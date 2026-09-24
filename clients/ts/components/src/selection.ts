@@ -8,14 +8,35 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-selection>`: the selected region's counts, the held marks inside it as a list (a click
- * picks one), and the actions. Shown inside is the held marks against `matched`. Matched inside is
- * exact for the shape unless the server answered with a cover (`x-tessera-region`). Visible inside
- * shows only while no other filter narrows the view.
+ * The selected region: its counts, the held marks inside it as a list, and its actions. Shown
+ * inside counts the held marks against the served set; matched inside is exact for the shape
+ * unless the server answered for a cover of it; visible inside appears only while no other filter
+ * narrows the view. Clicking a listed mark picks it. Outside flips the selection to its
+ * complement, and Clear drops it.
  *
- * The selection is itself a filter: the map and every count narrow to it once it settles.
- * Outside flips it to the complement. Not built yet: export and save as artifact, which need
- * server verbs; their buttons are disabled with the reason on hover.
+ * A selection is a filter: the map and every count narrow to it once it settles. Not built yet:
+ * Export and Save as artifact, which need server routes; their buttons are disabled with the
+ * reason on hover.
+ *
+ * @summary The selected region's counts, marks and actions.
+ * @tagname tessera-selection
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - Clear
+ *   (with `shape` null) or Outside and Inside (with the new shape and `status` `loading`) was
+ *   pressed.
+ * @csspart title - The heading, with the shape's kind.
+ * @csspart state - The state line, with `data-state`; its tooltip says whether the counts are
+ *   exact for the shape or for a cover.
+ * @csspart refusal - The refusal's code, in the refused state.
+ * @csspart counts - The counts.
+ * @csspart count-served - The `<tessera-count>` of marks shown inside.
+ * @csspart count-matched - The `<tessera-count>` matched inside (or outside).
+ * @csspart count-visible - The `<tessera-count>` visible inside (or outside).
+ * @csspart label - The heading above the list.
+ * @csspart items - The list of held marks inside.
+ * @csspart item - One held mark, by `tessera_id`.
+ * @csspart actions - The action buttons.
+ * @csspart action - One action button.
  */
 export class TesseraSelection extends TesseraElement {
   static override styles = [
@@ -57,7 +78,7 @@ export class TesseraSelection extends TesseraElement {
     `
   ];
 
-  /** By property, for a host with its own region. */
+  /** The region to show in place of the store's `region` projection. */
   @property({attribute: false}) accessor region: RegionProjection | null = null;
 
   private get shown(): RegionProjection | null {

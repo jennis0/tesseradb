@@ -53,21 +53,73 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
 ];
 
 /**
- * `<tessera-explorer>`: the map with its status strip, toolbar, layer picker, filters, artifact
- * list and detail card in a default layout. It builds its own store from `viewer-url` and `token`
- * or an `authorise` property, or takes a `.store`, and is the context provider for its pieces.
+ * The map with its status strip, toolbar, legend, layer picker, filters, hierarchy, artifact list,
+ * selection and detail card, laid out together. It builds its own store from `viewer-url` and
+ * `token` or an `authorise` property, or takes a `store` property, and provides it by context to
+ * everything inside it, including elements a host puts in its slots.
  *
- * `layout="docked"` puts the map beside a sidebar: the colour and layer selects at the top, the
- * layer checklist, the item or cluster card, then Filters and In view as collapsed sections with
- * a summary each. `layout="overlay"` draws the map full-bleed with a floating panel top-left (the
- * selects, the layers and the filters), the toolbar top-right, and a floating panel at the right
- * with In view and the card. In a narrow container the strip runs full width above a tab bar
- * (Filters, Layers, In view, Item), and each tab opens its panel as a sheet. `panels` chooses which
- * appear; every region is a named slot with default content.
+ * `layout="docked"` puts the map beside a sidebar: the toolbar at the top, the layer checklist, the
+ * selection, the item or artifact card, then Filters, Hierarchy and In view as collapsible
+ * sections. `layout="overlay"` draws the map full-bleed with a floating panel top-left (the
+ * toolbar, the layers, the filters and the hierarchy) and one top-right (the selection, In view and
+ * the card). In a container 720 px wide or narrower, the status strip runs full width above a tab
+ * bar (Filters, Layers, In view, Item), and each tab opens its panel as a sheet.
+ * The Hierarchy section appears only where the bundle has a hierarchical layer, and the card only
+ * once something is selected.
  *
- * `<tessera-hierarchy>` sits beneath the filters, drawn only where the bundle has a hierarchical
- * layer to browse, in a section collapsed by default: In view answers for the viewport and the
- * hierarchy for the corpus.
+ * Every event its elements fire bubbles out of it, since each is composed.
+ *
+ * @summary The map and every panel, in a default layout.
+ * @tagname tessera-explorer
+ * @category Elements
+ * @slot toolbar - Replaces the view picker, the key picker and the legend's selects.
+ * @slot layers - Replaces the layer picker.
+ * @slot filters - Replaces the filter panel.
+ * @slot hierarchy - Replaces the hierarchy panel.
+ * @slot artifacts - Replaces the In view list.
+ * @slot selection - Replaces the selection panel, shown while a region is selected.
+ * @slot detail - Replaces the item and artifact cards.
+ * @slot status - Replaces the status strip drawn on the map.
+ * @slot tooltip - Replaces the map's hover tooltip.
+ * @slot top-right - Content above the right-hand panel, in the overlay layout.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-viewchange']>} tessera-viewchange - The map's camera moved.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-pick']>} tessera-pick - A point was clicked, and again with its record.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-hover']>} tessera-hover - The pointer moved over a point.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactopen']>} tessera-artifactopen - An artifact was opened and its drill-down arrived.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - A selection was drawn, changed or cleared, or its counts arrived.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The layers drawn changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - The Colour by select changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level select changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - The session expired.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A filter control or chip changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A `member_of` clause was put on or taken off.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactselect']>} tessera-artifactselect - A row of the In view list was pressed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit was pressed on the artifact card or in the hierarchy; the explorer fits its map to the artifact.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-open']>} tessera-open - Open was pressed on the item card.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - A card's close button was pressed; the explorer drops the selection.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-viewswitch']>} tessera-viewswitch - The view changed through the view or key picker.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-viewfollow']>} tessera-viewfollow - A view chip on the item card was pressed; the explorer switches to that view and centres on the item.
+ * @csspart frame - The explorer's grid.
+ * @csspart sidebar - The sidebar, in the docked layout.
+ * @csspart sheet - The open sheet, in the narrow layout.
+ * @csspart strip-row - The full-width status strip, in the narrow layout.
+ * @csspart tabs - The tab bar, in the narrow layout.
+ * @csspart map-<part> - A part of the inner `<tessera-map>`, such as `map-controls`.
+ * @csspart status-<part> - A part of an inner `<tessera-status>`.
+ * @csspart view-picker-<part> - A part of the inner `<tessera-view-picker>`.
+ * @csspart key-picker-<part> - A part of the inner `<tessera-key-picker>`.
+ * @csspart legend-<part> - A part of the inner `<tessera-legend>`.
+ * @csspart layer-picker-<part> - A part of the inner `<tessera-layer-picker>`.
+ * @csspart filter-panel-<part> - A part of the inner `<tessera-filter-panel>`.
+ * @csspart filter-<part> - A part of a `<tessera-filter>` inside the filter panel.
+ * @csspart hierarchy-<part> - A part of the inner `<tessera-hierarchy>`.
+ * @csspart artifact-list-<part> - A part of the inner `<tessera-artifact-list>`.
+ * @csspart selection-<part> - A part of the inner `<tessera-selection>`.
+ * @csspart item-card-<part> - A part of the inner `<tessera-item-card>`, such as `item-card-title`.
+ * @csspart artifact-card-<part> - A part of the inner `<tessera-artifact-card>`.
+ * @cssprop --tessera-explorer-height - The explorer's height.
+ * @cssprop --tessera-sidebar-width - The sidebar's width in the docked layout.
  */
 export class TesseraExplorer extends TesseraElement {
   static override styles = [
@@ -302,18 +354,28 @@ export class TesseraExplorer extends TesseraElement {
   ];
 
   protected override canBuildOwn = true;
+  /** `docked`, the map beside a sidebar, or `overlay`, the map full-bleed under floating panels. */
   @property({reflect: true}) accessor layout: 'docked' | 'overlay' = 'docked';
-  @property() accessor panels = ALL_PANELS.join(' ');
+  /**
+   * Which regions appear, space- or comma-separated, from `toolbar`, `legend` (the layer picker),
+   * `filters`, `hierarchy`, `artifacts`, `selection` and `detail`. Defaults to all seven.
+   */
+  @property() accessor panels: string = ALL_PANELS.join(' ');
+  /** Passed to the map's `colour-by`. */
   @property({attribute: 'colour-by'}) accessor colourBy = '';
+  /** Passed to the map's `layers`. */
   @property() accessor layers = '';
+  /** Passed to the map's `tooltip-fields`. */
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
-  /** The record field that titles a point, for the map's hover and the item card; unset, its id. */
+  /** The field that titles a point, in the map's tooltip and the item card's headline. Unset, its `tessera_id`. */
   @property({attribute: 'title-field'}) accessor titleField = '';
+  /** Passed to the map's `budget`. */
   @property({type: Number}) accessor budget = 0;
+  /** @internal */
   @state() accessor sheet: Sheet | null = null;
   /** The narrow layout's tab focused last, which keeps the tab list's one place in the tab order. */
   @state() private accessor tabFocus: Sheet | null = null;
-  /** The level chosen through the legend's select; the map colours and labels at it. */
+  /** The level chosen through the legend's select; the map colours and labels at it. @internal */
   @state() accessor level: number | null = null;
 
   private provider = new ContextProvider(this, {context: storeContext, initialValue: null});
@@ -344,13 +406,14 @@ export class TesseraExplorer extends TesseraElement {
     super.disconnectedCallback();
   }
 
+  /** Dispose of the store the explorer built and of its map's GPU resources. */
   override dispose(): void {
     this.following?.();
     this.map?.dispose();
     super.dispose();
   }
 
-  /** The map this explorer renders, for a host that wants `fit`, `fitTo`, `select` or the probe. */
+  /** The `<tessera-map>` the explorer renders, for a host that calls `fit`, `fitTo` or `select`. */
   get map(): TesseraMap | null {
     return this.renderRoot?.querySelector<TesseraMap>('tessera-map') ?? null;
   }

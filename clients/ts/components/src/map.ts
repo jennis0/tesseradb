@@ -23,28 +23,6 @@ import {sameFrame} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 import {washChannel} from './wash.js';
 
-/**
- * `<tessera-map>` is the canvas: points, the density wash, the artifact outlines and labels,
- * hover, pick, the selection, and the refused, expired and empty states drawn over the canvas, so
- * none of them reads as an empty corpus.
- *
- * Each map owns its `Deck`, its `MarkSlab` and its probe. The `Deck` is finalised a moment after
- * disconnection, and not at all if the element reconnects first, since notebooks and frameworks
- * disconnect and reconnect elements routinely and the GPU slab would be rebuilt each time.
- *
- * The map owns the camera: deck's world-space `{target, zoom}` goes to `setView` through
- * `viewInputOf` on every change, and the store debounces. `fit()`, `fitTo()` and the keyboard move
- * the view state the element holds.
- *
- * `mode="box"`, or shift-drag in `pan`, draws a box; `mode="lasso"` a freehand polygon. The
- * settled shape goes to `store.select`, which sends it on every request as the `region` leaf, so
- * the map narrows to it and its count is exact for the shape.
- *
- * `colour-by="cluster:<layer>"` colours by cluster, with `palette` choosing positional or spread.
- *
- * The host is `display: block` with its height from `--tessera-map-height`, since deck sizes its
- * canvas from its parent.
- */
 
 /** How long after disconnection the `Deck` is finalised, unless the element reconnects. */
 const FINALIZE_SETTLE_MS = 250;
@@ -54,6 +32,8 @@ const HOVER_DESCRIBE_MS = 140;
 /**
  * What the map reports about itself for instruments and tests, one object mutated in place.
  * `timings.frame` and `cluster` are filled only while `measure` is on.
+ *
+ * @internal
  */
 export type MapProbe = {
   paints: number;
@@ -116,6 +96,51 @@ type ViewState = {target: [number, number, number]; zoom: number; minZoom: numbe
 
 const VIEW = new OrthographicView({id: 'ortho', flipY: true});
 
+/**
+ * The map: the points, the density wash, the artifacts' outlines and labels, hover, pick and the
+ * selection, drawn with deck.gl in an orthographic view. The refused, expired and empty states are
+ * drawn over the canvas, so none of them reads as an empty corpus. The toolbar switches between
+ * pan, box select and lasso select, and fits the whole extent; shift-drag in pan mode draws a box.
+ * A settled box or lasso becomes the store's selection, a filter every count narrows to.
+ *
+ * The map owns the camera and tells the store where it is looking on every move. Keys, with the
+ * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn or
+ * clears the selection. The map sets `tabindex="0"`, `role="application"` and an `aria-label` on
+ * itself unless the host set them.
+ *
+ * The host element is `display: block`; its height comes from `--tessera-map-height`. A map that
+ * is disconnected and not reconnected releases its GPU resources a quarter of a second later.
+ *
+ * @summary The map canvas.
+ * @tagname tessera-map
+ * @category Elements
+ * @slot top-left - Content in the top-left corner, beside the toolbar when it is there.
+ * @slot top-right - Content in the top-right corner, beside the toolbar when it is there.
+ * @slot bottom-left - Content in the bottom-left corner.
+ * @slot bottom-right - Content in the bottom-right corner.
+ * @slot tooltip - Replaces the hover tooltip's content.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-viewchange']>} tessera-viewchange - The camera
+ *   moved.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-pick']>} tessera-pick - A point was clicked, and
+ *   again with its record once the record arrives.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-hover']>} tessera-hover - The pointer moved onto
+ *   or over a point.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactopen']>} tessera-artifactopen - An
+ *   artifact was opened and its drill-down arrived.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - A
+ *   selection was drawn or cleared (`status` `loading` or `cleared`), and again when its counts
+ *   arrive.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The
+ *   `layers` attribute changed.
+ * @csspart canvas - The deck.gl canvas's container.
+ * @csspart overlay - The state drawn over the canvas when refused, expired or empty.
+ * @csspart state - The state line inside the overlay, with `data-state`.
+ * @csspart refusal - The refusal's code and detail, inside the overlay.
+ * @csspart controls - The toolbar.
+ * @csspart tooltip - The hover tooltip.
+ * @cssprop --tessera-map-height - The map's height.
+ * @cssprop --tessera-map-bg - The canvas's background, behind the points and any basemap.
+ */
 export class TesseraMap extends TesseraElement {
   static override styles = [
     tokens,
@@ -251,57 +276,86 @@ export class TesseraMap extends TesseraElement {
 
   protected override canBuildOwn = true;
 
+  /**
+   * What the points are coloured by: a declared column that is rendered, `cluster:<layer>` for a
+   * layer that can colour, or `none` for one colour. Unset, the store's choice stands.
+   */
   @property({attribute: 'colour-by'}) accessor colourBy = '';
+  /**
+   * The annotation layers to draw, space- or comma-separated; each is drawn with the layers it
+   * depends on. Unset, the store's choice stands.
+   */
   @property({
     attribute: 'layers',
     converter: {fromAttribute: (v: string | null) => (v ? v.split(/[\s,]+/).filter(Boolean) : []), toAttribute: (v: string[]) => v.join(' ')}
   })
   accessor layers: string[] | null = null;
+  /** How many marks to aim for on screen. `0` leaves the store's budget, which starts at 500000. */
   @property({type: Number}) accessor budget = 0;
-  /** Columns the marks carry, shown beneath a hovered point's title. */
+  /**
+   * Columns shown beneath a hovered point's title, space- or comma-separated. Only a rendered
+   * column's value is in the marks; another shows nothing.
+   */
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
   /**
-   * The record field a hovered point is titled by, read from the marks where they carry it, else
-   * from the record once the pointer rests. Unset, the title is the point's id.
+   * The field a hovered point is titled by, read from the marks where they carry it, else from the
+   * item's record once the pointer has rested on it for 140 ms. Unset, the title is the point's
+   * `tessera_id`.
    */
   @property({attribute: 'title-field'}) accessor titleField = '';
+  /** What a drag does: `pan` moves the camera, `box` draws a box selection and `lasso` a freehand one. */
   @property({reflect: true}) accessor mode: 'pan' | 'box' | 'lasso' = 'pan';
-  /** How served artifacts are coloured: by position about the extent's centre, or spread over the served set. */
+  /**
+   * How artifacts are coloured under colour by cluster: `positional` by where each sits about the
+   * extent's centre, which does not change as the view moves, or `spread`, hues spaced evenly over
+   * the served set.
+   */
   @property() accessor palette: PaletteKind = 'positional';
-  /** The level to colour a nested layer at; unset colours at the deepest served. */
+  /** The level to colour and label a nested layer at. Unset, the deepest level served. */
   @property({type: Number, attribute: 'cluster-level'}) accessor clusterLevel: number | null = null;
-  /** A deck.gl layer drawn under the points, such as a basemap. */
+  /** A deck.gl layer drawn under the points, such as a basemap, in the map's 512-unit world. */
   @property({attribute: false}) accessor basemap: Layer | null = null;
   /**
-   * The ground the map draws on, where it differs from the page's, such as a light basemap under a
-   * dark page. The label ink, halo and positional palette follow it; the chrome follows the page.
-   * Unset, the host's `color-scheme` decides both.
+   * The ground the map draws on, `light` or `dark`, where it differs from the page's, such as a light
+   * basemap under a dark page. The labels and the positional palette follow it, and the toolbar and
+   * panels follow the page. Unset, the host's `color-scheme` decides, else the system preference.
    */
   @property({reflect: true}) accessor ground: 'light' | 'dark' | '' = '';
-  /** Whether the single-hue density wash, built from the exact tiles' counts, is drawn under the points. */
+  /**
+   * Draws a density wash under the points, in one hue, from the tiles' exact counts: the highlighted
+   * count under a highlight, the matched count under a filter or selection, else the visible count.
+   */
   @property({type: Boolean}) accessor wash = false;
   /**
    * Whether the map measures itself for the probe: the frame-gap loop behind `probe.timings.frame`,
    * the colour-by-cluster sample behind `probe.cluster`, and the check that each composition
    * matches what was served. Off, none of the three runs.
+   *
+   * @internal
    */
   @property({type: Boolean}) accessor measure = false;
-  /** A fixed mark radius in pixels; unset, the marks are sized by their count and the zoom (`markStyle`). */
+  /** A fixed mark radius in pixels. Unset, marks are sized by how many are drawn and by the zoom. */
   @property({type: Number}) accessor radius: number | null = null;
-  /** Hides the mode and fit controls. */
+  /** Hides the toolbar. */
   @property({type: Boolean, attribute: 'no-controls'}) accessor noControls = false;
-  /** Which corner the controls sit in. */
+  /** Which corner the toolbar sits in: `top-left` or `top-right`. */
   @property({attribute: 'controls-corner'}) accessor controlsCorner: 'top-left' | 'top-right' = 'top-left';
 
+  /** @internal */
   @state() accessor hover: {x: number; y: number; title: string; lines: string[]} | null = null;
-  /** The artifact under the pointer (its outline, label or a mark it holds), whose outline is drawn. */
+  /** The artifact under the pointer (its outline, label or a mark it holds), whose outline is drawn. @internal */
   @state() accessor hoveredArtifact: bigint | null = null;
+  /** @internal */
   @state() accessor drag: [number, number, number, number] | null = null;
+  /** @internal */
   @state() accessor dragPolygon: [number, number][] | null = null;
 
-  /** What the last click resolved to: a miss, a broken pick, or a hit sent to the store. */
+  /**
+   * What the last click found where it found no item: `{kind: 'miss'}`, or a broken pick, a fault
+   * in the layer, with its details. `null` after a hit. `<tessera-item-card>`'s `pick` takes it.
+   */
   lastPick: PickOutcome = null;
-  /** The map's probe, one object mutated in place. */
+  /** The map's probe, one object mutated in place, for instruments and tests. @internal */
   readonly probe: MapProbe = {
     paints: 0,
     at: 0,
@@ -314,7 +368,7 @@ export class TesseraMap extends TesseraElement {
     cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: [], coloured: 0}
   };
 
-  /** Passed to the layer, so a hover can read a mark's band from it. */
+  /** Passed to the layer, so a hover can read a mark's band from it. @internal */
   readonly slab = new MarkSlab();
   private deck: Deck<OrthographicView> | null = null;
   private finalizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -577,7 +631,7 @@ export class TesseraMap extends TesseraElement {
     return {layer, layersOn: a.layers, coverage: a.coverage, servedIds: rows.map((x) => idString(x.tesseraId)), sample, coloured};
   }
 
-  /** Release the store this map built, and the `Deck`, now. */
+  /** Dispose of the store this map built, as on every element, and release its GPU resources now. */
   override dispose(): void {
     super.dispose();
     this.deck?.finalize();
@@ -889,7 +943,10 @@ export class TesseraMap extends TesseraElement {
     this.select(shape);
   };
 
-  /** Select a shape programmatically, in data coordinates; `null` clears. */
+  /**
+   * Select a shape in data coordinates, as drawing a box or lasso does; `null` clears the selection.
+   * Fires `tessera-selectchange`.
+   */
   select(shape: SelectionShape | null): void {
     this.regionAskedAt = performance.now();
     if (this.probe.region) this.probe.region = null;
@@ -908,7 +965,7 @@ export class TesseraMap extends TesseraElement {
     return this.viewState.zoom;
   }
 
-  /** Fit the whole extent. */
+  /** Fit the whole extent into the map. */
   fit(): void {
     const {width, height} = this.size;
     this.setViewState({target: [WORLD_SIZE / 2, WORLD_SIZE / 2, 0], zoom: Math.log2(Math.min(width, height) / WORLD_SIZE)});
@@ -926,7 +983,7 @@ export class TesseraMap extends TesseraElement {
     return true;
   }
 
-  /** Fit an artifact's box, if the store holds one for it. */
+  /** Fit a served artifact's box into the map. Returns false where the store holds no box for it. */
   fitTo(artifactId: bigint): boolean {
     const extent = this.resolvedStore?.extentOf(artifactId);
     if (!extent) return false;
@@ -934,9 +991,9 @@ export class TesseraMap extends TesseraElement {
   }
 
   /**
-   * Fit a box in data coordinates, the space `tessera-viewchange` reports. The camera keeps the
-   * canvas's aspect, so the box shown contains the one asked for, and the next
-   * `tessera-viewchange` reports the box shown.
+   * Fit a box `[x0, y0, x1, y1]` in data coordinates, the space `tessera-viewchange` reports, into
+   * the map. The camera keeps the canvas's aspect, so the box shown contains the one asked for,
+   * and the next `tessera-viewchange` reports the box shown. Returns false before `meta`.
    */
   fitBbox(extent: [number, number, number, number]): boolean {
     const q = this.resolvedStore?.frame();
