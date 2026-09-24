@@ -1,3 +1,4 @@
+import {expect} from 'vitest';
 import type {ArtifactChannelClock} from '../src/artifactChannel.js';
 import type {Band} from '../src/bands.js';
 import {tileXY} from '../src/coords.js';
@@ -20,6 +21,31 @@ const realSetTimeout = globalThis.setTimeout;
  */
 export function settle(): Promise<void> {
   return new Promise((resolve) => realSetTimeout(resolve, 0));
+}
+
+/**
+ * Asserts that `fn` throws a refusal: a plain `Error`, which is what the decoders raise on input
+ * they check. A `TypeError` or `RangeError` is a crash on input nothing checked, and fails this.
+ */
+export function refused(fn: () => unknown): void {
+  let thrown: unknown = null;
+  try {
+    fn();
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toBeInstanceOf(Error);
+  expect((thrown as Error).constructor).toBe(Error);
+}
+
+/** {@link refused} for a promise: it rejects with a plain `Error`. */
+export async function rejectsAsRefused(promise: Promise<unknown>): Promise<void> {
+  const thrown = await promise.then(
+    () => null,
+    (error: unknown) => error
+  );
+  expect(thrown).toBeInstanceOf(Error);
+  expect((thrown as Error).constructor).toBe(Error);
 }
 
 /** A clock whose timers fire only inside `advance`, each followed by a `settle`. */

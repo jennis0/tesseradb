@@ -5,7 +5,7 @@ import {TesseraClient, TesseraError} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {liftGolden, liftTilesHighlighted} from './old-shape-columns.js';
 import type {Decoder} from '../src/decoder.js';
-import {result} from './support.js';
+import {refused, result} from './support.js';
 
 /**
  * What the artifact channel puts on the wire, and what it makes of what comes back.
@@ -184,8 +184,8 @@ describe('the artifacts frame, decoded from a captured response', () => {
     // Neither is read as shapeless — the old column names are the refusal.
     // Lifted for the tiles frame's `highlighted` column first, so what is being refused is the
     // shape columns' old names and not the newer column these captures also predate.
-    expect(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts-pre-r40.bin')))).toThrow();
-    expect(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts.bin')))).toThrow();
+    refused(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts-pre-r40.bin'))));
+    refused(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts.bin'))));
   });
 
   it('carries one row per served artifact, and no points beside them', () => {
