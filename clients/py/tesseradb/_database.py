@@ -1296,22 +1296,17 @@ class Database:
         label and each layer's named default."""
         terms: list[str] = []
         for block in document.get("view", []) + document.get("view_group", []):
-            default = dict(block.get("point_visibility") or {}).get("default")
-            if default:
-                terms.append(default)
+            terms.extend(_label_terms(dict(block.get("point_visibility") or {}).get("default")))
         for block in document.get("layer", []):
-            default = dict(block.get("artifact_visibility") or {}).get("default")
-            if default and default != "inherited":
-                terms.append(default)
+            default = _label_terms(dict(block.get("artifact_visibility") or {}).get("default"))
+            if default != ["inherited"]:
+                terms.extend(default)
         for insert in self.inserts + self.pending:
             column = insert.columns.get("access") if insert.role in ("rows", "artifacts") else None
             if column is None:
                 continue
             for value in insert.table()[column].to_pylist():
-                if value is None:
-                    continue
-                for label in value if isinstance(value, list) else [value]:
-                    terms.append(str(label))
+                terms.extend(_label_terms(value))
         return terms
 
     # ------------------------------------------------------------------ verbs that are not inserts
@@ -1779,3 +1774,16 @@ def _untagged(value: Any) -> Any:
     if isinstance(value, list):
         return [_untagged(v) for v in value]
     return value
+
+
+# Rust's `str::trim` set, the Unicode White_Space property; `str.strip()` also strips U+001C-001F.
+_WHITE_SPACE = (
+    "\t\n\x0b\x0c\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
+    "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def _label_terms(value) -> list[str]:
+    """One access cell's labels as the server stores them: each trimmed, an empty one dropped."""
+    trimmed = (str(one).strip(_WHITE_SPACE) for one in C._labels(value) if one is not None)
+    return [label for label in trimmed if label]

@@ -1069,7 +1069,8 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // refused.
 // **24**: `PublishedArtifact` gained `incarnation`, the incarnation of its view it was published
 // under. A log at 23 is refused.
-const WAL_VERSION: u16 = 24;
+// **25**: every access label and declared word is stored trimmed. A log at 24 is refused.
+const WAL_VERSION: u16 = 25;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

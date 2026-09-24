@@ -23,7 +23,7 @@ pub type Descriptor = Vec<u8>;
 /// The string whose SHA-256 is both of `builtin:passthrough`'s hashes. Change it when either
 /// mapping changes. The two sides share one hash so that a change to the labelling also discards
 /// the cached fragments built under the old labelling, which are keyed by the auth hash.
-const PASSTHROUGH_IDENTITY: &str = "builtin:passthrough:2";
+const PASSTHROUGH_IDENTITY: &str = "builtin:passthrough:3";
 
 /// The sizes a plugin declares. An item that exceeds one is counted, reported and stored with all
 /// of its terms, because dropping a term changes who can see the item.
@@ -83,7 +83,9 @@ pub trait Plugin: Send + Sync {
 }
 
 /// `builtin:passthrough`. A label is its own descriptor, and `auth_data` is the JSON
-/// `{"terms": ["<label>", …]}`. The conformance oracle implements the same mapping.
+/// `{"terms": ["<label>", …]}`, each term trimmed as a stored label is, so a credential matches
+/// the label it names however either was padded. The conformance oracle implements the same
+/// mapping.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Passthrough;
 
@@ -143,7 +145,10 @@ impl Plugin for Passthrough {
                 "`auth_data` must be JSON of the form {{\"terms\": [\"<label>\", ...]}} ({e})"
             ))
         })?;
-        Ok(parsed.terms.into_iter().map(String::into_bytes).collect())
+        Ok(label_values(parsed.terms.iter().map(String::as_str))
+            .into_iter()
+            .map(|term| term.as_bytes().to_vec())
+            .collect())
     }
 
     fn declared_bounds(&self) -> DeclaredBounds {
@@ -166,18 +171,22 @@ fn passthrough_hash() -> String {
     format!("{:x}", Sha256::digest(PASSTHROUGH_IDENTITY.as_bytes()))
 }
 
-pub use tessera_types::label::{check_label, INHERITED, PUBLIC};
+use tessera_types::label::{declared_label, is_public, label_values, PUBLIC};
 
-/// An artifact's own access labels as the descriptors it is stored and compared by: the one rule the
-/// build and a running service both read labels through. No labels is no label. Labels the plugin
-/// maps to no term are refused: stored as no label, the artifact would take its layer's default,
-/// which can admit everyone the layer does.
-pub fn artifact_access(plugin: &dyn Plugin, labels: &[Descriptor]) -> Result<Vec<Descriptor>, String> {
+/// An artifact's own access labels as the descriptors it is stored and compared by, on the build
+/// and a running service alike. Each label is trimmed and an empty one dropped; none left is no
+/// label. Labels the plugin maps to no term are refused: stored as no label, the artifact would
+/// take its layer's default, which can admit everyone the layer does.
+pub fn artifact_access(plugin: &dyn Plugin, labels: &[String]) -> Result<Vec<Descriptor>, String> {
+    let labels: Vec<Descriptor> = label_values(labels.iter().map(String::as_str))
+        .into_iter()
+        .map(|label| label.as_bytes().to_vec())
+        .collect();
     if labels.is_empty() {
         return Ok(Vec::new());
     }
     let descriptors = plugin
-        .terms_of_labels(labels)
+        .terms_of_labels(&labels)
         .map_err(|e| format!("`access`: the plugin refused the labels: {e}"))?;
     if descriptors.is_empty() {
         return Err(
@@ -189,14 +198,15 @@ pub fn artifact_access(plugin: &dyn Plugin, labels: &[Descriptor]) -> Result<Vec
     Ok(descriptors)
 }
 
-/// Check `point_visibility.default`, the label given to a point that carries none of its own.
-/// `inherited` is refused because a point has no layer to take a `visibility` from. A label the
-/// plugin maps to no term is refused because no viewer would see the points given it.
-pub fn check_point_default(plugin: &dyn Plugin, default: &str) -> Result<(), String> {
+/// Check `point_visibility.default`, the label given to a point that carries none of its own, and
+/// return it trimmed, as it is stored. `inherited` is refused because a point has no layer to take
+/// a `visibility` from. A label the plugin maps to no term is refused because no viewer would see
+/// the points given it.
+pub fn check_point_default(plugin: &dyn Plugin, default: &str) -> Result<String, String> {
     const KEY: &str = "point_visibility.default";
-    check_label(KEY, default)?;
-    if default == PUBLIC {
-        return Ok(());
+    let default = declared_label(KEY, default)?;
+    if is_public(default) {
+        return Ok(PUBLIC.to_string());
     }
     let terms = plugin
         .terms_of_labels(&[default.as_bytes().to_vec()])
@@ -207,38 +217,40 @@ pub fn check_point_default(plugin: &dyn Plugin, default: &str) -> Result<(), Str
              given it; write `public` or a label the plugin maps to a term"
         ));
     }
-    Ok(())
+    Ok(default.to_string())
 }
 
 /// Check the labels a view or view group declares as its `visibility`, and return them as they
-/// are stored: `None` for `public` or where none is declared. A principal reaches the view by
-/// holding any one of the terms, so labels that map to no term admit nobody and are refused.
+/// are stored: each trimmed, and `None` for `public` or where none is declared. A principal
+/// reaches the view by holding any one of the terms, so labels that map to no term admit nobody
+/// and are refused.
 pub fn check_visibility(
     plugin: &dyn Plugin,
     declared: Option<&[String]>,
 ) -> Result<Option<Vec<String>>, String> {
-    let Some(labels) = declared else {
+    let Some(declared) = declared else {
         return Ok(None);
     };
-    if labels == [PUBLIC] {
-        return Ok(None);
-    }
-    if labels.is_empty() {
+    if declared.is_empty() {
         return Err(
             "`visibility = []` lists no labels; write `public`, or the labels a viewer needs \
              one of"
                 .to_string(),
         );
     }
-    for label in labels {
-        check_label("visibility", label)?;
-        if label == PUBLIC {
-            return Err(
-                "`visibility` lists `public` with other labels, and every principal holds \
-                 `public`; write it alone or remove it"
-                    .to_string(),
-            );
-        }
+    let labels = declared
+        .iter()
+        .map(|label| declared_label("visibility", label).map(str::to_string))
+        .collect::<Result<Vec<String>, String>>()?;
+    if matches!(labels.as_slice(), [only] if is_public(only)) {
+        return Ok(None);
+    }
+    if labels.iter().any(|label| is_public(label)) {
+        return Err(
+            "`visibility` lists `public` with other labels, and every principal holds \
+             `public`; write it alone or remove it"
+                .to_string(),
+        );
     }
     let descriptors: Vec<Descriptor> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
     let terms = plugin
@@ -250,7 +262,7 @@ pub fn check_visibility(
              the view; list a label the plugin maps to a term"
         ));
     }
-    Ok(Some(labels.to_vec()))
+    Ok(Some(labels))
 }
 
 #[cfg(test)]
@@ -295,6 +307,11 @@ mod tests {
             p.terms_of_auth(br#"{"terms": ["1207", "9"]}"#).unwrap(),
             vec![b"1207".to_vec(), b"9".to_vec()]
         );
+        // Each term is trimmed as a stored label is, and an empty one is dropped.
+        assert_eq!(
+            p.terms_of_auth(br#"{"terms": [" red ", "", "  "]}"#).unwrap(),
+            vec![b"red".to_vec()]
+        );
         // A credential of no terms is valid. Only input that does not parse is refused.
         assert!(p.terms_of_auth(br#"{"terms": []}"#).unwrap().is_empty());
         assert!(p.terms_of_auth(b"not json").is_err());
@@ -319,8 +336,13 @@ mod tests {
         let p = Passthrough::new();
         assert_eq!(check_visibility(&p, None), Ok(None));
         assert_eq!(check_visibility(&p, Some(&labels(&["public"]))), Ok(None));
+        assert_eq!(check_visibility(&p, Some(&labels(&[" public "]))), Ok(None));
         assert_eq!(
             check_visibility(&p, Some(&labels(&["finance", "legal"]))),
+            Ok(Some(labels(&["finance", "legal"])))
+        );
+        assert_eq!(
+            check_visibility(&p, Some(&labels(&[" finance ", "legal "]))),
             Ok(Some(labels(&["finance", "legal"])))
         );
         for refused in [
@@ -328,7 +350,9 @@ mod tests {
             labels(&[""]),
             labels(&["  "]),
             labels(&["finance", "public"]),
+            labels(&["finance", " public"]),
             labels(&["inherited"]),
+            labels(&[" inherited "]),
         ] {
             assert!(check_visibility(&p, Some(&refused)).is_err(), "{refused:?}");
         }
@@ -360,10 +384,11 @@ mod tests {
             }
         }
         assert!(check_visibility(&NoTerms, Some(&labels(&["finance"]))).is_err());
-        assert!(artifact_access(&NoTerms, &[b"finance".to_vec()]).is_err());
+        assert!(artifact_access(&NoTerms, &labels(&["finance"])).is_err());
         assert_eq!(artifact_access(&NoTerms, &[]), Ok(Vec::new()));
+        assert_eq!(artifact_access(&NoTerms, &labels(&["", " "])), Ok(Vec::new()));
         assert_eq!(
-            artifact_access(&Passthrough, &[b"finance".to_vec()]),
+            artifact_access(&Passthrough, &labels(&[" finance ", ""])),
             Ok(vec![b"finance".to_vec()])
         );
         assert!(check_point_default(&NoTerms, "finance").is_err());
@@ -374,10 +399,11 @@ mod tests {
     #[test]
     fn a_point_default_is_a_label_and_not_inherited() {
         let p = Passthrough::new();
-        for accepted in ["public", "finance"] {
-            assert!(check_point_default(&p, accepted).is_ok(), "{accepted:?}");
+        let accepted = [("public", "public"), (" public ", "public"), (" finance ", "finance")];
+        for (declared, stored) in accepted {
+            assert_eq!(check_point_default(&p, declared).as_deref(), Ok(stored));
         }
-        for refused in ["", "  ", "inherited"] {
+        for refused in ["", "  ", "inherited", " inherited "] {
             assert!(check_point_default(&p, refused).is_err(), "{refused:?}");
         }
     }

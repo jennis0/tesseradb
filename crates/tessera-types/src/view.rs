@@ -209,15 +209,15 @@ pub struct CreatedView {
     /// `LayerCreate` already follow. A build-declared view is incarnation 0, so a key first used
     /// at a build and dropped comes back at 1 or above.
     pub incarnation: ViewIncarnation,
-    /// This view's own gate: the labels a principal must hold one of, each one term verbatim
-    /// (`views.md` §6, decision 0132); `None` takes the group's. Never empty: a gate naming no
+    /// This view's own gate: the labels a principal must hold one of, each one term, stored
+    /// trimmed (`views.md` §6); `None` takes the group's. Never empty: a gate naming no
     /// terms is refused before a record is prepared.
     pub visibility: Option<Vec<String>>,
     pub metadata: BTreeMap<String, ViewMetadataValue>,
 }
 
 /// A view gate's `visibility` as a declaration or a request body spells it (`views.md` §6,
-/// decision 0132): one label, or a list of labels. Each element is one label, taken verbatim; a
+/// decision 0132): one label, or a list of labels. Each element is one label, never split; a
 /// comma inside a label is part of the label. One label is the common case, and the list is how a
 /// gate names several terms.
 ///

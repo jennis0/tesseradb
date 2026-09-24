@@ -471,8 +471,8 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
         ("tag", json!(7)),
         ("x", json!("east")),
         ("external_id", json!("not base64!")),
-        ("access", json!("0")),
-        ("access", json!([null])),
+        ("access", json!(7)),
+        ("access", json!([7])),
         (LAYER, json!(true)),
         ("unknown", json!(1)),
     ];
@@ -535,10 +535,11 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
     );
 }
 
-/// **Decision 0133 at the JSON door, four cases.** An empty list, a null and an absent `access`
-/// are each a row with no label: under a declared default all three land under it; under no
-/// default the batch is refused naming the count of such rows and the view. An empty element is
-/// no label at all and is refused. The Arrow door's four are in `access_list.rs`.
+/// **Decision 0133 at the JSON door.** An empty list, a null, an absent `access` and a list of
+/// empty, blank or null labels are each a row with no label: under a declared default all of them
+/// land under it; under no default the batch is refused naming the count of such rows and the
+/// view. A plain string is one label and a null element is dropped, as at the Arrow door, whose
+/// cases are in `access_list.rs`.
 #[tokio::test]
 async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_the_count() {
     fn body() -> Vec<u8> {
@@ -548,6 +549,11 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
             { "external_id": id(1), "x": 11.0, "y": 11.0, "access": null },
             { "external_id": id(2), "x": 12.0, "y": 12.0 },
             { "external_id": id(3), "x": 13.0, "y": 13.0, "access": ["1"] },
+            { "external_id": id(4), "x": 14.0, "y": 14.0, "access": [""] },
+            { "external_id": id(5), "x": 15.0, "y": 15.0, "access": ["  "] },
+            { "external_id": id(6), "x": 16.0, "y": 16.0, "access": [null] },
+            { "external_id": id(7), "x": 17.0, "y": 17.0, "access": " 1 " },
+            { "external_id": id(8), "x": 18.0, "y": 18.0, "access": [null, "1"] },
         ])
         .to_string()
         .into_bytes()
@@ -570,14 +576,20 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
 
     let (_tmp, server) = serve_with_default(Some("ir:sealed")).await;
     let before = visible_to(&server, &["ir:sealed"]).await;
+    let one_before = visible_to(&server, &["1"]).await;
     let (status, resp) = ingest(&server, "filled", Some("application/json"), body()).await;
     assert_eq!(status, 200, "{resp}");
-    assert_eq!(resp["accepted"], 4);
+    assert_eq!(resp["accepted"], 9);
     drain(&server).await;
     assert_eq!(
         visible_to(&server, &["ir:sealed"]).await,
-        before + 3,
-        "the three unlabelled rows landed under the declared default; the labelled row kept its own"
+        before + 6,
+        "the six unlabelled rows landed under the declared default; the labelled ones kept their own"
+    );
+    assert_eq!(
+        visible_to(&server, &["1"]).await,
+        one_before + 3,
+        "a list, a padded plain string and a list with a null element each label a row `1`"
     );
 
     let (_tmp, server) = serve_with_default(None).await;
@@ -599,7 +611,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
             .into_bytes(),
     )
     .await;
-    assert_eq!(status, 422, "an empty element is no label at all: {resp}");
+    assert_eq!(status, 422, "an empty element is no label, and no default is declared: {resp}");
 }
 
 /// Rows at the plain fixture's shape, which declares no scalar tail.

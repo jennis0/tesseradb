@@ -1601,7 +1601,7 @@ struct ViewGroupBody {
     #[serde(default = "projection_none")]
     projection: String,
     extent: ExtentBody,
-    /// One label or a list, each element one term taken verbatim. Absent is `public`.
+    /// One label or a list, each element one term. Absent is `public`.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
     #[serde(default)]
@@ -1702,7 +1702,7 @@ async fn create_plain_view(
 #[serde(deny_unknown_fields)]
 struct ViewRecord {
     /// This view's own gate; absent takes the group's. One label or a list, each element one
-    /// term taken verbatim.
+    /// term.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
     /// One entry per name the group declared. A `timestamp_us` is microseconds since the epoch,
@@ -1806,18 +1806,13 @@ async fn drop_view(
     acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 
-/// An artifact record's `access` labels as the plugin's descriptors: the call `/control/ingest`
-/// makes of its `access` column. Absent and empty are no label.
+/// An artifact record's `access` labels as the plugin's descriptors, by the rule the build reads
+/// an artifact's labels with. Absent and empty are no label.
 fn access_descriptors(
     state: &AppState,
     labels: Option<Vec<String>>,
 ) -> Result<Vec<Vec<u8>>, ApiError> {
-    let labels: Vec<Vec<u8>> = labels
-        .unwrap_or_default()
-        .into_iter()
-        .map(String::into_bytes)
-        .collect();
-    tessera_plugin::artifact_access(state.engine.plugin().as_ref(), &labels)
+    tessera_plugin::artifact_access(state.engine.plugin().as_ref(), &labels.unwrap_or_default())
         .map_err(ApiError::Contract)
 }
 
@@ -2009,17 +2004,9 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                      it grows"
                 )));
             }
-            let labels = match &access {
-                None => None,
-                Some(access) => Some(
-                    access
-                        .labels_at("growth body", row)
-                        .map_err(|DecodeError(detail)| ApiError::Contract(detail))?
-                        .into_iter()
-                        .map(|label| String::from_utf8(label).expect("a utf8 array holds utf8"))
-                        .collect(),
-                ),
-            };
+            let labels = access
+                .as_ref()
+                .map(|access| access.labels(row).map(str::to_string).collect());
             // The Arrow form carries joining members and labels only; content, shapes and ranked
             // pages travel on the JSON form.
             artifacts.push(GrowingArtifactBody {

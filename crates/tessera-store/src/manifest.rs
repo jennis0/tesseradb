@@ -437,7 +437,7 @@ pub struct ViewDescriptor {
     #[serde(with = "projection_name")]
     pub projection: Projection,
     /// **This view's own gate** (`views.md` §6): the labels a principal must hold one of to reach
-    /// the view at all, each element one term taken verbatim (decision 0132), or `None` for
+    /// the view at all, each element one term, stored trimmed, or `None` for
     /// `public` — the label every principal holds by construction
     /// ([decision 0088](../../../docs/decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)),
     /// which is why the ordinary case stores nothing rather than storing the word.

@@ -1153,8 +1153,7 @@ fn plan_inline(
 /// An artifact's labels as the plugin's descriptors. The build labels with the passthrough plugin,
 /// as it does a points file's access column.
 fn descriptors_of(layer: &str, labels: &[String]) -> Result<Vec<Vec<u8>>> {
-    let labels: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
-    tessera_plugin::artifact_access(&tessera_plugin::Passthrough::new(), &labels)
+    tessera_plugin::artifact_access(&tessera_plugin::Passthrough::new(), labels)
         .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))
 }
 
