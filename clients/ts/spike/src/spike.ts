@@ -18,7 +18,7 @@ new Deck({
       extent: [0, 0, WORLD_SIZE, WORLD_SIZE],
       refinementStrategy: 'best-available',
       getTileData: async ({index, bbox, signal}) => {
-        // A deliberate delay, so fast panning exercises the abort path.
+        // A delay, so fast panning exercises the abort path.
         await new Promise((r) => setTimeout(r, 300));
         if (signal?.aborted) throw new Error('aborted');
         const b = bbox as {left: number; top: number; right: number; bottom: number};

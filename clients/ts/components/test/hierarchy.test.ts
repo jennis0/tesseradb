@@ -6,9 +6,8 @@ import {UNNAMED} from '../src/base.js';
 import {deep, deepAll, deepText, fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
- * `<tessera-hierarchy>` over `POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §5.1): the
- * roots without a viewport, lazy children, *also under*, the two counts under a filter, and the
- * click that is a highlight.
+ * `<tessera-hierarchy>` over `POST /v1/artifacts/browse`: the roots without a viewport, lazy
+ * children, "also under", the two counts under a filter, and the click that highlights.
  */
 
 afterEach(() => {
@@ -194,9 +193,8 @@ describe('<tessera-hierarchy>', () => {
   });
 
   it('a panel that is not being shown asks for nothing, and browses when it is', async () => {
-    // The roots are the widest request this panel makes, and a host with the panel in a closed
-    // drawer was paying for it on the page's first meta — beside the first viewport, against a
-    // server still materialising the session.
+    // The roots are the widest request this panel makes; a hidden panel should not send it
+    // alongside the first viewport.
     const host = await mount('<tessera-hierarchy style="display:none"></tessera-hierarchy>');
     const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
     const store = fakeStore({meta: META, status: status({})});

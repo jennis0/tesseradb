@@ -2,22 +2,15 @@ import {describe, expect, it} from 'vitest';
 import {distanceToRing, hoverAt, pointInRing, ringWithin, shapeBbox, signedArea2, smoothRing, type ContourShape, type Ring} from '../src/contours.js';
 
 /**
- * The smoothing: a periodic cubic B-spline through the served ring, the construction DataMapPlot
- * draws its contours with.
- *
- * **Containment is no longer the test, and a bound is.** The corner cutting this replaces refused
- * to round a reflex corner, because the chord across a notch lies outside the polygon; the result
- * was a shape whose convex arcs were smooth and whose concavities were as angular as the wire.
- * Since the owner's ruling of 2026-08-28 a shape is a summary of where a cluster is rather than a
- * per-point assertion, so a curve that passes a little outside its own ring is admissible and a
- * curve that claims ground the members do not occupy is not. What the tests below pin is the
- * **bound** on how far outside it goes, and that it goes nowhere near the far side of a notch.
+ * The smoothing: a periodic cubic B-spline through the served ring. The curve may pass a little
+ * outside the ring at a reflex corner; the tests pin how far, and that it stays clear of the far
+ * side of a notch.
  */
 
-/** A ring's unsigned area — used only to say that a smoothed ring is smaller, never that it is right. */
+/** A ring's unsigned area, used only to show that a smoothed ring is smaller. */
 const area = (ring: readonly [number, number][]) => Math.abs(signedArea2(ring)) / 2;
 
-/** The interior angle at each vertex, in degrees — the measure of "smooth" this file uses. */
+/** The interior angle at each vertex, in degrees: this file's measure of smoothness. */
 function turns(ring: readonly [number, number][]): number[] {
   const out: number[] = [];
   for (let i = 0; i < ring.length; i++) {
@@ -55,12 +48,12 @@ function star(points = 5, outer = 1, inner = 0.38): Ring {
   return ring;
 }
 
-/** A blob with no reflex corner at all — the shape a hull of one dense cloud produces. */
+/** A blob with no reflex corner, as a hull of one dense cloud is. */
 function circle(n = 24, r = 1): Ring {
   return Array.from({length: n}, (_, i): [number, number] => [r * Math.cos((2 * Math.PI * i) / n), r * Math.sin((2 * Math.PI * i) / n)]);
 }
 
-/** The largest distance from a point of `inner` to the closed region `outer` — 0 where it is inside. */
+/** The largest distance from a point of `inner` to the closed region `outer`; 0 inside it. */
 function excursion(inner: readonly [number, number][], outer: readonly [number, number][]): number {
   let worst = 0;
   for (const p of inner) {
@@ -70,7 +63,7 @@ function excursion(inner: readonly [number, number][], outer: readonly [number, 
   return worst;
 }
 
-/** The longest edge of a ring — the scale the excursion bound is stated in. */
+/** The longest edge of a ring, the scale of the excursion bound. */
 function longestEdge(ring: readonly [number, number][]): number {
   let m = 0;
   for (let i = 0; i < ring.length; i++) {
@@ -118,8 +111,8 @@ describe('smoothRing', () => {
     // four ways, and the sharpest turn falls to about a quarter.
     expect(before).toBeGreaterThan(20);
     expect(after).toBeLessThan(before / 3.5);
-    // Convex all through, so the curve is strictly inside — a B-spline is in the convex hull of
-    // its control points, and here that is the source ring.
+    // Convex throughout, so the curve is strictly inside: a B-spline lies in the convex hull of its
+    // control points, here the source ring.
     expect(ringWithin(smoothed, source)).toBe(true);
   });
 
@@ -152,21 +145,20 @@ describe('smoothRing', () => {
   });
 
   it('costs what it is said to cost, on the largest hull the demo corpus serves', () => {
-    // 757 vertices across 10 rings is the largest shape on `clusters/hdbscan` at the overview
-    // (artifact-shapes §9). One shape's worth of smoothing, timed.
+    // Ten rings of 76 vertices, about the size of the largest served hull. One shape, timed.
     const rings = Array.from({length: 10}, (_, i) => circle(76, 1 + i / 10));
     const started = performance.now();
     let vertices = 0;
     for (const ring of rings) vertices += smoothRing(ring).length;
     const ms = performance.now() - started;
     expect(vertices).toBe(760 * 4);
-    // Generous — the point is the order of magnitude, and that it is per drawn shape, not per
+    // A generous bound: the order of magnitude matters, and the cost is per drawn shape, not per
     // served one.
     expect(ms).toBeLessThan(50);
   });
 });
 
-/** Chaikin's corner cutting — kept as the foil {@link ringWithin} is demonstrated against. */
+/** Chaikin's corner cutting, for the contrast {@link ringWithin} is shown against. */
 function chaikin(ring: readonly [number, number][], rounds: number): Ring {
   let current: Ring = ring.map((p) => [p[0], p[1]] as [number, number]);
   for (let r = 0; r < rounds; r++) {

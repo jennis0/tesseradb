@@ -65,7 +65,7 @@ export const tokens = css`
   }
 `;
 
-/** The shared control and panel rules — the boards' component CSS, so every element reads the same. */
+/** The control and panel rules every element shares. */
 export const chrome = css`
   button {
     font: inherit;
@@ -109,7 +109,7 @@ export const chrome = css`
     flex-grow: 1;
     min-width: 0;
   }
-  /* A panel, as the boards draw one: padding, a rule beneath, an uppercase heading. */
+  /* A panel: padding, a rule beneath, an uppercase heading. */
   .panel {
     padding: 14px 16px;
     border-bottom: 1px solid var(--_tessera-line-2);
@@ -289,8 +289,7 @@ export const chrome = css`
     font-size: 12px;
     font-weight: 500;
   }
-  /* A chip whose clause is in the highlight position — the same chip in the other colour, so the
-     position reads before the words do. */
+  /* A chip whose clause is in the highlight position, in the highlight colour. */
   .chip[data-verb='highlight'] {
     background: var(--_tessera-highlight-soft);
     color: var(--_tessera-highlight);
@@ -349,7 +348,7 @@ export const chrome = css`
   .list > .item.child {
     padding-left: 24px;
   }
-  /* The state region: an answer in one line, never a paragraph. */
+  /* The state region: one line. */
   [part='state'] {
     display: flex;
     align-items: center;

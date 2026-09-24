@@ -228,8 +228,7 @@ describe('a view change', () => {
     render({model, el: el2});
     expect(stores).toHaveLength(2);
     model.set('view', 'quarter:2026-Q3');
-    // A pointer change, never a rebuild (`view-switching.md` §3): no third store, and nothing
-    // disposed — which is what makes a slider through a group's roster usable.
+    // A view change rebuilds nothing: no third store, and nothing disposed.
     expect(stores).toHaveLength(2);
     expect(store.calls.filter((c) => c.name === 'dispose')).toHaveLength(0);
     for (const s of stores) expect(s.calls.filter((c) => c.name === 'setCurrentView').map((c) => c.args)).toEqual([['quarter:2026-Q3']]);

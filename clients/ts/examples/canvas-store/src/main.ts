@@ -2,11 +2,10 @@ import {createStore, formatCount, formatMasked, type MarksProjection, type Store
 import {fitWorld, pan, toScreen, worldBox, zoomAt, type Camera} from './camera.js';
 
 /**
- * C2: the store under a host's own camera and a 2D canvas, with none of Tessera's rendering
- * (design client-components §4, §9 step 4 — the check that the store is usable on its own).
- * Three calls: `createStore`, `setView` on every camera change, `subscribe('marks')` to draw.
- * The counts are formatted by the host with the package's two formatters, so a sample shows
- * both figures or neither and a masked scalar shows one — and nothing against a stale view.
+ * The store under a host's own camera and a 2D canvas, with none of Tessera's rendering. Three
+ * calls: `createStore`, `setView` on every camera change, `subscribe('marks')` to draw. The host
+ * formats counts with the package's two formatters: a sample shows both figures or neither, a
+ * masked scalar one, and a stale view none.
  */
 const canvas = document.getElementById('map') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
@@ -112,7 +111,7 @@ function numbers() {
 
 el('refresh').addEventListener('click', () => store?.refresh());
 
-// ---- the camera's gestures -------------------------------------------------------------------
+// The camera's gestures.
 let drag: {x: number; y: number} | null = null;
 canvas.addEventListener('pointerdown', (e) => {
   drag = {x: e.clientX, y: e.clientY};
@@ -135,7 +134,7 @@ canvas.addEventListener('wheel', (e) => {
 }, {passive: false});
 new ResizeObserver(() => tell()).observe(canvas);
 
-// ---- who is signed in --------------------------------------------------------------------------
+// Who is signed in.
 const principal = document.getElementById('principal') as HTMLSelectElement;
 const users = (await (await fetch('/users')).json()) as {name: string; label: string}[];
 for (const u of users) principal.add(new Option(u.label, u.name));

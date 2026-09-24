@@ -95,7 +95,7 @@ async function session(served, terms) {
   };
 }
 
-// ---- the wide corpus: every type a rendered column can have, and nulls in each -----------------
+// The wide corpus: every type a rendered column can have, with nulls in each.
 
 const WIDE_ROWS = 1000;
 
@@ -234,7 +234,7 @@ async function captureWide() {
   }
 }
 
-// ---- the notebook corpus: real clusters, a filter and a highlight, and the browse pages --------
+// The notebook corpus: real clusters, a filter and a highlight, and the browse pages.
 
 /** A principal seeing about half the notebook corpus, so its visible set is not the whole map. */
 const PRINCIPAL = [

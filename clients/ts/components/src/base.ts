@@ -8,23 +8,16 @@ import {storeContext} from './context.js';
 /**
  * What every element shares: how it finds its store, and how it follows it.
  *
- * **Store precedence**: a `.store` property; else a context answer (a provider that connects
- * after an element built its own store is not adopted); else, for the map, the explorer and
+ * Store precedence: a `.store` property; else a context answer (a provider that connects after an
+ * element built its own store is not adopted); else, for the map, the explorer and
  * `<tessera-store>`, its own store from `viewer-url` and `token` or an `authorise` property; else
- * detached, which renders nothing rather than "empty" or "refused", both of which are answers.
- * An element that may build its own store follows those three: it builds one when they become
- * sufficient after connection, and disposes the one it built and builds another when `viewer-url`
- * or `token` changes or `authorise` is set or cleared. A store handed in by property or context is
- * never disposed here.
+ * detached, which renders nothing. An own store is built once those attributes suffice, and
+ * replaced when `viewer-url` or `token` changes or `authorise` is set or cleared. A store handed in
+ * by property or context is not disposed here.
  *
- * **Disconnecting never disposes the store.** Frameworks reorder and keep-alive elements by
- * disconnecting and reconnecting them, and JupyterLab's windowed notebooks scroll cells out of
- * the DOM; a store torn down on each would refetch its whole view on every scroll-past. An own
- * store lives until `dispose()` is called on the element that built it, or until its attributes
- * change.
- *
- * Following the store is one subscription over every projection; Lit coalesces the resulting
- * update requests into one render per microtask.
+ * Disconnecting does not dispose the store. Frameworks disconnect and reconnect elements to
+ * reorder them, and JupyterLab scrolls notebook cells out of the DOM; a new store each time would
+ * refetch the view. An own store lives until `dispose()` or until its attributes change.
  */
 export type StoreSource = 'property' | 'context' | 'own' | 'detached';
 
@@ -56,7 +49,7 @@ export abstract class TesseraElement extends LitElement {
   private consumer: ContextConsumer<typeof storeContext, this> | null = null;
   private unsubscribe: (() => void) | null = null;
 
-  /** The store this element reads, and where it came from, for a test and for a host's probe. */
+  /** The store this element reads. */
   get activeStore(): Store | null {
     return this.resolvedStore;
   }
@@ -69,7 +62,7 @@ export abstract class TesseraElement extends LitElement {
     // A reconnect keeps what was resolved; `resolve` then catches up with anything that changed
     // while disconnected.
     if (this.resolvedStore) this.subscribeTo(this.resolvedStore);
-    // The request goes out now, synchronously, and a provider above answers before this returns.
+    // The request is synchronous: a provider above answers before this returns.
     this.consumer ??= new ContextConsumer(this, {
       context: storeContext,
       subscribe: true,
@@ -175,20 +168,17 @@ export abstract class TesseraElement extends LitElement {
 }
 
 /**
- * What stands where an artifact or a record has no name: no supplied text and no topic attached.
- *
- * Never its key or its id. A key is an identifier its layer's author chose (`hdb-2422486`), and
- * drawn where a name goes it reads as a cluster called that. The key still shows in the card's
- * field that says key.
+ * What stands where an artifact or a record has no name. A key such as `hdb-2422486` is an
+ * identifier and would read as a name, so it shows only in the card's key field.
  */
 export const UNNAMED = '\u2014';
 
-/** Emit one of the elements' events (`events.ts`), bubbling and composed so it crosses shadow roots. */
+/** Emit one of the elements' events, bubbling and composed so it crosses shadow roots. */
 export function emit<K extends keyof TesseraEventDetails>(from: HTMLElement, name: K, detail: TesseraEventDetails[K]): void {
   from.dispatchEvent(new CustomEvent(name, {detail, bubbles: true, composed: true}));
 }
 
-/** Ids cross the DOM boundary as decimal strings, the wire's own JSON form. */
+/** An id as the decimal string events carry, the wire's JSON form. */
 export function idString(id: bigint): string {
   return id.toString(10);
 }

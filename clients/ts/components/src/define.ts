@@ -1,19 +1,15 @@
 import {ContextRoot} from '@lit/context';
 
 /**
- * The two module-level mechanics every entry shares (design client-components §5.9).
+ * Module-level set-up every entry shares.
  *
- * **Every define is guarded.** `customElements.define` throws on a second definition, and a
- * second definition is ordinary here: anywidget evaluates `_esm` once per model, and a page may
- * hold both the unbundled and the single-file distribution. The first class to claim a tag keeps
- * it; a later copy of the package defines nothing and its elements upgrade to the first's.
+ * Every define is guarded: anywidget evaluates `_esm` once per model, and a page may hold two
+ * copies of the package. The first class to claim a tag keeps it.
  *
- * **The context root is attached once per document, on import.** Lit's context protocol is a
- * one-shot event: a `context-request` dispatched before its provider connected is lost, so a
- * panel rendered above the explorer in the DOM — or upgraded before it — would stay detached. A
- * `ContextRoot` on the document body buffers those requests and replays them when a provider
- * connects. Guarded through a global rather than a module variable, because two copies of this
- * module would otherwise attach two roots.
+ * A context root is attached to the document body once, on import. A Lit `context-request`
+ * dispatched before its provider connects is otherwise lost, so a panel upgraded before the
+ * explorer would stay detached; the root replays those requests. The guard is a global, so two
+ * copies of this module attach one root.
  */
 
 const ROOT_KEY = '__tesseradbContextRoot';

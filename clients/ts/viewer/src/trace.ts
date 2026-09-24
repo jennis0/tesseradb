@@ -1,42 +1,23 @@
 /**
- * A session recorder for the demo: what the user did, what the client did about it, and how long
- * each frame took.
+ * A session recorder for the viewer: inputs, the work they caused and the frames that resulted, on
+ * one timeline, which a browser-free harness cannot show (GPU upload, frame scheduling).
  *
- * **Why this exists.** The browser-free harness (`probes/2026-08-09-client-pipeline/`) attributes
- * client CPU well and cannot see the three things a user actually feels — GPU upload, frame
- * scheduling, and the relationship between an input and the paint that answers it. Every diagnosis
- * made without them this far has needed at least one correction. This closes that loop: the reader
- * gets a timeline in which an input, the work it caused, and the frame that resulted are the same
- * three records.
- *
- * **Off unless asked for.** `?trace=1`. Disabled, every method returns on a boolean and no observer,
- * no animation frame and no listener is installed — an instrument that perturbs what it measures is
- * worse than none, and this one runs inside the frame loop it is timing.
- *
- * **Bounded.** A ring of {@link CAPACITY} events, oldest dropped. A long session is meant to end in
- * a download, not an out-of-memory.
- *
- * The marker key (`m`) is the point of the whole thing: press it when something feels wrong, and the
- * trace carries the reader's own judgement rather than leaving it to be guessed from the numbers.
+ * Enabled by `?trace=1`. Disabled, every method returns on a boolean and no observer, animation
+ * frame or listener is installed. Events go in a ring of {@link CAPACITY}, oldest dropped, and the
+ * session ends in a download. Pressing `m` records a marker where something felt wrong.
  */
 
-/** ~10 minutes of 60 Hz frames plus everything else that happens alongside them. */
+/** About ten minutes of 60 Hz frames and the events alongside them. */
 const CAPACITY = 60_000;
 
-/**
- * One record. Deliberately flat and numeric.
- *
- * Objects rather than a typed ring because the volume is bounded and readability beats the
- * allocation: 60k small objects is a few MB, against a frame budget of 16 ms that a `push` does not
- * threaten. A packed encoding would be faster to write and much harder to trust.
- */
+/** One record, flat and mostly numeric. At the ring's capacity the objects take a few MB. */
 export type TraceEvent = {
   /** Milliseconds since the trace started. */
   t: number;
   kind: string;
   /** How long the thing took, where it is a duration. */
   ms?: number;
-  /** The thing's natural count — marks, bands, bytes, whichever the kind names. */
+  /** The count the kind names: marks, bands or bytes. */
   n?: number;
   [field: string]: number | string | undefined;
 };
@@ -47,7 +28,7 @@ export type TraceHeader = {
   userAgent: string;
   devicePixelRatio: number;
   viewport: {width: number; height: number};
-  /** The real GPU, via `WEBGL_debug_renderer_info` — software rasterisation invalidates timings. */
+  /** The GPU, from `WEBGL_debug_renderer_info`; timings under software rasterisation are void. */
   renderer: string;
 };
 
@@ -60,12 +41,8 @@ class Trace {
   private markers = 0;
   private onChange: (() => void) | null = null;
   /**
-   * The recent frames, one entry each — the two targets are computed from these alone.
-   *
-   * A bounded recent history rather than session totals, because the targets exempt the initial
-   * load: slow-while-loading is accepted, slow-while-exploring is the thing being fixed. A trailing
-   * window scores what the user is doing *now*, so the bar reads red exactly when the map feels
-   * rough and recovers when it stops.
+   * The recent frames, one entry each, which the frame targets are scored from. A trailing window
+   * rather than session totals, so the initial load is not counted.
    */
   private recent: {t: number; gap: number}[] = [];
 
@@ -81,7 +58,7 @@ class Trace {
     return this.markers;
   }
 
-  /** Record one event. The hot path: a timestamp, an object and a ring write. */
+  /** Record one event. */
   event(kind: string, fields?: Record<string, number | string | undefined>): void {
     if (!this.enabled) return;
     const record: TraceEvent = {t: performance.now() - this.origin, kind, ...fields};
@@ -93,12 +70,7 @@ class Trace {
     this.onChange?.();
   }
 
-  /**
-   * Time `fn` and record it, returning what it returned.
-   *
-   * Returns `fn()` uninstrumented when disabled — no closure, no clock read — so a call site can
-   * wrap a hot function without conditioning on the flag itself.
-   */
+  /** Time `fn` and record it, returning its result. Disabled, it calls `fn` and reads no clock. */
   phase<T>(kind: string, fn: () => T, fields?: Record<string, number | string | undefined>): T {
     if (!this.enabled) return fn();
     const start = performance.now();
@@ -107,23 +79,15 @@ class Trace {
     return out;
   }
 
-  /**
-   * Count one animation frame. Every frame, not only the slow ones — the average is over all of
-   * them, and recording only the misses would make the score look worse than the session felt.
-   */
+  /** Count one animation frame. Every frame is counted, so the average and quantile are exact. */
   noteFrame(gap: number): void {
     if (!this.enabled) return;
     this.recent.push({t: performance.now(), gap});
-    // Trimmed in bulk, amortised: ~68 s of 60 Hz frames, comfortably past the scoring window.
+    // Trimmed in bulk; 8,192 frames at 60 Hz is about 68 s, past the scoring window.
     if (this.recent.length > 8192) this.recent.splice(0, 4096);
   }
 
-  /**
-   * The score against the two targets over the last `windowMs`: average fps and p95 frame time.
-   *
-   * Exact over the window — every frame in it is recorded, so the quantile is a real quantile
-   * rather than an estimate from the misses.
-   */
+  /** Average fps and p95 frame time over the last `windowMs`. */
   frameStats(windowMs = 10_000): {fps: number; p95: number} | null {
     const since = performance.now() - windowMs;
     let start = this.recent.length;
@@ -154,7 +118,7 @@ class Trace {
     this.onChange = onChange;
   }
 
-  /** Chronological, oldest first — the ring unrolled. */
+  /** The ring unrolled, oldest first. */
   private ordered(): TraceEvent[] {
     if (this.events.length < CAPACITY) return this.events;
     return [...this.events.slice(this.cursor), ...this.events.slice(0, this.cursor)];
@@ -164,7 +128,7 @@ class Trace {
     return {header: this.header, events: this.ordered()};
   }
 
-  /** Hand the reader a file. A download rather than a console dump: 60k records is not readable. */
+  /** Download the trace as a JSON file. */
   download(): void {
     const blob = new Blob([JSON.stringify(this.toJSON())], {type: 'application/json'});
     const url = URL.createObjectURL(blob);
@@ -197,12 +161,8 @@ declare global {
 if (trace.enabled && typeof window !== 'undefined') window.__tesseraTrace = trace;
 
 /**
- * Frame timing, long tasks, and input — the three the harness cannot see.
- *
- * **Frame gaps are recorded, not frame *work*.** A gap is what a user perceives; attributing it
- * needs the phase records that sit between two gaps, which is exactly what the timeline gives.
- * Only gaps past {@link SLOW_FRAME_MS} are recorded, so a smooth stretch costs one number rather
- * than one record per frame — the interesting frames are the ones that missed.
+ * Frame gaps longer than this are recorded as events; every frame is still counted for the score.
+ * The phase records between two gaps say what the time went on.
  */
 const SLOW_FRAME_MS = 20;
 
@@ -235,8 +195,7 @@ export function installTrace(canvas: HTMLElement): void {
   };
   requestAnimationFrame(tick);
 
-  // Long tasks say *that* the main thread blocked; the phase records around them say what in. The
-  // pair is the whole diagnosis, and neither half is enough alone.
+  // Long tasks show that the main thread blocked; the phase records around them show on what.
   try {
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
@@ -244,12 +203,11 @@ export function installTrace(canvas: HTMLElement): void {
       }
     }).observe({entryTypes: ['longtask']});
   } catch {
-    // Not in every browser, and its absence is not a reason to record nothing else.
+    // Not in every browser.
   }
 
-  // Input, so a gap can be read against what the user was doing when it happened. Pointer *moves*
-  // are counted rather than recorded: at 120 Hz they would be most of the file and none of the
-  // signal, and the drag is bounded by the down and up either side of it.
+  // Input, so a gap can be read against what the user was doing. Pointer moves are counted, not
+  // recorded, since at 120 Hz they would fill the ring.
   let moves = 0;
   canvas.addEventListener('pointerdown', (e) => {
     moves = 0;
@@ -270,7 +228,7 @@ export function installTrace(canvas: HTMLElement): void {
   });
 }
 
-/** The GPU's own name, so a trace taken under software rasterisation can be discarded on sight. */
+/** The GPU's name, so a trace taken under software rasterisation can be discarded. */
 function rendererName(): string {
   try {
     const gl = document.createElement('canvas').getContext('webgl2');
@@ -282,12 +240,7 @@ function rendererName(): string {
   }
 }
 
-/**
- * The recording bar.
- *
- * Fixed and out of the layout, because the panels are themselves a thing being measured and a
- * recorder that reflows them is recording its own effect.
- */
+/** The recording bar, fixed and out of the layout so it does not reflow the panels it measures. */
 export function installTraceBar(): void {
   if (!trace.enabled) return;
   const bar = document.createElement('div');
@@ -314,9 +267,7 @@ export function installTraceBar(): void {
       label.innerHTML = `● ${trace.count} events, ${trace.markerCount} marks`;
       return;
     }
-    // The two targets, scored live over the last ten seconds: average fps above 45, p95 frame
-    // time under 100 ms. A trailing window because the targets exempt the initial load — the bar
-    // is meant to read red exactly while the map feels rough, and to recover when it stops.
+    // The targets over the last ten seconds: average fps above 45, p95 frame time under 100 ms.
     const fpsOk = stats.fps > 45;
     const p95Ok = stats.p95 < 100;
     const paint = (ok: boolean) => (ok ? '#7ad694' : '#ed7689');
@@ -326,7 +277,6 @@ export function installTraceBar(): void {
       `${trace.count} events, ${trace.markerCount} marks`;
   };
   render();
-  // Repainted on a timer rather than per event: the bar is not worth a DOM write per frame, and a
-  // recorder whose own UI shows up in the trace is measuring itself.
+  // Repainted on a timer, so the bar's own DOM writes stay out of the frames it measures.
   setInterval(render, 500);
 }

@@ -18,32 +18,22 @@ import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-filter column="…">` — one operand, rendered by its type from `meta` (design §5.3
- * tier 2), as the boards draw it: a text column is a search field with an *all words / phrase*
- * toggle; a category is a typeahead over `/v1/categories/{column}/suggest`
- * (`value-suggestion.md`) — a search field, the matched values with the matched span marked, the
- * chosen ones as chips above it; a number or a date is two inputs with *to* between them; a
- * keyword or string is a field with its operator.
+ * `<tessera-filter column="…">`: one operand, rendered by its type from `meta`. A text column is a
+ * search field with an all words or phrase toggle. A category is a typeahead over
+ * `/v1/categories/{column}/suggest`, or a checklist when every value fits on one page. A number or
+ * a date is two inputs; a keyword is a field with its operator.
  *
- * **A typed value is submitted, never validated against the suggestion page.** A category's
- * suggestions are what `/v1/categories/{column}/suggest` was willing to offer, and a key it did
- * not offer may still be one this principal can filter by; an unresolvable one is an empty answer
- * by contract (contracts §3.2), indistinguishable from a value that does not exist. So the search
- * field submits whatever is typed on Enter, and the control never says "no such value". A refused
- * suggestion renders as a refusal beside the field, not as an absent control.
+ * A typed category value is submitted on Enter without checking it against the suggestions. A key
+ * the server did not suggest may still be filterable, and an unknown key answers empty, the same
+ * as a value that does not exist, so the control does not say "no such value". A refused
+ * suggestion request shows as a refusal beside the field.
  *
- * **The suggestion page is rendered only while it answers the box in front of it.** The store
- * echoes `q` back on the projection precisely so a stale page — a slower response to an earlier
- * keystroke, landing after a faster response to a later one — is never mistaken for an answer to
- * what is now typed; this element applies the same `q` check the store already used to decide
- * whether to keep the page at all, because a page can go stale here too, between the store's tick
- * and this element's next render, in the case fewest visits: a very fast keystroke arriving inside
- * one microtask queue flush.
+ * A suggestion page is rendered only while its `q` matches the text in the box, so a late answer
+ * to an earlier keystroke is not shown.
  *
- * The draft is local to the element while a user is typing; the store's draft re-seeds it only
- * when it changes under the element (a *clear all*). Typing asks the store's typeahead action on
- * every keystroke, which debounces and single-flights it; a tick, a mode or a date lands at once.
- * Emits `tessera-filterchange` with the composed expression.
+ * The draft is local while the user types; the store's draft re-seeds it only when it changes
+ * underneath (a clear all). Typing asks the store's typeahead on every keystroke, and the store
+ * debounces it. Emits `tessera-filterchange` with the composed expression.
  */
 
 /** The operators a keyword control can send. */
@@ -94,9 +84,7 @@ export class TesseraFilter extends TesseraElement {
         flex-direction: column;
         gap: 2px;
       }
-      /* A row is a button (keyboard-operable, role=option inside [part=values]'s role=listbox),
-         stretched to the list's width by its column-flex parent; text-align is the one thing the
-         shared button reset does not set for us. */
+      /* A row is a button stretched to the list's width; the shared button reset leaves text-align. */
       [part='tick'] {
         text-align: left;
       }
@@ -105,19 +93,13 @@ export class TesseraFilter extends TesseraElement {
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /** The matched span, in the served string, exactly where the server said it sits. */
+      /* The matched span the server gave. */
       [part='tick'] mark {
         background: var(--_tessera-accent-soft);
         color: var(--_tessera-accent);
         border-radius: 2px;
       }
-      /**
-       * **The title leads and the key follows it, muted**, where the two differ. A value's key is
-       * what the filter is written in and it is not always what the value is called: a boundary
-       * set keys its divisions by uuid, so a key-then-title line put 36 characters of
-       * hexadecimal in front of every name and a column of them read as a column of nothing. Where a key is the name
-       * — an arXiv category, a country code — the two are one string and only it is drawn.
-       */
+      /* The key follows the title, muted, since a key may be an opaque identifier such as a uuid. */
       [part='tick'] .k {
         margin-left: 0.45em;
         opacity: 0.55;
@@ -146,41 +128,29 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor draft: ColumnDraft | null = null;
   @state() accessor search = '';
   /**
-   * The title last seen for a chosen key, so a chip shows a name rather than a bare key once its
-   * value has scrolled out of the current suggestion page. Filled in the moment a value is picked
-   * from a page that carried one; never fetched for its own sake — a chosen key with no title on
-   * record renders as its key, exactly as an unresolved one would.
+   * The title seen for each chosen key when it was picked, so its chip keeps a name after the value
+   * leaves the suggestion page. A key with no recorded title shows as the key.
    */
   @state() accessor labels: Record<string, string> = {};
   /**
-   * Which of the two category shapes this control draws (round 2 of `value-suggestion.md` §5.1):
-   * `null` while the empty-`q` page for this `(column, view)` has not yet answered, `'checklist'`
-   * once it has and said `more: false` — the whole visible set fits on one page, so a search box
-   * has nothing to narrow — and `'lookahead'` once it has said `more: true`. Decided **once** from
-   * that page and held afterwards: a later keystroke's page in `'lookahead'` mode must not flip
-   * this back and forth as its own `more` varies with the prefix typed. Re-set to `null` when the
-   * store's `suggestEpoch` moves — see `lastEpoch` below — so the next empty-`q` page decides
-   * again.
+   * Which category shape this control draws: `null` until the empty-`q` page answers, then
+   * `'checklist'` if it said `more: false` (every visible value fits) or `'lookahead'` if not.
+   * Decided once from that page, so later pages do not flip it, and reset when the store's
+   * `suggestEpoch` moves.
    */
   @state() accessor shape: 'checklist' | 'lookahead' | null = null;
   private sent: ColumnDraft | null = null;
   private typing: ReturnType<typeof setTimeout> | null = null;
   /**
-   * The last `q` this element actually asked the store's typeahead for. `onStoreChange` fires on
-   * every store tick — status, replica, points churn, none of it about this control — and asking
-   * again each time re-arms the store's own debounce without ever letting it fire: under fast
-   * enough churn no request goes out at all. Asking only when `q` has moved on from this makes a
-   * store tick a no-op here, the way it already is for every other projection this element reads.
+   * The last `q` this element asked the store's typeahead for. Store changes arrive for every
+   * projection, and re-asking on each would keep re-arming the store's debounce so no request went
+   * out; asking only on a new `q` avoids that.
    */
   private lastAsked: string | null = null;
   /**
-   * The store's `filters.suggestEpoch` as last seen here, `-1` before the first tick. A change
-   * against the live projection is what says every held page was invalidated (a view switch or a
-   * re-authorise, `store.ts`'s `resetSuggestions`) — **tested instead of `shape`**, because a
-   * column that never finished deciding a shape (still loading, or sitting on a refusal) carries
-   * no signal of its own that a reset happened: `suggestions[column]` and `suggestErrors[column]`
-   * are both already absent in that state, before and after the reset alike, so comparing them
-   * cannot tell an invalidation from "nothing has landed yet". The epoch can.
+   * The store's `filters.suggestEpoch` as last seen, `-1` before the first update. A change means
+   * every held page was invalidated (a view switch or re-authorisation). A column still loading or
+   * refused looks the same before and after a reset, so only the epoch shows one happened.
    */
   private lastEpoch = -1;
 
@@ -208,8 +178,8 @@ export class TesseraFilter extends TesseraElement {
   }
 
   protected override onStoreChange(): void {
-    // Re-seed from the store only when its draft moved under this control — a clear-all, or the
-    // first meta — never while the user's own edit is the one in flight.
+    // Re-seed from the store only when its draft changed underneath (a clear all, or the first
+    // meta), not while the user's own edit is in flight.
     const stored = this.resolvedStore?.get('filters').draft[this.column] ?? null;
     if (stored && stored !== this.sent && JSON.stringify(stored) !== JSON.stringify(this.draft)) {
       this.draft = structuredClone(stored);
@@ -218,32 +188,19 @@ export class TesseraFilter extends TesseraElement {
     if (this.resolvedOperand?.family === 'category') {
       const filters = this.resolvedStore?.get('filters');
       const epoch = filters?.suggestEpoch ?? -1;
-      // **Invalidated**, unconditionally on the epoch moving — never on `shape`, `suggestions` or
-      // `suggestErrors` alone: a column stuck loading or sitting on a refusal shows the identical
-      // absence of both before and after a reset, so those cannot say a reset happened at all, and
-      // gating on `shape !== null` (the earlier version of this check) left exactly that column
-      // sitting on its skeleton forever after a view switch or a re-authorise. Forgetting
-      // `lastAsked` and the typed `q` is what makes the next tick's `ask('')` actually reach the
-      // store instead of reading as already-asked, and returns the control to the
-      // picker's-list-before-typing state the design gives it on first mount.
+      // Invalidated: forget the shape, the typed `q` and `lastAsked`, so the `ask('')` below
+      // reaches the store and the control starts over as on first mount.
       if (epoch !== this.lastEpoch) {
         this.lastEpoch = epoch;
         this.shape = null;
         this.lastAsked = null;
         this.search = '';
       }
-      // Not an `else`: the first tick after mount moves `lastEpoch` from its `-1` starting value
-      // in the branch above, and a page can already be sitting on the store at that same tick
-      // (every test that seeds `filters` before connecting does exactly this) — gating the decision
-      // behind the reset branch not firing would leave a pre-seeded page undecided until a second,
-      // unrelated tick happened to come along.
+      // Not an `else`: the first update after mount takes the branch above, and a page may
+      // already be on the store then.
       const page = filters?.suggestions[this.column];
       if (page && page.q === '' && this.shape === null) this.shape = page.more ? 'lookahead' : 'checklist';
-      // The picker's list before anything is typed (`value-suggestion.md` §4): an empty `q`
-      // matches every value, so the first ask is for `this.search` as it stands — `''` on mount
-      // and after an invalidation, above. `ask`'s own guard is what makes this safe to call on
-      // every store tick: it only ever reaches the store once for a `q` this element has not
-      // already asked for.
+      // An empty `q` lists values before anything is typed. `ask` reaches the store once per `q`.
       this.ask(this.search);
     }
     super.onStoreChange();
@@ -255,9 +212,8 @@ export class TesseraFilter extends TesseraElement {
   }
 
   /**
-   * The control's draft: the one being edited, else the store's, else the empty draft the client
-   * seeds for this operand. The operator a keyword control starts on is the draft's, never this
-   * element's choice.
+   * The control's draft: the one being edited, else the store's, else the client's empty draft for
+   * this operand, which also sets a keyword control's starting operator.
    */
   private currentDraft(o: FilterOperandSet): ColumnDraft | null {
     return this.draft ?? this.resolvedStore?.get('filters').draft[this.column] ?? emptyDraft([o])[o.column] ?? null;
@@ -279,7 +235,7 @@ export class TesseraFilter extends TesseraElement {
     else this.typing = setTimeout(apply, TYPING_DEBOUNCE_MS);
   }
 
-  /** The column's name for a label: `submitted_at` reads as *Submitted at*. */
+  /** The column's name for a label: `submitted_at` reads as "Submitted at". */
   private heading(): string {
     const name = this.column.replace(/_/g, ' ');
     return name.charAt(0).toUpperCase() + name.slice(1);
@@ -290,9 +246,8 @@ export class TesseraFilter extends TesseraElement {
     if (!o) return nothing;
     const draft = this.currentDraft(o);
     if (!draft) return nothing;
-    // Every other shape's body has an `input` with `id="ctl"` for the label's `for`. The checklist's
-    // body is a `role="group"` of checkboxes, which `for` cannot label, so the group names the
-    // heading through `aria-labelledby` instead.
+    // The checklist is a `role="group"`, which `for` cannot label, so it uses `aria-labelledby`;
+    // every other shape has an `input` with `id="ctl"`.
     const checklist = draft.family === 'category' && this.shape === 'checklist';
     const label = checklist
       ? html`<span part="label" class="muted" id="ctl-label">${this.heading()}</span>`
@@ -340,10 +295,8 @@ export class TesseraFilter extends TesseraElement {
   }
 
   /**
-   * `field`'s text, the matched span marked where the server said it sits — in **characters of
-   * the served string**, so this never re-runs the fold (`value-suggestion.md` §5.1). Split on
-   * code points rather than UTF-16 units: the offsets are characters, and a naive `.slice` would
-   * cut a surrogate pair in half on any served string outside the basic plane.
+   * `field`'s text with the matched span the server gave marked. The offsets count code points of
+   * the served string, so the text is split by code point, not UTF-16 unit.
    */
   private markedField(v: SuggestValue, field: MatchSpan['field'], text: string): TemplateResult | string {
     if (v.match.field !== field) return text;
@@ -352,7 +305,7 @@ export class TesseraFilter extends TesseraElement {
     return html`${chars.slice(0, start).join('')}<mark>${chars.slice(start, start + len).join('')}</mark>${chars.slice(start + len).join('')}`;
   }
 
-  /** One suggested value's text: title leading, key muted after it, as a chosen value's does. */
+  /** One suggested value's text: the title, then the key muted. */
   private suggestionText(v: SuggestValue): TemplateResult {
     const title = v.title ?? v.key;
     return v.title && v.title !== v.key
@@ -360,11 +313,7 @@ export class TesseraFilter extends TesseraElement {
       : html`${this.markedField(v, 'key', v.key)}`;
   }
 
-  /**
-   * A checklist row's text — the same title-leads-key layout as {@link suggestionText}, with no
-   * match span: a checklist never asks with a typed `q`, so there is nothing a server-supplied
-   * span could be marking against.
-   */
+  /** A checklist row's text, as {@link suggestionText} without a match span, since nothing was typed. */
   private checklistText(v: SuggestValue): TemplateResult {
     const title = v.title ?? v.key;
     return v.title && v.title !== v.key ? html`${title}<span class="k">${v.key}</span>` : html`${v.key}`;
@@ -392,18 +341,11 @@ export class TesseraFilter extends TesseraElement {
           </div>`
         : nothing;
 
-    // **The checklist shape** (round 2 of `value-suggestion.md` §5.1): the empty-`q` page said
-    // `more: false`, so the whole visible set is on it and there is nothing a search box would
-    // narrow. A checkbox per value — ticked for a chosen one, native `<input>` keyboard operation,
-    // no entry field and no match span — using the same `pick`/`chips` a lookahead uses, so
-    // `setFilters` is sent the identical draft either way. `aria-labelledby` rather than `for` on
-    // the heading label (`render`): `for` only binds a labelable element (an `input`, not a
-    // `role="group"` div), which is what the lookahead's entry field is and this group is not.
+    // The checklist: every visible value is on the page, so a checkbox per value and no search
+    // box. It uses the same `pick` and `chips` as the lookahead, so the draft sent is the same.
     if (this.shape === 'checklist') {
       const rows = suggestion?.values ?? [];
-      // A refusal is defensive here rather than reachable today — a checklist never re-asks, so
-      // nothing on the current epoch can turn a landed page into one — but it costs nothing to
-      // show rather than silently drop should that stop being true.
+      // A checklist does not re-ask, so a refusal here is unexpected; it is shown if it happens.
       const refusalNote = refusal ? html`<span part="refusal" class="xs">${refusal.code}: values not listable</span>` : nothing;
       return html`${chips}<div part="values" class="list" role="group" aria-labelledby="ctl-label">
         ${repeat(
@@ -417,10 +359,7 @@ export class TesseraFilter extends TesseraElement {
       </div>${refusalNote}`;
     }
 
-    // What is typed is submitted on Enter whether or not it matched a suggestion (contracts
-    // §3.2): a key the page never offered may still be one this principal can filter by, and an
-    // unresolvable one is an empty answer, indistinguishable from one that does not exist — never
-    // a rejected keystroke.
+    // Enter submits what is typed, suggested or not; see the element's doc.
     const submit = () => {
       const key = this.search.trim();
       if (!key || chosen.has(key)) return;

@@ -11,9 +11,9 @@ export default defineConfig({
   // The workspace packages resolve to their sources, so the bundle needs no prior library build.
   resolve: {conditions: ['tessera-source', ...defaultClientConditions]},
   // deck.gl reads `process.env.NODE_ENV` unguarded, and library mode does not substitute it. A
-  // page bundled by a host is fine (its bundler substitutes); this file is evaluated as-is, from
-  // a `<script type="module">` and, as the widget's `_esm`, from a Blob URL inside JupyterLab,
-  // where the first `process` is a ReferenceError before any element defines.
+  // host's bundler substitutes it, but this bundle is also loaded as-is from a
+  // `<script type="module">` and, as the widget's `_esm`, from a Blob URL in JupyterLab, where
+  // `process` is undefined.
   define: {'process.env.NODE_ENV': JSON.stringify('production')},
   build: {
     lib: {

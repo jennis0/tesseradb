@@ -116,8 +116,8 @@ describe('<tessera-filter>', () => {
     const host = await mount('<tessera-filter column="archive"></tessera-filter>');
     const el = host.querySelector('tessera-filter') as TesseraFilter;
     const store = fakeStore({meta: META, status: status({})});
-    // `more: true` — the lookahead shape, so the control keeps its search box (round 2, §5.1: a
-    // `more: false` empty-`q` page renders a checklist instead, covered below).
+    // `more: true` gives the lookahead, with its search box; `more: false` gives a checklist,
+    // covered below.
     store.set('filters', {
       draft: {archive: {family: 'category', keys: [], verb: 'filter'}},
       expr: null,
@@ -146,9 +146,7 @@ describe('<tessera-filter>', () => {
     const host = await mount('<tessera-filter column="archive"></tessera-filter>');
     const el = host.querySelector('tessera-filter') as TesseraFilter;
     const store = fakeStore({meta: META, status: status({})});
-    // Nine values on one page and nothing left to page through — a small, public column
-    // (`value-suggestion.md` §5.1 round 2): the whole visible set fits, so a checkbox per value
-    // rather than a typeahead.
+    // Nine values on one page and no more to page through: a checkbox per value, not a typeahead.
     const values = Array.from({length: 9}, (_, i) => ({code: i + 1, key: `v${i}`, title: `Value ${i}`, match: {field: 'key' as const, start: 0, len: 0}}));
     store.set('filters', {
       draft: {archive: {family: 'category', keys: ['v2'], verb: 'filter'}},
@@ -360,9 +358,8 @@ describe('<tessera-filter-panel>', () => {
   });
 
   /**
-   * §5.2's two verbs on the chip: the word says which of the request's two expressions the clause
-   * joins, and clicking it moves the clause **without the predicate being re-entered** — which is
-   * exactly what is asserted, the draft the panel sends back carrying the same keys.
+   * The chip's verb says which of the request's two expressions the clause joins, and clicking it
+   * moves the clause with its predicate: the draft sent back carries the same keys.
    */
   it('moves a clause between filter and highlight from the chip, keeping its predicate', async () => {
     const host = await mount('<tessera-filter-panel></tessera-filter-panel>');

@@ -1,24 +1,19 @@
 #!/usr/bin/env node
-// What look-ahead is actually for: the time from the user stopping to the points being on screen.
+// The time from the user stopping a pan to the points being on screen, with and without look-ahead.
 //
 //   node clients/ts/viewer/smoke-latency.mjs [--clients N] [--url http://localhost:5173]
 //     [--headed] [--executable /path/to/chrome]
 //
 // Requires a running `tessera serve` and `vite dev`.
 //
-// Three questions, in order:
+// It measures:
 //
-//  1. **Latency.** Pan-to-paint is the part of render latency a client controls. Request counts are
-//     a proxy for it and a poor one: a pan answered from held bands makes no network activity at
-//     all, so anything watching requests cannot see the case the whole design exists to produce.
-//     Timed from the page, off `window.__tesseraProbe`.
-//
-//  2. **Speed.** A ring covers a fixed distance ahead; a fast pan crosses it sooner. So the useful
-//     question is not "does look-ahead help" but "up to what movement speed does it help", which is
-//     a sweep rather than a single number.
-//
-//  3. **Contention.** Anticipation is speculative server work, so its cost is paid per client while
-//     its benefit accrues to one. `--clients N` runs N pages against one server.
+//  1. Pan-to-paint latency, timed in the page from `window.__tesseraProbe`. Request counts cannot
+//     show a pan answered from held bands, which makes no request.
+//  2. How it varies with pan speed: look-ahead covers a fixed distance, which a fast pan crosses
+//     sooner, so the script sweeps speeds.
+//  3. Contention: look-ahead is speculative server work paid per client. `--clients N` runs N
+//     pages against one server.
 import {flags, launchBrowser, withParams} from './smoke-browser.mjs';
 
 const args = flags();
@@ -28,9 +23,8 @@ const PAN_PX = 420;
 // Pixels per second. A slow drag is a careful read; 3000 px/s is a flick across the screen.
 const SPEEDS = [300, 1000, 2500];
 
-// Under headless swiftshader the frame is the measurement's noise floor: pan-to-paint is timed
-// from the paint, and a software-rasterised frame at a few million marks is itself seconds. What
-// this reports is a client latency, so it wants the real browser (`smoke-browser.mjs`).
+// Pan-to-paint is timed to the paint, and a software-rasterised frame over a few million marks
+// takes seconds, so use `--headed`.
 const browser = await launchBrowser(args);
 
 /** Drive one page: settle it, then sweep pan speeds, reporting latency per pan. */
@@ -58,8 +52,8 @@ async function runClient(index, prefetch) {
   }
   await page.waitForTimeout(3000);
 
-  // Settle the depth budget: bands are keyed by depth, and calibration is one-directional, so a
-  // moving m_target lands every view where nothing is held.
+  // Settle the depth budget: bands are keyed by depth, and a moving `m_target` lands every view
+  // where nothing is held.
   for (let i = 0; i < 5; i++) {
     await pan(page, -200, 800);
     await pan(page, 200, 800);
@@ -103,17 +97,13 @@ async function pan(page, dx, pxPerSecond) {
 }
 
 /**
- * One pan, timed from mouse-up to the paint that answers it.
- *
- * A pan needing nothing repaints within a frame or two and costs no request; one that waits shows
- * up as the debounce plus a round trip. `waited` distinguishes them without guessing.
+ * One pan, timed from mouse-up to the paint that answers it. A pan needing nothing repaints within
+ * a frame or two with no request; one that waits costs the debounce and a round trip.
  */
 async function timedPan(page, dx, speed) {
   await pan(page, dx, speed);
-  // **Counters read AFTER mouse-up, not before.** A fast drag outlives the debounce, so a repaint
-  // can land mid-pan — one that answers an earlier position, not the one the user stopped at.
-  // Sampling before the drag counts that as the answer and reports a few milliseconds for a pan
-  // that had not been answered at all.
+  // Counters are read after mouse-up: a fast drag outlives the debounce, so a repaint mid-pan
+  // answers an earlier position.
   const before = await page.evaluate(() => ({
     paints: window.__tesseraProbe?.paints ?? 0,
     requests: window.__tesseraProbe?.requests ?? 0
@@ -126,9 +116,7 @@ async function timedPan(page, dx, speed) {
         return p && p.paints > b.paints ? {requests: p.requests, marks: p.marks} : null;
       },
       before,
-      // Short, because a pan that needs nothing is exactly the case that never repaints — so this
-      // timeout is paid on every *successful* free pan rather than on failures. At 8s the sweep
-      // spent most of its wall clock proving that nothing had happened.
+      // Short, since a pan that needs nothing never repaints and pays this timeout.
       {timeout: 2000, polling: 16}
     )
     .then((h) => h.jsonValue())

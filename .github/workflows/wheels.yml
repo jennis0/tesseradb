@@ -50,38 +50,38 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             platform: manylinux_2_28_x86_64
             target: x86_64-unknown-linux-gnu.2.28
             cargo: zigbuild
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             platform: manylinux_2_28_aarch64
             target: aarch64-unknown-linux-gnu.2.28
             cargo: zigbuild
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             platform: musllinux_1_2_x86_64
             target: x86_64-unknown-linux-musl
             cargo: zigbuild
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             platform: musllinux_1_2_aarch64
             target: aarch64-unknown-linux-musl
             cargo: zigbuild
-          - runner: macos-14
+          - runner: macos-15
             platform: macosx_11_0_arm64
             target: aarch64-apple-darwin
             cargo: build
             deployment_target: "11.0"
-          - runner: macos-14
+          - runner: macos-15
             platform: macosx_10_12_x86_64
             target: x86_64-apple-darwin
             cargo: build
             deployment_target: "10.12"
-          - runner: windows-latest
+          - runner: windows-2025
             platform: win_amd64
             target: x86_64-pc-windows-msvc
             cargo: build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -89,7 +89,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.platform }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # zig is the cross-linker and the glibc version selector. Both come from PyPI so the runner
@@ -153,7 +153,7 @@ jobs:
           print(_tessera)
           print(subprocess.run([tesseradb_native.binary_path(), '--version'], check=True))
           "
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tesseradb-native-${{ matrix.platform }}
           path: clients/py-native/dist/*.whl
@@ -161,15 +161,15 @@ jobs:
   # `tesseradb` itself: one `py3-none-any` wheel for every platform, built where the components'
   # bundle can be built, which is the only reason this needs Node.
   pure:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: clients/ts/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: npm --prefix clients/ts ci
@@ -195,7 +195,7 @@ jobs:
           if not any("tesseradb-native==" in r and "platform_machine" in r for r in requires):
               sys.exit("tesseradb must pin tesseradb-native exactly, behind a platform marker")
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tesseradb
           path: dist/*.whl
