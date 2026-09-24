@@ -27,11 +27,12 @@ pub(crate) struct ItemsArgs {
     view: String,
     /// The declared fields to return, comma-separated, in the order wanted. `--fields ''`
     /// returns `tessera_id` alone. A field declared for a view group, read under a view outside
-    /// that group, is named `<field>@<key>`.
+    /// that group, is named `<field>@<key>`. An undeclared or repeated field is refused.
     #[arg(long, value_name = "NAMES")]
     fields: String,
     /// Any of `position`, `external_id` and `labels`, comma-separated, in the order wanted: the
-    /// columns `tessera:x` and `tessera:y`, `tessera:external_id` and `tessera:labels`.
+    /// columns `tessera:x` and `tessera:y`, `tessera:external_id` and `tessera:labels`. Any other
+    /// name is refused.
     #[arg(long, value_name = "NAMES")]
     system_fields: Option<String>,
     /// A filter expression as JSON, such as `{"year": {"range": {"gte": 2020}}}`. Only the items
@@ -42,12 +43,13 @@ pub(crate) struct ItemsArgs {
     #[arg(long)]
     keep_unmatched: bool,
     /// Count the items the token may see in the view and those that match. The counts are
-    /// printed on stderr at the end.
+    /// printed on stderr at the end. Refused with `--cursor`.
     #[arg(long)]
     count: bool,
     /// `map` returns the items by their place on the map; `stored` in the order the server stores
     /// records, which is faster for a field that is neither rendered nor indexed. Without it the
-    /// server chooses.
+    /// order is the one `--cursor` was read in, or the server's choice. With `--cursor`, another
+    /// order is refused.
     #[arg(long, value_enum)]
     order: Option<Order>,
     #[command(flatten)]
@@ -61,20 +63,24 @@ pub(crate) struct ArtifactsArgs {
     /// The view whose items the counts and the geometry are computed over.
     #[arg(long)]
     view: String,
-    /// The layer to read, as `/v1/meta` lists it.
+    /// The layer to read, as `/v1/meta` lists it. A layer not published to the token in
+    /// `--view` is refused.
     #[arg(long)]
     layer: String,
     /// Any of `key`, `level`, `parents`, `target`, `masked_count`, `content`, `centroid`, `box`
-    /// and `shape`, comma-separated, in the order wanted.
+    /// and `shape`, comma-separated, in the order wanted. Any other name, or one repeated, is
+    /// refused.
     #[arg(long, value_name = "NAMES")]
     fields: String,
-    /// Only the artifacts at this level of a levelled layer.
+    /// Only the artifacts at this level of a levelled layer. Refused on a layer with one level,
+    /// and past the levels the layer holds.
     #[arg(long)]
     level: Option<u32>,
-    /// Only the children of this artifact, by its `tessera_id`.
+    /// Only the children of this artifact, by its `tessera_id`. Refused with `--q`.
     #[arg(long, value_name = "TESSERA_ID")]
     parent: Option<u64>,
-    /// Only the artifacts whose key, or first text, contains this, ignoring case.
+    /// Only the artifacts whose key, or first text, contains this, ignoring case. Refused with
+    /// `--parent`.
     #[arg(long, value_name = "TEXT")]
     q: Option<String>,
     /// A filter expression as JSON. Only the artifacts with a visible member that matches are
@@ -85,7 +91,7 @@ pub(crate) struct ArtifactsArgs {
     #[arg(long)]
     keep_unmatched: bool,
     /// Count the artifacts served and those that match. The counts are printed on stderr at the
-    /// end.
+    /// end. Refused with `--cursor`.
     #[arg(long)]
     count: bool,
     #[command(flatten)]
@@ -97,9 +103,11 @@ pub(crate) struct ArtifactsArgs {
 #[derive(clap::Args)]
 struct Paging {
     /// Rows in a page, at most the server's `selection.max_page_rows`, which applies without it.
+    /// 0 is refused.
     #[arg(long, value_name = "N")]
     page_rows: Option<u32>,
-    /// The most pages in one response. Responses are requested until the read is done.
+    /// The most pages in one response. Responses are requested until the read is done. 0 is
+    /// refused.
     #[arg(long, value_name = "N")]
     pages: Option<u32>,
     /// Start after the last page of an earlier read: the cursor a read cut short printed.
@@ -121,7 +129,7 @@ struct Target {
     #[arg(long, value_name = "URL")]
     server: String,
     /// A session token, as the session plane's `/session/authorise` issues one. Without it the
-    /// token is read from `TESSERA_TOKEN`.
+    /// token is read from `TESSERA_TOKEN`, and with neither the read is refused.
     #[arg(long)]
     token: Option<String>,
     /// The file to write. Without it, or with `-`, the output goes to stdout.
@@ -129,6 +137,7 @@ struct Target {
     out: Option<PathBuf>,
     /// `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is
     /// the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it.
+    /// A format that disagrees with the extension of `--out` is refused.
     #[arg(long, value_enum)]
     format: Option<Format>,
 }

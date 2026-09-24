@@ -528,9 +528,12 @@ export type Meta = {
      * session can see. Above it, `more` may mean that `maxSuggestionWalk` ran out.
      */
     maxSuggestSetEntities: number;
-    /** The most rows a `POST /v1/items` page holds. */
+    /** The most rows a `POST /v1/items` or `POST /v1/artifacts` page holds. */
     maxPageRows: number;
-    /** The most Arrow bytes a `POST /v1/items` page holds before compression. A single larger row is sent alone. */
+    /**
+     * The most Arrow bytes a `POST /v1/items` or `POST /v1/artifacts` page holds before
+     * compression. A single larger row is sent alone.
+     */
     maxPageBytes: number;
   };
   /** The most tiles one viewport request may span; over it the request is a `422`. */
@@ -1270,57 +1273,123 @@ export type BrowsePage = {
 };
 
 /**
- * `POST /v1/items`: every item this principal may see in `view` that matches `filters`. Each
- * field is sent only when set, so one left unset takes the server's default.
+ * The body of `POST /v1/items`, which {@link TesseraClient.items} sends: every item this
+ * principal may see in `view` that matches `filters`. A field left unset is not sent, and the
+ * server's default applies.
+ *
+ * The columns of each page are `tessera_id` (`uint64`), the named fields in the order named, the
+ * system fields in the order named, then `tessera:matched` (`bool`) under `keepUnmatched`. Every
+ * named field is present whether or not an item carries a value, and an absent value is null. A
+ * category field is a dictionary column of its keys, each page's dictionary holding only the keys
+ * its rows carry.
+ *
+ * @category Requests and responses
  */
 export type ItemsRequest = {
+  /** The view to read, from `/v1/meta`. An item with no position in it is not returned. */
   view: string;
   /**
-   * Declared fields, by name, in the order their columns come back. A group-scoped field outside
-   * its group is pinned as `<field>@<key>`. An empty list returns `tessera_id` alone.
+   * Declared fields, by name, each once, in the order their columns come back. A group-scoped
+   * field outside its group is pinned as `<field>@<key>`. An empty list returns `tessera_id`
+   * alone. An undeclared or repeated field is a `422`.
    */
   fields: string[];
+  /**
+   * System columns, after the fields, in this order. `position` is `tessera:x` and `tessera:y`
+   * (`float64`) in the view's coordinates, so degrees on a geographic view. `external_id` is
+   * `tessera:external_id` (`binary`), null where the item has none. `labels` is `tessera:labels`
+   * (`list<utf8>`), the item's labels this principal holds, sorted.
+   */
   systemFields?: ('position' | 'external_id' | 'labels')[];
+  /** The viewport's filter. Only the items matching it are returned, unless `keepUnmatched` is set. */
   filters?: FilterExpr;
-  /** Every visible item, with a `tessera:matched` column, in place of the matching ones only. */
+  /**
+   * Every visible item, with a `tessera:matched` column, in place of the matching ones only.
+   * Without `filters` every row is marked matched.
+   */
   keepUnmatched?: boolean;
-  /** Put the counts in the head. Refused together with a `cursor`. */
+  /**
+   * Put {@link ItemsHead.visible} and {@link ItemsHead.matched} in the head. A `422` together with
+   * `cursor`. {@link TesseraClient.items} sends it on the read's first request only.
+   */
   count?: boolean;
+  /**
+   * `map` returns rows by map cell in `view`, then by `tessera_id`. `stored` returns them in the
+   * order the record store holds items, which is faster for a field held only there. Unset takes
+   * the cursor's order, or with no cursor the server's choice. A value different from the
+   * cursor's is a `422`.
+   */
   order?: 'map' | 'stored';
-  /** Capped by `meta.selection.maxPageRows`; the head reports the size used. */
+  /**
+   * Rows per page, capped by `meta.selection.maxPageRows`; the head reports the size used. Unset
+   * is the cap, and `0` is a `422`.
+   */
   pageRows?: number;
-  /** The most pages this response may carry. */
+  /** The most pages one response may carry. Unset is as many as the response's budgets allow, and `0` is a `422`. */
   pages?: number;
-  /** A previous response's cursor, unchanged. */
+  /** A previous response's cursor, unchanged: where the read resumes. Unset starts from the beginning. */
   cursor?: string;
-  /** Compress each page's Arrow buffers. The client decodes either form. */
+  /** Compress each page's Arrow buffers with zstd. The client decodes either form. */
   compression?: 'zstd';
+  /** The idset the `tessera_id`s are read in, as `/v1/meta` publishes it. A server holding another answers `409`. */
   idset?: number;
 };
 
-/** `POST /v1/artifacts`: every artifact of `layer` this principal is served. */
+/**
+ * The body of `POST /v1/artifacts`, which {@link TesseraClient.artifacts} sends: every artifact of
+ * `layer` this principal is served, ordered by level and then by publication order within the
+ * level. A field left unset is not sent, and the server's default applies.
+ *
+ * The columns of each page are `tessera_id` (`uint64`), the named properties in the order named,
+ * then `matched_count` (`uint64`) where the request carries `filters`.
+ *
+ * @category Requests and responses
+ */
 export type ArtifactsRequest = {
   /** The view the counts, centroids, boxes and shapes are taken in. */
   view: string;
+  /** A layer `/v1/meta` publishes to this principal. Any other is a `422`. */
   layer: string;
-  /** Properties, in the order their columns come back. */
+  /**
+   * Properties, each once, in the order their columns come back. `centroid` is the columns
+   * `centroid_x` and `centroid_y`, and `box` the columns `box_x_min`, `box_y_min`, `box_x_max` and
+   * `box_y_max`, in the view's coordinates. `shape` is a WKB `MultiPolygon`. A repeated property is
+   * a `422`.
+   */
   fields: ('key' | 'level' | 'parents' | 'target' | 'masked_count' | 'content' | 'centroid' | 'box' | 'shape')[];
+  /** Only the artifacts at this level. A `422` on a layer with one level, and past the levels the layer holds. */
   level?: number;
-  /** Only the artifacts naming this one among their parents. Refused together with `q`. */
+  /** Only the artifacts naming this one among their parents. A `422` together with `q`. */
   parent?: bigint;
+  /** Only the artifacts whose key, or first served text content, contains this, ignoring case. A `422` together with `parent`. */
   q?: string;
   /** Only artifacts with a visible member matching it, and a `matched_count` column. */
   filters?: FilterExpr;
+  /** With `filters`, every served artifact, one with no matching member having a `matched_count` of zero. */
   keepUnmatched?: boolean;
+  /**
+   * Put {@link ArtifactsHead.served} and {@link ArtifactsHead.matched} in the head. A `422`
+   * together with `cursor`. {@link TesseraClient.artifacts} sends it on the read's first request
+   * only.
+   */
   count?: boolean;
+  /** As {@link ItemsRequest.pageRows}. */
   pageRows?: number;
+  /** As {@link ItemsRequest.pages}. */
   pages?: number;
+  /** As {@link ItemsRequest.cursor}. */
   cursor?: string;
+  /** As {@link ItemsRequest.compression}. */
   compression?: 'zstd';
+  /** As {@link ItemsRequest.idset}. */
   idset?: number;
 };
 
-/** The head of a `POST /v1/items` response. */
+/**
+ * The head of a `POST /v1/items` response, as {@link RecordsRead.head} carries it.
+ *
+ * @category Requests and responses
+ */
 export type ItemsHead = {
   /** The order this response's rows are in. */
   order: 'map' | 'stored';
@@ -1332,8 +1401,13 @@ export type ItemsHead = {
   matched: number | null;
 };
 
-/** The head of a `POST /v1/artifacts` response. */
+/**
+ * The head of a `POST /v1/artifacts` response, as {@link RecordsRead.head} carries it.
+ *
+ * @category Requests and responses
+ */
 export type ArtifactsHead = {
+  /** The page size used, after the cap. */
   pageRows: number;
   /** Artifacts the request selects that this principal is served; `null` unless the request asked for `count`. */
   served: number | null;
@@ -1341,21 +1415,40 @@ export type ArtifactsHead = {
   matched: number | null;
 };
 
-/** What follows each page of a bulk read. */
+/**
+ * The frame after each page of a bulk read.
+ *
+ * @category Requests and responses
+ */
 export type PageEnd = {
   /** The cursor to resume after this page; `null` where no row remains. */
   next: string | null;
-  /** `time` means the response ends after this page. */
+  /**
+   * `rows`: the page holds `pageRows` rows. `bytes`: the next row would have taken it past
+   * `meta.selection.maxPageBytes`. `time`: the response's time ran out, or the stream deadline
+   * cancelled it, and the response ends after this page. `end`: no row remains.
+   */
   endedBy: 'rows' | 'bytes' | 'time' | 'end';
 };
 
-/** The last frame of a bulk read's response. */
+/**
+ * The last frame of a bulk read's response.
+ *
+ * @category Requests and responses
+ */
 export type RecordsTrailer = {
+  /** The pages this response carried. A page of no rows, which a response that found no row carries, counts. */
   pages: number;
+  /** The rows this response carried. */
   rows: number;
   /** The cursor to resume from, which can be past the last page end; `null` where no row remains. */
   next: string | null;
+  /**
+   * `end`: no row remains. `pages`: the response carried the request's `pages` pages.
+   * `budget_bytes` and `budget_time`: the response's byte or time budget ran out. `deadline`: the
+   * stream deadline cancelled it.
+   */
   endedBy: 'end' | 'pages' | 'budget_bytes' | 'budget_time' | 'deadline';
-  /** The whole response's wall time on the server, in microseconds. */
+  /** The whole response's wall time on the server, in microseconds, including waits on the client. */
   streamUs: number;
 };

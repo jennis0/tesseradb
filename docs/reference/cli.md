@@ -134,21 +134,21 @@ For example, `tessera items --server http://127.0.0.1:8080 --view papers --field
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--view` | `VIEW` |  | The view to read, as `/v1/meta` names it. An item with no position in it is not returned. |
-| `--fields` | `NAMES` |  | The declared fields to return, comma-separated, in the order wanted. `--fields ''` returns `tessera_id` alone. A field declared for a view group, read under a view outside that group, is named `<field>@<key>`. |
-| `--system-fields` | `NAMES` |  | Any of `position`, `external_id` and `labels`, comma-separated, in the order wanted: the columns `tessera:x` and `tessera:y`, `tessera:external_id` and `tessera:labels`. |
+| `--fields` | `NAMES` |  | The declared fields to return, comma-separated, in the order wanted. `--fields ''` returns `tessera_id` alone. A field declared for a view group, read under a view outside that group, is named `<field>@<key>`. An undeclared or repeated field is refused. |
+| `--system-fields` | `NAMES` |  | Any of `position`, `external_id` and `labels`, comma-separated, in the order wanted: the columns `tessera:x` and `tessera:y`, `tessera:external_id` and `tessera:labels`. Any other name is refused. |
 | `--filters` | `JSON` |  | A filter expression as JSON, such as `{"year": {"range": {"gte": 2020}}}`. Only the items that match are returned. |
 | `--keep-unmatched` |  |  | Return every item, with a `tessera:matched` column saying whether it matches `--filters`. |
-| `--count` |  |  | Count the items the token may see in the view and those that match. The counts are printed on stderr at the end. |
-| `--order` | `ORDER` |  | `map` returns the items by their place on the map; `stored` in the order the server stores records, which is faster for a field that is neither rendered nor indexed. Without it the server chooses. |
-| `--page-rows` | `N` |  | Rows in a page, at most the server's `selection.max_page_rows`, which applies without it. |
-| `--pages` | `N` |  | The most pages in one response. Responses are requested until the read is done. |
+| `--count` |  |  | Count the items the token may see in the view and those that match. The counts are printed on stderr at the end. Refused with `--cursor`. |
+| `--order` | `ORDER` |  | `map` returns the items by their place on the map; `stored` in the order the server stores records, which is faster for a field that is neither rendered nor indexed. Without it the order is the one `--cursor` was read in, or the server's choice. With `--cursor`, another order is refused. |
+| `--page-rows` | `N` |  | Rows in a page, at most the server's `selection.max_page_rows`, which applies without it. 0 is refused. |
+| `--pages` | `N` |  | The most pages in one response. Responses are requested until the read is done. 0 is refused. |
 | `--cursor` | `CURSOR` |  | Start after the last page of an earlier read: the cursor a read cut short printed. |
 | `--compression` | `COMPRESSION` |  | `zstd` compresses the pages on their way from the server. The output is written uncompressed either way. |
 | `--idset` | `IDSET` |  | The id numbering the ids are read in, `/v1/meta`'s `idset`. A server holding another refuses the read. |
 | `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
-| `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`. |
+| `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`, and with neither the read is refused. |
 | `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |
-| `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. |
+| `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. A format that disagrees with the extension of `--out` is refused. |
 
 ## `tessera artifacts`
 
@@ -165,23 +165,23 @@ For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --l
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--view` | `VIEW` |  | The view whose items the counts and the geometry are computed over. |
-| `--layer` | `LAYER` |  | The layer to read, as `/v1/meta` lists it. |
-| `--fields` | `NAMES` |  | Any of `key`, `level`, `parents`, `target`, `masked_count`, `content`, `centroid`, `box` and `shape`, comma-separated, in the order wanted. |
-| `--level` | `LEVEL` |  | Only the artifacts at this level of a levelled layer. |
-| `--parent` | `TESSERA_ID` |  | Only the children of this artifact, by its `tessera_id`. |
-| `--q` | `TEXT` |  | Only the artifacts whose key, or first text, contains this, ignoring case. |
+| `--layer` | `LAYER` |  | The layer to read, as `/v1/meta` lists it. A layer not published to the token in `--view` is refused. |
+| `--fields` | `NAMES` |  | Any of `key`, `level`, `parents`, `target`, `masked_count`, `content`, `centroid`, `box` and `shape`, comma-separated, in the order wanted. Any other name, or one repeated, is refused. |
+| `--level` | `LEVEL` |  | Only the artifacts at this level of a levelled layer. Refused on a layer with one level, and past the levels the layer holds. |
+| `--parent` | `TESSERA_ID` |  | Only the children of this artifact, by its `tessera_id`. Refused with `--q`. |
+| `--q` | `TEXT` |  | Only the artifacts whose key, or first text, contains this, ignoring case. Refused with `--parent`. |
 | `--filters` | `JSON` |  | A filter expression as JSON. Only the artifacts with a visible member that matches are returned, each with a `matched_count` column. |
 | `--keep-unmatched` |  |  | With `--filters`, return every artifact, those with no matching member included. |
-| `--count` |  |  | Count the artifacts served and those that match. The counts are printed on stderr at the end. |
-| `--page-rows` | `N` |  | Rows in a page, at most the server's `selection.max_page_rows`, which applies without it. |
-| `--pages` | `N` |  | The most pages in one response. Responses are requested until the read is done. |
+| `--count` |  |  | Count the artifacts served and those that match. The counts are printed on stderr at the end. Refused with `--cursor`. |
+| `--page-rows` | `N` |  | Rows in a page, at most the server's `selection.max_page_rows`, which applies without it. 0 is refused. |
+| `--pages` | `N` |  | The most pages in one response. Responses are requested until the read is done. 0 is refused. |
 | `--cursor` | `CURSOR` |  | Start after the last page of an earlier read: the cursor a read cut short printed. |
 | `--compression` | `COMPRESSION` |  | `zstd` compresses the pages on their way from the server. The output is written uncompressed either way. |
 | `--idset` | `IDSET` |  | The id numbering the ids are read in, `/v1/meta`'s `idset`. A server holding another refuses the read. |
 | `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
-| `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`. |
+| `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`, and with neither the read is refused. |
 | `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |
-| `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. |
+| `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. A format that disagrees with the extension of `--out` is refused. |
 
 ## `tessera serve`
 

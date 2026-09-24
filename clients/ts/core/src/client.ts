@@ -897,13 +897,18 @@ export class TesseraClient {
 
   /**
    * `POST /v1/items`: a bulk read of the items this principal may see in a view. Resolves when the
-   * first response's head arrives, and a refusal of the first request throws {@link TesseraError}
-   * then. Iterating the result yields each page as an Arrow table, following each response's
-   * cursor until the read ends.
+   * first response's head arrives. Iterating the result yields each page as an Arrow table,
+   * following each response's cursor until the read ends; {@link RecordsRead} says what ends it
+   * early.
    *
    * Each request after the first is the caller's request with `cursor` set to the one the response
    * before it ended with, and without `count`, which the server takes only on a read's first
    * request.
+   *
+   * @throws {@link TesseraError} when the server refuses the first request: `404` for an unknown
+   *   view, `409` for a stale `idset` or a cursor from another idset, `422` for a request
+   *   {@link ItemsRequest} says is refused or a malformed filter, and `429` past the bulk-read
+   *   admission limit.
    */
   items(token: string, req: ItemsRequest, signal?: AbortSignal): Promise<RecordsRead<ItemsHead>> {
     return this.bulkRead('items', token, req, signal, (raw) => {
@@ -916,6 +921,11 @@ export class TesseraClient {
   /**
    * `POST /v1/artifacts`: a bulk read of the artifacts of one layer this principal is served, as
    * {@link items} reads items.
+   *
+   * @throws {@link TesseraError} when the server refuses the first request: `404` for an unknown
+   *   view, `409` for a stale `idset` or a cursor from another idset, `422` for a request
+   *   {@link ArtifactsRequest} says is refused or a malformed filter, and `429` past the bulk-read
+   *   admission limit.
    */
   artifacts(token: string, req: ArtifactsRequest, signal?: AbortSignal): Promise<RecordsRead<ArtifactsHead>> {
     return this.bulkRead('artifacts', token, req, signal, (raw) => {

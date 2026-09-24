@@ -24,6 +24,14 @@ A reader holds a set of access terms and sees an item when it holds one of the i
     options:
       heading_level: 3
 
+::: tesseradb._database.Database.items
+    options:
+      heading_level: 3
+
+::: tesseradb._database.Database.artifacts
+    options:
+      heading_level: 3
+
 ::: tesseradb._database.Database.categories
     options:
       heading_level: 3
@@ -35,3 +43,7 @@ A reader holds a set of access terms and sees an item when it holds one of the i
 ::: tesseradb._viewer.Selection
 
 ::: tesseradb._viewer.Sample
+
+::: tesseradb._viewer.Batches
+
+::: tesseradb._viewer.PartialRead

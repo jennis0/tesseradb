@@ -14,6 +14,7 @@ These are the names `tesseradb` exports:
 | `Token`, `authorise`, `revoke` | A token, and how an operator makes and ends one | [Connecting and creating](connecting.md) |
 | `Refusal` | The exception for a request that was refused | [Connecting and creating](connecting.md) |
 | `Viewer`, `Selection`, `Sample` | A reader, part of a view, and the points a map draws | [Reading](reading.md) |
+| `Batches`, `PartialRead` | The pages of a read of records, and the exception for a read that stopped part of the way | [Reading](reading.md) |
 | `Map` | The notebook map | [The notebook map](widget.md) |
 | `__version__` | The package's version, as a string | |
 

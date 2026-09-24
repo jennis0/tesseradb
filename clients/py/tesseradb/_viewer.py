@@ -110,6 +110,7 @@ class PartialRead(Refusal):
     - `cursor`: the cursor to pass as `cursor` to read the rows after them, or `None` to read
       from the start.
     - `done`: `True` where every row had arrived before the stop, so none is left to read.
+    - `why`: what stopped the read, which the message begins with.
     """
 
     def __init__(self, why: str, cursor: Optional[str], done: bool) -> None:
@@ -152,14 +153,13 @@ class Batches:
       page it is the read's own `cursor`, `None` for a read from the start.
     - `done`: `True` once the server has said that no row remains.
 
-    Every response carries at least one page, so a response that found no row gives a page of no
-    rows, with the read's columns. It is given like any other page, so that a read of nothing
-    still says what its columns are. A response cut short, or a later request refused, raises a
-    `PartialRead` after the pages before it. A category column's dictionary holds the keys of its
-    own page only. `read_all()`
-    joins the pages left into one table with one dictionary per column, and `to_pandas()` does the
-    same and returns a DataFrame. `close()` ends the response being read, which frees its place
-    on the server; dropping the last reference does the same.
+    A response that found no row gives a page of no rows with the read's columns, like any other
+    page, so a read of nothing still says what its columns are. A response cut short, or a later request refused, raises a `PartialRead` after
+    the pages before it. A category column's dictionary holds the keys of its own page only.
+
+    `read_all()` joins the pages not yet taken into one table, with one dictionary per column,
+    and `to_pandas()` returns the same as a DataFrame. `close()` ends the response being read,
+    which frees its place on the server; dropping the last reference does the same.
 
         for batch in db.items("papers", ["title"], page_rows=10_000, batches=True):
             frame = batch.to_pandas()
@@ -865,8 +865,9 @@ class Viewer:
         `page_rows`, the page size used, `order`, the order used, and the counts under `count`.
         A read that returns no row is a table of no rows with these columns.
 
-        A response cut short, or a later request refused, raises a `PartialRead` whose `rows` are
-        the rows read before it and whose `cursor` reads the rest.
+        A refusal of the first request raises `Refusal`. A response cut short, or a later request
+        refused, raises a `PartialRead` whose `rows` are the rows read before it and whose
+        `cursor` reads the rest.
 
             papers = db.items("papers", ["title", "year"], system_fields=["external_id"])
             papers.to_pandas()

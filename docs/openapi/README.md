@@ -112,8 +112,8 @@ kind 4  trailer   exactly one, last           JSON {pages, rows, next, ended_by,
 ```
 
 A response that finds no row carries one page of no rows, so every response gives the read's
-columns and their types; only a response cancelled before its first page, which happens only when
-the client has gone, carries none.
+columns and their types; only a response cancelled before its first page, by the stream deadline
+or because the client has gone, carries none.
 
 A reader keeps three rules. A body without a trailer is incomplete, however it was cut, and the
 read resumes from the cursor in the last page end received, which both decoders below hand back

@@ -52,7 +52,9 @@ export const FRAME_PAGE_END = 8;
  * {@link FramedStreams} lists. `'records'` is a `/v1/items` or `/v1/artifacts` body:
  *
  * - Kind 6, head: JSON, exactly one, first.
- * - Kind 7, records: an Arrow IPC stream of one page. Zero or more, each followed by a page end.
+ * - Kind 7, records: an Arrow IPC stream of one page, of no rows where the response found none.
+ *   One or more, each followed by a page end. None only in a response cancelled before its first
+ *   page, by the stream deadline or because the client went away.
  * - Kind 8, page end: JSON carrying the cursor to resume after the page before it.
  * - Kind 4, trailer: JSON, exactly one, last. A body without it is incomplete.
  */

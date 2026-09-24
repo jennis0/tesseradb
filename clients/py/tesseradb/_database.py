@@ -1485,6 +1485,7 @@ class Database:
         """Every artifact of `layer`, with the properties named, as one pyarrow table.
 
         This is `Viewer.artifacts` as this database's own reader; `options` are its keywords.
+        `batches=True` returns the pages one at a time instead.
 
             db.artifacts("papers", "clusters", ["key", "masked_count"])
         """

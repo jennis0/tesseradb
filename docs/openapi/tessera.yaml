@@ -568,7 +568,7 @@ paths:
         - `6` head: JSON `ItemsHead`, exactly one, first.
         - `7` records: one Arrow IPC stream holding one batch of up to `page_rows` rows. One or
           more, each followed by a page end; none only in a response cancelled before its first
-          page, which happens only when the client has gone.
+          page, by the stream deadline or because the client has gone.
         - `8` page end: JSON `PageEnd`, carrying the cursor to resume after that page.
         - `4` trailer: JSON `RecordsTrailer`, exactly one, last.
 
@@ -592,10 +592,11 @@ paths:
         number or boolean arrives as its declared type, `timestamp_us` as `timestamp[us, UTC]`, a
         keyword or text field as `utf8`, and a category as `dictionary<int32, utf8>` holding its
         keys, each frame's dictionary holding only the keys its rows carry. An absent value is
-        null. `position` is two `float64` columns, `tessera:x` and `tessera:y`: the stored
-        position converted back through the view's projection and frame, so degrees on a
-        geographic view, exact to one step of the view's 32-bit grid. `external_id` is `binary`
-        as `tessera:external_id`, null where the item has none. `labels` is `list<utf8>` as
+        null. `position` is two `float64` columns, `tessera:x` and `tessera:y`: the centre of the
+        step of the view's 32-bit grid the item is stored in, converted back through the view's
+        projection and frame, so degrees on a geographic view, and within half a step of the
+        position the item was given. `external_id` is `binary` as `tessera:external_id`, null
+        where the item has none. `labels` is `list<utf8>` as
         `tessera:labels`: the item's labels this principal holds, sorted. A rendered field is read
         from `view`, where the item card reads the first view the principal can reach, so the two
         can differ. An item joined into `view` before its own ingest is flushed has null record
@@ -672,7 +673,7 @@ paths:
               schema:
                 type: string
                 format: binary
-                description: A head, records frames each followed by a page end, and a trailer.
+                description: A head, one or more records frames each followed by a page end, and a trailer.
         "401":
           $ref: "#/components/responses/BadCredential"
         "403":
@@ -721,7 +722,8 @@ paths:
         The record is keyed by declared column name. A category appears as its vocabulary's key,
         and every number as a JSON number. A field the item has no value in is absent from
         `fields`, not `null`. `external_id` is the caller's own, in base64, present only where the
-        item has one; it is the only place this plane serves an external id.
+        item has one. This route and `POST /v1/items`, under `system_fields` holding
+        `external_id`, are the only routes on this plane that serve an external id.
 
         `views` names every view the item is in that this principal may reach, each with the
         position that view places it at, and `scoped` carries the group-scoped values by the
@@ -775,8 +777,8 @@ paths:
       summary: Every artifact of one layer this principal is served, page by page, with the properties the caller names.
       description: |
         The body is framed as `POST /v1/items` frames its body: a `6` head (JSON `ArtifactsHead`),
-        `7` records frames each followed by an `8` page end (JSON `PageEnd`), and a `4` trailer
-        (JSON `RecordsTrailer`). Its pages, budgets, page ends, trailer and cursor follow that
+        one or more `7` records frames each followed by an `8` page end (JSON `PageEnd`), and a
+        `4` trailer (JSON `RecordsTrailer`). Its pages, budgets, page ends, trailer and cursor follow that
         route's rules, and a read is carried across responses by passing each response's `next`
         back as `cursor` until it is null. Every page is built from the latest data with the
         visible set composed again, so a deletion or suppression accepted during a read applies
@@ -800,7 +802,12 @@ paths:
         it is attached to: its `matched_count` is its target's, it is kept or dropped as its
         target is, and the head's `matched` counts it so, as the viewport gives it its target's
         matched bit. A request with `filters` evaluates the filter over the whole view once per
-        response.
+        response, and again when a write lands during the response that moves the view's rows or
+        changes which of them this principal can see.
+
+        **A layer that goes during a read.** A layer dropped, or no longer published to this
+        principal, while a read is under way ends the read: the next page finds no artifact, and
+        the response ends by `end`.
 
         **Columns.** `tessera_id` (`uint64`) first, then the named properties in the order named,
         then `matched_count` (`uint64`) whenever the request carries `filters`.
@@ -825,9 +832,11 @@ paths:
           closed and holds at least four points; a hull over one or two members, or over members
           on one line, is a zero-area polygon over their positions, repeated.
 
-        **Cursor.** Bound to the route, the view and its incarnation, the layer, the `level` named
-        and the credential that received it. A cursor that fails any of these is one `422` with
-        one detail; one issued under another idset is the `409` below.
+        **Cursor.** Bound to the route, the view and its incarnation, the layer as it was
+        registered, the `level` named and the credential that received it. A layer dropped and
+        registered again under the same name is another layer and refuses the cursor. A cursor that
+        fails any of these is one `422` with one detail; one issued under another idset is the
+        `409` below.
 
         Runs under the bulk-read admission limit, `serve.bulk_admission`, with `POST /v1/items`. A
         read past the limit is refused at once with `429`.
@@ -871,7 +880,7 @@ paths:
               schema:
                 type: string
                 format: binary
-                description: A head, records frames each followed by a page end, and a trailer, as on `POST /v1/items`.
+                description: A head, one or more records frames each followed by a page end, and a trailer, as on `POST /v1/items`.
         "401":
           $ref: "#/components/responses/BadCredential"
         "403":
