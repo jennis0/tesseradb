@@ -221,8 +221,8 @@ class Insert(Summarised):
         return pq.read_table(self.path)
 
     def summary(self) -> list[str]:
-        """The summary the record shows as, one string per line: a single line naming the
-        target, the rows, the columns read and the columns ignored."""
+        """The lines `print()` shows: one line naming the target, the rows, the columns read and
+        the columns ignored."""
         into = self.target if self.role in ("rows", "key", "values") else (
             f"{self.target} ({self.role})"
         )

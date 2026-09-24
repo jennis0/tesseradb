@@ -68,9 +68,9 @@ class ServeRefused(Refusal):
 class Listening:
     """The addresses a database's server listens on, each as `host:port`.
 
-    - `viewer`: where readers read.
-    - `session`: where tokens are made and revoked.
-    - `control`: where the operator writes.
+    - `viewer`: the viewer plane, where readers read.
+    - `session`: the session plane, where tokens are made and revoked.
+    - `control`: the control plane, where the operator writes.
     """
 
     viewer: str

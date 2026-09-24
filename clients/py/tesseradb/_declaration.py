@@ -181,12 +181,13 @@ class Declaration:
 
 def view_block(
     name: str,
-    default_label: str | None = "public",
-    extent: Any = None,
-    projection: str = "none",
-    visibility: Any = "public",
-    anchor: bool = False,
-    title: str | None = None,
+    *,
+    default_label: str | None,
+    extent: Any,
+    projection: str,
+    visibility: Any,
+    anchor: bool,
+    title: str | None,
 ) -> dict:
     """One `[[view]]`: a frame, a projection and a gate, and no data.
 
@@ -209,13 +210,14 @@ def view_block(
 
 def view_group_block(
     name: str,
-    metadata: dict | None = None,
-    members: str | None = None,
-    default_label: str | None = "public",
-    extent: Any = None,
-    projection: str | None = None,
-    visibility: Any = "public",
-    title: str | None = None,
+    *,
+    metadata: dict | None,
+    members: str | None,
+    default_label: str | None,
+    extent: Any,
+    projection: str | None,
+    visibility: Any,
+    title: str | None,
 ) -> dict:
     """One `[[view_group]]`: a set of views sharing every setting, differing by a key.
 
@@ -294,12 +296,13 @@ def _extent(extent: Any, projection: str) -> Any:
 
 def vocabulary_block(
     name: str,
-    width: str | None = None,
-    closed: bool = False,
-    visibility: str = "public",
-    values: Any = None,
-    reserved: Sequence[int] | None = None,
-    title: str | None = None,
+    *,
+    width: str | None,
+    closed: bool,
+    visibility: str,
+    values: Any,
+    reserved: Sequence[int] | None,
+    title: str | None,
 ) -> dict:
     """One `[[vocabulary]]`, with no data of its own.
 
@@ -323,12 +326,13 @@ def vocabulary_block(
 def attribute_block(
     name: str,
     type: str,
-    render: bool | None = None,
-    index: bool | None = None,
-    vocabulary: str | None = None,
-    analyser: str | None = None,
-    scope: Any = "entity",
-    title: str | None = None,
+    *,
+    render: bool | None,
+    index: bool | None,
+    vocabulary: str | None,
+    analyser: str | None,
+    scope: Any,
+    title: str | None,
 ) -> dict:
     """One `[[attribute]]`: a type and its two flags, and nothing else.
 
@@ -356,24 +360,25 @@ def attribute_block(
 def layer_block(
     name: str,
     kind: str,
-    views: Iterable[str] | None = None,
-    membership: Any = "enumerated",
-    value_set: str | None = None,
-    levels: Sequence[Any] | None = None,
-    prune_children: bool = False,
-    shape: Any = None,
-    default_space: str = "view",
-    layout: str | None = None,
-    visibility: Any = "public",
-    artifact_visibility: Any = "inherited",
-    require_member_visibility: Any = "none",
-    withdraw_on_member_deletion: bool = False,
-    depends_on: Sequence[str] | None = None,
-    computed: Sequence[str] = DERIVED,
-    supplied: Sequence[Any] | None = None,
-    scope: Any = "entity",
-    artifacts: Any = None,
-    title: str | None = None,
+    *,
+    views: Iterable[str] | None,
+    membership: Any,
+    value_set: str | None,
+    levels: Sequence[Any] | None,
+    prune_children: bool,
+    shape: Any,
+    default_space: str,
+    layout: str | None,
+    visibility: Any,
+    artifact_visibility: Any,
+    require_member_visibility: Any,
+    withdraw_on_member_deletion: bool,
+    depends_on: Sequence[str] | None,
+    computed: Sequence[str],
+    supplied: Sequence[Any] | None,
+    scope: Any,
+    artifacts: Any,
+    title: str | None,
 ) -> dict:
     """One `[[layer]]`, with no data of its own.
 
@@ -557,11 +562,12 @@ def _artifact_row(layer: str, row: Any) -> dict:
 
 def labels_block(
     name: str,
-    content_requires: str = "inherited",
-    type: str = "text",
-    require_member_visibility: Any = "none",
-    artifact_visibility: Any = "inherited",
-    title: str | None = None,
+    *,
+    content_requires: str,
+    type: str,
+    require_member_visibility: Any,
+    artifact_visibility: Any,
+    title: str | None,
 ) -> dict:
     """The `[layer.labels]` block: a label set over the clustering it hangs from.
 

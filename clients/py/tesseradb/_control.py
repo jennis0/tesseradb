@@ -86,7 +86,7 @@ def batch_id(source: str, index: int) -> str:
 
 @dataclass
 class Answer:
-    """One request's answer. A refused request is an answer too, never an exception.
+    """One request's answer. `Control` returns one for every request, refused or unanswered.
 
     - `status`: the HTTP status, or 0 where no server answered.
     - `body`: the answer's JSON object. A JSON value that is not an object is under `"value"`,
@@ -109,11 +109,13 @@ class Answer:
 
 
 class Control:
-    """A client for the control plane of one served database: the routes an operator writes to.
+    """A client for the control plane of one served database, where the operator writes.
 
-    `Database.control` returns one. Each method sends one request with the operator credential
-    and returns its `Answer`. A `429` is sent again after the wait it names, at most 30 seconds,
-    up to 600 attempts in all. Every other status is returned as it came.
+    `Database.control` returns one. Each route method sends one request with the operator
+    credential and returns its `Answer`. `status()` and `limits()` return dictionaries, and
+    `limits()` sends its request once and keeps the answer. A `429` is sent again after the wait
+    it names, at most 30 seconds, up to 600 attempts in all. Every other status is returned as
+    it came.
 
     - `base`: the control plane's address, such as `http://127.0.0.1:41234`.
     - `credential`: the operator credential.
@@ -179,7 +181,11 @@ class Control:
     # ------------------------------------------------------------------ the routes
 
     def status(self) -> dict:
-        """`GET /control/status`: the server's status report, or `{}` where it was refused."""
+        """`GET /control/status`: the server's status report.
+
+        A refusal gives the server's error body, `{"error": ..., "detail": ...}`, and `{}` comes
+        only where no server answered.
+        """
         return self.status_answer().body
 
     def status_answer(self) -> Answer:

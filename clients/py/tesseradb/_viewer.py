@@ -508,7 +508,7 @@ class Viewer:
     Get one with `connect(url, token)` for a database someone else runs, or with
     `db.viewer(terms)` for one of your own.
 
-    - `url`: the address of the database's reading endpoint.
+    - `url`: the address of the database's viewer plane, where readers read.
     - `token`: a token as a string, a `Token`, or a function that returns either. A function is
       called again when the token it gave is close to expiry.
     - `terms`: the access terms the token was made for, if known. It is kept for display.
@@ -924,7 +924,7 @@ class Viewer:
 def connect(url: str, token: TokenSource) -> Viewer:
     """A reader of a Tessera database someone else runs.
 
-    - `url`: the address of its reading endpoint.
+    - `url`: the address of its viewer plane, where readers read.
     - `token`: the token its operator issued you, as a string, a `Token`, or a function that
       returns either. A function is called again when its token is close to expiry.
 

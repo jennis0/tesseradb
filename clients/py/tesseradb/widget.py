@@ -15,11 +15,12 @@ through `serve.cors_loopback`; another deployment names the notebook's origin in
 widget cannot reach a database from them. Not built yet: a Jupyter server extension that would
 forward the widget's requests from the notebook's own origin.
 
-Only controls and selection cross the kernel boundary, never data. `url` and `view` go down;
+Only controls and selection cross the kernel boundary, never data. `url` goes down. `view`,
 `bbox`, `layers`, `colour_by` and `filters` go both ways, and up only when the map settles, once
-it has finished fetching for a view, so the kernel is never asked on every frame; `selected`,
-`selected_artifact` and `region` go up. Ids are decimal strings, because a `tessera_id` is a
-`u64`, which is not a JavaScript number, and a `BigInt` does not serialise.
+it has finished fetching for a view, so the kernel is never asked on every frame. `selected` and
+`selected_artifact` go up on a pick, and `region` when a region's counts arrive. Ids are decimal
+strings, because a `tessera_id` is a `u64`, which is not a JavaScript number, and a `BigInt`
+does not serialise.
 """
 
 from __future__ import annotations
@@ -73,10 +74,11 @@ class Map(anywidget.AnyWidget):
     token reaches the page as a message and is never widget state, so saving the notebook does
     not save it.
 
-    - `url`: the address of the database's reading endpoint.
-    - `token`: the token your deployment issued you, as a string, a `Token` from `authorise`,
-      which is renewed before it expires, or a function returning either, which is called again
-      then. A `Map` without one is refused with `TypeError`.
+    - `url`: the address of the database's viewer plane.
+    - `token`: required, though the signature gives it a default of `None`. The token your
+      deployment issued you, as a string, a `Token` from `authorise`, which is renewed before it
+      expires, or a function returning either, which is called again then. A `Map` without one
+      raises `TypeError`.
     - `view`: the view to open on. `None`, the default, opens the first one.
     - `layers`: the annotation layers to draw, each with the layers it depends on. `None`, the
       default, lets the map choose, and `[]` draws none. `"all"` is not a layer name and is
@@ -93,20 +95,23 @@ class Map(anywidget.AnyWidget):
 
     Read the widget's attributes in a later cell:
 
-    - `selected`: the `tessera_id` of the picked item, as a decimal string, or `None`.
+    - `selected`: the `tessera_id` of the picked item, as a decimal string, or `None`. It
+      changes on a pick.
     - `selected_artifact`: the `tessera_id` of the opened annotation, likewise.
     - `region`: the drawn box or lasso, as a dictionary: its `shape` and `status`, the counts
       `visible`, `matched` and `served` inside it, `verdict`, which says whether the counts are
       exact for the shape or over the grid cells covering it, and `refusal` where the server
-      refused it.
-    - `bbox`: where the camera settled.
+      refused it. It changes when the region's counts arrive, and is `None` when it is cleared.
+    - `view`, `bbox`: the view shown and where the camera settled.
     - `filters`, `layers`, `colour_by`: as the map shows them. Setting one redraws the map.
     - `last_error`: why the page last refused something set here, or `None`.
+    - `url`, `height`, `explorer_layout`, `title_field`: as given.
+    - `tokens_sent`: how many tokens the kernel has sent the page.
 
-    These attributes change when the map settles, once it has finished fetching after a pan or
-    zoom, and not during one. In marimo, `mo.ui.anywidget(m)` puts every attribute in one
-    `.value`, so a cell that reads it runs again at every settle. To react to a pick alone, call
-    `m.observe(fn, names="selected")` on the `Map`.
+    `view`, `bbox`, `filters`, `layers` and `colour_by` change when the map settles, once it has
+    finished fetching after a pan or zoom, and not during one. In marimo, `mo.ui.anywidget(m)`
+    puts every attribute in one `.value`, so a cell that reads it runs again at every settle. To
+    react to a pick alone, call `m.observe(fn, names="selected")` on the `Map`.
 
     Setting `filters` applies the expression at once. Reading it after the filter panel changes
     gives the expression the panel built. An expression the panel cannot show, such as

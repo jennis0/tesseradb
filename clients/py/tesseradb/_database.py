@@ -160,7 +160,17 @@ class Database:
             self._mark_a_filled_column(block)
         return self._declared(self.blocks.add(kind, block))
 
-    def declare_view(self, name: str, **kwargs) -> dict:
+    def declare_view(
+        self,
+        name: str,
+        *,
+        extent: Any = None,
+        projection: str = "none",
+        default_label: str | None = "public",
+        visibility: Any = "public",
+        anchor: bool = False,
+        title: str | None = None,
+    ) -> dict:
         """Declare a view, and return its block.
 
         A view is one layout of the items: a map with its own x and y coordinates. One set of items
@@ -186,9 +196,29 @@ class Database:
 
             db.declare_view("papers", extent={"x": [0, 100], "y": [0, 100]})
         """
-        return self._declared(self.blocks.add("view", D.view_block(name, **kwargs)))
+        block = D.view_block(
+            name,
+            extent=extent,
+            projection=projection,
+            default_label=default_label,
+            visibility=visibility,
+            anchor=anchor,
+            title=title,
+        )
+        return self._declared(self.blocks.add("view", block))
 
-    def declare_view_group(self, name: str, **kwargs) -> dict:
+    def declare_view_group(
+        self,
+        name: str,
+        *,
+        metadata: dict | None = None,
+        members: str | None = None,
+        extent: Any = None,
+        projection: str = "none",
+        default_label: str | None = "public",
+        visibility: Any = "public",
+        title: str | None = None,
+    ) -> dict:
         """Declare a view group, and return its block.
 
         A view group is a set of views that share every setting and differ by a key, such as one
@@ -209,9 +239,29 @@ class Database:
 
             db.declare_view_group("years", metadata={"year": "i32"})
         """
-        return self._declared(self.blocks.add("view_group", D.view_group_block(name, **kwargs)))
+        block = D.view_group_block(
+            name,
+            metadata=metadata,
+            members=members,
+            extent=extent,
+            projection=projection,
+            default_label=default_label,
+            visibility=visibility,
+            title=title,
+        )
+        return self._declared(self.blocks.add("view_group", block))
 
-    def declare_vocabulary(self, name: str, **kwargs) -> dict:
+    def declare_vocabulary(
+        self,
+        name: str,
+        *,
+        closed: bool = False,
+        width: str = "u16",
+        values: Any = None,
+        reserved: Sequence[int] | None = None,
+        visibility: str = "public",
+        title: str | None = None,
+    ) -> dict:
         """Declare a vocabulary, the values a category column may take, and return its block.
 
         Each value has a key, a small integer code and an optional title. Its values come from
@@ -232,9 +282,29 @@ class Database:
 
             db.declare_vocabulary("venue", closed=True, values=["neurips", "icml", "iclr"])
         """
-        return self._declared(self.blocks.add("vocabulary", D.vocabulary_block(name, **kwargs)))
+        block = D.vocabulary_block(
+            name,
+            closed=closed,
+            width=width,
+            values=values,
+            reserved=reserved,
+            visibility=visibility,
+            title=title,
+        )
+        return self._declared(self.blocks.add("vocabulary", block))
 
-    def declare_attribute(self, name: str, type: str, **kwargs) -> dict:
+    def declare_attribute(
+        self,
+        name: str,
+        type: str,
+        *,
+        render: bool | None = None,
+        index: bool | None = None,
+        vocabulary: str | None = None,
+        analyser: str | None = None,
+        scope: Any = "entity",
+        title: str | None = None,
+    ) -> dict:
         """Declare a column the items carry, and return its block.
 
         Its values come from a column of the same name in the table inserted into the anchor view,
@@ -260,7 +330,16 @@ class Database:
 
             db.declare_attribute("year", type="i32", render=True, index=True)
         """
-        block = D.attribute_block(name, type, **kwargs)
+        block = D.attribute_block(
+            name,
+            type,
+            render=render,
+            index=index,
+            vocabulary=vocabulary,
+            analyser=analyser,
+            scope=scope,
+            title=title,
+        )
         self._refuse_a_render_column(name, block.get("render"))
         self._refuse_an_undeclared_group("attribute", name, block)
         self._mark_a_filled_column(block)
@@ -314,7 +393,30 @@ class Database:
             self.declare("attribute", block)
         return Declared(columns=rows, vocabularies=[block["name"] for block in vocabularies])
 
-    def declare_layer(self, name: str, kind: str, **kwargs) -> dict:
+    def declare_layer(
+        self,
+        name: str,
+        kind: str,
+        *,
+        views: Iterable[str] | None = None,
+        membership: Any = "enumerated",
+        shape: Any = None,
+        default_space: str = "view",
+        levels: Sequence[Any] | None = None,
+        require_member_visibility: Any = "none",
+        visibility: Any = "public",
+        artifact_visibility: Any = "inherited",
+        computed: Sequence[str] = D.DERIVED,
+        supplied: Sequence[Any] | None = None,
+        depends_on: Sequence[str] | None = None,
+        prune_children: bool = False,
+        withdraw_on_member_deletion: bool = False,
+        value_set: str | None = None,
+        scope: Any = "entity",
+        layout: str | None = None,
+        artifacts: Any = None,
+        title: str | None = None,
+    ) -> dict:
         """Declare an annotation layer, and return its block.
 
         A layer is a set of annotations over the items, such as one clustering, a set of regions or
@@ -349,8 +451,9 @@ class Database:
           insert names that column with `access=`, and an insert naming another column or none
           is refused. Without a field, the first artifacts insert naming `access=` sets it.
         - `computed`: which properties the server computes per reader from the members it may
-          see: `"centroid"`, `"box"` and `"hull"`. The default is all three, or `"centroid"` and
-          `"box"` on a spatial layer, whose shape is drawn instead of a hull.
+          see: `"centroid"`, `"box"` and `"hull"`. The default is all three; `"centroid"` and
+          `"box"` on a spatial layer, whose shape is drawn instead of a hull; and none on a layer
+          with attribute membership.
         - `supplied`: content you provide per annotation, such as text, as
           `(name, type, requires)` entries. `requires` is `"inherited"` to show the content
           wherever its annotation is shown, or `"all"` to show it only to a reader who may see
@@ -358,14 +461,14 @@ class Database:
         - `depends_on`: layers this one attaches to, such as the clustering a label set names.
         - `prune_children`: `True` shows a parent in place of its children when both qualify.
           The default is `False`.
-        - `withdraw_on_member_deletion`: `True` removes an annotation when a member is deleted.
-          The default is `False`.
+        - `withdraw_on_member_deletion`: Not built yet: `True` is refused at `check()`. The
+          default, `False`, keeps the annotation.
         - `value_set`: `"closed"` if no annotation keys may appear beyond those inserted, `"open"`
           otherwise. By default it is closed where an annotations table, `artifacts` or an
           attribute membership says which annotations there are, and open otherwise.
         - `scope`: `{"group": name}` keeps a separate set of annotations per view of that group.
         - `layout`: how the server stores memberships for serving: `"rows"`, `"column"` or
-          `"list"`. It changes speed, never answers. By default the server chooses.
+          `"list"`. It affects speed only. By default the server chooses.
         - `artifacts`: annotations written in the declaration itself, as a list of dictionaries or
           a table.
         - `title`: a display name.
@@ -375,11 +478,42 @@ class Database:
 
             db.declare_layer("clusters", kind="flat", require_member_visibility={"count": 20})
         """
-        block = D.layer_block(name, kind, **kwargs)
+        block = D.layer_block(
+            name,
+            kind,
+            views=views,
+            membership=membership,
+            shape=shape,
+            default_space=default_space,
+            levels=levels,
+            require_member_visibility=require_member_visibility,
+            visibility=visibility,
+            artifact_visibility=artifact_visibility,
+            computed=computed,
+            supplied=supplied,
+            depends_on=depends_on,
+            prune_children=prune_children,
+            withdraw_on_member_deletion=withdraw_on_member_deletion,
+            value_set=value_set,
+            scope=scope,
+            layout=layout,
+            artifacts=artifacts,
+            title=title,
+        )
         self._refuse_an_undeclared_group("layer", name, block)
         return self._declared(self.blocks.add("layer", block))
 
-    def declare_labels(self, name: str, of: str, **kwargs) -> dict:
+    def declare_labels(
+        self,
+        name: str,
+        of: str,
+        *,
+        content_requires: str = "inherited",
+        require_member_visibility: Any = "none",
+        artifact_visibility: Any = "inherited",
+        type: str = "text",
+        title: str | None = None,
+    ) -> dict:
         """Declare text labels for the annotations of another layer, and return their block.
 
         Each label names one annotation of the layer `of`, such as a topic line for a cluster, and
@@ -392,8 +526,10 @@ class Database:
           shown. `"all"` shows it only to a reader who may see every item the text was written
           from; those items come from `insert(name, members=table, id=, key=)`.
         - `require_member_visibility`, `title`: as for `declare_layer`.
-        - `artifact_visibility`: the access label of every label in the set. The default is
-          `"inherited"`. A label carries none of its own, so a `field` is refused.
+        - `artifact_visibility`: the access label of every label in the set. The default,
+          `"inherited"`, gives the labels none of their own, so the layer they label and
+          `require_member_visibility` decide alone. A label carries no labels of its own to read,
+          so a `field` is refused.
         - `type`: the type of each label's text. The default is `"text"`.
 
         A layer `of` that is not declared, or that already carries a label set, is refused.
@@ -407,7 +543,14 @@ class Database:
                 f"layer {of!r} already carries a label set. A second one is a `[[layer]]` of its "
                 f"own; write it through declare_layer"
             )
-        parent["labels"] = D.labels_block(name, **kwargs)
+        parent["labels"] = D.labels_block(
+            name,
+            content_requires=content_requires,
+            require_member_visibility=require_member_visibility,
+            artifact_visibility=artifact_visibility,
+            type=type,
+            title=title,
+        )
         self._declared(parent["labels"])
         return parent["labels"]
 
@@ -1532,7 +1675,8 @@ class Database:
         - `wait`: as for `drop_layer`.
 
         Without `delete_dangling`, no item is deleted. The answer's `fills_dropped` counts the
-        values sent for the view that had not yet been published, which are dropped with it.
+        items whose values for the view were sent and not yet published; those values are
+        dropped with the view.
         """
         self._refuse_before_the_first_commit("drop_view")
         return _accepted(
@@ -1577,12 +1721,14 @@ class Database:
 
     @property
     def viewer_url(self) -> str | None:
-        """The address readers read from, or `None` if the server is not running."""
+        """The address of the viewer plane, where readers read, or `None` if the server is not
+        running."""
         return None if self.listening is None else f"http://{self.listening.viewer}"
 
     @property
     def session_url(self) -> str | None:
-        """The address tokens are made at, or `None` if the server is not running."""
+        """The address of the session plane, where tokens are made, or `None` if the server is
+        not running."""
         return None if self.listening is None else f"http://{self.listening.session}"
 
     def _run(self, arguments: Sequence[str]) -> subprocess.CompletedProcess:
