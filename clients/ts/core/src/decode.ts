@@ -29,9 +29,8 @@ function partsColumn(table: Table, name: string): {get(i: number): Parts | null}
   const innermost = (inner as {children?: {type: DataType}[]} | undefined)?.children?.[0]?.type;
   if (col.type.typeId !== Type.List || inner?.typeId !== Type.List || innermost?.typeId !== Type.List) {
     throw new Error(
-      `viewport payload column "${name}" is ${col.type} — a served shape is parts of rings of ` +
-        'vertices, so the column is list<list<list<uint32>>> (contracts §3.2 item 4). Two levels ' +
-        'is a server older than the shape columns.'
+      `viewport artifacts column "${name}" is ${col.type}; a shape column is ` +
+        'list<list<list<uint32>>> (parts, rings, vertices), which a server older than this client does not send.'
     );
   }
   return col as unknown as {get(i: number): Parts | null};
@@ -468,7 +467,7 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   // names are refused: read as absent, every cluster would draw as its box.
   if (t.getChild('hull_x') || t.getChild('hull_y')) {
     throw new Error(
-      'viewport artifacts frame carries `hull_x`/`hull_y`: this client requires a server that serves `shape_x`/`shape_y` (contracts §3.2 r45 renamed the pair and deepened it to parts of rings)'
+      'viewport artifacts frame carries `hull_x`/`hull_y` from a server older than this client; it expects `shape_x`/`shape_y` as parts of rings.'
     );
   }
   const shapeX = partsColumn(t, 'shape_x');
@@ -500,12 +499,12 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   // label, and look like data.
   if (rung == null) {
     throw new Error(
-      'viewport artifacts frame carries no `rung` column: this client requires a server that serves it (contracts §3.2 r44 renamed and re-meant `level`)'
+      'viewport artifacts frame has no `rung` column; this client expects one on every artifact row, which a server older than this client does not send.'
     );
   }
   if (parentIds == null) {
     throw new Error(
-      'viewport artifacts frame carries no `parent_ids` column: this client requires a server that serves it (contracts §3.2 r71 replaced `parent_id`)'
+      'viewport artifacts frame has no `parent_ids` column; this client expects a list of parent ids on every artifact row, which a server older than this client does not send.'
     );
   }
   if (target == null) {

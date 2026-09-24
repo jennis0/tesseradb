@@ -275,8 +275,8 @@ export function bandSplitter(
         for (let p = 1; p < ids.length; p++) {
           if (ids[p]! <= ids[p - 1]!) {
             throw new Error(
-              `band ${tile.tile}: ids out of ascending order at ${p} — every client subset rule ` +
-                `rests on this, so a violation must refuse loudly rather than serve quietly.`
+              `band ${tile.tile}: ids out of ascending order at ${p}; a response lists each tile's ` +
+                `ids in ascending \`tessera_id\` order.`
             );
           }
         }
