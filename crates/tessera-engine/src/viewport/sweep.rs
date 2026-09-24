@@ -625,7 +625,7 @@ type ResolvedScalars<'a> = Vec<Option<ScalarSlice<'a>>>;
 ///
 /// A family with no column for this view — one created after the build — is not in the list;
 /// absence in a segment of a view that does have one is [`gather_tile_columns`]'s to resolve, and
-/// comes out as the row's placeholder.
+/// comes out as an absent value.
 pub(super) fn scoped_render_scalars(
     manifest: &tessera_store::manifest::Manifest,
     view: &str,
@@ -709,6 +709,71 @@ pub(super) fn resolve_scalars<'a>(
         .collect()
 }
 
+/// Which rows of one segment carry a value for one render column.
+///
+/// A category's absence is its code 0 in the column, so a category is `Every` here. A number,
+/// bool, timestamp or string is absent where the segment's presence record says so, and on every
+/// row of a segment that has no such column.
+pub(crate) enum RenderPresence<'a> {
+    Every,
+    NoRow,
+    Rows(&'a croaring::Bitmap),
+}
+
+impl<'a> RenderPresence<'a> {
+    pub(crate) fn of(segment: &'a SegmentData, name: &str, category: bool) -> Self {
+        Self::read(segment, name, category, segment.columns.scalar(name).is_some())
+    }
+
+    /// [`Self::of`] where the caller has already looked up whether the segment holds the column.
+    fn read(segment: &'a SegmentData, name: &str, category: bool, held: bool) -> Self {
+        if category {
+            return RenderPresence::Every;
+        }
+        if !held {
+            return RenderPresence::NoRow;
+        }
+        match segment.columns.presence(name).bitmap() {
+            None => RenderPresence::Every,
+            Some(rows) => RenderPresence::Rows(rows),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn contains(&self, row: u32) -> bool {
+        match self {
+            RenderPresence::Every => true,
+            RenderPresence::NoRow => false,
+            RenderPresence::Rows(rows) => rows.contains(row),
+        }
+    }
+}
+
+/// Which of `placed` carry a value for `d`, or `None` where all of them do. The per-row test runs
+/// only where some part has an absence.
+fn gather_presence(
+    parts: &SelectionParts<'_>,
+    resolved: &[ResolvedScalars<'_>],
+    ci: usize,
+    placed: &[(u32, u32)],
+    d: &DeclaredScalar,
+) -> Option<Vec<bool>> {
+    let parts = parts.as_slice();
+    let presence_of = |at: usize| {
+        let held = resolved[at][ci].is_some();
+        RenderPresence::read(parts[at].segment, &d.name, d.vocabulary.is_some(), held)
+    };
+    if (0..parts.len()).all(|at| matches!(presence_of(at), RenderPresence::Every)) {
+        return None;
+    }
+    let per_part: Vec<RenderPresence<'_>> = (0..parts.len()).map(presence_of).collect();
+    let present: Vec<bool> = placed
+        .iter()
+        .map(|&(part, local)| per_part[part as usize].contains(local))
+        .collect();
+    (!present.iter().all(|&p| p)).then_some(present)
+}
+
 /// Gather one tile's selected rows column-major. `tessera_id` and position are one load each from
 /// `columns.arrow` and `morton.u32`. `rows` are view-space, ascending by `tessera_id` and not by
 /// segment, so consecutive rows can land in different parts; they are resolved to `(part, local)`
@@ -719,8 +784,9 @@ pub(super) fn resolve_scalars<'a>(
 /// derived from whichever tile happened to be first. A declared column a segment holds at another
 /// type is a malformed bundle, refused rather than silently skipped. A column a segment's schema
 /// does not hold is absent for every row of that segment, answered from the schema and never a
-/// blob read, and takes the type's zero placeholder — the state a group-scoped family's lane in a
-/// segment written before it existed produces.
+/// blob read — the state a group-scoped family's lane in a segment written before it existed
+/// produces. An absent value is the type's zero in the buffer and false in the column's
+/// `present`, except a category's, which is code 0 in the buffer.
 pub(super) fn gather_tile_columns(
     parts: &SelectionParts<'_>,
     rows: &[u32],
@@ -826,7 +892,11 @@ pub(super) fn gather_tile_columns(
                 }
             };
         }
-        scalars.push(flat_families!(build));
+        let values = flat_families!(build);
+        scalars.push(PointScalar {
+            values,
+            present: gather_presence(parts, &resolved, ci, &placed, d),
+        });
     }
 
     Ok(PointColumns {

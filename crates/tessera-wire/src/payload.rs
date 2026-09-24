@@ -41,6 +41,7 @@ use arrow::array::{
     TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt32Builder, UInt64Array,
     UInt64Builder, UInt8Array,
 };
+use arrow::buffer::{BooleanBuffer, NullBuffer};
 use arrow::datatypes::{DataType, Field, Schema, UInt16Type};
 use arrow::error::ArrowError;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
@@ -78,7 +79,43 @@ pub enum ScalarColumn<'a> {
 }
 
 impl ScalarColumn<'_> {
-    fn array(&self) -> ArrayRef {
+    /// The column as an Arrow array, null wherever `present` is false. `None` is every value
+    /// present, and the array then carries no validity buffer.
+    fn array(&self, present: Option<&[bool]>) -> ArrayRef {
+        let Some(present) = present else {
+            return self.values();
+        };
+        let nulls = NullBuffer::from(present);
+        macro_rules! with_nulls {
+            ($array:ident, $values:expr) => {
+                Arc::new($array::new($values.to_vec().into(), Some(nulls)))
+            };
+        }
+        match self {
+            ScalarColumn::Bool(s) => Arc::new(BooleanArray::new(
+                BooleanBuffer::from(s.to_vec()),
+                Some(nulls),
+            )),
+            ScalarColumn::U8(s) => with_nulls!(UInt8Array, s),
+            ScalarColumn::U16(s) => with_nulls!(UInt16Array, s),
+            ScalarColumn::U32(s) => with_nulls!(UInt32Array, s),
+            ScalarColumn::U64(s) => with_nulls!(UInt64Array, s),
+            ScalarColumn::I8(s) => with_nulls!(Int8Array, s),
+            ScalarColumn::I16(s) => with_nulls!(Int16Array, s),
+            ScalarColumn::I32(s) => with_nulls!(Int32Array, s),
+            ScalarColumn::I64(s) => with_nulls!(Int64Array, s),
+            ScalarColumn::F32(s) => with_nulls!(Float32Array, s),
+            ScalarColumn::F64(s) => with_nulls!(Float64Array, s),
+            ScalarColumn::TimestampUs(s) => with_nulls!(TimestampMicrosecondArray, s),
+            ScalarColumn::Utf8(s) => Arc::new(StringArray::from_iter(
+                s.iter()
+                    .zip(present)
+                    .map(|(value, &present)| present.then_some(value.as_str())),
+            )),
+        }
+    }
+
+    fn values(&self) -> ArrayRef {
         macro_rules! copied {
             ($array:ident, $values:expr) => {
                 Arc::new($array::from_iter_values($values.iter().copied()))
@@ -429,13 +466,17 @@ fn membership_column_name(layer: &str) -> String {
 /// carried a highlight; then one nullable [`membership_column_name`] column per layer, holding
 /// the `tessera_id` of the deepest served artifact the point belongs to.
 ///
+/// Each declared scalar comes with which of its values are present, `None` where all are. Its
+/// field is nullable whether or not this frame holds a null, so every frame of a response has one
+/// schema, and a value that is absent is null.
+///
 /// # Panics
 ///
 /// Panics if the columns differ in length.
 pub fn points_frame(
     tessera_ids: &[u64],
     codes: &[u64],
-    scalars: &[(&str, ScalarColumn)],
+    scalars: &[(&str, ScalarColumn, Option<&[bool]>)],
     highlighted: Option<&[bool]>,
     membership: &[(&str, &[Option<u64>])],
 ) -> Vec<u8> {
@@ -444,9 +485,9 @@ pub fn points_frame(
         (required("tessera_id", &tessera_ids), tessera_ids),
         (required("code", &codes), codes),
     ];
-    for (name, scalar) in scalars {
-        let column = scalar.array();
-        columns.push((required(name, &column), column));
+    for (name, scalar, present) in scalars {
+        let column = scalar.array(*present);
+        columns.push((nullable(name, &column), column));
     }
     if let Some(highlighted) = highlighted {
         let column = bool_column(highlighted);

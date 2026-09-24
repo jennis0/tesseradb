@@ -14,9 +14,9 @@
 //!   second build of the same corpus with the family removed, whose segment must be
 //!   byte-identical.
 //! - **A sharing group renders the owner's family**, under its own view ids and its own geometry.
-//! - **Absence is ordinary.** An entity with no value in a quarter takes the type's zero, exactly
-//!   as an entity-scoped render column's absence does (decision 0064), and a view created while
-//!   the service runs — which no batch can write a scoped column for — simply carries none.
+//! - **Absence is ordinary.** An entity with no value in a quarter is a null in the points frame,
+//!   exactly as an entity-scoped render column's absence is, and a view created while the service
+//!   runs carries no column until a batch writes one.
 //!
 //! Since 2026-08-31 the family is also a **filter operand** on `render` alone (`views.md` §5 r26),
 //! which is why the filter cases below live in this file rather than beside the indexed family's:
@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, UInt64Array};
+use arrow::array::{Array, Float32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common::*;
@@ -63,19 +63,12 @@ const BORROWED: std::ops::Range<u64> = 0..10;
 
 /// **`heat`, per view and per entity** — the rendered family. An entity's value differs between
 /// quarters, so a tail gathered from the wrong view's column is a wrong number rather than a
-/// missing one; one entity in three carries none at all, which is the presence bitmap's ordinary
-/// case (decision 0064) and reaches the wire as the type's zero.
+/// missing one; one entity in three carries none at all, which reaches the wire as a null.
 fn heat(slot: usize, entity: u64) -> Option<f32> {
     if (entity + slot as u64).is_multiple_of(3) {
         return None;
     }
     Some((entity * 10 + slot as u64) as f32 / 4.0)
-}
-
-/// What a row of `heat` carries on the wire: the value, or the placeholder an absence is written
-/// as (the render column is non-nullable — contracts R4 — so absence is the type's zero).
-fn heat_on_the_wire(slot: usize, entity: u64) -> f32 {
-    heat(slot, entity).unwrap_or(0.0)
 }
 
 /// The entities quarter `slot` holds.
@@ -484,12 +477,13 @@ fn batch_with_heat(rows: &[(Vec<u8>, f32, f32, &str)], heat: &[Option<f32>]) -> 
     w.into_inner().unwrap()
 }
 
-/// The points frames' column names, and `heat` per `tessera_id` where the frame carries it.
+/// The points frames' column names, and `heat` per `tessera_id` where the frame carries it, `None`
+/// where the value is null.
 ///
 /// Read **by name**, which is what contracts §3.2 requires of a client: the scoped columns follow
 /// the entity-scoped ones, and a reader that indexed positionally would be reading the scope's
 /// placement rather than the schema's.
-fn points_columns(body: &[u8]) -> (Vec<String>, BTreeMap<u64, f32>) {
+fn points_columns(body: &[u8]) -> (Vec<String>, BTreeMap<u64, Option<f32>>) {
     let frames = tessera_wire::split_frames(body).expect("well-formed frames");
     let mut names: Vec<String> = Vec::new();
     let mut heat = BTreeMap::new();
@@ -518,7 +512,7 @@ fn points_columns(body: &[u8]) -> (Vec<String>, BTreeMap<u64, f32>) {
                     .unwrap()
                     .clone();
                 for row in 0..batch.num_rows() {
-                    heat.insert(ids.value(row), values.value(row));
+                    heat.insert(ids.value(row), values.is_valid(row).then(|| values.value(row)));
                 }
             }
         }
@@ -556,8 +550,8 @@ async fn entity_of(served: &Served, token: &str, id: u64) -> u64 {
 async fn by_entity(
     served: &Served,
     token: &str,
-    values: &BTreeMap<u64, f32>,
-) -> BTreeMap<u64, f32> {
+    values: &BTreeMap<u64, Option<f32>>,
+) -> BTreeMap<u64, Option<f32>> {
     let mut out = BTreeMap::new();
     for (&id, &value) in values {
         out.insert(entity_of(served, token, id).await, value);
@@ -578,7 +572,7 @@ async fn by_entity(
 #[tokio::test]
 async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_values() {
     let served = Served::build(build_with_families).await;
-    let mut seen: Vec<BTreeMap<u64, f32>> = Vec::new();
+    let mut seen: Vec<BTreeMap<u64, Option<f32>>> = Vec::new();
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter:{key}");
         let (status, body) = viewport_bytes(&served, &served.token, &view).await;
@@ -595,11 +589,7 @@ async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_
             "{view} serves its own rows"
         );
         for (&entity, &value) in &by_entity {
-            assert_eq!(
-                value,
-                heat_on_the_wire(slot, entity),
-                "{view}, entity {entity}"
-            );
+            assert_eq!(value, heat(slot, entity), "{view}, entity {entity}");
         }
         seen.push(by_entity);
     }
@@ -703,16 +693,14 @@ async fn a_sharing_group_renders_the_owners_family_under_its_own_views() {
         assert!(names.contains(&"heat".to_string()), "{view}: {names:?}");
         assert_eq!(values.len(), quarter_entities(slot).count(), "{view}");
         for (entity, value) in by_entity(&served, &served.token, &values).await {
-            assert_eq!(value, heat_on_the_wire(slot, entity), "{view}, {entity}");
+            assert_eq!(value, heat(slot, entity), "{view}, {entity}");
         }
     }
 }
 
-/// **An absent value is the type's zero, and the rows that carry one are the fixture's.** The hot
-/// column is non-nullable (contracts R4), so this is decision 0064's placeholder rather than a
-/// wire null — the same thing an entity-scoped render column's absence is.
+/// **An absent value is a null, and the rows that carry one are the fixture's.**
 #[tokio::test]
-async fn an_entity_with_no_value_in_a_view_takes_the_render_placeholder() {
+async fn an_entity_with_no_value_in_a_view_is_served_a_null() {
     let served = Served::build(build_with_families).await;
     let (status, body) = viewport_bytes(&served, &served.token, "quarter:2026-Q1").await;
     assert_eq!(status, 200);
@@ -721,11 +709,12 @@ async fn an_entity_with_no_value_in_a_view_takes_the_render_placeholder() {
         .filter(|&e| heat(0, e).is_none())
         .collect();
     assert!(!absent.is_empty(), "the fixture has absences to serve");
-    for (entity, value) in by_entity(&served, &served.token, &values).await {
+    let served_values = by_entity(&served, &served.token, &values).await;
+    for (&entity, &value) in &served_values {
         if absent.contains(&entity) {
-            assert_eq!(value, 0.0, "entity {entity} carries no value in 2026-Q1");
+            assert_eq!(value, None, "entity {entity} carries no value in 2026-Q1");
         } else {
-            assert_ne!(heat(0, entity), None);
+            assert_eq!(value, heat(0, entity), "entity {entity}");
         }
     }
 }
@@ -753,7 +742,7 @@ async fn a_row_the_mask_excludes_carries_no_scoped_value() {
         "the mask decides the rows"
     );
     for (entity, value) in by_entity {
-        assert_eq!(value, heat_on_the_wire(0, entity));
+        assert_eq!(value, heat(0, entity));
     }
 }
 
@@ -897,12 +886,13 @@ async fn a_view_created_at_runtime_gains_its_scoped_column_at_the_first_flush() 
     );
     let by_entity = by_entity(&served, &token, &values).await;
     assert_eq!(
-        by_entity[&MINTED[0]], 7.5,
+        by_entity[&MINTED[0]],
+        Some(7.5),
         "the value the batch carried is the value the row renders"
     );
     assert_eq!(
-        by_entity[&MINTED[1]], 0.0,
-        "a row with no value takes the render placeholder, as an absence always has"
+        by_entity[&MINTED[1]], None,
+        "a row with no value is served a null"
     );
 
     let meta: Value = served
@@ -933,7 +923,7 @@ async fn settled_points(
     token: &str,
     view: &str,
     expected: usize,
-) -> (Vec<String>, BTreeMap<u64, f32>) {
+) -> (Vec<String>, BTreeMap<u64, Option<f32>>) {
     let what = format!("{view} settling at {expected} rows");
     wait_for(&what, std::time::Duration::from_secs(60), async || {
         // A `429` is the admission gate shedding under machine load (contracts §3.1) and is not
@@ -988,13 +978,14 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_car
 
     let by_entity = by_entity(&served, &served.token, &values).await;
     assert_eq!(
-        by_entity[&NEW], 42.25,
+        by_entity[&NEW],
+        Some(42.25),
         "the flush wrote the lane, and the value in it is the one the batch carried"
     );
     for entity in quarter_entities(0) {
         assert_eq!(
             by_entity[&entity],
-            heat_on_the_wire(0, entity),
+            heat(0, entity),
             "the build's own rows are untouched by the segment beside them, entity {entity}"
         );
     }
@@ -1060,7 +1051,8 @@ async fn a_join_row_carries_this_views_scoped_value() {
         let (_, values) = settled_points(&served, &served.token, &view, expected).await;
         let by_entity = by_entity(&served, &served.token, &values).await;
         assert_eq!(
-            by_entity[&NEW], value,
+            by_entity[&NEW],
+            Some(value),
             "{view} draws the joined entity with its own scoped value"
         );
     }
@@ -1092,7 +1084,7 @@ async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
     let expected = quarter_entities(0).count() + 1;
     let (_, values) = settled_points(&served, &served.token, "quarter:2026-Q1", expected).await;
     let before = by_entity(&served, &served.token, &values).await;
-    assert_eq!(before[&NEW], 33.5, "the flushed row's value is served");
+    assert_eq!(before[&NEW], Some(33.5), "the flushed row's value is served");
 
     fold(&served.server).await;
 
@@ -1116,8 +1108,8 @@ async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
 ///
 /// The same entity holds a value in the first incarnation of `quarter:2026-Q3`, the key is dropped
 /// and created again, and the entity rejoins the new view with no value of its own. Its row
-/// renders the placeholder before the fold, and after the fold that rewrites the family's column
-/// it renders the placeholder and answers no leaf over the family — the dead incarnation's extents
+/// renders a null before the fold, and after the fold that rewrites the family's column it
+/// renders a null and answers no leaf over the family — the dead incarnation's extents
 /// being listed under the same view id the live one writes into.
 ///
 /// The leaf and the drill-down are asked the same question at each of the three states the
@@ -1163,7 +1155,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
     let (_, values) = settled_points(&served, &token, "quarter:2026-Q3", 1).await;
     assert_eq!(
         by_entity(&served, &token, &values).await[&REJOINS],
-        90.0,
+        Some(90.0),
         "the first incarnation renders the value its batch carried"
     );
 
@@ -1194,7 +1186,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
     assert_eq!(status, 200, "the batch is accepted: {body}");
     drain(&served.server).await;
 
-    /// The rendered rows of the new incarnation: the rejoining entity's placeholder and the
+    /// The rendered rows of the new incarnation: the rejoining entity's null and the
     /// fresh entity's own value.
     async fn rendered(served: &Served, token: &str, rejoins: u64, fresh: u64) {
         let (names, values) = settled_points(served, token, "quarter:2026-Q3", 2).await;
@@ -1204,10 +1196,10 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         );
         let by_entity = by_entity(served, token, &values).await;
         assert_eq!(
-            by_entity[&rejoins], 0.0,
-            "the rejoining entity takes the render placeholder"
+            by_entity[&rejoins], None,
+            "the rejoining entity is served a null"
         );
-        assert_eq!(by_entity[&fresh], 5.0, "and the new value is served");
+        assert_eq!(by_entity[&fresh], Some(5.0), "and the new value is served");
     }
     rendered(&served, &token, REJOINS, FRESH).await;
 
@@ -1348,7 +1340,14 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
     async fn answers(served: &Served, borrower: &str, entity: u64, stage: &str) {
         let token = token_for(&served.server, &["0", "1"]).await;
         let rows = (BORROWED.end - BORROWED.start) as usize + 1;
-        settled_points(served, &token, borrower, rows).await;
+        let (_, values) = settled_points(served, &token, borrower, rows).await;
+        // The build wrote the borrowing view's own rows before the view had a column of the
+        // family, so their segment has none and each of them is served a null.
+        let rendered = by_entity(served, &token, &values).await;
+        for built in BORROWED {
+            assert_eq!(rendered[&built], None, "{stage}: entity {built} has no value");
+        }
+        assert_eq!(rendered[&entity], Some(80.0), "{stage}: the batch's value is rendered");
         assert_eq!(
             filtered_entities(served, &token, borrower, range("heat")).await,
             BTreeSet::from([entity]),
@@ -1407,10 +1406,10 @@ async fn a_sharing_groups_view_is_listed_where_the_owners_gated_one_is_not() {
         .json()
         .await
         .unwrap();
-    let heat = &meta["scoped_scalars"][0];
-    assert_eq!(heat["render"], true);
+    let family = &meta["scoped_scalars"][0];
+    assert_eq!(family["render"], true);
     assert_eq!(
-        heat["views"],
+        family["views"],
         json!([
             "quarter:2026-Q1",
             "quarter_map:2026-Q1",
@@ -1426,7 +1425,7 @@ async fn a_sharing_groups_view_is_listed_where_the_owners_gated_one_is_not() {
     let (names, values) = points_columns(&body);
     assert!(names.contains(&"heat".to_string()), "{names:?}");
     for (entity, value) in by_entity(&served, &outsider, &values).await {
-        assert_eq!(value, heat_on_the_wire(1, entity), "entity {entity}");
+        assert_eq!(value, heat(1, entity), "entity {entity}");
     }
 
     // The owner's own view stays unreachable, and its 404 is the one an unknown name gets.
@@ -1688,7 +1687,8 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
     let (_, values) = settled_points(&served, &served.token, "quarter_map:2026-Q1", expected).await;
     let by_entity = by_entity(&served, &served.token, &values).await;
     assert_eq!(
-        by_entity[&NEW], VALUE,
+        by_entity[&NEW],
+        Some(VALUE),
         "the sharing group's row renders the value its own batch carried"
     );
 }
@@ -2470,14 +2470,14 @@ fn scoped_heat(key: &str, entity: u64) -> Option<f32> {
         .flatten()
 }
 
-/// What `heat` renders as for `entity` under `view`.
-fn rendered_heat(view: &str, entity: u64) -> f32 {
+/// What `heat` renders as for `entity` under `view`, `None` where it has no value.
+fn rendered_heat(view: &str, entity: u64) -> Option<f32> {
     match WRITTEN
         .iter()
         .find(|w| w.view == view && w.entity == entity)
     {
-        Some(written) => written.heat,
-        None => heat_on_the_wire(built_slot(view).expect("a built view"), entity),
+        Some(written) => Some(written.heat),
+        None => heat(built_slot(view).expect("a built view"), entity),
     }
 }
 
@@ -2514,7 +2514,7 @@ async fn serves_everything(served: &Served, token: &str, stage: &str) {
         let expected: BTreeSet<u64> = rows
             .iter()
             .copied()
-            .filter(|&e| f64::from(rendered_heat(view, e)) >= THRESHOLD)
+            .filter(|&e| rendered_heat(view, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
             .collect();
         assert_eq!(
             filtered_entities(served, token, view, range("heat")).await,

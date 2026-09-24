@@ -97,6 +97,10 @@ criterion = "0.5"
 name = "viewport"
 harness = false
 
+[[bench]]
+name = "render_gather"
+harness = false
+
 # The two-axis sweep drives `Engine::set_serial_fallback_max_rows_for_test`, which does not exist
 # at all without `bench-timing` (session.rs's `#[cfg]`), so this example cannot compile without the
 # feature — declared here rather than left to fail a plain `cargo build --workspace`.

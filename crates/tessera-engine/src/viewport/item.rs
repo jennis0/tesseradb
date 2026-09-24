@@ -324,14 +324,8 @@ fn record_fields(
             continue;
         };
         let d = &manifest.declared_scalars[declared_index];
-        // Absence is the presence bitmap beside the column, never a zero in it. A category
-        // needs no bitmap: its absence is the reserved code.
-        if d.vocabulary.is_none()
-            && !segment
-                .columns
-                .presence(&d.name)
-                .contains(u32::try_from(local).expect("a segment holds fewer than 2^32 rows"))
-        {
+        let row = u32::try_from(local).expect("a segment holds fewer than 2^32 rows");
+        if !RenderPresence::of(segment, &d.name, d.vocabulary.is_some()).contains(row) {
             continue;
         }
         values[declared_index] = row_field_out(view, local, d, &generation.vocabularies);
@@ -467,11 +461,10 @@ pub(crate) fn flushed_row_scalar(
             let Some((segment, local)) = resolved_row else {
                 continue;
             };
-            // Absence is the presence bitmap, never a zero in it; a category has none.
             let Ok(local_row) = u32::try_from(local) else {
                 continue;
             };
-            if d.vocabulary.is_none() && !segment.columns.presence(&d.name).contains(local_row) {
+            if !RenderPresence::of(segment, &d.name, d.vocabulary.is_some()).contains(local_row) {
                 continue;
             }
             let resolved = resolve_scalars(segment, &render_scalars);

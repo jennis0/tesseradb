@@ -724,9 +724,9 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
 
     let truth = tail_by_identity(&root);
     let (band, ingested_at, score) = match (
-        &out.points.scalars[0],
-        &out.points.scalars[1],
-        &out.points.scalars[2],
+        &out.points.scalars[0].values,
+        &out.points.scalars[1].values,
+        &out.points.scalars[2].values,
     ) {
         (ColumnBuf::U8(b), ColumnBuf::I64(t), ColumnBuf::F32(s)) => (b, t, s),
         other => panic!("the tail came back at the wrong types: {other:?}"),
@@ -1009,11 +1009,11 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
             .position(|n| n.as_str() == name)
             .unwrap()
     };
-    let band = match &out.points.scalars[position("band")] {
+    let band = match &out.points.scalars[position("band")].values {
         ColumnBuf::U8(v) => v,
         other => panic!("the column named 'band' must be u8, found {other:?}"),
     };
-    let score = match &out.points.scalars[position("score")] {
+    let score = match &out.points.scalars[position("score")].values {
         ColumnBuf::F32(v) => v,
         other => panic!("the column named 'score' must be f32, found {other:?}"),
     };
@@ -1041,10 +1041,10 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
     assert_eq!(counts_only.scalar_names, vec!["band", "score"]);
     assert_eq!(counts_only.points.scalars.len(), 2);
     assert!(
-        matches!(counts_only.points.scalars[0], ColumnBuf::U8(_)),
+        matches!(counts_only.points.scalars[0].values, ColumnBuf::U8(_)),
         "the seeded empty column carries the render column's type, not the declaration's first"
     );
-    assert!(matches!(counts_only.points.scalars[1], ColumnBuf::F32(_)));
+    assert!(matches!(counts_only.points.scalars[1].values, ColumnBuf::F32(_)));
 }
 
 /// **Drill-down under the same non-prefix declaration: every home's value under its own name.**
