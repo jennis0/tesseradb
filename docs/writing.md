@@ -93,7 +93,8 @@ The tell is emptiness, not structure. An introduction, an outline and a closing 
 
 Most of the other tells are in the sentences.
 
-- **Compound sentences, one after another.** Two clauses joined by ", and", ", so", ", but", a semicolon or a colon. People writing tutorials mostly write simple sentences: one subject, one verb, one thing said. Join two clauses only when the second makes no sense alone. If every other sentence is compound, split most of them.
+- **Compound sentences, one after another.** Two clauses joined by ", and", ", so", ", but", a semicolon or a colon, sentence after sentence. Join two clauses when they make one thought, not to avoid a full stop.
+- **Runs of short sentences in the same shape.** "It keeps shapes true. It stretches areas. It has no default." Four sentences in a row that begin "You'll". Chopped prose reads as mechanical as chained prose. Write as a person talks: mostly plain sentences of varied length, with a longer one where an idea needs carrying through and a short one where it lands.
 - **A colon followed by a list of three.** "One program does all the work: it checks, builds and serves." Say one thing, or show the three as they happen.
 - **Sentences about the text instead of the subject.** "There are six stages, and each one leaves something you can look at." "This is the step that decides what a viewer sees." Cut them, or replace them with the fact they gesture at.
 - **Framing that nobody would say aloud.** "The pieces every deployment is made of." "The whole path from a text file to a viewer's map." Name the actual things.
