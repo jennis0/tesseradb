@@ -618,6 +618,7 @@ fn concurrent_ingest_and_change_both_survive() {
         // Unallocated: signature-sorted assignment happens on the executor, so a caller does not
         // name the entity id at all.
         let row = tessera_lifecycle::UnallocatedRow {
+            join_only: false,
             external_id: Some(new_external_id.clone()),
             view: "s0".to_string(),
             join: None,

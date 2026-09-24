@@ -121,6 +121,7 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
 
     // Buffered row: a second request publishes it without waiting out the deadline.
     let row = tessera_lifecycle::UnallocatedRow {
+        join_only: false,
         external_id: Some(b"prompt-flush".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -270,6 +271,7 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
 
     for i in 0..4u8 {
         let row = tessera_lifecycle::UnallocatedRow {
+            join_only: false,
             external_id: Some(format!("rows-trigger-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,

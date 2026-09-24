@@ -9,13 +9,14 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::{ChangeOp, UnallocatedRow};
+use tessera_engine::{AcceptError, Engine, EngineConfig};
+use tessera_lifecycle::{ChangeOp, ExecError, UnallocatedRow};
 
 const WAIT: Duration = Duration::from_secs(10);
 
 fn row(engine: &Engine, external_id: &[u8]) -> UnallocatedRow {
     UnallocatedRow {
+        join_only: false,
         external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -131,19 +132,14 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
     );
 }
 
-#[test]
-fn a_suppressed_holder_still_blocks_reingest() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+/// An engine over the fixture in `dir`, its executor running and no flush or fold of its own.
+fn open_engine(dir: &std::path::Path) -> Engine {
+    let root = dir.join("bundle");
+    build_fixture(&root, &dir.join("points.parquet"), &dir.join("pairs.parquet"));
     let mut engine = Engine::open(
         &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
+        &dir.join("cache"),
+        &dir.join("wal.log"),
         tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
@@ -156,6 +152,46 @@ fn a_suppressed_holder_still_blocks_reingest() {
     )
     .expect("engine opens");
     engine.start_write_executor(8).expect("executor starts");
+    engine
+}
+
+/// **A row admitted only as a join is refused if its item was deleted before the writer took it**,
+/// rather than landing as a new item without the columns it left out. The row is built as the
+/// ingest handler leaves one it resolved as a join, with the delete landing between the two; the
+/// same row unmarked becomes a new item, as a row naming a deleted holder always has.
+#[test]
+fn a_join_only_row_whose_item_was_deleted_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let engine = open_engine(tmp.path());
+    let held = engine
+        .accept_ingest(vec![row(&engine, b"doc-3")], "held".to_string(), [5u8; 32])
+        .expect("ingest accepted")[0];
+    engine
+        .accept_change(held, ChangeOp::Delete)
+        .expect("delete accepted");
+    let joining = |join_only| UnallocatedRow {
+        join: Some(held),
+        join_only,
+        ..row(&engine, b"doc-3")
+    };
+
+    let err = engine
+        .accept_ingest(vec![joining(true)], "join-only".to_string(), [6u8; 32])
+        .expect_err("a row admitted only as a join cannot become a new item");
+    assert!(
+        matches!(err, AcceptError::Exec(ExecError::JoinRefused { .. })),
+        "{err:?}"
+    );
+    let fresh = engine
+        .accept_ingest(vec![joining(false)], "unmarked".to_string(), [7u8; 32])
+        .expect("an unmarked row becomes a new item")[0];
+    assert_ne!(fresh, held);
+}
+
+#[test]
+fn a_suppressed_holder_still_blocks_reingest() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let engine = open_engine(tmp.path());
 
     let entity = engine
         .accept_ingest(vec![row(&engine, b"doc-2")], "s-1".to_string(), [3u8; 32])

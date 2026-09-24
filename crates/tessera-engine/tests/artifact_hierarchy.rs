@@ -1822,6 +1822,7 @@ fn ingest_edges(
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
+        join_only: false,
         external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -2059,6 +2060,7 @@ fn ingest_levelled(
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
+        join_only: false,
         external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,

@@ -573,6 +573,7 @@ fn run_ingest(
         .cloned()
         .collect();
     let ParsedBatch {
+        columns,
         items,
         artifacts,
         clipped,
@@ -735,30 +736,28 @@ fn run_ingest(
     }
     // A row that creates an item carries every declared column. A join's entity-scoped values are
     // the item's already, so it carries only the families of its view's own group, whose values
-    // are the view's; a sharing group's view is held to none, as a build reads it for none. A join
-    // whose item is deleted before the writer settles it lands as a new item holding absences.
+    // are the view's; a sharing group's view is held to none, as a build reads it for none.
     let join_of: FxHashMap<usize, EntityId> = joins.into_iter().collect();
-    let columns: Vec<&str> = meta
-        .declared_scalars
-        .iter()
-        .map(|d| d.name.as_str())
-        .chain(scoped.iter().map(|f| f.name.as_str()))
-        .collect();
     let declared_count = meta.declared_scalars.len();
+    // A join that left out an entity-scoped column is admitted only as a join.
+    let mut join_only = vec![false; items.len()];
     for (index, item) in items.iter().enumerate() {
         if item.omitted.is_empty() {
             continue;
         }
         let creates = !join_of.contains_key(&index);
-        let required = columns.iter().enumerate().filter(|(at, _)| match at.checked_sub(declared_count) {
-            None => creates,
-            Some(family) => Some(&scoped[family].group) == own_group.as_ref(),
+        let required = columns.iter().enumerate().filter(|(at, _)| {
+            match at.checked_sub(declared_count) {
+                None => creates,
+                Some(family) => Some(&scoped[family].group) == own_group.as_ref(),
+            }
         });
         tessera_engine::check_declared_present(
             required.map(|(_, name)| (*name, *name)),
             |name| !item.omitted.iter().any(|&at| columns[at] == name),
         )
         .map_err(|detail| ApiError::Contract(format!("ingest body: row {index}: {detail}")))?;
+        join_only[index] = item.omitted.iter().any(|&at| at < declared_count);
     }
     // The buffer bound: the command queue drains in milliseconds, so between flushes the buffer
     // is what grows. Checked before submission, so a 429 costs no entity id or WAL append; the
@@ -786,6 +785,7 @@ fn run_ingest(
             external_id: item.external_id,
             view: view.clone(),
             join: join_of.get(&index).copied(),
+            join_only: join_only[index],
             descriptors,
             x: item.x,
             y: item.y,

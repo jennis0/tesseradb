@@ -39,7 +39,10 @@ pub(crate) struct RawIngestItem {
 }
 
 /// One ingest batch, decoded, with what its membership columns said.
-pub(crate) struct ParsedBatch {
+pub(crate) struct ParsedBatch<'a> {
+    /// The declared scalars' names followed by the scoped families', which the positions in
+    /// [`RawIngestItem::omitted`] index.
+    pub(crate) columns: Vec<&'a str>,
     pub(crate) items: Vec<RawIngestItem>,
     pub(crate) artifacts: BatchArtifacts,
     /// Rows whose latitude lay outside the projection's domain and were moved onto the frame's
@@ -114,8 +117,8 @@ fn record_batches<'a>(
             })?;
             let required: Vec<String> = json.required.iter().map(|name| name.to_string()).collect();
             Box::new(reader.map(move |batch| {
-                let batch =
-                    batch.map_err(|e| DecodeError(format!("{body_name}: arrow decode error: {e}")))?;
+                let batch = batch
+                    .map_err(|e| DecodeError(format!("{body_name}: arrow decode error: {e}")))?;
                 let absent = (0..required.len())
                     .filter(|&at| batch.column_by_name(&required[at]).is_none())
                     .collect();
@@ -292,19 +295,19 @@ fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
 /// scalars, its group's scoped families and the layer registry. `node_id` is accepted and not
 /// stored. Any refusal refuses the whole batch.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn parse_ingest_batch(
+pub(crate) fn parse_ingest_batch<'a>(
     encoding: BodyEncoding,
     body: &[u8],
     projection: Projection,
     extent: &Bounds,
-    declared: &[DeclaredScalar],
+    declared: &'a [DeclaredScalar],
     // The families of the group that owns the view, in manifest order; empty outside a group.
-    scoped: &[ScopedScalar],
+    scoped: &'a [ScopedScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
     // The key of the batch's view in a group, `None` where the view is none of the group's.
     view_in: &dyn Fn(&str) -> Option<String>,
-) -> Result<ParsedBatch, DecodeError> {
+) -> Result<ParsedBatch<'a>, DecodeError> {
     let body_name = "ingest body";
     let (x_name, y_name) = coordinates::axis_names(projection);
     let fixed = [
@@ -314,7 +317,7 @@ pub(crate) fn parse_ingest_batch(
         Fixed::Access,
         Fixed::NodeId,
     ];
-    let required: Vec<&str> = declared
+    let columns: Vec<&str> = declared
         .iter()
         .map(|d| d.name.as_str())
         .chain(scoped.iter().map(|f| f.name.as_str()))
@@ -325,7 +328,7 @@ pub(crate) fn parse_ingest_batch(
         body,
         &JsonColumns {
             fixed: &fixed,
-            required: &required,
+            required: &columns,
             declared,
             scoped,
             layer_of,
@@ -367,7 +370,8 @@ pub(crate) fn parse_ingest_batch(
         let memberships =
             check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
         // A column the batch leaves out holds its absence, which is what a null cell reads as.
-        let cells_of = |d: &DeclaredScalar| batch.column_by_name(&d.name).map(|col| Cells::new(col, d));
+        let cells_of =
+            |d: &DeclaredScalar| batch.column_by_name(&d.name).map(|col| Cells::new(col, d));
         let declared_cells: Vec<Option<Cells>> = declared.iter().map(cells_of).collect();
         let scoped_cells: Vec<Option<Cells>> = scoped_declared.iter().map(cells_of).collect();
         let value_of = |cells: &Option<Cells>, i: usize, d: &DeclaredScalar| match cells {
@@ -416,6 +420,7 @@ pub(crate) fn parse_ingest_batch(
         }
     }
     Ok(ParsedBatch {
+        columns,
         items,
         artifacts: tally.into_artifacts(),
         clipped,
