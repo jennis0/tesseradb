@@ -28,6 +28,8 @@ the same aggregate.
 - **Annotation layers**: clusters, hierarchies including DAGs, regions and hulls, each correct for the viewer, with access-controlled labels.
 - **Highlight mode**: light the matches, dull the rest.
 - **Item cards** for a selected point.
+- **Bulk reads** of the items and artifacts a viewer may see, page by page as Apache Arrow
+  tables, from the HTTP API, both client libraries and the command line.
 - **Live ingest** into a running service, with deletion and suppression enforced from the moment
   they are accepted.
 - **Embeddable clients**: web components, a deck.gl layer, React bindings, and a Python notebook
@@ -162,6 +164,7 @@ any framework, with a deck.gl layer and React bindings alongside them.
 | Filters and search: categories, numbers, dates, keywords, text | Built. Filtering on list-valued fields is not built yet |
 | Several coordinate systems over one corpus | Built |
 | Annotation layers: clusters, hierarchies, regions, hulls | Built |
+| Bulk reads of items and artifacts | Built, over HTTP and in the TypeScript client, the Python client and the CLI. A read pinned to one version of the corpus is not built yet |
 | Live ingest and denies | Built. A deletion or suppression hides the item from the next request; its rows are removed from disk later, at compaction, which runs on a schedule |
 | Clients: web components, a deck.gl layer, React bindings, a Python notebook widget | Built. Not yet published to a package index |
 | Conformance suite (the check that the guarantees hold) | Built and run on every change against an independent oracle. Its own record states where its coverage stands |
