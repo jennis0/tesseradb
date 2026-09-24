@@ -2,12 +2,8 @@ import {esc, panel} from '../html.js';
 import type {AppState} from '../state.js';
 
 /**
- * A failed tile is not an empty tile.
- *
- * An empty viewport and a failed viewport are semantic opposites — zero versus unknown — and
- * rendering a failure as blank space converts a fail-closed server into a fail-misleading picture.
- * The MVP does not carry the full four-state treatment; this panel is the part of it that must not
- * wait, because it is the part that turns a server's honesty into a lie.
+ * The refusals the store reported, so a failed viewport (unknown) is not read as an empty one
+ * (zero).
  */
 export function renderErrors(state: AppState): string {
   if (state.failures.length === 0) return '';

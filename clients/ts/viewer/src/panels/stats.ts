@@ -2,9 +2,8 @@ import {panel, row} from '../html.js';
 import type {AppState} from '../state.js';
 
 /**
- * `x-tessera-stage-ns` is a positional CSV with no names — the field order is contract with
- * `scripts/bench_*.py` and `tessera-bench`, and it is **append-only**. Mirrored here; if the
- * server appends a field, append here.
+ * The fields of `x-tessera-stage-ns`, a positional CSV. The order is shared with
+ * `scripts/bench_*.py` and `tessera-bench` and only grows at the end.
  */
 const STAGE_FIELDS = [
   'generation_resolve_ns',
@@ -36,32 +35,20 @@ const STAGE_FIELDS = [
 const INTERESTING = ['count_ns', 'select_ns', 'gather_ns', 'arrow_serialise_ns', 'total_ns'];
 
 /**
- * Whether the instrument drawer is open.
- *
- * Module state rather than store state on purpose: the panels are rebuilt from `innerHTML` on every
- * store change, so a `<details>` element's own open flag is destroyed several times a second and
- * cannot hold this. It is presentation and nothing subscribes to it, so putting it in the store
- * would make every reader of that type wonder what depends on it.
+ * Whether the instrument drawer is open. The panels are rebuilt from `innerHTML` on every store
+ * change, so a `<details>` element cannot keep its own open flag.
  */
 let drawerOpen = false;
 
-/** Called by the click handler in `main.ts` — see {@link drawerOpen}. */
+/** Called by the click handler in `main.ts`. */
 export function toggleStatsDrawer(open: boolean): void {
   drawerOpen = open;
 }
 
 /**
- * What the last view cost, and what the replica saved.
- *
- * **Six rows above the fold and the instrument below it.** The panel used to carry twenty-two, which
- * is the right number for a measurement session and the wrong one for reading at a glance — the
- * figure that matters (pan to paint) sat below rows nobody consults twice. The drawer holds the ones
- * that answer a specific question when you have one: the stage breakdown, and the replica's own
- * residency, which `run_demo.sh` documents as the way to watch look-ahead work.
- *
- * `residency` comes from the slab rather than from the store: it is GPU-facing storage that outlives
- * every frame, and routing it through state would make a redraw look like a state change on exactly
- * the frames whose whole point is that nothing changed.
+ * What the last view cost, and what the replica saved: six rows, with the stage breakdown and the
+ * replica's residency in a drawer. `residency` comes from the slab, not the store, so a redraw
+ * that changes nothing is not a state change.
  */
 export function renderStats(state: AppState, residency: {drawn: number; departed: number}): string {
   const t = state.lastTimings;
@@ -87,7 +74,7 @@ export function renderStats(state: AppState, residency: {drawn: number; departed
   return panel('Last request', `${headline}${core}${drawer(state, residency, provisional)}`);
 }
 
-/** The rows that answer a question you already have, rather than one you might. */
+/** The drawer's rows. */
 function drawer(
   state: AppState,
   residency: {drawn: number; departed: number},
@@ -120,13 +107,3 @@ function drawer(
       ${stage}
     </details>`;
 }
-
-/**
- * `k` and the underlay controls were removed with the tile-addressed layer.
- *
- * `k` is a per-tile cap that θ almost never reaches (measured: inert at every depth on every
- * fixture), and the quantity a user actually wants to set — marks on screen — is now the budget,
- * which `panels/view.ts` owns. The underlay moves to a cached per-session density pyramid under a
- * separate design (owner ruling, 2026-08-01), so a per-request offset slider would model something
- * the client no longer does.
- */

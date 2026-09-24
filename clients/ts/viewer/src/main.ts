@@ -13,23 +13,16 @@ import {installTrace, installTraceBar, trace} from './trace.js';
 import {coalesce, createStore as createAppState, type Store} from './state.js';
 
 /**
- * The demo: `<tessera-explorer layout="overlay">` plus its instruments (design client-components
- * §7).
+ * The viewer: `<tessera-explorer layout="overlay">` and a column of instruments.
  *
- * **What the explorer is.** The map, the status strip, the filters, the selection panel and the
- * item card are `@tesseradb/components`, reading one store by context. The demo hands the explorer
- * the store it built — the `.store` property, first in the precedence — because the store is
- * opened per dataset and principal through the demo's own session client, which is where
- * `session-url` and the session credential stay (§5.3: never on a C1 surface).
+ * The viewer hands the explorer a store it opened per dataset and principal through its own
+ * session client, which holds the session URL and credential; the store only gets a token
+ * supplier.
  *
- * **What the instruments are.** The things that measure rather than show: the dataset and
- * principal pickers, the mark budget, the depth the budget chose, the last request's timings and
- * the replica drawer, and the refusals observed. The layer picker, the legend, the artifact list
- * and the artifact card are the explorer's own (§5.3). The instruments read a mirror of the
- * store's projections plus the numbers the §4 surface deliberately omits, which the store
- * forwards on its demo-only `instruments` channel; the probe on `window` carries the three lanes'
- * timings — decode in the worker, absorb on this thread, the region's counting request — for the
- * harness.
+ * The instruments measure: the dataset and principal pickers, the mark budget, the depth chosen,
+ * the last request's timings, the replica drawer and the refusals. They read a mirror of the
+ * store's projections and the store's `instruments` channel. The probe on `window` carries the
+ * decode, absorb and region timings for the harness.
  */
 
 const config = readConfig();
@@ -38,12 +31,12 @@ let client: TesseraClient | null = null;
 let dataStore: DataStore | null = null;
 let unsubscribe: (() => void) | null = null;
 let datasets: Dataset[] = [];
-/** The presets of the dataset currently active — per bundle, since a term id is per dictionary. */
+/** The active dataset's presets; term ids are per bundle. */
 let presets: Dataset['presets'] = [];
 
-/** The slider's own maximum — see `panels/view.ts`. */
+/** The mark budget a session opens with: the budget slider's maximum in `panels/source.ts`. */
 const DEFAULT_BUDGET = 500_000;
-/** A declared category column, so the palette, the legend and `/v1/categories` are all live. */
+/** The column preferred for colour where a dataset has no artifact layer. */
 const DEFAULT_COLOUR_BY = 'archive';
 
 const store = createAppState({
@@ -85,27 +78,18 @@ declare global {
   }
 }
 
-/**
- * How long the camera must sit still before the ground under it is recomposed. Long enough that a
- * wheel gesture composes its destination and not every notch on the way.
- */
+/** How long the camera must be still before the basemap is recomposed, so a wheel gesture composes once. */
 const BASEMAP_SETTLE_MS = 180;
 
 /**
- * Draw a basemap under the points where `/v1/meta` says one lines up, and none where it does not.
- *
- * The decision is `tile_scheme`'s and the demo does not second-guess it: no dataset entry says
- * whether its corpus is geographic, and nothing here reads the extent. A tile that will not load —
- * no network, a refused request — leaves the map exactly as it was, a basemap being an underlay
- * and not the picture.
+ * Draw a basemap under the points where the view declares a `tile_scheme`, and none where it does
+ * not. A basemap that fails to load leaves the map as it was.
  */
 let basemapGeneration = 0;
 
 async function installBasemap(view: ViewInfo, camera?: Camera): Promise<void> {
-  // **A basemap is only ever installed for the switch that asked for it.** Both awaits below run
-  // for as long as a tile fetch takes, and a viewer stepping geographic → embedding →
-  // geographic-2 faster than that would otherwise have view A's tiles land under view C's points.
-  // The generation is the same guard `activate` uses for its meta.
+  // A basemap is installed only for the switch that asked for it; a faster later switch
+  // supersedes it through the generation.
   const mine = ++basemapGeneration;
   await explorer.updateComplete;
   const map = explorer.map;
@@ -114,11 +98,7 @@ async function installBasemap(view: ViewInfo, camera?: Camera): Promise<void> {
     const basemap = await basemapLayer(view, camera);
     if (mine !== basemapGeneration) return;
     map.basemap = basemap;
-    // **The ground under the labels is the basemap's, not the page's.** OpenStreetMap's standard
-    // style is a pale one, and the demo's chrome is dark — so with the ground left to
-    // `color-scheme` the names came out white in a black halo over a light street map, which is
-    // the one combination that reads as a rendering fault rather than a choice. The panels stay
-    // dark; only the canvas answers to what is behind it.
+    // OpenStreetMap's style is pale under a dark page, so the map's ground is light while it shows.
     map.ground = basemap ? 'light' : '';
   } catch (error) {
     store.update((s) => {
@@ -128,19 +108,10 @@ async function installBasemap(view: ViewInfo, camera?: Camera): Promise<void> {
 }
 
 /**
- * Keep the ground at the resolution the camera is at.
- *
- * **Composed per view, and only when the view left the tiles it was composed from.** A pan inside
- * the covered box and a zoom that does not change the depth need no new texture, so a gesture that
- * stays put costs nothing; what a recomposition costs is the tiles it has not already decoded.
- *
- * Debounced on the view *settling* rather than driven per frame: the wheel emits a view change per
- * notch, and composing a texture per notch would fetch every level between the two ends of the
- * gesture to draw none of them.
- *
- * **Bound to the current view, and rebound at a switch** (`view-switching.md` §6.5): one listener
- * for the page's life, reading the view it follows from a variable a switch replaces, so a
- * settle after a switch composes against the new view's frame and never the one it left.
+ * Keep the basemap at the camera's resolution. It is recomposed when the camera settles outside
+ * the tiles last composed; a pan within them or a zoom at the same depth needs nothing. One
+ * listener serves the page, reading the view to follow from `followedView`, which a switch
+ * replaces.
  */
 let followedView: ViewInfo | null = null;
 let composed: BasemapCover | null = null;
@@ -159,9 +130,7 @@ function followCameraWithBasemap(view: ViewInfo): void {
   followListening = true;
   explorer.addEventListener('tessera-viewchange', (event) => {
     const followed = followedView;
-    // A view whose frame is aligned to no tiling has no ground to follow (`tile` is null exactly
-    // when `tileScheme` is): every embedding view is this case, and composing for it threw from
-    // inside the store's own fan-out, which starved every subscriber behind the map.
+    // A view with no tiling (every embedding) has no basemap to follow.
     if (!followed || followed.tileScheme === null || followed.tile === null) return;
     const {bbox, zoom} = (event as CustomEvent<{bbox: [number, number, number, number]; zoom: number}>).detail;
     const [x0, y0] = dataToWorldXY(bbox[0], bbox[1], followed.quantisation);
@@ -192,12 +161,8 @@ function followCameraWithBasemap(view: ViewInfo): void {
 }
 
 /**
- * Take the basemap down, now, and stand every fetch in flight down with it.
- *
- * Called at the switch rather than when the next one arrives: a view with a `tile_scheme` of
- * `null` has no basemap to replace the old one with, so leaving the tiles up until an answer
- * comes would draw a map of the world under an embedding — and for as long as the fetch takes,
- * which is the whole of what a viewer sees of the switch.
+ * Take the basemap down and cancel every fetch in flight. Called at the switch, since a view with
+ * no `tile_scheme` has no basemap to replace the old one.
  */
 function dropBasemap(): void {
   basemapGeneration += 1;
@@ -214,9 +179,8 @@ function dropBasemap(): void {
 }
 
 /**
- * The current view is URL state (`view-switching.md` §6.5): `?view=<id>` beside `?dataset=`, so a
- * link means what it showed. Written with `replaceState` — a switch is not a page in the history,
- * and a slider run through a group's roster would otherwise leave one entry per step behind it.
+ * Write the current view to the URL as `?view=<id>`, so a link shows the same view. `replaceState`,
+ * so stepping through a roster does not fill the history.
  */
 function writeViewToUrl(id: string): void {
   const url = new URL(location.href);
@@ -226,14 +190,9 @@ function writeViewToUrl(id: string): void {
 }
 
 /**
- * Follow a switch: the basemap is decided **per switch** from the new view's `tile_scheme`, and
- * the URL says which view it is. A scheme of `null` means the basemap goes, which is what
- * `basemapLayer` answers with, so a switch from a geographic view to an embedding removes it
- * rather than leaving tiles under points that cannot line up with them.
- *
- * Within a group the camera does not move, so no settle will recompose the ground: the last
- * camera is composed for straight away. Across frames the map refits, and the settle that
- * follows composes for wherever it lands.
+ * Follow a switch: decide the basemap from the new view's `tile_scheme` and write the view to the
+ * URL. Within a group the camera does not move, so the basemap is composed for the last camera at
+ * once; across frames the map refits and the next settle composes.
  */
 function onViewChanged(id: string): void {
   const meta = store.state.meta;
@@ -254,7 +213,7 @@ function onViewChanged(id: string): void {
   void installBasemap(view, camera ?? undefined);
 }
 
-/** The first map's probe, published for the smoke scripts and the harness (§5.9). */
+/** Publish the first map's probe on `window` for the harness. */
 async function publishProbe(): Promise<void> {
   await explorer.updateComplete;
   const map = explorer.map;
@@ -268,9 +227,8 @@ async function publishProbe(): Promise<void> {
 }
 
 /**
- * The main thread's long tasks, so a latency the lanes cannot explain — a response answered in
- * milliseconds and projected seconds later — can be laid against what blocked the thread and
- * when. Chromium's `longtask` entries, the ten longest kept.
+ * The main thread's ten longest tasks (Chromium's `longtask` entries), to set against a latency
+ * the lanes do not explain.
  */
 let longTasksObserved = false;
 function observeLongTasks(lanes: Lanes): void {
@@ -286,36 +244,34 @@ function observeLongTasks(lanes: Lanes): void {
     });
     observer.observe({type: 'longtask', buffered: true});
   } catch {
-    // Not every runtime has the entry type; the lanes still say what they can.
+    // Not every runtime has the entry type.
   }
 }
 
-/** The three lanes' timings (design §5.10's measurement), kept on the probe for the harness. */
+/** Decode, absorb and region timings, kept on the probe for the harness. */
 type Lanes = {
   decode: {ms: number; workerMs: number | null; points: number; bytes: number; at: number}[];
   absorb: {split: number[]; store: number[]; remap: number[]; remapPoints: number[]; sliceMaxMs: number};
   region: Record<string, number | string> | null;
   coverage: Record<string, number | string> | null;
-  /** The ten longest main-thread tasks, ms and their start time on `performance.now()`'s clock. */
+  /** The ten longest main-thread tasks: duration in milliseconds, and start on `performance.now()`'s clock. */
   longTasks: {ms: number; at: number}[];
 };
 
-// ---------------------------------------------------------------------------------- the panels
-
-/** The controls: everything that changes what is asked for. */
+/** The controls: what changes the request. */
 function renderControls(): string {
   return renderSource(store.state, datasets, presets);
 }
 
-/** The readouts: everything that reports what came back. */
+/** The readouts: what came back. */
 function renderReadouts(): string {
   const slab = explorer.map?.slab;
   return renderStats(store.state, {drawn: slab?.drawn ?? 0, departed: slab?.departed ?? 0}) + renderDepth(store.state) + renderErrors(store.state);
 }
 
 /**
- * Everything the controls' markup depends on, as one string — rebuilt only when it moves, so a
- * rebuild never replaces the element under a user's cursor between mouse-down and click.
+ * Everything the controls' markup depends on, as one string. The controls are rebuilt only when
+ * it changes, so an element is not replaced under the cursor between mouse-down and click.
  */
 function controlsSignature(): string {
   const s = store.state;
@@ -335,7 +291,7 @@ function repaintControls() {
   if (focusId) document.getElementById(focusId)?.focus({preventScroll: true});
 }
 
-/** Rebuild the instruments — readouts every change, controls only when their signature moves. */
+/** Rebuild the instruments: readouts on every change, controls when their signature changes. */
 function render() {
   readoutsEl.innerHTML = renderReadouts();
   const drawer = document.getElementById('stats-drawer') as HTMLDetailsElement | null;
@@ -359,9 +315,8 @@ function bindControls() {
     const preset = presets[Number(select.value)];
     if (!preset) return;
     trace.event('principal', {label: preset.label, n: preset.terms.length});
-    // A different principal is a different mask, a different partition and a different visible set:
-    // open a fresh store on it. The old one's replica, encoding accumulators and held artifacts go
-    // with it, which is exactly what a mask change requires — and every card empties (§9).
+    // A different principal is a different visible set: open a new store, so nothing held under
+    // the old one survives.
     openSession(preset);
   });
 
@@ -381,13 +336,7 @@ installTraceBar();
 const rerender = coalesce(() => trace.phase('panels', render));
 store.subscribe(rerender);
 
-// ------------------------------------------------------------------- mirroring the store's projections
-
-/**
- * Copy the store's projections into the demo's app state, so the instrument panels see one
- * consistent picture per tick. The data-path decisions are all the store's; this is the demo's
- * mirror of them.
- */
+/** Copy the store's projections into the viewer's state, so the instrument panels see one consistent picture per change. */
 function mirror(): void {
   const ds = dataStore;
   if (!ds) return;
@@ -396,9 +345,7 @@ function mirror(): void {
   const view = ds.get('view');
   const replica = ds.get('replica');
 
-  // The store is the one place a switch is decided (§6.3): the pickers, the notebook and a host
-  // calling `setCurrentView` all land here, so the basemap and the URL follow the projection
-  // rather than any one control's event.
+  // The basemap and the URL follow the `view` projection, whichever control switched it.
   if (view.id && view.id !== store.state.view) onViewChanged(view.id);
 
   store.update((s) => {
@@ -418,17 +365,12 @@ function mirror(): void {
   });
 }
 
-// ------------------------------------------------------------------------------- dataset and principal
-
 /**
- * Open a store on one principal of the active dataset — the only writer of `dataStore`.
+ * Open a store on one principal of the active dataset; the only writer of `dataStore`.
  *
- * `held` is the session and the meta {@link activate} has just fetched to choose the layer and the
- * colour this store opens pointed at. Handed on rather than refetched: without it the first thing
- * a cold page did was authorise twice and read `/v1/meta` twice, and the second authorisation
- * materialises the principal's visible set again — 107 ms at 35.9 × 10^6 items, in front of every
- * mark on the screen. The credential still never reaches the store; what it is given is the
- * supplier, which simply answers with this token once before minting another.
+ * `held` is the session and meta {@link activate} fetched, passed on so a cold page authorises
+ * once: each authorisation materialises the principal's visible set on the server. The store gets
+ * a supplier that returns this token once and then mints new ones.
  */
 function openSession(
   preset: Dataset['presets'][number],
@@ -438,7 +380,7 @@ function openSession(
   const active = client;
   unsubscribe?.();
   dataStore?.dispose();
-  /** Answered once, then dropped: a renewal must mint a token and never replay an expiring one. */
+  /** Returned once, then dropped, so a renewal mints a new token. */
   let heldSession = held?.session;
 
   store.update((s) => {
@@ -453,8 +395,7 @@ function openSession(
   dataStore = createStore({
     viewerUrl: '',
     client: active,
-    // The store never holds the session credential: it is handed a supplier that re-authorises
-    // through the demo's own client (design §5.3, §5.4). Renewal runs before the first refusal.
+    // The store gets a supplier that authorises through the viewer's client, not the credential.
     authorise: async () => {
       const session = heldSession ?? (await active.authorise(preset.terms));
       heldSession = undefined;
@@ -463,15 +404,14 @@ function openSession(
       });
       return {token: session.token, expiresAt: session.expiresAt};
     },
-    // The document `activate` read under this very token (see the doc above).
+    // The meta `activate` read under this token.
     ...(held ? {meta: held.meta} : {}),
     budget: store.state.budget,
     view: store.state.view,
     prefetch,
     driver: {prefetchLayers: config.prefetchLayers},
     replica: {
-      // The absorb lane: the split and store phases per response, and the longest single slice —
-      // the figure that says whether the slice budget held the thread (§5.10's measurement).
+      // The absorb lane: the split and store phases per response, and the longest single slice.
       onPhase: (kind, ms, n) => {
         const lanes = window.__tesseraProbe?.lanes;
         if (!lanes) return;
@@ -514,25 +454,21 @@ function openSession(
     }
   });
   dataStore.setColourBy(store.state.colourBy);
-  // The demo opens with the first layer on: the smoke and the harness read counts off it.
+  // The viewer opens with the first layer on.
   dataStore.setLayers(store.state.artifactLayer ? [store.state.artifactLayer] : []);
   unsubscribe = dataStore.subscribe(() => mirror());
-  // The explorer takes the store by property — first in the precedence — and its map pushes the
-  // first view once meta lands.
+  // The explorer takes the store by property; its map pushes the first view once meta lands.
   explorer.store = dataStore;
   void publishProbe();
 }
 
-/**
- * Point the viewer at a dataset: a fresh client and a fresh store.
- *
- * A `tessera_id` minted by one bundle means nothing to another, a term id names a different set in
- * each, and a held band carries geometry quantised under one bundle's extent — so a switch is a
- * clean rebuild, never a reuse.
- */
-/** Which `activate` is current: an earlier one that is still awaiting its meta stands down. */
+/** Which `activate` is current; an earlier one still awaiting its meta stands down. */
 let activation = 0;
 
+/**
+ * Point the viewer at a dataset with a new client and store. Ids, term ids and quantised geometry
+ * are all per bundle, so nothing is reused.
+ */
 async function activate(dataset: Dataset, requestedView: string | null = null): Promise<void> {
   const mine = ++activation;
   unsubscribe?.();
@@ -546,8 +482,8 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
     viewerUrl: dataset.viewerUrl,
     sessionUrl: dataset.sessionUrl,
     sessionCredential: config.sessionCredential,
-    // Per-response decode time, for the harness's measurement (design §5.10): as seen from this
-    // thread, and the worker's own — the difference is the lane's queue.
+    // Per-response decode time as seen from this thread and in the worker; the difference is
+    // the queue.
     onDecode: (ms, bytes, points, workerMs) => {
       const probe = window.__tesseraProbe;
       if (!probe) return;
@@ -558,7 +494,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
     }
   });
 
-  /** The demo opens on its **hardest** case: the broadest principal available. */
+  /** The viewer opens on the broadest principal, the hardest case. */
   const first = presets.reduce<Dataset['presets'][number] | undefined>(
     (best, p) => (best && best.visible >= p.visible ? best : p),
     undefined
@@ -584,8 +520,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
     s.artifactLayer = null;
   });
 
-  // Choose the colour and layer defaults once meta is known, before opening the session's store, so
-  // the store opens already pointed at them. A throwaway meta fetch through the client.
+  // Choose the colour and layer from meta before opening the store, so it opens on them.
   if (first) {
     let session: Awaited<ReturnType<TesseraClient['authorise']>>;
     let meta: Awaited<ReturnType<TesseraClient['meta']>>;
@@ -606,9 +541,8 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
     }
     if (mine !== activation) return;
     const rendered = meta.declaredScalars.filter((c) => c.render);
-    // **An id the bundle does not declare falls back to the first view and is reported** (§6.5).
-    // A wrong view discloses nothing and costs a rerun, so it is a line in the failures panel and
-    // never a refusal to open the dataset.
+    // A view id the bundle does not declare falls back to the first view and is reported in the
+    // failures panel.
     const asked = requestedView === null ? null : (meta.views.find((v) => v.id === requestedView) ?? null);
     const opening = asked ?? meta.views[0]!;
     store.update((s) => {
@@ -620,7 +554,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
       }
       s.mTarget = meta.selection.thetaTargetMarks;
       s.artifactLayer = meta.layers[0]?.name ?? null;
-      // The demo opens coloured by cluster where a layer exists (the boards), else by a column.
+      // Colour by cluster where a layer exists, else by a column.
       s.colourBy = s.artifactLayer
         ? `cluster:${s.artifactLayer}`
         : rendered.some((c) => c.name === DEFAULT_COLOUR_BY)
@@ -640,8 +574,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
     });
     openSession(first, {session, meta});
   } else {
-    // A dataset with no principals cannot open a session, and a page that then says nothing reads
-    // as a server with no data. It is the bare address without a dataset document — say so.
+    // No principals means no dataset document was given; say so rather than show an empty map.
     store.update((s) => {
       s.switching = false;
       s.status = 'refused';
@@ -656,8 +589,7 @@ async function start() {
   const params = new URLSearchParams(location.search);
   const requested = params.get('dataset');
   const chosen = datasets.find((d) => d.id === requested) ?? datasets[0]!;
-  // `?view=` is read once, at the first activation: a view id belongs to a bundle, so carrying one
-  // across a dataset change from the picker would ask the next bundle for a view of the last.
+  // `?view=` applies to the first activation only, since a view id belongs to a bundle.
   await activate(chosen, params.get('view'));
 }
 

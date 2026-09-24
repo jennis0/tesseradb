@@ -3,57 +3,31 @@ import type {Layer} from '@deck.gl/core';
 import {WORLD_SIZE, basemapScheme, type ViewInfo} from '@tesseradb/client';
 
 /**
- * The demo's basemap, built from what `/v1/meta` says the view is a picture of
- * (design projections §9).
+ * The viewer's basemap, built from what `/v1/meta` says the view is a picture of. `<tessera-map>`
+ * draws a `basemap` layer under the points; which tiles, from which server, is the host page's
+ * choice.
  *
- * **This is the host's job and not the map component's.** `<tessera-map>` takes a `basemap` layer
- * and draws it under the points; which tiles those are, and from whose server, is a decision the
- * page around it makes — so the whole of it lives here, in the demo.
+ * A basemap is drawn only where the view declares a `tile_scheme`. An aligned extent is not enough:
+ * an equirectangular frame is square, but no tile server serves that tiling. With no scheme, no
+ * basemap is drawn.
  *
- * **The condition is `tile_scheme`, not the extent.** A tile basemap lines up with the points only
- * when the view's frame is a square of that scheme's own tiling, and a frame being aligned does not
- * say so on its own: an equirectangular frame is a square of a square tiling no server serves, so a
- * host that read alignment as availability would draw a Mercator basemap under a corpus that cannot
- * line up with one. A null scheme means draw the points and no basemap, which is every corpus in
- * the demo's own picker.
- *
- * **It follows the camera.** The first version composed one fixed depth over the whole frame and
- * never changed it, so the ground under a corpus of 73 million places stayed at the resolution of a
- * world map however far in you went — street-level marks over a picture of continents. What is
- * composed now is the visible box at the depth the camera is at, which is one texture again, and a
- * different one per view.
- *
- * The tiles are still composed into one image rather than drawn as a layer each, because `basemap`
- * is one layer and because a single texture is one upload instead of one per tile.
+ * The visible box is composed at the camera's depth into one image, so `basemap` stays one layer
+ * and one texture upload.
  */
 
-/** A slippy-map tile's pixel size — the size every `xyz` server publishes. */
+/** A slippy-map tile's size in pixels. */
 const TILE_PX = 256;
 
-/**
- * The most tiles one composition will fetch. It bounds the request burst on a view change, and it
- * is what a depth is given up for: a box needing more than this is drawn one level coarser rather
- * than fetching a screenful of tiles the next pan will discard.
- */
+/** The most tiles one composition fetches; a box needing more is drawn one level coarser. */
 const MAX_TILES = 64;
 
-/** The deepest XYZ level to ask for. Beyond 19 the standard style has nothing more to say. */
+/** The deepest XYZ level to ask for, the standard style's deepest. */
 const MAX_LEVEL = 19;
 
-/**
- * OpenStreetMap's own tile server. Fine for a screenshot and **not for a deployment**: its usage
- * policy forbids production load, and the client-components design's answer for that is a
- * self-hosted PMTiles basemap (client-interaction §12).
- */
+/** OpenStreetMap's tile server, whose usage policy forbids production load. */
 const osm = (z: number, x: number, y: number) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
 
-/**
- * Tiles already decoded, by `z/x/y`.
- *
- * Panning back over ground already seen is the common gesture, and without this every return trip
- * re-decodes what the browser cache is holding anyway. Bounded, and evicted oldest-first: a
- * `Map` iterates in insertion order, so the first key is the coldest.
- */
+/** Tiles already decoded, by `z/x/y`, evicted oldest first (a `Map` iterates in insertion order). */
 const held = new Map<string, ImageBitmap>();
 const HELD_MAX = 512;
 
@@ -62,9 +36,7 @@ async function tile(z: number, x: number, y: number): Promise<ImageBitmap | null
   const bitmap = held.get(key);
   if (bitmap) return bitmap;
   const response = await fetch(osm(z, x, y));
-  // **One tile that will not load is a hole, not a failure.** The whole composition used to be
-  // thrown away for a single bad response, which turned an edge tile the server declined into no
-  // basemap at all.
+  // A tile that will not load leaves a hole; the rest of the composition is kept.
   if (!response.ok) return null;
   const decoded = await createImageBitmap(await response.blob());
   if (held.size >= HELD_MAX) held.delete(held.keys().next().value as string);
@@ -76,20 +48,17 @@ async function tile(z: number, x: number, y: number): Promise<ImageBitmap | null
 export type Camera = {
   /** `[x0, y0, x1, y1]` in world units, y running south as the frame does. */
   worldBox: [number, number, number, number];
-  /** The viewport's zoom, which is 1:1 with tile depth (`coords.ts`, measured). */
+  /** The viewport's zoom, equal to tile depth. */
   zoom: number;
 };
 
-/** Which tiles a composition covers — what a caller compares to decide it need not recompose. */
+/** Which tiles a composition covers, compared to decide whether to recompose. */
 export type BasemapCover = {level: number; x0: number; y0: number; x1: number; y1: number};
 
 /**
- * The tiles to compose for a camera: the depth below the frame's own tile, and the range of the
- * frame's subdivision the box touches.
- *
- * **The depth is the viewport's zoom plus one.** A deck tile `z` is the depth at which a tile is
- * `TILE_SIZE` (512) screen pixels, and an `xyz` tile's image is 256 — so composing at the zoom
- * itself stretches every tile over twice its pixels, which is the blur one level of detail costs.
+ * The tiles to compose for a camera: a depth below the frame's own tile, and the range of the
+ * frame's subdivision the box touches. The depth is the zoom plus one, since a world tile at zoom
+ * `z` is 512 screen pixels and an `xyz` image is 256.
  */
 export function coverFor(view: ViewInfo, camera: Camera): BasemapCover {
   const frame = view.tile!;
@@ -111,7 +80,7 @@ export function coverFor(view: ViewInfo, camera: Camera): BasemapCover {
  * A basemap for `view` over `camera`, or `null` where no scheme addresses its frame.
  *
  * With no camera it covers the whole frame at a depth cheap enough to draw before the first view
- * change has been reported — the picture the map opens on.
+ * change has been reported, for the map to open on.
  */
 export async function basemapLayer(view: ViewInfo, camera?: Camera): Promise<Layer | null> {
   const scheme = basemapScheme(view);
@@ -143,9 +112,8 @@ export async function basemapLayer(view: ViewInfo, camera?: Camera): Promise<Lay
   return new BitmapLayer({
     id: 'basemap',
     image: canvas,
-    // `[left, bottom, right, top]`. The map's orthographic view is `flipY`, so the world's y runs
-    // south exactly as the tile grid's row index does — which is the frame's own convention
-    // (projections §4) and why the image needs no flip of its own: `bottom` is the larger y.
+    // `[left, bottom, right, top]`. The view is `flipY`, so world y runs south as tile rows do
+    // and `bottom` is the larger y.
     bounds: [cover.x0 * span, (cover.y1 + 1) * span, (cover.x1 + 1) * span, cover.y0 * span],
     opacity: 0.85
   }) as unknown as Layer;
