@@ -502,7 +502,7 @@ pub struct BuildReport {
 ///
 /// A frame goes wrong in two ways and the clamp count (`config::Frame`) sees only one of them.
 /// Data *outside* the frame is pushed onto its edge, so those positions are actively wrong — that
-/// is the clamp, and past half the corpus it is a refusal. Data *tiny inside* the frame clamps
+/// is the clamp, which the frame report counts. Data *tiny inside* the frame clamps
 /// nothing at all: every position is correct, and nearly all of the resolution is gone, because
 /// points a long way apart in the source land in one cell and can no longer be told apart.
 /// Coordinates spanning 100…118 against a 0…65536 frame do this with zero clamps.
@@ -512,10 +512,9 @@ pub struct BuildReport {
 /// corpus still shares a handful of cells. The number that cannot be fooled that way is how many
 /// cells hold at least one point, counted exactly over every point the build placed.
 ///
-/// **A warning, never a refusal.** A clamped corpus is stored *wrong* and is worth stopping for; a
-/// sparse one is stored *correctly but coarsely*, which is a legitimate thing to want — a small
-/// pilot corpus, a deliberately coarse frame, headroom left for data still to arrive. Refusing it
-/// would block builds the caller meant.
+/// **A warning, never a refusal**, as the clamp count is. A sparse corpus is stored *correctly but
+/// coarsely*, which is a legitimate thing to want — a small pilot corpus, a deliberately coarse
+/// frame, headroom left for data still to arrive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Occupancy {
     /// Points placed — one per row written.

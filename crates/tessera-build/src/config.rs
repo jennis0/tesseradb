@@ -1280,18 +1280,6 @@ impl LonLatBox {
 /// boundary point is inside it. A corpus that will *grow* needs a real margin, and says so.
 pub const DEFAULT_AUTO_MARGIN: f64 = 0.01;
 
-/// The share of a view's points that may sit on the frame's boundary before the build refuses
-/// rather than reports.
-///
-/// **Half, and the argument is what a clamped point *is*.** A clamped point's stored position is
-/// not its own — it is the frame's — so a frame that misplaces the majority of a corpus is not
-/// that corpus's frame; it describes some other data. Below half a clamp is a tail (outliers, a
-/// margin left for growth, a deliberately generous box) and the caller may well mean it, which is
-/// why the report is unconditional and only this is a refusal. There is no escape flag: the extent
-/// quantises, it never filters, so a frame chosen to *crop* piles the rest of the corpus onto the
-/// border instead of excluding it — filtering the source is what that caller wants.
-pub const CLAMP_REFUSAL_FRACTION: f64 = 0.5;
-
 /// The frame a view is quantised against, beside what the data actually does inside it.
 ///
 /// **The two travel together because neither is readable alone.** An extent is four numbers that
@@ -1350,8 +1338,8 @@ impl Frame {
     /// projection clipped at its own domain (`projections.md` §8).
     ///
     /// Reported rather than merely available: the whole defect this closes was a build that had
-    /// every one of these numbers and printed none of them. **It never refuses** — the refusal
-    /// this frame may earn is [`Frame::refusal`], and clipping is not among its causes (§7).
+    /// every one of these numbers and printed none of them. Neither a clamp nor a clip refuses a
+    /// build, as neither refuses an ingest.
     pub fn report(&self) -> String {
         let e = &self.extent;
         // **The projection is named beside the frame, and only where there is one.** Under
@@ -1494,37 +1482,6 @@ impl Frame {
              {lat_max}]",
             snap.square.z, snap.square.x, snap.square.y
         )
-    }
-
-    /// The refusal this frame earns, if any: past [`CLAMP_REFUSAL_FRACTION`] the frame is not
-    /// this corpus's frame, and building would write a bundle that is well-formed with the
-    /// geometry wrong.
-    pub fn refusal(&self) -> Option<String> {
-        let survey = self.coordinates()?;
-        if survey.clamped_fraction() <= CLAMP_REFUSAL_FRACTION {
-            return None;
-        }
-        let data = survey.bounds?;
-        Some(format!(
-            "{}: {} of {} point(s) ({:.1}%) would be stored on the frame's edge rather \
-             than where they were written. The frame is x [{}, {}], y [{}, {}]; the data spans x \
-             [{}, {}], y [{}, {}]. Past half the corpus this is not a tail, it is the wrong frame \
-             — quantisation clamps rather than filters, so a bundle built here is well-formed \
-             with the geometry wrong. Write `extent = \"auto\"` to fit the data, or state the box \
-             the data is actually in; filter the source if the intent was to crop",
-            self.subject,
-            survey.clamped,
-            survey.rows,
-            survey.clamped_fraction() * 100.0,
-            self.extent.x_min,
-            self.extent.x_max,
-            self.extent.y_min,
-            self.extent.y_max,
-            data.x_min,
-            data.x_max,
-            data.y_min,
-            data.y_max,
-        ))
     }
 }
 

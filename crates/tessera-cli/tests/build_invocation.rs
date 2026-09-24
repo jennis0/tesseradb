@@ -416,37 +416,23 @@ fn declare_extent(dir: &Path, extent: &str) {
     .unwrap();
 }
 
-/// **The notebook's own failure, and the reason this report exists.** A grid-shaped extent was
-/// declared over projection coordinates, every point folded into a nineteen-cell corner, the
-/// bundle came out well-formed with the geometry wrong — and the build said nothing at all.
-///
-/// It must now say all three things: how many points land on the frame's edge, what the frame is,
-/// and what the data's own bounds are. And past half the corpus it must refuse rather than report,
-/// because a frame that misplaces the majority of a corpus is not that corpus's frame.
+/// **A frame that clamps most of the corpus builds, and the report counts the clamps**, with the
+/// frame and the data's own bounds beside them. A clamp is reported and never refused, at a build
+/// as at an ingest.
 #[test]
-fn the_notebook_failure_is_loud() {
+fn a_majority_of_clamped_points_is_reported_and_built() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
     write_projection_points(&tmp.path().join("points.parquet"));
     declare_extent(tmp.path(), "{ min = 0.0, max = 65536.0 }");
 
-    let stderr = refusal(tmp.path(), &[]);
-    // The clamp count, as a count and as a share.
-    assert!(stderr.contains("CLAMP onto the frame's edge"), "{stderr}");
-    assert!(stderr.contains("of 64 point(s)"), "{stderr}");
-    // The frame it was given, and the data's own bounds beside it — the pair is the diagnosis.
-    assert!(
-        stderr.contains("quantising against x [0, 65536]"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("the data spans x [-17"), "{stderr}");
-    // And how little of the grid that leaves, which is the number the degenerate map needed.
-    assert!(stderr.contains("of the 65536 x 65536 cells"), "{stderr}");
-    // A refusal, not a warning: the build wrote nothing.
-    assert!(
-        !tmp.path().join("bundles/corpus/CURRENT").is_file(),
-        "a refused build must not have written a bundle"
-    );
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(tmp.path().join("bundles/corpus/CURRENT").is_file());
+    let text = stderr(&output);
+    // Against a frame of 0..65536, every point below zero on either axis clamps: all but the two
+    // whose x and y are both past zero.
+    assert!(text.contains("62 of 64 point(s)"), "{text}");
 }
 
 /// **A tail of clamped points is reported and built.** Outliers, or headroom a caller left for
