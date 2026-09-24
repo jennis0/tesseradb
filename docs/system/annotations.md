@@ -195,9 +195,20 @@ strings or a dictionary of strings, or from an inline row's `access`. At a runni
 record of a publication, and each row of a growth, carries its labels: `"access": ["team-a",
 "team-b"]` on a JSON row, or an `access` column of `list<utf8>` in the Arrow form of a growth, read
 as the ingest body's `access` column is. A record carrying labels on a layer that names no field is
-refused, and so are labels the plugin maps to no term. The Python client refuses an artifacts
-insert that names no `access=` column into a layer that reads labels, before and after the layer's
-first commit. On a layer scoped to a group a growth names the view its artifact belongs to, as a
+refused, and so are labels the plugin maps to no term.
+
+Every artifact created on a layer whose field is named states its labels, at a build and at a
+running service alike. At a build the artifact source carries the field's column, and an inline row
+carries `access`, `[]` for no label of its own. At a running service a publication record carries
+`access`, `null` or `[]` for no label of its own. A record without `access` is refused, as is a
+source without the column, and so is a key an ingest's layer column would mint, since a minted
+artifact carries nothing but its name. A record that only adds members to an artifact that exists,
+or a growth, need not state labels. The Python client refuses an artifacts insert that names no
+`access=` column into a layer that reads labels, and before the layer's first commit a `key=` or
+`members=` insert naming a key no artifacts insert declares; after the first commit the server
+refuses the artifact that insert would create.
+
+On a layer scoped to a group a growth names the view its artifact belongs to, as a
 publication does: `view` on a JSON row, or a `view` column in the Arrow form. A viewer is admitted
 by holding any one of the labels. An artifact with no label takes the layer's `default`: `inherited`
 leaves it to the layer's own label and membership requirement, and a label treats it as carrying

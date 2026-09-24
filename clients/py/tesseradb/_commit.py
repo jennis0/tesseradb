@@ -958,8 +958,10 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
             record[shape_field] = row[shape_field]
     if row.get("space") is not None:
         record["space"] = row["space"]
-    if row.get("access"):
-        record["access"] = list(row["access"])
+    if row.get("access") is not None:
+        # Stated whenever the insert named its label column: `null` for an artifact with no label
+        # of its own, since a layer reading labels refuses a record that states none.
+        record["access"] = list(row["access"]) or None
     members = list(row.get("members", []))
     sets = [list(one) for one in row.get("sets", [])]
     contents = row.get("content") or []
@@ -1100,6 +1102,9 @@ def _artifact_rows(artifacts, members, inline=None) -> list[dict]:
             view = record.get("view")
             row = rows.setdefault((level, key, view), _blank(key, level, view))
             _artifact_parts(row, record)
+            if insert.columns.get("access") and row["access"] is None:
+                # A null cell drops out of the record, and the row still states its labels.
+                row["access"] = []
     for record in inline or []:
         record = dict(record)
         level = int(record.get("level") or 0)
@@ -1173,9 +1178,8 @@ def _artifact_parts(row: dict, record: dict) -> None:
         row["excluding"] = list(record["excluding"])
     if record.get("members") is not None:
         row["members"] = list(record["members"])
-    labels = _labels(record.get("access"))
-    if labels:
-        row["access"] = labels
+    if "access" in record:
+        row["access"] = _labels(record["access"])
 
 
 def _records(table: pa.Table, insert) -> list[dict]:

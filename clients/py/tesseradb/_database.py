@@ -447,6 +447,9 @@ class Database:
             )
         self._refuse_an_insert_the_target_cannot_take(target, kind, role, block, named)
         self._refuse_a_label_column_the_layer_does_not_read(target, kind, role, block, named)
+        self._refuse_keys_that_would_create_unlabelled_artifacts(
+            target, kind, role, block, data, named
+        )
         projected = kind in ("view", "view_group") and block.get("projection", "none") != "none"
         metadata = D.metadata_names(block) if role == "roster" else ()
         if kind == "labels" and role == "text":
@@ -558,27 +561,37 @@ class Database:
                 f"carries the view it belongs to. Name the column that says which with view="
             )
 
+    def _label_column(self, target: str, block: dict) -> str | None:
+        """The column a layer reads its artifacts' labels from: the one it declares, a commit sent
+        or an uncommitted artifacts insert named, or `None` where it reads none."""
+        return dict(block.get("artifact_visibility") or {}).get("field") or next(
+            (
+                one.columns["access"]
+                for one in self._uncommitted(target, "artifacts")
+                if one.columns.get("access")
+            ),
+            None,
+        )
+
+    def _uncommitted(self, target: str, role: str) -> list[Insert]:
+        """This layer's inserts of one role that no commit has sent yet."""
+        return [
+            one
+            for one in (self.pending if self.built else self.inserts)
+            if one.target == target and one.kind == "layer" and one.role == role
+        ]
+
     def _refuse_a_label_column_the_layer_does_not_read(
         self, target: str, kind: str, role: str, block: dict, named: dict
     ) -> None:
         """Refuse an artifacts insert whose `access=` is not the column the layer reads its labels
-        from: the column the layer declares, a commit sent or an uncommitted insert named.
-
-        An insert naming no column is refused where the layer reads one, before and after the
-        first commit, since its artifacts would reach the layer with no labels.
+        from. An insert naming no column is refused where the layer reads one, before and after
+        the first commit, since its artifacts would reach the layer with no labels.
         """
         if kind != "layer" or role != "artifacts":
             return
         column = named.get("access") or None
-        held = dict(block.get("artifact_visibility") or {}).get("field") or next(
-            (
-                one.columns["access"]
-                for one in (self.pending if self.built else self.inserts)
-                if one.target == target and one.kind == "layer" and one.role == "artifacts"
-                and one.columns.get("access")
-            ),
-            None,
-        )
+        held = self._label_column(target, block)
         if column is None and held is not None:
             raise Refusal(
                 f"insert into layer {target!r}: this layer reads each artifact's own access labels "
@@ -588,6 +601,32 @@ class Database:
             )
         if column is not None and held is not None:
             D.carry_labels(target, {"artifact_visibility": {"field": held}}, column)
+
+    def _refuse_keys_that_would_create_unlabelled_artifacts(
+        self, target: str, kind: str, role: str, block: dict, data: Any, named: dict
+    ) -> None:
+        """Before the first commit, refuse a `key=` or `members=` insert naming a key that no
+        artifacts insert declares, on a layer that reads labels: the build would create that
+        artifact from its key alone, with no labels. After the first commit the server refuses
+        the same artifact.
+        """
+        if self.built or kind != "layer" or role not in ("key", "members"):
+            return
+        column = self._label_column(target, block)
+        if column is None:
+            return
+        declared: set[tuple] = set()
+        for one in self._uncommitted(target, "artifacts"):
+            declared |= _addresses(one.table(), one.columns)
+        table = pq.read_table(data) if _inserts.is_path(data) else _inserts.as_table(data)
+        missing = sorted(_addresses(table, named) - declared, key=repr)
+        if missing:
+            raise Refusal(
+                f"insert into layer {target!r}: key {missing[0][1]!r} names no artifact an "
+                f"artifacts insert declares, so it would create one with no labels, and this "
+                f"layer reads each artifact's labels from column {column!r}. Insert that artifact "
+                f"first with insert({target!r}, artifacts=..., key=..., access={column!r})"
+            )
 
     def _refuse_a_second_view_without_its_labels(
         self, kind: str, role: str, target: str, insert: Insert
@@ -1779,3 +1818,17 @@ def _untagged(value: Any) -> Any:
     if isinstance(value, list):
         return [_untagged(v) for v in value]
     return value
+
+
+def _addresses(table: pa.Table, columns: dict) -> set[tuple]:
+    """The `(level, key, view)` of every row of a layer's table naming a key, as `columns` names
+    them; a row whose key is null names no artifact."""
+    def column(role: str) -> list:
+        name = columns.get(role)
+        return table[name].to_pylist() if name else [None] * table.num_rows
+
+    return {
+        (int(level or 0), str(key), view)
+        for level, key, view in zip(column("level"), column("key"), column("view"))
+        if key is not None
+    }

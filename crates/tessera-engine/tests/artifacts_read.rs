@@ -214,9 +214,11 @@ fn fixture() -> Fx {
         let mut node =
             IncomingArtifact::from_entities(Some(root_key(r)), fx.entities(root_members(r)));
         node.contents = content(format!("The {} group", root_key(r)));
-        if r == LABELLED_ROOT {
-            node.access = vec![b"1".to_vec()];
-        }
+        node.access = Some(if r == LABELLED_ROOT {
+            vec![b"1".to_vec()]
+        } else {
+            Vec::new()
+        });
         planted.push(node);
         for c in 0..3 {
             let mut child = IncomingArtifact::from_entities(
@@ -225,9 +227,11 @@ fn fixture() -> Fx {
             );
             child.parent_keys = vec![root_key(r)];
             child.contents = content(format!("Subgroup {}", child_key(r, c)));
-            if (r, c) == HIDDEN_CHILD {
-                child.access = vec![b"7".to_vec()];
-            }
+            child.access = Some(if (r, c) == HIDDEN_CHILD {
+                vec![b"7".to_vec()]
+            } else {
+                Vec::new()
+            });
             planted.push(child);
         }
     }
@@ -866,6 +870,7 @@ fn a_read_continues_across_a_flush_a_fold_a_restart_and_a_publication() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let mut late = IncomingArtifact::from_entities(Some("r99".into()), fx.entities(0..10));
     late.contents = content("A late group".into());
+    late.access = Some(Vec::new());
     engine.publish_artifacts(TREE.into(), 0, vec![late]).unwrap();
     tick(engine);
     read.extend(keys(&read_from(engine, &session, &base, cursor)));

@@ -79,6 +79,10 @@ pub enum RegistryError {
     /// An artifact carries an access label on a layer whose `artifact_visibility` names no field,
     /// so nothing would read it.
     Access { layer: String, key: Option<String> },
+    /// An artifact created on a layer whose `artifact_visibility` names a field does not state its
+    /// labels, as a build's artifact source without that column does not. A record states no
+    /// label with an explicit empty or null `access`.
+    LabelsUnstated { layer: String, key: Option<String> },
     /// An artifact's access labels are more, or longer, than a stored record can hold.
     AccessTooLong { layer: String, key: Option<String> },
     /// A layer named in `depends_on` is not registered. Refused at create rather than discovered at
@@ -141,8 +145,8 @@ pub enum RegistryError {
     /// minted artifact could not be served: a minted artifact carries nothing but its name, and
     /// this layer requires more of every artifact it publishes.
     ///
-    /// **The same two refusals a publication already makes**, hoisted to admission so they refuse
-    /// the one batch rather than the window it would have joined — and the same two a build makes
+    /// **The same refusals a publication already makes**, hoisted to admission so they refuse
+    /// the one batch rather than the window it would have joined — and the same ones a build makes
     /// over a member table, which is what keeps one declaration from meaning two things at the two
     /// entry points ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
     Unmintable {
@@ -470,6 +474,16 @@ impl std::fmt::Display for RegistryError {
             RegistryError::Content { layer, detail } => {
                 write!(f, "{layer}: {detail}")
             }
+            RegistryError::LabelsUnstated { layer, key } => write!(
+                f,
+                "{layer} reads each artifact's own labels, and the artifact{} states none. Send \
+                 `access` with its labels, or `access: null` for an artifact with no label of its \
+                 own",
+                match key {
+                    Some(key) => format!(" keyed {key}"),
+                    None => String::new(),
+                },
+            ),
             RegistryError::AccessTooLong { layer, key } => write!(
                 f,
                 "{layer}: the artifact{} carries more than {} access labels, or one longer than {} \
@@ -1196,7 +1210,7 @@ impl LayerRegistry {
                     .map(|(rank, content)| (rank as u16, content.values.clone()))
                     .collect(),
                 shape: artifact.shape.clone(),
-                access: artifact.access.clone(),
+                access: artifact.access.clone().unwrap_or_default(),
             };
             let prepared = self.prepare_fills(
                 layer_name,
@@ -1686,7 +1700,7 @@ impl LayerRegistry {
                 attached_to: None,
                 parent_keys: Vec::new(),
                 shape: None,
-                access: Vec::new(),
+                access: None,
             })
             .collect();
         self.prepare_artifacts(
@@ -1809,12 +1823,16 @@ impl LayerRegistry {
             .filter(|artifact| !declared.is_empty() && artifact.contents.is_empty())
             .count() as u64;
         for artifact in incoming {
-            check_access(
-                layer_name,
-                &layer.declaration,
-                artifact.key.as_deref(),
-                &artifact.access,
-            )?;
+            let Some(access) = &artifact.access else {
+                if layer.declaration.artifact_visibility.carries_own_labels() {
+                    return Err(RegistryError::LabelsUnstated {
+                        layer: layer_name.to_string(),
+                        key: artifact.key.clone(),
+                    });
+                }
+                continue;
+            };
+            check_access(layer_name, &layer.declaration, artifact.key.as_deref(), access)?;
         }
         for (i, artifact) in incoming.iter().enumerate() {
             let refuse = |detail: String| {
@@ -2118,7 +2136,9 @@ impl LayerRegistry {
                         }),
                     parents: parents[i].clone(),
                     shape: artifact.shape.clone(),
-                    access: crate::membership::canonical_access(&artifact.access),
+                    access: crate::membership::canonical_access(
+                        artifact.access.as_deref().unwrap_or_default(),
+                    ),
                 }
             })
             .collect();
@@ -2309,9 +2329,10 @@ impl LayerRegistry {
     /// The ordinal a member key names, or **`None` where the layer is open and nothing holds it**
     /// — the resolution the ingest route makes at admission (`artifacts-from-points.md` §6.3).
     ///
-    /// `None` is *this key will be minted at the close*, and it is returned only after the two
+    /// `None` is *this key will be minted at the close*, and it is returned only after the
     /// checks a minted artifact could not pass are made: a layer declaring supplied content kinds,
-    /// and a layer declaring a dependency, each refuse here rather than at the close, so one
+    /// a layer declaring a dependency and a layer reading labels each refuse here rather than at
+    /// the close, so one
     /// caller's key refuses one batch instead of the window it would have joined.
     ///
     /// **Suppression is invisible to this by construction, which is §5's third ruling.** The lookup
@@ -2348,7 +2369,7 @@ impl LayerRegistry {
                         why: why.to_string(),
                     })
                 };
-                // The two refusals `prepare_publish` would make of an artifact carrying only a key,
+                // The refusals `prepare_publish` would make of an artifact carrying only a key,
                 // made here where the batch can still be rejected without effect. Both are
                 // declarations about *every* artifact of the layer, so neither depends on which key
                 // arrived — a layer is mintable or it is not.
@@ -2364,6 +2385,12 @@ impl LayerRegistry {
                     return unmintable(
                         "the layer declares depends_on, so every artifact it publishes attaches to \
                          one, and an artifact with no dependency would be gated on nothing",
+                    );
+                }
+                if declaration.artifact_visibility.carries_own_labels() {
+                    return unmintable(
+                        "the layer reads each artifact's own labels from a field, and a minted \
+                         artifact states none",
                     );
                 }
                 Ok(None)
@@ -3185,7 +3212,7 @@ mod tests {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
-            access: Vec::new(),
+            access: None,
         }
     }
 
@@ -4804,7 +4831,7 @@ mod tests {
         let mut store = ArtifactStore::default();
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
         let mut labelled = incoming("c1", &[1]);
-        labelled.access = vec![b"team-a".to_vec()];
+        labelled.access = Some(vec![b"team-a".to_vec()]);
         let refused = reg
             .prepare_put(
                 "clusters/a",
@@ -4824,6 +4851,38 @@ mod tests {
         assert!(matches!(refused, RegistryError::Access { .. }), "{refused:?}");
     }
 
+    /// An artifact stating no label of its own, on [`IncomingArtifact::access`]'s terms.
+    fn unlabelled(key: &str, members: &[u32]) -> IncomingArtifact {
+        let mut artifact = incoming(key, members);
+        artifact.access = Some(Vec::new());
+        artifact
+    }
+
+    /// On a layer naming a field, an artifact that states no labels is refused with nothing
+    /// allocated, whether alone or beside one that states them, and one stating an empty list
+    /// publishes with no label.
+    #[test]
+    fn an_artifact_stating_no_labels_on_a_layer_reading_them_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let store = ArtifactStore::default();
+        let mut d = declaration("clusters/a");
+        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        register(&mut reg, &mut alloc, d).unwrap();
+        for batch in [vec![incoming("c1", &[1])], vec![unlabelled("c0", &[2]), incoming("c1", &[1])]]
+        {
+            let refused = reg
+                .prepare_put("clusters/a", 0, &batch, &store, &mut alloc, &AnyView)
+                .unwrap_err();
+            assert!(matches!(refused, RegistryError::LabelsUnstated { .. }), "{refused:?}");
+            assert_eq!(store.next_ordinal("clusters/a", 0), 0);
+        }
+        let prepared = reg
+            .prepare_put("clusters/a", 0, &[unlabelled("c1", &[1])], &store, &mut alloc, &AnyView)
+            .unwrap();
+        assert_eq!(prepared.created, 1);
+    }
+
     /// On a layer naming a field, a label is published in canonical order, filled once on a held
     /// artifact that has none, accepted again unchanged, and a different one is a part conflict.
     #[test]
@@ -4836,12 +4895,12 @@ mod tests {
         register(&mut reg, &mut alloc, d).unwrap();
 
         let mut first = incoming("c1", &[1]);
-        first.access = vec![b"b".to_vec(), b"a".to_vec(), b"b".to_vec()];
+        first.access = Some(vec![b"b".to_vec(), b"a".to_vec(), b"b".to_vec()]);
         let prepared = reg
             .prepare_put(
                 "clusters/a",
                 0,
-                &[first, incoming("c2", &[2])],
+                &[first, unlabelled("c2", &[2])],
                 &store,
                 &mut alloc,
                 &AnyView,
@@ -4855,7 +4914,7 @@ mod tests {
         assert!(store.get("clusters/a", 0, 1).unwrap().access.is_empty());
 
         let mut fill = incoming("c2", &[]);
-        fill.access = vec![b"c".to_vec()];
+        fill.access = Some(vec![b"c".to_vec()]);
         let prepared = reg
             .prepare_put(
                 "clusters/a",
@@ -4886,7 +4945,7 @@ mod tests {
         assert!(again.fills.is_empty());
 
         let mut other = incoming("c2", &[]);
-        other.access = vec![b"d".to_vec()];
+        other.access = Some(vec![b"d".to_vec()]);
         let refused = reg
             .prepare_put("clusters/a", 0, &[other], &store, &mut alloc, &AnyView)
             .unwrap_err();
@@ -4903,24 +4962,24 @@ mod tests {
         let mut d = declaration("clusters/a");
         d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
         register(&mut reg, &mut alloc, d).unwrap();
-        publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[incoming("held", &[1])]).unwrap();
+        publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[unlabelled("held", &[1])]).unwrap();
 
         let long = vec![b'x'; u16::MAX as usize];
         let many: Vec<Vec<u8>> = (0..u16::MAX as u32).map(|i| i.to_le_bytes().to_vec()).collect();
         for access in [vec![long.clone()], many.clone()] {
             let mut fresh = incoming("c1", &[1]);
-            fresh.access = access.clone();
+            fresh.access = Some(access.clone());
             assert!(reg
                 .prepare_put("clusters/a", 0, &[fresh], &store, &mut alloc, &AnyView)
                 .is_err());
             let mut fill = incoming("held", &[]);
-            fill.access = access;
+            fill.access = Some(access);
             assert!(reg
                 .prepare_put("clusters/a", 0, &[fill], &store, &mut alloc, &AnyView)
                 .is_err());
         }
         let mut fits = incoming("c2", &[1]);
-        fits.access = vec![vec![b'x'; u16::MAX as usize - 1]];
+        fits.access = Some(vec![vec![b'x'; u16::MAX as usize - 1]]);
         assert!(reg.prepare_put(
             "clusters/a",
             0,

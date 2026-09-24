@@ -116,8 +116,9 @@ struct PlannedArtifact {
     /// shape content is read in the same space, and is read in a second pass once every row of the
     /// layer is in hand.
     space: Option<String>,
-    /// The artifact's own access label, as the plugin's descriptors. Empty is no label.
-    access: Vec<Vec<u8>>,
+    /// The artifact's own access labels, as the plugin's descriptors, on
+    /// [`IncomingArtifact::access`]'s terms.
+    access: Option<Vec<Vec<u8>>>,
 }
 
 /// How a source spelled one artifact's membership.
@@ -162,7 +163,7 @@ struct ResolvedArtifact {
     attached_to: Option<IncomingAttachment>,
     parent_keys: Vec<String>,
     shape: Option<ArtifactShapes>,
-    access: Vec<Vec<u8>>,
+    access: Option<Vec<Vec<u8>>>,
 }
 
 /// Where an artifact's members are by the time anything wants to read them.
@@ -945,16 +946,18 @@ fn read_artifacts(
         let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
         let parent = parent_column(path, &batch, fields)?;
-        let access = match access_field {
+        // A source without the declared column states no labels, and the publication refuses
+        // its artifacts as it refuses a record without `access` at a running service.
+        let access = match access_field.and_then(|field| Some((field, batch.column_by_name(field)?)))
+        {
             None => None,
-            Some(field) => {
+            Some((field, column)) => {
                 if let Some(detail) = crate::check::access_column_problem(field, &batch.schema()) {
                     return Err(BuildError::Schema {
                         path: path.to_path_buf(),
                         detail: format!("layer '{layer}': {detail}"),
                     });
                 }
-                let column = batch.column_by_name(field).expect("the check found the column");
                 Some(crate::input::access_labels(path, column, field)?)
             }
         };
@@ -1063,8 +1066,8 @@ fn read_artifacts(
                 },
                 space: space_at(spaces, row).map(str::to_string),
                 access: match &access {
-                    Some(labels) => descriptors_of(layer, &labels[row])?,
-                    None => Vec::new(),
+                    Some(labels) => Some(descriptors_of(layer, &labels[row])?),
+                    None => None,
                 },
             };
         }
@@ -1144,7 +1147,11 @@ fn plan_inline(
                 }
             },
             space: row.space.clone(),
-            access: descriptors_of(layer, &row.access)?,
+            access: row
+                .access
+                .as_deref()
+                .map(|labels| descriptors_of(layer, labels))
+                .transpose()?,
         };
     }
     Ok(())
@@ -2902,7 +2909,7 @@ struct PublishableBody {
     attached_to: Option<IncomingAttachment>,
     parent_keys: Vec<String>,
     shape: Option<ArtifactShapes>,
-    access: Vec<Vec<u8>>,
+    access: Option<Vec<Vec<u8>>>,
 }
 
 impl ResolvedArtifact {
@@ -4853,7 +4860,7 @@ mod tests {
             attached_to: None,
             parent_keys,
             shape: None,
-            access: Vec::new(),
+            access: None,
         };
         for parent in 0..parents {
             let member = parent as u32 * 10;
@@ -4969,7 +4976,7 @@ mod tests {
                 attached_to: None,
                 parent_keys: Vec::new(),
                 shape: None,
-                access: Vec::new(),
+                access: None,
             })
             .collect();
         let artifacts: Vec<(&str, usize)> = (0..sizes.len()).map(|i| ("k", i)).collect();

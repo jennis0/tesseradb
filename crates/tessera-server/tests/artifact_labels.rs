@@ -128,9 +128,9 @@ async fn deployment(red: bool) -> Deployment {
             &server,
             LAYER,
             json!([
-                { "key": "open", "members": members(0..40) },
-                { "key": "p-open", "members": members(40..120) },
-                { "key": "c-open", "members": members(0..20) },
+                { "key": "open", "members": members(0..40), "access": null },
+                { "key": "p-open", "members": members(40..120), "access": null },
+                { "key": "c-open", "members": members(0..20), "access": null },
                 { "key": "shared", "members": members(120..160), "access": ["blue"] },
             ]),
         )
@@ -580,6 +580,48 @@ async fn an_arrow_growth_fills_a_label_as_the_json_form_does() {
     assert_eq!(resp.status().as_u16(), 409);
 }
 
+/// On a layer that reads labels, a publication record without `access` is refused with nothing
+/// created, alone or beside one that states its labels, and one stating `null` or `[]` publishes
+/// an artifact with no label of its own. A record that only adds members to a held artifact
+/// needs none.
+#[tokio::test]
+async fn a_record_without_access_on_a_layer_reading_labels_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, teams_declaration("inherited")).await;
+    let put = |artifacts: serde_json::Value| {
+        server
+            .client
+            .put(artifacts_url(&server, LAYER))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+            .send()
+    };
+    for refused in [
+        json!([{ "key": "bare", "members": members(0..10) }]),
+        json!([{ "key": "bare", "members": members(0..10) },
+               { "key": "red", "members": members(10..20), "access": ["red"] }]),
+    ] {
+        let resp = put(refused).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 422);
+    }
+    let resp = put(json!([
+        { "key": "nulled", "members": members(0..10), "access": null },
+        { "key": "emptied", "members": members(10..20), "access": [] },
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 201);
+    let resp = put(json!([{ "key": "nulled", "members": members(20..30) }])).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    tick(&server).await;
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(
+        keys_served(&viewport_raw(&server, &token, viewport(0, json!({}))).await),
+        vec!["emptied".to_string(), "nulled".to_string()]
+    );
+}
+
 /// An artifact with no label takes the layer's default: a named default admits only a viewer
 /// holding it.
 #[tokio::test]
@@ -591,7 +633,7 @@ async fn an_unlabelled_artifact_takes_a_named_default() {
         &server,
         LAYER,
         json!([
-            { "key": "bare", "members": members(0..40) },
+            { "key": "bare", "members": members(0..40), "access": null },
             { "key": "blue", "members": members(0..40), "access": ["blue"] },
         ]),
     )
@@ -731,7 +773,7 @@ require_member_visibility = "none"
 hierarchy                 = {{ kind = "flat", prune_children = false }}
 artifacts = [
   {{ key = "inline-red", members = [0, 1, 2], access = "red" }},
-  {{ key = "inline-open", members = [3, 4, 5] }},
+  {{ key = "inline-open", members = [3, 4, 5], access = [] }},
 ]
 "#
     )
@@ -816,7 +858,7 @@ async fn labels_built_and_labels_published_serve_alike() {
             "inline",
             json!([
                 { "key": "inline-red", "members": members(0..3), "access": ["red"] },
-                { "key": "inline-open", "members": members(3..6) },
+                { "key": "inline-open", "members": members(3..6), "access": null },
             ]),
         )
         .await;
@@ -938,7 +980,12 @@ async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_non
         .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
 
-    publish(&server, LAYER, json!([{ "key": "bare", "members": members(0..40) }])).await;
+    publish(
+        &server,
+        LAYER,
+        json!([{ "key": "bare", "members": members(0..40), "access": null }]),
+    )
+    .await;
     let (status, _) = patch(&server, LAYER, json!([{ "key": "bare", "access": ["nothing"] }])).await;
     assert_eq!(status, 422);
     tick(&server).await;

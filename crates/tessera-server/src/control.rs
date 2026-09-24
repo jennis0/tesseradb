@@ -2206,11 +2206,21 @@ struct IncomingArtifactBody {
     /// This row's space, overriding `default_space` for its shape and authored content alike.
     #[serde(default)]
     space: Option<String>,
-    /// The artifact's own access labels, one per element, taken whole. Absent, `null` and `[]`
-    /// are no label, which the layer's `artifact_visibility.default` answers. Refused on a layer
+    /// The artifact's own access labels, one per element, taken whole. `null` and `[]` are no
+    /// label, which the layer's `artifact_visibility.default` answers; absent states none, which a
+    /// layer whose `artifact_visibility` names a field refuses. Labels are refused on a layer
     /// whose `artifact_visibility` names no field.
-    #[serde(default)]
-    access: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "present")]
+    access: Option<Option<Vec<String>>>,
+}
+
+/// A field whose absence differs from `null`: absent is `None`, and `null` is `Some(None)`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// The shape fields of a publication's or a growth's row.
@@ -2650,9 +2660,15 @@ async fn publish_artifacts(
         }
     }
 
-    let accesses: Vec<Vec<Vec<u8>>> = artifacts
+    let accesses: Vec<Option<Vec<Vec<u8>>>> = artifacts
         .iter_mut()
-        .map(|artifact| access_descriptors(&state, artifact.access.take()))
+        .map(|artifact| {
+            artifact
+                .access
+                .take()
+                .map(|labels| access_descriptors(&state, labels))
+                .transpose()
+        })
         .collect::<Result<_, _>>()?;
 
     // Shapes and addresses read the bundle, so they run on the blocking pool with the write.
