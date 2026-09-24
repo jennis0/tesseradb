@@ -1002,18 +1002,19 @@ export type ViewportResponse = {
    */
   contentKey: string;
   /**
-   * The geometry this response was answered from (`x-tessera-pin`), to echo back on the next
+   * The generation this response was answered from (`x-tessera-pin`), to echo back on the next
    * request as {@link ViewportRequest.stamp}.
    *
-   * **A stamp, not a selector.** It does not pin anything: the server always answers from live
-   * geometry, presenting a superseded one is never an error, and nothing is retained on its
-   * behalf. Its only effect is {@link ViewportResponse.stale}. The header keeps the name
-   * `x-tessera-pin` for compatibility; the meaning is contracts §3.1/§3.2's advisory stamp.
+   * It names the generation of the visible set this session was served. While the refresh after a
+   * flush has not reached the session, that is the previous generation; deletions, suppressions
+   * and segments are always current. Echoing it back does not choose what the request is answered
+   * from, presenting a superseded one is never an error, and nothing is retained on its behalf.
+   * Its only effect is {@link ViewportResponse.stale}.
    */
   pin: string | null;
   /**
-   * Whether the geometry moved since the stamp this request presented — `false` when none was
-   * presented.
+   * Whether the stamp this request presented differs from this response's {@link pin}. `false`
+   * when none was presented.
    *
    * Advisory. The client decides what to do: refetch now, refetch on the next idle, or ignore it.
    * Nothing expires and no response is withheld while it is `true`.

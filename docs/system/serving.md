@@ -132,9 +132,11 @@ testing whether an item is visible at all. Every tile a request does name pays t
 whatever the client already has.
 
 A third value, the generation a response was answered from, travels as a header,
-`x-tessera-pin`, and a request may echo it back. [What that buys a
-client](write-path.md#geometry-and-staleness) is one comparison against the current generation,
-reported as a flag on the response, `x-tessera-stale`.
+`x-tessera-pin`, and a request may echo it back. While the background refresh after a
+[flush](write-path.md#flush) has not reached a session, the header names the previous generation,
+because the session's visible set is still that generation's projection. Deletions, suppressions
+and segments are current either way. An echoed pin buys one comparison against the
+generation the response was answered from, reported as a flag on the response, `x-tessera-stale`.
 
 ## Serving other map stacks
 

@@ -2277,6 +2277,86 @@ async fn status_reports_a_held_refresh_and_a_held_merge_as_in_flight() {
     .await;
 }
 
+/// While the refresh after a flush is held, a session is served from its previous projection, and
+/// `x-tessera-pin` names the previous generation. Once the refresh publishes, it names the new one.
+#[tokio::test]
+async fn the_pin_names_the_generation_a_response_was_served_from_during_a_refresh() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let engine = &server.state.engine;
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+    let pin_of = async |presented: Option<&serde_json::Value>| {
+        let mut body =
+            serde_json::json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]});
+        if let Some(pin) = presented {
+            body["pin"] = pin.clone();
+        }
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let stale = resp.headers()["x-tessera-stale"].to_str().unwrap() == "1";
+        let pin: serde_json::Value =
+            serde_json::from_str(resp.headers()["x-tessera-pin"].to_str().unwrap()).unwrap();
+        (pin, stale)
+    };
+    let live_version = async || {
+        control_status(&server).await["partitions"][0]["segments_version"]
+            .as_u64()
+            .unwrap()
+    };
+
+    // A resident projection at the opening generation, so the flush has something to refresh.
+    let (before, _) = pin_of(None).await;
+    let version_before = live_version().await;
+    assert_eq!(before["segments_version"], version_before);
+
+    engine.set_refresh_paused_for_test(true);
+    let (code, body) = post_ingest(&server, "pin-served", &rows_from(50_000, 2), true).await;
+    assert_eq!(code, 200, "{body}");
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until("the flush publishing", WAIT, async || {
+        control_status(&server).await["write_executor"]["flush"]["flushes"].as_u64() == Some(1)
+    })
+    .await;
+    let status = control_status(&server).await;
+    assert_eq!(status["write_executor"]["flush"]["refresh_in_flight"], true, "{status}");
+    let version_after = live_version().await;
+    assert!(version_after > version_before);
+
+    // Served from the previous projection: the pin names the previous generation, and echoing
+    // the pin held from before the flush is not stale.
+    let (during, stale) = pin_of(Some(&before)).await;
+    assert_eq!(during, before);
+    assert!(!stale);
+
+    engine.set_refresh_paused_for_test(false);
+    wait_until("the released refresh ending", WAIT, async || {
+        control_status(&server).await["write_executor"]["flush"]["refresh_in_flight"] == false
+    })
+    .await;
+
+    let (after, stale) = pin_of(Some(&before)).await;
+    assert_eq!(after["segments_version"], version_after);
+    assert_eq!(after["prefix"], before["prefix"]);
+    assert!(stale);
+}
+
 /// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
 ///
 /// `ComputeGate::admit` is `async` and awaited **before** `spawn_blocking`, so viewer *demand* is

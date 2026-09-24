@@ -314,9 +314,14 @@ flush consumed, and the mask is re-derived against the larger row space. The mom
 or deleted item acquires a row is the moment it must appear in that mask.
 
 A flush only ever appends rows and never rewrites an existing one, so nothing a session has cached
-about the map becomes wrong at a flush. A session picks up the new rows once the background refresh has reached it, usually by its next request; until then it is served the previous generation's answer, which is still correct. Every
-response also carries a content key naming the generation it was answered from, travelling as an
-ETag; presenting an old one back is never an error.
+about the map becomes wrong at a flush. A session picks up the new rows once the background
+refresh has reached it, usually by its next request. Until then its visible set is the previous
+generation's projection, so the flush's new rows are not yet visible to it. Deletions,
+suppressions, segments and the overlay are always the current generation's. The response's
+`x-tessera-pin` header names the generation of the visible set, and `x-tessera-stale` for a pin
+held from before the flush changes when the refresh reaches the session, not at the flush. Every
+response also carries a content key, travelling as an ETag. Presenting an old pin or content key
+back is never an error.
 
 ## Merge
 

@@ -10,6 +10,9 @@ pub(crate) struct OpenView<'a> {
     pub(crate) mask: EffectiveMask,
     /// Kept beside the mask for the background ladder fill, which takes the whole entry.
     pub(super) geometry: Arc<SessionGeometry>,
+    /// The generation `geometry` was taken for: one behind `generation` while a refresh has not
+    /// yet replaced the session's projection.
+    pub(super) stamp: GenerationStamp,
     pub(crate) coordinates: ViewCoordinates,
     /// The bundle-wide render columns and then this view's scoped ones, in that order.
     pub(super) render_scalars: Vec<DeclaredScalar>,
@@ -63,7 +66,8 @@ impl Engine {
         // Resolved once, before the parallel tile sweep begins, and only borrowed after by every
         // `tile_sweep` call. Nothing reachable from a rayon worker may touch this cache: a worker
         // blocking on a build only the calling thread can drive would deadlock the pool.
-        let geometry = self.session_geometry(session, generation, view, view_data, cancel, probe)?;
+        let (geometry, key) =
+            self.session_geometry(session, generation, view, view_data, cancel, probe)?;
         let coordinates = self.view_coordinates(generation, &geometry, view);
         // Names the fragment this request composes against, which under stale-serve is the
         // entry's and not the newest one.
@@ -131,6 +135,10 @@ impl Engine {
             served,
             mask,
             geometry,
+            stamp: GenerationStamp {
+                prefix: key.prefix,
+                segments_version: key.segments_version,
+            },
             coordinates,
             render_scalars,
         })
@@ -191,6 +199,9 @@ impl Engine {
     /// the background refresh produced one; failing that, the one-generation-stale entry, sound
     /// only after a flush; failing that, this request builds the projection itself, or is shed
     /// with `ProjectionBuilding` if a refresh for this generation is already building one.
+    ///
+    /// Returns the key the geometry is stored under, which names the previous generation when the
+    /// second rung served it.
     pub(crate) fn session_geometry(
         &self,
         session: &Session,
@@ -199,7 +210,7 @@ impl Engine {
         view_data: &tessera_store::read::ViewData,
         cancel: &Option<CancelToken>,
         probe: &mut Probe,
-    ) -> Result<Arc<SessionGeometry>> {
+    ) -> Result<(Arc<SessionGeometry>, RowProjectionKey)> {
         let key = RowProjectionKey {
             token_id: session.token_id(),
             view: view.to_string(),
@@ -207,7 +218,7 @@ impl Engine {
             prefix: generation.prefix.clone(),
         };
         if let Peek::Ready(geometry) = self.row_projection_cache.peek(&key) {
-            return Ok(geometry);
+            return Ok((geometry, key));
         }
 
         // Rung 2: the generation one below is the only one retention keeps.
@@ -224,7 +235,7 @@ impl Engine {
                 predecessor_resident = true;
                 if geometry.projection.extends_to(space) {
                     self.counters.stale_serves.fetch_add(1, Ordering::Relaxed);
-                    return Ok(geometry);
+                    return Ok((geometry, stale_key));
                 }
             }
         }
@@ -249,8 +260,9 @@ impl Engine {
         // park: every warm request returns at rung 1.
         let never_cancelled = CancelToken::new();
         let cancel = cancel.as_ref().unwrap_or(&never_cancelled);
-        self.row_projection_cache
-            .get_or_derive_waiting(key, None, cancel, |_source| {
+        let geometry = self
+            .row_projection_cache
+            .get_or_derive_waiting(key.clone(), None, cancel, |_source| {
                 // Crosses entity space into row space over the whole fragment, taking seconds at
                 // scale. This call supplies the same shared pool the tile sweep uses.
                 probe.mark_projection_built();
@@ -282,7 +294,8 @@ impl Engine {
                 // would tell an operator the server is shedding when a browser closed a tab.
                 CacheWaitEnded::Budget => EngineError::ProjectionBuilding,
                 CacheWaitEnded::Cancelled => EngineError::Cancelled,
-            })
+            })?;
+        Ok((geometry, key))
     }
 
     /// What this request's composed mask is, for the masked-count cache's key. Taken from the
@@ -400,7 +413,7 @@ impl Engine {
             .find_map(|partition| partition.views.get(view))
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let mut probe = Probe::new();
-        let geometry =
+        let (geometry, _) =
             self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
         let denied = generation
             .denied()
@@ -442,7 +455,7 @@ impl Engine {
                 .values()
                 .find_map(|partition| partition.views.get(view))
                 .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-            let geometry =
+            let (geometry, _) =
                 self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
             let denied =
                 generation

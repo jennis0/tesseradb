@@ -282,7 +282,7 @@ impl crate::Engine {
         // is given one and its laps are dropped. Named `_probe` rather than silenced afterwards,
         // so that a stage field arriving here is a change to this line and not to a discard.
         let mut _probe = crate::timing::Probe::new();
-        let geometry =
+        let (geometry, _) =
             self.session_geometry(session, &generation, view, view_data, &None, &mut _probe)?;
         let denied = generation
             .denied()
