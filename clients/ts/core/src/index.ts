@@ -11,12 +11,15 @@ export {
   addressed,
   MAX_ATTEMPTS,
   MAX_BACKOFF,
+  MIN_BACKOFF,
   UNANSWERED,
   type Answer,
+  type CallOptions,
   type ChangeItem,
   type ControlOptions,
   type RowAnswer,
-  type RowOptions
+  type RowOptions,
+  type WriteOptions
 } from './control.js';
 export {createDecoder, inlineDecoder, setWorkerFactory, workerDecoder, type Decoder} from './decoder.js';
 export {BandCache, bandKey, bandsOfResult, distinctOrdinals, isComplete} from './bands.js';

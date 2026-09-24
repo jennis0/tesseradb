@@ -1,19 +1,19 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {addressed, Control, MAX_ATTEMPTS, UNANSWERED, type Answer} from '../src/control.js';
+import {addressed, Control, MAX_ATTEMPTS, MAX_BACKOFF, MIN_BACKOFF, UNANSWERED, type Answer, type WriteOptions} from '../src/control.js';
 
 /**
  * `Control` against a recording `fetch`: the request each method sends, the `429` retry, and that
  * every other status comes back as an answer. The live file checks the same routes against a server.
  */
 
-type Sent = {method: string; url: string; headers: Record<string, string>; body: unknown};
+type Sent = {method: string; url: string; headers: Record<string, string>; body: unknown; signal: AbortSignal | undefined};
 type Reply = {status: number; body?: unknown; headers?: Record<string, string>};
 
 /** Stubs `fetch` to record each request and answer the replies in turn, the last one for ever. */
 function recording(...replies: Reply[]): Sent[] {
   const sent: Sent[] = [];
   vi.stubGlobal('fetch', async (url: string, init: RequestInit = {}) => {
-    sent.push({method: init.method ?? 'GET', url, headers: {...(init.headers as Record<string, string>)}, body: init.body});
+    sent.push({method: init.method ?? 'GET', url, headers: {...(init.headers as Record<string, string>)}, body: init.body, signal: init.signal ?? undefined});
     const reply = replies[Math.min(sent.length - 1, replies.length - 1)]!;
     return {
       status: reply.status,
@@ -66,6 +66,35 @@ describe('each route', () => {
       expect(request!.url).toBe(`http://control${k.path}`);
       expect(request!.headers).toMatchObject({authorization: 'Bearer op-cred', ...k.headers});
       if (k.json !== undefined) expect(JSON.parse(request!.body as string)).toEqual(k.json);
+    });
+  }
+
+  const writes: {name: string; call: (c: Control, o: WriteOptions) => Promise<Answer>; path: string}[] = [
+    {name: 'ingest', call: (c, o) => c.ingest(rows, o), path: '/control/ingest'},
+    {name: 'values', call: (c, o) => c.values(rows, o), path: '/control/values'},
+    {name: 'declareLayer', call: (c, o) => c.declareLayer({}, o), path: '/control/layers'},
+    {name: 'declareViewGroup', call: (c, o) => c.declareViewGroup('g', {}, o), path: '/control/view_groups/g'},
+    {name: 'declareAttribute', call: (c, o) => c.declareAttribute({}, o), path: '/control/attributes'},
+    {name: 'declareVocabulary', call: (c, o) => c.declareVocabulary('v', {}, o), path: '/control/vocabularies/v'},
+    {name: 'vocabularyValues', call: (c, o) => c.vocabularyValues('v', {}, o), path: '/control/vocabularies/v/values'},
+    {name: 'declareView', call: (c, o) => c.declareView('p', {}, o), path: '/control/views/p'},
+    {name: 'createView', call: (c, o) => c.createView('g', 'k', {}, o), path: '/control/views/g/k'},
+    {name: 'publish', call: (c, o) => c.publish('l', {}, o), path: '/control/layers/l/artifacts'},
+    {name: 'grow', call: (c, o) => c.grow('l', rows, o), path: '/control/layers/l/artifacts'},
+    {name: 'changes', call: (c, o) => c.changes([], o), path: '/control/changes'},
+    {name: 'dropLayer', call: (c, o) => c.dropLayer('l', o), path: '/control/layers/l'},
+    {name: 'dropView', call: (c, o) => c.dropView('g', 'k', o), path: '/control/views/g/k'},
+    {name: 'flush', call: (c, o) => c.flush(o), path: '/control/flush'}
+  ];
+
+  for (const w of writes) {
+    it(`${w.name} asks for wait=visible only when told to, and hands fetch the caller's signal`, async () => {
+      const sent = recording({status: 200, body: {}});
+      const signal = new AbortController().signal;
+      await w.call(control, {});
+      await w.call(control, {wait: true, signal});
+      expect(sent.map((s) => s.url)).toEqual([`http://control${w.path}`, `http://control${w.path}?wait=visible`]);
+      expect(sent.map((s) => s.signal)).toEqual([undefined, signal]);
     });
   }
 
@@ -130,13 +159,56 @@ describe('an answer', () => {
 
   it('is the last 429 once the attempts are spent', async () => {
     vi.useFakeTimers();
-    const sent = recording({status: 429, headers: {'retry-after': '0'}, body: {error: 'backpressure'}});
+    const sent = recording({status: 429, headers: {'retry-after': '1'}, body: {error: 'backpressure'}});
     const pending = control.ingest(rows);
     await vi.runAllTimersAsync();
     const answer = await pending;
     expect(answer).toMatchObject({status: 429, ok: false, attempts: MAX_ATTEMPTS, body: {error: 'backpressure'}});
     expect(sent).toHaveLength(MAX_ATTEMPTS);
     expect(new Set(sent.map((s) => s.headers['x-tessera-batch-id'])).size).toBe(1);
+  });
+
+  for (const [asked, waited] of [
+    ['0', MIN_BACKOFF],
+    ['100', MAX_BACKOFF]
+  ] as const) {
+    it(`after a 429 asking for ${asked} s, waits ${waited} s`, async () => {
+      vi.useFakeTimers();
+      const sent = recording({status: 429, headers: {'retry-after': asked}}, {status: 200, body: {}});
+      const pending = control.status();
+      await vi.advanceTimersByTimeAsync(waited * 1000 - 1);
+      expect(sent).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await pending).attempts).toBe(2);
+    });
+  }
+
+  it('ends a 429 wait when the signal aborts, rejecting with its reason and sending nothing more', async () => {
+    vi.useFakeTimers();
+    const sent = recording({status: 429, headers: {'retry-after': '5'}});
+    const controller = new AbortController();
+    const pending = control.flush({signal: controller.signal});
+    const outcome = pending.then(
+      () => 'resolved',
+      (reason: unknown) => reason
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    const reason = new Error('stop');
+    controller.abort(reason);
+    expect(await outcome).toBe(reason);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('rejects with the signal’s reason when it aborts a request in flight', async () => {
+    vi.stubGlobal('fetch', (_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => init.signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))))
+    );
+    const controller = new AbortController();
+    const pending = control.status({signal: controller.signal});
+    const reason = new Error('stop');
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
   });
 
   it('is any other refusal as the server sent it, sent once', async () => {
@@ -158,7 +230,7 @@ describe('an answer', () => {
     recording({status: 200, body: [1, 2]});
     expect((await control.status()).body).toEqual({value: [1, 2]});
     vi.stubGlobal('fetch', async () => ({status: 502, headers: new Headers(), text: async () => 'bad gateway'}) as unknown as Response);
-    expect(await control.status()).toMatchObject({status: 502, body: {}, detail: 'bad gateway'});
+    expect(await control.status()).toMatchObject({status: 502, body: {}, text: 'bad gateway'});
   });
 
   it('limits is the status body’s limits block', async () => {
@@ -168,10 +240,31 @@ describe('an answer', () => {
 });
 
 describe('addressed', () => {
-  it('is base64 of a string’s UTF-8, a bigint’s eight little-endian bytes, or the bytes given', () => {
+  it('is base64 of a string’s UTF-8, an integer’s eight little-endian bytes, or the bytes given', () => {
     expect(addressed('é')).toBe('w6k=');
     expect(addressed(1n)).toBe('AQAAAAAAAAA=');
+    expect(addressed(1)).toBe('AQAAAAAAAAA=');
     expect(addressed(-1n)).toBe('//////////8=');
     expect(addressed(new Uint8Array([0xff, 0]))).toBe('/wA=');
+  });
+
+  it('takes every integer in [-2^63, 2^64) and refuses those outside it', () => {
+    expect(addressed(2n ** 64n - 1n)).toBe('//////////8=');
+    expect(addressed(-(2n ** 63n))).toBe('AAAAAAAAAIA=');
+    expect(() => addressed(2n ** 64n)).toThrow(RangeError);
+    expect(() => addressed(-(2n ** 63n) - 1n)).toThrow(RangeError);
+  });
+
+  it('refuses a number that is not a safe integer', () => {
+    expect(() => addressed(2 ** 53)).toThrow(RangeError);
+    expect(() => addressed(1.5)).toThrow(RangeError);
+    expect(() => addressed(Number.NaN)).toThrow(RangeError);
+    expect(addressed(Number.MAX_SAFE_INTEGER)).toBe(addressed(BigInt(Number.MAX_SAFE_INTEGER)));
+  });
+
+  it('refuses any other type', () => {
+    for (const other of [null, undefined, {}, [1], true]) {
+      expect(() => addressed(other as unknown as string)).toThrow(TypeError);
+    }
   });
 });
