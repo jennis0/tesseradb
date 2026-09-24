@@ -4,7 +4,7 @@ import type {Band} from '../src/bands.js';
 import {tileXY} from '../src/coords.js';
 import type {Clock} from '../src/driver.js';
 import type {FrameScheduler} from '../src/presented.js';
-import type {Artifact, Layer, Meta, TileCounts, ViewInfo, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Artifact, DeclaredScalar, Layer, Meta, TileCounts, ViewInfo, ViewportResponse, ViewportResult} from '../src/types.js';
 
 /** The fixtures the core tests share, the fake clocks, and `settle`. */
 
@@ -302,6 +302,11 @@ export function view(id: string, over: Partial<ViewInfo> = {}): ViewInfo {
     roster: null,
     ...over
   };
+}
+
+/** A declared column that is indexed, not rendered and read from the record, unless `over` says. */
+export function scalar(name: string, arrowType: DeclaredScalar['arrowType'], over: Partial<DeclaredScalar> = {}): DeclaredScalar {
+  return {name, arrowType, category: null, render: false, index: true, analyser: null, homes: ['record'], ...over};
 }
 
 /** `/v1/meta`'s `selection` block with the server's defaults for the ceilings. */

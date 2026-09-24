@@ -121,7 +121,7 @@ describe('/v1/meta', () => {
     bundle_format: 9,
     idset: 7,
     views: [{id: 's0', display_name: 'S0', quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536}, projection: 'none', world_aspect: null, tile_scheme: null, tile: null, group: null, key: null, metadata: null}],
-    groups: [],
+    groups: [{name: 'quarter', title: null, members_of: null, views: []}],
     declared_scalars: [{name: 'abstract', arrow_type: 'text', category: null, analyser: 'unicode/1', render: false, index: true, homes: ['record']}],
     scoped_scalars: [
       {name: 'mood', arrow_type: 'u8', scope: {group: 'quarter'}, category: {vocabulary: 'moods', kind: 'declared', visibility: 'public'}, analyser: null, render: true, index: true, views: ['quarter:q1']}
@@ -155,7 +155,7 @@ describe('/v1/meta', () => {
       bundleFormat: 9,
       idset: 7,
       views: [{id: 's0', displayName: 'S0', quantisation: {xMin: 0, xMax: 65536, yMin: 0, yMax: 65536}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
-      groups: [],
+      groups: [{name: 'quarter', title: null, membersOf: null, views: []}],
       declaredScalars: [{name: 'abstract', arrowType: 'text', category: null, analyser: 'unicode/1', render: false, index: true, homes: ['record']}],
       scopedScalars: [
         {name: 'mood', arrowType: 'u8', scope: {group: 'quarter'}, category: {vocabulary: 'moods', kind: 'declared', visibility: 'public'}, analyser: null, render: true, index: true, views: ['quarter:q1']}
@@ -200,15 +200,19 @@ describe('/v1/meta', () => {
     });
   });
 
-  it('refuses a body missing any field the contract requires, at the top or in selection', async () => {
-    const missing: Record<string, unknown>[] = [];
-    for (const field of Object.keys(body)) {
-      const {[field]: _, ...rest} = body as Record<string, unknown>;
-      missing.push(rest);
-    }
-    for (const field of Object.keys(selection)) {
-      const {[field]: _, ...rest} = selection as Record<string, unknown>;
-      missing.push({...body, selection: rest});
+  it('refuses a body missing any field the contract requires, at the top, in selection or in any list element', async () => {
+    type Json = Record<string, unknown>;
+    const at = (root: Json, path: (string | number)[]): Json => path.reduce<Json>((node, step) => node[step] as Json, root);
+    const blocks: (string | number)[][] = [[], ['selection'], ['views', 0], ['groups', 0], ['declared_scalars', 0], ['scoped_scalars', 0], ['filter_operands', 0], ['layers', 0], ['layers', 0, 'levels', 0]];
+    const missing: Json[] = [];
+    for (const path of blocks) {
+      for (const field of Object.keys(at(body, path))) {
+        // `scope` is present only on a group-scoped operand.
+        if (path[0] === 'filter_operands' && field === 'scope') continue;
+        const copy = structuredClone(body) as Json;
+        delete at(copy, path)[field];
+        missing.push(copy);
+      }
     }
     let answer: Record<string, unknown> = body;
     stubFetch(() => new Response(JSON.stringify(answer), {status: 200}));

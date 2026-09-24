@@ -3,7 +3,7 @@ import {TesseraClient, TesseraError} from '../src/client.js';
 import {createStore, type Store} from '../src/store.js';
 import {withVerb, type FilterDraft} from '../src/filters.js';
 import type {Artifact, Layer, MembershipColumn, Meta, ViewportResponse} from '../src/types.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view} from './support.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -15,7 +15,7 @@ import {tileRectOfBbox} from '../src/budget.js';
 
 const META = meta({
   views: [view('s0', {displayName: 'default', quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200}})],
-  declaredScalars: [{name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true}],
+  declaredScalars: [scalar('archive', 'u16', {category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, homes: ['rendered']})],
   filterOperands: [{column: 'archive', family: 'category', operands: ['in']}]
 });
 

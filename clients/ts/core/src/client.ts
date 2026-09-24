@@ -203,6 +203,15 @@ export class TesseraClient {
     const m = (await response.json()) as RawMeta;
     requireFields(m, META_FIELDS, '/v1/meta');
     requireFields(m.selection, SELECTION_FIELDS, "/v1/meta's selection");
+    for (const v of m.views) requireFields(v, VIEW_FIELDS, 'a view in /v1/meta');
+    for (const g of m.groups) requireFields(g, GROUP_FIELDS, 'a group in /v1/meta');
+    for (const c of m.declared_scalars) requireFields(c, DECLARED_FIELDS, 'a declared scalar in /v1/meta');
+    for (const c of m.scoped_scalars) requireFields(c, SCOPED_FIELDS, 'a scoped scalar in /v1/meta');
+    for (const f of m.filter_operands) requireFields(f, OPERAND_FIELDS, 'a filter operand in /v1/meta');
+    for (const l of m.layers) {
+      requireFields(l, LAYER_FIELDS, 'a layer in /v1/meta');
+      for (const v of l.levels) requireFields(v, LEVEL_FIELDS, `a level of layer ${l.name} in /v1/meta`);
+    }
     const category = (c: RawCategory | null) => (c ? {vocabulary: c.vocabulary, kind: c.kind, visibility: c.visibility} : null);
     return {
       apiVersion: m.api_version,
@@ -812,7 +821,14 @@ function browseRow(r: RawBrowseRow): BrowseRow {
   };
 }
 
-/** The fields `/v1/meta` must carry, and those of its `selection` block. */
+/** The fields `/v1/meta` must carry, and those each of its blocks and list elements must. */
+const VIEW_FIELDS = ['id', 'display_name', 'quantisation', 'projection', 'world_aspect', 'tile_scheme', 'tile', 'group', 'key', 'metadata'];
+const GROUP_FIELDS = ['name', 'title', 'members_of', 'views'];
+const DECLARED_FIELDS = ['name', 'arrow_type', 'category', 'analyser', 'render', 'index', 'homes'];
+const SCOPED_FIELDS = ['name', 'arrow_type', 'scope', 'category', 'analyser', 'render', 'index', 'views'];
+const OPERAND_FIELDS = ['column', 'family', 'operands'];
+const LAYER_FIELDS = ['name', 'title', 'views', 'membership', 'hierarchy', 'levels', 'computed_content', 'shape', 'supplied_content', 'depends_on', 'version'];
+const LEVEL_FIELDS = ['level', 'title', 'zoom'];
 const META_FIELDS = ['api_version', 'bundle_format', 'idset', 'views', 'groups', 'declared_scalars', 'scoped_scalars', 'filter_operands', 'selection', 'layers'] as const;
 const SELECTION_FIELDS = [
   'k_min',
@@ -833,8 +849,9 @@ const SELECTION_FIELDS = [
   'max_page_bytes'
 ] as const;
 
-/** Throws where `body` lacks one of `fields`. */
-function requireFields(body: object, fields: readonly string[], where: string): void {
+/** Throws where `body` is not an object or lacks one of `fields`. */
+function requireFields(body: unknown, fields: readonly string[], where: string): void {
+  if (typeof body !== 'object' || body === null) throw new Error(`${where} is not an object; the server and this client are from different versions`);
   for (const field of fields) {
     if (!(field in body)) throw new Error(`${where} has no \`${field}\`, which the contract requires; the server and this client are from different versions`);
   }
