@@ -118,8 +118,8 @@ enum Command {
         #[arg(long)]
         stage_timings: bool,
 
-        /// Write the per-stage records to this file as JSON when the build ends, including a
-        /// build that fails.
+        /// Write the per-stage records to this file as JSON when the build ends, including one
+        /// that fails partway.
         ///
         /// One object per stage, in order, with `stage`, `wall_s`, `rows`, `peak_rss_kib`,
         /// `started_at` and `ended_at`. It does not need `--stage-timings`.
@@ -272,11 +272,20 @@ enum Command {
     /// Ask a running server whether it is ready, and exit 0 if it is or 1 if it is not.
     ///
     /// Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address
-    /// in `[serve]`. The server answers 200 while its write side is running normally, and the
-    /// command then exits 0. It exits 1, with the reason on stderr, when the server gives another
-    /// answer, gives none within `--timeout` or is not listening, and when `tessera.toml` is
+    /// in `[serve]`. The server answers 503 while its write-ahead log cannot be written, when the
+    /// thread that applies writes has stopped, and when part of the bundle is served from an
+    /// older list of segments because the newest could not be used. Otherwise it answers 200,
+    /// even while a write to disc hangs.
+    ///
+    /// The command exits 0 on a 200. It exits 1, with the reason on stderr, on any other answer,
+    /// on no answer within `--timeout`, when nothing is listening, and when `tessera.toml` is
     /// refused or declares no viewer address. A server starts listening only once it has opened
     /// its bundle, so the check fails until then.
+    ///
+    /// Exit 1 means stop sending viewer requests to the server, and keep sending it deletions and
+    /// suppressions, which it still applies when its log has failed. It does not call for a
+    /// restart: a restart undoes each deletion or suppression the server answered with 500
+    /// because the log could not be written, until that change is sent again.
     ///
     /// A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run the command on the
     /// machine or in the container the server runs in. The Docker image's health check runs it.
@@ -291,20 +300,27 @@ enum Command {
     },
     /// Serve the bundle that `tessera.toml` names.
     ///
-    /// Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and the
-    /// write-ahead log, and listens on the viewer, session and control addresses in `[serve]`.
-    /// When all three are bound it prints one line of JSON to stdout naming them. Diagnostics go
-    /// to stderr, in colour only when stderr is a terminal.
+    /// Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and
+    /// replays the write-ahead log at `[bundle] wal`, all before it binds any address. It then
+    /// listens on the viewer, session and control addresses in `[serve]`. When all three are bound
+    /// it prints one line of JSON to stdout naming them. Diagnostics go to stderr, in colour only
+    /// when stderr is a terminal.
     ///
     /// SIGTERM or SIGINT stops the server at once, even while it opens the bundle, and it exits
-    /// 0. A write is acknowledged only once the write-ahead log holds it on disc, so stopping
-    /// loses no acknowledged write, and the next start replays the log.
+    /// 0. Stopping ends every viewer session, because sessions are held in memory. A write is
+    /// acknowledged only once the write-ahead log holds it on disc, so stopping loses no
+    /// acknowledged write. A deletion or suppression answered with 500 because the log could not
+    /// be written is in force but not on disc, and a restart undoes it until the change is sent
+    /// again.
     ///
-    /// It refuses to start when `tessera.toml` is refused, as `tessera build` would refuse it;
-    /// when the session or operator credential is not set, or its file cannot be read (set
-    /// `session_credential_file` or `session_credential_env`, and the same for `operator`, under
-    /// `[serve]`); when a `[serve]` address is missing; when the bundle cannot be read; and when
-    /// the write-ahead log fails its checksum.
+    /// It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would
+    /// refuse it or lacks one of the three `[serve]` addresses. It refuses when the session or
+    /// operator credential is not set or its file cannot be read. Under `[serve]`,
+    /// `session_credential_file` or `session_credential_env` names the file or environment
+    /// variable holding the session credential, and `operator_credential_file` or
+    /// `operator_credential_env` the operator's. It also refuses when the bundle cannot be read
+    /// and when the write-ahead log fails its checksum. An address that cannot be bound, such as
+    /// one already in use, stops it with exit 1 after the bundle has opened.
     Serve {
         /// Read this `tessera.toml` instead of searching for one upward from the working
         /// directory.
@@ -2098,8 +2114,9 @@ fn main() -> ExitCode {
                 .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
             // SIGTERM or SIGINT ends the process at once, including while the bundle opens. A
-            // write is fsynced before it is acknowledged, so stopping loses only what no client
-            // was told had landed, and the next start replays the log.
+            // write is fsynced before it is acknowledged, so stopping loses no acknowledged write,
+            // and the next start replays the log. A deletion or suppression answered 500 because
+            // the log could not be written is applied but not logged, so stopping undoes it.
             exit_on_termination();
             let deployment = match tessera_config::discover(
                 deployment.as_deref(),

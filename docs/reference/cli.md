@@ -2,7 +2,7 @@
 
 # CLI
 
-`tessera` is one binary with a subcommand for each job: `build` makes a bundle from a corpus declaration, `check` tests the declaration against its source files, `verify` checks a built bundle, `tokenise` shows how an analyser splits text, `health` asks a running server whether it is ready, and `serve` serves the bundle. `tessera <subcommand> --help` prints the text on this page, and `tessera --version` prints the commit the binary was built from.
+`tessera <subcommand> --help` prints the text on this page. `tessera --version` prints the commit the binary was built from. It prints `unknown` when `TESSERA_BUILD_COMMIT` was unset at build time and git could not name the commit, as in a build outside a git checkout.
 
 `build`, `check`, `health` and `serve` read the deployment file `tessera.toml` from the working directory, or from the nearest directory above it that has one. `--deployment` names a different file.
 
@@ -32,7 +32,7 @@ The other flags override `tessera.toml` or tune the build.
 | `--batch-items` | `ITEMS` | derived | Assign internal ids in batches of this many items. Default: the largest batch the memory budget allows, which is the whole corpus when it fits. Refused when the batch does not fit the budget, or when it is less than half the size the budget allows. A build of more than one batch records the size in the bundle, and a different size assigns different internal ids. `--carry-id-key-from` reuses a recorded size and refuses a different one. When the carried bundle was built as one batch, a size given here is used, and the build prints a note saying the ids will differ. |
 | `--memory-budget` | `SIZE` | derived | Peak memory for the build's own structures, in bytes or with a `k`, `m` or `g` suffix, such as `24g`. Default: 80% of the available memory or of the process's cgroup limit, whichever is lower, kept between 2 GiB and 1 TiB, and 24 GiB where available memory cannot be read. Batch and band sizes follow from it. A build that would not fit is refused before it assigns internal ids, with the arithmetic in the message. |
 | `--stage-timings` |  |  | Print each build stage's wall time, row count and peak resident memory to stderr as the stage ends. Peak resident memory is the process's high-water mark when the stage ended, so it shows the stage in which the peak was reached. |
-| `--stage-timings-json` | `PATH` |  | Write the per-stage records to this file as JSON when the build ends, including a build that fails. One object per stage, in order, with `stage`, `wall_s`, `rows`, `peak_rss_kib`, `started_at` and `ended_at`. It does not need `--stage-timings`. |
+| `--stage-timings-json` | `PATH` |  | Write the per-stage records to this file as JSON when the build ends, including one that fails partway. One object per stage, in order, with `stage`, `wall_s`, `rows`, `peak_rss_kib`, `started_at` and `ended_at`. It does not need `--stage-timings`. |
 | `--carry-id-key-from` | `BUNDLE` |  | Reuse the identity key, idset and batch size recorded in an existing bundle. This rebuilds a bundle while every `tessera_id` a client holds stays valid. Refused when the bundle's identity construction differs from this binary's, and when its key disagrees with another key source unless `--rotate-id-key` is given. |
 | `--identity-file` | `PATH` |  | Read the identity key from a TOML file with an `[identity]` table holding `key`, 32 lowercase hex digits, and an optional `idset`. A file can be made readable by its owner only, which an environment variable is not: another process of the same user can read it from `/proc`. Refused when `[identity]` has any other key or an idset of 0. |
 | `--mint-id-key` |  |  | Generate a new random identity key at idset 1 and print it. This starts a new identity: every `tessera_id` a client holds becomes invalid. Record the printed key, in the environment variable or a `.env` file beside `tessera.toml`, so later builds can reuse it. `--idset` and `--bump-idset` are ignored: the idset is 1. Refused when any other key source is given or set. |
@@ -102,7 +102,11 @@ tessera health [OPTIONS]
 
 Ask a running server whether it is ready, and exit 0 if it is or 1 if it is not.
 
-Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address in `[serve]`. The server answers 200 while its write side is running normally, and the command then exits 0. It exits 1, with the reason on stderr, when the server gives another answer, gives none within `--timeout` or is not listening, and when `tessera.toml` is refused or declares no viewer address. A server starts listening only once it has opened its bundle, so the check fails until then.
+Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address in `[serve]`. The server answers 503 while its write-ahead log cannot be written, when the thread that applies writes has stopped, and when part of the bundle is served from an older list of segments because the newest could not be used. Otherwise it answers 200, even while a write to disc hangs.
+
+The command exits 0 on a 200. It exits 1, with the reason on stderr, on any other answer, on no answer within `--timeout`, when nothing is listening, and when `tessera.toml` is refused or declares no viewer address. A server starts listening only once it has opened its bundle, so the check fails until then.
+
+Exit 1 means stop sending viewer requests to the server, and keep sending it deletions and suppressions, which it still applies when its log has failed. It does not call for a restart: a restart undoes each deletion or suppression the server answered with 500 because the log could not be written, until that change is sent again.
 
 A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run the command on the machine or in the container the server runs in. The Docker image's health check runs it.
 
@@ -119,11 +123,11 @@ tessera serve [OPTIONS]
 
 Serve the bundle that `tessera.toml` names.
 
-Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and the write-ahead log, and listens on the viewer, session and control addresses in `[serve]`. When all three are bound it prints one line of JSON to stdout naming them. Diagnostics go to stderr, in colour only when stderr is a terminal.
+Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and replays the write-ahead log at `[bundle] wal`, all before it binds any address. It then listens on the viewer, session and control addresses in `[serve]`. When all three are bound it prints one line of JSON to stdout naming them. Diagnostics go to stderr, in colour only when stderr is a terminal.
 
-SIGTERM or SIGINT stops the server at once, even while it opens the bundle, and it exits 0. A write is acknowledged only once the write-ahead log holds it on disc, so stopping loses no acknowledged write, and the next start replays the log.
+SIGTERM or SIGINT stops the server at once, even while it opens the bundle, and it exits 0. Stopping ends every viewer session, because sessions are held in memory. A write is acknowledged only once the write-ahead log holds it on disc, so stopping loses no acknowledged write. A deletion or suppression answered with 500 because the log could not be written is in force but not on disc, and a restart undoes it until the change is sent again.
 
-It refuses to start when `tessera.toml` is refused, as `tessera build` would refuse it; when the session or operator credential is not set, or its file cannot be read (set `session_credential_file` or `session_credential_env`, and the same for `operator`, under `[serve]`); when a `[serve]` address is missing; when the bundle cannot be read; and when the write-ahead log fails its checksum.
+It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would refuse it or lacks one of the three `[serve]` addresses. It refuses when the session or operator credential is not set or its file cannot be read. Under `[serve]`, `session_credential_file` or `session_credential_env` names the file or environment variable holding the session credential, and `operator_credential_file` or `operator_credential_env` the operator's. It also refuses when the bundle cannot be read and when the write-ahead log fails its checksum. An address that cannot be bound, such as one already in use, stops it with exit 1 after the bundle has opened.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
