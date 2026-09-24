@@ -342,6 +342,11 @@ would publish a hierarchy nobody declared. A `dag` layer's list is memberships a
 parents are declared on the artifact itself. A recorded edge reaches a response when the level's
 row form is next published, which is the terms every other change to an artifact is served on.
 
+A scalar key sits at level 0 unless the batch carries a `level` column of `uint32`, which places
+each row's scalar keys at that level, as a member file's `level` column does at a build. A null
+level is level 0. A list's positions carry its levels, so a `level` column beside a list is not
+read.
+
 A layer's supplied content declares, once, how it behaves when a point behind it is deleted.
 Either way the content stops serving the moment the deletion is accepted, because a generating set
 that no longer matches every visible member fails containment for every viewer, whatever the

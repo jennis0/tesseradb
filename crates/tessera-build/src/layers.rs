@@ -70,7 +70,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, FixedSizeListArray, ListArray, UInt32Array, UInt64Array};
+use arrow::array::{Array, ListArray, UInt32Array, UInt64Array};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
@@ -80,7 +80,7 @@ use tessera_lifecycle::membership::{
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
 use tessera_types::layer::RegisteredLayer;
-use tessera_types::layer::{parent_edges, LayerDeclaration, ListMeaning, ValueSet};
+use tessera_types::layer::{parent_edges, LayerDeclaration, ValueSet};
 use tessera_types::EntityId;
 
 use rayon::prelude::*;
@@ -1240,7 +1240,16 @@ fn read_members(
                 })?)
             }
         };
-        let level = optional_u32(path, &batch, LEVEL)?;
+        let level = match batch.column_by_name(LEVEL) {
+            None => None,
+            Some(array) => Some(read_levels(array.as_ref()).ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "{}: column {LEVEL} is {:?}; write it as uint32",
+                    path.display(),
+                    array.data_type()
+                ))
+            })?),
+        };
         let rank = optional_u32_field(path, &batch, fields, "rank")?;
         let entity = member_entities(path, &batch, fields, ids)?;
         read += batch.num_rows() as u64;
@@ -1250,7 +1259,7 @@ fn read_members(
         // column has already answered. Reading it would place a point at a level its list did not
         // name; refusing would block a build over an input that discloses nothing and costs a
         // rerun.
-        if level.is_some() && matches!(key, MemberKeys::Listed(_)) && !said_level_is_ignored {
+        if level.is_some() && key.cells.is_list() && !said_level_is_ignored {
             said_level_is_ignored = true;
             eprintln!(
                 "layer '{layer}': {} carries a `level` column beside a list key column, whose own \
@@ -1260,16 +1269,15 @@ fn read_members(
         }
 
         for row in 0..batch.num_rows() {
-            match &key {
-                MemberKeys::Scalar(column) => {
-                    let at_level = level.map_or(0, |c| number_at(c, row));
+            match key.cells.is_list() {
+                false => {
                     let named = member_view(path, layer, scoped, view, row)?;
                     let Some(member) = resolve_member(
                         MemberKey {
                             layer,
-                            level: at_level,
+                            level: key.level_at(level, row, 0),
                             view: named,
-                            read: column.read_at(row),
+                            read: key.keys.read_at(row),
                             value_set,
                             path,
                         },
@@ -1297,9 +1305,18 @@ fn read_members(
                         rank.as_ref().and_then(|c| value_index(c, row)),
                     )?;
                 }
-                MemberKeys::Listed(listed) => {
+                true => {
                     let named = member_view(path, layer, scoped, view, row)?;
-                    let Some(positions) = listed.entries(path, layer, row)? else {
+                    // A stacked or tiered layer's list is one entry per level, which is what
+                    // makes entry k mean level k.
+                    let positions = key.entries(row).map_err(|e| {
+                        BuildError::Invalid(format!(
+                            "{}: row {row} of layer '{layer}'s key column {e}; declare \
+                             `hierarchy.kind = \"nested\"` if the column is a lineage",
+                            path.display()
+                        ))
+                    })?;
+                    let Some(positions) = positions else {
                         unclustered += 1;
                         continue;
                     };
@@ -1314,9 +1331,9 @@ fn read_members(
                         entries.push(resolve_member(
                             MemberKey {
                                 layer,
-                                level: listed.meaning.level_of(position),
+                                level: key.level_at(level, row, position),
                                 view: named,
-                                read: listed.values.read_at(index),
+                                read: key.keys.read_at(index),
                                 value_set,
                                 path,
                             },
@@ -1334,7 +1351,7 @@ fn read_members(
                     for member in entries.iter().flatten() {
                         attach_member(plan, *member, path, source, rank)?;
                     }
-                    if listed.meaning.declares_edges() {
+                    if key.meaning.declares_edges() {
                         record_lineage(&entries, plan, &mut lineage, path)?;
                     }
                 }
@@ -3311,10 +3328,9 @@ fn write_content_extent(
 // named and the file does not carry is simply absent, which is what an optional column of the
 // artifact grain is.
 
-/// The two fields no `fields` map may move, because `configuration.md` §1's table does not name
-/// them: a level is an address rather than a value, and the map's key set is the closed one that
-/// table states.
-const LEVEL: &str = "level";
+/// A field no `fields` map may move, as [`LEVEL`] is not, because `configuration.md` §1's table
+/// does not name it: a level is an address rather than a value, and the map's key set is the closed
+/// one that table states.
 const ATTACHED_LEVEL: &str = "attached_level";
 
 pub(crate) fn batches(
@@ -3819,7 +3835,9 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 /// already has: a point whose cluster is on the roster formats nothing and allocates nothing, and
 /// the only decimal string an open layer writes is the one it mints an artifact under, once per
 /// cluster.
-pub(crate) use tessera_store::member_key::{KeyColumn, KeyRead};
+pub(crate) use tessera_store::member_key::{
+    read_levels, KeyCells, KeyColumn, KeyRead, MemberColumn, LEVEL,
+};
 
 pub(crate) fn key_column<'a>(
     path: &Path,
@@ -3830,7 +3848,7 @@ pub(crate) fn key_column<'a>(
     let name = fields.of(canonical);
     scalar_key_column(
         path,
-        required(path, batch, fields, canonical)?,
+        required(path, batch, fields, canonical)?.as_ref(),
         name,
         "column",
     )
@@ -3839,11 +3857,11 @@ pub(crate) fn key_column<'a>(
 /// One array read as a key column — the member source's own, or the elements of its list.
 fn scalar_key_column<'a>(
     path: &Path,
-    array: &'a std::sync::Arc<dyn Array>,
+    array: &'a dyn Array,
     name: &str,
     what: &str,
 ) -> Result<KeyColumn<'a>> {
-    KeyColumn::new(array.as_ref()).ok_or_else(|| {
+    KeyColumn::new(array).ok_or_else(|| {
         BuildError::Invalid(format!(
             "{}: {what} {name} is {:?}, and a key is {}; an integer key is read as its decimal \
              spelling, so `3` and \"3\" name one artifact",
@@ -3863,9 +3881,9 @@ fn scalar_key_column<'a>(
 /// every kind accepts, a scalar being a list of one (`dag-hierarchies.md` §4). The row's grain
 /// stays one row per artifact: several parents are several entries in one cell, and the one-row
 /// refusal in [`read_artifacts`] stands.
-pub(crate) enum ParentColumn<'a> {
-    Scalar(KeyColumn<'a>),
-    Listed(ListShape<'a>, KeyColumn<'a>),
+pub(crate) struct ParentColumn<'a> {
+    cells: KeyCells<'a>,
+    keys: KeyColumn<'a>,
 }
 
 pub(crate) fn parent_column<'a>(
@@ -3877,23 +3895,13 @@ pub(crate) fn parent_column<'a>(
         return Ok(None);
     };
     let name = fields.of("parent");
-    Ok(Some(match array.data_type() {
-        arrow::datatypes::DataType::List(_) => {
-            let list: &ListArray = typed(path, array, name)?;
-            ParentColumn::Listed(
-                ListShape::Variable(list),
-                scalar_key_column(path, list.values(), name, "the elements of")?,
-            )
-        }
-        arrow::datatypes::DataType::FixedSizeList(..) => {
-            let list: &FixedSizeListArray = typed(path, array, name)?;
-            ParentColumn::Listed(
-                ListShape::Fixed(list),
-                scalar_key_column(path, list.values(), name, "the elements of")?,
-            )
-        }
-        _ => ParentColumn::Scalar(scalar_key_column(path, array, name, "column")?),
-    }))
+    let (cells, values) = KeyCells::new(array.as_ref());
+    let what = match cells.is_list() {
+        true => "the elements of",
+        false => "column",
+    };
+    let keys = scalar_key_column(path, values, name, what)?;
+    Ok(Some(ParentColumn { cells, keys }))
 }
 
 /// One row's parents, each key once in the order written; empty where the cell is null, which is
@@ -3903,185 +3911,50 @@ pub(crate) fn parents_at(
     column: Option<&ParentColumn<'_>>,
     row: usize,
 ) -> Result<Vec<String>> {
-    let mut keys = match column {
-        None => Vec::new(),
-        Some(ParentColumn::Scalar(key)) => key.key_at(row).into_iter().collect(),
-        Some(ParentColumn::Listed(shape, values)) => {
-            let range = match shape {
-                ListShape::Variable(list) => {
-                    if list.is_null(row) {
-                        return Ok(Vec::new());
-                    }
-                    let offsets = list.value_offsets();
-                    offsets[row] as usize..offsets[row + 1] as usize
-                }
-                ListShape::Fixed(list) => {
-                    if list.is_null(row) {
-                        return Ok(Vec::new());
-                    }
-                    let width = list.value_length() as usize;
-                    row * width..(row + 1) * width
-                }
-            };
-            range
-                .map(|index| {
-                    values.key_at(index).ok_or_else(|| {
-                        BuildError::Invalid(format!(
-                            "{}: row {row}'s parent list holds a null entry; a parent is named \
-                             or the entry is left out, and a null here would be an edge to \
-                             nothing",
-                            path.display()
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<String>>>()?
-        }
+    let Some(ParentColumn { cells, keys }) = column else {
+        return Ok(Vec::new());
     };
-    dedup_keys(&mut keys);
-    Ok(keys)
+    let mut parents = match cells.range(row) {
+        None => Vec::new(),
+        Some(_) if !cells.is_list() => keys.key_at(row).into_iter().collect(),
+        Some(range) => range
+            .map(|index| {
+                keys.key_at(index).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: row {row}'s parent list holds a null entry; a parent is named or the \
+                         entry is left out, and a null here would be an edge to nothing",
+                        path.display()
+                    ))
+                })
+            })
+            .collect::<Result<Vec<String>>>()?,
+    };
+    dedup_keys(&mut parents);
+    Ok(parents)
 }
 
 // ---------------------------------------------------------------------------------------------
 // A list key column: the artifacts a point belongs to, and the edges between them
 // ---------------------------------------------------------------------------------------------
 
-/// A member source's `key` column: one artifact per row, or a list of them.
-///
-/// **The list's meaning is the hierarchy kind the layer already declares**
-/// (`artifacts-from-points.md` §4). A hierarchical clusterer emits a list per point and nothing in
-/// the list says what its positions mean, so the kind is declared as it always was and only the
-/// edges are read from the data.
-enum MemberKeys<'a> {
-    Scalar(KeyColumn<'a>),
-    Listed(ListedKeys<'a>),
-}
-
-/// A list key column, its elements, and what its positions mean.
-struct ListedKeys<'a> {
-    shape: ListShape<'a>,
-    /// The list's child array, read as a key column: an element is a key on exactly the rule a
-    /// scalar is, integer or text, with the roster converted once rather than per element.
-    values: KeyColumn<'a>,
-    meaning: ListMeaning,
-}
-
-pub(crate) enum ListShape<'a> {
-    /// A `List`: its rows may differ in length, which is what a lineage is.
-    Variable(&'a ListArray),
-    /// A `FixedSizeList`: every row has the arity the type states.
-    Fixed(&'a FixedSizeListArray),
-}
-
-impl ListedKeys<'_> {
-    /// The row's entries, as a range into the element array — `None` where the row named no
-    /// artifact at all.
-    ///
-    /// **A null cell and an empty one are the whole row's `Unclustered`**, which is §2's rule for a
-    /// scalar key applied to a cell that holds no key: a point may be in no artifact at any
-    /// resolution, and a clusterer that emitted nothing for it is the ordinary way of saying so.
-    fn entries(
-        &self,
-        path: &Path,
-        layer: &str,
-        row: usize,
-    ) -> Result<Option<std::ops::Range<usize>>> {
-        let (start, end) = match &self.shape {
-            ListShape::Variable(list) => {
-                if list.is_null(row) {
-                    return Ok(None);
-                }
-                let offsets = list.value_offsets();
-                (offsets[row] as usize, offsets[row + 1] as usize)
-            }
-            ListShape::Fixed(list) => {
-                if list.is_null(row) {
-                    return Ok(None);
-                }
-                let start = list.value_offset(row) as usize;
-                (start, start + list.value_length() as usize)
-            }
-        };
-        if start == end {
-            return Ok(None);
-        }
-        // **The declaration and the data must agree.** A `stacked` or `tiered` layer's list is one
-        // entry per declared level — that is what makes entry *k* mean level *k* — so a row of any
-        // other length is a lineage against a levelled declaration, and guessing which of the two
-        // the caller meant would publish a hierarchy they did not write.
-        if let ListMeaning::Levelled { levels, .. } = self.meaning {
-            if end - start != levels {
-                return Err(BuildError::Invalid(format!(
-                    "{}: row {row} names {} artifacts and layer '{layer}' declares {levels} \
-                     levels. A stacked or tiered layer's key column is one entry per level, \
-                     nullable where the point is in no artifact at that resolution, so a row of \
-                     another length is a variable-length list against a levelled declaration — \
-                     declare `hierarchy.kind = \"nested\"` if the column is a lineage",
-                    path.display(),
-                    end - start,
-                )));
-            }
-        }
-        Ok(Some(start..end))
-    }
-}
-
-/// The member source's key column, at the shapes a layer of this kind may carry.
+/// The member source's key column, read against the layer's hierarchy
+/// (`artifacts-from-points.md` §4): one artifact per row, or a list of them whose positions mean
+/// what the layer's hierarchy kind declares.
 fn member_keys<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
     fields: &Fields,
     layer: &str,
     declaration: &LayerDeclaration,
-) -> Result<MemberKeys<'a>> {
+) -> Result<MemberColumn<'a>> {
     let name = fields.of("key");
     let array = required(path, batch, fields, "key")?;
-    let fixed = match array.data_type() {
-        arrow::datatypes::DataType::List(_) => None,
-        arrow::datatypes::DataType::FixedSizeList(_, size) => Some(*size as usize),
-        _ => return Ok(MemberKeys::Scalar(key_column(path, batch, fields, "key")?)),
-    };
-    // **The meaning of the positions is the layer's own declaration**, read through the one rule
-    // both entry points share ([`ListMeaning`]). What is left here is the *type* half of the arity
-    // check: an Arrow `FixedSizeList` states its length in its own type, which a plain list does
-    // not, so it is the one place a disagreement can be caught before a row is read.
-    let meaning = declaration.list_meaning();
-    if let Some(size) = fixed {
-        match meaning {
-            ListMeaning::Lineage => {
-                return Err(BuildError::Invalid(format!(
-                    "{}: column {name} is a fixed-size list of {size} and layer '{layer}' is \
-                     declared nested, whose lineage is as deep as each point's own branch — a \
-                     fixed arity is one entry per level, which is the stacked and tiered shape. \
-                     Write the column as a list, or declare the layer tiered and its levels",
-                    path.display()
-                )))
-            }
-            ListMeaning::Levelled { levels, .. } if size != levels => {
-                return Err(BuildError::Invalid(format!(
-                    "{}: column {name} is a fixed-size list of {size} and layer '{layer}' \
-                     declares {levels} levels. Entry k is the artifact at level k, so the two \
-                     counts are one number written twice",
-                    path.display()
-                )))
-            }
-            _ => {}
-        }
-    }
-    let shape = match array.data_type() {
-        arrow::datatypes::DataType::List(_) => {
-            ListShape::Variable(typed::<ListArray>(path, array, name)?)
-        }
-        _ => ListShape::Fixed(typed::<FixedSizeListArray>(path, array, name)?),
-    };
-    let values = match &shape {
-        ListShape::Variable(list) => list.values(),
-        ListShape::Fixed(list) => list.values(),
-    };
-    Ok(MemberKeys::Listed(ListedKeys {
-        values: scalar_key_column(path, values, name, "the elements of column")?,
-        shape,
-        meaning,
-    }))
+    MemberColumn::new(array.as_ref(), declaration.list_meaning()).map_err(|e| {
+        BuildError::Invalid(format!(
+            "{}: column {name} of layer '{layer}' {e}",
+            path.display()
+        ))
+    })
 }
 
 /// The layer's artifacts, indexed by what their keys spell — the integer, and the text.

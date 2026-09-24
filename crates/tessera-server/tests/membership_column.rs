@@ -148,11 +148,25 @@ content = {{ computed = ["centroid", "box"] }}
     )
 }
 
-/// The points file: geometry, and the two membership spellings beside it.
+/// The level the levelled fixture places a point's scalar key at: `e % 3`, and null, which is
+/// level 0, on every seventh point.
+fn level_of(e: u64) -> Option<u32> {
+    (!e.is_multiple_of(7)).then_some((e % 3) as u32)
+}
+
+/// A `level` column over `rows`.
+fn levels(rows: &[u64]) -> ArrayRef {
+    Arc::new(UInt32Array::from(
+        rows.iter().map(|e| level_of(*e)).collect::<Vec<_>>(),
+    ))
+}
+
+/// The points file: geometry, and the two membership spellings beside it, with a `level` column
+/// where `with_levels` is set.
 ///
 /// `rows` is which of the corpus's points this file carries — the whole of it on the built side, its
 /// seed on the ingested one.
-fn write_membership_points(path: &Path, rows: &[u64]) {
+fn write_membership_points(path: &Path, rows: &[u64], with_levels: bool) {
     let item = Arc::new(Field::new("item", DataType::Int64, true));
     let mut offsets: Vec<i32> = vec![0];
     let mut entries: Vec<Option<i64>> = Vec::new();
@@ -167,15 +181,15 @@ fn write_membership_points(path: &Path, rows: &[u64]) {
         None,
     );
     let cluster = Int64Array::from(rows.iter().map(|e| cluster_of(*e)).collect::<Vec<_>>());
-    write_points(
-        path,
-        rows,
-        |e| (x_of(e), y_of(e)),
-        vec![
-            column("cluster", true, cluster),
-            column("lineage", true, lineage),
-        ],
-    );
+    let mut columns = vec![
+        column("cluster", true, cluster),
+        column("lineage", true, lineage),
+    ];
+    if with_levels {
+        let level = UInt32Array::from(rows.iter().map(|e| level_of(*e)).collect::<Vec<_>>());
+        columns.push(column("level", true, level));
+    }
+    write_points(path, rows, |e| (x_of(e), y_of(e)), columns);
 }
 
 /// The labels an ingested row carries, one per term — the same terms the pairs file gives a
@@ -191,12 +205,17 @@ struct Built {
 
 /// Build a bundle over `rows`, with the layer reading its members from the point table.
 fn build_side(rows: &[u64], layer: &str) -> Built {
+    build_side_with(rows, layer, false)
+}
+
+/// [`build_side`], with the point table carrying a `level` column where `with_levels` is set.
+fn build_side_with(rows: &[u64], layer: &str, with_levels: bool) -> Built {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path().to_path_buf();
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     let config_path = dir.join("config.toml");
-    write_membership_points(&points, rows);
+    write_membership_points(&points, rows, with_levels);
     write_pairs(&pairs, rows);
     std::fs::write(&config_path, format!("{VIEW_TOML}{layer}")).unwrap();
 
@@ -226,6 +245,11 @@ fn build_side(rows: &[u64], layer: &str) -> Built {
 /// One ingest batch: the reserved geometry columns, and a column **named for the layer** carrying
 /// each point's artifacts.
 fn ingest_batch(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
+    ingest_batch_with(rows, vec![(column, keys)])
+}
+
+/// [`ingest_batch`] with any columns beside the reserved ones.
+fn ingest_batch_with(rows: &[u64], columns: Vec<(&str, ArrayRef)>) -> Vec<u8> {
     let labels: Vec<Vec<String>> = rows.iter().map(|e| access_of(*e)).collect();
     let labels: Vec<Vec<&str>> = labels
         .iter()
@@ -233,31 +257,31 @@ fn ingest_batch(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
         .collect();
     let labels: Vec<&[&str]> = labels.iter().map(Vec::as_slice).collect();
     let access = access_lists(&labels);
-    let schema = Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
-        Field::new(column, keys.data_type().clone(), true),
-    ]));
+    ];
     let ext: Vec<Vec<u8>> = rows.iter().map(|e| external_id_of(*e)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter_values(
-                ext.iter().map(|v| v.as_slice()),
-            )),
-            Arc::new(Float32Array::from_iter_values(
-                rows.iter().map(|e| x_of(*e) as f32),
-            )),
-            Arc::new(Float32Array::from_iter_values(
-                rows.iter().map(|e| y_of(*e) as f32),
-            )),
-            Arc::new(access),
-            keys,
-        ],
-    )
-    .unwrap();
+    let mut arrays: Vec<ArrayRef> = vec![
+        Arc::new(BinaryArray::from_iter_values(
+            ext.iter().map(|v| v.as_slice()),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|e| x_of(*e) as f32),
+        )),
+        Arc::new(Float32Array::from_iter_values(
+            rows.iter().map(|e| y_of(*e) as f32),
+        )),
+        Arc::new(access),
+    ];
+    for (name, array) in columns {
+        fields.push(Field::new(name, array.data_type().clone(), true));
+        arrays.push(array);
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();
     writer.into_inner().unwrap()
@@ -921,6 +945,113 @@ async fn a_dag_list_column_ingests_memberships_and_no_edges() {
         view.artifacts
     );
     assert_same_database(&built, &ingested, lineage_keys_of, "a dag list column").await;
+}
+
+/// The lineage column as a `large_list`, which carries the same keys as a `list`.
+fn large_lineage_keys(rows: &[u64]) -> ArrayRef {
+    let list = lineage_keys(rows);
+    arrow::compute::cast(
+        &list,
+        &DataType::LargeList(Arc::new(Field::new("item", DataType::Int64, true))),
+    )
+    .unwrap()
+}
+
+/// A `large_list` key column is read as a `list` one is.
+#[tokio::test]
+async fn a_large_list_column_ingests_the_database_a_list_builds() {
+    let layer = layer_toml("nested", "lineage");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..SEED).collect::<Vec<_>>(), &layer);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    ingest_tail(&ingested, LAYER, large_lineage_keys, SEED).await;
+    assert_same_database(&built, &ingested, lineage_keys_of, "a large_list column").await;
+}
+
+/// The artifacts one principal is served, in one order whatever order a side lists them in.
+async fn sorted_artifacts(server: &TestServer, terms: &[&str]) -> Vec<ClientArtifact> {
+    let mut artifacts = client_view(server, terms).await.artifacts;
+    artifacts.sort_by(|a, b| {
+        (&a.key, a.masked_count, &a.parent_keys).cmp(&(&b.key, b.masked_count, &b.parent_keys))
+    });
+    artifacts
+}
+
+/// One JSON ingest body carrying `rows`' cluster keys and their levels.
+fn levelled_json(rows: &[u64]) -> Vec<u8> {
+    use base64::Engine as _;
+    let records: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|e| {
+            json!({
+                "external_id": base64::engine::general_purpose::STANDARD.encode(external_id_of(*e)),
+                "x": x_of(*e),
+                "y": y_of(*e),
+                "access": access_of(*e),
+                LAYER: cluster_of(*e),
+                "level": level_of(*e),
+            })
+        })
+        .collect();
+    serde_json::to_vec(&records).unwrap()
+}
+
+/// **A `level` column places a scalar key at its level on the wire, as it does in a member
+/// table**, and a null there is level 0. The first batch is JSON and the rest Arrow.
+#[tokio::test]
+async fn a_level_column_places_a_scalar_key_on_the_wire_as_at_a_build() {
+    let mut layer = layer_toml("stacked", "cluster");
+    layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side_with(&all, &layer, true);
+    let ingested = build_side_with(&[], &layer, true);
+
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
+    for (i, chunk) in all.chunks(70).enumerate() {
+        let (status, detail) = match i {
+            0 => {
+                let resp = ingested
+                    .client
+                    .post(ingested.control_url("/control/ingest"))
+                    .bearer_auth(OPERATOR_CREDENTIAL)
+                    .header("x-tessera-batch-id", "levelled-json")
+                    .header("content-type", "application/json")
+                    .body(levelled_json(chunk))
+                    .send()
+                    .await
+                    .unwrap();
+                (resp.status().as_u16(), resp.text().await.unwrap())
+            }
+            _ => {
+                let body = ingest_batch_with(
+                    chunk,
+                    vec![(LAYER, scalar_keys(chunk)), ("level", levels(chunk))],
+                );
+                post_ingest(&ingested, &format!("levelled-{i}"), body).await
+            }
+        };
+        assert_eq!(status, 200, "{detail}");
+    }
+    tick(&ingested).await;
+    fold(&ingested).await;
+
+    let served = sorted_artifacts(&built, &["0", "1"]).await;
+    let keys: std::collections::BTreeSet<_> = served.iter().map(|a| a.key.clone()).collect();
+    assert!(
+        served.len() > keys.len(),
+        "one key at several levels is several artifacts, or the levels were not read: {served:?}"
+    );
+    for terms in [vec!["0"], vec!["1"], vec!["0", "1"]] {
+        assert_eq!(
+            sorted_artifacts(&built, &terms).await,
+            sorted_artifacts(&ingested, &terms).await,
+            "the artifacts differ for a principal holding {terms:?}"
+        );
+    }
 }
 
 /// **A tiered chain mints a level at a time, coarse first** — the ordering constraint edges carry

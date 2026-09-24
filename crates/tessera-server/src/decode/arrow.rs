@@ -1,6 +1,7 @@
-use arrow::array::Array;
+use arrow::array::{Array, UInt32Array};
 use arrow::record_batch::RecordBatch;
 use tessera_engine::coordinates;
+use tessera_engine::member_key;
 use tessera_engine::shapes::Bounds;
 use tessera_engine::scalar_column::{self, ScalarColumn};
 use tessera_engine::utf8::Utf8Column;
@@ -110,9 +111,16 @@ fn record_batches<'a>(
     })
 }
 
+/// A batch's layer columns, and the `level` column that places their scalar keys.
+struct Memberships<'b> {
+    columns: Vec<MembershipColumn<'b>>,
+    levels: Option<&'b UInt32Array>,
+}
+
 /// Checks a batch's columns before any row is read and returns its layer columns. A name is the
 /// route's own, a declared scalar, a family in `scoped` or a registered layer's, matched in that
 /// order, so a layer cannot redefine `x`; a declared or scoped column at the wrong type is refused.
+/// A `level` column is read as a member table's is wherever the batch carries a layer column.
 fn check_columns<'b>(
     body_name: &str,
     batch: &'b RecordBatch,
@@ -121,8 +129,15 @@ fn check_columns<'b>(
     scoped: &[ScopedScalar],
     layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
     view_in: &dyn Fn(&str) -> Option<String>,
-) -> Result<Vec<MembershipColumn<'b>>, DecodeError> {
+) -> Result<Memberships<'b>, DecodeError> {
+    let undeclared = |name: &str| {
+        DecodeError(format!(
+            "{body_name}: column '{name}' is not a declared scalar, a registered layer or a \
+             group-scoped attribute of this batch's view; declare it or leave it out"
+        ))
+    };
     let mut declarations = Vec::new();
+    let mut level_unclaimed = false;
     for field in batch.schema_ref().fields() {
         let name = field.name().as_str();
         if fixed.iter().any(|f| f.name() == name)
@@ -133,20 +148,34 @@ fn check_columns<'b>(
         {
             continue;
         }
-        let Some(declaration) = layer_of(name) else {
-            return Err(DecodeError(format!(
-                "{body_name}: column '{name}' is not a declared scalar, a registered layer or a \
-                 group-scoped attribute of this batch's view; declare it or leave it out"
-            )));
-        };
-        declarations.push((name, declaration));
+        match layer_of(name) {
+            Some(declaration) => declarations.push((name, declaration)),
+            None if name == member_key::LEVEL => level_unclaimed = true,
+            None => return Err(undeclared(name)),
+        }
     }
-    let mut memberships = Vec::with_capacity(declarations.len());
+    if level_unclaimed && declarations.is_empty() {
+        return Err(undeclared(member_key::LEVEL));
+    }
+    let levels = match batch.column_by_name(member_key::LEVEL) {
+        Some(column) if !declarations.is_empty() && layer_of(member_key::LEVEL).is_none() => {
+            Some(member_key::read_levels(column.as_ref()).ok_or_else(|| {
+                DecodeError(format!(
+                    "{body_name}: column '{}' places the batch's member keys at a level and is \
+                     {:?}; send it as uint32",
+                    member_key::LEVEL,
+                    column.data_type()
+                ))
+            })?)
+        }
+        _ => None,
+    };
+    let mut columns = Vec::with_capacity(declarations.len());
     for (name, declaration) in &declarations {
         let column = batch
             .column_by_name(name)
             .expect("the column was found in this batch's own schema");
-        memberships.push(membership_column(
+        columns.push(membership_column(
             body_name,
             name,
             column,
@@ -182,7 +211,7 @@ fn check_columns<'b>(
             )));
         }
     }
-    Ok(memberships)
+    Ok(Memberships { columns, levels })
 }
 
 /// A column `check_columns` has passed, read once for all of one record batch's rows.
@@ -353,8 +382,8 @@ pub(crate) fn parse_ingest_batch(
                 .map_err(|e| DecodeError(format!("ingest body: row {} {e}", offset + i)))?;
             clipped += u64::from(placed.clipped);
             clamped += u64::from(placed.clamped());
-            for column in &memberships {
-                tally.read(body_name, column, i, offset)?;
+            for column in &memberships.columns {
+                tally.read(body_name, column, memberships.levels, i, offset)?;
             }
             // In declared order, not schema order: the vector is read back by position. A
             // declared column the batch omits keeps its slot, absent, so an older client's batch
@@ -520,8 +549,8 @@ pub(crate) fn parse_values_batch(
             .collect();
 
         for i in 0..batch.num_rows() {
-            for column in &memberships {
-                tally.read(body_name, column, i, offset)?;
+            for column in &memberships.columns {
+                tally.read(body_name, column, memberships.levels, i, offset)?;
             }
             let external = match &ext {
                 Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),

@@ -17,7 +17,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use serde_json::{Map, Value};
-use tessera_engine::{scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
+use tessera_engine::{member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::layer::LayerDeclaration;
 
 use super::{DecodeError, Fixed};
@@ -92,12 +92,18 @@ pub(crate) fn record_batch(
             || columns.scoped.iter().any(|f| f.name == name)
     };
     let mut layers: Vec<String> = Vec::new();
+    let mut levels = false;
     for (row, record) in rows.iter().enumerate() {
         for name in record.keys() {
             if known(name) || layers.iter().any(|l| l == name) {
                 continue;
             }
             if (columns.layer_of)(name).is_none() {
+                // Read as a member table's `level` column where the batch carries a layer column.
+                if name == member_key::LEVEL {
+                    levels = true;
+                    continue;
+                }
                 return Err(DecodeError(format!(
                     "{body_name}: row {row}, column '{name}' is not a declared scalar, a \
                      registered layer or a group-scoped attribute of this batch's view; declare \
@@ -110,6 +116,11 @@ pub(crate) fn record_batch(
     for name in &layers {
         let column = membership_column(body_name, &rows, name)?;
         fields.push(Field::new(name, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+    if levels {
+        let column = u32_column(body_name, &rows, member_key::LEVEL)?;
+        fields.push(Field::new(member_key::LEVEL, column.data_type().clone(), true));
         arrays.push(column);
     }
 
@@ -248,31 +259,29 @@ fn fixed_column(
             }
             Arc::new(builder.finish())
         }
-        Fixed::IdSet => {
-            let mut builder = UInt32Builder::new();
-            for (row, record) in rows.iter().enumerate() {
-                match record.get("idset") {
-                    None | Some(Value::Null) => builder.append_null(),
-                    other => {
-                        match integer(body_name, other.unwrap_or(&Value::Null), row, "idset")? {
-                            None => builder.append_null(),
-                            Some(value) => {
-                                builder.append_value(u32::try_from(value).map_err(|_| {
-                                    refusal(
-                                        body_name,
-                                        row,
-                                        "idset",
-                                        "is out of range for an identifier set",
-                                    )
-                                })?)
-                            }
-                        }
-                    }
-                }
-            }
-            Arc::new(builder.finish())
-        }
+        Fixed::IdSet => u32_column(body_name, rows, "idset")?,
     })
+}
+
+/// A column of `uint32`, null where a row omits it.
+fn u32_column(
+    body_name: &str,
+    rows: &[Map<String, Value>],
+    name: &str,
+) -> Result<ArrayRef, DecodeError> {
+    let mut builder = UInt32Builder::new();
+    for (row, record) in rows.iter().enumerate() {
+        match record.get(name) {
+            None | Some(Value::Null) => builder.append_null(),
+            Some(value) => match integer(body_name, value, row, name)? {
+                None => builder.append_null(),
+                Some(value) => builder.append_value(u32::try_from(value).map_err(|_| {
+                    refusal(body_name, row, name, "is out of range; send a uint32")
+                })?),
+            },
+        }
+    }
+    Ok(Arc::new(builder.finish()))
 }
 
 /// The body's records: a JSON array of objects, or one object per line.
