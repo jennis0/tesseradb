@@ -9,14 +9,32 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-status>`: the state and the counts on one line. A dot and a word, then
- * `4,812 shown · 12,465 matched · 181,900 visible`, plus `the highlight matched N` when a
- * highlight is set (without one it would repeat `matched`). Skeleton bars fill the cells while
- * loading or retrying, and the stale and expired states offer Refresh and Sign in again.
- * `expanded` renders the detail behind the numbers as a card; otherwise it is a hover.
+ * The view's state and counts on one line: a dot and a word, then
+ * `4,812 shown · 12,465 matched · 181,900 visible`, with `the highlight matched N` added while a
+ * highlight is set. Skeleton bars fill the cells while loading or retrying. The stale state offers
+ * Refresh, and the expired state offers Sign in again where `reauthorise` is set. `expanded`
+ * renders the detail behind the numbers as a card; otherwise it is the strip's tooltip.
  *
- * The element is an `aria-live` region, so a refusal, expiry or stale signal is announced. It
- * fires `tessera-statechange` on every state change and `tessera-expired` once per expiry.
+ * The strip is an `aria-live` region, so a refusal, an expiry or a stale view is announced. The
+ * state is one of the eight panel states (see `PanelState`).
+ *
+ * @summary The state and the counts of the view, on one line.
+ * @tagname tessera-status
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - On every
+ *   change of panel state, including the first render.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - Once each time the
+ *   session expires.
+ * @csspart strip - The one-line strip.
+ * @csspart state - The state's dot and word, with `data-state` set to the panel state.
+ * @csspart refusal - The refusal's code and detail, in the refused state.
+ * @csspart refresh - The Refresh button, in the stale state.
+ * @csspart reauthorise - The Sign in again button, in the expired state where `reauthorise` is set.
+ * @csspart count-shown - The `<tessera-count>` of marks shown.
+ * @csspart count-matched - The `<tessera-count>` matched by the filters.
+ * @csspart count-highlighted - The `<tessera-count>` the highlight matched, while a highlight is set.
+ * @csspart count-visible - The `<tessera-count>` visible to the viewer.
+ * @csspart card - The detail card, under `expanded`.
  */
 export class TesseraStatus extends TesseraElement {
   static override styles = [
@@ -123,8 +141,9 @@ export class TesseraStatus extends TesseraElement {
     `
   ];
 
+  /** Renders the detail behind the numbers as a card below the strip, in place of the tooltip. */
   @property({type: Boolean}) accessor expanded = false;
-  /** The host's renewal, shown on expiry beside the prompt. */
+  /** Called by the Sign in again button that the expired state shows; without it, no button. */
   @property({attribute: false}) accessor reauthorise: (() => void) | null = null;
 
   private lastState: PanelState | null = null;

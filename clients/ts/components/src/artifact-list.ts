@@ -9,13 +9,25 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-artifact-list>`: the artifacts served for this view as a tree built from `parentIds`,
- * each row with its name and `Masked` count, the opened one highlighted. A click opens the card
- * and the outline without moving the camera. An artifact with no text and no topic shows
- * {@link UNNAMED}, not its key.
+ * The artifacts served for the current view, as a tree built from their parents, each row with its
+ * name and masked count; the opened artifact is highlighted. Pressing a row opens the artifact's
+ * card and outline without moving the camera. An artifact with no name shows a dash.
  *
- * The count covers the artifact's whole membership as this principal sees it, not the viewport;
- * only whether an artifact appears depends on the view.
+ * The count is the artifact's whole membership as the viewer sees it, not the part in view; the
+ * view decides only whether an artifact is listed.
+ *
+ * @summary The artifacts served for the view, with their counts.
+ * @tagname tessera-artifact-list
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactselect']>} tessera-artifactselect - A
+ *   row was pressed.
+ * @csspart title - The heading, with how many are listed.
+ * @csspart state - The state line, with `data-state`.
+ * @csspart refusal - A refusal's code and detail, in the refused state.
+ * @csspart items - The list.
+ * @csspart item - One artifact, with `data-id`, and `data-opened` on the opened one.
+ * @csspart name - An artifact's name, with `data-unnamed` where it has none.
+ * @csspart count - An artifact's `<tessera-count>`.
  */
 export class TesseraArtifactList extends TesseraElement {
   static override styles = [
@@ -47,9 +59,9 @@ export class TesseraArtifactList extends TesseraElement {
     `
   ];
 
-  /** By property, for a host with its own served set. */
+  /** The served artifacts to list in place of the store's `artifacts` projection. */
   @property({attribute: false}) accessor artifacts: ArtifactsProjection | null = null;
-  /** How many rows before the list stops and says how many it did not show. */
+  /** How many rows the list shows before it says how many more there are. */
   @property({type: Number}) accessor rows = 40;
 
   private get shown(): ArtifactsProjection | null {

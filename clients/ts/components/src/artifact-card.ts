@@ -24,15 +24,48 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
 };
 
 /**
- * `<tessera-artifact-card>`: the selected artifact. Its name, its masked count, its description,
- * layer and key, the kind of shape its layer draws, its parents and children in this view, Fit to
- * cluster, and the `member_of` clause buttons for inside and outside it. A `member_of` clause
- * selects by membership, a drawn `region` by shape; they differ for an artifact whose members are
- * spread across the map. Fit is absent on a layer that draws nothing.
+ * The opened artifact: its name, its masked count, its description, layer and key, the kind of
+ * shape its layer draws, its parents and its children in this view, Fit to cluster, and buttons
+ * that put a `member_of` clause on it as a filter, as a highlight, or as a filter to what is
+ * outside it. A `member_of` clause selects by membership, where a drawn region selects by shape;
+ * they differ for an artifact whose members are spread across the map. Fit is absent on a filter
+ * layer, which draws nothing. Pressing a parent or child opens it.
  *
- * The count is the drill-down's, over the whole membership this principal sees; it does not
- * change with the viewport. An artifact with no text and no topic shows {@link UNNAMED} in the
- * headline and its key in its own field. The server gives one refusal for every withheld case.
+ * The count is over the artifact's whole membership as the viewer sees it and does not change with
+ * the view. An artifact with no name shows a dash in the headline and its key in its own field.
+ * The server gives the same refusal for every artifact it withholds. The artifact is the store's
+ * (`Store.openArtifact`), or the `artifact` property.
+ *
+ * @summary The opened artifact, with its lineage and its filter buttons.
+ * @tagname tessera-artifact-card
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit to
+ *   cluster was pressed. `<tessera-explorer>` fits its map to the artifact.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A clause
+ *   button put a `member_of` clause on or took it off.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - The close button was
+ *   pressed, with `what` set to `artifact`.
+ * @csspart title - The heading: the level's or the layer's title, holding the close button.
+ * @csspart close - The close button.
+ * @csspart state - The state line, with `data-state`.
+ * @csspart refusal - A refusal's code and detail.
+ * @csspart headline - The artifact's name.
+ * @csspart count - The masked count.
+ * @csspart content - The artifact's description, or its attached topic.
+ * @csspart value - The layer and the key.
+ * @csspart shape - What the layer's shape is, with `data-kind` (`derived`, `predicate` or
+ *   `authored`).
+ * @csspart label - The headings above the parents and the children.
+ * @csspart parents - The list of parents.
+ * @csspart parent - One parent, with `data-id`.
+ * @csspart children - The list of children in this view.
+ * @csspart child - One child, with `data-id`.
+ * @csspart name - A parent's or a child's name.
+ * @csspart fit - The Fit to cluster button.
+ * @csspart verbs - The clause buttons.
+ * @csspart filter - The Filter to this button, with `aria-pressed` while its clause is on.
+ * @csspart highlight - The Highlight this button, with `aria-pressed` while its clause is on.
+ * @csspart outside - The Outside this button, with `aria-pressed` while its clause is on.
  */
 export class TesseraArtifactCard extends TesseraElement {
   static override styles = [
@@ -120,8 +153,12 @@ export class TesseraArtifactCard extends TesseraElement {
     `
   ];
 
-  /** By property, for a host feeding the card from its own drill-down. */
+  /**
+   * The artifact to show, for a host that fetches the drill-down itself. Set with `refusal` or
+   * alone, it replaces the store's opened artifact.
+   */
   @property({attribute: false}) accessor artifact: {id: bigint; detail: ArtifactDetail} | null = null;
+  /** A refusal to show in place of an artifact, for a host that fetches the drill-down itself. */
   @property({attribute: false}) accessor refusal: Refusal | null = null;
 
   private get shown(): {artifact: {id: bigint; detail: ArtifactDetail} | null; refusal: Refusal | null} {

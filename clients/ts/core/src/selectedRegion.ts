@@ -7,41 +7,77 @@ import {insideBox, insidePolygon, type WorldPolygon} from './region.js';
 import type {Quantisation, RegionVerdict} from './types.js';
 
 /**
- * A selection, in data coordinates, or a published shape named by its `tessera_id`. A selection
- * is a filter: it goes on every viewport request as a `region` leaf beside the other filters, so
- * the region's counts are read off the same frame as everything else. `outside` negates it,
- * selecting the complement within what this principal can see.
+ * A selection for {@link Store.select}: a box or a lasso in the current view's data coordinates, or
+ * a published artifact's shape. The store sends it on every viewport request as a `region` leaf
+ * beside the other filters, so the region's counts are read off the same frame as the rest.
+ *
+ * - `box`: `bbox` is `[x0, y0, x1, y1]`, with either corner first.
+ * - `lasso`: `points` are the drawn polygon's vertices, closed implicitly. A lasso needs at least
+ *   three points; one with fewer clears the selection.
+ * - `artifact`: `id` is the artifact's `tessera_id`, and the selection is its published shape.
+ *
+ * @category Projections
  */
 export type SelectionShape = (
   | {kind: 'box'; bbox: [number, number, number, number]}
   | {kind: 'lasso'; points: [number, number][]}
   | {kind: 'artifact'; id: bigint}
-) & {outside?: boolean};
+) & {
+  /** Whether to select everything outside the shape that this viewer can see. Defaults to `false`. */
+  outside?: boolean;
+};
 
 /**
- * The selected region and what it holds, read off the presented frame.
+ * The selected region and what it holds, read off the presented frame. The store publishes `null`
+ * in its place while nothing is selected.
  *
- * `matched` is the sum of the frame's `matched` counts: the items inside the shape that the other
- * filters admit. It is exact when the server's verdict says so and the frame's tiles cover the
- * shape, and a cover otherwise. `visible` is the region alone, the same figure while no other filter
- * is on and `null` while one is. `served` is the held marks inside against `matched`. `status` is
- * `loading` until a frame fetched after the selection lands; a refused request is the region's
- * refusal.
+ * @category Projections
  */
 export type RegionProjection = {
+  /** The selection, as passed to {@link Store.select}. */
   shape: SelectionShape;
+  /**
+   * `loading` after a selection, a change of filters or `member_of` clauses, or a refresh, until a
+   * frame fetched after it lands; then `shown`. `refused` where the request carrying the region was
+   * refused.
+   */
   status: 'loading' | 'shown' | 'refused';
+  /** The refusal while `status` is `refused`, else `null`. */
   refusal: Refusal | null;
+  /**
+   * The items inside the shape that this viewer can see. `null` while a filter or a `member_of`
+   * clause in the filter position also narrows the frame, and while the region is not `shown`.
+   */
   visible: Masked | null;
+  /**
+   * The items inside the shape that the other filters admit: the sum of the frame's `matched`
+   * counts. It is exact where the server counted the shape exactly and the frame's tiles cover the
+   * shape's extent; a complement (`outside`) is never exact. Zero while the region is not `shown`.
+   */
   matched: Masked;
+  /**
+   * The held marks inside the shape (`shown`) against `matched` (`total`). Not exact, with a
+   * `total` of zero, while the region is not `shown`.
+   */
   served: Count;
-  /** `x-tessera-region`: exact for the shape, or a cover at a depth; `null` until it has answered. */
+  /**
+   * How the server counted the shape, from the `x-tessera-region` header: exactly, or over a cover
+   * of the shape at a stated depth. `null` until a response has carried it.
+   */
   verdict: RegionVerdict | null;
-  /** The held marks inside the shape: ids and world positions, the first {@link REGION_HELD_LIMIT}. */
+  /**
+   * The held marks inside the shape: the `tessera_id`s and world positions (`x, y` pairs) of the
+   * first {@link REGION_HELD_LIMIT}, and the `count` of every one.
+   */
   held: {ids: BigUint64Array; positions: Float32Array; count: number};
 };
 
-/** How many held marks a region lists. The count is always whole. */
+/**
+ * How many held marks a region lists in `held.ids` and `held.positions`. `held.count` counts them
+ * all.
+ *
+ * @category Projections
+ */
 export const REGION_HELD_LIMIT = 500;
 
 /** The marks the store holds, which the region's sample is taken from. */

@@ -5,31 +5,39 @@ import type {ViewportResult} from './types.js';
 export type HeadFrames = {tiles: Uint8Array; subCells: Uint8Array | null; artifacts: Uint8Array | null};
 
 /**
- * Turns a response into typed arrays. `workerDecoder` does it off the render thread; `inlineDecoder`
- * is synchronous and correct, for a test, a script or a runtime without `Worker`.
+ * Turns a `/v1/viewport` body into typed arrays. {@link workerDecoder} decodes in web workers, off
+ * the thread that draws; {@link inlineDecoder} decodes on the calling thread, for a test, a script
+ * or a runtime without `Worker`. Pass one as a {@link TesseraClient}'s `decoder` option.
  *
- * {@link decode} takes a whole body. {@link decodeHead} and {@link decodePoints} take a streamed
- * response's frames as they land, so a tile is drawable before the last frame arrives.
+ * @category HTTP client
  */
 export type Decoder = {
   /**
-   * `background` sends speculative work to its own lane where there is one, so a response the user
-   * is waiting for does not queue behind an anticipatory one.
+   * Decodes a whole body, as {@link decodeViewport} does. `background` sends the work to a separate
+   * worker where the decoder has one, so a response the user is waiting for does not queue behind
+   * speculative work. Rejects with `Error` for a malformed body.
    */
   decode(bytes: Uint8Array, background?: boolean): Promise<ViewportResult>;
-  /** The counts, the underlay and the artifacts: everything before the first points frame. */
+  /** The counts, the underlay and the artifacts: everything before the first points frame. @internal */
   decodeHead(frames: HeadFrames, background?: boolean): Promise<ViewportHead>;
-  /** One kind-3 frame, decoded alone. Each frame is an independent Arrow stream. */
+  /** One kind-3 frame, decoded alone. Each frame is an independent Arrow stream. @internal */
   decodePoints(frame: Uint8Array, background?: boolean): Promise<PointsPart>;
-  /** Releases the workers, if there are any. */
+  /** Terminates the workers, if there are any, and rejects the decodes they hold. */
   close(): void;
   /**
-   * The last reply's decode time in the worker, in ms, excluding time queued in its lane. `null`
-   * for the inline decoder. Per frame under a streamed response.
+   * The last reply's decode time inside a worker, in milliseconds, excluding time queued. On a
+   * streamed response, the time of the last frame. `null` for the inline decoder and before the
+   * first reply.
    */
   readonly lastWorkerMs: number | null;
 };
 
+/**
+ * A decoder that runs on the calling thread. `background` has no effect and `lastWorkerMs` is
+ * always `null`.
+ *
+ * @category HTTP client
+ */
 export function inlineDecoder(): Decoder {
   // Synchronous, so `background` has no effect.
   return {
@@ -41,18 +49,21 @@ export function inlineDecoder(): Decoder {
   };
 }
 
-/**
- * How the worker is made where the default cannot load it. The default loads `decode.worker.js`
- * from beside this module, which Vite and webpack follow and bundle. The package build writes that
- * file with Arrow bundled into it, because a page's import map does not apply inside a worker, so
- * it also loads unbundled. esbuild does not follow the URL: a host copies the file beside its
- * output or installs a factory here. The single-file bundle installs one that makes the worker
- * from a Blob or data URL.
- *
- * The factory is read each time a worker is made.
- */
+/** The factory {@link setWorkerFactory} installed, or `null` for the default. */
 let workerFactory: (() => Worker) | null = null;
 
+/**
+ * Sets how {@link workerDecoder} makes a worker, for a host whose bundler cannot load the default.
+ * The default loads `decode.worker.js` from beside this module, which Vite and webpack follow and
+ * bundle. That file has Arrow bundled into it, since a page's import map does not apply inside a
+ * worker, so it also loads unbundled. esbuild does not follow the URL: a host copies the file
+ * beside its output or installs a factory here. The single-file bundle installs one that makes the
+ * worker from a Blob or data URL.
+ *
+ * @param factory - Makes one worker. Read each time a worker is made. `null` restores the default.
+ *
+ * @category HTTP client
+ */
 export function setWorkerFactory(factory: (() => Worker) | null): void {
   workerFactory = factory;
 }
@@ -75,13 +86,15 @@ type Job<T> = {request: () => {message: object; transfer: ArrayBuffer[]}; inline
 type Reply = {ready: true} | {id: number; result?: never; error?: string; ms?: number};
 
 /**
- * Decodes in workers: two foreground lanes and a background lane made on first use. `null` where
- * `Worker` is unavailable or no worker can be constructed.
+ * A decoder that decodes in web workers: two workers that take requests in turn, and a third for
+ * `background` work, made on its first use. Returns `null` where `Worker` is undefined or no
+ * worker can be made.
  *
- * A lane holds its requests until its worker says `ready`, without transferring their buffers. A
- * worker that fails before `ready` did not load, so the lane decodes what it holds, and everything
- * after, on the main thread. A worker that fails after `ready` loses the requests it holds, which
- * are rejected, and the lane decodes everything after on the main thread.
+ * A worker holds its requests until it has loaded. One that fails to load has its requests, and
+ * every later one, decoded on the calling thread. One that fails after loading rejects the
+ * decodes it holds, and later requests to it are decoded on the calling thread.
+ *
+ * @category HTTP client
  */
 export function workerDecoder(): Decoder | null {
   if (typeof Worker === 'undefined') return null;
@@ -225,7 +238,12 @@ export function workerDecoder(): Decoder | null {
   };
 }
 
-/** A worker when one can be had, the inline decoder otherwise. */
+/**
+ * {@link workerDecoder} where a worker can be made, {@link inlineDecoder} otherwise. The decoder a
+ * {@link TesseraClient} uses when given none.
+ *
+ * @category HTTP client
+ */
 export function createDecoder(): Decoder {
   return workerDecoder() ?? inlineDecoder();
 }

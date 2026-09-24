@@ -15,6 +15,7 @@ import type {Quantisation, TileCounts, ViewportPart, ViewportResponse, RegionVer
 /** The byte budget for held bands where none is given. */
 export const DEFAULT_CACHE_BYTES = 512 * 1024 * 1024;
 
+/** @internal */
 export type ReplicaOptions = {
   view: string;
   /** The byte budget for held bands. */
@@ -48,7 +49,7 @@ export type ReplicaOptions = {
   onPhase?: (kind: string, ms: number, n: number) => void;
 };
 
-/** What one {@link Replica.fetchRegion} call resolved to. */
+/** What one {@link Replica.fetchRegion} call resolved to. @internal */
 export type ReplicaFrame = {
   depth: number;
   /** The region asked about, in tile-index space at `depth`. */
@@ -166,6 +167,7 @@ function splitRect(rect: TileRect, maxTiles: number): TileRect[] {
   return out;
 }
 
+/** @internal */
 export class Replica {
   private readonly cache: BandCache;
   private readonly now: () => number;

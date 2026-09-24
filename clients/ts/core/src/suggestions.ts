@@ -14,12 +14,27 @@ const SUGGEST_MIN_RETRY_S = 0.25;
 /** How many `superseded` retries one `q` gets before it is published as a `backpressure` refusal. */
 const SUGGEST_MAX_RETRIES = 5;
 
-/** What the typeahead publishes into the `filters` projection. */
+/**
+ * The category typeahead's state, which the store publishes as part of the `filters` projection.
+ * {@link Store.suggest} fills it.
+ *
+ * @category Projections
+ */
 export type SuggestState = {
-  /** The last page landed per column, with the `q` it answers. */
+  /**
+   * The last page that landed per column: the `q` it answers, the values this viewer can see, and
+   * `more`, which is true where the server stopped before running out of matches.
+   */
   suggestions: Record<string, {q: string; values: SuggestValue[]; more: boolean}>;
+  /**
+   * The refusal per column for its last ask, which replaces the column's page. An ask the server
+   * still sheds as `superseded` after five retries is published here as `backpressure`.
+   */
   suggestErrors: Record<string, Refusal>;
-  /** Moves at every {@link Suggestions.reset}, so a control can tell that every page was dropped. */
+  /**
+   * Moves each time every page, refusal and pending ask is dropped (at a view switch and at
+   * {@link Store.clear}), so a control can tell that its page was dropped.
+   */
   suggestEpoch: number;
 };
 

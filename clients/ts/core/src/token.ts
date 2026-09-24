@@ -3,8 +3,15 @@ import type {Clock} from './driver.js';
 import type {Refusal} from './presented.js';
 
 /**
- * How the store gets a viewer token it renews before expiry. `expiresAt` is seconds since the Unix
- * epoch, as `/session/authorise` reports `expires_at`; `Infinity` is a token that does not expire.
+ * A function the store calls for a viewer token, and calls again to renew it. It resolves to the
+ * token and `expiresAt`, in seconds since the Unix epoch, as `/session/authorise` reports
+ * `expires_at`; `Infinity` is a token that does not expire.
+ *
+ * The store renews 30 seconds before expiry, or halfway through a lifetime shorter than a minute,
+ * and calls again before a request where the token has 5 seconds or less left. Concurrent requests
+ * share one call. A rejection refuses the request that was waiting for the token.
+ *
+ * @category Store
  */
 export type TokenSupplier = () => Promise<{token: string; expiresAt: number}>;
 

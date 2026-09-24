@@ -11,7 +11,16 @@ import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
 import type {ArrowType, ArtifactDetail, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
-/** Where a streamed response's points go, one frame's worth at a time. */
+/**
+ * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
+ * {@link TesseraClient.viewport} decodes them. Parts arrive in the order the server sent them, and
+ * the next part is not handed over until a returned promise settles.
+ *
+ * Each part's `result` holds whole tiles: the counts of the tiles whose points it carries, those
+ * points, and the response's artifacts. Its `subCells` is `null`.
+ *
+ * @category HTTP client
+ */
 export type PartSink = (part: ViewportPart) => void | Promise<void>;
 
 /** What either decode path hands back, before the headers are folded in around it. */
@@ -24,11 +33,8 @@ type Decoded = {
 };
 
 /**
- * The point columns of a response that carried none — every streamed response's own result.
- *
- * Fresh buffers each time rather than one shared empty set: a caller that holds a result holds
- * these, and two results sharing a `scalars` object is an aliasing fault waiting for the day
- * something writes to one.
+ * Empty point columns, for a result whose points went to a part sink. Each call makes fresh
+ * buffers, so no two results share a `scalars` object.
  */
 function emptyPoints() {
   return {
@@ -45,7 +51,7 @@ function emptyPoints() {
   };
 }
 
-/** The same result with its points removed — they were delivered to the sink instead. */
+/** The same result with its points removed, since they went to the part sink. */
 function headOnly(result: ViewportResult): ViewportResult {
   return {...result, ...emptyPoints()};
 }
@@ -53,10 +59,9 @@ function headOnly(result: ViewportResult): ViewportResult {
 /**
  * The run of tiles whose served counts add up to one points frame's rows.
  *
- * **A chunk boundary never splits a tile** (`streamed-serving.md` §2), so the frame's rows are
- * exactly some run of the tiles batch and the run is found by adding up the counts the server
- * already sent. A frame whose rows land inside a tile is a wire the client cannot attribute, and
- * it refuses rather than assigning the points to a tile they may not belong to.
+ * The server does not split a tile across frames, so a frame's rows are some run of the tiles
+ * batch, found by adding up the counts the server already sent. A frame whose rows end inside a
+ * tile cannot be attributed, and is refused rather than assigned to a tile it may not belong to.
  */
 function tilesFor(tiles: readonly TileCounts[], from: number, rows: number): {tiles: TileCounts[]; next: number} {
   let at = from;
@@ -71,16 +76,23 @@ function tilesFor(tiles: readonly TileCounts[], from: number, rows: number): {ti
 }
 
 /**
- * A Tessera error body, `{"error": code, "detail": string}`, with its HTTP status.
+ * A refusal from the server: the HTTP status and the `error` and `detail` of its JSON error body.
+ * A request that reaches no server rejects with the `fetch` error instead, so a caller can tell a
+ * refusal from a transport failure. The `message` is `"<status> <code>: <detail>"`.
  *
- * Typed rather than a bare `Error` because the viewer must be able to tell a refusal from a
- * transport failure: an empty region and a failed region are semantic opposites, and only a typed
- * error lets a caller render them differently.
+ * @category HTTP client
  */
 export class TesseraError extends Error {
   constructor(
+    /** The HTTP status, such as `404` or `422`. */
     readonly status: number,
+    /**
+     * The body's `error` code: `bad-credential`, `expired-token`, `unknown`, `conflict`,
+     * `contract`, `backpressure`, `fail-closed` or `not-ready`. `unknown` also where the body is not
+     * JSON or has no code.
+     */
     readonly code: string,
+    /** The body's `detail`, saying what was wrong. The HTTP status text where the body has none. */
     readonly detail: string
   ) {
     super(`${status} ${code}: ${detail}`);
@@ -101,40 +113,61 @@ async function fail(response: Response): Promise<never> {
   throw new TesseraError(response.status, code, detail);
 }
 
+/**
+ * Where a {@link TesseraClient} sends its requests, and how.
+ *
+ * @category HTTP client
+ */
 export type TesseraClientOptions = {
+  /** The viewer listener's base URL, without a trailing slash. Routes under `/v1/` are appended to it. */
   viewerUrl: string;
+  /** The session listener's base URL, without a trailing slash. Routes under `/session/` are appended to it. */
   sessionUrl: string;
   /**
-   * Needed only by `authorise` and `revoke`. A browser holds it only where the server allows it,
-   * which a deployment turns on for development.
+   * The session credential, sent as the bearer token by `authorise` and `revoke`; no other method
+   * uses it. A browser page can reach the session listener only from an origin the deployment
+   * lists in `serve.dev_cors_origins`, a development setting.
    */
   sessionCredential?: string;
   /**
-   * Called once per viewport response with its decode time. `ms` runs from bytes in to typed
-   * arrays out as seen from this thread; `workerMs` is the worker's own decode time, `null` where
-   * the response decoded inline, so the difference is time spent queued. On a streamed response
-   * `ms` runs from the head to the last part and includes the wire, and `workerMs` is the sum of
-   * the frames' decode times.
+   * Called once per viewport response with its decode figures. `ms` runs from the response's
+   * headers to the last typed array, as this thread sees it, and includes reading the body.
+   * `bytes` is the body's size and `points` the points decoded. `workerMs` is the worker's own
+   * decode time, or `null` where the response decoded on this thread, so `ms - workerMs` is time
+   * spent reading and queued. On a streamed response `workerMs` is the sum over the frames.
    */
   onDecode?: (ms: number, bytes: number, points: number, workerMs: number | null) => void;
-  /** Where responses are decoded: a worker in a browser and inline elsewhere unless given. */
+  /**
+   * Where responses are decoded. Defaults to {@link createDecoder}'s choice: a worker where one can
+   * be made, this thread otherwise. Made at the first `viewport` call.
+   */
   decoder?: Decoder;
   /** Used for every request in place of the global `fetch`. */
   fetch?: typeof fetch;
-  /** Sent on every request. A verb's own `authorization` and `content-type` are set after these. */
+  /**
+   * Headers sent on every request. A method's own `authorization` and `content-type` replace a
+   * header of the same name here.
+   */
   headers?: Record<string, string>;
 };
 
 /**
- * The viewer and session routes, one method each. It holds no cache, session or replica state;
- * the store above it holds those.
+ * Calls the viewer and session routes, one method per route. It holds no cache or session state;
+ * {@link createStore} holds those.
+ *
+ * A method rejects with {@link TesseraError} when the server refuses, and with the `fetch` error
+ * when no server answers. On a viewer route, `401 bad-credential` for a token that worked before
+ * and `403 expired-token` both mean the session has ended. Every count a viewer route returns is
+ * over the items the token's session may see.
+ *
+ * @category HTTP client
  */
 export class TesseraClient {
   /**
    * Where responses are turned into typed arrays.
    *
    * Created lazily and shared across requests. In a browser this is a worker, so decode does not
-   * compete with drawing; everywhere else it is the same synchronous call this always made.
+   * compete with drawing; elsewhere it decodes on this thread.
    */
   private decoder: Decoder | null = null;
 
@@ -150,12 +183,24 @@ export class TesseraClient {
     return (this.opts.fetch ?? fetch)(url, {...init, headers});
   }
 
-  /** Release the decode worker, if one was created. */
+  /** Closes the decoder, terminating its workers if it has any. */
   close(): void {
     this.decoder?.close();
     this.decoder = null;
   }
 
+  /**
+   * `POST /session/authorise`: mints a viewer session. The request's `auth_data` is base64 of the
+   * JSON `{"terms": [...]}`, the form the built-in `builtin:passthrough` auth plugin reads.
+   *
+   * @param terms - The access labels to grant, under `builtin:passthrough`. Another auth plugin
+   *   reads them by its own rules.
+   * @returns The session: `token` for the viewer methods, `tokenId` for `revoke`, and `expiresAt`
+   *   in seconds since the Unix epoch.
+   * @throws `Error` when the options carry no `sessionCredential`.
+   * @throws {@link TesseraError} when the server refuses: `401` for a wrong session credential,
+   *   `422` where the auth plugin refuses `auth_data`, `429` under load.
+   */
   async authorise(terms: string[], signal?: AbortSignal): Promise<Session> {
     if (!this.opts.sessionCredential) {
       throw new Error('authorise needs a sessionCredential');
@@ -176,7 +221,14 @@ export class TesseraClient {
     return {token: body.token, tokenId: body.token_id, expiresAt: body.expires_at};
   }
 
-  /** End a session by its `tokenId`, so the token itself is not sent again. An id naming no live session is not refused. */
+  /**
+   * `POST /session/revoke`: ends the session `tokenId` names, so the token itself is not sent
+   * again. An id naming no live session is not refused.
+   *
+   * @throws `Error` when the options carry no `sessionCredential`.
+   * @throws {@link TesseraError} when the server refuses: `401` for a wrong session credential,
+   *   `422` for a malformed request.
+   */
   async revoke(tokenId: number, signal?: AbortSignal): Promise<void> {
     if (!this.opts.sessionCredential) {
       throw new Error('revoke needs a sessionCredential');
@@ -193,7 +245,15 @@ export class TesseraClient {
     if (!response.ok) await fail(response);
   }
 
-  /** `GET /v1/meta`. A body missing a field the contract requires is refused. */
+  /**
+   * `GET /v1/meta`: the deployment's views, groups, columns, filter operands and selection limits,
+   * and the layers this token's session may know of. The layers differ between principals, so a
+   * result is not shared across tokens.
+   *
+   * @throws {@link TesseraError} when the server refuses.
+   * @throws `Error` when the body lacks a field this client requires, which means the server and
+   *   the client are from different versions.
+   */
   async meta(token: string, signal?: AbortSignal): Promise<Meta> {
     const response = await this.send(`${this.opts.viewerUrl}/v1/meta`, {
       headers: {authorization: `Bearer ${token}`},
@@ -301,19 +361,29 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /v1/viewport`. A field the caller leaves unset is left out of the body, so the server's
-   * own default applies; `k` defaults to the deployment's ceiling.
+   * `POST /v1/viewport`: for one region at one depth, each tile's counts, a sample of up to `k`
+   * points per tile, and the served artifacts. A field of `req` left unset is left out of the
+   * body, so the server's default applies: `k` defaults to `selection.kMaxMarks` from
+   * {@link TesseraClient.meta}, and the server caps it at `selection.maxK`. `k = 0` asks for the
+   * counts alone, which decode on this thread.
+   *
+   * @param background - Decode on the decoder's background worker, so a response the user is
+   *   waiting for does not queue behind this one. Defaults to `false`.
+   * @param onPart - Receives the points as each points frame is decoded, before the body has
+   *   finished. With a sink the returned `result` carries the counts, sub-cells and artifacts and
+   *   no points. Not called for `k = 0`.
+   * @returns The decoded result, the server's timings, the response's keys (`identityKey`,
+   *   `contentKey`, `pin`, `stale`, `region`) and the body's size in `bytes`.
+   * @throws {@link TesseraError} when the server refuses: `404` for an unknown view, `422` for a
+   *   malformed request, `429` under load.
+   * @throws `Error` when the body is malformed or ends before its trailer. Parts already passed to
+   *   `onPart` hold whole tiles and stay correct.
    */
   async viewport(
     token: string,
     req: ViewportRequest,
     signal?: AbortSignal,
-    /** Decode on the speculative lane; see {@link Decoder.decode}. */
     background = false,
-    /**
-     * Takes each points frame as it lands. With a sink the returned response carries no points,
-     * since each went to the sink. A request with `k = 0` has no points frames.
-     */
     onPart?: PartSink
   ): Promise<ViewportResponse> {
     // Each optional field is sent only when the caller set it, so an unset one takes the server's
@@ -381,7 +451,7 @@ export class TesseraClient {
     };
   }
 
-  /** The whole body, then the decoder — what a caller holding no part sink gets. */
+  /** Reads the whole body, then decodes it: the path for a caller with no part sink. */
   private async whole(
     response: Response,
     counts: boolean,
@@ -404,25 +474,21 @@ export class TesseraClient {
   }
 
   /**
-   * Consume the body as it arrives, landing each points frame the moment it is whole.
+   * Reads the body as it arrives and hands each points frame to the sink once it is whole.
    *
-   * **Slow data should cause pop-in, not lag.** A wide view is around a hundred point frames and a
-   * hundred megabytes; reading the body to its end before decoding the first frame means nothing
-   * is drawn until the last byte has landed, and then every tile arrives at once — the wire
-   * streams and the client waits. The server already emits whole tiles per frame, in tile order,
-   * each frame an independently decodable Arrow stream (`streamed-serving.md` §2, §3), which is
-   * precisely the licence to decode and draw one as it completes.
+   * A wide view is around a hundred points frames and a hundred megabytes. Reading the body to its
+   * end before decoding would draw nothing until the last byte arrived. The server sends whole
+   * tiles per frame, in tile order, each frame an Arrow stream decodable alone, so each frame is
+   * decoded and drawn as it completes.
    *
    * The tiles frame comes first, so each part carries the run of tile counts its own points
-   * satisfy — walked off the counts the server already sent, since a chunk boundary never splits a
-   * tile. A part is therefore a set of *whole* bands, not a fragment of one, and the replica
-   * stores it exactly as it stores a whole response.
+   * satisfy, found from the counts the server already sent. A part is a set of whole bands, and
+   * the replica stores it as it stores a whole response.
    *
-   * **What ends the response is the trailer, not the socket.** A body that stops without one is
-   * incomplete by contract and throws here as it always did (`streamed-serving.md` §6); what the
-   * caller has already landed stays landed and stays sound — every part came from the one
-   * generation snapshot and each tile's points are an id-order prefix of `served(T)` — but the
-   * request never resolves, so nothing downstream marks the region covered.
+   * The trailer ends the response. A body that stops without one is incomplete and throws here.
+   * What the caller has already received stays correct, since every part came from one generation
+   * and each tile's points are an id-order prefix of its served set, but the request does not
+   * resolve, so nothing marks the region covered.
    */
   private async streamed(
     response: Response,
@@ -575,13 +641,22 @@ export class TesseraClient {
   }
 
   /**
-   * `GET /v1/categories/{column}`: what this column's codes stand for. Passing `codes` resolves
-   * those codes alone; omitting them enumerates the whole value set, a page at a time until the
-   * server returns no cursor.
+   * `GET /v1/categories/{column}`: what a category column's codes stand for, as `code`, `key` and
+   * `title`. With `codes`, resolves those codes alone, in the order given; an empty list returns
+   * `[]` without a request. Without `codes`, lists the whole value set in key order, requesting
+   * page after page until the server returns no cursor.
    *
-   * A code missing from the answer is either unknown or a value this principal cannot see, and
-   * the server does not say which. A code the client drew always resolves, since a visible point
-   * carries it. A refusal throws {@link TesseraError}.
+   * A code missing from the answer is unknown or is a value this principal may not see, and the
+   * server does not say which. A code on a point this session was served always resolves.
+   *
+   * @param column - The column's name, or `<column>@<key>` for a group-scoped category pinned to
+   *   one view.
+   * @param opts.codes - The codes to resolve. Left out, the whole value set is listed.
+   * @param opts.limit - The page size when listing, capped at `selection.maxCategoryValues`, which
+   *   is also the default.
+   * @param opts.view - The view whose value set a group-scoped column answers from.
+   * @throws {@link TesseraError} when the server refuses: `404` for a column that is not a category,
+   *   `422` for a malformed request such as `limit: 0` or a group-scoped column named with no view.
    */
   async categories(
     token: string,
@@ -630,14 +705,24 @@ export class TesseraClient {
   }
 
   /**
-   * `GET /v1/categories/{column}/suggest`: at most `limit` values of a category whose folded key,
-   * folded title or a word start of either begins with `q`, ordered by the matched text and
-   * visible to this principal on the rule `categories` follows.
+   * `GET /v1/categories/{column}/suggest`: up to `limit` values of a category whose key, title or a
+   * word start of either begins with `q`, compared after case folding. Values are ordered by the
+   * matched text, and only values this principal may see are offered, as for
+   * {@link TesseraClient.categories}. The page echoes `q` as sent, so a caller can match a page to
+   * its request.
    *
    * A session has one suggestion in flight at a time. The server refuses a second with `429`, and
-   * this returns `{status: 'superseded', retryAfterS}` for it rather than throwing, since the
-   * caller's answer is to retry. The response echoes `q` as sent, so a caller can match a page to
-   * the request it answers.
+   * this returns `{status: 'superseded', retryAfterS}` for it instead of throwing.
+   *
+   * @param column - As for {@link TesseraClient.categories}.
+   * @param q - The text typed. Empty matches every value.
+   * @param opts.limit - The page size, capped at `selection.maxSuggestions`, which is also the
+   *   default.
+   * @param opts.counts - `true` adds each value's count of the items carrying it that this
+   *   principal may see.
+   * @param opts.view - As for `categories`.
+   * @throws {@link TesseraError} for any other refusal: `404` for a column that is not a category,
+   *   `422` for a `q` over 256 bytes or a malformed request.
    */
   async suggest(
     token: string,
@@ -681,9 +766,14 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /v1/items/{tessera_id}`: the whole record, keyed by column name, a category as its
-   * vocabulary key. A column the item has no value for is absent from `fields`. `labels` names
-   * the item's access labels this session satisfies and no others.
+   * `POST /v1/items/{tessera_id}`: one item's whole record. `fields` is keyed by column name, with
+   * a category given as its vocabulary key and a column the item has no value for left out.
+   * `labels` lists the item's access labels this session satisfies and no others. `views` and
+   * `scoped` cover only the views this principal may reach.
+   *
+   * @param tesseraId - The item's `tessera_id`, as a viewport result's `ids` carries it.
+   * @throws {@link TesseraError} when the server refuses: `404` both for an id that names nothing
+   *   and for an item this principal may not see.
    */
   async item(token: string, tesseraId: bigint, signal?: AbortSignal): Promise<ItemDetail> {
     const response = await this.send(`${this.opts.viewerUrl}/v1/items/${tesseraId.toString()}`, {
@@ -711,12 +801,19 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /v1/artifacts/{tessera_id}`: one artifact's layer, key, masked count and geometry under
-   * `view`, since a masked count is per view.
+   * `POST /v1/artifacts/{tessera_id}`: one artifact's layer, key, masked count and geometry in a
+   * view. The count and the geometry are over the members this principal may see. Geometry is in
+   * 32-bit grid units (see {@link GRID32}), and a geometry field is `null` where the layer declares
+   * no such property.
    *
-   * An identifier naming nothing, a point, an artifact of a layer this principal cannot reach, a
-   * suppressed one and one below its layer's existence criterion all answer the same `404`, which
-   * throws {@link TesseraError}.
+   * @param opts.view - The view to count and place the artifact in.
+   * @param opts.idset - The `idset` the id was issued under; refused with `409` where it differs
+   *   from the deployment's.
+   * @param opts.zoom - The depth to simplify the shape for, floored and clamped to 0 to 16. Left
+   *   out, the whole stored shape is served.
+   * @throws {@link TesseraError} when the server refuses: one `404` alike for an id naming nothing,
+   *   a point, an artifact of a layer this principal cannot reach, a suppressed artifact and one
+   *   below its layer's existence criterion; `409` for a stale `idset`.
    */
   async artifact(
     token: string,
@@ -760,13 +857,18 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /v1/artifacts/browse`: a layer's hierarchy by lineage (its roots, one artifact's
-   * children and parents, or a name search), each row with its masked count and, under a filter,
-   * its matched count. It takes no bbox, tiles or zoom. Identifiers travel as decimal strings,
-   * since JSON has no 64-bit integer.
+   * `POST /v1/artifacts/browse`: one page of a layer's hierarchy, read by parent and child links
+   * whatever the map shows: its roots, one artifact's children with that artifact's parents, or a
+   * search by name. Each row carries its masked count and, where `filters` is set, its matched
+   * count. Rows are ordered by count, highest first, then by `tessera_id`; the count is the matched
+   * one under `filters` and the masked one otherwise. Pass `next` back as `cursor` for the
+   * following page; it is `null` on the last.
    *
-   * An unknown layer is a `422`. An artifact this principal was never served answers an empty
-   * page.
+   * A parent is listed only where this principal is served both ends of the link. A `parent` this
+   * principal is not served answers an empty page.
+   *
+   * @throws {@link TesseraError} when the server refuses: `404` for an unknown view, `422` for an
+   *   unknown layer, both `parent` and `q`, `limit: 0` or a malformed filter.
    */
   async browse(token: string, req: BrowseRequest, signal?: AbortSignal): Promise<BrowsePage> {
     const body: Record<string, unknown> = {view: req.view, layer: req.layer};

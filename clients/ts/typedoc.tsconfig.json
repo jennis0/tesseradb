@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": ["core/src/index.ts", "deck/src/index.ts", "components/src/index.ts", "react/src/index.ts", "react/src/components.ts"],
+  "compilerOptions": {"noEmit": true, "lib": ["ES2022", "DOM", "DOM.Iterable"]}
+}

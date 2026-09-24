@@ -8,13 +8,35 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-legend>`: what the colours mean. For a category column, the values the marks on screen
- * carry, resolved per column; for a numeric column, a ramp over the domain of the marks served, not
- * the corpus; under cluster colour, the served artifacts in their colours.
+ * What the colours mean. For a category column, the values the marks on screen carry, in their
+ * colours; for a numeric column, a ramp over the range of the marks served, with its minimum and
+ * maximum; under colour by cluster, the served artifacts in their colours.
  *
- * `selectable` adds a Colour by select (the rendered columns and every layer that can colour,
- * drawn or not) beside a Layers select that draws one layer or none. Colouring by a layer does
- * not draw it.
+ * `selectable` adds up to three selects. *Colour by* offers the rendered columns and every layer
+ * that can colour, drawn or not; colouring by a layer does not draw it. *Layers* draws one layer or
+ * none. *Level* appears under colour by a levelled layer with several levels served.
+ *
+ * @summary What the map's colours mean, and the colour controls.
+ * @tagname tessera-legend
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - The Colour
+ *   by select changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level
+ *   select, or a levelled layer's entry in Colour by, chose a level.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The Layers
+ *   select changed.
+ * @csspart title - The heading, shown where `selectable` is not set.
+ * @csspart state - The state line, with `data-state`.
+ * @csspart refusal - A refusal's code and detail, or `no such column`.
+ * @csspart select - The Colour by select.
+ * @csspart cluster-option - An entry in Colour by for a layer, or for one level of a levelled layer.
+ * @csspart layers-select - The Layers select.
+ * @csspart level-select - The Level select.
+ * @csspart swatches - The list of colours.
+ * @csspart swatch - One colour.
+ * @csspart ramp - A numeric column's ramp.
+ * @csspart label - The ramp's `min` and `max` captions.
+ * @csspart value - The ramp's minimum and maximum.
  */
 export class TesseraLegend extends TesseraElement {
   static override styles = [
@@ -61,8 +83,9 @@ export class TesseraLegend extends TesseraElement {
     `
   ];
 
+  /** Adds the Colour by, Layers and Level selects, and drops the heading. */
   @property({type: Boolean}) accessor selectable = false;
-  /** Whether the readout (swatches, ramp) renders under the selects. */
+  /** Under `selectable`, also renders the swatches or the ramp below the selects. */
   @property({type: Boolean}) accessor readout = false;
 
   private choose(value: string): void {
@@ -76,9 +99,9 @@ export class TesseraLegend extends TesseraElement {
     if (at > 0) this.chooseLevel(value.slice(at + 1));
   }
 
-  /** The level the map colours and labels at: `null` is the deepest served (the cut's leaves). */
+  /** The level chosen in the Level select; `null` chooses the level drawn by default. */
   @property({type: Number, attribute: 'cluster-level'}) accessor level: number | null = null;
-  /** The level drawn when none is chosen (the explorer's, from the budget); shown in the first option. */
+  /** The level drawn when none is chosen, named in the Level select's first entry; `null` names the deepest served. */
   @property({type: Number, attribute: false}) accessor autoLevel: number | null = null;
 
   private chooseLevel(value: string): void {

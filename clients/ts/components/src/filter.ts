@@ -17,25 +17,6 @@ import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
 
-/**
- * `<tessera-filter column="…">`: one operand, rendered by its type from `meta`. A text column is a
- * search field with an all words or phrase toggle. A category is a typeahead over
- * `/v1/categories/{column}/suggest`, or a checklist when every value fits on one page. A number or
- * a date is two inputs; a keyword is a field with its operator.
- *
- * A typed category value is submitted on Enter without checking it against the suggestions. A key
- * the server did not suggest may still be filterable, and an unknown key answers empty, the same
- * as a value that does not exist, so the control does not say "no such value". A refused
- * suggestion request shows as a refusal beside the field.
- *
- * A suggestion page is rendered only while its `q` matches the text in the box, so a late answer
- * to an earlier keystroke is not shown.
- *
- * The draft is local while the user types; the store's draft re-seeds it only when it changes
- * underneath (a clear all). Typing asks the store's typeahead on every keystroke, and the store
- * debounces it. Emits `tessera-filterchange` with the composed expression.
- */
-
 /** The operators a keyword control can send. */
 const KEYWORD_OPERATORS = ['contains', 'prefix', 'eq'] as const;
 type KeywordOperator = (typeof KEYWORD_OPERATORS)[number];
@@ -43,6 +24,34 @@ type KeywordOperator = (typeof KEYWORD_OPERATORS)[number];
 /** How long a typed control must be quiet before its change is sent. */
 const TYPING_DEBOUNCE_MS = 350;
 
+/**
+ * One filter control for the column `column`, drawn by the family `/v1/meta` gives the column. A
+ * text column is a search box and two buttons: all words, and phrase (any word where the column
+ * takes no phrase). A category is a checklist when every value the viewer can see fits on the first page of suggestions, else a
+ * typeahead over `/v1/categories/{column}/suggest`. A number is two inputs, and a date two date
+ * inputs. A keyword column is a text box with its operator (`contains`, `prefix` or `eq`).
+ *
+ * Typing is sent 350 ms after the last keystroke; a choice is sent at once. Each change replaces
+ * the column's control in the store's filter draft (`Store.setFilters`). A category value typed
+ * and entered is added whether or not it was suggested; a key the viewer cannot see matches
+ * nothing, as a key that does not exist does. The host carries `data-on` while the control holds a
+ * value.
+ *
+ * @summary One filter control, drawn by the column's type.
+ * @tagname tessera-filter
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - The
+ *   control changed, with the column and the composed filter expression.
+ * @csspart label - The column's name, as a caption.
+ * @csspart entry - A text, number or date input.
+ * @csspart mode - The text column's word toggle, or the keyword column's operator select.
+ * @csspart value-chips - The chosen category values.
+ * @csspart value-chip - One chosen category value, with a remove button.
+ * @csspart values - The checklist, or the typeahead's suggestions.
+ * @csspart tick - One value in the checklist or the suggestions.
+ * @csspart more - The hint that more values match than one page holds.
+ * @csspart refusal - The refusal of a suggestion request.
+ */
 export class TesseraFilter extends TesseraElement {
   static override styles = [
     tokens,
@@ -121,15 +130,20 @@ export class TesseraFilter extends TesseraElement {
     `
   ];
 
+  /** The column this control filters, a name `meta.filterOperands` lists. Unset or unknown, the control renders nothing. */
   @property() accessor column = '';
-  /** The operand set by property, for a host with no store on the page. */
+  /** The column's operands, for a host that sets them itself in place of the store's `meta`. */
   @property({attribute: false}) accessor operand: FilterOperandSet | null = null;
 
+  /** @internal */
   @state() accessor draft: ColumnDraft | null = null;
+  /** @internal */
   @state() accessor search = '';
   /**
    * The title seen for each chosen key when it was picked, so its chip keeps a name after the value
    * leaves the suggestion page. A key with no recorded title shows as the key.
+   *
+   * @internal
    */
   @state() accessor labels: Record<string, string> = {};
   /**
@@ -137,6 +151,8 @@ export class TesseraFilter extends TesseraElement {
    * `'checklist'` if it said `more: false` (every visible value fits) or `'lookahead'` if not.
    * Decided once from that page, so later pages do not flip it, and reset when the store's
    * `suggestEpoch` moves.
+   *
+   * @internal
    */
   @state() accessor shape: 'checklist' | 'lookahead' | null = null;
   private sent: ColumnDraft | null = null;

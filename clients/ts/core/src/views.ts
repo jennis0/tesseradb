@@ -1,9 +1,11 @@
 import type {Meta, ViewInfo, ViewMetadataValue} from './types.js';
 
 /**
- * The views of one group, in the server's order, which is creation order. Keys are not sorted: a
- * key is the caller's own string, and `2026-Q2` sorts after `2026-Q10`. An unknown group gives the
- * empty list, as a group with no views does.
+ * The views of `group` that `meta.views` lists, in the server's order, which is creation order.
+ * Keys are not sorted: a key is the caller's own string, and `2026-Q2` sorts after `2026-Q10`. An
+ * unknown group gives the empty list, as a group with no views does.
+ *
+ * @category Layers and views
  */
 export function viewsOfGroup(meta: Meta, group: string): ViewInfo[] {
   const byId = new Map(meta.views.map((v) => [v.id, v]));
@@ -15,8 +17,10 @@ export function viewsOfGroup(meta: Meta, group: string): ViewInfo[] {
 }
 
 /**
- * The view `step` places along its group: `-1` is previous and `1` next. `null` at either end and
- * for a plain view, which is in no group. It does not wrap.
+ * The view `step` places from view `id` along its group: `-1` is the previous view and `1` the next.
+ * Returns `null` past either end, and for a plain view, which is in no group. It does not wrap.
+ *
+ * @category Layers and views
  */
 export function stepView(meta: Meta, id: string, step: number): ViewInfo | null {
   const view = meta.views.find((v) => v.id === id);
@@ -72,12 +76,16 @@ function dateSpan(startsUs: number, endsUs: number | null): string {
 }
 
 /**
- * What one view of a roster reads as: a label and its key, which is the view's only address.
+ * What one view of a group reads as: a label, and its key, which is the view's only address.
  *
- * The label is a text value named `label` or `title`; else a `timestamp_us` `starts`, as a date or,
- * with an `ends`, a range; else none, and the key stands for the view. A `members` group's views
- * resolve through `membersOf` to the owner's view under the same key. A plain view is in no roster
- * and both fields are `null`.
+ * The label is the view's text metadata value named `label`, else one named `title`, else its
+ * `timestamp_us` value `starts` as a date (`3 Jul 2026`), or with an `ends` as a range. Dates are
+ * written in `en-GB`, in UTC; a range covering whole months is written by its months
+ * (`Apr – Jun 2026`). With none of these the label is `null` and the key stands for the view. A
+ * view of a `members` group with no metadata of its own reads the owner group's view under the
+ * same key. For a plain view, which is in no group, both fields are `null`.
+ *
+ * @category Layers and views
  */
 export function viewLabel(meta: Meta, view: ViewInfo): {label: string | null; key: string | null} {
   const roster = view.roster;
@@ -95,10 +103,15 @@ export function viewLabel(meta: Meta, view: ViewInfo): {label: string | null; ke
   return {label: text('label') ?? text('title') ?? (starts === null ? null : dateSpan(starts, instant('ends'))), key: roster.key};
 }
 
-/** One entry of the layout picker: a plain view or a whole group. See {@link viewPickerEntries}. */
+/**
+ * One entry of the layout picker: a plain view or a whole group. See {@link viewPickerEntries}.
+ *
+ * @category Layers and views
+ */
 export type ViewPickerEntry = {
+  /** `view` for a plain view, `group` for a group of views. */
   kind: 'view' | 'group';
-  /** A view's id or a group's name, as {@link enterGroup} and `setCurrentView` take. */
+  /** A plain view's id, as {@link Store.setCurrentView} takes it, or a group's name, as {@link enterGroup} takes it. */
   id: string;
   /** What the entry reads as: a view's `displayName`, a group's `title` else its `name`. */
   text: string;
@@ -110,6 +123,10 @@ export type ViewPickerEntry = {
  * The layout picker's entries: one per plain view, then one per group, in `/v1/meta`'s order. An
  * owner group and a `members` group over its keys are two entries, two layouts of one roster. A
  * group is one entry however many views it holds; {@link enterGroup} picks which is entered.
+ *
+ * @param currentId - The view the store answers from, which decides each entry's `current`.
+ *
+ * @category Layers and views
  */
 export function viewPickerEntries(meta: Meta, currentId: string): ViewPickerEntry[] {
   const current = meta.views.find((v) => v.id === currentId) ?? null;
@@ -127,17 +144,24 @@ export function viewPickerEntries(meta: Meta, currentId: string): ViewPickerEntr
 
 /**
  * Whether a bundle offers one layout, so the layout picker draws nothing. A bundle whose one layout
- * is a group of many views answers `true`, and its key picker still draws the roster.
+ * is a group of many views answers `true`, and its key picker still draws the group's views.
+ *
+ * @category Layers and views
  */
 export function hasOneLayout(meta: Meta): boolean {
   return viewPickerEntries(meta, '').length <= 1;
 }
 
 /**
- * Which view of `group` a picker enters, or `null` for a group with no views this session may
- * reach. In order: the key the user is on, where the current view's group shares keys with this
- * one, so a layout toggle keeps the key; else `lastLeft`, the key the caller last left this group
- * on; else the group's first view in creation order.
+ * The id of the view of `group` a picker enters, or `null` for a group with no views this viewer
+ * may reach. In order: the view under the current view's key, where the current view's group
+ * shares keys with this one, so a layout toggle keeps the key; else the view under `lastLeft`;
+ * else the group's first view in creation order.
+ *
+ * @param currentId - The view the store answers from.
+ * @param lastLeft - The key the caller last left this group on, if it recorded one.
+ *
+ * @category Layers and views
  */
 export function enterGroup(meta: Meta, group: string, currentId: string, lastLeft?: string): string | null {
   const roster = viewsOfGroup(meta, group);

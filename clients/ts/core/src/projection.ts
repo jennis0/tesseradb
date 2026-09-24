@@ -11,22 +11,35 @@ import type {ProjectionName, Quantisation, TileScheme, ViewInfo} from './types.j
  * A `null` scheme means draw the points and no basemap.
  */
 
-/** The only tile scheme a Tessera view can address: the slippy-map `z/x/y`. */
+/**
+ * The only tile scheme a Tessera view can be addressed in: the slippy-map `z/x/y`.
+ *
+ * @category Coordinates and colour
+ */
 export const XYZ: TileScheme = 'xyz';
 
 /**
- * The tile scheme `view`'s frame is addressed in, or `null`: the condition under which a tile
- * basemap lines up with the points. The server has already taken the projection into account, and
- * a frame aligned to a square tiling is not enough on its own.
+ * The tile scheme `view`'s frame is addressed in (`view.tileScheme`), or `null`. A tile basemap
+ * lines up with the points only where this is not `null`; with `null`, draw the points and no
+ * basemap. The server decides it from the view's projection and frame.
+ *
+ * @category Coordinates and colour
  */
 export function basemapScheme(view: ViewInfo): TileScheme | null {
   return view.tileScheme;
 }
 
 /**
- * A stored position as longitude and latitude in degrees, or `null` for a view with no projection.
- * `cx`/`cy` are cell-grid units, as {@link decodeViewport} returns. A point clipped at the build
- * (beyond Web Mercator's ±85.0511°) returns the frame's edge, where it is stored and drawn.
+ * A stored position as `[longitude, latitude]` in degrees, or `null` for a view whose projection is
+ * `none`. A point clipped at the build (beyond Web Mercator's ±85.0511°) returns the frame's edge,
+ * where it is stored and drawn.
+ *
+ * @param cx - The x position in cell space, `[0, 65536)` across the frame, as the `positions` of
+ *   {@link decodeViewport}'s result hold it.
+ * @param cy - The y position in cell space.
+ * @param q - The view's `quantisation`.
+ *
+ * @category Coordinates and colour
  */
 export function lonLatOfCell(
   cx: number,

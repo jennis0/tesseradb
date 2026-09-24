@@ -5,34 +5,76 @@
  */
 
 /**
- * A served sample of a set: `served` for the view, the draw list, the marks inside a region.
- * `shown` is how many were drawn and `total` the set they sample. Both are shown or neither, since
- * a sample alone reads as the set.
+ * A sample of a set: how many marks were drawn out of how many items the set holds. The store
+ * publishes one as `view.served`, `marks.count` and a region's `served`. Show `shown` and `total`
+ * together or not at all, since a sample shown alone reads as the whole set.
+ *
+ * @category Counts
  */
-export type Count = {shown: number; total: number; exact: boolean};
+export type Count = {
+  /** How many marks were drawn. */
+  shown: number;
+  /** How many items the sampled set holds, counted over the viewer's visible set. */
+  total: number;
+  /**
+   * Whether the pair is exact. `false` before anything is served and while a region waits for its
+   * numbers; {@link formatCount} then renders nothing.
+   */
+  exact: boolean;
+};
 
 /**
- * A count with no sample behind it: `visible`, `matched`, an artifact's masked count, a region's
- * counts. `exact` is false where the figure is exact for a cover of the region at some depth rather
- * than for the shape.
+ * A count with no sample behind it, over the viewer's visible set: `visible`, `matched` and
+ * `highlighted` in the `view` projection, a region's counts, or an artifact's masked count.
+ *
+ * @category Counts
  */
-export type Masked = {value: number; exact: boolean};
+export type Masked = {
+  /** The count. */
+  value: number;
+  /**
+   * Whether `value` is exact. A region's count is inexact where the server answered for a cover of
+   * the shape at some depth, which is a superset of the shape. {@link formatMasked} prefixes an
+   * inexact figure with `≈`.
+   */
+  exact: boolean;
+};
 
+/**
+ * Options for {@link formatCount} and {@link formatMasked}.
+ *
+ * @category Counts
+ */
 export type FormatOptions = {
-  /** Whether the view the figure belongs to is stale, its content key having moved. Nothing renders then. */
+  /**
+   * Whether the figure's view is stale (`status.stale` in the store). A stale figure renders as the
+   * empty string. Defaults to `false`.
+   */
   stale?: boolean;
+  /** The locale for thousands separators, as `Number.prototype.toLocaleString` takes it. Defaults to `en-GB`. */
   locale?: string;
 };
 
 const fmt = (n: number, locale: string) => n.toLocaleString(locale);
 
-/** The zero count, before anything is served. */
+/**
+ * The count before anything is served: zero of zero, not exact.
+ *
+ * @category Counts
+ */
 export const NO_COUNT: Count = {shown: 0, total: 0, exact: false};
+/**
+ * The masked count before anything is served: zero, not exact.
+ *
+ * @category Counts
+ */
 export const NO_MASKED: Masked = {value: 0, exact: false};
 
 /**
- * `shown of total`, or the empty string where the count is not exact (the drawn set is a superset)
- * or the view is stale.
+ * Formats a count as `<shown> of <total>`, such as `1,204 of 29,935`. Returns the empty string
+ * where the count is not exact or `opts.stale` is set.
+ *
+ * @category Counts
  */
 export function formatCount(count: Count, opts: FormatOptions = {}): string {
   if (opts.stale || !count.exact) return '';
@@ -41,8 +83,10 @@ export function formatCount(count: Count, opts: FormatOptions = {}): string {
 }
 
 /**
- * One figure, or the empty string against a stale view. An inexact figure is marked as
- * approximate.
+ * Formats a masked count as one figure, such as `29,935`, prefixed `≈ ` where it is not exact.
+ * Returns the empty string where `opts.stale` is set.
+ *
+ * @category Counts
  */
 export function formatMasked(masked: Masked, opts: FormatOptions = {}): string {
   if (opts.stale) return '';

@@ -1,44 +1,40 @@
 /**
- * Split a `/v1/viewport` response into its frames.
+ * A `/v1/viewport` body split into its frames' payloads, as {@link splitFramedStreams} returns
+ * them. The body is a sequence of frames, each a `u8` kind, a `u32` little-endian payload length
+ * and the payload:
  *
- * The wire frame (contracts §3.2 r26; `tessera-wire`'s `payload` module doc) is a sequence of
- * tagged, length-prefixed frames — every frame prefixed, which is client-interaction §8.6(2)'s
- * owner-annotated item and what retired this file's previous Arrow-message boundary walk and the
- * padding-arithmetic desynchronisation bug it documented:
+ * - Kind 1, tiles: an Arrow IPC stream of `tile`, `visible`, `matched`, `served` and
+ *   `highlighted`, all `uint64`. Exactly one, first.
+ * - Kind 2, sub-cells: an Arrow IPC stream of `cell` and `count`, both `uint64`. Present only where
+ *   the request asked for an underlay, and schema-only where it asked and no cell had a count.
+ * - Kind 5, artifacts: an Arrow IPC stream with one row per served artifact, in the full
+ *   projection or the five-column identity projection. At most one, after the tiles frame and
+ *   before any points frame. Absent where the response serves no artifact.
+ * - Kind 3, points: an Arrow IPC stream of `tessera_id` and `code`, both `uint64`, then the
+ *   rendered columns, a `highlighted` column where the request carried a highlight, and a
+ *   `membership:<layer>` column per layer the response names; a request for the highlight
+ *   projection gets `tessera_id` and `highlighted` alone. Zero or more, each holding whole tiles;
+ *   their rows, in order, are the response's points.
+ * - Kind 4, trailer: JSON, exactly one, last. A body without it is incomplete.
  *
- *     u8 kind, u32 LE payload length, <payload>     -- repeated
- *       kind 1  tiles      Arrow IPC stream: tile, visible, matched, served (all uint64)
- *       kind 2  sub-cells  Arrow IPC stream: cell uint64, count uint64 — present iff the
- *                          underlay was requested (schema-only when requested-but-empty)
- *       kind 3  points     Arrow IPC stream: tessera_id uint64, code uint64, ...scalars —
- *                          zero or more frames, concatenating to the full points stream
- *       kind 4  trailer    JSON; exactly one, last — its presence marks the response complete
- *       kind 5  artifacts  Arrow IPC stream: the fourteen fixed columns `layer` (dictionary
- *                          u16/utf8) through `matched`, hull columns trailing when a served
- *                          layer declares one — or the identity projection's four (contracts
- *                          §3.2 r44) — at most one, after tiles and before any points frame;
- *                          ABSENT when the response served none
- *
- * Every failure here throws, and strictly: a truncated body, an unknown kind, a missing trailer
- * or a misplaced tiles frame must never decode to a plausible shorter response — a sample
- * silently standing in for the set is the one failure mode this client exists to make
- * impossible. A response missing its trailer is incomplete BY CONTRACT, whatever the transport
- * said (the server aborts mid-body streams without one).
+ * @category HTTP client
  */
 export type FramedStreams = {
+  /** The kind-1 tiles payload. */
   tiles: Uint8Array;
-  /** One entry per kind-3 frame, in arrival order — decode each alone, concatenate the rows. */
+  /**
+   * One payload per kind-3 points frame, in the order received. Each is a complete Arrow stream:
+   * decode each alone and concatenate the rows.
+   */
   points: Uint8Array[];
+  /** The kind-2 sub-cells payload, or `null` where the request asked for no underlay. */
   subCells: Uint8Array | null;
   /**
-   * The kind-5 artifacts payload, or `null` when the response served none.
-   *
-   * `null` and an empty table are the same fact here — the server omits the frame rather than
-   * sending an empty one, so a deployment with no layers pays nothing for the channel — which is
-   * why this does not carry the request/result distinction {@link subCells} does.
+   * The kind-5 artifacts payload, or `null` where the response serves no artifact. The server
+   * omits the frame instead of sending it empty, so `null` is the empty set.
    */
   artifacts: Uint8Array | null;
-  /** The kind-4 trailer's raw JSON bytes. */
+  /** The kind-4 trailer's JSON bytes. */
   trailer: Uint8Array;
 };
 
@@ -56,11 +52,9 @@ export type Frame = {kind: number; payload: Uint8Array};
 /**
  * The frame grammar, enforced once, over a body that may arrive in any number of pieces.
  *
- * **This is the only statement of the grammar in this client.** {@link splitFramedStreams} is this
- * reader pushed a whole body; the streaming path in `client.ts` is this reader pushed each network
- * chunk. Two readers would be two chances to disagree about what a legal response is, and the
- * disagreement would be silent in exactly the direction that matters — a body one accepts and the
- * other refuses is a body whose points were drawn by one code path and not the other.
+ * It is the client's one statement of the grammar. {@link splitFramedStreams} pushes it a whole
+ * body, and the streaming path in the client pushes it each network chunk, so the two paths accept
+ * the same bodies and draw the same points.
  *
  * Chunk boundaries carry no meaning: a frame's five-byte header may be split across three chunks
  * and its payload across a hundred, and the reader emits the frame only when it is whole. A frame
@@ -107,14 +101,13 @@ export class FrameReader {
   }
 
   /**
-   * No more bytes are coming: what is left must be nothing, and what arrived must be a whole
+   * No more bytes are coming. Throws unless nothing is left over and what arrived is a whole
    * response.
    *
-   * **A response missing its trailer is incomplete BY CONTRACT** (`streamed-serving.md` §6),
-   * whatever the transport said — the server aborts a mid-stream failure without one, and a reader
-   * that accepted the prefix as an answer would present a sample as the set. The delivered prefix
-   * is still sound and a caller may keep what it has already landed; what it must not do is call
-   * the response complete, which is what this throw denies it.
+   * A response without its trailer is incomplete whatever the transport said, since the server
+   * ends a failed stream without one. A reader that took the frames received as the answer would
+   * present a sample as the set. The frames already delivered are correct and a caller may keep
+   * them, but the response is not complete.
    */
   end(): void {
     if (this.queued > 0) {
@@ -129,7 +122,7 @@ export class FrameReader {
     }
   }
 
-  /** Whether a whole response has been read — the trailer's presence, which is the signal. */
+  /** Whether a whole response has been read, which the trailer's arrival marks. */
   get complete(): boolean {
     return this.sawTrailer;
   }
@@ -214,10 +207,13 @@ export class FrameReader {
 }
 
 /**
- * Split a whole body into its frames — {@link FrameReader} over one chunk.
+ * Splits a whole `/v1/viewport` body into its frames' payloads. Each payload is a view onto `buf`;
+ * nothing is copied.
  *
- * Every payload is a view onto `buf` rather than a copy, which is what a batch decoder wants; the
- * streaming path takes the same frames one network chunk at a time.
+ * @throws `Error` for a body that is truncated, lacks its tiles frame or its trailer, or has a
+ *   frame of unknown kind, out of order or repeated.
+ *
+ * @category HTTP client
  */
 export function splitFramedStreams(buf: Uint8Array): FramedStreams {
   const reader = new FrameReader();

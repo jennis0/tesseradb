@@ -3,8 +3,9 @@ import type {StatusProjection} from '@tesseradb/client';
 import {icon} from './icons.js';
 
 /**
- * The eight panel states. Every panel renders them through one `part="state"` region, so restyling
- * one restyles all. The mapping from the store's `status`:
+ * The eight panel states. Every panel shows its state in one `part="state"` region, with
+ * `data-state` set to it, so one rule restyles every panel. Each follows from the store's `status`
+ * projection:
  *
  * | state | from `status` |
  * |---|---|
@@ -18,7 +19,7 @@ import {icon} from './icons.js';
  * | stale | `shown` with `stale` |
  *
  * `expired` is a named refusal and wins over `refused`. `stale` is `shown` with the picture older
- * than the numbers. A state's text is one line that answers, without explaining how Tessera works.
+ * than the numbers.
  */
 export type PanelState = 'detached' | 'loading' | 'retrying' | 'shown' | 'empty' | 'refused' | 'expired' | 'stale';
 
