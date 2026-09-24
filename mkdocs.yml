@@ -83,7 +83,9 @@ nav:
       - Your first map from files: start/first-map.md
   - Guides:
       - guides/index.md
-      - Run a standalone deployment: guides/deployment.md
+      - Run Tessera under systemd: guides/systemd.md
+      - Run Tessera with Docker: guides/docker.md
+      - Operate a deployment: guides/operating.md
   - Reference:
       - reference/index.md
       - HTTP API: reference/http.md

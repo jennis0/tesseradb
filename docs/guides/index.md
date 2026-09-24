@@ -2,7 +2,9 @@
 
 Each guide covers one task for a user who has finished a tutorial.
 
-- [Run a standalone deployment](deployment.md): one Linux server under systemd, with nginx in front for TLS; credentials, the identity key, memory, health and readiness, and compaction.
+- [Run Tessera under systemd](systemd.md) on a Linux server, from the files the first tutorial made.
+- [Run Tessera with Docker](docker.md), with the database in a volume and Compose to start it.
+- [Operate a deployment](operating.md): who reaches each address, the identity key and rebuilds, memory, TLS, health, compaction and failed writes.
 - Declaring a corpus: views, attributes, vocabularies and access labels. Not written yet.
 - Declaring several layouts over one corpus with views and view groups. Not written yet.
 - Deciding who may see what: terms, labels and the session plane. Not written yet.
