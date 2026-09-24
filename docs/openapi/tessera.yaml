@@ -1214,7 +1214,7 @@ components:
                 items: { type: string }
         declared_scalars:
           type: array
-          description: The entity-scoped column schema in full, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column — followed, under a view of a group, by that group's `render = true` scoped families (`scoped_scalars`). Readers take the columns by name. Every such column is nullable: a point whose item has no value is null, except in a category, where no value is code 0.
+          description: The entity-scoped column schema in full, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column — followed, under a view of a group, by that group's `render = true` scoped families (`scoped_scalars`). Readers take the columns by name. Every such column is nullable, and a point whose item has no value is null, except in a category, where no value is code 0.
           items:
             $ref: "#/components/schemas/DeclaredScalar"
         scoped_scalars:
