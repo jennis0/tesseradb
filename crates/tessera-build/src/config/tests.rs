@@ -1242,7 +1242,7 @@ fn a_check_answers_a_projected_views_frame_from_the_declaration_alone() {
     let report = crate::check::check(&stated);
     assert_eq!(report.frames.len(), 1);
     assert_eq!(report.frames[0].view, "s0");
-    assert_eq!(report.frames[0].projection, "equirectangular");
+    assert_eq!(report.frames[0].projection.name(), "equirectangular");
     let (asked, snap) = report.frames[0].snapped.expect("a stated box snaps");
     assert_eq!(asked.lon_min, -180.0);
     // `x [0, 0.25], y [0, 0.25]`, whose maxima are the z2 boundary and so belong to the next tile.

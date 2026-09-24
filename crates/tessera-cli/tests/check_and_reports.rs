@@ -280,7 +280,7 @@ fn check_prints_every_disclosure_decision() {
     for expected in [
         "labels from field, default 'public'",
         "public, closed, 3 declared value(s), reserved [7]",
-        "u8 over vocabulary 'severity', hot",
+        "u8 over vocabulary 'severity', render",
         "gate 'public' | artifacts 'inherited' | members {\"fraction\":0.05}",
         "written by `[layer.labels]` on 'clusters/a'",
         "gate 'ir:analyst'",
@@ -548,7 +548,7 @@ fn the_disclosure_report_carries_every_decision() {
     assert_eq!(json["vocabularies"][0]["visibility"], "public");
     assert_eq!(json["vocabularies"][0]["value_set"], "closed");
     assert_eq!(json["vocabularies"][0]["reserved"][0], 7);
-    assert_eq!(json["attributes"][0]["placement"], "hot");
+    assert_eq!(json["attributes"][0]["placement"], "render");
     assert_eq!(json["attributes"][0]["vocabulary"], "severity");
 
     let clusters = &json["layers"][0];
