@@ -186,6 +186,22 @@ export class TesseraClient {
     return {token: body.token, tokenId: body.token_id, expiresAt: body.expires_at};
   }
 
+  /** End a session by its `tokenId`, so the token itself is not sent again. An id naming no live session is not refused. */
+  async revoke(tokenId: number): Promise<void> {
+    if (!this.opts.sessionCredential) {
+      throw new Error('revoke needs a sessionCredential');
+    }
+    const response = await fetch(`${this.opts.sessionUrl}/session/revoke`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.opts.sessionCredential}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({token_id: tokenId})
+    });
+    if (!response.ok) await fail(response);
+  }
+
   async meta(token: string): Promise<Meta> {
     const response = await fetch(`${this.opts.viewerUrl}/v1/meta`, {
       headers: {authorization: `Bearer ${token}`}
