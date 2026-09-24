@@ -1,4 +1,4 @@
-import {LitElement, css, html, nothing} from 'lit';
+import {LitElement, css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {formatCount, formatMasked, type Count, type Masked} from '@tesseradb/client';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -41,7 +41,7 @@ export class TesseraCount extends LitElement {
   @property() accessor label = '';
   @property() accessor figure: 'both' | 'shown' = 'both';
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const kind = this.count ? 'sample' : this.masked ? 'scalar' : 'none';
     const pair = this.count ? formatCount(this.count, {stale: this.stale}) : this.masked ? formatMasked(this.masked, {stale: this.stale}) : '';
     const text = this.count && this.figure === 'shown' && pair !== '' ? pair.split(' of ')[0]! : pair;

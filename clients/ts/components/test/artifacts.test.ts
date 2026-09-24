@@ -1,7 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
 import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection, type Layer, type Meta} from '@tesseradb/client';
 import '../src/layer-picker.js';
-import {flatten} from '../src/artifact-list.js';
 import '../src/artifact-card.js';
 import '../src/legend.js';
 import '../src/explorer.js';
@@ -121,8 +120,10 @@ describe('<tessera-artifact-list>', () => {
     expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['1', '3', '2']);
     expect(rows.map((r) => (r as HTMLElement).style.getPropertyValue('--depth'))).toEqual(['0', '1', '0']);
     // Two roots of equal count list by lowest id, so the order is the served set's and not the wire's row order.
-    const tied = flatten(servedLineage([artifact(5n, 7n), artifact(4n, 7n)]));
-    expect(tied.map(({artifact}) => artifact.tesseraId)).toEqual([4n, 5n]);
+    const tied = [artifact(5n, 7n, null, ['Epsilon']), artifact(4n, 7n, null, ['Delta'])];
+    store.set('artifacts', artifactsProjection(tied));
+    await settle(host);
+    expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['4', '5']);
   });
 
   it('shows a count and a neutral placeholder where a row has no name — never the key', async () => {

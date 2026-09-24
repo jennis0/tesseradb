@@ -1,5 +1,5 @@
 import {ContextProvider} from '@lit/context';
-import {css, html, nothing, type PropertyValues} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import type {Store} from '@tesseradb/client';
 import {activeCount, artifactBudgetFor, browsableLayers, emptyDraft, levelForBudget} from '@tesseradb/client';
@@ -359,7 +359,7 @@ export class TesseraExplorer extends TesseraElement {
     return this.panels.split(/[\s,]+/).includes(panel);
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const region = s?.get('region') ?? null;
     const selection = s?.get('selection');

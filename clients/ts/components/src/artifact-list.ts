@@ -1,4 +1,4 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {type Artifact, type ArtifactsProjection, type Masked, type ServedLineage} from '@tesseradb/client';
 import {attachedTopics, displayName} from '@tesseradb/deck/internal';
@@ -61,7 +61,7 @@ export class TesseraArtifactList extends TesseraElement {
     emit(this, 'tessera-artifactselect', {id: idString(a.tesseraId), layer: a.layer});
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const a = this.shown;
     const heading = (summary: unknown = nothing) => html`<h2 part="title">In view<span class="summary">${summary}</span></h2>`;
     if (!a) return html`<div class="panel">${heading()}${renderState('detached', null)}</div>`;
@@ -116,7 +116,7 @@ export class TesseraArtifactList extends TesseraElement {
  * listed under the first this depth-first walk reaches (roots in count order, ties by lowest
  * identifier), so the placement depends on the served set and not on row order.
  */
-export function flatten(lineage: ServedLineage): {artifact: Artifact; depth: number}[] {
+function flatten(lineage: ServedLineage): {artifact: Artifact; depth: number}[] {
   const out: {artifact: Artifact; depth: number}[] = [];
   const bigger = (a: Artifact, b: Artifact) =>
     a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : a.tesseraId < b.tesseraId ? -1 : a.tesseraId > b.tesseraId ? 1 : 0;

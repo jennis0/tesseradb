@@ -1,4 +1,4 @@
-import {css, html, nothing, type PropertyValues} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {enterGroup, hasOneLayout, viewPickerEntries, type Meta} from '@tesseradb/client';
 import {TesseraElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -68,7 +68,7 @@ export class TesseraViewPicker extends TesseraElement {
     if (select && select.value !== this.chosen) select.value = this.chosen;
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const meta = s?.get('meta') ?? null;
     if (!s || !meta || hasOneLayout(meta)) return nothing;

@@ -1,4 +1,4 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {REGION_HELD_LIMIT, type RegionProjection} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail} from './base.js';
@@ -64,7 +64,7 @@ export class TesseraSelection extends TesseraElement {
     return this.region ?? this.resolvedStore?.get('region') ?? null;
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const r = this.shown;
     const heading = (shape: string = '') => html`<h2 part="title">Selection<span class="summary">${shape}</span></h2>`;
     if (!r) return html`<div class="panel">${heading()}<span part="state" data-state="detached"></span></div>`;

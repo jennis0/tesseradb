@@ -1,8 +1,8 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import type {DeclaredScalar, ItemDetail, ItemViewPosition, Meta, Quantisation, Refusal} from '@tesseradb/client';
 import {GRID32} from '@tesseradb/client';
-import {TesseraElement, emit, idString} from './base.js';
+import {TesseraElement, emit, idString, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {renderState, stateOf} from './states.js';
@@ -21,11 +21,6 @@ import {chrome, tokens} from './tokens.js';
  * `pick` is what the map's pick resolved to. A miss is ordinary; a broken pick is a fault in the
  * map and the card says so.
  */
-export type PickOutcome =
-  | {kind: 'miss'}
-  | {kind: 'broken'; index: number; layer: string | null; hasIds: boolean; idCount: number}
-  | null;
-
 export class TesseraItemCard extends TesseraElement {
   static override styles = [
     tokens,
@@ -95,7 +90,7 @@ export class TesseraItemCard extends TesseraElement {
     return {item: sel.item, refusal: sel.itemRefusal, meta: this.meta ?? s.get('meta')};
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const {item, refusal, meta} = this.shown;
     const heading = html`<h2 part="title">Item<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'item'})}>${icon('close', 14)}</button></h2>`;
     if (refusal) {
@@ -217,13 +212,8 @@ export class TesseraItemCard extends TesseraElement {
   }
 }
 
-/** A `timestamp_us` value in full, as an ISO date-time. */
-export function timestampText(value: number | bigint): string {
-  return new Date(Number(value) / 1000).toISOString();
-}
-
 /** A value as text, by the column's declared type; a category is already its key. */
-export function present(value: unknown, column: DeclaredScalar | undefined): string {
+function present(value: unknown, column: DeclaredScalar | undefined): string {
   if (value === null || value === undefined) return '—';
   if (column?.arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return timestampText(value);
   if (typeof value === 'number') return Number.isInteger(value) ? value.toLocaleString('en-GB') : String(value);

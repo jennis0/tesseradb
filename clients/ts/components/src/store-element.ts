@@ -1,5 +1,5 @@
 import {ContextProvider} from '@lit/context';
-import {css, html} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import type {Store} from '@tesseradb/client';
 import {TesseraElement} from './base.js';
 import {storeContext} from './context.js';
@@ -26,7 +26,7 @@ export class TesseraStore extends TesseraElement {
     this.provider.setValue(store);
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     return html`<slot></slot>`;
   }
 }
