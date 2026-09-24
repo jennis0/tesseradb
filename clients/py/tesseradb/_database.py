@@ -1255,14 +1255,59 @@ class Database:
 
     def _inserted_id(self, raw: bytes):
         """External-id bytes read back as the type the id column had."""
+        read, _ = self._id_reader()
+        return read(raw)
+
+    def _id_reader(self):
+        """How external-id bytes read back as the type the id column had, and that type: an
+        integer column's eight little-endian bytes, signed where the column was, a string
+        column's UTF-8, and any other column's bytes as they are."""
         insert = self._identity_insert()
         dtype = None if insert is None else insert.id_type
         if is_integer_type(dtype):
-            # Eight little-endian bytes, signed where the column was.
-            return int.from_bytes(raw, "little", signed=str(dtype).startswith("int"))
+            signed = str(dtype).startswith("int")
+            return (lambda raw: int.from_bytes(raw, "little", signed=signed)), dtype
         if dtype is not None and (pa.types.is_string(dtype) or pa.types.is_large_string(dtype)):
-            return raw.decode()
-        return raw
+            return (lambda raw: raw.decode()), dtype
+        return (lambda raw: raw), pa.binary()
+
+    def _with_inserted_ids(self, batch: pa.RecordBatch) -> pa.RecordBatch:
+        """`batch` with its `tessera:external_id` column read back as `item` reads one."""
+        at = batch.schema.get_field_index("tessera:external_id")
+        if at < 0:
+            return batch
+        read, dtype = self._id_reader()
+        raw = batch.column(at).to_pylist()
+        ids = pa.array([None if one is None else read(one) for one in raw], type=dtype)
+        columns = [ids if i == at else column for i, column in enumerate(batch.columns)]
+        schema = batch.schema.set(at, pa.field("tessera:external_id", dtype))
+        return pa.RecordBatch.from_arrays(columns, schema=schema)
+
+    def items(self, view: str, fields: Sequence[str], **options):
+        """Every item in `view`, with the fields named, as one pyarrow table.
+
+        This is `Viewer.items` as this database's own reader, which sees every item; `options`
+        are its keywords. `batches=True` returns the pages one at a time instead. The
+        `tessera:external_id` column holds each id as the type the id column had, as `item`
+        gives it.
+
+            db.items("papers", ["title", "year"]).to_pandas()
+            db.items("papers", ["title"], filters={"year": {"eq": 2023}}, order="stored")
+        """
+        self._refuse_before_the_first_commit("items")
+        read = self.viewer().items(view, fields, **{**options, "batches": True})
+        read._page = self._with_inserted_ids
+        return read if options.get("batches") else read.read_all()
+
+    def artifacts(self, view: str, layer: str, fields: Sequence[str], **options):
+        """Every artifact of `layer`, with the properties named, as one pyarrow table.
+
+        This is `Viewer.artifacts` as this database's own reader; `options` are its keywords.
+
+            db.artifacts("papers", "clusters", ["key", "masked_count"])
+        """
+        self._refuse_before_the_first_commit("artifacts")
+        return self.viewer().artifacts(view, layer, fields, **options)
 
     def view(self, name: str) -> Selection:
         """The whole of one view, as this database's own reader sees it: every item.
@@ -1275,7 +1320,7 @@ class Database:
         """
         self._refuse_before_the_first_commit("view")
         self.viewer()._require_view(name)
-        return Selection(self.viewer, name)
+        return Selection(self.viewer, name, items=self.items)
 
     def categories(
         self,

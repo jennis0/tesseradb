@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod records;
+
 use clap::{Parser, Subcommand};
 use tessera_spatial::Bounds;
 use tessera_store::manifest::identity_key_fingerprint;
@@ -298,6 +300,38 @@ enum Command {
         #[arg(long, value_name = "SECONDS", default_value_t = 3)]
         timeout: u64,
     },
+    /// Read every item a session token may see in one view, with the fields named, from a running
+    /// server, and write them as Arrow IPC or Parquet.
+    ///
+    /// The server answers `POST /v1/items` a page at a time, several pages to a response, and ends
+    /// each response with a cursor for the next. This requests responses until no row remains and
+    /// writes each page as it arrives. Each of the route's fields is the argument of the same
+    /// name, sent only when given, so the server's own setting applies otherwise.
+    ///
+    /// The columns are `tessera_id`, the fields in the order named, the system fields in the order
+    /// named, then `tessera:matched` under `--keep-unmatched`. A category field is a dictionary
+    /// column of its value keys, each page's dictionary holding the keys of its own rows. A read
+    /// that returns no row writes these columns with no rows.
+    ///
+    /// A read cut short leaves the whole pages read before it in the output, exits 1 and prints
+    /// the cursor to read the rest with. The first response's head, with the counts under
+    /// `--count`, is printed on stderr at the end.
+    ///
+    /// For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields
+    /// title,year --system-fields external_id --out papers.parquet`.
+    Items(records::ItemsArgs),
+    /// Read every artifact of one layer a session token is served, with the properties named, from
+    /// a running server, and write them as Arrow IPC or Parquet.
+    ///
+    /// An artifact is one member of a layer: a cluster, a region, a node in a taxonomy. The read is
+    /// carried across `POST /v1/artifacts` responses, and written, as `tessera items` carries and
+    /// writes one. The columns are `tessera_id`, the properties in the order named, then
+    /// `matched_count` under `--filters`. The rows are in order of level, and in the order they
+    /// were published within a level.
+    ///
+    /// For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --layer
+    /// clusters --fields key,masked_count --format ipc > clusters.arrows`.
+    Artifacts(records::ArtifactsArgs),
     /// Serve the bundle that `tessera.toml` names.
     ///
     /// Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and
@@ -451,63 +485,45 @@ enum ArtifactCensusLayer {
     Treed,
 }
 
-/// `GET /readyz` on the viewer plane, over one plain HTTP/1.1 connection, within `timeout` in all.
+/// `GET /readyz` on the viewer plane, waiting at most `timeout` to connect and for the answer.
 fn readyz(mut addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<(), String> {
-    use std::io::{ErrorKind, Read, Write};
     if addr.ip().is_unspecified() {
         addr.set_ip(match addr {
             std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
             std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
         });
     }
-    let deadline = std::time::Instant::now() + timeout;
-    let failed = |e: std::io::Error| match e.kind() {
-        ErrorKind::WouldBlock | ErrorKind::TimedOut => format!(
-            "{addr} did not answer /readyz within {} s",
-            timeout.as_secs()
-        ),
-        _ => format!("{addr}: {e}"),
-    };
-    // A zero duration is refused as a socket timeout, so the last moment before the deadline
-    // waits a millisecond.
-    let remaining = || {
-        deadline
-            .saturating_duration_since(std::time::Instant::now())
-            .max(std::time::Duration::from_millis(1))
-    };
-    let mut stream =
-        std::net::TcpStream::connect_timeout(&addr, remaining()).map_err(|e| match e.kind() {
-            ErrorKind::WouldBlock | ErrorKind::TimedOut => failed(e),
-            _ => format!("no server answering at {addr}: {e}"),
-        })?;
-    stream
-        .set_write_timeout(Some(remaining()))
-        .and_then(|()| {
-            stream.write_all(
-                format!("GET /readyz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
-            )
-        })
-        .map_err(failed)?;
-    let mut head = [0u8; 16];
-    let mut read = 0;
-    while read < head.len() {
-        stream.set_read_timeout(Some(remaining())).map_err(failed)?;
-        match stream.read(&mut head[read..]) {
-            Ok(0) => break,
-            Ok(n) => read += n,
-            Err(e) => return Err(failed(e)),
-        }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("starting the HTTP client: {e}"))?;
+    let status = client
+        .get(format!("http://{addr}/readyz"))
+        .send()
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("{addr} did not answer /readyz within {} s", timeout.as_secs())
+            } else if e.is_connect() {
+                format!("no server answering at {addr}: {}", innermost(&e))
+            } else {
+                format!("{addr}: {}", innermost(&e))
+            }
+        })?
+        .status();
+    match status.as_u16() {
+        200 => Ok(()),
+        code => Err(format!("{addr} answered /readyz with {code}: not ready")),
     }
-    let status_line = String::from_utf8_lossy(&head[..read]);
-    let code = status_line
-        .strip_prefix("HTTP/")
-        .and_then(|rest| rest.split(' ').nth(1));
-    match code {
-        Some("200") => Ok(()),
-        Some(code) => Err(format!("{addr} answered /readyz with {code}: not ready")),
-        None => Err(format!("{addr} did not answer /readyz with HTTP")),
+}
+
+/// The last error in `e`'s chain of sources, which names the cause: an HTTP client's own message
+/// names only the request that failed.
+fn innermost(e: &dyn std::error::Error) -> String {
+    let mut last = e;
+    while let Some(source) = last.source() {
+        last = source;
     }
+    last.to_string()
 }
 
 /// Exit with success on the first SIGTERM or SIGINT, from a thread of its own so the handler is
@@ -2073,6 +2089,8 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Command::Items(args) => records::items(args),
+        Command::Artifacts(args) => records::artifacts(args),
         Command::Health {
             deployment,
             timeout,

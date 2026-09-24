@@ -13,11 +13,13 @@ from __future__ import annotations
 
 from ._auth import Token, authorise, revoke
 from ._refusal import Refusal
-from ._viewer import Sample, Selection, Viewer, connect
+from ._viewer import Batches, PartialRead, Sample, Selection, Viewer, connect
 
 __all__ = [
+    "Batches",
     "Database",
     "Map",
+    "PartialRead",
     "Refusal",
     "Sample",
     "Selection",
