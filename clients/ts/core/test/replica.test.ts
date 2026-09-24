@@ -22,9 +22,8 @@ function served(tiles: {tile: bigint; served: number; visible?: number}[], pin =
 }
 
 /**
- * A server that answers only for the tiles the request actually listed — which is what makes the
- * "requests only what it does not hold" test mean anything. A fixture answering for tiles nobody
- * asked about would seed the cache behind the replica's back.
+ * A server that answers only for the tiles the request listed, so a fixture cannot seed the cache
+ * with tiles nobody asked about.
  */
 function replica(
   serve: (req: {bbox: [number, number, number, number]; zoom: number; k?: number}) => ViewportResponse,
@@ -50,7 +49,7 @@ const rect = (x0: number, y0: number, x1: number, y1: number) => ({x0, y0, x1, y
 
 describe('tileXY', () => {
   it('inverts the Morton interleave of a tile prefix', () => {
-    // x occupies the even bits, y the odd — the same convention decode.ts compacts positions under.
+    // x on the even bits, y on the odd, as decode.ts compacts positions.
     expect(tileXY(0b00n, 1)).toEqual({x: 0, y: 0});
     expect(tileXY(0b01n, 1)).toEqual({x: 1, y: 0});
     expect(tileXY(0b10n, 1)).toEqual({x: 0, y: 1});
@@ -125,8 +124,7 @@ describe('Replica.fetchRegion', () => {
   });
 
   it('asks only for the strip a pan actually exposes', async () => {
-    // The whole point: coverage is a rectangle, so a shifted viewport subtracts to one strip
-    // rather than to a per-tile diff over the viewport.
+    // Coverage is a rectangle, so a shifted viewport subtracts to one strip.
     const {r, calls} = replica(() => served([{tile: 0n, served: 1}]));
 
     await r.fetchRegion(rect(0, 0, 3, 3), 3, 500);
@@ -139,8 +137,7 @@ describe('Replica.fetchRegion', () => {
   });
 
   it('treats a covered region as answered, so empty ground is never re-asked', async () => {
-    // A response omits empty tiles entirely. Coverage is what records "we asked here", and without
-    // it a mostly-empty viewport re-requests its empty tiles forever.
+    // A response omits empty tiles; coverage records that they were asked about.
     const {r, calls} = replica(() => served([{tile: 0n, served: 2}]));
 
     await r.fetchRegion(world(3), 3, 500); // 64 tiles, one of which holds anything
@@ -159,8 +156,8 @@ describe('Replica.fetchRegion', () => {
     await r.fetchRegion(world(1), 1, 500);
     expect(calls).toHaveLength(1);
 
-    // Everything is held, so this costs a counts-only request and nothing more — which is what
-    // keeps an accepted change from staying invisible to a client panning from cache.
+    // Everything is held, so this costs a count-only request, which lets an accepted change reach a
+    // client panning from cache.
     await r.fetchRegion(world(1), 1, 500);
     expect(calls).toHaveLength(2);
     expect(calls[1]!.k).toBe(0);
@@ -191,8 +188,7 @@ describe('Replica.fetchRegion', () => {
   });
 
   it('splits a large region so no single response can block a frame', async () => {
-    // One rectangle of 200x200 tiles is 40,000 — above the per-request bound, so it arrives as
-    // several responses rather than one that decodes for seconds on the main thread.
+    // 200x200 tiles is 40,000, above the per-request bound, so it arrives as several responses.
     const {r, calls} = replica(() => served([{tile: 0n, served: 1}]));
     await r.fetchRegion(rect(0, 0, 199, 199), 8, 500);
     expect(calls.length).toBeGreaterThan(1);
@@ -208,7 +204,7 @@ describe('Replica.fetchRegion', () => {
 
     expect(first.exact[0]!.ids.length).toBe(2); // still renderable
     expect(second.exact[0]!.ids.length).toBe(2);
-    expect(calls).toHaveLength(2); // and byte-for-byte the traffic of a client with no replica
+    expect(calls).toHaveLength(2); // the traffic of a client with no replica
     expect(r.bytes).toBe(0);
   });
 
@@ -223,8 +219,7 @@ describe('Replica.fetchRegion', () => {
   });
 
   it('drops everything when the server reports a different identity coordinate', async () => {
-    // The rotation can only be observed on a response, so the second ask has to reach new ground —
-    // an all-held ask makes no request and would never learn of it.
+    // A new identity key is seen only on a response, so the second ask goes to new ground.
     let identity = 'i1';
     const {r, calls} = replica(() => {
       const res = served([{tile: 0n, served: 2}]);
@@ -238,11 +233,8 @@ describe('Replica.fetchRegion', () => {
     identity = 'i2';
     await r.fetchRegion(rect(4, 4, 5, 5), 3, 500); // new ground, and the response rotates identity
 
-    // The partition went with the rotation, so the originally-held region is cold again.
+    // The held bands went with the old key, so the first region is cold again.
     const back = await r.fetchRegion(rect(0, 0, 1, 1), 3, 500);
     expect(back.plan.novel).toBe(4);
   });
 });
-
-// The per-tile ask suite left with `tile()` itself (D3): a tile-based engine adapts over
-// `fetchRegion`/`frameFromCache`, keeping empty distinct from refused per ask.

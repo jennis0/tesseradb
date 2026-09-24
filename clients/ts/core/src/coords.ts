@@ -3,15 +3,12 @@ import type {Quantisation} from './types.js';
 /**
  * The mapping between deck.gl's non-geospatial tile indices and Tessera's Morton cell grid.
  *
- * The engine's world is a 2^16 x 2^16 cell grid, quantised per axis (design §2.5), so a tile is
- * square in CELL space and rectangular in data space. The viewer therefore uses cell space as its
- * deck.gl world, scaled down by CELLS_PER_WORLD_UNIT so that a tile is TILE_SIZE world units at
- * depth 0 — which makes a deck tile `z` identically a Morton depth.
- *
- * **Measured, not assumed** (`spike/src/convention.test.ts`, run against deck.gl's own
- * `Tileset2D`): viewport zoom maps 1:1 onto tile `z`; tile `(0,0,0)` covers the whole 512-unit
- * world; and a tile bbox arrives as `{left, top, right, bottom}` with `top` numerically below
- * `bottom`, so tile y and cell y increase together. Change these constants only with that test.
+ * The engine's world is a 2^16 x 2^16 cell grid, quantised per axis, so a tile is square in cell
+ * space and rectangular in data space. The viewer uses cell space, scaled by `CELLS_PER_WORLD_UNIT`,
+ * as its deck.gl world, so a tile is `TILE_SIZE` world units at depth 0 and a deck tile `z` is a
+ * Morton depth. deck.gl's viewport zoom maps 1:1 onto tile `z`, tile `(0,0,0)` covers the 512-unit
+ * world, and tile y and cell y increase together. These were checked against deck.gl's `Tileset2D`
+ * in `clients/ts/spike/src/convention.test.ts`; change the constants only with that test.
  */
 export const CELL_GRID = 65536;
 export const MAX_DEPTH = 16;
@@ -19,10 +16,8 @@ export const TILE_SIZE = 512;
 export const WORLD_SIZE = 512;
 export const CELLS_PER_WORLD_UNIT = CELL_GRID / WORLD_SIZE; // 128
 /**
- * Wire artifact geometry — `centroid`, `box`, `hull` — is 32 bits per axis (contracts §3.2 item 4,
- * the same units as `code`), which is 2^16 finer than the cell grid. One constant, used by every
- * reader of that geometry, because two readers with their own divisor is how `fit` landed off
- * the corpus while the outlines drew in place.
+ * Wire artifact geometry (`centroid`, `box`, shapes) is 32 bits per axis, in the same units as
+ * `code`: 2^16 finer than the cell grid. Every reader of that geometry uses this one constant.
  */
 export const GRID32 = 2 ** 32;
 export const GRID32_PER_WORLD_UNIT = GRID32 / WORLD_SIZE;
@@ -41,33 +36,21 @@ export type TileIndex = {x: number; y: number; z: number};
 export type CellBox = {cx0: number; cy0: number; cx1: number; cy1: number};
 
 /**
- * The depth-`z` tile containing a point, from its 64-bit position code.
- *
- * **The shift is 64 − 2z, not 32 − 2z.** A tile prefix is defined over the 32-bit Morton *cell*
- * (contracts §2.5, `tessera_spatial::morton`), and the cell is the code's high half — so the
- * conversion carries the 32-bit extraction and the prefix shift together. Doing only the prefix
- * shift returns the whole code at depth 16 rather than the cell, which buckets every point into a
- * distinct tile and looks like a corpus with no structure rather than like a bug.
- *
- * Returns 0 at `z = 0`, where one tile covers the world.
+ * The depth-`z` tile containing a point, from its 64-bit position code. A tile prefix is over the
+ * 32-bit Morton cell, which is the code's high half, so the shift is `64 - 2z`. Returns 0 at `z = 0`.
  */
 export function tileOfCode(code: bigint, z: number): bigint {
   return code >> BigInt(64 - 2 * z);
 }
 
-/**
- * Whether a depth-`za` tile contains a depth-`zb` one. Containment is prefix containment, which is
- * the property that makes a parent's declaration answer for its children.
- */
+/** Whether a depth-`za` tile contains a depth-`zb` one: prefix containment. */
 export function tileContains(a: bigint, za: number, b: bigint, zb: number): boolean {
   return zb >= za && b >> BigInt(2 * (zb - za)) === a;
 }
 
 /**
- * A tile's Morton prefix from its `(x, y)` index at a depth.
- *
- * x occupies the even bits and y the odd, which is the interleave `decode.ts` compacts positions
- * under — so this and {@link tileXY} are inverses, and both agree with the server's own tiling.
+ * A tile's Morton prefix from its `(x, y)` index at a depth: x on the even bits, y on the odd, as
+ * the server tiles. The inverse of {@link tileXY}.
  */
 export function mortonOfTile(x: number, y: number, depth: number): bigint {
   let prefix = 0n;
@@ -78,7 +61,7 @@ export function mortonOfTile(x: number, y: number, depth: number): bigint {
   return prefix;
 }
 
-/** The `(x, y)` index of a tile from its Morton prefix — the inverse of {@link mortonOfTile}. */
+/** The `(x, y)` index of a tile from its Morton prefix; the inverse of {@link mortonOfTile}. */
 export function tileXY(prefix: bigint, depth: number): {x: number; y: number} {
   let x = 0;
   let y = 0;
@@ -96,11 +79,8 @@ export function tileToCellBox({x, y, z}: TileIndex): CellBox {
 }
 
 /**
- * The exact data-space bbox `[x0, y0, x1, y1]` a tile covers — half-open, matching
- * {@link tileToCellBox}.
- *
- * This is the honest geometry of the tile. It is **not** what to send to `/v1/viewport`; see
- * {@link tileToRequestBbox} for why.
+ * The data-space bbox `[x0, y0, x1, y1]` a tile covers, half-open like {@link tileToCellBox}. Not
+ * what to send to `/v1/viewport`; see {@link tileToRequestBbox}.
  */
 export function tileToDataBbox(
   index: TileIndex,
@@ -118,22 +98,12 @@ export function tileToDataBbox(
 }
 
 /**
- * The bbox to actually request for a tile: the tile's own cell block, inset to the **centres** of
- * its first and last cells.
+ * The bbox to request for a tile: its cell block, inset to the centres of its first and last cells.
  *
- * **The server's bbox is closed, not half-open.** `tessera-spatial`'s `tile_corners` quantises
- * both corners to cells and iterates `lo..=hi` inclusively, so a bbox whose upper corner lands on
- * the tile boundary — which is exactly what {@link tileToDataBbox} returns — selects the
- * neighbouring row and column of tiles as well. One request then answers for up to four tiles.
- *
- * That is not a cosmetic overlap. It was measured: summing the returned counts across loaded tiles
- * reported a `visible` of 5,128,867 against a corpus of 2,422,486, because every interior tile was
- * counted by itself and by three neighbours — and the neighbours' points were gathered, shipped
- * and drawn too, so the map over-plotted at the same time.
- *
- * Insetting to cell centres makes the request name exactly one tile at its own depth. At depth 16
- * a tile is a single cell and both corners collapse onto that cell's centre, which is a legal
- * degenerate bbox and still names one tile.
+ * The server's bbox is closed: it quantises both corners to cells and includes both. A bbox whose
+ * upper corner lies on the tile boundary also selects the next row and column of tiles, so their
+ * points are counted and drawn twice. Inset to cell centres, the bbox names one tile. At depth 16
+ * both corners fall on one cell's centre, which is a valid bbox.
  */
 export function tileToRequestBbox(
   index: TileIndex,
@@ -143,12 +113,8 @@ export function tileToRequestBbox(
 }
 
 /**
- * The same, for a rectangle of tiles — the form a region fetch uses.
- *
- * Generalises {@link tileToRequestBbox} and inherits its whole argument: inset to the centre of the
- * rectangle's first cell and of its last, so a closed bbox names exactly the tiles in the rectangle
- * and not the neighbouring row and column. Sending a region as one bbox rather than as an explicit
- * tile list is what keeps a request four numbers instead of tens of thousands of identifiers.
+ * {@link tileToRequestBbox} for a rectangle of tiles: a closed bbox naming exactly the tiles in
+ * the rectangle, sent as four numbers rather than a tile list.
  */
 export function rectToRequestBbox(
   rect: {x0: number; y0: number; x1: number; y1: number},
@@ -169,8 +135,8 @@ export function rectToRequestBbox(
 }
 
 /**
- * Data space to deck.gl world space. Each axis is scaled independently, exactly as §2.5 quantises
- * them — which is what makes a tile square in world space despite a rectangular data extent.
+ * Data space to deck.gl world space. Each axis is scaled separately, as quantisation does, so a
+ * tile is square in world space whatever the data extent.
  */
 export function dataToWorldXY(x: number, y: number, q: Quantisation): [number, number] {
   return [
@@ -180,19 +146,13 @@ export function dataToWorldXY(x: number, y: number, q: Quantisation): [number, n
 }
 
 /**
- * Cell→world conversion of an interleaved x,y buffer, narrowing to the `Float32Array` a deck.gl
- * binary attribute takes. One pass, one allocation per tile response.
+ * Converts an interleaved x, y buffer from cell space to world space, narrowing to the
+ * `Float32Array` a deck.gl binary attribute takes. Needs no quantisation extent: cell space is the
+ * grid's own units, and world space is a uniform scaling of it.
  *
- * **No quantisation extent, and that is the point.** `decodeViewport` returns cell space, which is
- * the grid's own units — the same units this world is a scaling of — so the conversion is one
- * constant factor per axis and there is no extent for it to disagree with the server about. The
- * scale is uniform because cell space is square; a rectangular data extent is already accounted
- * for by the quantisation that produced the cells.
- *
- * This is where the `f64` positions narrow to `f32`, and therefore where precision is actually
- * spent: below roughly a 2^-8 fraction of a world unit the mantissa runs out. Recovering it means
- * deck.gl's `fp64` emulation — a `position64Low` attribute carrying `p - Math.fround(p)` — which
- * is a layer-side change, not a wire one.
+ * Precision is lost here: below about a 2^-8 fraction of a world unit `f32` runs out. Recovering it
+ * would take deck.gl's `fp64` emulation, a `position64Low` attribute, which is a change to the layer
+ * and not to the wire.
  */
 export function positionsToWorld(positions: Float64Array): Float32Array {
   const out = new Float32Array(positions.length);

@@ -159,10 +159,9 @@ impl std::error::Error for ExecutorStartError {}
 pub enum AcceptError {
     Submit(SubmitError),
     Exec(ExecError),
-    /// A row's coordinates fall outside the view's declared quantisation extent, so the point has
-    /// no cell to occupy. Refused before anything is acked or WAL-durable, rather than clamped
-    /// (see [`Quantisation::contains`]). Checked at the engine's ingest boundary because the
-    /// buffer has more than one writer, not only the HTTP handler.
+    /// A row's coordinates fall outside the view's extent, or are not finite. The HTTP handler
+    /// clamps each row into the extent and refuses a non-finite one before it gets here, so this
+    /// guards the engine's other callers, before anything is acked or WAL-durable.
     OutsideExtent {
         index: usize,
         x: f64,

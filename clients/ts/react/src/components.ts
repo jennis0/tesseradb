@@ -22,16 +22,14 @@ import {
 
 /**
  * `@tesseradb/react/components`: every `tessera-*` element as a React component with typed props
- * and events. Importing this entry imports `@tesseradb/components`, which defines the elements on
- * import and pulls in Lit and, through the map, deck.gl; a host that wants only the hooks imports
- * the package root instead.
+ * and events. This entry imports `@tesseradb/components`, and with it Lit and deck.gl; a host that
+ * wants only the hooks imports the package root.
  *
- * `@lit/react` sets a prop that names a property on the element as the **property**, never as an
- * attribute, which is what an object value (`store`, `count`, `item`, `authorise`) needs and what
- * React 18 cannot do on a custom element by itself. Under React 19 the wrappers still give the
- * typing: a `store` prop is a `Store`, and an `onPick` prop is a handler for the event the map
- * emits, with its detail typed. The components carry the elements' names (`TesseraMap` is
- * `<tessera-map>`); the element classes are exported as types with an `Element` suffix, for a ref.
+ * `@lit/react` sets a prop that names an element property as that property, not an attribute,
+ * which object values such as `store` need and React 18 does not do for custom elements. Under
+ * React 19 the wrappers still type the props and event handlers. `TesseraMap` wraps
+ * `<tessera-map>`, and so on; the element classes are exported as types with an `Element` suffix,
+ * for a ref.
  */
 
 /** The events the elements emit, as `@tesseradb/components` declares them. */

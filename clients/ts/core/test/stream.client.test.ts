@@ -7,19 +7,16 @@ import type {ViewportPart} from '../src/types.js';
 import {chunked, framed, manual, rejectsAsRefused, settle, u64} from './support.js';
 
 /**
- * The streamed viewport: a response landed frame by frame instead of body by body.
- *
- * **Slow data should cause pop-in, not lag.** The wire streams — the server flushes whole tiles at
- * a size threshold and the trailer ends the response (`streamed-serving.md` §2, §6) — and the
- * client reads it as it arrives, so the counts and the first tiles are usable long before the last
- * of a hundred point frames has been received. What these pin is that the streamed reading is
- * *equal* to the whole-body reading, that it is genuinely early, and that the two loud failures —
- * an abort and a body without its trailer — stay loud.
+ * The streamed viewport: a response read frame by frame as it arrives. The server flushes whole
+ * tiles at a size threshold and the trailer ends the response, so the counts and the first tiles
+ * are usable before the last points frame arrives. These check that the streamed reading equals
+ * the whole-body reading, that it is early, and that an abort and a body without its trailer both
+ * fail.
  */
 
 /**
- * Seven tiles over three points frames, two points a tile — and a tile the definition serves
- * nothing for, because a zero-served tile is the one thing a walk over the counts can lose.
+ * Seven tiles over three points frames, two points a tile, and a tile that serves nothing, which a
+ * walk over the counts can lose.
  */
 const SERVED = [2n, 2n, 0n, 2n, 2n, 2n, 2n];
 const PER_FRAME = [2, 2, 3]; // tiles per points frame; frames flush at whole tiles
@@ -84,16 +81,15 @@ describe('a streamed viewport response', () => {
       expect(parts.flatMap((p) => p.result.tiles.map((t) => t.tile))).toEqual(
         whole.tiles.map((t) => t.tile)
       );
-      // ...and their points concatenate to exactly the whole body's, in the same order.
+      // Their points concatenate to the whole body's, in the same order.
       const ids = parts.flatMap((p) => [...p.result.ids]);
       expect(ids).toEqual([...whole.ids]);
       expect(parts.flatMap((p) => [...p.result.world])).toEqual([...whole.world]);
-      // Each part carries the coordinates it was served under, so a store can partition on them
-      // before the response has resolved.
+      // Each part carries the keys it was served under, so a store can partition on them before the
+      // response resolves.
       expect(parts.map((p) => `${p.identityKey}/${p.contentKey}`)).toEqual(parts.map(() => 'i1/c1'));
 
-      // Every point went to the sink, so the response carries none — handing them over twice
-      // would double both the memory and the absorbing.
+      // Every point went to the sink, so the response carries none.
       expect(response.result.ids.length).toBe(0);
       expect(response.result.tiles.map((t) => t.tile)).toEqual(whole.tiles.map((t) => t.tile));
       expect(response.bytes).toBe(body.byteLength);
@@ -117,8 +113,7 @@ describe('a streamed viewport response', () => {
 
     feed.push(body.subarray(0, lastPoints));
     await settle();
-    // Two of the three point frames are in, with the counts they satisfy — while the third has
-    // not been sent at all. Whole-body reading could not have drawn any of this.
+    // Two of the three points frames are in, with their counts, while the third has not been sent.
     expect(parts.length).toBe(2);
     expect(parts[0]!.result.tiles.length).toBe(2);
     expect(parts[0]!.result.ids.length).toBe(4);
@@ -149,13 +144,13 @@ describe('a streamed viewport response', () => {
     expect(parts.length).toBe(1);
 
     controller.abort();
-    // The rest of the body would decode perfectly well; nothing must read it.
+    // The rest of the body would decode; nothing reads it.
     feed.push(body.subarray(secondPoints));
     await expect(asking).rejects.toThrow();
     await settle();
     expect(parts.length).toBe(1);
-    // What did land stays sound — it is a whole tile's worth of points from the one snapshot, and
-    // a caller keeps it. What it never gets is a completed response to mark the region covered on.
+    // What landed stays: whole tiles from one snapshot. The caller gets no completed response, so
+    // the region is not marked covered.
     expect(parts[0]!.result.ids.length).toBe(4);
   });
 
@@ -174,8 +169,8 @@ describe('a streamed viewport response', () => {
     feed.push(body.subarray(0, trailerAt));
     feed.close();
     await rejectsAsRefused(asking);
-    // Well-framed and incomplete: every points frame was delivered and is drawable, and the
-    // response is still refused, because the trailer's presence is the completeness signal.
+    // Every points frame arrived and is drawable, and the response is still refused: the trailer is
+    // what says it is complete.
     expect(parts.length).toBe(3);
   });
 
@@ -188,8 +183,7 @@ describe('a streamed viewport response', () => {
   it('takes the whole body where the transport cannot stream, and still fills the sink', async () => {
     const body = bodyBytes();
     const whole = decodeViewport(body);
-    // A polyfilled or mocked `fetch` with no `body`: the sink is handed everything in one piece.
-    // The difference is when, never what.
+    // A `fetch` with no `body` stream hands the sink everything at once.
     vi.stubGlobal('fetch', async () => ({
       ok: true,
       body: null,

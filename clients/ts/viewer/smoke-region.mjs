@@ -1,26 +1,23 @@
 #!/usr/bin/env node
-// Shoot the region leaf under two principals: a lasso over the places, exact for the shape, and
-// *filter to this* on a division — the evidence for `selection-operand.md` §8 and
-// `polygon-membership.md` §8 (stage 4 of the shape work).
+// Screenshot the region leaf under two principals: a lasso over the places, exact for the shape,
+// and a filter to one division.
 //
 //   node clients/ts/viewer/smoke-region.mjs [--url http://localhost:5173] [--shots DIR]
 //     [--headed] [--executable /path/to/chrome] [--principals i,j]
 //
-// **This is the instrument for two claims.** A lasso is a filter leaf on the viewport request the
-// client was sending anyway — no counting request of its own — and its count is **exact for the
-// shape**: the server says so on `x-tessera-region`, the store reads it, and the panel's count
-// renders exact; under a second principal the same lasso counts that principal's own items, and
-// the verdict is the same because it is the shape's and not the rows'. *Filter to this* on a
-// division narrows the map and every count to its members, by the leaf by artifact.
+// A lasso is a filter leaf on the ordinary viewport request, with no counting request of its own,
+// and its count is exact for the shape: the server says so on `x-tessera-region` and the panel
+// renders the count exact. Under a second principal the same lasso counts that principal's items,
+// with the same verdict. Filtering to a division narrows the map and every count to its members.
 //
 // It reports, per principal: the lasso's count and verdict, the request that carried the leaf,
 // and for the division the card's count against the region's. It fails if a verdict is not exact,
 // if a request carrying a region leaf was a counts-only request of its own, if the panel renders
 // the count inexact, or if filtering to the division does not narrow the map.
 //
-// Everything is read through the components' parts and the store; never through an id the shadow
-// DOM hides. Requires a running `tessera serve` over a bundle with a `spatial` layer (the Overture
-// one-part ladder is the one the evidence note used) and a running `vite dev`.
+// Everything is read through the components' parts and the store. Requires a running
+// `tessera serve` over a bundle with a `spatial` layer (such as the Overture one-part ladder) and
+// a running `vite dev`.
 import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
@@ -58,13 +55,13 @@ page.on('request', (r) => {
     const body = JSON.parse(r.postData() ?? '{}');
     requests.push({leaf: regionOf(body.filters), k: body.k, tiles: Array.isArray(body.tiles)});
   } catch {
-    // Not a request this script reads.
+    // Not JSON.
   }
 });
 
 await page.goto(withParams(url, {prefetch: 0}), {waitUntil: 'load'});
 
-/** Wait until the mark count stops moving — every figure below is only meaningful once it has. */
+/** Wait until the mark count stops changing. */
 const settled = async (limitMs = 60_000) => {
   const started = Date.now();
   let last = -1;
@@ -146,7 +143,7 @@ const select = async (shape) => {
   }, shape);
 };
 
-/** Wait for the region to be answered — the frame carrying the leaf presented. */
+/** Wait for the region to be answered: the frame carrying the leaf presented. */
 const answered = async () => {
   for (let i = 0; i < 60; i++) {
     const r = await region();
@@ -197,8 +194,8 @@ for (const p of pair) {
   const before = requests.length;
   await select({kind: 'lasso', points: LASSO});
   await answered();
-  // The first frame carrying the leaf answers the region; the ones after fill the shape's extent
-  // in, and the count is read once nothing is still arriving — the number a viewer sees.
+  // The first frame carrying the leaf answers the region; later frames fill in the shape's extent,
+  // so the count is read once nothing is arriving.
   await settled();
   await page.waitForTimeout(1000);
   const r = await region();

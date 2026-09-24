@@ -324,7 +324,7 @@ export class Control {
     return this.send('DELETE', path, options);
   }
 
-  /** `POST /control/compact`: ask for a fold, which removes deleted rows. Answered before it runs. */
+  /** `POST /control/compact`: asks for a compaction, which removes deleted rows. Answered before it runs. */
   compact(options: CallOptions = {}): Promise<Answer> {
     return this.send('POST', '/control/compact', options, '');
   }

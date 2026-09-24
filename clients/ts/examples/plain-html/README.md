@@ -5,7 +5,7 @@ One page, no build step: the self-contained bundle by relative path with its int
 every C1 host has, in its smallest form.
 
 ```bash
-npm run build -w @tesseradb/components      # the bundle, dist/tessera-components.js and its .sri
+npm run bundle -w @tesseradb/components     # the bundle, dist/tessera-components.js and its .sri
 node server.mjs                             # http://localhost:5180
 ```
 

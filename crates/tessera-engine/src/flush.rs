@@ -18,7 +18,7 @@ use rustc_hash::FxHashMap;
 use tessera_authz::{write_delta_tier, DeltaTier, Dict, DictStreamWriter};
 use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::{BufferedItem, Overlay};
-use tessera_spatial::tiler::{ScalarType, ScalarValue};
+use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::SegmentData;
@@ -713,7 +713,7 @@ fn execute_flush_stages(
                 ))
             })?;
             // Absence is not resolved here: `write_flush_segment` records it in the presence bitmap.
-            scalars.push(to_scalar_value(value));
+            scalars.push(value.clone());
         }
         // The group-scoped render lanes follow the declared ones.
         for index in &ctx.scoped_render {
@@ -721,7 +721,7 @@ fn execute_flush_stages(
             let value = index
                 .and_then(|index| item.scoped.get(index))
                 .unwrap_or(&WalScalar::Null);
-            scalars.push(to_scalar_value(value));
+            scalars.push(value.clone());
         }
         rows.push(FlushRow {
             entity_id: *entity,
@@ -2002,34 +2002,6 @@ fn segment_dir(ctx: &FlushContext) -> PathBuf {
     )
     .join("segments")
     .join(&ctx.seg_id)
-}
-
-/// The WAL's scalar shape into the segment writer's: a variant-for-variant transcription, so a
-/// missing arm is a compile error rather than a value taking another type's place.
-fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
-    macro_rules! same {
-        ($($v:ident),* $(,)?) => {
-            match scalar {
-                $(WalScalar::$v(x) => ScalarValue::$v(*x),)*
-                WalScalar::Utf8(x) => ScalarValue::Utf8(x.clone()),
-                WalScalar::Null => ScalarValue::Null,
-            }
-        };
-    }
-    same!(
-        Bool,
-        U8,
-        U16,
-        U32,
-        U64,
-        I8,
-        I16,
-        I32,
-        I64,
-        F32,
-        F64,
-        TimestampUs
-    )
 }
 
 /// One file's size and hex SHA-256, by reading it back: `tessera_store::digest_of` with this

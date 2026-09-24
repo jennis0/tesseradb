@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {BASE_ARTIFACT_BUDGET, MAX_ARTIFACT_BUDGET, artifactBudgetFor, levelForBudget} from '../src/artifactBudget.js';
 
-describe('the artifact budget follows the zoom (design §6)', () => {
+describe('the artifact budget follows the zoom', () => {
   it('is the base at the overview, doubles per zoom level, and is capped', () => {
     expect(artifactBudgetFor(0)).toBe(BASE_ARTIFACT_BUDGET);
     // Wide enough that a root of 26 children is served with its children, not alone (the tree is cut at one depth).

@@ -38,7 +38,7 @@ use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::{Wal, WalRecord};
 use tessera_plugin::Passthrough;
-use tessera_spatial::{Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
+use tessera_spatial::{Bounds, Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
 
 use common::*;
 
@@ -74,6 +74,11 @@ const POLAR: usize = 11;
 /// `Fields::moved` is what a projected `[[view]]` compiles to — the geographic names carried on the
 /// canonical axes — so the build reads `lon`/`lat` here exactly as it would from a declaration.
 fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
+    build_projected_in(out, tmp, points, world_frame());
+}
+
+/// [`build_projected`] against `frame`.
+fn build_projected_in(out: &Path, tmp: &Path, points: &[(f64, f64)], frame: Bounds) {
     let points_path = tmp.join("points.parquet");
     let pairs_path = tmp.join("pairs.parquet");
     write_lon_lat(&points_path, points);
@@ -82,7 +87,7 @@ fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
         out,
         vec![tessera_build::ViewArgs {
             projection: Projection::WebMercator,
-            extent: world_frame(),
+            extent: frame,
             point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
             ..view_args("s0", &points_path, AccessInput::relation(pairs_path))
         }],
@@ -149,13 +154,18 @@ async fn post_ingest(
 
 /// Every served point's 64-bit position, by `tessera_id`.
 fn served_positions(engine: &Engine, k: usize) -> BTreeMap<u64, u64> {
+    served_positions_in(engine, k, [0.0, 0.0, 1.0, 1.0])
+}
+
+/// [`served_positions`] over `bbox`.
+fn served_positions_in(engine: &Engine, k: usize, bbox: [f64; 4]) -> BTreeMap<u64, u64> {
     let session = engine
         .authorise(br#"{"terms": ["0"]}"#)
         .expect("the fixture's pairs grant term 0 to every row");
     let out = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, [0.0, 0.0, 1.0, 1.0], k),
+            ViewportRequest::new("s0", 0, bbox, k),
         )
         .expect("the viewport answers over the whole frame");
     out.points
@@ -325,6 +335,57 @@ async fn a_polar_row_is_clipped_counted_and_lands_on_the_frames_edge() {
         cell_y, 0,
         "a clipped northern row is stored on the frame's northern edge"
     );
+}
+
+/// A projected row outside the view's frame is clamped onto the frame's edge and counted, and
+/// lands where a build clamps the same row.
+#[tokio::test]
+async fn a_projected_row_outside_the_frame_is_clamped_where_a_build_clamps_it() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    // The north-western quarter of the world, which Tokyo lies east of.
+    let quarter = Bounds {
+        x_min: 0.0,
+        x_max: 0.5,
+        y_min: 0.0,
+        y_max: 0.5,
+    };
+    let points = vec![
+        (-0.1276, 51.5072),
+        (-74.0060, 40.7128),
+        (-155.5828, 19.8968),
+        (-100.0, 40.0),
+        (-60.0, 10.0),
+        (139.6917, 35.6895),
+    ];
+    const TOKYO: usize = 5;
+    build_projected_in(&root, tmp.path(), &points, quarter);
+    let server = spawn_server_with_config(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config(),
+    )
+    .await;
+
+    let (lon, lat) = points[TOKYO];
+    let rows = vec![(ingested_id(TOKYO), lon, lat, "0")];
+    let (status, body) = post_ingest(&server, "tokyo", ingest_batch(("lon", "lat"), &rows)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["clamped"], 1, "{body}");
+    assert_eq!(body["clipped"], 0, "{body}");
+    tick(&server).await;
+
+    let positions = served_positions_in(&server.state.engine, 400, [0.0, 0.0, 0.5, 0.5]);
+    let ingested = position_of(&server.state.engine, &positions, &ingested_id(TOKYO));
+    let built = position_of(
+        &server.state.engine,
+        &positions,
+        &external_id_of(TOKYO as u64),
+    );
+    assert_eq!(ingested, built, "the build and the ingest clamp Tokyo into one cell");
+    let (cell_x, _) = deinterleave((ingested >> 32) as u32);
+    assert_eq!(cell_x, 65_535, "Tokyo is stored on the frame's eastern edge");
 }
 
 /// A batch spelling its coordinate columns `x`/`y` against a **projected** view is refused, naming

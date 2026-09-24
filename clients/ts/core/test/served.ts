@@ -15,7 +15,8 @@ import {createInterface} from 'node:readline';
  * of a server, and each test skips with it. A `TESSERA_BIN` naming no file is an error.
  *
  * The declaration served is the notebook's own `schema.toml` with one view group added, two views
- * over the same points, so `/v1/meta` has a group and a roster to decode.
+ * over the same points, so `/v1/meta` has a group and a roster to decode. A caller may pass another
+ * corpus instead: a directory of Parquet sources and the declaration that reads them.
  */
 export type Served = {
   viewerUrl: string;
@@ -133,25 +134,32 @@ function listening(child: ChildProcess, errors: () => string, timeoutMs: number)
 }
 
 /**
- * Build the notebook corpus into a temporary deployment and serve it.
+ * Build a corpus into a temporary deployment and serve it: the notebook's, or `corpus`. The
+ * identity key, which decides every `tessera_id`, is `identityKey` (32 hex digits) or a fresh one.
  *
- * Returns a string, the reason, where the binary or the corpus is not on this machine. A build or
- * a serve that fails throws: those are failures, not absences.
+ * Returns a string, the reason, where the binary or the notebook corpus is not on this machine. A
+ * build or a serve that fails throws: those are failures, not absences.
  */
-export async function start(): Promise<Served | string> {
+export async function start(
+  options: {corpus?: {directory: string; schema: string}; identityKey?: string} = {}
+): Promise<Served | string> {
+  let corpus = options.corpus;
   const found = findBinary();
   if (!found) return 'no tessera binary: set TESSERA_BIN, put tessera on PATH, or run cargo build --release -p tessera-cli';
   const binary = found.path;
   console.log(`live test: serving with ${binary}, from ${found.from}`);
-  const corpus = findCorpus();
-  if (!corpus) return 'data/notebook/ is not in this checkout; set TESSERA_NOTEBOOK_DATA';
+  if (!corpus) {
+    const notebook = findCorpus();
+    if (!notebook) return 'data/notebook/ is not in this checkout; set TESSERA_NOTEBOOK_DATA';
+    corpus = {directory: notebook, schema: declaration(notebook)};
+  }
 
   const directory = mkdtempSync(join(tmpdir(), 'tessera-ts-live-'));
   try {
-    for (const name of readdirSync(corpus)) {
-      if (name.endsWith('.parquet')) symlinkSync(join(corpus, name), join(directory, name));
+    for (const name of readdirSync(corpus.directory)) {
+      if (name.endsWith('.parquet')) symlinkSync(join(corpus.directory, name), join(directory, name));
     }
-    writeFileSync(join(directory, 'schema.toml'), declaration(corpus));
+    writeFileSync(join(directory, 'schema.toml'), corpus.schema);
     writeFileSync(join(directory, 'tessera.toml'), DEPLOYMENT);
     const secrets = join(directory, '.tessera');
     mkdirSync(join(secrets, 'cache'), {recursive: true});
@@ -160,7 +168,7 @@ export async function start(): Promise<Served | string> {
     writeFileSync(join(secrets, 'session.cred'), `${sessionCredential}\n`, {mode: 0o600});
     const operatorCredential = randomBytes(24).toString('hex');
     writeFileSync(join(secrets, 'operator.cred'), `${operatorCredential}\n`, {mode: 0o600});
-    const env = {...process.env, TESSERA_IDENTITY_KEY: randomBytes(16).toString('hex')};
+    const env = {...process.env, TESSERA_IDENTITY_KEY: options.identityKey ?? randomBytes(16).toString('hex')};
     const deployment = join(directory, 'tessera.toml');
 
     const build = spawnSync(binary, ['build', '--deployment', deployment], {cwd: directory, env, encoding: 'utf8'});

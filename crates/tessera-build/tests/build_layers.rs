@@ -2167,6 +2167,11 @@ fn a_minted_artifact_and_a_declared_one_are_the_same_artifact() {
 /// `int64`, and as a variable-length list or a fixed-size one, which are the shapes §4's table
 /// distinguishes: the fixed one is a levelled analysis and the variable one a lineage.
 fn write_listed_points(path: &Path, lists: &[Vec<Option<i64>>], as_text: bool, fixed: Option<i32>) {
+    write_lineage_points(path, listed_column(lists, as_text, fixed));
+}
+
+/// The list column [`write_listed_points`] writes.
+fn listed_column(lists: &[Vec<Option<i64>>], as_text: bool, fixed: Option<i32>) -> ArrayRef {
     let item = Arc::new(Field::new(
         "item",
         if as_text {
@@ -2192,7 +2197,7 @@ fn write_listed_points(path: &Path, lists: &[Vec<Option<i64>>], as_text: bool, f
     } else {
         Arc::new(Int64Array::from(entries))
     };
-    let column: ArrayRef = match fixed {
+    match fixed {
         Some(size) => Arc::new(FixedSizeListArray::new(item, size, child, None)),
         None => Arc::new(ListArray::new(
             item,
@@ -2200,8 +2205,12 @@ fn write_listed_points(path: &Path, lists: &[Vec<Option<i64>>], as_text: bool, f
             child,
             None,
         )),
-    };
-    let ids: Vec<u64> = (0..lists.len() as u64).collect();
+    }
+}
+
+/// The points, with `column` as their `lineage`, one row per entry.
+fn write_lineage_points(path: &Path, column: ArrayRef) {
+    let ids: Vec<u64> = (0..column.len() as u64).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let schema = Arc::new(Schema::new(vec![
@@ -2398,6 +2407,33 @@ fn a_lineage_column_and_an_edged_artifact_table_build_the_same_bundle() {
         &from_tables,
         "a lineage column against an artifact table with parents",
     );
+}
+
+/// A lineage column written as a `large_list` builds the bundle a `list` builds.
+#[test]
+fn a_large_list_lineage_column_builds_the_bundle_a_list_builds() {
+    let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS).map(lineage_of).collect();
+    let layer = format!(
+        "{}value_set = \"open\"\n{FROM_LINEAGE}",
+        layer_of_kind("nested")
+    );
+    let (list, _a) = build_spelling(&layer, |inputs| {
+        write_listed_points(&inputs.points, &lists, false, None);
+    });
+    let (large, _b) = build_spelling(&layer, |inputs| {
+        let large = DataType::LargeList(Arc::new(Field::new("item", DataType::Int64, true)));
+        let column = arrow::compute::cast(&listed_column(&lists, false, None), &large).unwrap();
+        write_lineage_points(&inputs.points, column);
+        let file = std::fs::File::open(&inputs.points).unwrap();
+        let read = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap();
+        assert_eq!(
+            read.schema().field_with_name("lineage").unwrap().data_type(),
+            &large,
+            "the file must carry the large list, or this case discriminates nothing"
+        );
+    });
+    assert_bundles_identical(&list, &large, "a large_list lineage column against a list one");
 }
 
 /// Entity `e`'s levels, coarse → fine: one country, two states, four counties.

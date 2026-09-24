@@ -1,9 +1,6 @@
 import {svg, type TemplateResult} from 'lit';
 
-/**
- * The icons, as the boards draw them (`gen.py`'s `_ICONS`): 16-unit line icons, `currentColor`,
- * a 1.5 stroke. Words never stand in for these on a control the boards draw as an icon.
- */
+/** The icons: 16-unit line icons in `currentColor` with a 1.5 stroke. */
 const PATHS = {
   pan: svg`<path d="M9 3v7M5 6v4M13 6v4M5 10c0 3 2 5 4 5s4-2 4-5"/>`,
   box: svg`<rect x="3" y="3" width="10" height="10" stroke-dasharray="2.5 2"/>`,
@@ -24,7 +21,7 @@ const PATHS = {
   clock: svg`<circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/>`,
   lock: svg`<rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/>`,
   menu: svg`<path d="M2 4h12M2 8h12M2 12h12"/>`,
-  /** A marker pen over a ruled line — the highlight verb, beside `filter`'s funnel. */
+  /** A marker pen over a ruled line, for the highlight verb. */
   highlight: svg`<path d="M4.5 10.5l5.5-5.5 2.5 2.5-5.5 5.5H4.5v-2.5z"/><path d="M2.5 14.5h11"/>`
 };
 

@@ -1,46 +1,22 @@
 #!/usr/bin/env node
-// **Stage 4's write cycle, on a running deployment, in the order an operator would live it.**
+// A write cycle on a running deployment: what happens to a label when a document it was written
+// from is deleted.
 //
 //   TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node clients/ts/scripts/write-cycle-demo.mjs
 //
-// `publish-clusters.mjs` gives the viewer something to draw and `check-labels.mjs` proves *who is
-// served which description*. This one proves what happens when the corpus underneath a description
-// changes, which is the whole of Stage 4.
+// A client cannot see a label's generating set, so the script publishes its own small cluster and
+// one label over documents it chose, then deletes one of them. The steps:
 //
-// ## Why it publishes its own pair rather than driving an existing one
+// 1. The label is served to a principal who can see every document it was generated from.
+// 2. One of those documents is deleted with one `POST /control/changes`. The label is gone at the
+//    acknowledgement, since containment is evaluated per request against masks the delete has
+//    already changed. The cluster stays, one member fewer.
+// 3. A fold runs. A viewer should see no change.
+// 4. The label is still gone after the fold, and the cluster's count is one less.
 //
-// A generating set never crosses the trust boundary, so a client cannot tell which documents a
-// label was written about — that is the design working. Driving somebody else's labels therefore
-// means deleting documents at random and hoping one lands in a generating set, which on a 2.4M
-// corpus means deleting a great many documents to demonstrate one thing. So this publishes a small
-// cluster and one label over documents it picked itself, and then deletes **one** of them. Nothing
-// is guessed and exactly one document dies.
-//
-// ## What it demonstrates, in four steps
-//
-// 1. **The label is served** to a principal who can see every document it was generated from.
-// 2. **One of those documents is deleted.** One `POST /control/changes`, and the label is gone at
-//    the ack — nothing was stored to make that happen, because containment is evaluated per
-//    request and the deleted document left every mask the moment the deny was accepted. The
-//    cluster stays, one member lighter: a deletion moves a count *and* withdraws a description,
-//    and those are two consequences of one event rather than one.
-// 3. **A fold runs** — the operation a node holding artifacts used to refuse outright, and the one
-//    whose whole job here is to make step 2 structural.
-// 4. **The label is still gone.** That is the assertion the stage exists for: an earlier draft had
-//    the fold re-base generating sets into row space, which brought the withheld label back —
-//    served on a set that no longer named what its text was derived from.
-//
-// ## What to watch in the viewer while this runs
-//
-// At step 2 the label stops being served and its cluster stays; at step 3 nothing visibly happens,
-// which is the point — a fold is maintenance, and a viewer should not be able to tell one ran.
-//
-// ## What it does to the deployment
-//
-// It registers two layers (names are minted per run and cannot be reused), **deletes one document**
-// irreversibly — a delete is not a suppress — and **runs a fold**, which writes a new prefix and
-// reclaims the one it replaces, so it needs free disc of about the bundle's own size. `--dry-run`
-// stops before the first write.
+// The script registers two layers (their names are minted per run and cannot be reused), deletes
+// one document irreversibly, and runs a fold, which writes a new prefix and reclaims the old one,
+// so it needs free disc of about the bundle's size. `--dry-run` stops before the first write.
 import {Buffer} from 'node:buffer';
 import {tableFromIPC} from 'apache-arrow';
 // Loading a `.ts` module needs Node 22.18 or later, which strips its types.
@@ -62,9 +38,7 @@ const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721
 
 const dryRun = 'dry-run' in args;
 
-// ------------------------------------------------------------------------------- the plumbing
-// Deliberately the same shapes `check-labels.mjs` uses — a second decoding of the same frames is a
-// second place for the two to disagree about what the server said.
+// The same request and decoding shapes as `check-labels.mjs`.
 
 async function authorise(terms) {
   const r = await fetch(`${session}/session/authorise`, {
@@ -97,7 +71,7 @@ function frames(buf) {
 
 async function viewport(token, body) {
   const meta = await metaOf(token);
-  const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
+  const q = meta.views[0].quantisation;
   const r = await fetch(`${viewer}/v1/viewport`, {
     method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
@@ -114,8 +88,7 @@ async function viewport(token, body) {
 
 /** Every artifact this principal is served for these layers, as `layer::key → row`. */
 async function artifacts(token, layers) {
-  // `k = 0` is the annotation channel's own request shape: no points come back, so nothing here
-  // depends on which documents the sampler happened to draw.
+  // `k = 0` asks for no points, so nothing depends on which documents were sampled.
   const frame = (await viewport(token, {k: 0, layers})).find((f) => f.kind === 5);
   const out = new Map();
   if (!frame) return out;
@@ -138,10 +111,9 @@ async function artifacts(token, layers) {
   return out;
 }
 
-/** `k` served point identifiers — the only route to something the operator plane will act on. */
+/** `k` served point identifiers, which the operator API accepts. */
 async function points(token, k) {
-  // Kind 3 is the points frame (`tessera-wire`'s `FRAME_POINTS`); kind 5 is the artifacts one.
-  // Each is a complete Arrow stream of its own.
+  // Kind 3 is the points frame and kind 5 the artifacts frame, each a complete Arrow stream.
   const frame = (await viewport(token, {k})).find((f) => f.kind === 3);
   if (!frame) throw new Error('the viewport served no points frame');
   return [...tableFromIPC(frame.payload).getChild('tessera_id').toArray()];
@@ -161,9 +133,9 @@ async function status() {
 }
 
 const line = (label, value) => console.log(`  ${String(label).padEnd(34)} ${value}`);
-const describe = (row) => (row ? `${row.masked}${row.text ? ` — "${row.text}"` : ''}` : 'absent');
+const describe = (row) => (row ? `${row.masked}${row.text ? `, "${row.text}"` : ''}` : 'absent');
 
-// ------------------------------------------------------------------------------------- the run
+// The run.
 
 const stamp = Date.now().toString(36);
 const clusterLayer = args.layer ?? `clusters/write-cycle-${stamp}`;
@@ -174,7 +146,7 @@ const meta = await metaOf(token);
 const keysOf = (rows, layer) =>
   new Set([...rows.values()].filter((r) => r.layer === layer).map((r) => r.key));
 
-// ---- publish a cluster and one label over documents we picked ------------------------------
+// Publish a cluster and one label over documents chosen here.
 const sample = await points(token, 12);
 if (sample.length < 6) throw new Error(`the viewport served ${sample.length} points; this needs six`);
 const members = sample.slice(0, 6);
@@ -186,12 +158,12 @@ line('label layer', labelLayer);
 line('members', members.length);
 line('the label’s generating set', `${sources.length} of them`);
 if (dryRun) {
-  console.log('\n(dry run — nothing was sent)');
+  console.log('\n(dry run: nothing was sent)');
   process.exit(0);
 }
 
-// The label layer's content is withdrawn at the fold once a member it was generated from is
-// deleted, which is what step 4 checks.
+// Once a document the label was generated from is deleted, the fold withdraws the label's
+// content; step 4 checks it stays withdrawn.
 await register(
   clusterLayerDeclaration({
     name: clusterLayer,
@@ -230,7 +202,7 @@ const afterDelete = await artifacts(token, [clusterLayer, labelLayer]);
 line('cluster', describe(afterDelete.get(`${clusterLayer}::c0`)));
 line('label', describe(afterDelete.get(`${labelLayer}::l-c0`)));
 
-console.log('\n3. run a fold — which a node holding artifacts used to refuse outright');
+console.log('\n3. run a fold');
 const statusBefore = await status();
 accepted('compact', await control.compact());
 const folds = (st) => st.compaction?.folds ?? st.folds ?? 0;
@@ -243,7 +215,7 @@ for (;;) {
     break;
   }
   if (failures(now) > failures(statusBefore)) {
-    throw new Error('the fold was discarded — the server log names the gate that refused it');
+    throw new Error('the fold was discarded; the server log says which check refused it');
   }
   if (Date.now() > deadline) throw new Error('the fold did not publish within thirty minutes');
   await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -264,6 +236,6 @@ console.log(
 );
 if (!labelGone || !countFell) process.exitCode = 1;
 console.log(
-  'The fold wrote what it degraded to reports/fold-<prefix>.json in the bundle root — the notice\n' +
-    'the publisher is owed, written before anything retired.'
+  'The fold wrote how many members each artifact lost, and which descriptions it withdrew, to\n' +
+    'reports/fold-<prefix>.json in the bundle root, before the deletions took effect.'
 );

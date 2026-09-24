@@ -3,8 +3,8 @@ import {GRID32_CENTRE, NEUTRAL, artifactColours, hslToRgb, polarOf, positionalCo
 
 const at = (x: number, y: number, ordinal: number): Placed => ({ordinal, centroid: [x, y]});
 
-describe('the positional palette (§5.10, decision 0099)', () => {
-  it('is a function of the centroid alone — stable under pan and across served sets', () => {
+describe('the positional palette', () => {
+  it('is a function of the centroid alone: stable under pan and across served sets', () => {
     const c = GRID32_CENTRE;
     const a = positionalColour([c + 1e9, c]);
     expect(positionalColour([c + 1e9, c])).toEqual(a);
@@ -23,7 +23,7 @@ describe('the positional palette (§5.10, decision 0099)', () => {
     expect(polarOf([0, c]).radius).toBe(1);
     const lum = (rgb: readonly number[]) => rgb[0]! + rgb[1]! + rgb[2]!;
     // The same hue at both distances; on a dark ground the rim is lighter, on a light ground
-    // the rim is deeper (the boards' `position_colours`).
+    // deeper.
     expect(lum(positionalColour([2 ** 32 - 1, c], 'dark'))).toBeGreaterThan(lum(positionalColour([c + 1000, c], 'dark')));
     expect(lum(positionalColour([c + 1000, c], 'light'))).toBeGreaterThan(lum(positionalColour([2 ** 32 - 1, c], 'light')));
     expect(positionalColour([c + 1000, c], 'light')).not.toEqual(positionalColour([c + 1000, c], 'dark'));
@@ -32,7 +32,7 @@ describe('the positional palette (§5.10, decision 0099)', () => {
   it('spreads hues evenly over the served set in angle order, and neutral for an artifact with no centroid', () => {
     const c = GRID32_CENTRE;
     const spread = artifactColours([at(c + 10, c, 1), at(c, c + 10, 2), at(c - 10, c, 3), {ordinal: 4, centroid: null}], 'spread');
-    // Evenly spaced from the boards' hue origin (an offset of 0.95 of the circle), on the dark ground.
+    // Evenly spaced from the hue origin (an offset of 0.95 of the circle), on the dark ground.
     const origin = 0.95 * 360;
     expect(spread.get(1)!.slice(0, 3)).toEqual(hslToRgb(origin, 0.62, 0.64));
     expect(spread.get(2)!.slice(0, 3)).toEqual(hslToRgb(origin + 120, 0.62, 0.64));

@@ -1,22 +1,11 @@
 /**
- * The drawn contour's geometry: the smoothing that produces it, and what answers a hover over it.
+ * Contour geometry: the smoothing that draws a served ring, and which shape answers a hover.
  *
- * Two rules govern this module.
- *
- * - **The served ring is the shape; the drawn curve is a smoothing of it.** {@link smoothRing} is
- *   a periodic cubic B-spline through the served vertices, which is how DataMapPlot's contours are
- *   made (`alpha_shapes.py`: `splprep(..., per=True)` then `splev`). It does not interpolate, so
- *   the curve sits a little inside a convex corner and a little outside a reflex one — bounded
- *   locally, and permitted since the owner's ruling of 2026-08-28 that a shape is a summary of
- *   where a cluster is rather than a per-point assertion (`artifact-shapes.md` §4). What is
- *   forbidden is claiming ground the members do not occupy, and a curve that follows the ring
- *   within a fraction of its own edges does not. **Anything that reasons about containment reads
- *   the served ring, never the drawn curve.**
- * - **Only a shape that is drawn answers a hover.** The resolution is {@link hoverAt}: deepest
- *   wins where shapes overlap, and a hovered shape holds the hover until the pointer leaves it.
+ * The served ring is the shape; the drawn curve is a smoothing of it that strays a fraction of an
+ * edge either side. Anything that reasons about containment reads the served ring.
  */
 
-/** A closed ring in world space — the first vertex is not repeated at the end. */
+/** A closed ring in world space; the first vertex is not repeated at the end. */
 export type Ring = [number, number][];
 
 /** Twice a ring's signed area; positive counter-clockwise in a y-up frame. */
@@ -30,7 +19,7 @@ export function signedArea2(ring: readonly [number, number][]): number {
   return sum;
 }
 
-/** Whether a point is inside a closed ring — an even-odd crossing count. */
+/** Whether a point is inside a closed ring, by an even-odd crossing count. */
 export function pointInRing(p: readonly [number, number], ring: readonly [number, number][]): boolean {
   let odd = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -41,7 +30,7 @@ export function pointInRing(p: readonly [number, number], ring: readonly [number
   return odd;
 }
 
-/** The distance from a point to a ring's boundary — the nearest edge, never the interior. */
+/** The distance from a point to a ring's nearest edge, whether the point is inside or out. */
 export function distanceToRing(p: readonly [number, number], ring: readonly [number, number][]): number {
   let best = Number.POSITIVE_INFINITY;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -60,13 +49,8 @@ export function distanceToRing(p: readonly [number, number], ring: readonly [num
 }
 
 /**
- * The orientation of the triple, by the sign of the cross product; 0 is collinear.
- *
- * The comparison is against a **relative** epsilon, not against zero. The points this is asked
- * about are constructed — a cut point is a quarter of the way along an edge — so a point that is
- * collinear by construction lands a few units in the last place off the line, and an exact test
- * reads that as a turn. It did: a cut chord's own endpoint read as crossing the edge it sits on,
- * and every corner of a circle was refused.
+ * The orientation of the triple, by the sign of the cross product; 0 is collinear. The test uses
+ * a relative epsilon because a constructed point on an edge lands a few ulps off the line.
  */
 function turn(a: readonly [number, number], b: readonly [number, number], c: readonly [number, number]): number {
   const ux = b[0] - a[0];
@@ -78,11 +62,7 @@ function turn(a: readonly [number, number], b: readonly [number, number], c: rea
   return Math.abs(cross) <= scale * 1e-12 ? 0 : Math.sign(cross);
 }
 
-/**
- * Whether two segments cross at a point interior to **both** — a touch at an endpoint is not a
- * crossing. That is the predicate the chord test below needs: a cut chord's endpoints lie on the
- * ring's own edges by construction, and those touches must not read as exits.
- */
+/** Whether two segments cross at a point interior to both; a touch at an endpoint does not count. */
 function crossesProperly(p1: readonly [number, number], p2: readonly [number, number], q1: readonly [number, number], q2: readonly [number, number]): boolean {
   const d1 = turn(p1, p2, q1);
   const d2 = turn(p1, p2, q2);
@@ -92,46 +72,20 @@ function crossesProperly(p1: readonly [number, number], p2: readonly [number, nu
 }
 
 /**
- * How many curve samples each ring vertex contributes.
- *
- * Four is where a 16-gon stops looking like a polygon at the zoom a hovered cluster is read at,
- * and it makes the drawn ring four times the served one — against the eight times three rounds of
- * corner cutting cost. Only the one or two shapes that draw are smoothed, and only where the wire
- * answered with a hull ({@link focusOutlines} in `layer.ts` — four box corners through a periodic
- * spline is an oval). So this is a per-interaction cost and never a per-served-artifact one: the
- * largest shape on the measurement layer is 757 vertices across 10 rings, and 3,028 vertices is
- * one `PolygonLayer` call either way.
+ * How many curve samples each ring vertex contributes. Four is enough for a 16-gon to stop looking
+ * like a polygon. Only the one or two shapes drawn at a time are smoothed.
  */
 const SAMPLES_PER_SPAN = 4;
 
 /**
- * A ring smoothed as a **periodic uniform cubic B-spline** through its vertices.
+ * A ring smoothed as a periodic uniform cubic B-spline over its vertices: closed, with no fitting
+ * parameter, and `C²` everywhere. DataMapPlot draws its contours the same way.
  *
- * This is DataMapPlot's construction rather than an approximation of it in spirit only: their
- * `alpha_shapes.py` fits `scipy.interpolate.splprep(..., s=spline_coeff, per=True)` through the
- * α-shape's boundary and evaluates it with `splev` at a multiple of the vertex density, and the
- * α shape underneath is as angular as ours. The periodic uniform cubic B-spline is the closed,
- * knot-free member of that family: no fitting, no parameter, and `C²` everywhere.
- *
- * **It smooths rather than interpolates**, which is the whole difference from the corner cutting
- * it replaces. Each span between two ring vertices is the cubic
- * `(b₀P₀ + b₁P₁ + b₂P₂ + b₃P₃)`, so the curve passes near a vertex rather than through it — at a
- * knot it sits at `(Pᵢ₋₁ + 4Pᵢ + Pᵢ₊₁)/6`, a sixth of the second difference away from `Pᵢ`. At a
- * convex corner that is inward and at a reflex corner outward, and the outward case is what the
- * deleted implementation refused to draw at all.
- *
- * **Why the outward case is now allowed.** The bar is no longer containment but *does the shape
- * claim ground the members do not occupy* (`artifact-shapes.md` §4, owner ruling 2026-08-28). The
- * excursion is bounded by a third of the longer adjacent served edge, and the served edges of a
- * dug ring are α-scale lengths in the cloud's own units — so the curve reaches at most a fraction
- * of the members' own spacing past their outline. That is an imprecise summary of where the
- * cluster is, not a claim about empty ground, and it buys a boundary that reads as a contour at
- * every corner rather than at the convex ones only. The refused reflex corner was visible: a dug
- * shape's concavities stayed as angular as the wire while its convex arcs rounded.
- *
- * **The served ring is unaffected**, and it is what the pick reads, what
- * {@link ringWithin} is asked about, and what any containment reasoning uses. A ring of fewer than
- * four vertices is handed back as it is: a triangle or a degenerate group has no span to fit.
+ * The curve passes near each vertex, not through it: at a knot it sits at
+ * `(Pᵢ₋₁ + 4Pᵢ + Pᵢ₊₁)/6`, inside a convex corner and outside a reflex one. The excursion is at
+ * most a third of the longer adjacent edge, a fraction of the members' own spacing, so the curve
+ * does not claim ground the members do not occupy. A ring of fewer than four vertices is returned
+ * as it is.
  */
 export function smoothRing(ring: readonly [number, number][], samplesPerSpan = SAMPLES_PER_SPAN): Ring {
   const n = ring.length;
@@ -160,22 +114,10 @@ export function smoothRing(ring: readonly [number, number][], samplesPerSpan = S
 }
 
 /**
- * Whether `inner` is contained in `outer` — **an oracle for tests, and not an area comparison**.
- *
- * Nothing in the drawing path asks this any more: {@link smoothRing} is a smoothing and not a
- * containment-preserving cut, and the ruling it was written under has moved. It is kept because
- * containment is still the right question to ask of the *served* rings — a ring is inside its
- * group's convex wrap, and a narrow principal's shape is inside a broad one's — and an area
- * comparison cannot answer it.
- *
- * Every vertex and every edge midpoint of `inner` must be inside `outer` or on its boundary, and
- * no edge of `inner` may cross an edge of `outer`. On the boundary counts as inside: a
- * containment-preserving cut keeps whole sub-segments of the source ring, whose points sit exactly
- * on it, and an inside-only test would reject the very construction it is there to check.
- *
- * An area comparison would not do: the deleted implementation's own note records that its total
- * area *fell* while its boundary crossed into empty ground, because a convex corner gives up more
- * than a reflex corner takes.
+ * Whether `inner` is contained in `outer`, for tests of served rings (a ring inside its group's
+ * convex wrap, a narrow principal's shape inside a broad one's). Every vertex and edge midpoint of
+ * `inner` must be inside `outer` or on its boundary, and no edge of `inner` may cross an edge of
+ * `outer`. A smaller area does not imply containment, so areas are not compared.
  */
 export function ringWithin(inner: readonly [number, number][], outer: readonly [number, number][]): boolean {
   const box = shapeBbox([[outer]]);
@@ -193,19 +135,14 @@ export function ringWithin(inner: readonly [number, number][], outer: readonly [
   return true;
 }
 
-// ---- what answers a hover ---------------------------------------------------------------------
-
 /** One part of a drawn shape: its outer ring first, then its holes. */
 export type Part = readonly (readonly [number, number][])[];
 
 /**
- * One artifact's drawn shape, as the hover reads it: every part it draws — outer ring first,
- * then holes (`polygon-membership.md` §7.1) — the wire's `rung` it is drawn at (contracts §3.2
- * r44), and the bounding box of the lot for a cheap rejection.
- *
- * **This answers a hover and a click, and nothing else.** A served shape is a drawing generalised
- * to the pixel, and whether a *point* is a member is the wire's `membership:<layer>` column's to
- * say, never a test against these rings.
+ * One artifact's drawn shape, as the hover reads it: its parts, the served `rung` (its level, or
+ * its depth in a tree), and the bounding box of all parts. It answers a hover and a click only. A served
+ * shape is generalised to the pixel, so whether a point is a member comes from the served
+ * `membership:<layer>` column.
  */
 export type ContourShape = {
   id: bigint;
@@ -230,11 +167,7 @@ export function shapeBbox(parts: readonly Part[]): [number, number, number, numb
   return [x0, y0, x1, y1];
 }
 
-/**
- * Whether a point is in any part of a shape — the even-odd rule over each part's rings, so a
- * point inside a hole is outside the part. A hull's parts are separated groups (§1), one ring
- * each, for which this is the plain ring test.
- */
+/** Whether a point is in any part of a shape, by the even-odd rule over each part's rings. */
 export function shapeContains(shape: ContourShape, p: readonly [number, number]): boolean {
   if (p[0] < shape.bbox[0] || p[0] > shape.bbox[2] || p[1] < shape.bbox[1] || p[1] > shape.bbox[3]) return false;
   for (const part of shape.parts) {
@@ -256,30 +189,14 @@ export function shapeDistance(shape: ContourShape, p: readonly [number, number])
 }
 
 /**
- * The artifact under the pointer: **the deepest drawn shape containing it**, with the one already
- * hovered held until the pointer leaves it.
+ * The artifact under the pointer, among `shapes` (the caller passes the frontier). In order:
  *
- * The hover used to be whatever deck's pick pass answered over a polygon layer that kept every
- * served artifact pickable at zero alpha. An ancestor is served alongside its children, its ring
- * contains theirs, and nothing is drawn for it — so the pointer crossed invisible shapes and the
- * answer flipped between a cluster and its sub-cluster on a pixel of movement. Four rules, in
- * order, and each is needed:
- *
- * - **hysteresis**: `sticky` — the artifact already hovered — is kept while the pointer is inside
- *   its shape, and for `margin` world units beyond it, so a hand resting on a boundary does not
- *   oscillate and a few pixels of movement inside one cluster never change the answer;
- * - **`prefer`** — the artifact the mark under the pointer belongs to, where the caller has one —
- *   wins next, so the highlighted contour is the cluster whose point the tooltip is describing.
- *   Membership is a fact the wire carries; where hulls interleave, geometry alone would answer
- *   with whichever shape the point happens to fall in;
- * - **deepest wins** where shapes still overlap — two rings of one artifact, or a frontier
- *   artifact inside another's ring — so the answer is the most specific thing under the cursor,
- *   and it is the served tree that decides rather than paint order;
- * - **only shapes a viewer can point at are candidates at all** — the caller passes the frontier,
- *   which is what carries a label and what draws a contour when the pointer reaches it.
- *
- * Ties on depth are broken by the smaller shape and then by the identifier, so the answer is a
- * function of the pointer, the served set and the mark beneath, and of nothing else.
+ * - `sticky`, the artifact already hovered, is kept while the pointer is inside its shape or
+ *   within `margin` world units of it, so a hand resting on a boundary does not flicker;
+ * - `prefer`, the artifact of the mark under the pointer, wins next if its shape contains the
+ *   pointer, so the contour matches the point the tooltip describes where shapes interleave;
+ * - otherwise the deepest containing shape wins, then the smaller bounding box, then the smaller
+ *   identifier.
  */
 export function hoverAt(
   shapes: readonly ContourShape[],
@@ -306,8 +223,6 @@ export function hoverAt(
     if (a < b || (a === b && shape.id < best.id)) best = shape;
   }
   if (held) return held.id;
-  // The pointer has left the held shape, but not by much: the hover is kept until it is clear of
-  // it. Without this a boundary is a place where two answers alternate under an unmoving hand.
   if (sticky !== null && margin > 0) {
     for (const shape of shapes) {
       if (shape.id === sticky && shapeDistance(shape, p) <= margin) return sticky;

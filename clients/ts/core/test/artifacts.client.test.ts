@@ -1,19 +1,16 @@
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
+import {tableFromIPC} from 'apache-arrow';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
-import {decodeViewport} from '../src/decode.js';
-import {liftGolden, liftTilesHighlighted} from './old-shape-columns.js';
+import {decodeArtifactsFrame, decodeViewport} from '../src/decode.js';
+import {splitFramedStreams} from '../src/frame.js';
 import type {Decoder} from '../src/decoder.js';
 import {refused, rejectsAsRefused, result} from './support.js';
 
 /**
- * What the artifact channel puts on the wire, and what it makes of what comes back.
- *
- * The transport is stubbed rather than live: every assertion here is about the *shape* of the
- * request the client composes and the mapping of the reply, which is precisely the part a live
- * test cannot pin — a server that ignored `layers` would pass the live test on a bundle with one
- * layer.
+ * What the client puts on the wire for artifacts, and how it maps the reply. The transport is
+ * stubbed: a live server that ignored `layers` would pass on a bundle with one layer.
  */
 
 /** Answers every whole response with an empty result; these tests read the request, not the body. */
@@ -25,7 +22,7 @@ const empty: Decoder = {
   close: () => {}
 };
 
-/** Capture every request the client makes, and answer each with the body given. */
+/** Captures every request the client makes, and answers each with the body given. */
 function stubFetch(answer: (url: string) => Response) {
   const seen: {url: string; body: Record<string, unknown>}[] = [];
   vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
@@ -52,8 +49,8 @@ describe('the viewport request', () => {
     await c.viewport('tok', {view: 's0', zoom: 4, layers: []});
     await c.viewport('tok', {view: 's0', zoom: 4});
 
-    // The wire is `string[] | 'all'`: `[]` and absent both mean *none* now, so a point-fetching
-    // client sends `[]` (or omits) and pays nothing for artifacts.
+    // `layers` is `string[] | 'all'`: `[]` and absent both mean none, so a client fetching points
+    // pays nothing for artifacts.
     expect(seen[0]!.body.layers).toEqual([]);
     expect('layers' in seen[1]!.body).toBe(false);
   });
@@ -63,8 +60,7 @@ describe('the viewport request', () => {
     const c = client();
     await c.viewport('tok', {view: 's0', zoom: 4, layers: 'all'});
     await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x']});
-    // `'all'` is every reachable layer; an array is those ∩ reachable. Each reaches the wire as
-    // exactly what the caller gave — the store must name the on layers, never rely on a default.
+    // `'all'` is every reachable layer and an array those reachable; each is sent as given.
     expect(seen[0]!.body.layers).toBe('all');
     expect(seen[1]!.body.layers).toEqual(['clusters/x']);
   });
@@ -90,8 +86,7 @@ describe('the viewport request', () => {
     const c = client();
     await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x'], artifactRows: 'identity'});
     await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x']});
-    // `"identity"` is the same rows in four columns (contracts §3.2 r44); absent leaves the
-    // server's own default, `"full"`, and the request shape a caller who never asks always sent.
+    // `"identity"` is the same rows in fewer columns; absent leaves the server's default, `"full"`.
     expect(seen[0]!.body.artifact_rows).toBe('identity');
     expect('artifact_rows' in seen[1]!.body).toBe(false);
   });
@@ -225,50 +220,33 @@ describe('/v1/meta', () => {
 });
 
 /**
- * **The two artifact goldens are r44 captures** (2026-08-28) — taken against a `tessera serve`
- * built from this tree over the notebook corpus's `clusters/hdbscan` (`./run_demo.sh --scale
- * notebook --no-viewer`, then `scripts/capture-golden.mjs --artifacts-only` as the corpus's
- * *medium* preset principal, whose terms are arXiv categories; `--terms 0` sees nothing there), so
- * `layer` is dictionary-encoded, `rung` stands where `level` did, and `hull_x`/`hull_y` trail the
- * fixed prefix as the nested list of rings contracts §3.2 r44 specified.
- *
- * **Both goldens are now bodies from before the shape columns** (contracts §3.2 r45 renamed the
- * pair `shape_x`/`shape_y` and deepened it to parts of rings), and the decoder refuses them by
- * name rather than reading them as shapeless: read as *no drawn geometry*, an r44 body draws
- * every cluster as its box and looks like a layer that declares none. So the two fixture tests
- * below are the refusal, and the geometry and row-set claims are made against a hand-assembled
- * r45 body in `artifacts-frame.test.ts` and `shape.test.ts`. ⊘ The goldens are due a recapture
- * against a served corpus (`scripts/capture-golden.mjs --artifacts-only`), which restores the
- * captured-body claims here; `clients/ts/README.md`'s fixture rule applies.
+ * The artifacts frame as a server sent it: the k-means layer of the notebook corpus, which declares
+ * centroid, box and hull over clusters in different parts of the map, captured at `k = 0` by
+ * `scripts/capture-golden.mjs`.
  */
 describe('the artifacts frame, decoded from a captured response', () => {
   const fixture = (name: string) =>
     new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 
-  it('refuses a body captured before the shape columns, whichever nesting its hull carried', () => {
-    // Two real bodies, not hand-assembled ones: the pre-r40 flat hull and the r44 list of rings.
-    // Neither is read as shapeless — the old column names are the refusal.
-    // Lifted for the tiles frame's `highlighted` column first, so what is being refused is the
-    // shape columns' old names and not the newer column these captures also predate.
-    refused(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts-pre-r40.bin'))));
-    refused(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts.bin'))));
+  it('refuses an artifacts frame captured before the shape columns', () => {
+    // A captured body from an older server, with `hull_x`/`hull_y` and no `rung` column. Its tile
+    // frame is older too, so the artifacts frame is decoded alone.
+    refused(() => decodeArtifactsFrame(splitFramedStreams(fixture('viewport-artifacts-pre-r40.bin')).artifacts!));
   });
 
   it('carries one row per served artifact, and no points beside them', () => {
-    const result = decodeViewport(liftGolden(fixture('viewport-artifacts.bin')));
+    const result = decodeViewport(fixture('viewport-artifacts.bin'));
     expect(result.artifacts.length).toBeGreaterThan(0);
-    // Captured at `k = 0` — the annotation channel's own request shape. A body with an artifacts
-    // frame and no points frame at all is the case a decoder is most likely to get wrong.
+    // Captured at `k = 0`: an artifacts frame and no points frame.
     expect(result.ids.length).toBe(0);
     expect(result.membership).toEqual({});
 
     for (const artifact of result.artifacts) {
       expect(artifact.layer.length).toBeGreaterThan(0);
-      // u64 on the wire and kept as one: a `tessera_id` does not survive a double.
+      // Kept as a u64: a `tessera_id` does not survive a double.
       expect(artifact.tesseraId).toBeTypeOf('bigint');
       expect(artifact.maskedCount).toBeTypeOf('bigint');
-      // Served at all means it cleared its layer's criterion, so nothing here is a zero-count row
-      // this principal cannot see any of.
+      // Served means it met its layer's criterion, so no row has a zero count.
       expect(artifact.maskedCount).toBeGreaterThan(0n);
     }
 
@@ -278,37 +256,66 @@ describe('the artifacts frame, decoded from a captured response', () => {
   });
 
   it('reads a response with no artifacts frame as no artifacts, not as a failure', () => {
-    expect(decodeViewport(liftTilesHighlighted(fixture('viewport-plain.bin'))).artifacts).toEqual([]);
+    expect(decodeViewport(fixture('viewport-plain.bin')).artifacts).toEqual([]);
   });
 
   it('carries the derived geometry in the same grid units as the points', () => {
-    const result = decodeViewport(liftGolden(fixture('viewport-artifacts.bin')));
-    // The captured layer declares all three; the centroid and the box are read here, and the
-    // shape — under its r44 name in this capture — is what `liftGolden` took out. A null
-    // centroid or box would be *the layer declares none* and never *withheld* — content is never
-    // withheld from a served artifact — so a null on a layer that declares the property is a
-    // decoder or a server bug.
+    const result = decodeViewport(fixture('viewport-artifacts.bin'));
+    // The layer declares all three and the request narrowed none. A null would mean the layer
+    // declares none.
     for (const a of result.artifacts) {
       expect(a.centroid).not.toBeNull();
       expect(a.box).not.toBeNull();
-      expect(a.shape).toBeNull();
+      expect(a.shape).not.toBeNull();
 
       const [cx, cy] = a.centroid!;
       const [minX, minY, maxX, maxY] = a.box!;
-      // The centroid is a mean of the members' positions, so it lies inside their bounds. This
-      // catches the axis transposition a two-column-per-shape wire invites.
+      // The centroid is a mean of the members' positions, so it lies inside their bounds; this
+      // catches transposed axes.
       expect(cx).toBeGreaterThanOrEqual(minX);
       expect(cx).toBeLessThanOrEqual(maxX);
       expect(cy).toBeGreaterThanOrEqual(minY);
       expect(cy).toBeLessThanOrEqual(maxY);
 
-      // Grid units, not data coordinates: the axes span 2^32, exactly as `codes` does.
+      // Grid units: the axes span 2^32, as `codes` does.
       expect(maxX).toBeLessThanOrEqual(2 ** 32);
+      // Parts, then rings, then vertices, each vertex a member's position and so inside the box.
+      // A group of one or two members is served as that point or that segment.
+      expect(a.shape!.length).toBeGreaterThan(0);
+      for (const part of a.shape!) {
+        for (const ring of part) {
+          expect(ring.length).toBeGreaterThan(0);
+          for (const [x, y] of ring) {
+            expect(x).toBeGreaterThanOrEqual(minX);
+            expect(x).toBeLessThanOrEqual(maxX);
+            expect(y).toBeGreaterThanOrEqual(minY);
+            expect(y).toBeLessThanOrEqual(maxY);
+          }
+        }
+      }
     }
-    // Different clusters, different shapes — one geometry repeated across rows would mean the
-    // decoder read row 0 for everybody.
+    // Different clusters, different shapes; one geometry on every row would mean row 0 was read for
+    // all.
     const centroids = new Set(result.artifacts.map((a) => a.centroid!.join(',')));
     expect(centroids.size).toBe(result.artifacts.length);
+  });
+
+  it('reads every shape part, ring and vertex as Arrow reads the nested lists', () => {
+    const body = fixture('viewport-artifacts.bin');
+    const result = decodeViewport(body);
+    const table = tableFromIPC(splitFramedStreams(body).artifacts!);
+    const nested = (name: string, i: number) =>
+      Array.from(table.getChild(name)!.get(i) as Iterable<Iterable<Iterable<number>>>, (rings) => Array.from(rings, (ring) => Array.from(ring)));
+    expect(result.artifacts.length).toBe(table.numRows);
+    result.artifacts.forEach((a, i) => {
+      const xs = nested('shape_x', i);
+      const ys = nested('shape_y', i);
+      expect(a.shape, `artifact ${i}`).toEqual(xs.map((rings, p) => rings.map((ring, r) => ring.map((x, v) => [x, ys[p]![r]![v]]))));
+    });
+    // The capture holds a shape of several parts and a ring of several vertices, so reading only
+    // the first of either is caught.
+    expect(result.artifacts.some((a) => a.shape!.length > 1)).toBe(true);
+    expect(result.artifacts.some((a) => a.shape!.some((part) => part.some((ring) => ring.length > 1)))).toBe(true);
   });
 });
 
@@ -329,8 +336,8 @@ describe('the drill-down', () => {
   });
 
   it('carries the geometry, which is what the viewport is no longer asked for', async () => {
-    // The route the drawn shape now comes from: the viewport asks for centroids and boxes and this
-    // answers with the one shape that draws (`artifact-shapes.md` §9).
+    // The route the drawn shape comes from: the viewport serves centroids and boxes, and this
+    // answers with the one shape drawn.
     const seen = stubFetch(
       () =>
         new Response(
@@ -350,7 +357,7 @@ describe('the drill-down', () => {
     // Parts of rings, not a list of vertices: a membership that is two clouds is two parts.
     expect(detail.shape?.length).toBe(2);
     expect(detail.shape?.[1]?.[0]?.[0]).toEqual([100, 100]);
-    // The zoom travels as the whole depth the server's vertex rule reads (§7.2).
+    // The zoom is sent as the whole depth the server's vertex rule reads.
     expect(seen[0]!.body).toEqual({view: 's0', zoom: 5});
   });
 
@@ -365,9 +372,8 @@ describe('the drill-down', () => {
         new Response(JSON.stringify({error: 'unknown', detail: 'unknown artifact'}), {status: 404})
     );
 
-    // Every withheld case arrives here identically — an identifier naming nothing, one naming a
-    // point, one gated, one suppressed, one below its layer's criterion. A caller that branched on
-    // the detail string would be inventing a distinction the server refuses to make.
+    // Every withheld case arrives alike: an id naming nothing, one naming a point, one gated, one
+    // suppressed, one below its layer's criterion.
     await expect(client().artifact('tok', 1n, {view: 's0'})).rejects.toThrow(TesseraError);
   });
 });

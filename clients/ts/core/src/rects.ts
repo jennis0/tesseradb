@@ -1,35 +1,21 @@
 /**
- * Rectangles of tiles, and the subtraction that makes planning O(1) in tile count.
+ * Rectangles of tiles, and their subtraction.
  *
- * **Why the client's coverage is a rectangle set and not a tile set.** A viewport is a rectangle;
- * a pan produces a rectangle overlapping the last one; the novel part is therefore
- * rectangle-minus-rectangle, which is at most four rectangles. Enumerating every tile in the
- * viewport to rediscover that shape costs O(tiles) — measured at 181 ms to enumerate and 56 ms to
- * diff a 262 144-tile ring, on the thread that also draws. Subtracting rectangles costs O(rects),
- * which is single digits.
+ * Coverage is a set of rectangles because a viewport is a rectangle and a pan's new ground is one
+ * rectangle less another, at most four pieces. Enumerating tiles costs time in proportion to the
+ * viewport; subtracting rectangles costs time in proportion to a handful of rectangles. A covered
+ * rectangle records that the region was asked for and anything not sent is empty, in four integers.
  *
- * It also removes a leak. Recording emptiness per tile meant one map entry for every empty tile
- * ever looked at — ~97% of a viewport, unbounded, and not counted against the cache's byte budget.
- * A covered rectangle asserts the same thing for its whole area in four integers: *we asked here
- * and absorbed the answer, so anything we were not sent is empty*.
- *
- * **Integer tile indices, never world coordinates.** Containment and subtraction have to be exact
- * or a rectangle "covers" a region it does not; floats drift and would make that test lie.
- * Everything here is inclusive-bounds integer arithmetic at one depth.
+ * Everything is inclusive integer tile indices at one depth, so containment is exact.
  */
 
 /** An inclusive rectangle in tile-index space at one depth. `x1 >= x0`, `y1 >= y0`. */
 export type TileRect = {x0: number; y0: number; x1: number; y1: number};
 
 /**
- * A rectangle the client has asked for and absorbed the answer to.
- *
- * `capUsed` is `min(k, k_max_marks)` in force when it was fetched. Coverage is only reusable at a
- * `k` no larger than that: where the cap was the binding clause of the selection rule, a larger `k`
- * yields more points for the same tiles, so the region is no longer fully held. The per-*tile* test
- * could be sharper — a tile whose served count came in under the cap is unaffected by raising it —
- * but that distinction cannot be made for a rectangle as a whole, and being conservative here costs
- * bytes rather than correctness.
+ * A rectangle the client has asked for and absorbed the answer to. `capUsed` is `min(k, k_max_marks)`
+ * when it was fetched; the coverage holds only for a `k` no larger, since a larger `k` can serve
+ * more points from the same tiles.
  */
 export type Coverage = {rect: TileRect; depth: number; contentKey: string; capUsed: number};
 
@@ -63,10 +49,8 @@ export function rectIntersection(a: TileRect, b: TileRect): TileRect | null {
 }
 
 /**
- * `want` minus `hole`, as up to four disjoint rectangles.
- *
- * Cut in bands — above, below, then the left and right of what remains — so the pieces never
- * overlap. Overlapping pieces would be re-requested twice and, worse, absorbed twice.
+ * `want` minus `hole`, as up to four disjoint rectangles: above, below, then left and right of what
+ * remains. Overlapping pieces would be requested and absorbed twice.
  */
 export function rectSubtract(want: TileRect, hole: TileRect): TileRect[] {
   const overlap = rectIntersection(want, hole);
@@ -82,14 +66,9 @@ export function rectSubtract(want: TileRect, hole: TileRect): TileRect[] {
 }
 
 /**
- * `want` minus every hole, as a disjoint set.
- *
- * **Bounded rather than exact, and the bound is the point.** Subtracting *n* holes can in principle
- * fragment into O(n) pieces; if it does, the caller is better served by one slightly-too-large
- * request than by a hundred small ones — the per-request floor is ~170 µs and a tile it already
- * holds costs the server essentially nothing to be asked for again. So past `maxPieces` this stops
- * subtracting and returns what it has, which is a superset of the novel region: more bytes, never
- * a hole.
+ * `want` minus every hole, as disjoint rectangles. Past `maxPieces` it stops subtracting and returns
+ * what it has, a superset of the new ground: one slightly large request is cheaper than many small
+ * ones, and asking again for a held tile costs the server almost nothing.
  */
 export function rectSubtractAll(want: TileRect, holes: TileRect[], maxPieces = 8): TileRect[] {
   let pieces = [want];
@@ -104,12 +83,9 @@ export function rectSubtractAll(want: TileRect, holes: TileRect[], maxPieces = 8
 }
 
 /**
- * The union of two rectangles, when that union is itself exactly a rectangle.
- *
- * True in three cases: one contains the other, or they span the same rows and touch or overlap
- * horizontally, or they span the same columns and touch or overlap vertically. Anything else has a
- * union that is L-shaped or disjoint, and returning a bounding box for it would claim ground
- * neither rectangle covered.
+ * The union of two rectangles where that union is a rectangle: one contains the other, or they
+ * share rows or columns and touch or overlap. Otherwise `null`; a bounding box would claim ground
+ * neither covered.
  */
 export function rectFuse(a: TileRect, b: TileRect): TileRect | null {
   if (rectContains(a, b)) return a;
@@ -124,16 +100,9 @@ export function rectFuse(a: TileRect, b: TileRect): TileRect | null {
 }
 
 /**
- * Absorb `rect` into a coverage list, fusing where that is exact.
- *
- * **Fusion is what keeps a pan sequence to one rectangle**, and without it the structure defeats
- * itself: each pan adds a strip, subtraction then shatters the next request against a chain of
- * overlapping pieces, and one request per pan becomes three or four. Measured that way round
- * before this existed.
- *
- * Only *exactly* rectangular unions are fused — see {@link rectFuse}. A bounding box over an
- * L-shaped union would claim emptiness for tiles nobody asked about, which is the one failure this
- * structure must not have. Re-run to a fixed point, because fusing two can make a third fusable.
+ * Adds a rectangle to a coverage list, fusing where the union is exactly a rectangle, repeated until
+ * nothing more fuses. Fusion keeps a sequence of pans to one rectangle, so each pan subtracts to one
+ * request.
  */
 export function coverageAdd(list: Coverage[], added: Coverage): Coverage[] {
   const others: Coverage[] = [];
@@ -178,7 +147,7 @@ export function coverageAt(
   return out;
 }
 
-/** The union of `rect`'s tiles, as `(x, y)` pairs. Only for callers that genuinely need each one. */
+/** `rect`'s tiles, as `(x, y)` pairs. */
 export function* rectTiles(r: TileRect): Generator<{x: number; y: number}> {
   for (let y = r.y0; y <= r.y1; y++) for (let x = r.x0; x <= r.x1; x++) yield {x, y};
 }

@@ -1,13 +1,6 @@
 /**
- * Escape a value for interpolation into a panel's HTML.
- *
- * The panels build markup as strings, and several of the values they interpolate are **not ours**:
- * a scalar column's contents come from whatever corpus was built into the bundle, and an error
- * `detail` comes off the wire. Neither is markup and neither may become markup.
- *
- * This is hygiene rather than a security boundary — the bundle and the server are inside the same
- * trust boundary as this page. It is here because the alternative is remembering to be careful at
- * every interpolation site, which is exactly the discipline that fails quietly.
+ * Escape a value for interpolation into a panel's HTML. The panels build markup as strings from
+ * values that come from the corpus or the server, such as column contents and error details.
  */
 export function esc(value: unknown): string {
   return String(value)
