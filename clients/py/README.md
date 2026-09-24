@@ -359,6 +359,7 @@ papers = db.items("s0", ["title", "primary_category"], system_fields=["external_
 papers.to_pandas()                            # every paper, as one DataFrame
 cs = db.viewer(["cs.LG"]).items("s0", ["title"], filters={"archive": {"eq": "cs"}})
 topics = db.artifacts("s0", "clusters/kmeans", ["key", "masked_count", "centroid"])
+db.view("s0").filter({"archive": {"eq": "cs"}}).items(["title"])   # a selection's own items
 
 for batch in db.items("s0", ["title"], page_rows=10_000, batches=True):
     batch.to_pandas()                         # a page at a time
@@ -369,12 +370,13 @@ named, as one pyarrow table. The server answers a page at a time, several pages 
 and ends each response with a cursor for the next. `items` asks for responses until no row
 remains and joins their pages. The columns are `tessera_id`, the fields in the order named, then
 the `system_fields` asked for: `position` as `tessera:x` and `tessera:y`, in the view's
-coordinates; `external_id` as `tessera:external_id`, the id each item was inserted with, as bytes;
-and `labels` as `tessera:labels`. A category column holds each value's key as a dictionary column, and a missing
-value is null. `filters` narrows the rows as `Selection.filter` does, and `keep_unmatched=True`
+coordinates; `external_id` as `tessera:external_id`, the id each item was inserted with; and
+`labels` as `tessera:labels`. From a `Database` an id comes back as the type its id column had, as
+`item()` gives it, and from `connect()` as bytes. A category column holds each value's key as a
+dictionary column, and a missing value is null. `filters` narrows the rows as `Selection.filter` does, and `keep_unmatched=True`
 keeps every row and adds a `tessera:matched` column. The table's schema metadata `tessera.head`
 holds the page size and order the server used, and with `count=True` the numbers of items
-`visible` and `matched`. A read that returns no row is a table of `tessera_id` alone.
+`visible` and `matched`. A read that returns no row is a table of no rows with the same columns.
 
 `order="map"` returns the items by their place on the map and `order="stored"` in the order the
 server stores records, which is faster for a column that is neither rendered nor indexed. Without
@@ -389,7 +391,9 @@ batch's category dictionary holds only that page's keys; `read_all()` joins the 
 one table with one dictionary per column, and `to_pandas()` into one DataFrame. `head` is the
 first response's head. `next` is the cursor to pass as `cursor` to read on after the last batch
 taken, and before the first batch it is the `cursor` the read began from. `done` is `True` once
-the server has said no row remains, and `close()` ends the read.
+the server has said no row remains, and `close()` ends the read. A response that found no row
+gives a batch of no rows with the read's columns, so a read of nothing still says what its
+columns are.
 
 A response cut short, or a later request refused, as when the server's bulk reads are all busy,
 raises a `PartialRead`, a kind of `Refusal`, after the whole pages before it. Its `cursor` is the
@@ -408,8 +412,10 @@ level, then in the order they were published.
 Parquet; `tessera items --help` lists their arguments. When a read stops part of the way, they
 keep the whole pages before the stop in the output and print the cursor to read the rest with.
 
-Not built yet: `items()` on a selection. `db.items(view, fields, filters=...)` takes the same
-filter expression.
+`items(fields, ...)` on a selection reads the items it counts: its filters and its box are sent
+as `filters`, and its other keywords are `items`'s. A selection's `items` takes no `filters` of its
+own; narrow the selection with `filter` instead. A selection holds no layer, so it has no
+`artifacts`.
 
 ### The other queries
 

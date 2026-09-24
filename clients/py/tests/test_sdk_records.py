@@ -28,7 +28,7 @@ from conftest import post  # noqa: E402
 from tesseradb import PartialRead, Refusal, connect  # noqa: E402
 
 VENUES = ["neurips", "icml", "iclr", "kdd"]
-PAPERS = [f"p{i}".encode() for i in range(20)]
+PAPERS = [f"p{i}" for i in range(20)]
 #: A read of every field kind here, one page to a response and three rows to a page, so that it
 #: takes seven responses.
 PAGED = {
@@ -48,7 +48,7 @@ FRAME_RECORDS, FRAME_TRAILER, FRAME_PAGE_END = 7, 4, 8
 def papers(db) -> None:
     """Twenty papers in a line, five to a venue, with a rendered number, a keyword held only in
     the records, and five clusters of four."""
-    ids = [paper.decode() for paper in PAPERS]
+    ids = list(PAPERS)
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
     db.declare_vocabulary("venue")
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
@@ -271,10 +271,20 @@ def following(body: dict, cursor: str) -> dict:
 
 
 def papers_read(rows) -> list:
-    """The external ids of `rows`, a table or batches, in order."""
+    """The external ids of `rows`, a table or batches, in order, as the strings inserted: a
+    database reads them back so, and any other reader gives their bytes."""
     if isinstance(rows, list):
         return [paper for batch in rows for paper in papers_read(batch)]
-    return rows.column("tessera:external_id").to_pylist()
+    ids = rows.column("tessera:external_id").to_pylist()
+    return [one.decode() if isinstance(one, bytes) else one for one in ids]
+
+
+def as_inserted(table):
+    """`table` with its external ids decoded from the bytes the server sends to the strings a
+    database reads them back as."""
+    at = table.schema.get_field_index("tessera:external_id")
+    ids = pa.array(papers_read(table), pa.string())
+    return table.set_column(at, pa.field("tessera:external_id", pa.string()), ids)
 
 
 def read_until_stopped(viewer, batches: bool, **request):
@@ -305,9 +315,10 @@ def test_a_whole_read_is_every_page_of_the_read_in_order(db, sent):
 
     by_page = http_pages(db, "items", PAGED)
     assert len(by_page) >= 7
-    assert table.to_pylist() == pa.concat_tables(by_page).to_pylist()
+    assert table.to_pylist() == as_inserted(pa.concat_tables(by_page)).to_pylist()
     whole = {key: value for key, value in PAGED.items() if key not in ("page_rows", "pages")}
-    assert table.to_pylist() == pa.concat_tables(http_pages(db, "items", whole)).to_pylist()
+    one = as_inserted(pa.concat_tables(http_pages(db, "items", whole)))
+    assert table.to_pylist() == one.to_pylist()
 
 
 def test_every_request_is_the_arguments_given(db, sent):
@@ -544,10 +555,95 @@ def test_a_refused_read_raises_a_refusal(db):
         db.items("map", ["n"], count=True, cursor=pages.next)
 
 
-def test_a_read_that_returns_no_row_is_a_table_of_ids(db):
-    table = db.items("map", ["n"], filters={"venue": {"eq": "absent"}})
+def test_a_read_that_returns_no_row_has_the_columns_asked_for(db):
+    """A table of no rows, typed as a read with rows types it; from `batches=True`, one batch of
+    no rows."""
+    asked = {"view": "map", "fields": ["venue", "n", "title"], "system_fields": ["external_id"]}
+    schema = db.items(**asked).schema
+    nothing = {**asked, "filters": {"venue": {"eq": "absent"}}}
+    table = db.items(**nothing)
     assert table.num_rows == 0
-    assert table.column_names == ["tessera_id"]
+    assert table.schema.remove_metadata() == schema.remove_metadata()
+    pages = list(db.items(**nothing, batches=True))
+    assert [page.num_rows for page in pages] == [0]
+    assert pages[0].schema.remove_metadata() == schema.remove_metadata()
+
+    empty = db.artifacts("map", "clusters", ["key", "masked_count"], q="absent")
+    assert (empty.num_rows, empty.column_names) == (0, ["tessera_id", "key", "masked_count"])
+
+
+def test_external_ids_come_back_as_item_gives_them(db):
+    """From the database, as the string the id column held; from any other reader, as bytes."""
+    table = db.items("map", [], system_fields=["external_id"])
+    assert table.schema.field("tessera:external_id").type == pa.string()
+    for tessera_id, paper in zip(table.column("tessera_id").to_pylist(), papers_read(table)):
+        assert db.item(tessera_id)["external_id"] == paper
+    assert sorted(papers_read(table)) == sorted(PAPERS)
+    raw = db.viewer().items("map", [], system_fields=["external_id"])
+    assert raw.schema.field("tessera:external_id").type == pa.binary()
+
+
+def numbered(db) -> None:
+    """Four papers named by a signed integer column."""
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.insert(
+        "map",
+        pa.table(
+            {
+                "paper": pa.array([-3, 0, 7, 2**40], pa.int64()),
+                "x": pa.array([1.0, 2.0, 3.0, 4.0]),
+                "y": pa.array([0.0] * 4),
+                "labels": pa.array([["public"]] * 4, pa.list_(pa.string())),
+            }
+        ),
+        id="paper",
+        x="x",
+        y="y",
+        access="labels",
+    )
+
+
+def test_an_integer_id_comes_back_as_the_integer_inserted(served, corpus):
+    one = served(numbered)
+    table = one.items("map", [], system_fields=["external_id"], page_rows=1)
+    assert table.schema.field("tessera:external_id").type == pa.int64()
+    ids = table.column("tessera:external_id").to_pylist()
+    assert sorted(ids) == [-3, 0, 7, 2**40]
+    for tessera_id, inserted in zip(table.column("tessera_id").to_pylist(), ids):
+        assert one.item(tessera_id)["external_id"] == inserted
+    pages = one.items("map", [], system_fields=["external_id"], page_rows=1, batches=True)
+    assert sorted(i for page in pages for i in page.column(1).to_pylist()) == sorted(ids)
+
+
+# ---------------------------------------------------------------------------- a selection
+
+
+def test_a_selection_reads_the_items_it_counts(db, sent):
+    """Its filters and its box go as the read's filters, and nothing else is added."""
+    selection = db.view("map").filter({"venue": {"in": ["icml", "iclr"]}}).within((0, -1, 12.5, 2))
+    table = selection.items(["n"], system_fields=["external_id"], page_rows=2)
+    assert table.num_rows == selection.count() == 8
+    assert sorted(table.column("n").to_pylist()) == list(range(5, 13))
+    assert sorted(papers_read(table)) == sorted(f"p{i}" for i in range(5, 13))
+    assert sent.bodies[0] == {
+        "view": "map",
+        "fields": ["n"],
+        "system_fields": ["external_id"],
+        "page_rows": 2,
+        "filters": {
+            "all_of": [
+                {"venue": {"in": ["icml", "iclr"]}},
+                {"region": {"bbox": [0.0, -1.0, 12.5, 2.0]}},
+            ]
+        },
+    }
+    pages = selection.items(["n"], batches=True)
+    assert sum(page.num_rows for page in pages) == 8
+
+    everything = db.view("map").items(["n"])
+    assert everything.num_rows == db.view("map").count() == 20
+    with pytest.raises(Refusal):
+        selection.items(["n"], filters={"n": {"eq": 1}})
 
 
 # ---------------------------------------------------------------------------- artifacts

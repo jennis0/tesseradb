@@ -101,8 +101,9 @@ class PartialRead(Refusal):
     """A read from `items` or `artifacts` that stopped part of the way: a response cut short, or
     a later request refused. Every page given before the stop is whole.
 
-    - `rows`: on a read into one table, the rows read before the stop, as a pyarrow table. `None`
-      from `batches=True`, whose pages were given as they came.
+    - `rows`: on a read into one table, the rows read before the stop, as a pyarrow table, or
+      `None` where no page had arrived. `None` from `batches=True`, whose pages were given as they
+      came.
     - `cursor`: the cursor to pass as `cursor` to read the rows after them, or `None` to read
       from the start.
     - `done`: `True` where every row had arrived before the stop, so none is left to read.
@@ -129,6 +130,10 @@ class PartialRead(Refusal):
         return f"{self.why}. {kept} {rest}"
 
 
+def _as_sent(page):
+    return page
+
+
 class Batches:
     """The pages of a read from `items` or `artifacts`, each a `pyarrow.RecordBatch`, requested
     from the server as they are iterated.
@@ -144,8 +149,11 @@ class Batches:
       page it is the read's own `cursor`, `None` for a read from the start.
     - `done`: `True` once the server has said that no row remains.
 
-    A response cut short, or a later request refused, raises a `PartialRead` after the pages
-    before it. A category column's dictionary holds the keys of its own page only. `read_all()`
+    Every response carries at least one page, so a response that found no row gives a page of no
+    rows, with the read's columns. It is given like any other page, so that a read of nothing
+    still says what its columns are. A response cut short, or a later request refused, raises a
+    `PartialRead` after the pages before it. A category column's dictionary holds the keys of its
+    own page only. `read_all()`
     joins the pages left into one table with one dictionary per column, and `to_pandas()` does the
     same and returns a DataFrame. `close()` ends the response being read, which frees its place
     on the server; dropping the last reference does the same.
@@ -165,6 +173,8 @@ class Batches:
             self._response.close()
             raise Refusal(f"POST /v1/{route}: the response did not begin with its head")
         self.head: dict = json.loads(first[1])
+        # What each page goes through before it is given: a database reads its ids back here.
+        self._page = _as_sent
         # The server takes `count` on a read's first request only.
         rest = {key: value for key, value in request.items() if key != "count"}
         self._pages = self._read(reader, rest, frames)
@@ -184,7 +194,7 @@ class Batches:
                             raise self._stopped(f"{what}: a page end has no page before it")
                         self._reached(json.loads(payload))
                         page, pending = pending, None
-                        yield page
+                        yield self._page(page)
                     elif kind == FRAME_TRAILER:
                         self._reached(json.loads(payload))
                         ended = True
@@ -219,25 +229,27 @@ class Batches:
         """The pages not yet taken, as one `pyarrow.Table`.
 
         Its schema metadata `tessera.head` is `head` as JSON. A read that returns no row is a
-        table of `tessera_id` alone, since no page carried the other columns. A `PartialRead`
-        carries the rows read before it as its `rows`.
+        table of no rows with the read's columns. A `PartialRead` carries the rows read before it
+        as its `rows`, or `None` where no page had arrived.
         """
         batches = []
         try:
             for batch in self:
                 batches.append(batch)
         except PartialRead as stopped:
-            stopped.rows = self._table(batches)
+            stopped.rows = self._table(batches) if batches else None
             raise
+        if not batches:
+            raise Refusal(
+                f"POST /v1/{self._route}: the read ended without a page, so its columns are not "
+                f"known; a server answers every read with at least one page"
+            )
         return self._table(batches)
 
     def _table(self, batches: list):
         import pyarrow as pa
 
-        if batches:
-            table = pa.Table.from_batches(batches).unify_dictionaries()
-        else:
-            table = pa.table({"tessera_id": pa.array([], pa.uint64())})
+        table = pa.Table.from_batches(batches).unify_dictionaries()
         return table.replace_schema_metadata({"tessera.head": json.dumps(self.head)})
 
     def to_pandas(self, **options):
@@ -400,11 +412,15 @@ class Selection:
         view: str,
         filters: tuple = (),
         boxes: tuple = (),
+        items: Optional[Callable] = None,
     ) -> None:
         self._reader = reader
         self._view = view
         self._filters = filters
         self._boxes = boxes
+        # How `items` reads: a database's own `items`, which reads its ids back as inserted, or
+        # the reader's.
+        self._items = items
 
     @property
     def view(self) -> str:
@@ -451,7 +467,9 @@ class Selection:
                 f"filter takes one expression as a dictionary, such as "
                 f"{{'year': {{'range': {{'gte': 2020}}}}}}; got {expression!r}"
             )
-        return Selection(self._reader, self._view, self._filters + (expression,), self._boxes)
+        return Selection(
+            self._reader, self._view, self._filters + (expression,), self._boxes, self._items
+        )
 
     def within(self, box: Sequence[float]) -> "Selection":
         """A narrower selection: the items here whose position is inside `box`.
@@ -469,7 +487,8 @@ class Selection:
                 f"within: {edges} has a minimum above its maximum. Write "
                 f"(min_x, min_y, max_x, max_y)"
             )
-        return Selection(self._reader, self._view, self._filters, self._boxes + (edges,))
+        boxes = self._boxes + (edges,)
+        return Selection(self._reader, self._view, self._filters, boxes, self._items)
 
     def count(self) -> int:
         """How many items this reader may see in this selection.
@@ -591,6 +610,27 @@ class Selection:
             artifacts,
             sub_cells,
         )
+
+    def items(self, fields: Sequence[str], **options):
+        """Every item in this selection, with the fields named, as one pyarrow table.
+
+        The selection's filters and box are sent as the read's `filters`, so the rows are the
+        items `count()` counts. `options` are `items`'s other keywords, such as `system_fields`,
+        `order`, `page_rows` and `batches`, each sent only when given. From a database's
+        selection, `tessera:external_id` holds each id as the type the id column had.
+
+            db.view("papers").filter({"year": {"eq": 2023}}).items(["title"]).to_pandas()
+        """
+        if "filters" in options:
+            raise Refusal(
+                "items on a selection sends the selection's own filters; narrow it with "
+                ".filter(expression) and call items on the result"
+            )
+        read = self._items or self._reader().items
+        expression = self._expression()
+        if expression is not None:
+            options["filters"] = expression
+        return read(self._view, fields, **options)
 
     def map(
         self,
@@ -791,7 +831,8 @@ class Viewer:
           named `"<column>@<key>"` to say which of the group's views to read it in.
         - `system_fields`: any of `"position"`, the columns `tessera:x` and `tessera:y` in the
           view's coordinates (degrees for a geographic view); `"external_id"`, the column
-          `tessera:external_id` holding the id each item was inserted with, as bytes; and
+          `tessera:external_id` holding the id each item was inserted with, as bytes here and
+          as the type the id column had from a `Database`; and
           `"labels"`, the column `tessera:labels` holding the item's labels this reader also
           holds.
         - `filters`: a filter expression, as `Selection.filter` takes one. Only the items that
@@ -817,7 +858,7 @@ class Viewer:
         and a missing value is null. A category column holds each value's key, as a dictionary
         column. The table's schema metadata `tessera.head` is the first response's head as JSON:
         `page_rows`, the page size used, `order`, the order used, and the counts under `count`.
-        A read that returns no row is a table of `tessera_id` alone.
+        A read that returns no row is a table of no rows with these columns.
 
         A response cut short, or a later request refused, raises a `PartialRead` whose `rows` are
         the rows read before it and whose `cursor` reads the rest.
