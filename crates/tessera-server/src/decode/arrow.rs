@@ -6,9 +6,7 @@ use tessera_engine::shapes::Bounds;
 use tessera_engine::scalar_column::{self, ScalarColumn};
 use tessera_engine::utf8::Utf8Column;
 use tessera_engine::vocabulary::{code_value, Resolved};
-use tessera_engine::{
-    DeclaredScalar, Projection, ScalarType, ScalarValue, ScopedScalar, Vocabularies,
-};
+use tessera_engine::{DeclaredScalar, Projection, ScopedScalar, Vocabularies};
 use tessera_lifecycle::{BatchArtifacts, WalScalar};
 use tessera_types::layer::LayerDeclaration;
 use tessera_types::TesseraId;
@@ -71,7 +69,7 @@ fn category_code(
         ))
     })?;
     match minter.resolve(keys.at(row)) {
-        Ok(Resolved::Code(code)) => Ok(code_at(declared.arrow_type, code)),
+        Ok(Resolved::Code(code)) => Ok(code_value(declared.arrow_type, code)),
         // The executor mints a novel key's code at a commit window's close or in a values batch's
         // pass, before the WAL append.
         Ok(Resolved::Novel(key)) => Ok(WalScalar::Utf8(key.to_string())),
@@ -80,11 +78,6 @@ fn category_code(
             declared.name
         ))),
     }
-}
-
-/// A code at its column's declared width.
-pub(super) fn code_at(width: ScalarType, code: u32) -> WalScalar {
-    wal_scalar(code_value(width, code))
 }
 
 /// The body's record batches. A JSON body becomes one record batch, read by the same rules as
@@ -253,7 +246,7 @@ fn cell(
                 .expect("a column of keys is a category's");
             category_code(body_name, *col, row, declared, vocabulary, vocabularies)
         }
-        Cells::Scalars(column) => column.value(row).map(wal_scalar).map_err(|e| {
+        Cells::Scalars(column) => column.value(row).map_err(|e| {
             DecodeError(format!(
                 "{body_name}: row {request_row}, column '{}' (declared {}) carries {e}; send a \
                  value that fits or declare a wider type",
@@ -262,19 +255,6 @@ fn cell(
             ))
         }),
     }
-}
-
-/// The build's value type as the write-ahead log's, variant for variant.
-fn wal_scalar(value: ScalarValue) -> WalScalar {
-    macro_rules! same {
-        ($($v:ident),* $(,)?) => {
-            match value {
-                $(ScalarValue::$v(x) => WalScalar::$v(x),)*
-                ScalarValue::Null => WalScalar::Null,
-            }
-        };
-    }
-    same!(Bool, U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, TimestampUs, Utf8)
 }
 
 fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
@@ -688,7 +668,7 @@ mod category_wire {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
-    use tessera_engine::{DeclaredScalar, Vocabularies, VocabularyKind, ABSENT_CODE};
+    use tessera_engine::{DeclaredScalar, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE};
 
     const CODE_OPS: u32 = 4711;
     const EXTENT: Bounds = Bounds {

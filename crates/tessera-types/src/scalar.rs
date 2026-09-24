@@ -2,6 +2,65 @@
 //! types, the store's column reader and the server's JSON reader take integer ranges from one
 //! table.
 
+/// A declared-scalar value carried alongside the fixed columns (`tessera_id`, `residual`).
+/// The kinds below are the whole set.
+///
+/// Also the value a write-ahead log row carries. Postcard encodes a variant by its index, so
+/// reordering these changes the log's bytes and is a `WAL_VERSION` bump.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ScalarValue {
+    Bool(bool),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    /// Microseconds since the Unix epoch, stored as an `i64`; the type exists so the unit is in
+    /// the manifest.
+    TimestampUs(i64),
+    Utf8(String),
+    /// No value at all: distinct from every in-band value, including the empty string.
+    ///
+    /// A category expresses absence in band as the reserved code 0; a string has no such spare
+    /// value, since the empty string is one a corpus may legitimately hold.
+    Null,
+}
+
+impl ScalarValue {
+    /// This value as a render column holds it: `columns.arrow`, non-nullable with nowhere to put
+    /// [`ScalarValue::Null`]. The zero goes in the column, and a presence bitmap beside it
+    /// records the substitution.
+    pub fn or_render_placeholder(&self, ty: ScalarType) -> ScalarValue {
+        if !matches!(self, ScalarValue::Null) {
+            return self.clone();
+        }
+        match ty {
+            ScalarType::Bool => ScalarValue::Bool(false),
+            ScalarType::U8 => ScalarValue::U8(0),
+            ScalarType::U16 => ScalarValue::U16(0),
+            ScalarType::U32 => ScalarValue::U32(0),
+            ScalarType::U64 => ScalarValue::U64(0),
+            ScalarType::I8 => ScalarValue::I8(0),
+            ScalarType::I16 => ScalarValue::I16(0),
+            ScalarType::I32 => ScalarValue::I32(0),
+            ScalarType::I64 => ScalarValue::I64(0),
+            ScalarType::F32 => ScalarValue::F32(0.0),
+            ScalarType::F64 => ScalarValue::F64(0.0),
+            ScalarType::TimestampUs => ScalarValue::TimestampUs(0),
+            // Unreachable in practice: `render` on strings is refused at schema parse.
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+                ScalarValue::Utf8(String::new())
+            }
+        }
+    }
+}
+
 /// The Arrow type of a declared scalar column, used to build `columns.arrow`'s schema.
 ///
 /// The widths are narrow because a hot column is baked into every row and priced per bit; the
