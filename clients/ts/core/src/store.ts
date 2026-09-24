@@ -962,7 +962,7 @@ export function createStore(options: StoreOptions): Store {
       verdict: replica?.lastRegionVerdict ?? null,
       fetched: p.fetched !== null,
       matched: Number(matched),
-      narrowed: composeFilters(projections.filters.draft) !== null
+      narrowed: filtersBesideRegion() !== null
     });
     accumulateEncoding(frame);
     refreshColours();
@@ -1462,10 +1462,14 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
+  /** The filter-position controls and `member_of` clauses, without the region leaf. */
+  function filtersBesideRegion(): FilterExpr | null {
+    return withMembers(composeFilters(projections.filters.draft, 'filter'), projections.filters.members, 'filter');
+  }
+
   function requestFilters(): FilterExpr | null {
-    const expr = withMembers(composeFilters(projections.filters.draft, 'filter'), projections.filters.members, 'filter');
     const selected = region.selected;
-    return withRegion(expr, selected ? regionOperand(selected) : null, selected?.outside ?? false);
+    return withRegion(filtersBesideRegion(), selected ? regionOperand(selected) : null, selected?.outside ?? false);
   }
 
   /**

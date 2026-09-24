@@ -629,6 +629,31 @@ describe('select — the selection is the region leaf on every request (§5.11)'
     expect(leafOf(viewport.mock.calls[cleared])).toBeNull();
   });
 
+  it('gives no region-alone figure while a member_of clause in the filter position narrows the frame', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store} = await warm(() => response('ck1'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    store.select({kind: 'box', bbox: [0, 0, 1, 1]});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('region')?.visible).toEqual(store.get('region')?.matched);
+
+    store.setMembers([{layer: 'l', artifact: 7n, outside: false, verb: 'filter'}]);
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('region')?.status).toBe('shown');
+    expect(store.get('region')?.visible).toBeNull();
+
+    // In the highlight position the clause moves no count, so the region alone is the figure again.
+    store.setMembers([{layer: 'l', artifact: 7n, outside: false, verb: 'highlight'}]);
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('region')?.visible).toEqual(store.get('region')?.matched);
+  });
+
   it('sends a lasso as its polygon, and outside as none_of over it', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
