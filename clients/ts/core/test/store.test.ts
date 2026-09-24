@@ -1134,3 +1134,104 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     expect(store.get('legend').colourBy).toBe('cluster:topic_names');
   });
 });
+
+describe('the token', () => {
+  it('asks the supplier for a new token before the one it holds expires, and asks with it', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewport} = fakeClient(() => response('ck'));
+    let issued = 0;
+    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    expect(authorise).toHaveBeenCalledTimes(1);
+
+    // A minute's token is renewed within its minute, with no request in between to prompt it.
+    await clock.advance(59_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(viewport.mock.calls.at(-1)![0]).toBe('t2');
+  });
+
+  it('reports the session expired when the server refuses the token it holds as expired', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    let refuse = false;
+    const {store, viewport} = await warm(
+      () => {
+        if (refuse) throw new TesseraError(401, 'expired-token', 'the token has expired');
+        return response('ck');
+      },
+      {clock, scheduler}
+    );
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('status').expired).toBe(false);
+    const asked = viewport.mock.calls.length;
+
+    // Zoomed far in, so the held frame cannot answer and a request goes out.
+    refuse = true;
+    store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+    await clock.advance(5_000);
+    scheduler.flush();
+    expect(viewport.mock.calls.length).toBeGreaterThan(asked);
+    expect(store.get('status')).toMatchObject({status: 'refused', expired: true, refusal: {code: 'expired-token'}});
+  });
+});
+
+describe('the item a click opens and the record a hover names', () => {
+  it('puts a picked item in the selection, and a refusal in its place', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const detail = {fields: {archive: 'cs'}, externalId: null, views: [], scoped: {}, labels: []};
+    const item = vi.fn(async (_token: string, id: bigint) => {
+      if (id === 404n) throw new TesseraError(404, 'not-found', 'no such item');
+      return detail;
+    });
+    (client as unknown as {item: typeof item}).item = item;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    await store.pick(7n);
+    expect(store.get('selection')).toMatchObject({item: {id: 7n, detail}, itemRefusal: null});
+
+    await store.pick(404n);
+    expect(store.get('selection')).toMatchObject({item: null, itemRefusal: {code: 'not-found'}});
+  });
+
+  it('asks for a hovered record once, holds a refusal as none, and asks again after a clear', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const item = vi.fn(async (_token: string, id: bigint) => {
+      if (id === 404n) throw new TesseraError(404, 'not-found', 'no such item');
+      return {fields: {title: `paper ${id}`}, externalId: null, views: [], scoped: {}, labels: []};
+    });
+    (client as unknown as {item: typeof item}).item = item;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    // Two hovers in flight at once share one request, and a later one is answered from what is held.
+    const [first, second] = await Promise.all([store.describe(7n), store.describe(7n)]);
+    expect(first).toEqual({title: 'paper 7'});
+    expect(second).toEqual({title: 'paper 7'});
+    expect(await store.describe(7n)).toEqual({title: 'paper 7'});
+    expect(item).toHaveBeenCalledTimes(1);
+
+    expect(await store.describe(404n)).toBeNull();
+    expect(await store.describe(404n)).toBeNull();
+    expect(item).toHaveBeenCalledTimes(2);
+    // A hover writes no projection.
+    expect(store.get('selection').item).toBeNull();
+
+    store.clear();
+    await clock.advance(1);
+    await store.describe(7n);
+    expect(item).toHaveBeenCalledTimes(3);
+  });
+});
