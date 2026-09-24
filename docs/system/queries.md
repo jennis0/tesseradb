@@ -59,7 +59,7 @@ for this viewer or it does not; that does not depend on which points are drawn.
 ## The visible set and the filtered set
 
 Every viewer has an authorised set: everything their session's terms admit, computed once when the
-session opens ([access control](access-control.md#composing-the-viewers-set)). Every request
+session opens ([access control](access-control.md#what-a-request-answers-from)). Every request
 composes the authorised set against the overlay, the record of items currently deleted or
 suppressed, to get the visible set: read fresh each time, so a suppression applies to every session
 immediately ([access control](access-control.md#what-a-request-answers-from)). A filter narrows

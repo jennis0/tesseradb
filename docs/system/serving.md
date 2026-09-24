@@ -43,7 +43,7 @@ reader cannot hold compute capacity a waiting request needs.
 ## What the server keeps warm
 
 A session's authorised set and its row projection, which [access control
-describes](access-control.md#composing-the-viewers-set), are built once, together, and then kept
+describes](access-control.md#what-a-request-answers-from), are built once, together, and then kept
 rather than rebuilt on every request. Rebuilding either from nothing is the most expensive step in
 the path a request takes. What [a flush, a merge and a compaction fold](write-path.md#flush) each
 do to that cached pair is described there; none of the three is applied on the thread answering a

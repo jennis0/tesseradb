@@ -5,18 +5,13 @@ Three things a power user who installs nothing needs, and where each is:
 | | where | kept true by |
 |---|---|---|
 | The API | [`tessera.yaml`](tessera.yaml) — OpenAPI 3.1 for the viewer and session planes | `crates/tessera-server/tests/openapi.rs`, which starts the server, exercises every route with a success and a refusal, and validates every JSON body against the description's schemas |
-| The framing, to the byte | [`../design/contracts.md`](../design/contracts.md) §5, and the worked decodes below | the viewport decodes' tests, over the golden fixtures in `clients/ts/core/test/fixtures/`; the items decodes have none |
-| What the server cannot enforce | [`../design/client-obligations.md`](../design/client-obligations.md) | reading it |
-
-The contract is `contracts.md` §3 and §5. Where this directory disagrees with it, this directory
-is wrong; the test above is what keeps the disagreement from lasting.
+| The framing, to the byte | [The framing](#the-framing) and [the worked decodes](#the-worked-decodes) below | the viewport decodes' tests, over the golden fixtures in `clients/ts/core/test/fixtures/`; the items decodes have none |
+| What the server cannot enforce | [The twelve rules](../system/clients.md#the-twelve-rules) in the clients chapter | reading it |
 
 ## What the description is, and is not
 
 `tessera.yaml` is **hand-authored**. The JSON DTOs live in `tessera-server`, some private, two
-responses built with `json!`, and the Arrow-facing structs carry a deliberate *no serde derive*
-(I10 — entity ids never cross the boundary, so nothing about those types is allowed to serialise
-itself). Nothing generates the description from them, so the test is what stops it drifting:
+responses built with `json!`, and the Arrow-facing structs carry a deliberate *no serde derive*. Nothing generates the description from them, so the test is what stops it drifting:
 every closed DTO is declared `additionalProperties: false`, and a field added to a response and
 not to the file fails the test rather than surfacing on a stranger's screen.
 
@@ -103,7 +98,7 @@ That fixture is a `k = 0` request naming a layer — the *just the artifacts* id
 with `served = 0` everywhere, the artifacts frame, and no points frame. The `u64` columns come off
 Arrow JS as `BigInt` and are printed as decimal strings; a decoder that narrows a `tessera_id` to
 a JS `number` has already lost bits on this fixture's first id. Its test is
-`test/decode.test.ts`, run by `bash scripts/check-clients.sh` with the rest of the client gate.
+`clients/ts/wire-example/test/decode.test.ts`, run by `bash scripts/check-clients.sh` with the rest of the client gate.
 
 Both decoders are strict on purpose — a truncated body, a missing trailer and an unknown kind
 each raise — and both tests prove it on the fixtures.
