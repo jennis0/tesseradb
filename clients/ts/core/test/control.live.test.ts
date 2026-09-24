@@ -1,4 +1,4 @@
-import {Binary, Field, Float64, List, RecordBatch, Schema, Table, tableToIPC, Utf8, vectorFromArray} from 'apache-arrow';
+import {Binary, Field, Float64, List, Null, RecordBatch, Schema, Table, tableToIPC, Utf8, vectorFromArray} from 'apache-arrow';
 import {afterAll, beforeAll, describe, expect, it, vi, type TestContext} from 'vitest';
 import {clusterLayerDeclaration, labelLayerDeclaration} from '../../scripts/operator.js';
 import {TesseraClient} from '../src/client.js';
@@ -47,7 +47,18 @@ function live(ctx: TestContext): void {
 
 const bytes = (id: string) => new TextEncoder().encode(id);
 
-/** The four rows, near the middle of view `s0`, each labelled `TERM`. */
+/**
+ * The columns declared when the tests insert: the notebook's six and the `note` the first test
+ * declares. A row that creates an item carries every declared column.
+ */
+const DECLARED = ['archive', 'primary_category', 'submitted_at', 'title', 'abstract', 'arxiv_id', 'note'];
+
+/** Each declared column, null on every one of `rows` rows. */
+function nulls(rows: number) {
+  return Object.fromEntries(DECLARED.map((name) => [name, vectorFromArray(Array.from({length: rows}, () => null), new Null())]));
+}
+
+/** The four rows, near the middle of view `s0`, each labelled `TERM`, with no value in any declared column. */
 function points(): Uint8Array {
   const q = meta.views.find((v) => v.id === 's0')!.quantisation;
   const x = (q.xMin + q.xMax) / 2;
@@ -56,7 +67,8 @@ function points(): Uint8Array {
     external_id: vectorFromArray(IDS.map(bytes), new Binary()),
     x: vectorFromArray(IDS.map((_, i) => x + i), new Float64()),
     y: vectorFromArray(IDS.map(() => y), new Float64()),
-    access: vectorFromArray(IDS.map(() => [TERM]), new List(new Field('item', new Utf8(), true)))
+    access: vectorFromArray(IDS.map(() => [TERM]), new List(new Field('item', new Utf8(), true))),
+    ...nulls(IDS.length)
   });
   return tableToIPC(table, 'stream');
 }
@@ -116,7 +128,8 @@ describe('Control against a live server', () => {
     const body = new Table({
       x: vectorFromArray([meta.views.find((v) => v.id === 's0')!.quantisation.xMin], new Float64()),
       y: vectorFromArray([meta.views.find((v) => v.id === 's0')!.quantisation.yMin], new Float64()),
-      access: vectorFromArray([['someone-else']], new List(new Field('item', new Utf8(), true)))
+      access: vectorFromArray([['someone-else']], new List(new Field('item', new Utf8(), true))),
+      ...nulls(1)
     });
     const page = tableToIPC(body, 'stream');
     const first = await control.ingest(page, {view: 's0'});
