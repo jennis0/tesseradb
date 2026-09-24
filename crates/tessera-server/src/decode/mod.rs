@@ -10,7 +10,9 @@ use tessera_lifecycle::WalScalar;
 use tessera_types::TesseraId;
 
 use self::arrow::code_at;
-pub(crate) use self::arrow::{parse_ingest_batch, parse_values_batch, ParsedBatch, ParsedValues};
+pub(crate) use self::arrow::{
+    labels_col, parse_ingest_batch, parse_values_batch, ParsedBatch, ParsedValues,
+};
 
 /// A body the decoder refuses. A refusal names a row by its index in the batch, never by the id
 /// the caller sent.

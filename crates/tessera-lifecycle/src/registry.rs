@@ -91,6 +91,9 @@ pub enum RegistryError {
     /// replacement is refused where it would dangle a *declared* dependent, so an edge into a layer
     /// nobody declared is an edge nothing protects.
     UndeclaredAttachment { layer: String, target: String },
+    /// An artifact attaches into a layer drawn on none of the views its own layer is drawn on. It
+    /// is served only on a view where its target is, so it could never be served.
+    NoSharedView { layer: String, target: String },
     /// An artifact declares no dependency in a layer that declares one.
     ///
     /// **Fail-closed, because a dependency edge is a visibility term**
@@ -498,6 +501,12 @@ impl std::fmt::Display for RegistryError {
                 "{layer} publishes an artifact attached into {target}, which it does not declare in \
                  depends_on — an attached artifact is withheld with its target, and a dependency \
                  nobody declared is one no replacement checks"
+            ),
+            RegistryError::NoSharedView { layer, target } => write!(
+                f,
+                "{layer} attaches an artifact into {target}, which is drawn on none of the views \
+                 {layer} is drawn on, so the artifact could never be served; declare {layer} on a \
+                 view {target} is drawn on"
             ),
             RegistryError::MissingAttachment { layer, key } => write!(
                 f,
@@ -1923,59 +1932,20 @@ impl LayerRegistry {
                     }
                     return Ok(None);
                 };
-                if !layer.declaration.depends_on.contains(&wanted.layer) {
-                    return Err(RegistryError::UndeclaredAttachment {
-                        layer: layer_name.to_string(),
-                        target: wanted.layer.clone(),
-                    });
+                // A new attachment is stored only here: every artifact of a layer that declares
+                // a dependency is published with its attachment, so a later fill of one can only
+                // repeat it.
+                if let Some(target) = self.layers.get(&wanted.layer) {
+                    if !layer.declaration.shares_a_view_with(&target.declaration) {
+                        return Err(RegistryError::NoSharedView {
+                            layer: layer_name.to_string(),
+                            target: wanted.layer.clone(),
+                        });
+                    }
                 }
-                let missing = || RegistryError::NoSuchAttachmentTarget {
-                    layer: layer_name.to_string(),
-                    target: wanted.layer.clone(),
-                    level: wanted.level,
-                    key: wanted.key.clone(),
-                };
-                let target = self.layers.get(&wanted.layer).ok_or_else(missing)?;
-                // The target's own view, on `resolve_attachment`'s rule: inside this artifact's
-                // view where the target layer is group-scoped, and a key held only in another
-                // view is the crossing rather than a missing target (`views.md` §3.5).
-                let in_view = target.declaration.scope.group().and(*view);
-                let ordinal =
-                    match store.ordinal_of_key(&wanted.layer, wanted.level, in_view, &wanted.key) {
-                        Some(ordinal) => ordinal,
-                        None => {
-                            let held_in = store.views_holding_key(
-                                &wanted.layer,
-                                wanted.level,
-                                in_view,
-                                &wanted.key,
-                            );
-                            if !held_in.is_empty() {
-                                return Err(RegistryError::CrossViewEdge {
-                                    layer: layer_name.to_string(),
-                                    level: wanted.level,
-                                    child: artifact
-                                        .key
-                                        .clone()
-                                        .unwrap_or_else(|| "<no key>".to_string()),
-                                    parent: wanted.key.clone(),
-                                    held_in,
-                                });
-                            }
-                            return Err(missing());
-                        }
-                    };
-                let entity = target
-                    .runs
-                    .get(wanted.level as usize)
-                    .and_then(|runs| runs.entity_of(ordinal as u64))
-                    .ok_or_else(missing)?;
-                Ok(Some(crate::membership::Attachment {
-                    layer: wanted.layer.clone(),
-                    level: wanted.level,
-                    ordinal,
-                    entity: EntityId::new(entity),
-                }))
+                let key = artifact.key.as_deref().unwrap_or("<no key>");
+                self.resolve_attachment(layer_name, *view, key, wanted, store)
+                    .map(Some)
             })
             .collect::<Result<_, _>>()?;
 
@@ -4524,6 +4494,60 @@ mod tests {
             panic!("a new key is published");
         };
         assert_eq!(artifacts[0].incarnation, 4);
+    }
+
+    /// A label on a layer drawn on none of its target layer's views is refused at publication with
+    /// nothing allocated; one on a layer sharing a view with its target publishes.
+    #[test]
+    fn an_attachment_into_a_layer_on_none_of_its_views_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let on = |name: &str, group: &str, views: &[&str]| {
+            let mut d = scoped(name, group);
+            d.views = views.iter().map(|view| view.to_string()).collect();
+            d
+        };
+        register(
+            &mut reg,
+            &mut alloc,
+            on("clusters/q", "quarter", &["quarter:q1", "halves:q1"]),
+        )
+        .unwrap();
+        let put = reg
+            .prepare_put("clusters/q", 0, &[in_view("c1", "q1", &[1])], &store, &mut alloc, &AnyView)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &put);
+        let label = || {
+            let mut label = in_view("n1", "q1", &[1]);
+            label.attached_to = Some(crate::membership::IncomingAttachment {
+                layer: "clusters/q".into(),
+                level: 0,
+                key: "c1".into(),
+            });
+            label
+        };
+        for (name, group, view) in [
+            ("labels/t", "tally", "tally:q1"),
+            ("labels/w", "wholes", "wholes:q1"),
+            ("labels/h", "halves", "halves:q1"),
+        ] {
+            let mut d = on(name, group, &[view]);
+            d.depends_on = vec!["clusters/q".into()];
+            register(&mut reg, &mut alloc, d).unwrap();
+        }
+
+        for refused_layer in ["labels/t", "labels/w"] {
+            let refused = reg
+                .prepare_put(refused_layer, 0, &[label()], &store, &mut alloc, &AnyView)
+                .unwrap_err();
+            assert!(matches!(refused, RegistryError::NoSharedView { .. }), "{refused:?}");
+            assert_eq!(store.next_ordinal(refused_layer, 0), 0);
+        }
+        let put = reg
+            .prepare_put("labels/h", 0, &[label()], &store, &mut alloc, &AnyView)
+            .unwrap();
+        assert_eq!(put.created, 1);
     }
 
     /// **`view` is part of the identity** (`ingest.md` §1.5, `views.md` §3.5): required on a

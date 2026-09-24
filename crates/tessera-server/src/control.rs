@@ -26,8 +26,8 @@ use tessera_types::view::ViewMetadataValue;
 use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::decode::{
-    parse_ingest_batch, parse_values_batch, Address, BodyEncoding, DecodeError, ParsedBatch,
-    ParsedValues,
+    labels_col, parse_ingest_batch, parse_values_batch, Address, BodyEncoding, DecodeError,
+    ParsedBatch, ParsedValues,
 };
 use crate::error::{
     map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
@@ -1843,8 +1843,9 @@ fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Res
 }
 
 /// `PATCH /control/layers/{name}/artifacts`'s Arrow form: one row per artifact, `key: utf8` and
-/// `members: list<utf8>` or `large_list<utf8>`, with `addressing`, `level` and `idset` in the
-/// schema metadata. Decoded into the JSON form's body, so the handler has one path.
+/// `members: list<utf8>` or `large_list<utf8>`, with `view` and `access` optional, and
+/// `addressing`, `level` and `idset` in the schema metadata. Decoded into the JSON form's body, so
+/// the handler has one path.
 fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     use arrow::array::{LargeListArray, ListArray, StringArray};
     use arrow::datatypes::DataType;
@@ -1856,10 +1857,10 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     let metadata = reader.schema().metadata().clone();
     // Any other column or metadata key is refused, as the JSON form refuses unknown fields.
     for field in reader.schema().fields() {
-        if !matches!(field.name().as_str(), "key" | "members" | "view") {
+        if !matches!(field.name().as_str(), "key" | "members" | "view" | "access") {
             return Err(ApiError::Contract(format!(
                 "growth body: column '{}' is not one this route takes; a growth carries `key`, \
-                 `members` and, on a layer scoped to a group, `view`, and nothing else",
+                 `members`, `access` and, on a layer scoped to a group, `view`, and nothing else",
                 field.name()
             )));
         }
@@ -1927,6 +1928,8 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                 )
             })?),
         };
+        let access = labels_col("growth body", &batch, "access")
+            .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
         let members = batch.column_by_name("members").ok_or_else(|| {
             ApiError::Contract(
                 "growth body: column 'members' is missing; it is list<utf8> or large_list<utf8>, \
@@ -2006,8 +2009,19 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                      it grows"
                 )));
             }
-            // The Arrow form carries joining members only; content, shapes and ranked pages
-            // travel on the JSON form.
+            let labels = match &access {
+                None => None,
+                Some(access) => Some(
+                    access
+                        .labels_at("growth body", row)
+                        .map_err(|DecodeError(detail)| ApiError::Contract(detail))?
+                        .into_iter()
+                        .map(|label| String::from_utf8(label).expect("a utf8 array holds utf8"))
+                        .collect(),
+                ),
+            };
+            // The Arrow form carries joining members and labels only; content, shapes and ranked
+            // pages travel on the JSON form.
             artifacts.push(GrowingArtifactBody {
                 key: keys.value(row).to_string(),
                 view: views
@@ -2024,7 +2038,7 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                 ellipse: None,
                 wkt: None,
                 space: None,
-                access: None,
+                access: labels,
             });
         }
     }

@@ -89,14 +89,6 @@ pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
 /// encode them one at a time. See [`ArtifactStore::pending_ranges`].
 pub type PendingRange = (String, u32, u32, u32);
 
-/// What [`ArtifactStore::retire_dead_views`] removed: the levels it changed, and the artifacts
-/// of other views attached to what it removed, which the caller deletes.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct RetiredViews {
-    pub levels: Vec<(String, u32)>,
-    pub dependents: Vec<EntityId>,
-}
-
 /// What [`ArtifactStore::fill`] did with one part, under the fill rule (`ingest.md` §1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillOutcome {
@@ -2592,12 +2584,14 @@ impl ArtifactStore {
     /// A view dropped and created again under the same key is a new incarnation, so this is what
     /// keeps the predecessor's artifacts, and their keys, out of the new view. A key goes only
     /// where it still names the removed artifact, since a republication into the new view may
-    /// hold it. An artifact of another layer attached to a removed one is not removed here; it is
-    /// returned, with its own dependents, for the caller to delete.
+    /// hold it. An artifact attached to a removed one is removed by its own stamp: the
+    /// publication refused it unless its layer shares a view with its target's, so its view key
+    /// was dropped with its target's and its own incarnation is dead too. Returns the levels it
+    /// changed.
     pub fn retire_dead_views(
         &mut self,
         live: impl Fn(&str, &str, tessera_types::view::ViewIncarnation) -> bool,
-    ) -> RetiredViews {
+    ) -> Vec<(String, u32)> {
         let dead: Vec<(String, u32, u32)> = self
             .levels
             .iter()
@@ -2610,11 +2604,6 @@ impl ArtifactStore {
                 })
             })
             .collect();
-        let roots: Vec<EntityId> = dead
-            .iter()
-            .filter_map(|(layer, level, ordinal)| Some(self.get(layer, *level, *ordinal)?.entity))
-            .collect();
-        let dependents = self.cascade_from(&roots);
         let mut moved: Vec<(String, u32)> = Vec::new();
         for (layer, level, ordinal) in dead {
             let Some(record) = self
@@ -2656,10 +2645,7 @@ impl ArtifactStore {
             self.bump(layer, *level);
             self.bump_lineage(layer, *level);
         }
-        RetiredViews {
-            levels: moved,
-            dependents,
-        }
+        moved
     }
 
     /// The supplied content of every artifact not yet in a manifest, as `(entity, tagged values)`.
@@ -3533,7 +3519,7 @@ mod tests {
 
     /// A dead incarnation's artifacts leave holes and free their keys, and a key the live
     /// incarnation already holds again stays with it. Entity-scoped records are never asked about,
-    /// and the artifacts attached to a removed one are returned rather than removed.
+    /// and a label in the dead view goes with the artifact it is attached to.
     #[test]
     fn a_dead_views_artifacts_leave_holes_and_a_republished_key_stays() {
         let scoped = |entity: u64, key: &str, incarnation| ArtifactRecord {
@@ -3547,13 +3533,21 @@ mod tests {
         store.put("clusters/q", 0, 1, scoped(101, "c2", 1), None);
         store.put("clusters/q", 0, 2, scoped(102, "c1", 2), None);
         store.put("clusters/p", 0, 0, record(103, &[1]), None);
-        // A label of another group on the dead c2, and one on that label.
-        store.put("labels/t", 0, 0, attached(200, 101, "clusters/q", 1), None);
-        store.put("labels/u", 0, 0, attached(201, 200, "labels/t", 0), None);
+        // A label in the dead view on the dead c2, and one in the live view on c1.
+        let label = |entity: u64, target: u64, ordinal: u32, incarnation| ArtifactRecord {
+            view: Some("q2".into()),
+            incarnation,
+            ..attached(entity, target, "clusters/q", ordinal)
+        };
+        store.put("labels/t", 0, 0, label(200, 101, 1, 1), None);
+        store.put("labels/t", 0, 1, label(201, 102, 2, 2), None);
         let before = store.level_version("clusters/q", 0);
 
         let retired = store.retire_dead_views(|_, _, incarnation| incarnation == 2);
-        assert_eq!(retired.levels, vec![("clusters/q".to_string(), 0)]);
+        assert_eq!(
+            retired,
+            vec![("clusters/q".to_string(), 0), ("labels/t".to_string(), 0)]
+        );
         assert!(store.level_version("clusters/q", 0) > before);
         let held: Vec<u32> = store.level("clusters/q", 0).map(|(ordinal, _)| ordinal).collect();
         assert_eq!(held, vec![2]);
@@ -3561,12 +3555,10 @@ mod tests {
         assert_eq!(store.ordinal_of_key("clusters/q", 0, Some("q2"), "c2"), None);
         assert_eq!(store.next_ordinal("clusters/q", 0), 3);
         assert_eq!(store.level("clusters/p", 0).count(), 1);
-        assert_eq!(retired.dependents, vec![EntityId::new(200), EntityId::new(201)]);
-        assert_eq!(store.level("labels/t", 0).count(), 1, "a dependent is the caller's to delete");
-        assert_eq!(
-            store.retire_dead_views(|_, _, incarnation| incarnation == 2),
-            RetiredViews::default()
-        );
+        let labels: Vec<u32> = store.level("labels/t", 0).map(|(ordinal, _)| ordinal).collect();
+        assert_eq!(labels, vec![1]);
+        assert!(store.cascade_from(&[EntityId::new(101)]).is_empty());
+        assert!(store.retire_dead_views(|_, _, incarnation| incarnation == 2).is_empty());
     }
 
     #[test]

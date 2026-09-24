@@ -1176,6 +1176,18 @@ impl std::fmt::Display for DeclarationError {
 impl std::error::Error for DeclarationError {}
 
 impl LayerDeclaration {
+    /// Whether this layer's artifacts are drawn on `view`, a view id. Every route serving an
+    /// artifact asks this, and so does the publication of an artifact attached to another.
+    pub fn draws_on(&self, view: &str) -> bool {
+        self.views.iter().any(|drawn| drawn == view)
+    }
+
+    /// Whether some view this layer is drawn on is one `other` is drawn on: the only views where
+    /// an artifact of this layer attached to one of `other` can be served.
+    pub fn shares_a_view_with(&self, other: &LayerDeclaration) -> bool {
+        self.views.iter().any(|view| other.draws_on(view))
+    }
+
     /// Checks the declaration is internally coherent. **Everything here is a refusal a caller can
     /// fix**, checked once at registration rather than at every request — the request-time
     /// invariants (containment, the criterion) are evaluated per request and live elsewhere.

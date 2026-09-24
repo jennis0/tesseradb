@@ -487,6 +487,99 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
     }
 }
 
+/// The Arrow form of a growth whose `access` column carries `labels` on one row keyed `key`, or a
+/// null list where `labels` is `None`.
+fn arrow_growth(key: &str, labels: Option<&[&str]>) -> Vec<u8> {
+    use arrow::array::{Array, ListBuilder, StringArray, StringBuilder};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    let mut members = ListBuilder::new(StringBuilder::new());
+    members.append(true);
+    let members = members.finish();
+    let mut access = ListBuilder::new(StringBuilder::new());
+    match labels {
+        Some(labels) => {
+            for label in labels {
+                access.values().append_value(label);
+            }
+            access.append(true);
+        }
+        None => access.append(false),
+    }
+    let access = access.finish();
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("members", members.data_type().clone(), false),
+            Field::new("access", access.data_type().clone(), true),
+        ],
+        [("addressing".to_string(), "external".to_string())].into(),
+    ));
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(vec![key])),
+            Arc::new(members),
+            Arc::new(access),
+        ],
+    )
+    .unwrap();
+    let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// The Arrow form of a growth carries labels in an `access` column, read as the ingest body reads
+/// one: a null list fills nothing, a label fills an artifact that has none, the same label again
+/// is accepted, a different one is a `409`, and the label is held across a restart.
+#[tokio::test]
+async fn an_arrow_growth_fills_a_label_as_the_json_form_does() {
+    let d = deployment(false).await;
+    let patch = |server: &TestServer, body: Vec<u8>| {
+        server
+            .client
+            .patch(artifacts_url(server, LAYER))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .header("content-type", "application/vnd.apache.arrow.stream")
+            .body(body)
+            .send()
+    };
+    async fn open_served(server: &TestServer) -> bool {
+        let blue = token_for(server, &["0", "blue"]).await;
+        keys_served(&viewport_raw(server, &blue, viewport(0, json!({}))).await)
+            .contains(&"open".to_string())
+    }
+
+    let server = &d.server;
+    let resp = patch(server, arrow_growth("open", None)).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    tick(server).await;
+    assert!(open_served(server).await);
+
+    let resp = patch(server, arrow_growth("open", Some(&["red"])))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    tick(server).await;
+    assert!(!open_served(server).await);
+    let resp = patch(server, arrow_growth("open", Some(&["red"])))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = patch(server, arrow_growth("open", Some(&["blue"])))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 409);
+
+    let d = d.restart().await;
+    assert!(!open_served(&d.server).await);
+    let resp = patch(&d.server, arrow_growth("open", Some(&["blue"])))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 409);
+}
+
 /// An artifact with no label takes the layer's default: a named default admits only a viewer
 /// holding it.
 #[tokio::test]

@@ -1612,12 +1612,6 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
     &mut artifact.contents[index]
 }
 
-/// Register every declaration, publish every artifact, and write the extents that carry them.
-///
-/// `resolve` maps a **source** entity id to the entity this build assigned it, and `high_water` is
-/// the point region's mark — passed so the allocator refuses rather than letting the two regions
-/// meet unnoticed.
-#[allow(clippy::too_many_arguments)]
 /// The views this build writes, each at the incarnation a build gives it.
 struct DeclaredViews<'a>(&'a [String]);
 
@@ -1642,6 +1636,12 @@ impl tessera_lifecycle::GroupViews for DeclaredViews<'_> {
     }
 }
 
+/// Register every declaration, publish every artifact, and write the extents that carry them.
+///
+/// `resolve` maps a **source** entity id to the entity this build assigned it, and `high_water` is
+/// the point region's mark — passed so the allocator refuses rather than letting the two regions
+/// meet unnoticed.
+#[allow(clippy::too_many_arguments)]
 pub fn publish(
     plan: &mut LayerPlan,
     resolve: &(dyn Fn(u64) -> Option<u64> + Sync),

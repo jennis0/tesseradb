@@ -192,9 +192,12 @@ widens it.
 
 At a build the label is read from the artifact source's column the field names, a string, a list of
 strings or a dictionary of strings, or from an inline row's `access`. At a running service each
-record of a publication, and each JSON row of a growth, carries `"access": ["team-a", "team-b"]`; a
-record carrying one on a layer that names no field is refused, and so are labels the plugin maps to
-no term. On a layer scoped to a group a growth names the view its artifact belongs to, as a
+record of a publication, and each row of a growth, carries its labels: `"access": ["team-a",
+"team-b"]` on a JSON row, or an `access` column of `list<utf8>` in the Arrow form of a growth, read
+as the ingest body's `access` column is. A record carrying labels on a layer that names no field is
+refused, and so are labels the plugin maps to no term. The Python client refuses an artifacts
+insert that names no `access=` column into a layer that reads labels, before and after the layer's
+first commit. On a layer scoped to a group a growth names the view its artifact belongs to, as a
 publication does: `view` on a JSON row, or a `view` column in the Arrow form. A viewer is admitted
 by holding any one of the labels. An artifact with no label takes the layer's `default`: `inherited`
 leaves it to the layer's own label and membership requirement, and a label treats it as carrying

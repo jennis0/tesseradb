@@ -310,9 +310,9 @@ class Database:
         - `visibility`: who may see the layer at all: `"public"` or an access label.
         - `artifact_visibility`: the access label of an annotation that carries none of its own,
           or `{"field": column, "default": label}`. The field names the column each annotation's
-          own labels are read from; an artifacts insert names that column with `access=`, and an
-          insert naming another column is refused. Without a field, the first artifacts insert
-          naming `access=` sets it.
+          own labels are read from; every artifacts insert names that column with `access=`, and
+          an insert naming another column or none is refused. Without a field, the first
+          artifacts insert naming `access=` sets it.
         - `computed`: which properties the server computes per reader: `"centroid"`, `"box"` and
           `"hull"`.
         - `supplied`: content you provide per annotation, such as text, as
@@ -446,7 +446,7 @@ class Database:
                 f"insert into {kind} {target!r}: a {kind} takes no {role} table"
             )
         self._refuse_an_insert_the_target_cannot_take(target, kind, role, block, named)
-        self._refuse_a_second_label_column(target, kind, role, block, named)
+        self._refuse_a_label_column_the_layer_does_not_read(target, kind, role, block, named)
         projected = kind in ("view", "view_group") and block.get("projection", "none") != "none"
         metadata = D.metadata_names(block) if role == "roster" else ()
         if kind == "labels" and role == "text":
@@ -558,15 +558,36 @@ class Database:
                 f"carries the view it belongs to. Name the column that says which with view="
             )
 
-    def _refuse_a_second_label_column(
+    def _refuse_a_label_column_the_layer_does_not_read(
         self, target: str, kind: str, role: str, block: dict, named: dict
     ) -> None:
-        """Refuse an artifacts insert whose `access=` differs from the column the layer declares
-        or an earlier insert named."""
-        column = named.get("access")
-        if kind != "layer" or role != "artifacts" or not column:
+        """Refuse an artifacts insert whose `access=` is not the column the layer reads its labels
+        from: the column the layer declares, a commit sent or an uncommitted insert named.
+
+        An insert naming no column is refused where the layer reads one, before and after the
+        first commit, since its artifacts would reach the layer with no labels.
+        """
+        if kind != "layer" or role != "artifacts":
             return
-        D.carry_labels(target, {"artifact_visibility": block.get("artifact_visibility")}, column)
+        column = named.get("access") or None
+        held = dict(block.get("artifact_visibility") or {}).get("field") or next(
+            (
+                one.columns["access"]
+                for one in (self.pending if self.built else self.inserts)
+                if one.target == target and one.kind == "layer" and one.role == "artifacts"
+                and one.columns.get("access")
+            ),
+            None,
+        )
+        if column is None and held is not None:
+            raise Refusal(
+                f"insert into layer {target!r}: this layer reads each artifact's own access labels "
+                f"from column {held!r}, and this insert names no access column. Name it with "
+                f"access={held!r}, giving that column nulls for artifacts with no label of their "
+                f"own"
+            )
+        if column is not None and held is not None:
+            D.carry_labels(target, {"artifact_visibility": {"field": held}}, column)
 
     def _refuse_a_second_view_without_its_labels(
         self, kind: str, role: str, target: str, insert: Insert

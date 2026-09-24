@@ -185,7 +185,7 @@ impl Engine {
                 continue;
             };
             for layer in &layers {
-                if !layer.declaration.views.iter().any(|s| s == view) {
+                if !layer.declaration.draws_on(view) {
                     continue;
                 }
                 // Same order as `serve_artifacts`: a suppressed or deleted layer is served to
@@ -355,7 +355,7 @@ impl Engine {
         let Some(layer) = self.write.live().registered_layer(&name) else {
             return Ok(None);
         };
-        if !layer.declaration.views.iter().any(|s| s == view) {
+        if !layer.declaration.draws_on(view) {
             return Ok(None);
         }
         // Another view's artifact is refused here, indistinguishable from one naming nothing.
@@ -859,7 +859,7 @@ impl Engine {
             return false;
         }
         // A layer not in this view has no membership here to serve.
-        if !layer.declaration.views.iter().any(|s| s == ctx.served.name) {
+        if !layer.declaration.draws_on(ctx.served.name) {
             return false;
         }
         let record = self.write.live().with_artifacts(|store| {

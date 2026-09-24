@@ -54,7 +54,7 @@ impl Engine {
             .live()
             .registered_layer(name)
             .ok_or(LayerRefusal::Unknown)?;
-        if !layer.declaration.views.iter().any(|s| s == view)
+        if !layer.declaration.draws_on(view)
             || generation.overlay.is_deleted(layer.entity)
             || generation.overlay.is_suppressed(layer.entity)
         {
