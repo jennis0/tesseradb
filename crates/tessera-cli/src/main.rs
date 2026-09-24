@@ -1,5 +1,4 @@
-//! `tessera` — one binary for the build pipeline and (later) the server (SA §3: Rust is the
-//! implementation language for engine, build and serving alike).
+//! `tessera`: the one binary that builds, checks, verifies and serves a bundle.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -9,10 +8,14 @@ use tessera_spatial::Bounds;
 use tessera_store::manifest::identity_key_fingerprint;
 use tessera_types::{IdentityKey, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
+#[cfg(test)]
+mod reference;
+
 #[derive(Parser)]
 #[command(
     name = "tessera",
-    about = "Tessera: a permission-masked point service",
+    about = "Build a Tessera bundle from a corpus declaration, check the declaration, verify the \
+             bundle and serve it.",
     // The commit rather than the crate version: a measurement is read against a tree, and the
     // crate version does not move between two of them.
     version = tessera_build::BUILD_COMMIT
@@ -26,250 +29,301 @@ struct Cli {
 #[allow(clippy::large_enum_variant)] // `Build` carries the identity-key flags; the enum is
                                      // parsed once per process invocation, never hot.
 enum Command {
-    /// Build a bundle from this deployment's corpus declaration and the sources it names.
+    /// Build a bundle from the corpus declaration and the source files it names.
     ///
-    /// **`tessera build`, with no flags at all, is the whole invocation.** `tessera.toml` — found
-    /// by walking up from the working directory — says where the declaration is and where the
-    /// bundle goes; the declaration says where the corpus is and what frame it is quantised
-    /// against; the environment carries the identity key. Everything below is an override or a
-    /// performance knob (`configuration.md` §3).
+    /// `tessera build` needs no flags. It reads `tessera.toml` from the
+    /// working directory, or from the nearest directory above it that has one. That file names
+    /// the corpus declaration in `[build] schema` (default `schema.toml`) and the bundle
+    /// directory in `[bundle] path`, each relative to the file's own directory. The declaration
+    /// names the source files.
+    ///
+    /// The identity key comes from the environment variable that `[identity] env` in
+    /// `tessera.toml` names, `TESSERA_IDENTITY_KEY` by default. A `.env` file beside
+    /// `tessera.toml` may set it, and a value in the process environment takes precedence over
+    /// the file. With no key, the build is refused before it reads any data; pass
+    /// `--carry-id-key-from`, `--identity-file` or `--mint-id-key` to supply or create one.
+    ///
+    /// The other flags override `tessera.toml` or tune the build.
     Build {
-        /// This deployment's `tessera.toml`, instead of the one found by walking up from the
-        /// working directory.
+        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
-        /// Bundle root to create, overriding `tessera.toml`'s `bundle.path`.
+        /// Write the bundle to this directory instead of `[bundle] path` in `tessera.toml`.
         ///
-        /// **The same value the server's `bundle_path` is**, seen from the other side, which is
-        /// why it is declared once rather than typed twice: a build and a server naming different
-        /// directories is a server serving whatever was there before.
-        #[arg(long)]
+        /// `tessera serve` opens `[bundle] path`, so it does not serve a bundle written
+        /// elsewhere.
+        #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space), which drops
-        /// every negative id, its bytes reading as at least 2^63.
-        #[arg(long)]
-        limit: Option<u64>,
-        /// The corpus declaration, overriding `tessera.toml`'s `build.schema`: one TOML document
-        /// declaring the corpus, its views, its vocabularies, its attributes and its layers
-        /// (configuration.md §1).
+        /// Build only the rows whose identity column's value is an integer below this value.
         ///
-        /// **A build input, never server configuration** (configuration.md §4). It compiles into
-        /// MANIFEST.json and the server reads the compiled form, so a server cannot be restarted
-        /// against a bundle whose columns disagree with a schema it holds.
+        /// A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit
+        /// drops it. Refused when the identity column holds strings or bytes, and when rows have
+        /// no identity column. Layer member files are read whole: a member row naming a row the
+        /// limit dropped is refused, so limit the member file to the same values.
+        #[arg(long, value_name = "ID")]
+        limit: Option<u64>,
+        /// Read this corpus declaration instead of `[build] schema` in `tessera.toml`.
+        ///
+        /// The declaration is compiled into the bundle's `MANIFEST.json`, and the server reads
+        /// it from there.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
-        /// Read one of the declaration's sources from somewhere else: `--file NAME=PATH`,
-        /// repeatable (configuration.md §8).
+        /// Read the source NAME in the declaration's `[sources]` from PATH instead. Repeatable.
         ///
-        /// **An override, not a binding.** `[sources]` already writes every path, relative to the
-        /// declaration itself, so the ordinary build names no files here at all. This is for the
-        /// deployment that stages one source elsewhere, and NAME is the source's own name in
-        /// `[sources]` — so one override moves every block reading that file at once.
-        ///
-        /// Fail-closed both ways: a name `[sources]` does not carry is a refusal listing the ones
-        /// it does, and an override never *creates* a source — so a closed vocabulary cannot be
-        /// opened, nor a view given geometry, from the command line alone.
-        ///
-        /// Note the interaction with `--limit` for a member source: a member outside the limited
-        /// prefix names nothing this build assigned, and refuses it. Limit the members file with
-        /// the corpus.
+        /// A relative PATH is read from the working directory, not from the declaration's
+        /// directory. Every block that reads the source reads PATH. Refused when `[sources]` has no source
+        /// called NAME (the message lists the names it has), and when NAME is given twice. The
+        /// flag replaces a source's path and cannot add a source.
         #[arg(long = "file", value_name = "NAME=PATH", value_parser = parse_file_binding)]
         file: Vec<(String, PathBuf)>,
-        /// Mint an external ID for every item from its source entity id, and write the
-        /// external-id extents and locator. **Off by default**: contracts §2.4 forbids
-        /// manufacturing an external ID for an item whose caller supplied none, and this
-        /// build's inputs carry none — the flag exists so benchmark fixtures can keep carrying
-        /// the sidecar's cost realistically (2026-07-30 memo §3.2 D1).
+        /// Write an external id for every item, made from its identity column's integer value.
+        ///
+        /// An identity column of strings or bytes writes external ids without
+        /// this flag. Rows with no identity column get no external ids, with or without it.
         #[arg(long)]
         mint_external_ids: bool,
-        /// Skip writing `pairs.parquet`. The file serves only the test-time reference oracle
-        /// and build-cadence tooling — nothing on any request path reads it — so a deployment
-        /// that runs no conformance suite against the bundle can save writing and hashing it.
+        /// Do not write `pairs.parquet`.
+        ///
+        /// The server does not read the file. The conformance suite and `tessera verify --deep`
+        /// do, and `verify --deep` passes a bundle without one.
         #[arg(long)]
         no_oracle_pairs: bool,
-        /// Signature-sort batch size in items (design §11.1 r23: assignment is
-        /// signature-sorted per batch). Omit to derive the largest batch the memory budget
-        /// supports — usually the whole corpus in one batch. Whatever is used is recorded in
-        /// MANIFEST provenance when it batches, and is **identity-bearing**: a rebuild
-        /// preserving this corpus's identity must replay the recorded value
-        /// (`--carry-id-key-from` does so automatically).
-        #[arg(long)]
+        /// Assign internal ids in batches of this many items.
+        ///
+        /// Default: the largest batch the memory budget allows, which is the whole corpus when
+        /// it fits. Refused when the batch does not fit the budget, or when it is less than half
+        /// the size the budget allows. A build of more than one batch records the size in the
+        /// bundle, and a different size assigns different internal ids. `--carry-id-key-from`
+        /// reuses a recorded size and refuses a different one. When the carried bundle was built
+        /// as one batch, a size given here is used, and the build prints a note saying the ids
+        /// will differ.
+        #[arg(long, value_name = "ITEMS")]
         batch_items: Option<u64>,
-        /// Peak-memory budget for the build's own structures, e.g. `24g`, `900m` or bytes.
-        /// Omit to derive from the machine's available memory. Batch and band sizing, and the
-        /// fail-closed pre-flight, all follow from it.
-        #[arg(long, value_parser = parse_byte_size)]
+        /// Peak memory for the build's own structures, in bytes or with a `k`, `m` or `g`
+        /// suffix, such as `24g`.
+        ///
+        /// Default: 80% of the available memory or of the process's cgroup limit, whichever is
+        /// lower, kept between 2 GiB and 1 TiB, and 24 GiB where available memory cannot be
+        /// read. Batch and band sizes follow from it. A build that would not fit is refused
+        /// before it assigns internal ids, with the arithmetic in the message.
+        #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
         memory_budget: Option<u64>,
 
-        /// Print each pipeline stage's wall time, row count and peak RSS as it completes.
+        /// Print each build stage's wall time, row count and peak resident memory to stderr as
+        /// the stage ends.
         ///
-        /// **What it is for**: "which of the twelve stages bends with scale" is the question every
-        /// sizing decision here turns on, and without this a build reports one total and one
-        /// stage's own figure — so an optimisation is aimed at whichever stage was last watched
-        /// through `top`. The observer sees durations and counts and nothing derived from the
-        /// corpus, and the timed path is the shipping one: `build` is `build_observed` with a
-        /// no-op, so there is no second code path to drift.
+        /// Peak resident memory is the process's high-water mark when the stage ended, so it
+        /// shows the stage in which the peak was reached.
         #[arg(long)]
         stage_timings: bool,
 
-        /// Write the same per-stage records as JSON to this path at the end of the build.
+        /// Write the per-stage records to this file as JSON when the build ends, including one
+        /// that fails partway.
         ///
-        /// The stderr lines `--stage-timings` prints are for a person watching a build; a
-        /// measurement campaign wants the same numbers in a file it can put beside a rung's other
-        /// figures on one schema. Both may be given, and this one enables the observation on its
-        /// own. One object per stage, in report order: `stage`, `wall_s`, `rows`,
-        /// `peak_rss_kib`, `started_at`, `ended_at`.
+        /// One object per stage, in order, with `stage`, `wall_s`, `rows`, `peak_rss_kib`,
+        /// `started_at` and `ended_at`. It does not need `--stage-timings`.
         #[arg(long, value_name = "PATH")]
         stage_timings_json: Option<PathBuf>,
 
-        /// Carry `identity.key` and `identity.idset` forward from an existing bundle's
-        /// MANIFEST.json. **This is the normal rebuild path** (contracts §2.2).
-        #[arg(long, value_name = "BUNDLE_ROOT")]
-        carry_id_key_from: Option<PathBuf>,
-        /// Read the deployment's identity key from a file — `[identity]\nkey = "<32 lowercase
-        /// hex>"`, plus an optional `idset = <n>`.
+        /// Reuse the identity key, idset and batch size recorded in an existing bundle.
         ///
-        /// The ordinary route is the environment: `tessera.toml`'s `[identity] env` names the
-        /// variable (default `TESSERA_IDENTITY_KEY`), and a `.env` beside `tessera.toml` may
-        /// supply it. This flag is for the deployment that would rather keep the key in a `0600`
-        /// file, which an environment — readable from `/proc` — is not.
+        /// This rebuilds a bundle while every `tessera_id` a client holds stays valid.
+        /// Refused when the bundle's identity construction differs from this binary's, and when
+        /// its key disagrees with another key source unless `--rotate-id-key` is given.
+        #[arg(long, value_name = "BUNDLE")]
+        carry_id_key_from: Option<PathBuf>,
+        /// Read the identity key from a TOML file with an `[identity]` table holding `key`, 32
+        /// lowercase hex digits, and an optional `idset`.
+        ///
+        /// A file can be made readable by its owner only, which an environment
+        /// variable is not: another process of the same user can read it from `/proc`. Refused
+        /// when `[identity]` has any other key or an idset of 0.
         #[arg(long, value_name = "PATH")]
         identity_file: Option<PathBuf>,
-        /// Explicitly mint a fresh 16-byte key from the OS CSPRNG at idset 1 and print it
-        /// prominently. **Starts a NEW identity lineage; every `tessera_id` any client holds
-        /// becomes wrong.**
+        /// Generate a new random identity key at idset 1 and print it.
+        ///
+        /// This starts a new identity: every `tessera_id` a client holds becomes invalid. Record
+        /// the printed key, in the environment variable or a `.env` file beside `tessera.toml`,
+        /// so later builds can reuse it. `--idset` and `--bump-idset` are ignored: the idset is
+        /// 1. Refused when any other key source is given or set.
         #[arg(long)]
         mint_id_key: bool,
-        /// Required to proceed when a key was carried or supplied *and* it disagrees with
-        /// another given source. **Invalidates every `tessera_id` any client holds, and — since
-        /// the key is now part of the storage sort key — reorders every row.**
+        /// Accept a change of identity key when the key sources disagree.
+        ///
+        /// Without it, disagreeing sources are refused. The new key is the one from
+        /// `--identity-file` if given, otherwise the one from the environment. Every `tessera_id` a client holds becomes invalid,
+        /// every row is stored in a new order, and the idset returns to 1 unless `--idset` is
+        /// given.
         #[arg(long)]
         rotate_id_key: bool,
-        /// Advance `identity.idset` while keeping the key: the repartitioning/resharding signal
-        /// (contracts §2a).
+        /// Add one to the idset and keep the key.
+        ///
+        /// The server publishes the idset at `/v1/meta`, and refuses a request that names any
+        /// other idset.
         #[arg(long)]
         bump_idset: bool,
-        /// Set `identity.idset` explicitly. Accompanies **any** key source — the environment,
-        /// `--identity-file` (whose `[identity].idset`, if present, it overrides) or
-        /// `--carry-id-key-from` (whose carried idset it overrides) — and is the only way to
-        /// state an idset for a key source that records none. Default 1.
-        #[arg(long)]
+        /// Set the idset.
+        ///
+        /// Default: the idset in `--identity-file`, then the one recorded by
+        /// `--carry-id-key-from`, then 1. Required when those two disagree. `--bump-idset` adds
+        /// one to it.
+        #[arg(long, value_name = "N")]
         idset: Option<u32>,
     },
-    /// Check the declaration against the files it names — **schemas only, never a row** — and
-    /// print the disclosure decisions it makes.
+    /// Check the declaration against the column schemas of the files it names, without reading
+    /// a row.
     ///
-    /// **What a CI job runs.** It resolves exactly what `tessera build` resolves — the same
-    /// `tessera.toml` found the same way, the same declaration, the same `--file` overrides — and
-    /// then opens each source's Parquet footer to ask whether the columns the declaration named
-    /// are there and can carry what it said they carry. Seconds, and every finding rather than the
-    /// first: a build stops at the first thing wrong because everything after it is wasted work,
-    /// and a check exists to be fixed in one pass.
+    /// `tessera check` finds `tessera.toml`, the declaration and the `--file` overrides as
+    /// `tessera build` does, and stops at the first error in `tessera.toml` or the declaration,
+    /// such as a missing key or a TOML syntax error. Once both parse, it reads the footer of
+    /// each source Parquet file and reports every column that is missing or has the wrong type,
+    /// not only the first. It reads no rows except the geometry of shape layers, which it reads
+    /// to size them.
     ///
-    /// It cannot answer anything needing a row — whether a closed vocabulary covers the keys in
-    /// the data, whether a member id resolves, or where the data sits inside its view's extent,
-    /// which is the build's own clamp report.
+    /// The report goes to stderr: the files read, the findings, warnings, the frames the views
+    /// will have, the view groups, the shape layers' sizes, and on a clean check the disclosure
+    /// table. The exit status is non-zero when
+    /// there is a finding; a warning does not change it.
+    ///
+    /// It cannot check anything that needs a row: whether a closed vocabulary covers the values
+    /// in the data, whether a member id resolves, or where the data lies in its view's extent.
+    /// `tessera build` reports those.
     Check {
-        /// This deployment's `tessera.toml`, instead of the one found by walking up.
+        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
-        /// The corpus declaration, overriding `tessera.toml`'s `build.schema`.
+        /// Read this corpus declaration instead of `[build] schema` in `tessera.toml`.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
-        /// Read one of the declaration's sources from somewhere else: `--file NAME=PATH`,
-        /// repeatable — the same override `tessera build` takes, so a check and the build it
-        /// guards see one set of files.
+        /// Read the source NAME in the declaration's `[sources]` from PATH instead. Repeatable,
+        /// and the same override `tessera build` takes.
         #[arg(long = "file", value_name = "NAME=PATH", value_parser = parse_file_binding)]
         file: Vec<(String, PathBuf)>,
-        /// Write the control-plane payloads to stdout instead of the disclosure table: one JSON
-        /// object, a key per runtime block kind — `layers`, `attributes`, `vocabularies`, `views`,
-        /// `view_groups` — each an array in declaration order.
+        /// Print the declaration to stdout as the JSON request bodies the control plane takes,
+        /// to declare the same corpus on a running service.
         ///
-        /// A layer body and an attribute body carry their own `name`, so those two arrays are the
-        /// bodies themselves. A vocabulary, a view and a view group are addressed by a path
-        /// segment, so each of those entries is `{ "name", "body" }`. A vocabulary's entry also
-        /// carries `values` — the `PATCH /control/vocabularies/{name}/values` page its inline
-        /// values make — or `values_source`, naming the `[sources]` key a sourced value set reads:
-        /// those keys are rows rather than declaration, and are not emitted.
-        ///
-        /// **This is the one thing a declare-only deployment cannot get anywhere else.** Such a
-        /// deployment authors every layer twice — once as TOML to compile an empty bundle, once as
-        /// JSON to create it online — and a `[[layer]]` block minus its acquisition keys *is* that
-        /// payload (`configuration.md` §2). The parser has already produced it by the time this
-        /// runs. Findings still go to stderr and still decide the exit status, so a payload is
-        /// never emitted from a declaration that failed its check.
+        /// Printed only when the check has no finding. The output is one object with the keys
+        /// `layers`, `attributes`, `vocabularies`, `views` and `view_groups`, each an array in
+        /// declaration order. A layer or attribute entry is the request body itself. A
+        /// vocabulary, view or view group entry is `{ "name", "body" }`, because its name goes
+        /// in the route's path. A vocabulary entry also has `values`, the body for `PATCH
+        /// /control/vocabularies/{name}/values`, or `values_source`, the `[sources]` name its
+        /// values are read from. Values read from a source are not printed.
         #[arg(long)]
         payloads: bool,
     },
-    /// Verify a bundle: the read protocol (digests, manifests) plus permutation bijectivity and
-    /// the identity column (contracts §2.6: `tessera_id` re-derived from the key).
+    /// Verify a bundle's files and its identity column.
+    ///
+    /// It opens the bundle as the server does. That checks every manifest digest, the size and
+    /// SHA-256 of every file except the external-id files and their locator, and that each
+    /// segment's permutation maps one-to-one onto its rows. `--deep` hashes the external-id
+    /// files too. It
+    /// then confirms that the row space holds exactly the rows the segments claim, and computes
+    /// each row's `tessera_id` again from the identity key, failing on the first row that
+    /// differs.
+    ///
+    /// It also prints to stderr each indexed keyword column's count of distinct values against
+    /// its rows, with a warning for a column whose values are unique per row. A warning does not
+    /// fail the verify.
     Verify {
-        /// Bundle root (the directory containing `CURRENT`).
+        /// The bundle directory, the one holding `CURRENT`.
         bundle: PathBuf,
-        /// Also run the deep structural pass (correctness-suite §11): postings sorted,
-        /// duplicate-free and bounded; the external-id locator and its sidecar agreeing in both
-        /// directions; dictionary extents positional and never repeating a descriptor; and
-        /// `pairs.parquet` matching the base postings it was written with. Point it at a bundle
-        /// no live engine is publishing into.
+        /// Also check the bundle's internal structures.
+        ///
+        /// The external-id files and their locator are hashed against the manifest. The term
+        /// lists must be sorted, free of duplicates and in range; the external-id
+        /// index and its locator must agree in both directions; dictionary records must not
+        /// repeat; record blobs and Morton cells must agree with their indexes; each group-scoped
+        /// render column must be present in every segment; and `pairs.parquet`, when present,
+        /// must match the term lists it was written with. Run it on a bundle no running server
+        /// is writing to.
         #[arg(long)]
         deep: bool,
     },
-    /// Analyse text through the shipped tokeniser, one input per line, tokens tab-separated.
+    /// Split text into tokens with an analyser built into this binary. Each input line prints as
+    /// one line, its tokens separated by tabs.
     ///
-    /// **The conformance oracle's access to the analyser** (`records-and-search.md` §4.4). The
-    /// oracle derives expected `match` results from the fixture's own values and must pass them
-    /// through the *same* pipeline the index was built with; reimplementing it in Python would
-    /// test PyICU's ICU4C against icu4x rather than testing Tessera. This verb is that access, on
-    /// the harness's existing drive-the-CLI precedent.
-    ///
-    /// It is also how a client diagnoses an empty `match`: `/v1/meta` publishes each text column's
-    /// analyser identity (`declared_scalars[].analyser`), and running the query text through the
-    /// analyser that identity names shows whether it segmented the way the index did.
+    /// When a `match` filter returns nothing, this shows how the index split the text.
+    /// `/v1/meta` publishes each text column's analyser identity as
+    /// `declared_scalars[].analyser`, such as `unicode/icu4x-2.2/p1`. The analyser's name is the
+    /// part before the first `/`; run the query text through the analyser of that name. The
+    /// conformance suite uses the command to compute expected `match` results with the analyser
+    /// the index was built with.
     Tokenise {
-        /// Text to analyse. Repeatable. With none given, reads one input per line from stdin.
+        /// Text to split. Repeatable. With none, reads one input per line from stdin.
         #[arg(long = "text")]
         text: Vec<String>,
-        /// Which analyser, by declared name (decision 0070). A column records the identity this
-        /// resolves to — `/v1/meta` publishes it per column — and an unknown name is refused
-        /// rather than defaulted.
-        #[arg(long, default_value = tessera_analyse::UNICODE)]
+        /// The analyser to use, by name. An unknown name is refused with the list of names this
+        /// binary carries.
+        #[arg(long, value_name = "NAME", default_value = tessera_analyse::UNICODE)]
         analyser: String,
-        /// Print the analyser's identity and exit — what a column records, and what a rebuild moves.
+        /// Print the analyser's identity, the value a text column records, and exit.
         #[arg(long)]
         identity: bool,
     },
-    /// The correctness suite's generated corpus: expected items by served join key, and expected
-    /// masked counts per tile (`docs/design/correctness-suite.md` §8, §12.1).
-    ///
-    /// **The suite's access to the generator**, on the `tokenise` precedent: expected answers must
-    /// come from the same statement of the corpus the fixtures were materialised from, and a
-    /// Python reimplementation would put the fixture under test rather than the system. The verb
-    /// granularity is deliberate — one `items` call per recorded response and one `census` per
-    /// run, never a call per row — so the O(n) work stays in Rust and the driver compares vectors.
+    /// Generators for the conformance suite's corpus. Internal, and not shown in help.
+    #[command(hide = true)]
     Corpus {
         #[command(subcommand)]
         command: CorpusCommand,
     },
-    /// Ask the server this deployment describes whether it is ready: exit 0 when its viewer
-    /// plane answers `/readyz` with 200, and 1 otherwise.
+    /// Ask a running server whether it is ready, and exit 0 if it is or 1 if it is not.
     ///
-    /// For a container's health check, run beside the server. An unspecified bind address
-    /// (`0.0.0.0` or `[::]`) is reached on loopback.
+    /// Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address
+    /// in `[serve]`. The server answers 503 while its write-ahead log cannot be written, when the
+    /// thread that applies writes has stopped, and when part of the bundle is served from an
+    /// older list of segments because the newest could not be used. Otherwise it answers 200,
+    /// even while a write to disc hangs.
+    ///
+    /// The command exits 0 on a 200. It exits 1, with the reason on stderr, on any other answer,
+    /// on no answer within `--timeout`, when nothing is listening, and when `tessera.toml` is
+    /// refused or declares no viewer address. A server starts listening only once it has opened
+    /// its bundle, so the check fails until then.
+    ///
+    /// Exit 1 means stop sending viewer requests to the server, and keep sending it deletions and
+    /// suppressions, which it still applies when its log has failed. It does not call for a
+    /// restart: a restart undoes each deletion or suppression the server answered with 500
+    /// because the log could not be written, until that change is sent again.
+    ///
+    /// A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run the command on the
+    /// machine or in the container the server runs in. The Docker image's health check runs it.
     Health {
-        /// This deployment's `tessera.toml`, instead of the one found by walking up.
+        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
-        /// Seconds to wait for the connection and for the answer.
-        #[arg(long, default_value_t = 3)]
+        /// Seconds the whole request may take, from connecting to reading the answer.
+        #[arg(long, value_name = "SECONDS", default_value_t = 3)]
         timeout: u64,
     },
-    /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
+    /// Serve the bundle that `tessera.toml` names.
     ///
-    /// Takes no required flag: the same `tessera.toml` `tessera build` wrote into names the
-    /// bundle to open (`configuration.md` §3).
+    /// Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and
+    /// replays the write-ahead log at `[bundle] wal`, all before it binds any address. It then
+    /// listens on the viewer, session and control addresses in `[serve]`. When all three are bound
+    /// it prints one line of JSON to stdout naming them. Diagnostics go to stderr, in colour only
+    /// when stderr is a terminal.
+    ///
+    /// SIGTERM or SIGINT stops the server at once, even while it opens the bundle, and it exits
+    /// 0. Stopping ends every viewer session, because sessions are held in memory. A write is
+    /// acknowledged only once the write-ahead log holds it on disc, so stopping loses no
+    /// acknowledged write. A deletion or suppression answered with 500 because the log could not
+    /// be written is in force but not on disc, and a restart undoes it until the change is sent
+    /// again.
+    ///
+    /// It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would
+    /// refuse it or lacks one of the three `[serve]` addresses. It refuses when the session or
+    /// operator credential is not set or its file cannot be read. Under `[serve]`,
+    /// `session_credential_file` or `session_credential_env` names the file or environment
+    /// variable holding the session credential, and `operator_credential_file` or
+    /// `operator_credential_env` the operator's. It also refuses when the bundle cannot be read
+    /// and when the write-ahead log fails its checksum. An address that cannot be bound, such as
+    /// one already in use, stops it with exit 1 after the bundle has opened.
     Serve {
-        /// This deployment's `tessera.toml`, instead of the one found by walking up from the
-        /// working directory (SA §7).
+        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
     },
@@ -2060,8 +2114,9 @@ fn main() -> ExitCode {
                 .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
             // SIGTERM or SIGINT ends the process at once, including while the bundle opens. A
-            // write is fsynced before it is acknowledged, so stopping loses only what no client
-            // was told had landed, and the next start replays the log.
+            // write is fsynced before it is acknowledged, so stopping loses no acknowledged write,
+            // and the next start replays the log. A deletion or suppression answered 500 because
+            // the log could not be written is applied but not logged, so stopping undoes it.
             exit_on_termination();
             let deployment = match tessera_config::discover(
                 deployment.as_deref(),
