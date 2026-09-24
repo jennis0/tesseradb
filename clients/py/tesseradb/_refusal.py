@@ -8,7 +8,8 @@ class Refusal(ValueError):
 
     The package raises it for a call it will not make, and for a request the server refused, in
     which case the message carries the server's status and answer. A `commit()` that did nothing
-    carries its report as `report`, which is `None` otherwise.
+    carries its report as `report`, which is `None` otherwise. `authorise` and `revoke` raise
+    `PermissionError` for a refused request instead.
 
         try:
             db.commit()

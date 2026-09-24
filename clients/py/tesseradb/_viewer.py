@@ -15,10 +15,13 @@ import struct
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 from ._auth import Token, TokenSource, minted
 from ._refusal import Refusal
+
+if TYPE_CHECKING:
+    from .widget import Map
 
 #: How near expiry a held token may come before the next read gets another, in seconds.
 TOKEN_MARGIN = 60.0
@@ -337,8 +340,8 @@ class Selection:
         reader may see in the view.
 
         A box whose outline is longer than the server's `max_region_cells` setting allows is
-        counted over the grid cells covering it, so the number can include items just outside
-        the box.
+        counted over the grid cells covering it, so the number can include items outside the box
+        that lie in those cells.
 
             db.view("papers").count()
             db.viewer(["cs.LG"]).view("papers").filter({"year": {"eq": 2023}}).count()
@@ -455,17 +458,19 @@ class Selection:
         colour_by: Optional[str] = None,
         layers: Optional[Sequence[str]] = None,
         height: int = 480,
-    ):
+    ) -> Map:
         """The interactive map of this selection, as a notebook widget.
 
         It opens on this view with this selection's filters applied, framed on its box if it
-        has one. Items outside the box are still drawn when they are in frame.
+        has one.
 
         - `colour_by`: the column to colour points by, or `"cluster:<layer>"` to colour them by
           the clusters of that layer.
         - `layers`: the annotation layers to draw. `None` lets the map choose and `[]` draws
           none.
         - `height`: the widget's height in pixels.
+
+        Items outside the box are still drawn when they are in frame.
 
             db.view("papers").filter({"year": {"range": {"gte": 2020}}}).map(colour_by="venue")
         """
@@ -561,7 +566,7 @@ class Viewer:
         filters: Optional[dict] = None,
         height: int = 480,
         **kwargs: Any,
-    ):
+    ) -> Map:
         """The interactive map, as a notebook widget, showing what this reader may see.
 
         - `view`: the view to open on. `None` opens the first one.

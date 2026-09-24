@@ -84,6 +84,9 @@ def authorise(
     The token's `renew()` makes a fresh one with the same credential, which stays in this
     process. A `Database` does this for you: `db.token(terms)` and `db.viewer(terms)`.
 
+    An empty `session_url` or `credential` raises `ValueError`, and a request the server refuses
+    raises `PermissionError` with its status and answer.
+
         token = tesseradb.authorise(session_url, credential, ["cs.LG"])
         tesseradb.connect(viewer_url, token).view("papers").count()
     """
@@ -131,7 +134,8 @@ def revoke(
     - `timeout`: how long to wait for the server, in seconds.
 
     An id that names no live token is accepted without comment, so the answer says nothing
-    about which tokens exist.
+    about which tokens exist. An empty `session_url` or `credential`, or a `Token` with no
+    `token_id`, raises `ValueError`, and a request the server refuses raises `PermissionError`.
 
         tesseradb.revoke(session_url, credential, token)
     """

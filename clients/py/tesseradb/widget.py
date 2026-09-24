@@ -1,28 +1,25 @@
-"""The notebook widget: ``Map``, the kernel half of the protocol in ``components/src/widget.ts``.
+"""The notebook widget, `Map`: the kernel half of the protocol in `components/src/widget.ts`.
 
-The page half is the components' single-file bundle, which
-anywidget evaluates as ``_esm``; this half holds the token, answers the page's ``ready`` and
-``reauthorise`` with it as a **custom message**, and mirrors control and selection as traitlets.
+The page half is the components' single-file bundle, which anywidget runs as `_esm`. This half
+holds the token, answers the page's `ready` and `reauthorise` messages with it as a custom
+message, and mirrors the map's controls and selection as traitlets.
 
-**The token is never model state.** No traitlet carries it, so nothing that serialises widget
-state can save it — not the frontend's "save widget state", not ``nbconvert --execute``, not
-papermill, not a headless run in which no frontend ever mounts. What remains is a token in the
-browser's memory for its lifetime, which is browser-direct's exposure everywhere.
+No traitlet carries the token, so nothing that saves widget state saves it: not the front end's
+"save widget state", `nbconvert --execute`, papermill, or a run in which no front end mounts. The
+token stays in the browser's memory while the page is open.
 
-**Where the widget's requests go.** The page calls ``url`` — the viewer plane — from the
-notebook page's origin, so that origin must be in the viewer plane's CORS list: today the
-development-only ``serve.dev_cors_origins``; the production list is design D10, not yet ruled.
-⊘ The proxy arm (the widget's base URL a path on the notebook server, the proxy holding the
-credential and authorising per principal) is documented in ``clients/py/README.md`` and not built;
-D4 chooses which arm ships first. A VS Code notebook and Colab render in origins no list can
-name, so they wait on it.
+The page calls `url`, the viewer plane, from the notebook page's origin, so the viewer plane must
+allow that origin. A database made with `create()` allows pages served from a loopback address,
+through `serve.cors_loopback`; another deployment names the notebook's origin in
+`serve.cors_origins`. A VS Code notebook and Colab render in origins no list can name, so the
+widget cannot reach a database from them. Not built yet: a Jupyter server extension that would
+forward the widget's requests from the notebook's own origin.
 
-**What crosses the kernel boundary is control and selection, never data.** ``url`` and ``view``
-down; ``bbox``, ``layers``, ``colour_by`` and ``filters`` both ways, synced up **at the settle** —
-when the map has finished fetching for a view — and never per frame, so the kernel is never on
-the pan path; ``selected``, ``selected_artifact`` and ``region`` up. Ids are **decimal strings**:
-a ``tessera_id`` is a ``u64``, which is not a JavaScript number, and a ``BigInt`` does not
-serialise.
+Only controls and selection cross the kernel boundary, never data. `url` and `view` go down;
+`bbox`, `layers`, `colour_by` and `filters` go both ways, and up only when the map settles, once
+it has finished fetching for a view, so the kernel is never asked on every frame; `selected`,
+`selected_artifact` and `region` go up. Ids are decimal strings, because a `tessera_id` is a
+`u64`, which is not a JavaScript number, and a `BigInt` does not serialise.
 """
 
 from __future__ import annotations
@@ -70,34 +67,57 @@ def _decimal_id(value: Any, name: str) -> Optional[str]:
 
 
 class Map(anywidget.AnyWidget):
-    """The explorer in a notebook cell, against a Tessera viewer plane.
+    """The interactive map in a notebook cell, reading a Tessera database with a token.
 
-    ``Map(url, token=..., view=None)``: ``url`` is the viewer plane; ``token`` is the viewer token
-    your deployment issued you — a string, a ``Token`` from :func:`tesseradb.authorise` (renewed
-    on expiry), or a callable returning either (called on expiry). ``view`` names one of the
-    served views; ``None`` is the first.
+    The page in the browser fetches its data from the database itself, as the token allows. The
+    token reaches the page as a message and is never widget state, so saving the notebook does
+    not save it.
 
-    ``title_field`` names the record field that titles a point in the hover and the item card;
-    ``None`` titles a point by its id.
+    - `url`: the address of the database's reading endpoint.
+    - `token`: the token your deployment issued you, as a string, a `Token` from `authorise`,
+      which is renewed before it expires, or a function returning either, which is called again
+      then. A `Map` without one is refused with `TypeError`.
+    - `view`: the view to open on. `None`, the default, opens the first one.
+    - `layers`: the annotation layers to draw, each with the layers it depends on. `None`, the
+      default, lets the map choose, and `[]` draws none. `"all"` is not a layer name and is
+      refused.
+    - `colour_by`: the column to colour points by, or `"cluster:<layer>"` to colour them by the
+      annotations of that layer.
+    - `filters`: a filter expression, as `Selection.filter` takes one.
+    - `bbox`: the box to frame the camera on, as `(min_x, min_y, max_x, max_y)`.
+    - `height`: the widget's height in pixels. The default is 480.
+    - `explorer_layout`: `"docked"`, the default, puts the controls in a sidebar beside the map;
+      `"overlay"` draws the map across the whole widget with the controls floating over it.
+    - `title_field`: the field whose value titles a point in the hover and the item card.
+      `None`, the default, titles a point by its id.
 
-    ``layers`` names the annotation layers to draw (their dependents come with them); ``None``
-    leaves the explorer's default and ``[]`` draws none. ``colour_by`` is a column, or
-    ``"cluster:<layer>"`` for the served clusters' exact membership.
+    Read the widget's attributes in a later cell:
 
-    Reading the widget in the next cell is the point: ``m.selected`` is the picked item's id,
-    ``m.selected_artifact`` the opened artifact's, ``m.region`` the drawn box or lasso with its
-    counts, ``m.bbox`` where the camera settled. Setting ``m.filters`` (the wire's expression, e.g.
-    ``{"year": {"range": {"gte": 2000}}}`` or ``{"all_of": [...]}``), ``m.layers``, ``m.colour_by``
-    or ``m.bbox`` redraws. Nothing is data: the marks stay in the browser.
+    - `selected`: the `tessera_id` of the picked item, as a decimal string, or `None`.
+    - `selected_artifact`: the `tessera_id` of the opened annotation, likewise.
+    - `region`: the drawn box or lasso, as a dictionary: its `shape` and `status`, the counts
+      `visible`, `matched` and `served` inside it, `verdict`, which says whether the counts are
+      exact for the shape or over the grid cells covering it, and `refusal` where the server
+      refused it.
+    - `bbox`: where the camera settled.
+    - `filters`, `layers`, `colour_by`: as the map shows them. Setting one redraws the map.
+    - `last_error`: why the page last refused something set here, or `None`.
 
-    Marimo: ``mo.ui.anywidget(m)`` folds every synced trait into one ``.value``, so a cell that
-    reads it re-runs at every settle (each pan that finishes fetching). To react to a pick alone,
-    ``m.observe(fn, names="selected")`` on this object.
+    These attributes change when the map settles, once it has finished fetching after a pan or
+    zoom, and not during one. In marimo, `mo.ui.anywidget(m)` puts every attribute in one
+    `.value`, so a cell that reads it runs again at every settle. To react to a pick alone, call
+    `m.observe(fn, names="selected")` on the `Map`.
 
-    Reading ``.filters`` after the panel changes it gives the composed expression the store
-    applied; setting it applies without the panel's typing debounce. An expression the panel's
-    controls cannot hold (``any_of``, ``none_of``, two leaves on a column) is refused by the page
-    and reported through ``last_error`` and a warning, and applies nothing.
+    Setting `filters` applies the expression at once. Reading it after the filter panel changes
+    gives the expression the panel built. An expression the panel cannot show, such as
+    `any_of`, `none_of` or two tests on one column, is refused by the page: nothing is applied,
+    and `last_error` and a warning say why.
+
+    The map needs the components' bundle, which `pip install 'tesseradb[widget]'` installs; a
+    `Map` made without it raises `RuntimeError` naming what to install.
+
+        m = tesseradb.Map(viewer_url, token=token, colour_by="venue")
+        m
     """
 
     # The bundle's text, set per instance from `bundle_path()`; anywidget's frontend reads both.

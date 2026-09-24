@@ -46,10 +46,24 @@ SPATIAL_DERIVED = ("centroid", "box")
 
 
 class Declaration:
+    """A database's declared blocks, held by `Database` and written out as `schema.toml`.
+
+    `blocks` maps each kind (`"view"`, `"view_group"`, `"vocabulary"`, `"attribute"` and
+    `"layer"`) to its blocks in the order they were declared. A label set is a `labels` entry on
+    the block of the layer it labels. Declare through `Database.declare` and the `declare_*`
+    methods, which check a block against the database and save it with the database; `add`
+    does neither.
+    """
+
     def __init__(self) -> None:
         self.blocks: dict[str, list[dict]] = {kind: [] for kind in KINDS}
 
     def add(self, kind: str, block: dict) -> dict:
+        """Add a copy of `block` to the blocks of `kind`, and return the copy.
+
+        A kind not in `blocks`, a name already declared for that kind, and a view named like a
+        view group, or the reverse, are refused.
+        """
         if kind not in KINDS:
             raise Refusal(f"declare: {kind!r} is not a block kind: {', '.join(KINDS)}")
         block = dict(block)
@@ -70,27 +84,33 @@ class Declaration:
         return block
 
     def layer(self, name: str) -> dict:
+        """The block of the layer named `name`, or a refusal where none is declared."""
         for block in self.blocks["layer"]:
             if block.get("name") == name:
                 return block
         raise Refusal(f"no layer named {name!r} is declared")
 
     def group(self, name: str) -> dict:
+        """The block of the view group named `name`, or a refusal where none is declared."""
         for block in self.blocks["view_group"]:
             if block.get("name") == name:
                 return block
         raise Refusal(f"no view group named {name!r} is declared")
 
     def view_names(self) -> list[str]:
+        """The names of the views outside view groups, in the order they were declared."""
         return [block["name"] for block in self.blocks["view"]]
 
     def group_names(self) -> list[str]:
+        """The names of the view groups, in the order they were declared."""
         return [block["name"] for block in self.blocks["view_group"]]
 
     def attribute_names(self) -> set[str]:
+        """The names of the declared attributes."""
         return {block["name"] for block in self.blocks["attribute"]}
 
     def vocabulary_names(self) -> set[str]:
+        """The names of the declared vocabularies."""
         return {block["name"] for block in self.blocks["vocabulary"]}
 
     def allocation_view(self) -> str | None:

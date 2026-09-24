@@ -160,34 +160,42 @@ PROJECTED = {"x": "lon", "y": "lat"}
 
 @dataclass(repr=False)
 class Insert(Summarised):
-    """One table bound to one declared thing, and the columns it reads.
+    """What one `insert` call handed over: a table, its target, and the columns read.
 
-    It shows as one line: the target, the rows, the columns read and how many were ignored.
-    `columns` is what the call named, `read` and `ignored` the table's columns in its own order,
-    and `path` where the rows are, `in_place` saying whether that is the file the call gave.
+    It shows as one line: the target, the rows, the columns read and the columns ignored.
+
+    - `target`: the name of the declared thing.
+    - `kind`: what the target is: `"view"`, `"view_group"`, `"attribute"`, `"layer"`,
+      `"labels"` or `"vocabulary"`.
+    - `role`: which of the target's tables this is: `"rows"`, `"roster"`, `"values"`, `"key"`,
+      `"artifacts"`, `"members"` or `"text"`.
+    - `columns`: the columns the call named, by what each holds, such as
+      `{"id": "paper_id", "x": "x", "y": "y"}`.
+    - `named_attributes`: on the anchor view's rows, the attributes the table fills, as
+      `{attribute: column}`.
+    - `metadata_columns`: on a view group's roster, the column each metadata value is read from.
+    - `shape`, `shape_columns`: on an annotations table, the kind of shape its rows carry and
+      the columns it is read from.
+    - `view_key`: the one view of a view group every row is in, where `view_key=` named it.
+    - `read`, `ignored`: the table's columns, in its own order, split into those read and those
+      ignored.
+    - `rows`: how many rows the table has.
+    - `schema`: each column's Arrow type.
+    - `path`: the Parquet file the rows are in. `in_place` is `True` where that is the file the
+      call gave, and `False` where the package wrote the table into the database's directory.
+    - `source`, `declared_path`: the name and path the declaration file gives the table, before
+      the first commit.
     """
 
     target: str
-    #: The block kind the target is: `view`, `view_group`, `attribute`, `layer`, `labels` or
-    #: `vocabulary`.
     kind: str
-    #: Which of that kind's tables this is: `rows`, `roster`, `values`, `key`, `artifacts`,
-    #: `members` or `text`.
     role: str
-    #: What the call named, by the contract's own name: `{"id": "paper", "x": "x", …}`.
     columns: dict[str, str] = field(default_factory=dict)
-    #: An attribute's value column, named explicitly on a view's insert or matched by the
-    #: attribute's own name from a frame inserted into the allocation view: `{attribute: column}`.
     named_attributes: dict[str, str] = field(default_factory=dict)
-    #: A group's roster carries one column per metadata name the group declared.
     metadata_columns: dict[str, str] = field(default_factory=dict)
-    #: The membership shape kind this table's rows carry, and the columns it is written in.
     shape: str | None = None
     shape_columns: list[str] = field(default_factory=list)
-    #: The one view of its group every row of this table belongs to, where `view_key=` named it
-    #: rather than `view=` naming a column.
     view_key: str | None = None
-    #: The source key this insert writes into `[sources]`, before the first commit.
     source: str | None = None
     path: Path | None = None
     declared_path: str | None = None
@@ -199,18 +207,22 @@ class Insert(Summarised):
 
     @property
     def id_column(self) -> str | None:
+        """The column the call named with `id=`, or `None`."""
         return self.columns.get("id")
 
     @property
     def id_type(self) -> Any:
+        """The Arrow type of the id column, or `None` where the call named none."""
         column = self.id_column
         return None if column is None else self.schema.get(column)
 
     def table(self) -> pa.Table:
-        """The rows, read back from wherever this insert put them."""
+        """The rows, read back from `path`."""
         return pq.read_table(self.path)
 
     def summary(self) -> list[str]:
+        """The summary the record shows as, one string per line: a single line naming the
+        target, the rows, the columns read and the columns ignored."""
         into = self.target if self.role in ("rows", "key", "values") else (
             f"{self.target} ({self.role})"
         )

@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Hashable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Hashable, Iterable, Sequence
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -30,7 +30,7 @@ from . import _columns
 from . import _commit as C
 from . import _declaration as D
 from . import _inserts, _instance
-from ._auth import authorise, revoke
+from ._auth import Token, authorise, revoke
 from ._control import Control, addressed
 from ._inserts import Insert, is_integer_type
 from ._refusal import Refusal
@@ -44,6 +44,9 @@ from ._reports import (
 )
 from ._toml import Inline, dumps
 from ._viewer import Selection, Viewer
+
+if TYPE_CHECKING:
+    from .widget import Map
 
 #: The compiled extension that checks a declaration in this process, or `None`, in which case
 #: the check runs `tessera check` instead. Both use the same parser.
@@ -88,6 +91,19 @@ class Database:
         db.insert("papers", frame, id="paper_id", x="x", y="y", access="labels")
         db.commit()
         db.view("papers").count()
+
+    Its attributes:
+
+    - `path`: the database's directory.
+    - `temporary`: `True` for a database `create()` made without a path, which `close()`
+      deletes.
+    - `built`: `True` once the first commit has built the database.
+    - `terms`: the access terms `viewer()` and `token()` hold when given none: every access label
+      the database's rows carry, and each view's default label.
+    - `inserts`: the `Insert` records made before the first commit, which it builds from.
+    - `pending`: the `Insert` records made since the last commit, which the next one sends.
+    - `listening`: the addresses the server listens on, as `serve()` returns them, or `None`
+      while it is not running.
     """
 
     def __init__(self, path: Path, temporary: bool = False) -> None:
@@ -115,7 +131,8 @@ class Database:
         """The `tessera` program this database runs.
 
         `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else the one the
-        `tesseradb-native` wheel installed, else a checkout's own build.
+        `tesseradb-native` wheel installed, else a checkout's own build. Where there is none, the
+        refusal says where it looked.
         """
         return _instance.find_binary()[0]
 
@@ -133,7 +150,8 @@ class Database:
         - `block`: the block as a dictionary, with the keys `schema.toml` uses.
 
         The `declare_*` methods build these dictionaries for you. Use this for a key none of them
-        takes.
+        takes. A kind not listed, and a name already declared for that kind, are refused. The
+        block itself is checked at `check()` and `commit()`.
 
             db.declare("attribute", {"name": "score", "type": "f64", "index": True})
         """
@@ -154,15 +172,17 @@ class Database:
           or `{"lon": [...], "lat": [...]}` under a projection. By default it is fitted to the rows
           of the first commit with room around them. It cannot change later, so a view declared
           after the first commit must give one.
-        - `projection`: `"none"` for plain x and y, or a map projection such as `"web_mercator"`
-          for longitude and latitude.
+        - `projection`: `"none"` (the default) for plain x and y, or a map projection such as
+          `"web_mercator"` for longitude and latitude.
         - `default_label`: the access label of a row whose access column is empty. It is
           `"public"` unless you say otherwise; `None` gives such rows no label.
-        - `visibility`: who may see the view at all: `"public"`, or the access label, or list of
-          labels, that decides it.
+        - `visibility`: who may see the view at all: `"public"` (the default), or the access
+          label, or list of labels, that decides it.
         - `anchor`: `True` makes this the view whose layout orders the items on disk. The first
           view declared is the anchor otherwise.
-        - `title`: a display name.
+        - `title`: a display name. By default there is none.
+
+        A name already declared for a view or a view group is refused.
 
             db.declare_view("papers", extent={"x": [0, 100], "y": [0, 100]})
         """
@@ -178,10 +198,14 @@ class Database:
 
         - `name`: the group's name.
         - `metadata`: the metadata each view carries, as `{name: type}`, filled from the roster.
+          By default there is none.
         - `members`: the name of another group whose views this group shares. Such a group has no
           roster or metadata of its own.
         - `extent`, `projection`, `default_label`, `visibility`, `title`: as for `declare_view`,
           applied to every view in the group.
+
+        A name already declared for a view or a view group is refused, and so is `metadata` given
+        with `members`.
 
             db.declare_view_group("years", metadata={"year": "i32"})
         """
@@ -194,15 +218,17 @@ class Database:
         `values=` or from `insert(name, table, key=, title=, code=)`.
 
         - `name`: the vocabulary's name.
-        - `closed`: `True` if only the values given are allowed. An open vocabulary adds each new
-          value it meets.
+        - `closed`: `True` if only the values given are allowed. An open vocabulary, the default,
+          adds each new value it meets.
         - `width`: the integer size of a code, `"u8"`, `"u16"` (the default) or `"u32"`, which
           limits how many values there can be.
         - `values`: the values, as a list of keys or as `{key: code}` to fix each code.
         - `reserved`: codes never to hand out.
-        - `visibility`: `"public"` to list every value to every reader, or `"derived"` to list a
-          value only to a reader who may see at least one item carrying it.
+        - `visibility`: `"public"` (the default) to list every value to every reader, or
+          `"derived"` to list a value only to a reader who may see at least one item carrying it.
         - `title`: a display name.
+
+        A name already declared for a vocabulary is refused.
 
             db.declare_vocabulary("venue", closed=True, values=["neurips", "icml", "iclr"])
         """
@@ -215,17 +241,22 @@ class Database:
         or from `insert(name, table, id=, value=)`.
 
         - `name`: the column's name.
-        - `type`: `"bool"`, an integer type from `"u8"` to `"i64"`, `"f32"`, `"f64"`,
-          `"timestamp_us"`, `"keyword"` (a string matched exactly), `"text"` (a string searched by
-          word) or `"category"` (a value from a vocabulary).
+        - `type`: `"bool"`, `"u8"`, `"u16"`, `"u32"`, `"u64"`, `"i8"`, `"i16"`, `"i32"`,
+          `"i64"`, `"f32"`, `"f64"`, `"timestamp_us"`, `"keyword"` (a string matched exactly),
+          `"text"` (a string searched by word) or `"category"` (a value from a vocabulary).
         - `render`: `True` sends the value with every point drawn, so a map can colour by it. It
-          is fixed at the first commit, and a column declared after it cannot be rendered.
-        - `index`: `True` makes the column filterable.
+          is fixed at the first commit, and a keyword or text column cannot be rendered. The
+          default is `False`.
+        - `index`: `True` makes the column filterable. The default is `False`.
         - `vocabulary`: for a category, the vocabulary its values come from.
-        - `analyser`: for text, how the text is split into words. `"unicode"` is the one there is.
+        - `analyser`: for text, how the text is split into words. `"unicode"`, the default, is the
+          one there is.
         - `scope`: `{"group": name}` gives the column a separate value in each view of that
           view group. The default is one value per item.
         - `title`: a display name.
+
+        A name already declared for an attribute is refused, and so are `render=True` after the
+        first commit and a `scope` naming a view group not yet declared.
 
             db.declare_attribute("year", type="i32", render=True, index=True)
         """
@@ -287,10 +318,9 @@ class Database:
         """Declare an annotation layer, and return its block.
 
         A layer is a set of annotations over the items, such as one clustering, a set of regions or
-        a taxonomy. Each annotation, or artifact, has a key and a set of member items, and a reader
-        is shown one only when they may see enough of its members. Its annotations and members
-        come from `insert(name, table, id=, key=)`, or from `insert(name, artifacts=...)` and
-        `insert(name, members=...)`.
+        a taxonomy. Each annotation, or artifact, has a key and a set of member items. Its
+        annotations and members come from `insert(name, table, id=, key=)`, or from
+        `insert(name, artifacts=...)` and `insert(name, members=...)`.
 
         - `name`: the layer's name.
         - `kind`: how the annotations relate. `"flat"` has no parents; `"nested"` is a tree;
@@ -302,33 +332,46 @@ class Database:
           `{"attribute": column}` makes one annotation per value of a category column.
         - `shape`: for a spatial layer, the kind of shape: `"bbox"`, `"circle"`, `"ellipse"` or
           `"polygon"`.
-        - `default_space`: for a spatial layer, the coordinates shapes are given in: `"view"` or
-          `"wgs84"` (longitude and latitude).
+        - `default_space`: for a spatial layer, the coordinates shapes are given in: `"view"`
+          (the default) or `"wgs84"` (longitude and latitude).
         - `levels`: the levels of a layered hierarchy, as `(level, title)` or
           `(level, title, (min_zoom, max_zoom))`.
         - `require_member_visibility`: how much of an annotation's membership a reader must see
-          for it to be shown: `"all"`, `"any"`, `"none"`, `{"fraction": 0.1}` or `{"count": 50}`.
-        - `visibility`: who may see the layer at all: `"public"` or an access label.
+          for it to be shown. `"none"`, the default, shows it to every reader the access labels
+          admit, whatever they see of its members. `"any"`, `"all"`, `{"fraction": 0.1}` and
+          `{"count": 50}` require that much.
+        - `visibility`: who may see the layer at all: `"public"` (the default) or an access
+          label.
         - `artifact_visibility`: the access label of an annotation that carries none of its own,
-          or `{"field": column, "default": label}`. The field names the column each annotation's
-          own labels are read from; every artifacts insert names that column with `access=`, and
-          an insert naming another column or none is refused. Without a field, the first
-          artifacts insert naming `access=` sets it.
-        - `computed`: which properties the server computes per reader: `"centroid"`, `"box"` and
-          `"hull"`.
+          or `{"field": column, "default": label}`. The default, `"inherited"`, gives such an
+          annotation no label, so `visibility` and `require_member_visibility` decide alone. The
+          field names the column each annotation's own labels are read from; every artifacts
+          insert names that column with `access=`, and an insert naming another column or none
+          is refused. Without a field, the first artifacts insert naming `access=` sets it.
+        - `computed`: which properties the server computes per reader from the members it may
+          see: `"centroid"`, `"box"` and `"hull"`. The default is all three, or `"centroid"` and
+          `"box"` on a spatial layer, whose shape is drawn instead of a hull.
         - `supplied`: content you provide per annotation, such as text, as
-          `(name, type, gate)` entries.
+          `(name, type, requires)` entries. `requires` is `"inherited"` to show the content
+          wherever its annotation is shown, or `"all"` to show it only to a reader who may see
+          every item it was written from.
         - `depends_on`: layers this one attaches to, such as the clustering a label set names.
         - `prune_children`: `True` shows a parent in place of its children when both qualify.
+          The default is `False`.
         - `withdraw_on_member_deletion`: `True` removes an annotation when a member is deleted.
+          The default is `False`.
         - `value_set`: `"closed"` if no annotation keys may appear beyond those inserted, `"open"`
-          otherwise. By default it follows the inserts.
+          otherwise. By default it is closed where an annotations table, `artifacts` or an
+          attribute membership says which annotations there are, and open otherwise.
         - `scope`: `{"group": name}` keeps a separate set of annotations per view of that group.
         - `layout`: how the server stores memberships for serving: `"rows"`, `"column"` or
-          `"list"`. It changes speed, never answers.
+          `"list"`. It changes speed, never answers. By default the server chooses.
         - `artifacts`: annotations written in the declaration itself, as a list of dictionaries or
           a table.
         - `title`: a display name.
+
+        A name already declared for a layer is refused, and so is a `scope` naming a view group
+        not yet declared.
 
             db.declare_layer("clusters", kind="flat", require_member_visibility={"count": 20})
         """
@@ -349,8 +392,11 @@ class Database:
           shown. `"all"` shows it only to a reader who may see every item the text was written
           from; those items come from `insert(name, members=table, id=, key=)`.
         - `require_member_visibility`, `title`: as for `declare_layer`.
-        - `artifact_visibility`: the access label of every label in the set. A label carries none
-          of its own, so no `field` is taken.
+        - `artifact_visibility`: the access label of every label in the set. The default is
+          `"inherited"`. A label carries none of its own, so a `field` is refused.
+        - `type`: the type of each label's text. The default is `"text"`.
+
+        A layer `of` that is not declared, or that already carries a label set, is refused.
 
             db.declare_labels("topics", of="clusters")
             db.insert("topics", {"c0": "graph neural networks", "c1": "diffusion models"})
@@ -433,7 +479,12 @@ class Database:
         A categorical column (a pandas `Categorical` or an Arrow dictionary column) is read as the
         values it holds, wherever a column of those values is read. A column the call does not
         name is ignored, and the record returned says what was read and what was ignored. On the
-        anchor view, a column named like a declared attribute fills that attribute. Several inserts into one target add up. Nothing is sent until `commit()`.
+        anchor view, a column named like a declared attribute fills that attribute. Several
+        inserts into one target add up. Nothing is sent until `commit()`.
+
+        A target that is not declared, a keyword the target does not read, a column the target
+        needs and the call does not name, and a name that is not a column of the table are
+        refused.
 
             db.insert("papers", frame, id="paper_id", x="x", y="y", access="labels")
             db.insert("clusters", frame, id="paper_id", key="cluster")
@@ -913,7 +964,8 @@ class Database:
             document.pop("defaults")
 
     def write(self) -> dict:
-        """Write `schema.toml` and `tessera.toml` into the directory, and return the declaration.
+        """Write `schema.toml` and `tessera.toml` into the directory, and return the declaration
+        as a dictionary.
 
         `check()` and `commit()` do this themselves. Call it to look at the files first.
         """
@@ -1117,7 +1169,7 @@ class Database:
 
     @property
     def control(self) -> Control:
-        """A client for this database's operator endpoint, starting the server if needed."""
+        """A `Control` for this database's control plane, starting the server if needed."""
         listening = self.serve()
         credential = (self.path / ".tessera" / "operator.cred").read_text(encoding="utf-8")
         return Control(f"http://{listening.control}", credential.strip())
@@ -1140,7 +1192,7 @@ class Database:
         except _tessera.DeclarationError as why:
             raise Refusal(f"{refused}check FAILED: {why}") from None
 
-    def token(self, terms: Sequence[str] | None = None):
+    def token(self, terms: Sequence[str] | None = None) -> Token:
         """A token for reading this database, made with its own session credential.
 
         - `terms`: the access terms the token grants. By default it grants every access label the
@@ -1189,7 +1241,7 @@ class Database:
         filters: dict | None = None,
         height: int = 480,
         **kwargs,
-    ):
+    ) -> Map:
         """The interactive map of this database, as a notebook widget, showing everything.
 
         - `view`: the view to open on. `None` opens the first one.
@@ -1386,8 +1438,10 @@ class Database:
     def addresses(self, ids: Iterable[Hashable]) -> list[dict]:
         """The ids given, in the form the server's change requests take them.
 
-        Where the rows were inserted with an id column, each id is sent as the bytes that column
-        held. Otherwise each is a `tessera_id`, sent with the id numbering it belongs to.
+        Where the rows were inserted with an id column, each is `{"external_id": ...}`: the bytes
+        that column held, base64-encoded. A string is its UTF-8 and an integer its eight
+        little-endian bytes. Otherwise each is `{"tessera_id": ..., "idset": ...}`, the id with
+        the id numbering it belongs to.
         """
         insert = self._identity_insert()
         if insert is not None and insert.id_column is not None:
@@ -1421,9 +1475,9 @@ class Database:
 
         - `layer`: the label set.
         - `key`: the label's key.
-        - `ids`: the items to take out.
-        - `rank`: which of the label's texts, where it has several.
-        - `level`: the level the label is at.
+        - `ids`: the items to take out, by the ids their id column holds.
+        - `rank`: which of the label's texts, where it has several. The default is 0, the first.
+        - `level`: the level the label is at. The default is 0.
         - `view`: the view the label belongs to, on a layer scoped to a group.
 
         Taking out every item withdraws the text; insert it again to replace it.
@@ -1448,16 +1502,21 @@ class Database:
     def compact(self) -> dict:
         """Ask the server to remove the rows of deleted items from disk now.
 
-        It returns once the server has accepted the request, before the work is done.
+        It returns `{}` once the server has accepted the request, before the work is done. A
+        request made while a compaction runs is dropped; the `compaction` block of `status()`
+        shows what happened.
         """
         self._refuse_before_the_first_commit("compact")
         return _accepted(self.control.compact(), "compact")
 
     def drop_layer(self, name: str, wait: bool = False) -> dict:
-        """Remove an annotation layer.
+        """Remove an annotation layer, and return the server's answer.
 
         - `name`: the layer's name. It cannot be used for a new layer afterwards.
-        - `wait`: `True` returns only once readers no longer see the layer.
+        - `wait`: `True` returns only once readers no longer see the layer, or after the server's
+          `serve.visible_wait_max_secs`, when the answer's `visible` is `false`.
+
+        The answer's `publication` names the publication from which readers no longer see it.
         """
         self._refuse_before_the_first_commit("drop_layer")
         return _accepted(self.control.drop_layer(name, wait), f"drop_layer {name}")
@@ -1470,9 +1529,10 @@ class Database:
         - `group`, `key`: the view is `"<group>:<key>"`.
         - `delete_dangling`: `True` also deletes the items that were in no other view. The
           answer's `deleted` says how many. A deletion cannot be undone.
-        - `wait`: `True` returns only once readers no longer see the view.
+        - `wait`: as for `drop_layer`.
 
-        Without `delete_dangling`, no item is deleted.
+        Without `delete_dangling`, no item is deleted. The answer's `fills_dropped` counts the
+        values sent for the view that had not yet been published, which are dropped with it.
         """
         self._refuse_before_the_first_commit("drop_view")
         return _accepted(
