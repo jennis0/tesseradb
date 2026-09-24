@@ -50,7 +50,14 @@ function fail(message) {
 
 // The TypeScript reference.
 process.chdir(clients);
-const app = await Application.bootstrapWithPlugins({options: join(clients, 'typedoc.json')});
+// The element classes are documented on the components pages, so a type naming one links there.
+const elementClasses = elementClassesByTag();
+const app = await Application.bootstrapWithPlugins({
+  options: join(clients, 'typedoc.json'),
+  externalSymbolLinkMappings: {
+    '@tesseradb/components': Object.fromEntries([...elementClasses].map(([cls, tag]) => [cls, `../../components/${tag}.md`]))
+  }
+});
 const project = await app.convert();
 if (!project || app.logger.hasErrors()) {
   console.error('reference: TypeDoc failed (above). Every warning counts: fix the comment it names.');
@@ -71,10 +78,8 @@ for (const file of markdownFiles(outTypescript)) {
   if (escaped !== text) writeFileSync(file, escaped);
 }
 
-// The element classes are documented on the components pages, which the manifest is rendered to.
-const elementClasses = elementClassNames();
 for (const [target, users] of danglingReferences(app.serializer.projectToObject(project, normalizePath(clients)))) {
-  if (UNDOCUMENTED_TYPES.has(target) || elementClasses.has(target)) continue;
+  if (UNDOCUMENTED_TYPES.has(target) || (target.startsWith('@tesseradb/components:') && elementClasses.has(target.split(':')[1]))) continue;
   fail(`${[...users].join(', ')} names ${target}, which the reference leaves out. Export and document it, or mark the member that names it @internal.`);
 }
 
@@ -139,15 +144,15 @@ function markdownFiles(dir) {
   return readdirSync(dir, {recursive: true, encoding: 'utf8'}).filter((f) => f.endsWith('.md')).map((f) => join(dir, f));
 }
 
-/** `@tesseradb/components:<class>` for every class whose comment carries `@tagname`. */
-function elementClassNames() {
-  const names = new Set();
+/** Each element class, by the tag its comment's `@tagname` gives. */
+function elementClassesByTag() {
+  const classes = new Map();
   const dir = join(components, 'src');
   for (const file of readdirSync(dir)) {
     const text = readFileSync(join(dir, file), 'utf8');
-    for (const match of text.matchAll(/@tagname [a-z-]+[\s\S]*?\*\/\s*export class (\w+)/g)) names.add(`@tesseradb/components:${match[1]}`);
+    for (const match of text.matchAll(/@tagname ([a-z-]+)[\s\S]*?\*\/\s*export class (\w+)/g)) classes.set(match[2], match[1]);
   }
-  return names;
+  return classes;
 }
 
 /** References to a reflection the output does not include, by target, with the items that make them. */
@@ -357,12 +362,18 @@ function eventsPage(events, elements) {
 }
 
 function tokensPage(tokens) {
-  const colours = tokens.filter((t) => t.value?.includes('light-dark('));
+  // A colour token's default is a light-dark() pair of colours; the shadow's pairs hold shadows.
+  const colour = /^(#[0-9a-f]{3,8}|(rgb|hsl)a?\(.*\)|[a-z]+)$/i;
+  const colours = tokens.filter((t) => {
+    if (!t.value?.includes('light-dark(')) return false;
+    const {light, dark} = lightDark(t.value);
+    return colour.test(light) && colour.test(dark);
+  });
   const others = tokens.filter((t) => !colours.includes(t));
   const lines = [
     '# Theme tokens',
     '',
-    'The elements take every colour, font, spacing and radius from these CSS custom properties. Set one on an element or on any ancestor, such as `:root` or an enclosing `<tessera-explorer>`, and the elements inside take it. Where none is set, the default below applies. A colour has a light and a dark default, chosen by the `color-scheme` the element inherits from the page.',
+    "The elements take their colours, fonts, corner radius and shadow from these CSS custom properties, and the map its height and the spacing of its corners; other spacing is fixed. Set one on an element or on any ancestor, such as `:root` or an enclosing `<tessera-explorer>`, and the elements inside take it. Where none is set, the default below applies. A colour has a light and a dark default, chosen by the `color-scheme` the element inherits from the page.",
     '',
     '## Colours',
     '',
@@ -373,13 +384,12 @@ function tokensPage(tokens) {
     const {light, dark} = lightDark(t.value);
     lines.push(row([code(t.name), code(light), code(dark), t.description]));
   }
-  lines.push('', '## Fonts, sizes and spacing', '', '| Token | Default | What it sets |', '| --- | --- | --- |');
+  lines.push('', '## Fonts, sizes, spacing and shadow', '', '| Token | Default | What it sets |', '| --- | --- | --- |');
   for (const t of others) lines.push(row([code(t.name), defaultText(t.value), t.element ? `${t.description} Read by \`<${t.element}>\` alone.` : t.description]));
   lines.push('');
   return lines.join('\n');
 }
 
-/** A table row. A pipe outside a code span is escaped; Python-Markdown leaves one inside a code span alone. */
 /** A token's default as a table cell: one value, or its light and dark values. */
 function defaultText(value) {
   if (value === null) return 'none';
@@ -387,6 +397,7 @@ function defaultText(value) {
   return light === dark ? code(light) : `${code(light)} (light), ${code(dark)} (dark)`;
 }
 
+/** A table row. A pipe outside a code span is escaped; Python-Markdown leaves one inside a code span alone. */
 function row(cells) {
   const cell = (c) => oneLine(c ?? '').split(/(`+[^`]*`+)/).map((part, i) => (i % 2 ? part : part.replace(/\|/g, '\\|'))).join('');
   return `| ${cells.map(cell).join(' | ')} |`;

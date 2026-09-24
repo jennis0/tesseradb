@@ -1,6 +1,6 @@
 # Tessera documentation
 
-This directory is the source of the documentation site, built by `mkdocs.yml` at the repository root with `mkdocs build --strict`; `bash scripts/check-docs.sh` builds it and runs the documentation checks. [index.md](index.md) is the site's home page.
+This directory is the source of the documentation site, configured by `mkdocs.yml` at the repository root. `bash scripts/check-docs.sh` builds it and runs the documentation checks. The TypeScript and components reference under `reference/typescript/` and `reference/components/` is generated from the client sources, so a plain `mkdocs build --strict` needs `node clients/ts/scripts/reference.mjs` run first. [index.md](index.md) is the site's home page.
 
 - [start/](start/index.md): tutorials for a new user.
 - [guides/](guides/index.md): the steps for particular tasks. [guides/views.md](guides/views.md) is the existing guide to views and view groups; it is out of date, is left out of the site, and will be rewritten.

@@ -18,12 +18,15 @@ if ! command -v node >/dev/null 2>&1; then
   echo "  Node (>=20), then run: npm --prefix clients/ts ci" >&2
   exit 1
 fi
-if [ ! -d clients/ts/node_modules ]; then
-  echo "check-docs: clients/ts/node_modules is absent. The TypeScript reference is generated from" >&2
-  echo "  the client sources with the tools it holds. Run:" >&2
-  echo "    npm --prefix clients/ts ci" >&2
-  exit 1
-fi
+# The generator's tools, which a node_modules installed before they were added lacks.
+for tool in typedoc typedoc-plugin-markdown @custom-elements-manifest/analyzer; do
+  if [ ! -d "clients/ts/node_modules/$tool" ]; then
+    echo "check-docs: clients/ts/node_modules has no $tool, which generates the TypeScript" >&2
+    echo "  reference. Install the client workspace's dependencies:" >&2
+    echo "    npm --prefix clients/ts ci" >&2
+    exit 1
+  fi
+done
 
 # Every public export and every element member has a doc comment, and each element's comment names
 # the events, slots, parts and tokens its code has. Then the pages under docs/reference/typescript/

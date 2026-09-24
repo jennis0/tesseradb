@@ -160,21 +160,25 @@ function elements(): Element[] {
 
 const ELEMENTS = elements();
 const tagsOf = (element: Element, tag: string) => element.doc.filter((t) => t.tagName.text === tag).map(named);
-const literals = (text: string) => [...text.matchAll(/'([^']*)'/g)].map((m) => m[1]!);
+/** A string in single quotes, double quotes or backticks; `text` is what is between them. */
+const STRING = String.raw`(?<quote>['"\`])(?<text>(?:(?!\k<quote>)[^\\])*)\k<quote>`;
+const literals = (text: string) => [...text.matchAll(new RegExp(STRING, 'g'))].map((m) => m.groups!['text']!);
+/** The text of the string at `%s` in every match of `pattern`. */
+const quoted = (text: string, pattern: string) => [...text.matchAll(new RegExp(pattern.replace('%s', STRING), 'g'))].map((m) => m.groups!['text']!);
 
 /** The functions in these sources that emit an event, with the events each emits. */
 const EMITTERS = new Map<string, Set<string>>();
 for (const file of readdirSync(SRC).filter((f) => f.endsWith('.ts'))) {
   const text = readFileSync(join(SRC, file), 'utf8');
   for (const match of text.matchAll(/export function (\w+)\([^)]*\)[^{]*\{([\s\S]*?)\n\}/g)) {
-    const events = [...match[2]!.matchAll(/emit\(\w+, '([a-z-]+)'/g)].map((m) => m[1]!);
+    const events = quoted(match[2]!, String.raw`\bemit\(\w+,\s*%s`);
     if (events.length > 0) EMITTERS.set(match[1]!, new Set(events));
   }
 }
 
 /** What an element emits itself: `emit(this, ...)`, and the emitting functions it calls. */
 function emits(element: Element): Set<string> {
-  const out = new Set([...element.text.matchAll(/emit\(this, '([a-z-]+)'/g)].map((m) => m[1]!));
+  const out = new Set(quoted(element.text, String.raw`\bemit\(this,\s*%s`));
   for (const [fn, events] of EMITTERS) if (new RegExp(`\\b${fn}\\(this\\b`).test(element.text)) for (const e of events) out.add(e);
   return out;
 }
@@ -190,13 +194,13 @@ function emitsWithin(element: Element, seen = new Set<string>()): Set<string> {
   return out;
 }
 
-const EVENT_NAMES = new Set([...readFileSync(join(SRC, 'events.ts'), 'utf8').matchAll(/^ {2}'(tessera-[a-z]+)':/gm)].map((m) => m[1]!));
+const EVENT_NAMES = new Set(quoted(readFileSync(join(SRC, 'events.ts'), 'utf8'), String.raw`\n  %s\??:`));
 const STATE_PARTS = literals(/const STATE = \[([^\]]*)\]/.exec(readFileSync(join(SRC, 'parts.ts'), 'utf8'))![1]!);
 const tokenNames = (text: string) => new Set([...text.matchAll(/var\(\s*(--tessera-[a-z0-9-]+)/g)].map((m) => m[1]!));
 
 describe('each element documents what it renders', () => {
   it('finds every element the sources define', () => {
-    const defined = readdirSync(SRC).flatMap((f) => [...readFileSync(join(SRC, f), 'utf8').matchAll(/defineOnce\('(tessera-[a-z-]+)'/g)].map((m) => m[1]!));
+    const defined = readdirSync(SRC).flatMap((f) => quoted(readFileSync(join(SRC, f), 'utf8'), String.raw`\bdefineOnce\(%s`));
     expect(ELEMENTS.map((e) => e.tag).sort()).toEqual(defined.sort());
   });
 
@@ -220,7 +224,10 @@ describe('each element documents what it renders', () => {
 
       it('documents its slots', () => {
         const normal = (name: string) => name.replace(/<[^>]*>/g, '<*>').replace(/\$\{[^}]*\}/g, '<*>');
-        const inCode = new Set([...element.text.matchAll(/<slot(?:\s+name=(?:"([^"]+)"|\$\{`([^`]+)`\}))?[\s>]/g)].map((m) => normal(m[1] ?? m[2] ?? '')));
+        // A slot's name is a quoted attribute, or a string or template literal in `${...}`.
+        const named = quoted(element.text, String.raw`<slot\s[^>]*?\bname=(?:\$\{\s*)?%s`);
+        const unnamed = [...element.text.matchAll(/<slot(?=[\s>])(?![^>]*\bname=)/g)].map(() => '');
+        const inCode = new Set([...named, ...unnamed].map(normal));
         expect(new Set(tagsOf(element, 'slot').map((s) => normal(s.name)))).toEqual(inCode);
       });
 
@@ -228,14 +235,15 @@ describe('each element documents what it renders', () => {
         const parts = tagsOf(element, 'csspart').map((p) => p.name);
         const plain = new Set(parts.filter((p) => !p.endsWith('-<part>')));
         const literal = new Set([
-          ...[...element.text.matchAll(/(?<![\w-])part="([^"]+)"/g)].map((m) => m[1]!),
+          // Not a CSS selector's `[part='...']`, which styles a part and renders none.
+          ...quoted(element.text, String.raw`(?<![\w[-])part=%s`),
           ...[...element.text.matchAll(/(?<![\w-])part=\$\{([^}]*)\}/g)].flatMap((m) => literals(m[1]!))
         ]);
         const states = /\brenderState\(/.test(element.text);
         for (const part of literal) expect(plain, `@csspart ${part}`).toContain(part);
         if (states) expect(plain, '@csspart state').toContain('state');
         for (const part of plain) expect([...literal, ...(states ? STATE_PARTS : [])], `${part} is rendered`).toContain(part);
-        const forwarded = new Set([...element.text.matchAll(/(?:exportparts|forwarded)\('([a-z-]+)'/g)].map((m) => `${m[1]}-<part>`));
+        const forwarded = new Set(quoted(element.text, String.raw`\b(?:exportparts|forwarded)\(%s`).map((name) => `${name}-<part>`));
         expect(new Set(parts.filter((p) => p.endsWith('-<part>')))).toEqual(forwarded);
       });
 
