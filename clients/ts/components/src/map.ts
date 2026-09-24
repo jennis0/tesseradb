@@ -162,14 +162,14 @@ export class TesseraMap extends TesseraElement {
       :host {
         display: block;
         position: relative;
-        height: var(--tessera-map-height);
+        height: var(--_tessera-map-height);
         min-height: 120px;
-        background: var(--tessera-map-bg);
+        background: var(--_tessera-map-bg);
         outline: none;
         overflow: hidden;
       }
       :host(:focus-visible) {
-        box-shadow: inset 0 0 0 2px var(--tessera-accent);
+        box-shadow: inset 0 0 0 2px var(--_tessera-accent);
       }
       [part='canvas'] {
         position: absolute;
@@ -184,7 +184,7 @@ export class TesseraMap extends TesseraElement {
         z-index: 2;
         display: flex;
         flex-direction: column;
-        gap: var(--tessera-space);
+        gap: var(--_tessera-space);
         max-width: 46%;
         pointer-events: none;
       }
@@ -192,29 +192,29 @@ export class TesseraMap extends TesseraElement {
         pointer-events: auto;
       }
       .top-left {
-        top: var(--tessera-space);
-        left: var(--tessera-space);
+        top: var(--_tessera-space);
+        left: var(--_tessera-space);
       }
       .top-right {
-        top: var(--tessera-space);
-        right: var(--tessera-space);
+        top: var(--_tessera-space);
+        right: var(--_tessera-space);
       }
       .bottom-left {
-        bottom: var(--tessera-space);
-        left: var(--tessera-space);
+        bottom: var(--_tessera-space);
+        left: var(--_tessera-space);
       }
       .bottom-right {
-        bottom: var(--tessera-space);
-        right: var(--tessera-space);
+        bottom: var(--_tessera-space);
+        right: var(--_tessera-space);
         align-items: flex-end;
       }
       [part='controls'] {
         display: flex;
         flex-direction: column;
-        background: var(--tessera-surface);
-        border: 1px solid var(--tessera-line);
-        border-radius: var(--tessera-radius);
-        box-shadow: var(--tessera-shadow);
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius);
+        box-shadow: var(--_tessera-shadow);
         overflow: hidden;
         pointer-events: auto;
       }
@@ -223,21 +223,21 @@ export class TesseraMap extends TesseraElement {
         height: 36px;
         display: grid;
         place-items: center;
-        color: var(--tessera-ink-2);
-        border-bottom: 1px solid var(--tessera-line-2);
+        color: var(--_tessera-ink-2);
+        border-bottom: 1px solid var(--_tessera-line-2);
         border-radius: 0;
       }
       [part='controls'] button:last-child {
         border-bottom: 0;
       }
       [part='controls'] button[aria-pressed='true'] {
-        background: var(--tessera-accent-soft);
-        color: var(--tessera-accent);
+        background: var(--_tessera-accent-soft);
+        color: var(--_tessera-accent);
       }
       [part='controls'] .sep {
         height: 6px;
-        background: var(--tessera-surface-2);
-        border-bottom: 1px solid var(--tessera-line-2);
+        background: var(--_tessera-surface-2);
+        border-bottom: 1px solid var(--_tessera-line-2);
       }
       [part='tooltip'] {
         position: absolute;
@@ -245,10 +245,10 @@ export class TesseraMap extends TesseraElement {
         pointer-events: none;
         padding: 8px 10px;
         max-width: 260px;
-        background: var(--tessera-surface);
-        border: 1px solid var(--tessera-line);
-        border-radius: var(--tessera-radius);
-        box-shadow: var(--tessera-shadow);
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius);
+        box-shadow: var(--_tessera-shadow);
         font-size: 12px;
         transform: translate(14px, 14px);
       }
@@ -259,7 +259,7 @@ export class TesseraMap extends TesseraElement {
       [part='tooltip'] .s {
         margin-top: 3px;
         font-size: 11px;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       [part='overlay'] {
         position: absolute;
@@ -273,16 +273,16 @@ export class TesseraMap extends TesseraElement {
       [part='overlay'] [part='state'] {
         pointer-events: auto;
         padding: 10px 14px;
-        background: var(--tessera-surface);
-        border: 1px solid var(--tessera-line);
-        border-radius: var(--tessera-radius);
-        box-shadow: var(--tessera-shadow);
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius);
+        box-shadow: var(--_tessera-shadow);
         font-size: 13px;
         font-weight: 600;
       }
       [part='overlay'] [part='state'][data-state='refused'],
       [part='overlay'] [part='state'][data-state='expired'] {
-        background: var(--tessera-refuse-soft);
+        background: var(--_tessera-refuse-soft);
       }
     `
   ];

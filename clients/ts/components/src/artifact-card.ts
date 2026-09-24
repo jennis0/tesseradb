@@ -55,7 +55,7 @@ export class TesseraArtifactCard extends TesseraElement {
       [part='count'] tessera-count::part(count) {
         font-size: 20px;
         font-weight: 500;
-        font-family: var(--tessera-font-mono);
+        font-family: var(--_tessera-font-mono);
       }
       [part='count'] tessera-count::part(label) {
         font-size: 13px;
@@ -64,10 +64,10 @@ export class TesseraArtifactCard extends TesseraElement {
       [part='content'] {
         margin: 0 0 10px;
         font-size: 12px;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       .field .v {
-        font-family: var(--tessera-font-mono);
+        font-family: var(--_tessera-font-mono);
         font-size: 12px;
       }
       .children-label {
@@ -80,7 +80,7 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='child'] tessera-count::part(count) {
         margin-left: auto;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         font-size: 12px;
         font-weight: 400;
       }
@@ -97,8 +97,8 @@ export class TesseraArtifactCard extends TesseraElement {
         border-color: currentColor;
       }
       [part='verbs'] [data-verb='highlight'][aria-pressed='true'] {
-        background: var(--tessera-highlight-soft);
-        color: var(--tessera-highlight);
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
       }
       .parents-label {
         margin: 12px 0 4px;
@@ -110,13 +110,13 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='parent'] tessera-count::part(count) {
         margin-left: auto;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         font-size: 12px;
         font-weight: 400;
       }
       [part='close'] {
         display: inline-flex;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
     `
   ];

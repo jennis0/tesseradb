@@ -82,20 +82,20 @@ export class TesseraHierarchy extends TesseraElement {
         border-radius: 3px;
       }
       [part='row']:hover {
-        background: var(--tessera-surface-2);
+        background: var(--_tessera-surface-2);
       }
       [part='row'][data-clause='highlight'] {
-        background: var(--tessera-highlight-soft);
-        color: var(--tessera-highlight);
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
       }
       [part='row'][data-clause='filter'] {
-        background: var(--tessera-accent-soft);
-        color: var(--tessera-accent);
+        background: var(--_tessera-accent-soft);
+        color: var(--_tessera-accent);
       }
       [part='expander'] {
         display: inline-flex;
         width: 14px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
       [part='expander'][data-leaf] {
         visibility: hidden;
@@ -108,14 +108,14 @@ export class TesseraHierarchy extends TesseraElement {
         text-align: left;
       }
       [part='name'][data-unnamed] {
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       [part='counts'] {
         display: inline-flex;
         gap: 6px;
         align-items: baseline;
         font-size: 12px;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       [part='actions'] {
         display: inline-flex;
@@ -129,26 +129,26 @@ export class TesseraHierarchy extends TesseraElement {
       [part='actions'] button {
         display: inline-flex;
         padding: 2px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
         border-radius: 2px;
       }
       [part='actions'] button:hover {
-        color: var(--tessera-ink);
-        background: var(--tessera-surface-3);
+        color: var(--_tessera-ink);
+        background: var(--_tessera-surface-3);
       }
       [part='also'] {
         padding-left: calc(18px + var(--depth, 0) * 14px);
         font-size: 11px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
       [part='more'] {
         padding-left: calc(18px + var(--depth, 0) * 14px);
         font-size: 12px;
-        color: var(--tessera-accent);
+        color: var(--_tessera-accent);
       }
       [part='lineage'] {
         font-size: 11px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
     `
   ];

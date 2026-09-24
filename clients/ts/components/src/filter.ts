@@ -102,8 +102,8 @@ export class TesseraFilter extends TesseraElement {
       }
       /** The matched span, in the served string, exactly where the server said it sits. */
       [part='tick'] mark {
-        background: var(--tessera-accent-soft);
-        color: var(--tessera-accent);
+        background: var(--_tessera-accent-soft);
+        color: var(--_tessera-accent);
         border-radius: 2px;
       }
       /**
@@ -122,14 +122,14 @@ export class TesseraFilter extends TesseraElement {
       [part='more'] {
         text-align: left;
         height: 24px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
         font-size: 12px;
       }
       .to {
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
       input.mono {
-        font-family: var(--tessera-font-mono);
+        font-family: var(--_tessera-font-mono);
       }
     `
   ];

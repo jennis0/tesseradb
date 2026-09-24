@@ -40,7 +40,7 @@ export class TesseraFilterPanel extends TesseraElement {
       [part='clear'] {
         text-transform: none;
         letter-spacing: 0;
-        color: var(--tessera-accent);
+        color: var(--_tessera-accent);
         font-weight: 500;
         font-size: 12px;
       }

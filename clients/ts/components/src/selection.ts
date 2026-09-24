@@ -48,7 +48,7 @@ export class TesseraSelection extends TesseraElement {
         overflow-y: auto;
       }
       [part='item'] {
-        font-family: var(--tessera-font-mono);
+        font-family: var(--_tessera-font-mono);
         font-size: 12px;
       }
       [part='actions'] {

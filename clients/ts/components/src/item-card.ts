@@ -60,7 +60,7 @@ export class TesseraItemCard extends TesseraElement {
       }
       [part='close'] {
         display: inline-flex;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
       .chips {
         display: flex;
@@ -69,8 +69,8 @@ export class TesseraItemCard extends TesseraElement {
         margin: 4px 0 10px;
       }
       [part='view-chip'][aria-current='true'] {
-        background: var(--tessera-accent);
-        color: var(--tessera-accent-ink);
+        background: var(--_tessera-accent);
+        color: var(--_tessera-accent-ink);
       }
       [part='scoped'] {
         margin-top: 12px;
