@@ -3,9 +3,8 @@ import type {StatusProjection} from '@tesseradb/client';
 import {icon} from './icons.js';
 
 /**
- * The eight states, uniformly (design client-components §5.4). Every panel renders them through
- * one `part="state"` region so a host that restyles one has restyled them all. The mapping from
- * the store's `status` is the table's third column, exactly:
+ * The eight panel states. Every panel renders them through one `part="state"` region, so restyling
+ * one restyles all. The mapping from the store's `status`:
  *
  * | state | from `status` |
  * |---|---|
@@ -15,15 +14,11 @@ import {icon} from './icons.js';
  * | shown | `shown` |
  * | empty | `empty` |
  * | refused | `refused` |
- * | expired | the `expired` flag — `expired-token`, a `bad-credential` on a token this store used, or `expiresAt` passed |
+ * | expired | the `expired` flag: `expired-token`, a `bad-credential` on a token this store used, or `expiresAt` passed |
  * | stale | `shown` with `stale` |
  *
- * `expired` wins over `refused` because it is a refusal with a name; `stale` is `shown` with the
- * picture marked older than the numbers, and the only state besides `shown` a number appears in
- * — through the formatter, which renders nothing against it.
- *
- * What a state *says* is one line — an answer, never an explanation of how Tessera works
- * (owner, 2026-08-25): the words are the boards' (`StatusStates.png`).
+ * `expired` is a named refusal and wins over `refused`. `stale` is `shown` with the picture older
+ * than the numbers. A state's text is one line that answers, without explaining how Tessera works.
  */
 export type PanelState = 'detached' | 'loading' | 'retrying' | 'shown' | 'empty' | 'refused' | 'expired' | 'stale';
 
@@ -45,7 +40,7 @@ export function stateOf(status: StatusProjection | null | undefined): PanelState
   }
 }
 
-/** Whether a panel in this state shows its content — the numbers, the list, the card. */
+/** Whether a panel in this state shows its content: the numbers, the list, the card. */
 export function showsContent(state: PanelState): boolean {
   return state === 'shown' || state === 'stale';
 }
@@ -53,7 +48,7 @@ export function showsContent(state: PanelState): boolean {
 export type StateActions = {
   /** The refresh control, present when stale. */
   onRefresh?: (() => void) | null;
-  /** Renewal, when the host gave the map an `authorise` property — shown on expiry. */
+  /** Renewal, shown on expiry when the host gave the map an `authorise` property. */
   onReauthorise?: (() => void) | null;
 };
 
@@ -79,9 +74,8 @@ export function stateWord(state: PanelState, status: StatusProjection | null | u
 }
 
 /**
- * The state region. Rendered by every panel in the same markup: a `part="state"` carrying
- * `data-state`, and the one line the state needs — a skeleton while loading, an answer when
- * empty, the refusal's code, the refresh control when stale, the way back in when expired.
+ * The state region every panel renders: a `part="state"` carrying `data-state`, and the line the
+ * state needs, such as a skeleton while loading or the refresh control when stale.
  */
 export function renderState(
   state: PanelState,
@@ -91,7 +85,7 @@ export function renderState(
   const refusal = status?.refusal ?? null;
   switch (state) {
     case 'detached':
-      // Nothing — neither "empty" nor "refused", both of which are answers.
+      // Empty: "empty" and "refused" are answers, and a detached panel has none.
       return html`<span part="state" data-state="detached"></span>`;
     case 'loading':
       return html`<span part="state" data-state="loading"><span class="dot quiet"></span>${stateWord(state, status)}${status && !status.sessionWarm ? nothing : html`<span class="skel" aria-hidden="true"></span>`}</span>`;

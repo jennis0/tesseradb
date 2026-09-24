@@ -8,13 +8,13 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-legend>` — what the colours mean (design §5.3 tier 2): the values marks on screen
- * carry, resolved per column and never per vocabulary; a numeric domain as a ramp, derived from
- * the marks served and never a corpus-wide range; under cluster colour, the served artifacts in
- * their colours. `selectable` renders the boards' *Colour by* select — the rendered columns and
- * the clusters of every layer that can colour, drawn or not (exact only, decision 0099) — beside a
- * *Layers · N of M on* select that draws one layer or none. Colouring by a layer does not draw it.
- * The readout below is what the swatches say.
+ * `<tessera-legend>`: what the colours mean. For a category column, the values the marks on screen
+ * carry, resolved per column; for a numeric column, a ramp over the domain of the marks served, not
+ * the corpus; under cluster colour, the served artifacts in their colours.
+ *
+ * `selectable` adds a Colour by select (the rendered columns and every layer that can colour,
+ * drawn or not) beside a Layers select that draws one layer or none. Colouring by a layer does
+ * not draw it.
  */
 export class TesseraLegend extends TesseraElement {
   static override styles = [
@@ -68,8 +68,7 @@ export class TesseraLegend extends TesseraElement {
   private choose(value: string): void {
     const s = this.resolvedStore;
     if (!s) return;
-    // `cluster:<layer>@<level>` is a level of a levelled layer: the colouring is the layer's and
-    // the level is chosen with it, in one gesture.
+    // `cluster:<layer>@<level>` chooses a levelled layer's colouring and its level together.
     const at = value.lastIndexOf('@');
     const chosen = value === '' ? null : at > 0 ? value.slice(0, at) : value;
     s.setColourBy(chosen);
@@ -106,13 +105,9 @@ export class TesseraLegend extends TesseraElement {
     const colourBy = legend.colourBy;
     const entries = layerEntries(meta.layers);
     const on = entries.filter((e) => artifacts.layers.includes(e.root.name));
-    // The level select follows what the cut served: the rungs present in the served set of the
-    // colouring layer, titled from `meta.levels` where the layer is tiered, else *level N*.
-    //
-    // **The wire's `rung`, read off the served artifact** (contracts §3.2 r44): the declared level
-    // on a levelled layer, the response-local chain depth on a treed one — so a treed layer, whose
-    // every artifact is declared at level 0, still offers the rungs it actually has (the demo's own
-    // `clusters/hdbscan`), and nothing here has to pick a derivation per layer kind.
+    // The level options are the rungs present among the colouring layer's served artifacts,
+    // titled from `meta.levels` where the layer is levelled, else "level N". The server computes
+    // `rung` per layer kind, so a tree's depths are offered too.
     const cluster = clusterLayerOf(colourBy);
     const clusterMeta = cluster ? meta.layers.find((l) => l.name === cluster) : null;
     const rungs = new Set<number>();
@@ -120,8 +115,7 @@ export class TesseraLegend extends TesseraElement {
       for (const x of artifacts.colourServed) rungs.add(x.rung);
     }
     const levelsServed = [...rungs].sort((x, y) => x - y);
-    // The level the colouring is drawn at, which a levelled layer's option shows as chosen: the
-    // one chosen, else the explorer's, else the deepest served.
+    // The level drawn: the one chosen, else the explorer's, else the deepest served.
     const drawnLevel = this.level ?? this.autoLevel ?? levelsServed.at(-1) ?? null;
     const selects = this.selectable
       ? html`<div class="selects">
@@ -129,10 +123,8 @@ export class TesseraLegend extends TesseraElement {
             <select part="select" aria-label="Colour by" @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}>
               <option value="" ?selected=${colourBy === null}>none</option>
               ${colourLayers(meta.layers).flatMap((decl) => {
-                // **A levelled layer is offered level by level, by the titles the corpus declared** —
-                // Country, Admin 1 … Admin 4 — because that is what the colouring *is* on such a
-                // layer: membership at one level. "clusters" named the mechanism, not the data
-                // (the owner, 2026-08-28). A layer without levels is offered once, by its title.
+                // A levelled layer is offered once per level, by the declared level titles, since
+                // colouring it is membership at one level. Any other layer is offered once.
                 const value = `${CLUSTER_PREFIX}${decl.name}`;
                 if (decl.levels.length === 0) {
                   return [html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>${decl.title || decl.name}</option>`];
@@ -187,7 +179,7 @@ export class TesseraLegend extends TesseraElement {
       const overflow = values.length - shown.length;
       return wrap(html`<span part="state" data-state="shown"></span>
         <div part="swatches">
-          ${shown.map(({value, rank}) => swatch(colourOfRank(rank), value.title && value.title !== value.key ? `${value.key} — ${value.title}` : value.key, `code ${value.code}`))}
+          ${shown.map(({value, rank}) => swatch(colourOfRank(rank), value.title && value.title !== value.key ? `${value.key}: ${value.title}` : value.key, `code ${value.code}`))}
           ${overflow > 0 ? swatch(UNMAPPED, `${overflow} rarer value${overflow === 1 ? '' : 's'}`) : nothing}
           ${swatch(UNMAPPED, 'other')}
         </div>`);

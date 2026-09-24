@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 // Measure each candidate term's exact visible-set size, and emit viewer/presets.json.
 //
-// The size comes from the service itself: a zoom=0, full-extent viewport call returns `visible`
-// for the single root tile, which IS that principal's visible-set cardinality. Nothing here is
-// estimated, and nothing is derived from a drawn sample.
+// The size comes from the server: a zoom-0, full-extent viewport call returns `visible` for the
+// root tile, which is the principal's visible-set cardinality.
 //
 //   TESSERA_SESSION_CRED=… node clients/ts/scripts/measure-principals.mjs \
 //     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 --terms 0..200 \
@@ -12,23 +11,16 @@
 // `--terms-file PATH` is `--terms` for a corpus whose keys carry commas: one term per line, blank
 // lines skipped.
 //
-// Re-run it per fixture: the term dictionary differs between bundles, so presets measured against
-// 2m4 are meaningless against 1e8. That is what `--out` is for — the demo serves several bundles at
-// once, and each needs its own measured list.
+// Run it per bundle, since term dictionaries differ; `--out` writes each bundle's list.
 //
-// With `--ranks` (scripts/rank_terms.py's output) it also composes COVERAGE principals — sparse
-// ~1%, medium ~10%, heavy ~85% of the corpus — because at a 4.8 x 10^4-term dictionary any single
-// term is a sliver and "switch principal" demonstrates nothing. Each is the shortest prefix of the
-// ranked terms whose visible set reaches the target, found by binary search on the prefix length
-// with the REAL visible measured per probe — the ranking orders candidates, the service decides
-// sizes, and nothing here is estimated from pair counts. **`full` holds every ranked term** and
-// is the denominator the bands are measured against: it is the principal who sees everything, not
-// the top of the ranking (owner ruling, 2026-09-02 — a heavy 80–90% band sits beneath it rather
-// than standing in for it). Only when the session refuses a dictionary-sized `auth_data` does
-// `full` fall back to the top 4096 terms, and its label says so.
+// With `--ranks` (scripts/rank_terms.py's output) it also composes coverage principals, sparse
+// (about 1%), medium (about 10%) and heavy (about 85%) of the corpus, since in a large dictionary
+// one term sees very little. Each is a run of ranked terms whose measured visible set reaches the
+// target, found by binary search on the run's length. `full` holds every ranked term and is the
+// denominator; if the session refuses that `auth_data`, it falls back to the top 4096 terms and
+// its label says so.
 //
-// Note it decodes only the TILE stream, which is the response's first frame — so this script needs
-// none of core's frame walking beyond one header, and stays plain JS.
+// It decodes only the tiles frame, which comes first in the response.
 import {readFile, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -44,12 +36,8 @@ const session = args.session ?? 'http://127.0.0.1:49303';
 const cred = process.env.TESSERA_SESSION_CRED;
 if (!cred) throw new Error('set TESSERA_SESSION_CRED');
 
-// **A comma delimits the list and a term is under no obligation to avoid one.** `--terms-file`
-// takes one term per line instead, which a key cannot contain: rung 5's candidates are publisher
-// names, and 70 of its 474 carry a comma — "Royal Botanic Gardens, Kew" — so a comma-joined list
-// splits them into fragments naming nothing, and the principal measures empty with no error. The
-// same hazard on the ingest wire was ruled the other way for the same reason (decision 0129: the
-// wire carries a list, taken verbatim). `--terms` keeps the `lo..hi` form and the plain list.
+// `--terms` splits on commas, which a term may contain (a publisher called "Royal Botanic
+// Gardens, Kew"); `--terms-file` takes one term per line. `--terms` also takes the `lo..hi` form.
 if (args.terms && args['terms-file']) {
   throw new Error('--terms and --terms-file both name the candidate list; pass one');
 }
@@ -81,7 +69,7 @@ const metaResp = await fetch(`${viewer}/v1/meta`, {
 });
 if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.text()}`);
 const meta = await metaResp.json();
-const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
+const q = meta.views[0].quantisation;
 const view = meta.views[0].id;
 
 /** The `visible` total from a zoom-0, full-extent call: this principal's visible-set size. */
@@ -90,20 +78,15 @@ async function visibleFor(terms) {
   const r = await fetch(`${viewer}/v1/viewport`, {
     method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-    // k = 1 because we want the counts, not the marks: the tile batch carries exact masked
-    // figures regardless of how many points the response gathers.
+    // k = 1: only the counts are wanted, and the tiles frame carries them exactly.
     body: JSON.stringify({view, zoom: 0, bbox: [q.x_min, q.y_min, q.x_max, q.y_max], k: 1})
   });
   if (!r.ok) throw new Error(`viewport ${terms}: ${r.status} ${await r.text()}`);
   const buf = new Uint8Array(Buffer.from(await r.arrayBuffer()));
-  // Named `frame`, not `view`: `view` is this module's view id, read a few lines above and used in
-  // the request body, and a `const view` here shadows it for the whole function body — the request
-  // above then reads an initialiser that has not run yet and every term throws.
+  // Not `view`, which would shadow the module's view id used in the request above.
   const frame = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  // `u8 kind, u32 LE length, <payload>` — every frame prefixed, tiles always first (`core/frame.ts`
-  // carries the full table). Asserted rather than assumed: reading the length from byte 0 decodes
-  // the kind tag as part of it, which yields a plausible-looking offset and an empty table, and an
-  // empty table here reads as "this principal sees nothing" rather than as a broken parse.
+  // Each frame is `u8 kind, u32 LE length, <payload>`, tiles first. The kind is checked, since a
+  // misread header gives an empty table that would read as a principal seeing nothing.
   const kind = frame.getUint8(0);
   if (kind !== 1) throw new Error(`expected a tiles frame first, got kind ${kind}`);
   const tileLength = frame.getUint32(1, true);
@@ -131,8 +114,7 @@ const narrow = at(0.05);
 const medium = at(0.5);
 const broad = measured[measured.length - 1];
 
-// Distinct terms only: at a small dictionary the quantiles can collide, and three identical
-// presets would make "switch principal and watch the map change" untestable while looking fine.
+// Distinct terms only: in a small dictionary the quantiles can collide.
 const chosen = [];
 const singles = args.ranks ? [['narrow', narrow]] : [['narrow', narrow], ['medium', medium], ['broad', broad]];
 for (const [label, m] of singles) {
@@ -146,31 +128,24 @@ if (args.ranks) {
   const ranked = rankedRows.map((r) => String(r.term));
   const pairShare = rankedRows.map((r) => r.pairs);
   const totalPairs = pairShare.reduce((a, b) => a + b, 0);
-  // The denominator is the corpus a maximal principal can see, not the item count — measured the
-  // same way as everything else. The whole dictionary in one authorise call would be a megabyte of
-  // auth_data; the top view of a Zipf-shaped ranking is within a hair of the same union.
+  // The denominator is what a principal holding every ranked term sees, measured like the rest.
   let fullTerms = ranked;
   let fullLabel = `full — all ${ranked.length} terms`;
   let corpus;
   try {
     corpus = await visibleFor(fullTerms);
   } catch (e) {
-    // A dictionary-sized `auth_data` the session would not take: measure the head instead, and
-    // say so in the label rather than calling the head "full".
+    // The session refused a dictionary-sized `auth_data`: measure the head, and say so.
     fullTerms = ranked.slice(0, Math.min(ranked.length, 4096));
     fullLabel = `full — top ${fullTerms.length} of ${ranked.length} terms (session refused all: ${e.message})`;
     corpus = await visibleFor(fullTerms);
   }
   console.log(`corpus visible (${fullLabel}): ${corpus.toLocaleString()}`);
 
-  // **A small target cannot start at the head of a Zipf ranking** — the head term alone was 5.5%
-  // of this corpus, so no prefix is 1%. Each target instead starts at the first term whose own
-  // pair share is at or below the target, and takes the shortest run of consecutive ranked terms
-  // from there whose MEASURED union reaches it: pair shares choose where to start, the service
-  // decides when the run is long enough. ~log2 service calls per target.
-  // In PAIR space, scaled by the measured items-per-pair ratio: a term's pair share overstates
-  // its visible share by the corpus's term multiplicity (~2.2x here), and without the scaling the
-  // sparse preset started on a term twice its target.
+  // The head term alone may exceed a small target, so each run starts at the first term whose
+  // pair share is at or below the target, and is the shortest run from there whose measured union
+  // reaches it: about log2 calls per target. Pair shares are scaled by the measured items-per-pair
+  // ratio, since a term's pair share overstates its visible share by the corpus's term multiplicity.
   const startFor = (fraction) => {
     const pairFraction = fraction * (corpus / totalPairs);
     let i = 0;
@@ -191,9 +166,8 @@ if (args.ranks) {
       if ((await unionOf(mid)) >= target) hi = mid;
       else lo = mid + 1;
     }
-    // The first run at or over the target can overshoot it by a lot when terms overlap heavily —
-    // rung 3's MeSH branches jump from 71% to 99.6% in one term — so take whichever of that run and
-    // the one before sits closer to the target, on either side of it.
+    // One term can overshoot the target a long way when terms overlap heavily, so take whichever
+    // of this run and the one before is closer to it.
     const over = await unionOf(lo);
     if (lo > 1) {
       const under = await unionOf(lo - 1);
@@ -228,10 +202,8 @@ if (args.ranks) {
   });
 }
 
-// `--out` because presets are **per bundle** and the demo now serves more than one: a term id names
-// a different set in each dictionary, so one shared file would mislabel every principal on whichever
-// dataset it was not measured against. `run_demo.sh` composes the per-dataset files
-// into the dataset document under `tessera-demo/`, which it hands the viewer in the URL it prints.
+// Presets are per bundle. `run_demo.sh` composes the per-bundle files into the dataset document
+// it names in the viewer URL it prints.
 const out =
   args.out ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'viewer', 'presets.json');
 await writeFile(out, `${JSON.stringify(chosen, null, 2)}\n`);

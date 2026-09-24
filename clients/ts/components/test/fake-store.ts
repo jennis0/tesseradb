@@ -6,10 +6,7 @@ import {NO_COUNT, NO_MASKED, regionOperand, servedLineage, SessionArtifactTable,
  */
 export type FakeStore = Store & {
   set<K extends ProjectionName>(name: K, value: Projections[K]): void;
-  /**
-   * Move the frame `frame()` answers with — how a test drives a switch across frames
-   * (`view-switching.md` §4), which the store makes by pointing at another view's quantisation.
-   */
+  /** Move the frame `frame()` answers with, as a switch to a view with another quantisation does. */
   setFrame(q: Quantisation): void;
   /** Script one browse answer: `roots`, `roots:<cursor>`, `p:<id>`, `p:<id>:<cursor>`, `q:<text>`. */
   setBrowse(key: string, page: BrowsePage): void;

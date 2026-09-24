@@ -1,10 +1,6 @@
 #!/usr/bin/env node
-// Does the viewport-addressed client hold marks roughly constant across zoom, in ONE request
-// per view, without shedding?
-//
-// This is the acceptance test for the whole Phase 1 workstream. The tile-addressed MVP's figures
-// against the same fixtures are 17 / 50 / 242 / 456 marks at depths 0-3, with 12 of 23 requests
-// shed at 1e9. Both numbers should move decisively.
+// Whether the client holds marks roughly constant across zoom, with one request per view and
+// no shedding.
 //
 //   node clients/ts/viewer/smoke-budget.mjs [--url http://localhost:5173] [--principal N]
 //     [--headed] [--executable /path/to/chrome]
@@ -25,10 +21,8 @@ page.on('response', (r) => {
 });
 page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => {
-  // A 429 the client retried and recovered still prints a browser resource-load error. That is
-  // the transport narrating, not the client failing; judge on whether the view survived instead.
-  // A 429 is shed-and-retried, and a superseded request's abort is the client working as
-  // designed (`smoke-browser.mjs`).
+  // A 429 the client retried still logs a resource-load error, and a superseded request's abort
+  // logs one too; neither is a failure.
   if (m.type() === 'error' && !/429|Too Many Requests/.test(m.text()) && !isSupersededAbort(m.text())) errors.push(m.text());
 });
 
@@ -38,9 +32,8 @@ await page.selectOption('#principal', principal);
 await page.waitForTimeout(settle);
 
 /**
- * The figures come from the map's probe (design §5.9): the store's `view` projection — depth,
- * status, the counts — and the demo's instrument numbers beside it (the tiles the budget asked
- * for and what limited it), which the §4 surface deliberately omits and the demo publishes.
+ * The figures from the map's probe: the store's `view` projection (depth, status, counts) and the
+ * viewer's instrument numbers (the tiles the budget asked for, and what limited it).
  */
 const readPanels = () =>
   page.evaluate(() => {
@@ -91,9 +84,8 @@ for (let step = 0; step <= 5; step++) {
 
 const shed = statuses.filter((s) => s === 429).length;
 const ok = statuses.filter((s) => s === 200).length;
-// The budget can be met only where at least that many are visible: a step whose view holds
-// fewer marks than the budget is read from the strip's own visible count and left out of the
-// spread — a zoom into sparse ground says nothing about the depth choice.
+// A step whose view holds fewer visible marks than the budget is left out of the spread, since
+// the budget cannot be met there.
 const budget = 500_000;
 const eligible = marks.filter((m, i) => m > 0 && visibles[i] >= budget);
 const nonZero = eligible;

@@ -2,15 +2,14 @@ import type {Device} from '@luma.gl/core';
 
 /**
  * A device that counts: every buffer and texture it hands out records its writes, so a test can
- * assert that a colouring interaction rewrote the lookup texture and not the attributes (design
- * §5.10, decision 0100). Nothing here draws.
+ * assert that a colouring change rewrote the lookup texture and not the attributes. Nothing draws.
  */
 export type FakeDevice = Device & {
   bufferWrites: number;
   textureWrites: number;
-  /** Writes per buffer, keyed by creation order — the slab creates positions, colours, picking, ordinals. */
+  /** Writes per buffer, by creation order: the slab creates positions, colours, picking, ordinals. */
   writesByBuffer: number[];
-  /** The region of each texture write, in rows — what a test asserts a patch wrote and no more. */
+  /** The rows of each texture write, so a test can assert what a patch wrote. */
   textureRegions: {y: number; height: number}[];
 };
 

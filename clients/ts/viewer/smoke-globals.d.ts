@@ -1,11 +1,9 @@
 /**
- * What the smoke scripts read off the page, for the typecheck that covers them.
- *
- * The definition is `@tesseradb/components`' `MapProbe` (design §5.9), which the demo publishes on
- * `window` with the lanes it keeps itself; this declares the fields these six scripts actually
- * read and no more, because a script that reads a field it has not declared is exactly the mistake
- * the check exists to catch. `clients/ts/harness/global.d.ts` declares the harness's own view of
- * the same object — a separate `tsc` program, hence a separate file.
+ * What the smoke scripts read off the page, for the typecheck that covers them. The object is
+ * `@tesseradb/components`' `MapProbe`, which the viewer publishes on `window` with its timing
+ * lanes. Only the fields the scripts read are declared, so reading an undeclared one fails the
+ * typecheck. `clients/ts/harness/global.d.ts` declares the harness's view of the same object for
+ * a separate `tsc` program.
  */
 interface Window {
   __tesseraProbe?: {
@@ -14,16 +12,14 @@ interface Window {
     requests: number;
     view: {depth: number; status: string; visible: number; matched: number; served: number; provisional: number};
     /**
-     * The outline layer holds **what draws** and nothing else — the hovered and the opened
-     * artifact — so both counts are 0 at rest. They differ in unit: `outlines` counts rings and
-     * `outlinesDrawn` the artifacts they belong to (`map.ts` publishes both from `LayerTimings`).
-     * What may be hovered is the frontier, which the map holds and the layer no longer does.
+     * The outline layer draws only the hovered and opened artifacts, so both counts are 0 at rest.
+     * `outlines` counts parts and `outlinesDrawn` the artifacts they belong to.
      */
     timings: {outlines: number; outlinesDrawn: number; labels: number};
     cluster: {layersOn: string[]; servedIds: string[]};
-    /** The selected region: the wire's verdict, its count and whether it is typed exact (`map.ts`). */
+    /** The selected region: the server's verdict, its count and whether it is exact. */
     region: {verdict: string; exact: boolean; visible: number | null; matched: number; held: number; status: string; ms: number | null} | null;
-    /** The demo's instrument numbers, which the §4 surface omits and the demo publishes. */
+    /** The viewer's instrument numbers, which the store reports on its `instruments` channel. */
     instruments?: {depth: number; tiles: number; predictedMarks: number; source: string; limitedBy: string; bytes: number};
   };
 }

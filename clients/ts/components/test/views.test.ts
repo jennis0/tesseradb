@@ -9,17 +9,13 @@ import type {TesseraItemCard} from '../src/item-card.js';
 import {deep, deepAll, fakeStore, mount, settle, status, type FakeStore, meta, scalar} from './fake-store.js';
 
 /**
- * What the two pickers, the map and the item card **draw and wire**, against the fake store
- * (`view-switching.md` §9, the V2 row).
+ * What the two view pickers, the map and the item card draw and call, against the fake store. The
+ * picker rules are the client's and are tested in `core/test/views.test.ts`; here each element
+ * asks for the right one, renders it, and calls `setCurrentView` with the result.
  *
- * The rules the pickers apply — the entries and their order, which view a group is entered at, a
- * view's label — are `@tesseradb/client`'s and are tested there (`core/test/views.test.ts`). What
- * is tested here is that each element asks for the right one, renders it as the boards draw it,
- * and calls `setCurrentView` with what came back.
- *
- * The fixture is one bundle with two plain views and two groups over one key set — an owner and a
- * `members` layout of it — with the keys in an order key sorting would not produce (`2026-Q2`
- * before `2026-Q10`).
+ * The fixture is one bundle with two plain views and two groups over one key set (a group and a
+ * `members` group of it), with keys in an order sorting would not produce (`2026-Q2` before
+ * `2026-Q10`).
  */
 
 afterEach(() => {
@@ -253,7 +249,7 @@ describe('<tessera-map> at a switch', () => {
     const before = pushes(store);
     store.set('view', {...store.get('view'), id: 'quarter:2026-Q3'});
     await settle(host);
-    // The marks under the cursor are different rows in the next view (owner ruling).
+    // The marks under the cursor are different rows in the next view.
     expect(el.hover).toBeNull();
     expect(pushes(store)).toBe(before);
   });

@@ -1,25 +1,20 @@
 #!/usr/bin/env node
-// Shoot what a client does with `/v1/meta`'s projection fields: a basemap under the points where a
-// scheme addresses the frame, and **no basemap where none does** — the evidence for design
-// projections §9.
+// Screenshot what a client does with `/v1/meta`'s projection fields: a basemap under the points
+// where a tile scheme addresses the frame, and none where it does not.
 //
 //   node clients/ts/viewer/smoke-basemap.mjs [--url http://localhost:5173] [--dataset ID]
 //     [--shots DIR] [--name PREFIX] [--headed] [--executable /path/to/chrome]
 //
-// **A map whose numbers are right and whose basemap is offset has failed, and only a picture shows
-// it.** So the pictures are the point, and the arithmetic around them is read off the running
-// client rather than typed in: the four fields the server published, and a handful of known places
-// put through the frame and inverted back — a check a picture cannot make, and the one that catches
-// a frame mirrored north-south, which round-trips perfectly on the equator and puts London in the
-// southern ocean.
+// An offset basemap shows only in a picture, so the script takes screenshots. It also reads the
+// published frame from the running client and puts known places through it and back, which
+// catches a frame mirrored north-south (London would land in the southern ocean).
 //
-// The two outcomes are both assertions, not a branch between a test and a screenshot:
+// Both outcomes are asserted:
 //
-// * `tile_scheme: "xyz"` — the map must be carrying a basemap layer, and every known place must
-//   round-trip to within a cell of where it belongs.
-// * `tile_scheme: null` — the map must be carrying **none**, whatever its frame looks like. This is
-//   the equirectangular case, whose frame is as aligned as the Mercator one's and which a boolean
-//   would get wrong.
+// * `tile_scheme: "xyz"`: the map carries a basemap layer, and every known place round-trips to
+//   within a cell.
+// * `tile_scheme: null`: the map carries no basemap, whatever its frame. An equirectangular frame
+//   is as aligned as a Mercator one, so alignment alone would get this wrong.
 //
 // Requires a running `tessera serve` and a running `vite dev`.
 import {mkdir, writeFile} from 'node:fs/promises';
@@ -63,8 +58,7 @@ await page.waitForFunction(() => window.__tesseraProbe !== undefined, null, {tim
 const publishedScheme = await page.evaluate(
   () => /** @type {any} */ (document.querySelector('tessera-explorer')).store.get('meta').views[0].tileScheme
 );
-// The basemap is composed from a tile server, so where one is expected it settles after the first
-// frame; where none is, waiting proves nothing and the settle below is the whole wait.
+// Where a basemap is expected, wait for it; tiles arrive after the first frame.
 if (publishedScheme !== null) {
   await page.waitForFunction(
     () => /** @type {any} */ (document.querySelector('tessera-explorer'))?.map?.basemap != null,
@@ -136,10 +130,9 @@ if (view.tileScheme === null && reading.basemap !== null) {
 
 await page.screenshot({path: join(shots, `${name}-world.png`)});
 
-// Western Europe: a coastline is where a one-cell offset between the basemap and the marks shows,
-// and the whole-world shot cannot show it. In the unit square whatever the projection, so the same
-// numbers frame the same ground under either — a lower box under equirectangular, the two
-// projections placing 50°N differently, which is itself the thing being drawn.
+// Western Europe, where a coastline shows a one-cell offset the whole-world shot cannot. The box
+// is in the unit square, lower under equirectangular, since the projections place 50°N
+// differently.
 await page.evaluate((box) => {
   /** @type {any} */ (document.querySelector('tessera-explorer')).map.fitBbox(box);
 }, view.projection === 'web_mercator' ? [0.47, 0.31, 0.52, 0.35] : [0.47, 0.22, 0.52, 0.26]);

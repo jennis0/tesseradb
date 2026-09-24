@@ -6,19 +6,13 @@ import {switchView} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-view-picker>` — which **layout** (`view-switching.md` §6.1): one entry per plain view
- * and one per group, in `/v1/meta`'s serving order, at the top of the explorer's toolbar.
+ * `<tessera-view-picker>`: chooses the layout, with one entry per plain view and one per group, in
+ * `/v1/meta`'s serving order. The rules are the client's `viewPickerEntries`, `enterGroup` and
+ * `hasOneLayout`; this element adds the control, the key it last left each group on, and the
+ * switch. It renders nothing where the bundle offers one entry.
  *
- * The rules are `@tesseradb/client`'s: `viewPickerEntries` for the entries and their order,
- * `enterGroup` for which view of a chosen group is entered, `hasOneLayout` for the hiding
- * rule. What this element adds is the control the boards draw, the memory of the key it last left
- * each group on, and the switch.
- *
- * **Renders nothing** — not an empty select — where the bundle offers one entry, which is every
- * demo corpus today; the toolbar then looks exactly as it did.
- *
- * Restyling is the parts a host already knows from the legend: `part="select"` is the same control
- * in the same chrome, `part="label"` its caption, `part="field"` the pair.
+ * `part="select"` is the control, `part="label"` its caption and `part="field"` the pair, as in
+ * the legend.
  */
 export class TesseraViewPicker extends TesseraElement {
   static override styles = [
@@ -37,16 +31,13 @@ export class TesseraViewPicker extends TesseraElement {
     `
   ];
 
-  /** The key this element last left each group on — the second rung of `enterGroup`. */
+  /** The key this element last left each group on, which `enterGroup` prefers. */
   private lastKey = new Map<string, string>();
   private chosen = '';
 
   /**
-   * The chosen option, written to the select **after** its options exist.
-   *
-   * A `selected` attribute toggled on a re-render does not move a select whose value has already
-   * been set once — the element's own dirtiness rule — so the closed control would keep showing
-   * the layout the user switched away from. The attribute is still rendered, for the first paint.
+   * Writes the chosen option to the select after its options exist. Toggling `selected` on a
+   * re-render does not move a select whose value has been set once.
    */
   protected override updated(_changed: PropertyValues<this>): void {
     const select = this.renderRoot.querySelector('select');
@@ -57,15 +48,13 @@ export class TesseraViewPicker extends TesseraElement {
     const s = this.resolvedStore;
     if (!s) return;
     const currentId = s.get('view').id;
-    // Leaving a group records the key it was left on, for the day it is chosen again.
+    // Leaving a group records the key it was left on.
     const roster = meta.views.find((v) => v.id === currentId)?.roster ?? null;
     if (roster) this.lastKey.set(roster.group, roster.key);
     const group = value.startsWith('g:') ? value.slice(2) : null;
     const target = group === null ? value.slice(2) : enterGroup(meta, group, currentId, this.lastKey.get(group));
-    // **A choice that issues no switch is put back.** A group this session reaches no view of
-    // answers `null`, and a group whose entry view is the one already current is not a switch;
-    // in both the store stays where it is, and a select left showing the choice would name a
-    // layout the map is not drawing.
+    // A choice that switches nothing (a group with no view this session may reach, or the view
+    // already current) puts the select back to the layout the map is drawing.
     if (target === null || target === currentId) {
       this.restoreSelect();
       return;
@@ -73,7 +62,7 @@ export class TesseraViewPicker extends TesseraElement {
     switchView(this, s, meta, target);
   }
 
-  /** Put the select back to the entry the store is in — see {@link choose}. */
+  /** Put the select back to the entry the store is in. */
   private restoreSelect(): void {
     const select = this.renderRoot.querySelector('select');
     if (select && select.value !== this.chosen) select.value = this.chosen;
