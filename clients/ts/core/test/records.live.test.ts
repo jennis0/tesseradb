@@ -1,6 +1,7 @@
 import type {Table} from 'apache-arrow';
 import {afterAll, beforeAll, describe, expect, it, type TestContext} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
+import {Control} from '../src/control.js';
 import {refusalOf} from '../src/presented.js';
 import type {RecordsRead} from '../src/records.js';
 import type {ArtifactsRequest, BrowseRow, ItemsRequest, Meta, Session, ViewportRequest} from '../src/types.js';
@@ -41,26 +42,28 @@ async function viewportCounts(extra: Partial<ViewportRequest> = {}) {
   const q = meta.views.find((v) => v.id === 's0')!.quantisation;
   const response = await client.viewport(session.token, {view: 's0', zoom: 2, bbox: [q.xMin, q.yMin, q.xMax, q.yMax], k: 0, ...extra});
   const sum = (field: 'visible' | 'matched') => Number(response.result.tiles.reduce((n, t) => n + t[field], 0n));
-  return {visible: sum('visible'), matched: sum('matched')};
+  return {visible: sum('visible'), matched: sum('matched'), identityKey: response.identityKey};
 }
 
 /**
  * A whole read: `open` sends one request from `cursor`, and the read follows each response's
- * cursor until it is null. Returns every page and the heads of the responses.
+ * cursor until it is null. Returns every page, and each response's head and identity key.
  */
 async function readAll<Head>(open: (cursor: string | undefined) => Promise<RecordsRead<Head>>) {
   const tables: Table[] = [];
   const heads: Head[] = [];
+  const identityKeys: string[] = [];
   let cursor: string | undefined;
   for (;;) {
     const read = await open(cursor);
     heads.push(read.head);
+    identityKeys.push(read.identityKey);
     for await (const table of read) tables.push(table);
     expect(read.trailer).not.toBeNull();
     if (read.cursor === null) break;
     cursor = read.cursor;
   }
-  return {tables, heads};
+  return {tables, heads, identityKeys};
 }
 
 const items = (request: ItemsRequest) =>
@@ -78,10 +81,13 @@ const dump = (tables: Table[]) => tables.map((t) => JSON.stringify(t.toArray(), 
 describe('bulk reads against a live server', () => {
   it('reads every item of a view once, across pages and responses, as the viewport counts and the item card holds them', async (ctx) => {
     live(ctx);
-    const {visible} = await viewportCounts();
-    const {tables, heads} = await items({view: 's0', fields: ['archive', 'title'], systemFields: ['position'], count: true, pageRows: 400, pages: 2});
+    const {visible, identityKey} = await viewportCounts();
+    const {tables, heads, identityKeys} = await items({view: 's0', fields: ['archive', 'title'], systemFields: ['position'], count: true, pageRows: 400, pages: 2});
     expect(heads.length).toBeGreaterThan(2);
     expect(heads[0]!.visible).toBe(visible);
+    // Every response names the principal and view as the viewport does.
+    expect(new Set(identityKeys)).toEqual(new Set([identityKey]));
+    expect(identityKey).not.toBe('');
     for (const t of tables) expect(t.numRows).toBeLessThanOrEqual(400);
     const ids = column(tables, 'tessera_id') as bigint[];
     expect(ids.length).toBe(visible);
@@ -211,18 +217,30 @@ describe('bulk reads against a live server', () => {
     }
   });
 
-  it('stops a read whose signal aborts, and the server serves the next', async (ctx) => {
+  it('stops reads whose signals abort, and the server frees their slots', async (ctx) => {
     live(ctx);
-    const abort = new AbortController();
-    const read = await client.items(session.token, {view: 's0', fields: ['title'], pageRows: 50}, abort.signal);
-    const first = await read.next();
-    expect(first.done).toBe(false);
-    abort.abort();
-    const thrown = await read.next().catch((error: unknown) => error);
-    expect(thrown).toMatchObject({name: 'AbortError'});
-    expect(await read.next()).toEqual({done: true, value: undefined});
-    expect(read.trailer).toBeNull();
+    // Two at once, which is every slot of the deployment's default bulk-read lane, each far larger
+    // than the socket buffers, so a read the client does not close holds its slot.
+    const aborts = [new AbortController(), new AbortController()];
+    const request: ItemsRequest = {view: 's0', fields: ['title', 'abstract'], pageRows: 50};
+    const reads = await Promise.all(aborts.map((abort) => client.items(session.token, request, abort.signal)));
+    for (const [i, read] of reads.entries()) {
+      expect((await read.next()).done).toBe(false);
+      aborts[i]!.abort();
+      const thrown = await read.next().catch((error: unknown) => error);
+      expect(thrown).toMatchObject({name: 'AbortError'});
+      expect(await read.next()).toEqual({done: true, value: undefined});
+      expect(read.trailer).toBeNull();
+    }
 
+    // The server frees a slot once it sees the connection close, which takes a moment. The limit is
+    // well inside the ten seconds after which the server sheds a response nobody reads.
+    const {controlUrl, operatorCredential} = served as Served;
+    const control = new Control({controlUrl, operatorCredential});
+    const deadline = Date.now() + 5_000;
+    while (((await control.status()).body.bulk as {in_flight: number}).in_flight > 0) {
+      expect(Date.now(), 'the aborted reads still hold their slots').toBeLessThan(deadline);
+    }
     const {visible} = await viewportCounts();
     const again = await items({view: 's0', fields: [], pageRows: 5000});
     expect(column(again.tables, 'tessera_id').length).toBe(visible);

@@ -418,8 +418,11 @@ and it carries:
 - `pageEnd`: the page end after the page last yielded, with its cursor `next` and its `endedBy`.
 - `trailer`: `null` until the body has been read to its end.
 - `cursor`: where the read continues. It is the trailer's `next` once the body is whole, the last
-  page end's before that, and the request's own `cursor` before any page end. `null` means no row
-  remains.
+  page end's before that, and the request's own `cursor` before any page end, so it is `undefined`
+  before any page end of a read started without one. `null` means no row remains.
+- `identityKey`, `region` and `timings` (`serverUs`, `admissionUs`): the response's headers, read
+  as a viewport response reads them. A read and a viewport for the same principal and view carry
+  the same `identityKey`.
 
 To read a whole result, send the request again with `cursor` until it is `null`:
 
@@ -439,15 +442,14 @@ holds nothing between calls.
 A page is yielded once its page end has arrived. A body that ends without its trailer yields its
 whole pages and then throws; `cursor` is then the last page end's cursor, and a read resumed from
 it repeats no row. Breaking out of the loop, calling `return()` or aborting the request's signal
-closes the connection, and the server stops the response. After an abort no further page is
-yielded, including pages already received.
+closes the connection, and the server stops the response. A `return()` while a page is awaited
+ends that wait as the end of the read. After an abort no further page is yielded, including pages
+already received.
 
-Under `compression: 'zstd'` each page's Arrow buffers arrive compressed. On the first page it
-decodes, the client registers a zstd decoder with apache-arrow's reader, so a compressed page
-decodes to the same table as an uncompressed one. The decoder is `fzstd`: plain JavaScript,
-decompression only, no dependencies, about 8 KB minified and 4 KB gzipped, and synchronous, which
-is what apache-arrow's codec interface requires. A zstd decoder the host has registered itself is
-kept.
+Under `compression: 'zstd'` each page's Arrow buffers arrive compressed. On such a read the client
+registers a zstd decoder (`fzstd`) in apache-arrow's shared codec registry, so a compressed page
+decodes to the same table as an uncompressed one. A zstd codec the host has registered itself is
+kept, and a read without compression leaves the registry as it was.
 
 ## Testing
 

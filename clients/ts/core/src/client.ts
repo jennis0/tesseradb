@@ -842,7 +842,7 @@ export class TesseraClient {
       signal
     });
     if (!response.ok) await fail(response);
-    return openRecords(response, req.cursor, signal, parseHead);
+    return openRecords(response, req, signal, parseHead);
   }
 }
 

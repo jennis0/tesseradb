@@ -2,7 +2,7 @@ import {compressionRegistry, CompressionType, tableFromIPC, type Table} from 'ap
 import {decompress} from 'fzstd';
 import {FRAME_PAGE_END, FRAME_RECORDS, FRAME_TRAILER, FrameReader, type Frame} from './frame.js';
 import {parseRegionVerdict} from './region.js';
-import type {PageEnd, RecordsTrailer, RegionVerdict} from './types.js';
+import type {PageEnd, RecordsTrailer, RegionVerdict, Timings} from './types.js';
 
 /**
  * One response of `POST /v1/items` or `POST /v1/artifacts`: the head, then each page as an Arrow
@@ -14,21 +14,33 @@ import type {PageEnd, RecordsTrailer, RegionVerdict} from './types.js';
  * repeating a row.
  *
  * The body is read only as the caller iterates. Iterating to the end, breaking out of the loop,
- * calling `return()` or aborting the request's signal each release the connection.
+ * calling `return()` or aborting the request's signal each release the connection. A `return()`
+ * while a page is awaited ends that wait as the end of the read.
  */
 export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
+  /** The viewport's identity coordinate for this principal and view; empty where the response carried none. */
+  readonly identityKey: string;
+  /** The `x-tessera-region` verdict, present where `filters` carried a `region` leaf. */
+  readonly region: RegionVerdict | null;
+  /** The server's time from admission to the head, and the time admission took, in microseconds. */
+  readonly timings: Pick<Timings, 'serverUs' | 'admissionUs'>;
   private lastEnd: PageEnd | null = null;
   private ended: RecordsTrailer | null = null;
   private readonly pages: AsyncGenerator<Table, undefined, undefined>;
 
   constructor(
     readonly head: Head,
-    /** The `x-tessera-region` verdict, present where `filters` carried a `region` leaf. */
-    readonly region: RegionVerdict | null,
+    headers: Headers,
     /** The cursor the request carried. */
     private readonly from: string | undefined,
     private readonly frames: Frames
   ) {
+    this.identityKey = headers.get('x-tessera-identity-key') ?? '';
+    this.region = parseRegionVerdict(headers.get('x-tessera-region'));
+    this.timings = {
+      serverUs: Number(headers.get('x-tessera-server-us') ?? 0),
+      admissionUs: Number(headers.get('x-tessera-admission-us') ?? 0)
+    };
     this.pages = this.read();
   }
 
@@ -78,7 +90,7 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
           open = frame.payload;
         } else if (frame.kind === FRAME_PAGE_END) {
           // The grammar puts a records frame before every page end.
-          const table = decodePage(open!);
+          const table = tableFromIPC(open!);
           open = null;
           this.lastEnd = pageEndOf(frame.payload);
           pages += 1;
@@ -91,6 +103,7 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
     } finally {
       this.frames.release();
     }
+    if (this.frames.released) return undefined;
     // A complete body has a trailer: the grammar refuses one without.
     if (trailer!.pages !== pages || trailer!.rows !== rows) {
       throw new Error(`the trailer counts ${trailer!.pages} pages and ${trailer!.rows} rows, but the body carried ${pages} and ${rows}`);
@@ -102,20 +115,23 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
 
 /**
  * Read a bulk read's response up to its head. `parseHead` checks and translates the head's JSON.
- * A body that fails before its head, or whose head `parseHead` refuses, throws.
+ * A body that fails before its head, or whose head `parseHead` refuses, throws. The request's
+ * `cursor` is where the read resumes before any page end, and a zstd decoder is registered only
+ * where it asked for `compression: 'zstd'`.
  */
 export async function openRecords<Head>(
   response: Response,
-  from: string | undefined,
+  request: {cursor?: string; compression?: 'zstd'},
   signal: AbortSignal | undefined,
   parseHead: (raw: unknown) => Head
 ): Promise<RecordsRead<Head>> {
+  if (request.compression === 'zstd') registerZstd();
   const frames = new Frames(response.body?.getReader(), signal);
   try {
     // The grammar refuses a body whose first frame is not the head, and one that ends before it.
     const first = (await frames.next())!;
     const head = parseHead(JSON.parse(new TextDecoder().decode(first.payload)));
-    return new RecordsRead(head, parseRegionVerdict(response.headers.get('x-tessera-region')), from, frames);
+    return new RecordsRead(head, response.headers, request.cursor, frames);
   } catch (error) {
     frames.release();
     throw error;
@@ -126,7 +142,8 @@ export async function openRecords<Head>(
 class Frames {
   private readonly grammar = new FrameReader('records');
   private ready: Frame[] = [];
-  private finished = false;
+  /** `released` once the caller has stopped the read, `ended` once the body has been read to its end. */
+  private state: 'reading' | 'ended' | 'released' = 'reading';
 
   constructor(
     private readonly reader: ReadableStreamDefaultReader<Uint8Array> | undefined,
@@ -134,15 +151,18 @@ class Frames {
   ) {}
 
   /**
-   * The next whole frame, or `null` at the end of a complete body. Throws on a body that is not
-   * complete, and once the signal has aborted, even where frames already read remain.
+   * The next whole frame, or `null` at the end of a complete body or once the read is released.
+   * Throws on a body that is not complete, and once the signal has aborted, even where frames
+   * already read remain.
    */
   async next(): Promise<Frame | null> {
     this.signal?.throwIfAborted();
     while (this.ready.length === 0) {
       const chunk = this.reader ? await this.reader.read() : {done: true as const, value: undefined};
       if (chunk.done) {
-        this.finished = true;
+        // A release while this read waited ends the body early, and that is not a fault.
+        if (this.released) return null;
+        this.state = 'ended';
         this.grammar.end();
         return null;
       }
@@ -151,27 +171,26 @@ class Frames {
     return this.ready.shift()!;
   }
 
+  get released(): boolean {
+    return this.state === 'released';
+  }
+
   /** Stop reading the body, which closes the connection and stops the server's response. */
   release(): void {
-    if (this.finished) return;
-    this.finished = true;
+    if (this.state !== 'reading') return;
+    this.state = 'released';
     void this.reader?.cancel().catch(() => {});
   }
 }
 
-function decodePage(payload: Uint8Array): Table {
-  registerZstd();
-  return tableFromIPC(payload);
-}
-
 /**
- * Give Arrow's reader a zstd decoder, which it needs for a page sent under `compression: 'zstd'`.
- * A decoder the host registered is kept, and so is an encoder.
+ * Give Arrow's shared codec registry a zstd decoder. A decoder the host registered is kept, and so
+ * is the host's encoder where it registered only that.
  */
 function registerZstd(): void {
   const registered = compressionRegistry.get(CompressionType.ZSTD);
   if (registered?.decode) return;
-  compressionRegistry.set(CompressionType.ZSTD, {...registered, decode: zstdDecode});
+  compressionRegistry.set(CompressionType.ZSTD, {encode: registered?.encode?.bind(registered), decode: zstdDecode});
 }
 
 function zstdDecode(data: Uint8Array): Uint8Array {
