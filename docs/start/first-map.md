@@ -1,9 +1,28 @@
 # Your first map from files
 
 You will build a map of the 29,935 places GeoNames lists for Ireland, serve it, and filter it in a
-browser by name, kind of place and population. You need the `tessera` binary on your `PATH`,
-Python 3, `git`, and Node.js with npm. The commands below were run on Linux with Python 3.12 and
-Node 22.
+browser by name, kind of place and population. You need Rust (installed with rustup), `git`,
+`curl`, `unzip`, `openssl`, Python 3, and Node.js with npm. The commands below were run on Linux
+with Rust 1.97, Python 3.12 and Node 22.
+
+## Build the binary
+
+Clone the repository and install `tessera` from it:
+
+```bash
+git clone https://github.com/jennis0/tesseradb ~/tesseradb
+cd ~/tesseradb
+cargo install --path crates/tessera-cli
+```
+
+```
+...
+    Finished `release` profile [optimized] target(s) in 1m 56s
+...
+```
+
+Cargo puts the binary in `~/.cargo/bin`, which rustup adds to your `PATH`. The build took two
+minutes on a 12-core machine.
 
 ## Download the extract
 
@@ -22,7 +41,7 @@ Archive:  IE.zip
 ```
 
 `IE.txt` holds one place per line, in 19 tab-separated columns with no header row. `readme.txt`
-names the columns.
+describes the columns.
 
 ## Convert it to Parquet
 
@@ -33,8 +52,8 @@ python3 -m venv .venv
 .venv/bin/pip install pyarrow
 ```
 
-Save the following as `convert.py`. It reads `IE.txt` with the column names from `readme.txt` and
-writes the six columns the map uses to `points.parquet`.
+Save the following as `convert.py`. It names the 19 columns as `readme.txt` lists them and writes
+the six the map uses to `points.parquet`.
 
 ```{.python notest}
 import pyarrow as pa
@@ -82,8 +101,7 @@ wrote 29935 places to points.parquet
 
 ## Declare the corpus
 
-The corpus declaration says which files to read, how to place each row on a map, and which
-columns to serve with it. Save this as `corpus.toml` beside `points.parquet`:
+Save this as `corpus.toml` beside `points.parquet`:
 
 ```toml
 [sources]
@@ -115,7 +133,6 @@ name       = "feature_class"
 type       = "category"
 vocabulary = "feature_class"
 render     = true
-index      = true
 
 [[attribute]]
 name   = "population"
@@ -123,29 +140,25 @@ type   = "i64"
 render = true
 ```
 
-`[sources]` names each file, relative to `corpus.toml`. `[defaults]` makes `points` the file that
-every block below reads unless it names another.
+Paths in `[sources]` are relative to `corpus.toml`, and `[defaults]` makes `points` the file every
+block below reads unless it names another.
 
-A `[[view]]` is one map of the data. `web_mercator` is the projection that web maps use; the build
-projects each row's `lon` and `lat` through it. `extent` is the area the map covers, in degrees.
-It has no default. The build widens it to the smallest map tile that contains it and moves any
-point outside that tile onto the tile's edge. `point_visibility`
-decides who may see each point. This file gives no field to read a label from, so every place
-carries the label `public`.
+The view needs an `extent`, the area of the map in degrees; there is no default. The build widens
+it to the smallest map tile that contains it and moves any point outside that tile onto the tile's
+edge. `point_visibility` names no field to read an access label from, so every place gets the
+default label, `public`.
 
-A `[[vocabulary]]` lists the values a category column may hold: here, the nine GeoNames feature
-classes. `u8` stores each value in one byte. `closed` makes the build refuse a value that is not
-in the list, and `public` lets every viewer see the whole list.
+The vocabulary holds the nine GeoNames feature classes. Because it is `closed`, the build refuses
+a place whose class is not in the list, and `public` lets every viewer see the whole list.
 
-Each `[[attribute]]` is a column served with the places. `name` is text, and `index = true` makes
-it searchable by word. `feature_class` is a category over the vocabulary above; `render = true`
-sends it with every point drawn, so the map can colour by it, and `index = true` lets you filter
-on it. `population` is a 64-bit integer, sent with every point drawn.
+With `index = true`, the `name` column can be searched by word. `render = true` sends
+`feature_class` and `population` with every point drawn, so the map can colour by them and filter
+on them.
 
 ## Describe the deployment
 
-A deployment is one bundle and the server that serves it. `tessera.toml` says where its files live
-and which addresses it listens on. Save this beside `corpus.toml`:
+`tessera.toml` says where the deployment keeps its files and which addresses the server listens
+on. Save this beside `corpus.toml`:
 
 ```toml
 [bundle]
@@ -173,8 +186,8 @@ operator_credential_file = "operator.secret"
 `[bundle]` names the directory the build writes and the server opens, a directory for the server's
 cache, and the log the server writes changes to before applying them. `[build]` points at the
 declaration; without it, the build looks for `schema.toml`. `[plugin]` decides how a request for a
-token becomes a set of labels, and `builtin:passthrough` takes the labels the request names.
-`token_max_lifetime` is how long a viewer's token lasts, in seconds.
+token becomes a set of labels, and `builtin:passthrough` takes the labels the request names. Each
+token the server issues lasts `token_max_lifetime` seconds unless it is revoked sooner.
 
 The server listens on three addresses. The browser reads the map from the viewer address. The
 session address hands out tokens to anyone holding the session credential, and the control address
@@ -183,7 +196,7 @@ takes writes from anyone holding the operator credential. `tessera check`, `tess
 
 ## Make the identity key and credentials
 
-Clients never see `entity_id`. They see a `tessera_id` for each place, which the build derives from
+Clients see a `tessera_id` for each place instead of its `entity_id`, and the build derives it from
 the identity key. `tessera build` reads the key from a file named `.env` beside `tessera.toml`. The
 two credentials go in the files `tessera.toml` names.
 
@@ -209,7 +222,7 @@ tessera check
 ...
 projected views, from the declaration alone:
   ireland              web_mercator, asked for lon [-11, -5], lat [51, 55.5]
-...
+                       snapped outward to the square at z5 (15, 10) — x [0.46875, 0.5], y [0.3125, 0.34375]
 
 views
   ireland                    labels from default_only, default 'public'
@@ -219,7 +232,7 @@ vocabularies
 
 attributes (in declaration order, which is the stored column order)
   name                       text, index, from column 'name'
-  feature_class              u8 over vocabulary 'feature_class', hot+index, from column 'feature_class'
+  feature_class              u8 over vocabulary 'feature_class', hot, from column 'feature_class'
   population                 i64, hot, from column 'population'
 
 check OK: 2 source(s), 1 view(s), 0 view group(s) over 0 declared view(s), 1 vocabulary(ies), 3 attribute(s), 0 layer(s), 0 warning(s)
@@ -242,10 +255,11 @@ tessera build
 ```
 
 ```
-View 'ireland': web_mercator, quantising against x [0.46875, 0.5], y [0.3125, 0.34375]
-...
-tessera build: commit d15e9d2df9ab498ceb0c71f61fbd247e475dbefe
-1 view(s): 0 point row(s) carried access terms of their own; 29935 took the declared default
+view 'ireland': web_mercator, quantising against x [0.46875, 0.5], y [0.3125, 0.34375]
+        asked for lon [-11, -5], lat [51, 55.5] — snapped outward to the square at z5 (15, 10), lon [-11.25, 0], lat [48.922499263758255, 55.7765730186677]
+        the data spans x [0.47030425, 0.5235287777777777], y [0.3141878520203559, 0.33315262108750776] — 62277 x 39773 of the 65536 x 65536 cells
+        1 of 29935 point(s) (0.0%) CLAMP onto the frame's edge — 1 on x, 0 on y. A clamped point is stored at the boundary, not where it was written
+        none of them outside web_mercator's ±85.0511287798066° domain, so nothing was clipped
 ...
 attribute 'name': 29,935 of 29,935 entities have a value
 attribute 'feature_class': 29,935 of 29,935 entities have a value
@@ -254,38 +268,36 @@ attribute 'population': 29,935 of 29,935 entities have a value
   view ireland: 29935 row(s)
 ```
 
-The bundle is 2,255,482 bytes on disk. Its map tile runs from longitude −11.25 to 0, and one of the
-lines cut above reports a place outside it:
-`1 of 29935 point(s) (0.0%) CLAMP onto the frame's edge — 1 on x, 0 on y`. The place is Saint
-Patrick's Bridge, a spit near Cork. GeoNames gives its longitude as 8.47036, where Cork's is
-−8.47, so the build stored it on the eastern edge of the map. To move it, correct the longitude in
-`IE.txt`, run `convert.py` again, delete the `bundle` directory and build again. The build refuses
-to write over an existing bundle.
+The map tile runs from longitude −11.25 to 0, and the CLAMP line reports one place outside it. The
+place is Saint Patrick's Bridge, a spit near Cork. GeoNames gives its longitude as 8.47036, where
+Cork's is −8.47, so the build stored it on the eastern edge of the map. To move it, correct the
+longitude in `IE.txt`, run `convert.py` again, delete the `bundle` directory and build again. The
+build refuses to write over an existing bundle.
 
 ## Serve it
 
-Run the server in a terminal of its own, from `~/ireland`:
+Run the server in a terminal of its own:
 
 ```bash
+cd ~/ireland
 tessera serve
 ```
 
 ```
-2026-09-23T23:44:56.858183Z  INFO tessera_server::memory: the allocator's arena count is capped arenas=12
-2026-09-23T23:44:56.894068Z  INFO tessera_engine::engine: the engine adopted the prefix's derived artifact structures named=0 containment_adopted=0 prefix=v00000
-2026-09-23T23:44:56.894374Z  INFO tessera_server: bulk reads may hold this much memory at once, within the process's memory cap bulk_admission=2 max_page_bytes=67108864 bulk_read_memory_bytes=939524096
+2026-09-24T00:07:42.664932Z  INFO tessera_server::memory: the allocator's arena count is capped arenas=12
+2026-09-24T00:07:42.715355Z  INFO tessera_engine::engine: the engine adopted the prefix's derived artifact structures named=0 containment_adopted=0 prefix=v00000
+2026-09-24T00:07:42.715714Z  INFO tessera_server: bulk reads may hold this much memory at once, within the process's memory cap bulk_admission=2 max_page_bytes=67108864 bulk_read_memory_bytes=939524096
 {"event":"listening","viewer":"127.0.0.1:9141","session":"127.0.0.1:9142","control":"127.0.0.1:9143"}
 ```
 
-The last line means all three addresses are open. The server runs until you stop it.
+The last line means all three addresses are open.
 
 ## Open the map
 
-The map is drawn by the browser components in the repository's `clients/ts` directory. Not built
-yet: a published package of them. Build them from a copy of the repository instead:
+The map is drawn by the browser components in the repository's `clients/ts` directory. There is
+no published package of them yet, so build them from the clone:
 
 ```bash
-git clone https://github.com/jennis0/tesseradb ~/tesseradb
 cd ~/tesseradb/clients/ts
 npm ci
 npm run build -w @tesseradb/components
@@ -293,41 +305,41 @@ npm run build -w @tesseradb/components
 
 ```
 ...
+dist/assets/decode.worker-DjqcC_7y.js    266.69 kB
 dist/tessera-components.js             1,857.60 kB │ gzip: 444.08 kB
 
-✓ built in 894ms
+✓ built in 1.60s
 ...
 ```
 
 `examples/plain-html` holds a page with the map on it and a small Node server for it. The server
-keeps the session credential, asks Tessera for a token on behalf of the page's user, and passes
-the page's requests to the viewer address, so the browser talks only to the page's own server.
-It offers the users listed in `users.json`. Replace them with one user who holds the label
-`public`:
+holds the session credential and forwards the page's requests to Tessera, so the credential never
+reaches the browser. It offers the users listed in `users.json`. Replace the example's users with
+one who holds the label `public`:
 
 ```bash
 cd examples/plain-html
 echo '{"everyone": {"label": "Everyone", "terms": ["public"]}}' > users.json
 ```
 
-Point the server at your deployment and start it in another terminal:
+In another terminal, point the server at your deployment and start it:
 
 ```bash
+cd ~/tesseradb/clients/ts/examples/plain-html
 export TESSERA_VIEWER_URL=http://127.0.0.1:9141
 export TESSERA_SESSION_URL=http://127.0.0.1:9142
 export TESSERA_SESSION_CRED=$(cat ~/ireland/session.secret)
-PORT=5190 node server.mjs
+node server.mjs
 ```
 
 ```
-plain-html example on http://localhost:5190
+plain-html example on http://localhost:5180
 ```
 
-Open <http://localhost:5190>. The page signs in as Everyone and draws every place in blue, and the
-strip along the bottom reads 29,935 shown, 29,935 matched and 29,935 visible. The outline of
-Ireland is the places themselves. Not built yet: a base map under the points on this page. The
-single point far to the east is Saint Patrick's Bridge. Scroll to zoom in, and hold the pointer
-over a point to see its name.
+Open <http://localhost:5180>. The page signs in as Everyone and draws every place in blue, and the
+strip along the bottom reads 29,935 shown, 29,935 matched and 29,935 visible. The page has no base
+map yet, so the outline of Ireland is the places themselves. The single point far to the east is
+Saint Patrick's Bridge. Scroll to zoom in, and hold the pointer over a point to see its name.
 
 ## Filter the map
 
@@ -336,8 +348,7 @@ their letters; the [GeoNames feature codes page](http://www.geonames.org/export/
 what each one means. P is a city, town or village.
 
 Tick P. The matched count falls to 12,159, the places whose class is P. Then type 10000 in the
-first Population box and press Enter. The two filters combine, and 72 places match. The largest is
-Dublin, with 1,024,027.
+first Population box and press Enter: 72 places match. The largest is Dublin, with 1,024,027.
 
 Choose Clear all, type `kilkenny` in the Name box and press Enter. Twelve places match. The search
 matches whole words, so Kilkennybeg is not among them.
