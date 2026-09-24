@@ -1,4 +1,4 @@
-import {NO_COUNT, NO_MASKED, regionOperand, servedLineage, SessionArtifactTable, withMembers, withRegion, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection} from '@tesseradb/client';
+import {NO_COUNT, NO_MASKED, regionOperand, servedLineage, SessionArtifactTable, withMembers, withRegion, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection, type DeclaredScalar, type Meta} from '@tesseradb/client';
 
 /**
  * A store with no network and no driver: projections a test sets directly, and the subscription
@@ -15,6 +15,45 @@ export type FakeStore = Store & {
   setBrowse(key: string, page: BrowsePage): void;
   calls: {name: string; args: unknown[]}[];
 };
+
+/** A declared column that is indexed, not rendered and read from the record, unless `over` says. */
+export function scalar(name: string, arrowType: DeclaredScalar['arrowType'], over: Partial<DeclaredScalar> = {}): DeclaredScalar {
+  return {name, arrowType, category: null, render: false, index: true, analyser: null, homes: ['record'], ...over};
+}
+
+/** A deployment of one plain view `s0` over the unit square with nothing declared, and whichever fields `over` names. */
+export function meta(over: Partial<Meta> = {}): Meta {
+  return {
+    apiVersion: 1,
+    bundleFormat: 1,
+    idset: 0,
+    views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
+    groups: [],
+    declaredScalars: [],
+    scopedScalars: [],
+    layers: [],
+    selection: {
+      kMin: 1,
+      kMaxMarks: 500,
+      maxK: 5000,
+      thetaTargetMarks: 10,
+      maxUnderlayOffset: 0,
+      maxCategoryValues: 1000,
+      maxRegionVertices: 10_000,
+      maxRegionCells: 262_144,
+      maxBrowseRows: 200,
+      maxShapeVertices: 50_000,
+      maxSuggestions: 20,
+      maxSuggestionWalk: 100_000,
+      maxSuggestSetEntities: 10_000_000,
+      maxPageRows: 65_536,
+      maxPageBytes: 16_777_216
+    },
+    maxTilesPerRequest: 4096,
+    filterOperands: [],
+    ...over
+  };
+}
 
 export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const projections: Projections = {

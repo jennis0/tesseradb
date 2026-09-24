@@ -34,7 +34,7 @@ function channel(client: TesseraClient, clock: ArtifactChannelClock, table?: Ses
   const ch = new ArtifactChannel(client, {
     view: 's0',
     quantisation: Q,
-    token: () => 'tok',
+    token: async () => 'tok',
     depth: () => 5, // a drawn frame exists
     clock,
     table,
@@ -284,7 +284,7 @@ function holdingChannel(
   const ch = new ArtifactChannel(client, {
     view: 's0',
     quantisation: Q,
-    token: () => 'tok',
+    token: async () => 'tok',
     depth: () => 5,
     clock,
     onChange: (s) => states.push(s),
@@ -749,7 +749,7 @@ describe('the depth clamp', () => {
     const ch = new ArtifactChannel(client, {
       view: 's0',
       quantisation: Q,
-      token: () => 'tok',
+      token: async () => 'tok',
       // A frame drawn at depth 10 while the camera sits at the full extent — the pairing the
       // harness produced on a principal switch, which asked for 2^20 tiles and was refused (422).
       depth: () => 10,

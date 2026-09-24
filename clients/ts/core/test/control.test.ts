@@ -1,5 +1,6 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {addressed, Control, MAX_ATTEMPTS, MAX_BACKOFF, MIN_BACKOFF, UNANSWERED, type Answer, type WriteOptions} from '../src/control.js';
+import {headersOf} from './support.js';
 
 /**
  * `Control` against a recording `fetch`: the request each method sends, the `429` retry, and that
@@ -13,7 +14,7 @@ type Reply = {status: number; body?: unknown; headers?: Record<string, string>};
 function recording(...replies: Reply[]): Sent[] {
   const sent: Sent[] = [];
   vi.stubGlobal('fetch', async (url: string, init: RequestInit = {}) => {
-    sent.push({method: init.method ?? 'GET', url, headers: {...(init.headers as Record<string, string>)}, body: init.body, signal: init.signal ?? undefined});
+    sent.push({method: init.method ?? 'GET', url, headers: headersOf(init), body: init.body, signal: init.signal ?? undefined});
     const reply = replies[Math.min(sent.length - 1, replies.length - 1)]!;
     return {
       status: reply.status,
@@ -97,6 +98,25 @@ describe('each route', () => {
       expect(sent.map((s) => s.signal)).toEqual([undefined, signal]);
     });
   }
+
+  it('sends every route through the host’s fetch, with its headers beside the route’s own', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('the global fetch was used');
+    });
+    const sent: Record<string, string>[] = [];
+    const hosted = async (_url: string | URL | Request, init?: RequestInit) => {
+      sent.push(headersOf(init));
+      return new Response('{}', {status: 200});
+    };
+    const c = new Control({controlUrl: 'http://control', operatorCredential: 'op-cred', fetch: hosted as typeof fetch, headers: {'X-Host': 'script', Authorization: 'Bearer host'}});
+    const calls = [...cases.map((k) => k.call), ...writes.map((w) => (c: Control) => w.call(c, {})), (c: Control) => c.grow('l', rows)];
+    for (const call of calls) {
+      sent.length = 0;
+      expect((await call(c)).ok).toBe(true);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({'x-host': 'script', authorization: 'Bearer op-cred'});
+    }
+  });
 
   it('grow sends bytes as an Arrow stream', async () => {
     const sent = recording({status: 200, body: {}});

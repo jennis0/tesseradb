@@ -46,9 +46,9 @@ import {chrome, tokens} from './tokens.js';
  * Emits `tessera-filterchange` with the composed expression.
  */
 
-/** The operators a string or keyword control can send. */
-const STRING_OPERATORS = ['contains', 'prefix', 'eq'] as const;
-type StringOperator = (typeof STRING_OPERATORS)[number];
+/** The operators a keyword control can send. */
+const KEYWORD_OPERATORS = ['contains', 'prefix', 'eq'] as const;
+type KeywordOperator = (typeof KEYWORD_OPERATORS)[number];
 
 /** How long a typed control must be quiet before its change is sent. */
 const TYPING_DEBOUNCE_MS = 350;
@@ -304,9 +304,8 @@ export class TesseraFilter extends TesseraElement {
     switch (draft.family) {
       case 'text':
         return this.text(o, draft);
-      case 'string':
       case 'keyword':
-        return this.string(o, draft);
+        return this.keyword(o, draft);
       case 'category':
         return this.category(draft);
       case 'numeric':
@@ -326,15 +325,15 @@ export class TesseraFilter extends TesseraElement {
       </div>`;
   }
 
-  /** A string or keyword control, offering the operators the column publishes. */
-  private string(o: FilterOperandSet, draft: ColumnDraft & {family: 'string' | 'keyword'}) {
-    const ops = o.operands.filter((op): op is StringOperator => (STRING_OPERATORS as readonly string[]).includes(op));
+  /** A keyword control, offering the operators the column publishes. */
+  private keyword(o: FilterOperandSet, draft: ColumnDraft & {family: 'keyword'}) {
+    const ops = o.operands.filter((op): op is KeywordOperator => (KEYWORD_OPERATORS as readonly string[]).includes(op));
     return html`<div class="ctl-row">
       <div class="input grow">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.needle} autocomplete="off"
         aria-label=${`${this.column} value`}
         @input=${(e: Event) => this.change({...draft, needle: (e.target as HTMLInputElement).value}, false)} /></div>
       <select part="mode" style="width:auto" aria-label=${`${this.column} operator`} .value=${draft.op}
-        @change=${(e: Event) => this.change({...draft, op: (e.target as HTMLSelectElement).value as StringOperator}, true)}>
+        @change=${(e: Event) => this.change({...draft, op: (e.target as HTMLSelectElement).value as KeywordOperator}, true)}>
         ${ops.map((op) => html`<option value=${op} ?selected=${draft.op === op}>${op}</option>`)}
       </select>
     </div>`;

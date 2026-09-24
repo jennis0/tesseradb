@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient} from '../src/client.js';
 import {createStore} from '../src/store.js';
 import type {ViewportPart, ViewportResponse} from '../src/types.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, tile, view} from './support.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, tile, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -28,7 +28,7 @@ const everyView = {views: ['v0', 'v1', 'v2', 'far'], computedContent: ['centroid
 const META = meta({
   views: [inGroup('far', OTHER_FRAME, null), inGroup('v0', FRAME, 'g'), inGroup('v1', FRAME, 'g'), inGroup('v2', FRAME, 'g')],
   groups: [{name: 'g', title: 'quarters', membersOf: null, views: ['v0', 'v1', 'v2']}],
-  declaredScalars: [{name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true}],
+  declaredScalars: [scalar('archive', 'u16', {category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, homes: ['rendered']})],
   layers: [layer('l', everyView), layer('m', everyView)],
   filterOperands: [{column: 'archive', family: 'category', operands: ['in']}]
 });
