@@ -43,11 +43,6 @@ pub fn is_public(word: &str) -> bool {
     word.trim() == PUBLIC
 }
 
-/// Whether a declared gate is `public` alone, which is stored as no gate.
-pub fn is_public_gate(labels: &[String]) -> bool {
-    matches!(labels, [only] if is_public(only))
-}
-
 /// Whether a declared word is `inherited`, where a layer's artifact default may take it.
 pub fn is_inherited(word: &str) -> bool {
     word.trim() == INHERITED

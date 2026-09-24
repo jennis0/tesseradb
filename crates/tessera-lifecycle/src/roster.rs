@@ -238,16 +238,8 @@ impl ViewRoster {
                 key: key.to_string(),
             });
         }
-        // **`public` compiles to no gate** (`views.md` §6, decision 0088): it is the label every
-        // principal holds inside the trust boundary, so the word and the absence are one
-        // statement and the record keeps the shorter of them — which is also what makes a stored
-        // label always a term to look up rather than sometimes the reserved word.
-        //
-        // A real label is **not checked here**: whether the plugin can read it is a question only
-        // the engine can ask, and `Engine::create_view` asks it before this record is prepared, on
-        // the same route an item's `access` labels take at ingest. The gate is a list of labels,
-        // each one term (decision 0132); `public` is recognised only as the whole of the list.
-        let visibility = visibility.filter(|labels| !tessera_types::label::is_public_gate(labels));
+        // The gate arrives as `Engine::create_view` stored it: checked against the plugin,
+        // trimmed, and `None` for `public`.
         // **A `timestamp_us` arrives as an integer, and the declaration is what says so.** JSON
         // carries no date type, so a record's `starts` is microseconds since the epoch as a
         // number; typing it from the wire alone would make every timestamp an `int` and refuse
@@ -639,14 +631,9 @@ mod tests {
             .is_err());
     }
 
-    /// **`public` and no gate are one statement, and the record keeps the shorter** (`views.md`
-    /// §6, decision 0088): every principal holds the label inside the trust boundary, so a record
-    /// storing the word would make the roster's `visibility` sometimes a term to look up and
-    /// sometimes a reserved one. A real label list is stored as written, each element one label
-    /// (decision 0132); whether the plugin can read it is `Engine::create_view`'s question, this
-    /// crate holding no plugin.
+    /// A gate is recorded as the engine hands it over, each element one label.
     #[test]
-    fn public_is_recorded_as_no_gate_and_a_label_is_recorded_as_written() {
+    fn a_gate_is_recorded_as_given() {
         let roster = ViewRoster::new();
         let gate_of = |declared: Option<&[&str]>| {
             let record = roster
@@ -671,8 +658,6 @@ mod tests {
             Some(vec!["finance,legal".to_string(), "tax".to_string()]),
             "a comma inside a label is part of the label"
         );
-        assert_eq!(gate_of(Some(&["public"])), None);
-        assert_eq!(gate_of(Some(&[" public "])), None);
         assert_eq!(gate_of(None), None);
     }
 }

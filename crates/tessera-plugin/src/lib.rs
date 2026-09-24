@@ -171,7 +171,7 @@ fn passthrough_hash() -> String {
     format!("{:x}", Sha256::digest(PASSTHROUGH_IDENTITY.as_bytes()))
 }
 
-use tessera_types::label::{declared_label, is_public, is_public_gate, label_values, PUBLIC};
+use tessera_types::label::{declared_label, is_public, label_values, PUBLIC};
 
 /// An artifact's own access labels as the descriptors it is stored and compared by, on the build
 /// and a running service alike. Each label is trimmed and an empty one dropped; none left is no
@@ -242,7 +242,7 @@ pub fn check_visibility(
         .iter()
         .map(|label| declared_label("visibility", label).map(str::to_string))
         .collect::<Result<Vec<String>, String>>()?;
-    if is_public_gate(&labels) {
+    if matches!(labels.as_slice(), [only] if is_public(only)) {
         return Ok(None);
     }
     if labels.iter().any(|label| is_public(label)) {
