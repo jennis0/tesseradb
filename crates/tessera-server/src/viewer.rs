@@ -798,11 +798,11 @@ impl ViewportSink for WireSink {
         let serialise_start = Instant::now();
         // The engine's buffers go on the wire borrowed. Names zip with the chunk's columns by
         // position; both lists hold only rendered columns, in declaration order.
-        let scalar_refs: Vec<(&str, ScalarColumn)> = head
+        let scalar_refs: Vec<(&str, ScalarColumn, Option<&[bool]>)> = head
             .render_scalars
             .iter()
             .zip(&chunk.scalars)
-            .map(|(d, col)| (d.name.as_str(), column_ref(col)))
+            .map(|(d, col)| (d.name.as_str(), column_ref(&col.values), col.present.as_deref()))
             .collect();
         // Membership columns carry their own layer names, since the artifact pass settles them
         // after the head.

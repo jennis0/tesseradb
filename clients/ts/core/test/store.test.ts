@@ -3,7 +3,7 @@ import {TesseraClient, TesseraError} from '../src/client.js';
 import {createStore, type Store} from '../src/store.js';
 import {withVerb, type FilterDraft} from '../src/filters.js';
 import type {Artifact, Layer, MembershipColumn, Meta, ViewportResponse} from '../src/types.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view} from './support.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -15,7 +15,7 @@ import {tileRectOfBbox} from '../src/budget.js';
 
 const META = meta({
   views: [view('s0', {displayName: 'default', quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200}})],
-  declaredScalars: [{name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true}],
+  declaredScalars: [scalar('archive', 'u16', {category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, homes: ['rendered']})],
   filterOperands: [{column: 'archive', family: 'category', operands: ['in']}]
 });
 
@@ -1218,6 +1218,174 @@ describe('the token', () => {
     expect(await store.describe(7n)).toEqual({asked: 't2'});
   });
 
+  it('answers every verb called before the first token lands, from one supplier call', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const shape: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const detail = {fields: {archive: 'cs'}, externalId: null, views: [], scoped: {}, labels: []};
+    Object.assign(client, {
+      item: vi.fn(async () => detail),
+      artifact: vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape})),
+      suggest: vi.fn(async (_t: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}))
+    });
+    let land: (() => void) | null = null;
+    const authorise = vi.fn(async () => {
+      await new Promise<void>((resolve) => (land = resolve));
+      return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    // Opening an artifact clears the picked item, so the item is read as it lands.
+    const items: unknown[] = [];
+    store.subscribe('selection', (selection) => items.push(selection.item));
+
+    const picked = store.pick(7n);
+    const described = store.describe(8n);
+    const opened = store.openArtifact(9n);
+    store.needShape(10n);
+    store.suggest('archive', 'c');
+    await clock.advance(1_000);
+    land!();
+    await Promise.all([picked, opened]);
+    await clock.advance(1_000);
+
+    expect(authorise).toHaveBeenCalledTimes(1);
+    expect(items).toContainEqual({id: 7n, detail});
+    expect(await described).toEqual(detail.fields);
+    expect(store.get('selection').artifact?.id).toBe(9n);
+    expect(new Set(store.get('artifacts').shapes.keys())).toEqual(new Set([9n, 10n]));
+    expect(store.get('filters').suggestions.archive?.q).toBe('c');
+  });
+
+  it('refuses every verb called before a first token that is refused', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const authorise = vi.fn(async () => {
+      throw new TesseraError(401, 'bad-credential', 'refused');
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+
+    await store.pick(7n);
+    expect(await store.describe(8n)).toBeNull();
+    store.suggest('archive', 'c');
+    await clock.advance(1_000);
+
+    expect(store.get('selection').itemRefusal?.code).toBe('bad-credential');
+    expect(store.get('filters').suggestErrors.archive?.code).toBe('bad-credential');
+    // The artifact route names the view, which the store knows once it has read its meta.
+    await store.openArtifact(9n);
+    expect(store.get('selection').artifactRefusal?.code).toBe('bad-credential');
+  });
+
+  it('asks, after the first token, under the view the store read from meta', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'), meta({...META, views: [view('s1', {quantisation: META.views[0]!.quantisation})]}));
+    const artifact = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: null}));
+    const suggest = vi.fn(async (_t: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}));
+    const browse = vi.fn(async () => ({artifacts: [], parents: [], next: null}));
+    Object.assign(client, {artifact, suggest, browse});
+    let land: (() => void) | null = null;
+    const authorise = vi.fn(async () => {
+      await new Promise<void>((resolve) => (land = resolve));
+      return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+
+    const opened = store.openArtifact(9n);
+    store.needShape(10n);
+    store.suggest('archive', 'c');
+    const browsed = store.browse({layer: 'l'});
+    await clock.advance(1_000);
+    land!();
+    await Promise.all([opened, browsed]);
+    await clock.advance(1_000);
+
+    const views = [...artifact.mock.calls, ...suggest.mock.calls, ...browse.mock.calls].map((call) => {
+      const last = call.at(-1) as {view?: string};
+      return last.view;
+    });
+    expect(views).toEqual(['s1', 's1', 's1', 's1']);
+  });
+
+  it('stops every verb waiting on the first token when the store is disposed', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewport} = fakeClient(() => response('ck'));
+    const calls: string[] = [];
+    for (const verb of ['meta', 'item', 'artifact', 'suggest', 'browse'] as const) {
+      const original = (client as unknown as Record<string, (...args: unknown[]) => unknown>)[verb]!;
+      Object.assign(client, {[verb]: (...args: unknown[]) => (calls.push(verb), original(...args))});
+    }
+    let land: (() => void) | null = null;
+    const authorise = vi.fn(async () => {
+      await new Promise<void>((resolve) => (land = resolve));
+      return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    const before = store.get('selection');
+
+    const waiting = [store.pick(7n), store.openArtifact(9n), store.describe(8n), store.browse({layer: 'l'}).catch(() => null)];
+    store.suggest('archive', 'c');
+    await clock.advance(1_000);
+    store.dispose();
+    land!();
+    await Promise.all(waiting);
+    await clock.advance(1_000);
+    // Asked after the dispose, each returns at once.
+    await Promise.all([store.pick(7n), store.openArtifact(9n), store.describe(8n)]);
+
+    expect(authorise).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual([]);
+    expect(viewport).not.toHaveBeenCalled();
+    expect(store.get('selection')).toBe(before);
+    expect(store.get('filters').suggestErrors).toEqual({});
+  });
+
+  it('warms up again once a supplier call succeeds after the first failed', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const artifact = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: null}));
+    Object.assign(client, {artifact});
+    let refuse = true;
+    const authorise = vi.fn(async () => {
+      if (refuse) throw new TesseraError(401, 'bad-credential', 'refused');
+      return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    expect(store.get('status').status).toBe('refused');
+    expect(store.get('meta')).toBeNull();
+
+    refuse = false;
+    await store.openArtifact(9n);
+    expect(store.get('meta')).not.toBeNull();
+    expect(store.get('selection').artifact?.id).toBe(9n);
+    expect((artifact.mock.calls[0] as unknown[])[2]).toMatchObject({view: 's0'});
+  });
+
+  it('refuses the artifact channel’s ask when its token cannot be renewed', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'), meta({...META, layers: [layer('l', {computedContent: ['centroid', 'box']})]}));
+    let issued = 0;
+    // A token a second from expiry is renewed at every ask; the second renewal is refused.
+    const authorise = vi.fn(async () => {
+      if (++issued > 1) throw new TesseraError(401, 'bad-credential', 'refused');
+      return {token: 't1', expiresAt: (Date.now() + 1_000) / 1000};
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    expect(store.get('artifacts')).toMatchObject({status: 'refused', refusal: {code: 'bad-credential'}});
+  });
+
   it('reports the session expired when the server refuses the token it holds as expired', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
@@ -1264,6 +1432,65 @@ describe('the item a click opens and the record a hover names', () => {
 
     await store.pick(404n);
     expect(store.get('selection')).toMatchObject({item: null, itemRefusal: {code: 'not-found'}});
+  });
+
+  it('forgets the item and the artifact on a clear, including one still on its way', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    let answer: (() => void) | null = null;
+    const item = vi.fn(async (_token: string, id: bigint) => {
+      if (id === 8n) await new Promise<void>((resolve) => (answer = resolve));
+      return {fields: {title: `paper ${id}`}, externalId: null, views: [], scoped: {}, labels: []};
+    });
+    (client as unknown as {item: typeof item}).item = item;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    await store.openArtifact(9n);
+    await store.pick(7n);
+    expect(store.get('selection').item?.id).toBe(7n);
+    expect(store.get('selection').artifact?.id).toBe(9n);
+
+    store.clear();
+    expect(store.get('selection')).toEqual({item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
+
+    // Asked before the next clear and answered after it.
+    const late = store.pick(8n);
+    await clock.advance(1);
+    store.clear();
+    answer!();
+    await late;
+    expect(store.get('selection').item).toBeNull();
+  });
+
+  it('does not show a refusal or an artifact that lands after a clear', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const answers: (() => void)[] = [];
+    const held = () => new Promise<void>((resolve) => answers.push(resolve));
+    Object.assign(client, {
+      item: vi.fn(async () => {
+        await held();
+        throw new TesseraError(404, 'not-found', 'no such item');
+      }),
+      artifact: vi.fn(async () => {
+        await held();
+        return {layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: null};
+      })
+    });
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    const picked = store.pick(7n);
+    const opened = store.openArtifact(9n);
+    await clock.advance(1);
+    expect(answers).toHaveLength(2);
+    store.clear();
+    for (const answer of answers) answer();
+    await Promise.all([picked, opened]);
+    expect(store.get('selection')).toEqual({item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
   });
 
   it('asks for a hovered record once, holds a refusal as none, and asks again after a clear', async () => {

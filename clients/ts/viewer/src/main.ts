@@ -1,6 +1,6 @@
 import '@tesseradb/components';
 import type {TesseraExplorer, MapProbe} from '@tesseradb/components';
-import {TesseraClient, createStore, dataToWorldXY, type Store as DataStore} from '@tesseradb/client';
+import {TesseraClient, createStore, dataToWorldXY, refusalOf, type Store as DataStore} from '@tesseradb/client';
 import type {ViewInfo} from '@tesseradb/client';
 import {basemapLayer, coverFor, type BasemapCover, type Camera} from './basemap.js';
 import {loadDatasets, readConfig, type Dataset} from './config.js';
@@ -259,6 +259,8 @@ async function publishProbe(): Promise<void> {
   await explorer.updateComplete;
   const map = explorer.map;
   if (!map) return;
+  // The frame gaps and the cluster sample the harness reads are filled only while measuring.
+  map.measure = true;
   const probe = map.probe as MapProbe & {lanes: Lanes};
   probe.lanes ??= {decode: [], absorb: {split: [], store: [], remap: [], remapPoints: [], sliceMaxMs: 0}, region: null, coverage: null, longTasks: []};
   window.__tesseraProbe = probe;
@@ -591,15 +593,13 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
       session = await client.authorise(first.terms);
       meta = await client.meta(session.token);
     } catch (error) {
-      // The picker's `change` handler cannot await this, so a refusal here used to vanish and
-      // leave `switching` set for good — the panel said "establishing a session…" over an empty
-      // map with nothing to say why. It is reported where every other refusal is.
+      // The picker's `change` handler cannot await this, so the refusal is reported here, where
+      // every other refusal is, and `switching` is cleared.
       if (mine !== activation) return;
-      const e = error as {code?: string; detail?: string; message?: string};
       store.update((s) => {
         s.switching = false;
         s.status = 'refused';
-        s.lastError = {code: e.code ?? 'switch-failed', detail: e.detail ?? e.message ?? String(error)};
+        s.lastError = refusalOf(error);
         s.failures = [...s.failures.slice(-19), {...s.lastError, at: Date.now()}];
       });
       return;
@@ -628,6 +628,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
           : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
       s.switching = false;
     });
+    explorer.titleField = dataset.titleField ?? '';
     writeViewToUrl(opening.id);
     followCameraWithBasemap(opening);
     void installBasemap(opening);

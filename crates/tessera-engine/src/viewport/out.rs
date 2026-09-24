@@ -54,7 +54,7 @@ pub struct PointColumns {
     pub codes: Vec<u64>,
     /// One buffer per render scalar, in declaration order — see [`ViewportOut::scalar_names`]. A
     /// `filter`-only or blob-resident column has no slot here.
-    pub scalars: Vec<ColumnBuf>,
+    pub scalars: Vec<PointScalar>,
     /// One column per layer this response served artifacts from: the deepest served artifact
     /// each point belongs to, or `None` — see [`crate::membership_column`]. Empty if none served.
     pub membership: Vec<crate::membership_column::MembershipColumn>,
@@ -126,6 +126,65 @@ impl PointColumns {
             bytes += self.tessera_ids.len().div_ceil(8);
         }
         bytes
+    }
+}
+
+/// One render column's gathered values, and which points carry one.
+///
+/// `present` is `None` where every point carries a value, the common case, which then costs no
+/// buffer. Otherwise `present[i]` is false where point *i* has no value: a number, bool,
+/// timestamp or string whose segment's presence record says so, or whose segment has no such
+/// column. `values[i]` is then the type's zero and means nothing. A category has no `present`;
+/// code 0 in `values` is its absence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PointScalar {
+    pub values: ColumnBuf,
+    pub present: Option<Vec<bool>>,
+}
+
+impl PointScalar {
+    pub(super) fn empty(ty: ScalarType) -> Self {
+        PointScalar {
+            values: ColumnBuf::empty(ty),
+            present: None,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Whether point `i` carries a value.
+    pub fn is_present(&self, i: usize) -> bool {
+        self.present.as_ref().is_none_or(|present| present[i])
+    }
+
+    /// Concatenate `other` onto this column. Where only one side has absences, the other's
+    /// validity is written out as all present.
+    fn append(
+        &mut self,
+        other: PointScalar,
+    ) -> std::result::Result<(), (&'static str, &'static str)> {
+        let (held, arriving) = (self.values.len(), other.values.len());
+        match (&mut self.present, other.present) {
+            (None, None) => {}
+            (Some(present), None) => present.resize(held + arriving, true),
+            (present, Some(more)) => {
+                let mut all = present.take().unwrap_or_else(|| vec![true; held]);
+                all.extend(more);
+                *present = Some(all);
+            }
+        }
+        self.values.append(other.values)
+    }
+
+    fn wire_bytes_estimate(&self) -> usize {
+        let validity = self.present.as_ref().map_or(0, |present| present.len().div_ceil(8));
+        self.values.wire_bytes_estimate() + validity
     }
 }
 
@@ -454,7 +513,7 @@ pub(super) fn emit_points(
         scalars: schema
             .render_scalars
             .iter()
-            .map(|d| ColumnBuf::empty(d.arrow_type))
+            .map(|d| PointScalar::empty(d.arrow_type))
             .collect(),
         membership: schema
             .membership

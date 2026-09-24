@@ -31,7 +31,7 @@ import './explorer.js';
  * new model, so it sends `ready` again.
  *
  * **What crosses the kernel boundary is control and selection, never data.** `url` comes down
- * (with `explorer_layout` and `height`, which are the cell's, not the store's); `view`, `bbox`,
+ * (with `explorer_layout`, `height` and `title_field`, which are the cell's, not the store's); `view`, `bbox`,
  * `layers`, `colour_by` and `filters` go both ways; `selected`, `selected_artifact`
  * and `region` go up. Up-syncs happen **at the settle** — when the store's status reaches `shown`
  * for a new composition, and when a region's counts arrive — never per frame, so the kernel is
@@ -192,7 +192,6 @@ function controlOf(column: string, control: ColumnDraft, op: Record<string, unkn
       }
       throw bad();
     }
-    case 'string':
     case 'keyword': {
       if ((name === 'eq' || name === 'prefix' || name === 'contains') && typeof value === 'string') {
         return {family: control.family, needle: value, op: name, verb};
@@ -448,6 +447,9 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   model.on('change:height', () => {
     for (const v of state.views.values()) v.explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
   });
+  model.on('change:title_field', () => {
+    for (const v of state.views.values()) v.explorer.titleField = titleFieldOf(model);
+  });
   model.on('destroy', () => state.dispose());
 
   // What `render` calls, kept on the state so a test's fake model needs no second entry point.
@@ -465,6 +467,12 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   return () => state.dispose();
 }
 
+/** The record field that titles a point, as the kernel set it; empty where it set none. */
+function titleFieldOf(model: WidgetModel): string {
+  const f = model.get('title_field');
+  return typeof f === 'string' ? f : '';
+}
+
 const mounts = new WeakMap<ModelState, (explorer: TesseraExplorer) => () => void>();
 
 export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement; signal?: AbortSignal}): () => void {
@@ -477,6 +485,7 @@ export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement
   const explorer = document.createElement('tessera-explorer') as TesseraExplorer;
   explorer.layout = (model.get('explorer_layout') as 'docked' | 'overlay') || 'docked';
   explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
+  explorer.titleField = titleFieldOf(model);
   el.append(explorer);
   const unmount = mounts.get(state)!(explorer);
   const v = state.views.get(explorer)!;

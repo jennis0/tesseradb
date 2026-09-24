@@ -46,6 +46,7 @@ function transferables(result: {
   for (const column of Object.values(result.scalars)) {
     const values = column.values as unknown;
     if (ArrayBuffer.isView(values)) out.push((values as ArrayBufferView).buffer);
+    if (column.present) out.push(column.present.buffer);
   }
   for (const column of Object.values(result.membership)) out.push(column.index.buffer, column.ids.buffer);
   // A buffer listed twice is a `DataCloneError`, and Arrow columns can share one.

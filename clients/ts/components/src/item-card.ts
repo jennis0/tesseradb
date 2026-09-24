@@ -9,17 +9,16 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-item-card>` — the selected point (design §5.3 tier 2), as the boards draw it: the
- * title, then the fields **by name, in declaration order** as a label/value grid, then *Open* and
- * *Copy id*. `/v1/items` omits a field the item carries no value for, so position lies and a card
+ * `<tessera-item-card>`: the selected point. A headline, then the fields **by name, in
+ * declaration order** as a label/value grid, then Open and Copy id. `/v1/items` omits a field the item carries no value for, so position lies and a card
  * reading positionally would misattribute every field after the first gap. A text column lives in
  * the record blob and never appears in a viewport response, so this is the only place its prose
  * is ever seen. A category arrives already resolved to its key.
  *
- * The title is the first declared text column that has a value (`title` by name where there is
- * one); a slot per field — `field-<name>` — lets a host render one as a link into their
- * application without replacing the card, and `tessera-open` (the id as a decimal string) does
- * the same for *Open*.
+ * The headline is the field the host names in `title-field`, else the item's id, and every other
+ * field is in the grid, the id among them when it is not the headline. A slot per field
+ * (`field-<name>`) lets a host render one as a link into their application without replacing the
+ * card, and `tessera-open` (the id as a decimal string) does the same for Open.
  *
  * **A miss and a broken pick are different.** Nothing under the cursor is the ordinary case; a
  * hit whose layer carried no identity is a fault in the map and says so, rather than reading as
@@ -60,7 +59,7 @@ export class TesseraItemCard extends TesseraElement {
       }
       [part='close'] {
         display: inline-flex;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
       .chips {
         display: flex;
@@ -69,8 +68,8 @@ export class TesseraItemCard extends TesseraElement {
         margin: 4px 0 10px;
       }
       [part='view-chip'][aria-current='true'] {
-        background: var(--tessera-accent);
-        color: var(--tessera-accent-ink);
+        background: var(--_tessera-accent);
+        color: var(--_tessera-accent-ink);
       }
       [part='scoped'] {
         margin-top: 12px;
@@ -86,6 +85,8 @@ export class TesseraItemCard extends TesseraElement {
   @property({attribute: false}) accessor refusal: Refusal | null = null;
   @property({attribute: false}) accessor pick: PickOutcome = null;
   @property({attribute: false}) accessor meta: Meta | null = null;
+  /** The field the headline shows; unset, the headline is the item's id. */
+  @property({attribute: 'title-field'}) accessor titleField = '';
 
   private get shown(): {item: {id: bigint; detail: ItemDetail} | null; refusal: Refusal | null; meta: Meta | null} {
     // A host feeding the card by property still gets the store's schema where one is adopted: the
@@ -119,18 +120,21 @@ export class TesseraItemCard extends TesseraElement {
     const names = Object.keys(fields);
     const ordered = [...declared.map((c) => c.name).filter((n) => n in fields), ...names.filter((n) => !declared.some((c) => c.name === n))];
     const id = idString(item.id);
-    // The title: a declared text column named `title` with a value, else the first with prose.
-    const titleName = ordered.find((n) => n === 'title' && typeof fields[n] === 'string') ?? ordered.find((n) => declared.find((c) => c.name === n)?.arrowType === 'utf8' && typeof fields[n] === 'string');
+    const titleName = this.titleField && fields[this.titleField] !== undefined && fields[this.titleField] !== null ? this.titleField : null;
     const rest = ordered.filter((n) => n !== titleName);
     const copy = () => void navigator.clipboard?.writeText(id);
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
-      ${titleName ? html`<div part="field" class="card-title" data-name=${titleName}><slot name=${`field-${titleName}`}><span part="value">${String(fields[titleName])}</span></slot></div>` : nothing}
+      ${titleName
+        ? html`<div part="headline" class="card-title" data-name=${titleName}><slot name=${`field-${titleName}`}><span part="value">${present(fields[titleName], declared.find((c) => c.name === titleName))}</span></slot></div>`
+        : html`<div part="headline" class="card-title mono" data-name="tessera_id">${id}</div>`}
       ${this.views(item.detail.views, meta)}
       ${this.labels(item.detail.labels)}
       <div class="field">
         ${rest.map((name) => this.field(name, fields[name], declared.find((c) => c.name === name)))}
-        <div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>
+        ${titleName
+          ? html`<div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>`
+          : nothing}
         ${externalId ? html`<div part="field" data-name="external_id" style="display:contents"><span part="label" class="k">external_id</span><span part="value" class="v mono">${externalId}</span></div>` : nothing}
       </div>
       ${this.scoped(item.detail.scoped)}
@@ -223,12 +227,15 @@ export class TesseraItemCard extends TesseraElement {
   }
 }
 
-/** A value as text, by the column's declared type — a category is already its key. */
+/** A `timestamp_us` value in full, as an ISO date-time. */
+export function timestampText(value: number | bigint): string {
+  return new Date(Number(value) / 1000).toISOString();
+}
+
+/** A value as text, by the column's declared type; a category is already its key. */
 export function present(value: unknown, column: DeclaredScalar | undefined): string {
   if (value === null || value === undefined) return '—';
-  if (column?.arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) {
-    return new Date(Number(value) / 1000).toISOString().slice(0, 10);
-  }
+  if (column?.arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return timestampText(value);
   if (typeof value === 'number') return Number.isInteger(value) ? value.toLocaleString('en-GB') : String(value);
   if (typeof value === 'boolean') return value ? 'yes' : 'no';
   return String(value);

@@ -14,6 +14,8 @@ export type Dataset = {
   items: number;
   /** The text columns this bundle indexes — the reason one dataset differs from another. */
   prose: string[];
+  /** The record field that titles a point in the hover and the item card; absent, points show their ids. */
+  titleField?: string;
   viewerUrl: string;
   sessionUrl: string;
   presets: Preset[];

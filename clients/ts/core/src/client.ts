@@ -5,6 +5,7 @@ import {
   type PointsPart,
   type ViewportHead
 } from './decode.js';
+import {base64} from './control.js';
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
@@ -104,39 +105,29 @@ export type TesseraClientOptions = {
   viewerUrl: string;
   sessionUrl: string;
   /**
-   * Needed only by `authorise`. Holding it in a browser is a development shape — see
-   * `crates/tessera-server/src/cors.rs` for why the server key that permits it is off unless
-   * typed, and client-interaction §7 for the topology that is actually recommended.
+   * Needed only by `authorise` and `revoke`. A browser holds it only where the server allows it,
+   * which a deployment turns on for development.
    */
   sessionCredential?: string;
   /**
-   * Per-response decode time — an instrument's hook (design §5.10's measurements), never a
-   * behaviour: `ms` from bytes-in to typed-arrays-out as seen from this thread, with the
-   * response's size and point count, and `workerMs` — the worker's own decode time, so the
-   * difference is what the response spent queued behind another in its lane (`null` where it
-   * decoded inline).
-   *
-   * **On a streamed response `ms` is head-to-last-part and so includes the wire**, there being no
-   * moment at which the bytes are all in hand and none of them decoded; `workerMs` is then the sum
-   * of the frames' own decode times, and is the decode figure.
+   * Called once per viewport response with its decode time. `ms` runs from bytes in to typed
+   * arrays out as seen from this thread; `workerMs` is the worker's own decode time, `null` where
+   * the response decoded inline, so the difference is time spent queued. On a streamed response
+   * `ms` runs from the head to the last part and includes the wire, and `workerMs` is the sum of
+   * the frames' decode times.
    */
   onDecode?: (ms: number, bytes: number, points: number, workerMs: number | null) => void;
-  /**
-   * Override where responses are decoded. Defaults to a worker in a browser, inline elsewhere.
-   *
-   * Exists for tests and for a consumer that already owns a worker pool — not as a switch anyone
-   * needs to think about.
-   */
+  /** Where responses are decoded: a worker in a browser and inline elsewhere unless given. */
   decoder?: Decoder;
+  /** Used for every request in place of the global `fetch`. */
+  fetch?: typeof fetch;
+  /** Sent on every request. A verb's own `authorization` and `content-type` are set after these. */
+  headers?: Record<string, string>;
 };
 
 /**
- * The five viewer/session verbs, and nothing else.
- *
- * No cache, no view key, no session lifetime, no replica state — client-interaction §10's session
- * client layer, which is what a REST user would have written anyway. The replica store goes
- * *above* this, not inside it, so that this file stays a thing you can read in one sitting and
- * check against the contracts spec.
+ * The viewer and session routes, one method each. It holds no cache, session or replica state;
+ * the store above it holds those.
  */
 export class TesseraClient {
   /**
@@ -149,56 +140,83 @@ export class TesseraClient {
 
   constructor(private readonly opts: TesseraClientOptions) {}
 
+  /**
+   * One request, through the host's `fetch`, with the host's headers and then the route's own,
+   * which replace a host header of the same name in any case.
+   */
+  private send(url: string, init: Omit<RequestInit, 'headers'> & {headers?: Record<string, string>} = {}): Promise<Response> {
+    const headers = new Headers(this.opts.headers);
+    for (const [name, value] of Object.entries(init.headers ?? {})) headers.set(name, value);
+    return (this.opts.fetch ?? fetch)(url, {...init, headers});
+  }
+
   /** Release the decode worker, if one was created. */
   close(): void {
     this.decoder?.close();
     this.decoder = null;
   }
 
-  async authorise(terms: string[]): Promise<Session> {
+  async authorise(terms: string[], signal?: AbortSignal): Promise<Session> {
     if (!this.opts.sessionCredential) {
       throw new Error('authorise needs a sessionCredential');
     }
-    // **`btoa` takes bytes, not text, and a term is text.** It maps each UTF-16 code unit to one
-    // byte: it throws `InvalidCharacterError` above U+00FF, and below it silently emits Latin-1
-    // rather than UTF-8. The session plane base64-decodes this to a `Vec<u8>` and reads it as UTF-8
-    // JSON (`crates/tessera-server/src/session.rs`), so both halves of that are wrong — a term
-    // carrying an en-dash refuses the whole authorise, and one carrying an accent authorises
-    // against bytes no dictionary holds. Encode to UTF-8 first, then base64 the bytes.
-    const bytes = new TextEncoder().encode(JSON.stringify({terms}));
-    // Chunked because `String.fromCharCode(...bytes)` spreads one argument per byte and overflows
-    // the call stack on a candidate list of any size.
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += 0x8000) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    }
-    const authData = btoa(binary);
-    const response = await fetch(`${this.opts.sessionUrl}/session/authorise`, {
+    // The session plane reads `auth_data` as base64 of UTF-8 JSON.
+    const authData = base64(new TextEncoder().encode(JSON.stringify({terms})));
+    const response = await this.send(`${this.opts.sessionUrl}/session/authorise`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${this.opts.sessionCredential}`,
         'content-type': 'application/json'
       },
-      body: JSON.stringify({auth_data: authData})
+      body: JSON.stringify({auth_data: authData}),
+      signal
     });
     if (!response.ok) await fail(response);
     const body = (await response.json()) as {token: string; token_id: number; expires_at: number};
     return {token: body.token, tokenId: body.token_id, expiresAt: body.expires_at};
   }
 
-  async meta(token: string): Promise<Meta> {
-    const response = await fetch(`${this.opts.viewerUrl}/v1/meta`, {
-      headers: {authorization: `Bearer ${token}`}
+  /** End a session by its `tokenId`, so the token itself is not sent again. An id naming no live session is not refused. */
+  async revoke(tokenId: number, signal?: AbortSignal): Promise<void> {
+    if (!this.opts.sessionCredential) {
+      throw new Error('revoke needs a sessionCredential');
+    }
+    const response = await this.send(`${this.opts.sessionUrl}/session/revoke`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.opts.sessionCredential}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({token_id: tokenId}),
+      signal
+    });
+    if (!response.ok) await fail(response);
+  }
+
+  /** `GET /v1/meta`. A body missing a field the contract requires is refused. */
+  async meta(token: string, signal?: AbortSignal): Promise<Meta> {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/meta`, {
+      headers: {authorization: `Bearer ${token}`},
+      signal
     });
     if (!response.ok) await fail(response);
     const m = (await response.json()) as RawMeta;
+    requireFields(m, META_FIELDS, '/v1/meta');
+    requireFields(m.selection, SELECTION_FIELDS, "/v1/meta's selection");
+    for (const v of m.views) requireFields(v, VIEW_FIELDS, 'a view in /v1/meta');
+    for (const g of m.groups) requireFields(g, GROUP_FIELDS, 'a group in /v1/meta');
+    for (const c of m.declared_scalars) requireFields(c, DECLARED_FIELDS, 'a declared scalar in /v1/meta');
+    for (const c of m.scoped_scalars) requireFields(c, SCOPED_FIELDS, 'a scoped scalar in /v1/meta');
+    for (const f of m.filter_operands) requireFields(f, OPERAND_FIELDS, 'a filter operand in /v1/meta');
+    for (const l of m.layers) {
+      requireFields(l, LAYER_FIELDS, 'a layer in /v1/meta');
+      for (const v of l.levels) requireFields(v, LEVEL_FIELDS, `a level of layer ${l.name} in /v1/meta`);
+    }
+    const category = (c: RawCategory | null) => (c ? {vocabulary: c.vocabulary, kind: c.kind, visibility: c.visibility} : null);
     return {
       apiVersion: m.api_version,
+      bundleFormat: m.bundle_format,
       idset: m.idset,
-      // The frame and the four projection fields ride with the view they describe, because that
-      // is where the server declares them: both belong to a view, and two views of one bundle may
-      // quantise and project differently (decision 0040). `projection.ts` is what a client does
-      // with them.
       views: m.views.map((s) => ({
         id: s.id,
         displayName: s.display_name,
@@ -212,13 +230,9 @@ export class TesseraClient {
         worldAspect: s.world_aspect,
         tileScheme: s.tile_scheme,
         tile: s.tile,
-        // The three roster fields are one record on the wire and one object here — a plain view
-        // has all three null, and `group` alone decides which case this is (`views.md` §3.2).
-        roster: s.group === null ? null : {group: s.group, key: s.key!, metadata: s.metadata ?? {}}
+        // The three roster fields are null together on a plain view, so `group` decides the case.
+        roster: s.group === null ? null : {group: s.group, key: s.key!, metadata: s.metadata!}
       })),
-      // The orderings, so a client can offer previous-and-next without interpreting a key. Empty
-      // is what a deployment of plain views alone publishes, and it wants the same rendering as
-      // "no groups here" — no group picker.
       groups: m.groups.map((g) => ({
         name: g.name,
         title: g.title,
@@ -228,13 +242,21 @@ export class TesseraClient {
       declaredScalars: m.declared_scalars.map((s) => ({
         name: s.name,
         arrowType: s.arrow_type,
-        // Null for a plain column, and the absence is the whole signal: without it a `u16`
-        // category is indistinguishable from a `u16` integer, since the hot path ships the code.
-        category: s.category
-          ? {vocabulary: s.category.vocabulary, kind: s.category.kind, visibility: s.category.visibility}
-          : null,
+        category: category(s.category),
         render: s.render,
-        index: s.index
+        index: s.index,
+        analyser: s.analyser,
+        homes: s.homes
+      })),
+      scopedScalars: m.scoped_scalars.map((s) => ({
+        name: s.name,
+        arrowType: s.arrow_type,
+        scope: {group: s.scope.group},
+        category: category(s.category),
+        analyser: s.analyser,
+        render: s.render,
+        index: s.index,
+        views: s.views
       })),
       selection: {
         kMin: m.selection.k_min,
@@ -242,39 +264,35 @@ export class TesseraClient {
         maxK: m.selection.max_k,
         thetaTargetMarks: m.selection.theta_target_marks,
         maxUnderlayOffset: m.selection.max_underlay_offset,
-        maxCategoryValues: m.selection.max_category_values ?? 1_000,
-        maxRegionVertices: m.selection.max_region_vertices ?? 10_000,
-        maxRegionCells: m.selection.max_region_cells ?? 262_144,
-        maxBrowseRows: m.selection.max_browse_rows ?? 200
+        maxCategoryValues: m.selection.max_category_values,
+        maxRegionVertices: m.selection.max_region_vertices,
+        maxRegionCells: m.selection.max_region_cells,
+        maxBrowseRows: m.selection.max_browse_rows,
+        maxShapeVertices: m.selection.max_shape_vertices,
+        maxSuggestions: m.selection.max_suggestions,
+        maxSuggestionWalk: m.selection.max_suggestion_walk,
+        maxSuggestSetEntities: m.selection.max_suggest_set_entities,
+        maxPageRows: m.selection.max_page_rows,
+        maxPageBytes: m.selection.max_page_bytes
       },
-      // Older servers do not publish it; fall back to the documented default rather than
-      // refusing to run against them.
-      maxTilesPerRequest: m.selection.max_tiles_per_request ?? 262_144,
-      // Absent, not merely empty, when the schema declares nothing filterable — so the fallback is
-      // the empty list and a client draws no filter controls, which is the correct rendering of a
-      // bundle that has none.
-      filterOperands: (m.filter_operands ?? []).map((f) => ({
+      maxTilesPerRequest: m.selection.max_tiles_per_request,
+      filterOperands: m.filter_operands.map((f) => ({
         column: f.column,
         family: f.family,
         operands: f.operands,
-        // Absent for an entity-scoped column, which is every column of a bundle that declares no
-        // view group — so the field is omitted rather than nulled, and a client that never met a
-        // scoped attribute reads the list exactly as it did before.
+        // Present only on a group-scoped column.
         ...(f.scope ? {scope: {group: f.scope.group}} : {})
       })),
-      // Gate-filtered by the server, so this list *is* what this principal may know about — and
-      // the empty list is the honest rendering of both "no layers here" and "none you may reach".
-      layers: (m.layers ?? []).map((l) => ({
+      // Filtered per principal by the server: the layers this principal may know exist.
+      layers: m.layers.map((l) => ({
         name: l.name,
         title: l.title,
         views: l.views,
         membership: l.membership,
         hierarchy: {kind: l.hierarchy.kind, pruneChildren: l.hierarchy.prune_children},
-        levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom ?? null})),
+        levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom})),
         computedContent: l.computed_content,
-        // The kind of the layer's one drawn geometry, or null; a server that publishes none is
-        // a server older than the shape columns, and the map then draws boxes for good.
-        shape: l.shape ?? null,
+        shape: l.shape,
         suppliedContent: l.supplied_content,
         depsOn: l.depends_on,
         version: l.version
@@ -283,67 +301,42 @@ export class TesseraClient {
   }
 
   /**
-   * `k` is omitted from the body unless the caller sets it, so the deployment's own ceiling is the
-   * default — contracts §3.2's rule, and the reason a caller who never mentions `k` cannot
-   * decrease it.
+   * `POST /v1/viewport`. A field the caller leaves unset is left out of the body, so the server's
+   * own default applies; `k` defaults to the deployment's ceiling.
    */
   async viewport(
     token: string,
     req: ViewportRequest,
     signal?: AbortSignal,
-    /** Route decode to the speculative lane — see {@link Decoder.decode}. */
+    /** Decode on the speculative lane; see {@link Decoder.decode}. */
     background = false,
     /**
-     * Take each points frame as it lands, rather than the whole response at the end.
-     *
-     * **With a sink the returned response carries no points**: every one of them went to the sink,
-     * and handing them over twice would double both the memory and the work. Without one the
-     * response is what it always was. `k = 0` has no points frames and ignores this.
+     * Takes each points frame as it lands. With a sink the returned response carries no points,
+     * since each went to the sink. A request with `k = 0` has no points frames.
      */
     onPart?: PartSink
   ): Promise<ViewportResponse> {
+    // Each optional field is sent only when the caller set it, so an unset one takes the server's
+    // default. For `layers`, `levels` and `computed` an empty array is a request for none, which
+    // differs from leaving the field out.
     const body: Record<string, unknown> = {view: req.view, zoom: req.zoom};
     if (req.bbox) body.bbox = req.bbox;
-    // JSON has no 64-bit integer, and a Morton prefix at depth 16 needs 32 bits — inside `Number`'s
-    // exact range, so the narrowing is lossless here and stays so for every depth the grid allows.
+    // A tile prefix at depth 16 needs 32 bits, which a JSON number holds exactly.
     if (req.tiles) body.tiles = req.tiles.map(Number);
     if (req.k !== undefined) body.k = req.k;
     if (req.underlayOffset) body.underlay_offset = req.underlayOffset;
-    // Omitted when null, which is the unfiltered request. An empty `all_of` would *also* be
-    // unfiltered, but sending one makes every caller's "no filters" state a distinct request shape
-    // from the one a caller who never mentioned filters sends — and a cache keyed on the body would
-    // then hold two entries for one question.
     if (req.filters) body.filters = req.filters;
-    // The second expression, beside the first and never a second endpoint
-    // (`highlight-and-hierarchy.md` §2). Omitted when null for the reason `filters` is: a request
-    // with an empty highlight and one that never mentioned a highlight are the same question.
     if (req.highlight) body.highlight = req.highlight;
-    // Sent only when named, so the default stays the server's own (`"full"`) and a caller who
-    // never mentions it sends the request shape it always sent — the same arrangement
-    // `artifact_rows` takes, for the same reason.
     if (req.pointRows !== undefined) body.point_rows = req.pointRows;
-    // Sent exactly as given, `[]` included: the wire is `string[] | 'all'`, where `[]` (or absent)
-    // is "no layers, charge me nothing", `'all'` is "every layer I reach", and an array is those ∩
-    // the reachable set. The server's old convention that absent meant *all* is gone; this sends
-    // what the caller passed and never substitutes one for the other.
     if (req.layers !== undefined) body.layers = req.layers;
     if (req.artifactBudget !== undefined) body.artifact_budget = req.artifactBudget;
-    // Sent only when named, so the default stays the server's own (`"full"`) and a caller who
-    // never mentions it sends the request shape it always sent.
     if (req.artifactRows !== undefined) body.artifact_rows = req.artifactRows;
-    // **Absent is a real selection here, not a missing one.** Omitting `levels` asks the server to
-    // follow each layer's own declared zoom ranges against this request's depth, so a client that
-    // never thinks about levels gets the one a map would draw. Sent only when the caller named
-    // something, so "follow the declaration" and "give me these" stay distinct request shapes.
     if (req.levels !== undefined) body.levels = req.levels;
-    // **Absent is the layer's declaration and an empty array is *none***, so this is sent only
-    // when the caller named something — an omitted field and `[]` mean opposite things here.
     if (req.computed !== undefined) body.computed = req.computed;
-    // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
-    // an opaque string on this side so a client never has to know its shape.
+    // The stamp is held as the string the server sent and travels as the object it parses to.
     if (req.stamp) body.pin = JSON.parse(req.stamp);
 
-    const response = await fetch(`${this.opts.viewerUrl}/v1/viewport`, {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/viewport`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
       body: JSON.stringify(body),
@@ -353,24 +346,17 @@ export class TesseraClient {
     const stage = response.headers.get('x-tessera-stage-ns');
     const coordinates = {
       identityKey: response.headers.get('x-tessera-identity-key') ?? '',
-      // Unquoted here: the quotes are HTTP's entity-tag syntax, not part of the value, and every
-      // comparison this client makes is against another value it took from this same header.
+      // The quotes are the entity-tag syntax and not part of the key.
       contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
       pin: response.headers.get('x-tessera-pin'),
       stale: response.headers.get('x-tessera-stale') === '1',
-      // Absent when the request carried no region leaf; `exact` or a cover at a depth otherwise
-      // (`selection-operand.md` §6). A header, so a counts-only reader sees it without a decode.
+      // Absent unless the request carried a region leaf.
       region: parseRegionVerdict(response.headers.get('x-tessera-region'))
     };
     this.decoder ??= this.opts.decoder ?? createDecoder();
-    const decodeStarted = performance.now();
-    // **A counts-only response decodes on this thread.** `k = 0` carries tiles and artifacts and
-    // no points (contracts §3.2) — a few kilobytes to a couple of megabytes of fixed-width rows,
-    // milliseconds to decode — and the worker lanes are serial: measured on the demo, a region's
-    // count queued 7.9 s behind a million-point decode in the lane it was dealt, for a response
-    // the server answered in 5 ms. The channel's and the region's asks are exactly the requests
-    // whose latency the user is waiting on, so they never queue behind a point sweep. It has no
-    // points frames either, so there is nothing for a part sink to be handed.
+    // A counts-only response (`k = 0`) has no points and decodes in milliseconds, so it decodes on
+    // this thread rather than queueing behind a point decode in a worker lane. It has no points
+    // frames to hand a part sink.
     const counts = req.k === 0;
     const decoded =
       onPart && !counts
@@ -385,9 +371,7 @@ export class TesseraClient {
     return {
       result: decoded.result,
       timings: {
-        // Time-to-**first-flush**, not the whole response (`streamed-serving.md` §6): the server's
-        // own cost is the sweep, and the trailer's `stream_us` — which includes every wait on this
-        // client's own reading — is deliberately not this number.
+        // The server's time to its first flush, not to the end of the stream.
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),
         stageNs: stage ? stage.split(',').map(Number) : null
@@ -591,41 +575,29 @@ export class TesseraClient {
   }
 
   /**
-   * `GET /v1/categories/{column}`: what this column's codes stand for.
+   * `GET /v1/categories/{column}`: what this column's codes stand for. Passing `codes` resolves
+   * those codes alone; omitting them enumerates the whole value set, a page at a time until the
+   * server returns no cursor.
    *
-   * Two forms, and **the first is the one to reach for**. Passing `codes` resolves exactly those —
-   * which is what a viewer wants, since it knows which codes it drew, and it means a 60,000-value
-   * vocabulary never crosses the wire. Omitting them enumerates the whole set, paging until the
-   * server stops handing back a cursor.
-   *
-   * **A code that comes back unresolved is not an error.** "No such code" and "a value you cannot
-   * see" are one outcome by contract (contracts §3.2), so the caller gets a shorter list rather
-   * than a refusal, and must not treat a missing code as a failure. A code the client actually
-   * *drew* always resolves: its point was admitted by the mask, so the value has a visible member.
-   *
-   * Throws {@link TesseraError} for a real refusal — notably `500 fail-closed` on a `derived`
-   * column, whose gate is specified and unbuilt.
+   * A code missing from the answer is either unknown or a value this principal cannot see, and
+   * the server does not say which. A code the client drew always resolves, since a visible point
+   * carries it. A refusal throws {@link TesseraError}.
    */
   async categories(
     token: string,
     column: string,
-    opts: {codes?: readonly number[]; limit?: number; view?: string} = {}
+    opts: {codes?: readonly number[]; limit?: number; view?: string; signal?: AbortSignal} = {}
   ): Promise<CategoryValue[]> {
-    // Encoded, because a column name reaches this from `/v1/meta` rather than from a literal.
     const base = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}`;
     const out: CategoryValue[] = [];
-    // The view the caller is asking under (contracts §3.2): what a **group-scoped** category's
-    // codes stand for is that view's own column, and the route resolves the view before the
-    // column whatever the column's scope — so naming it costs an entity-scoped column nothing and
-    // is the only thing that answers a scoped one.
+    // A group-scoped category's codes are per view, so the view decides which column answers.
     const view = opts.view ? `view=${encodeURIComponent(opts.view)}` : '';
 
     if (opts.codes) {
-      // Nothing to ask about. Returning early rather than sending `codes=` keeps an empty request
-      // from being read as the *enumeration* form, which would fetch the whole vocabulary.
+      // An empty `codes=` would be read as the enumeration form.
       if (opts.codes.length === 0) return out;
       const url = `${base}?codes=${[...opts.codes].join(',')}${view ? `&${view}` : ''}`;
-      const page = await this.categoryPage(token, url);
+      const page = await this.categoryPage(token, url, opts.signal);
       return page.values;
     }
 
@@ -636,7 +608,7 @@ export class TesseraClient {
       if (cursor !== null) params.set('after', cursor);
       if (opts.view !== undefined) params.set('view', opts.view);
       const query = params.toString();
-      const page = await this.categoryPage(token, query ? `${base}?${query}` : base);
+      const page = await this.categoryPage(token, query ? `${base}?${query}` : base, opts.signal);
       out.push(...page.values);
       cursor = page.next;
     } while (cursor !== null);
@@ -645,9 +617,10 @@ export class TesseraClient {
 
   private async categoryPage(
     token: string,
-    url: string
+    url: string,
+    signal: AbortSignal | undefined
   ): Promise<{values: CategoryValue[]; next: string | null}> {
-    const response = await fetch(url, {headers: {authorization: `Bearer ${token}`}});
+    const response = await this.send(url, {headers: {authorization: `Bearer ${token}`}, signal});
     if (!response.ok) await fail(response);
     const body = (await response.json()) as RawCategories;
     return {
@@ -657,37 +630,30 @@ export class TesseraClient {
   }
 
   /**
-   * `GET /v1/categories/{column}/suggest`: the typeahead over a category vocabulary
-   * (`value-suggestion.md`, contracts §3.2). At most `limit` values whose folded key, folded
-   * title or a word start of either has `q` as a prefix, gated exactly as `categories` — a
-   * `public` vocabulary as authored, a `derived` one iff a visible member exists — and ordered by
-   * the matched text, never by frequency, recency or the count.
+   * `GET /v1/categories/{column}/suggest`: at most `limit` values of a category whose folded key,
+   * folded title or a word start of either begins with `q`, ordered by the matched text and
+   * visible to this principal on the rule `categories` follows.
    *
-   * **Not behind the compute-admission gate, and one in flight per session.** A second call while
-   * one is outstanding is refused `429` before any work is done; this surfaces as `{status:
-   * 'superseded', retryAfterS}` rather than a thrown {@link TesseraError}, because a debounced
-   * caller's answer to it is *retry*, not *render a refusal* — and a store that never debounces
-   * quite fast enough should not have to catch an exception to know that.
-   *
-   * `q` is echoed on the response exactly as sent (never folded), so a caller can match a page to
-   * the request it has in flight rather than trust arrival order.
+   * A session has one suggestion in flight at a time. The server refuses a second with `429`, and
+   * this returns `{status: 'superseded', retryAfterS}` for it rather than throwing, since the
+   * caller's answer is to retry. The response echoes `q` as sent, so a caller can match a page to
+   * the request it answers.
    */
   async suggest(
     token: string,
     column: string,
     q: string,
-    opts: {limit?: number; counts?: boolean; view?: string} = {}
+    opts: {limit?: number; counts?: boolean; view?: string; signal?: AbortSignal} = {}
   ): Promise<SuggestResult> {
     const params = new URLSearchParams({q});
     if (opts.limit !== undefined) params.set('limit', String(opts.limit));
     if (opts.counts) params.set('counts', 'true');
     if (opts.view !== undefined) params.set('view', opts.view);
     const url = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}/suggest?${params.toString()}`;
-    const response = await fetch(url, {headers: {authorization: `Bearer ${token}`}});
+    const response = await this.send(url, {headers: {authorization: `Bearer ${token}`}, signal: opts.signal});
     if (response.status === 429) {
-      // The body carries `retry_after_s` agreeing with `Retry-After` (contracts §3.1); the header
-      // is read as the fallback for a body that failed to parse, never the other way round, since
-      // the body is what the contract actually requires here.
+      // The body's `retry_after_s` is what the contract requires; the header is the fallback for
+      // a body that does not parse.
       let retryAfterS = Number(response.headers.get('retry-after') ?? '1');
       try {
         const body = (await response.json()) as {retry_after_s?: number};
@@ -715,26 +681,16 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /v1/items/{tessera_id}`: the whole record, by declared column name.
-   *
-   * **Named, not positional.** The response is an object keyed by column name covering all three
-   * homes — rendered columns, indexed and category columns (a category as its vocabulary *key*,
-   * already resolved), and blob-resident prose. A column the item carries no value for is **absent
-   * from the object** rather than null, so `name in fields` is the presence test and a missing key
-   * is a fact about the item rather than a gap in the response.
-   *
-   * Nothing here can be read positionally against `/v1/meta`'s `declared_scalars`: the absent
-   * columns are omitted, so index *i* of the response is not column *i* of the schema.
-   *
-   * Beside the record, `labels` names the item's access labels **this session satisfies** and no
-   * others (decision 0114) — the answer to *which of my grants admits me here*, and not to *what
-   * this item is labelled*.
+   * `POST /v1/items/{tessera_id}`: the whole record, keyed by column name, a category as its
+   * vocabulary key. A column the item has no value for is absent from `fields`. `labels` names
+   * the item's access labels this session satisfies and no others.
    */
-  async item(token: string, tesseraId: bigint): Promise<ItemDetail> {
-    const response = await fetch(`${this.opts.viewerUrl}/v1/items/${tesseraId.toString()}`, {
+  async item(token: string, tesseraId: bigint, signal?: AbortSignal): Promise<ItemDetail> {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/items/${tesseraId.toString()}`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: '{}'
+      body: '{}',
+      signal
     });
     if (!response.ok) await fail(response);
     const body = (await response.json()) as {
@@ -747,48 +703,36 @@ export class TesseraClient {
     return {
       fields: body.fields ?? {},
       externalId: body.external_id ?? null,
-      // **Not defaulted either**, on `labels`' argument below: both are required by the response
-      // schema and both are always present, empty included. An empty `views` is a real answer —
-      // *none of this item's views is one you can reach* — and `?? []` would give a server that
-      // omitted the field the same reading.
+      // Required by the response schema and read as given: an empty list is an answer.
       views: body.views,
       scoped: body.scoped,
-      // **Not defaulted.** `labels` is required by the response schema and is always present,
-      // empty included — a principal satisfying none of the item's labels is a real answer with a
-      // real shape. A `?? []` here would give a server that omitted the field the same reading as
-      // one that answered "none", which is a nonconforming server made to look correct.
       labels: body.labels
     };
   }
 
   /**
-   * `POST /v1/artifacts/{tessera_id}`: one artifact's layer, key and masked count.
+   * `POST /v1/artifacts/{tessera_id}`: one artifact's layer, key, masked count and geometry under
+   * `view`, since a masked count is per view.
    *
-   * **`view` is required here and optional on {@link item}**, and the asymmetry is real: a point's
-   * record is the same wherever it is read from, but a masked count is an intersection in row
-   * space and row space is per view.
-   *
-   * **`404` is the only failure shape, and it distinguishes nothing.** An identifier naming
-   * nothing, one naming a point, one whose layer this principal cannot reach, one suppressed, and
-   * one below its layer's existence criterion are the same answer byte for byte. A caller must not
-   * build a surface that tells them apart; there is nothing to tell them apart by. It throws
-   * {@link TesseraError} like every other refusal.
+   * An identifier naming nothing, a point, an artifact of a layer this principal cannot reach, a
+   * suppressed one and one below its layer's existence criterion all answer the same `404`, which
+   * throws {@link TesseraError}.
    */
   async artifact(
     token: string,
     tesseraId: bigint,
-    opts: {view: string; idset?: number; zoom?: number}
+    opts: {view: string; idset?: number; zoom?: number; signal?: AbortSignal}
   ): Promise<ArtifactDetail> {
     const body: Record<string, unknown> = {view: opts.view};
     if (opts.idset !== undefined) body.idset = opts.idset;
-    // The depth the shape is drawn at, for the server's vertex rule (`polygon-membership.md`
-    // §7.2): a predicate or an authored shape is generalised to the pixel at this zoom. Omitted,
-    // the whole presimplified shape is served under the vertex guard alone.
+    // The depth the shape is drawn at, which the server simplifies it to. Left out, the whole
+    // stored shape is served.
     if (opts.zoom !== undefined) body.zoom = Math.max(0, Math.min(16, Math.floor(opts.zoom)));
-    const response = await fetch(`${this.opts.viewerUrl}/v1/artifacts/${tesseraId.toString()}`, {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/${tesseraId.toString()}`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: opts.signal
     });
     if (!response.ok) await fail(response);
     const served = (await response.json()) as {
@@ -816,26 +760,15 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /v1/artifacts/browse`: a layer's hierarchy by lineage — roots, one artifact's children
-   * and parents, or a name search — each row carrying the masked count and, under a filter, the
-   * matched one (`highlight-and-hierarchy.md` §4).
+   * `POST /v1/artifacts/browse`: a layer's hierarchy by lineage (its roots, one artifact's
+   * children and parents, or a name search), each row with its masked count and, under a filter,
+   * its matched count. It takes no bbox, tiles or zoom. Identifiers travel as decimal strings,
+   * since JSON has no 64-bit integer.
    *
-   * **JSON rather than Arrow**, and deliberately: a page is at most `max_browse_rows` small rows,
-   * and the verb is read by the panel and by a notebook alike.
-   *
-   * **Independent of the viewport.** It carries no bbox, no tiles and no zoom, and the answer does
-   * not move when the map does. It carries no `highlight` either: a highlighted view of a
-   * hierarchy is the filtered one, since a count under the highlight's expression is what
-   * `matchedCount` is when that expression is sent as `filters`.
-   *
-   * Identifiers travel as **decimal strings**, as they do in the `region` and `member_of` leaves
-   * and for the same reason: a `tessera_id` is `u64` and JSON has no 64-bit integer.
-   *
-   * A refusal throws {@link TesseraError} like every other. An unknown *layer* is a `422`, being
-   * deployment schema; an artifact this principal was never served is an empty page and never a
-   * refusal, so nothing here is an existence oracle.
+   * An unknown layer is a `422`. An artifact this principal was never served answers an empty
+   * page.
    */
-  async browse(token: string, req: BrowseRequest): Promise<BrowsePage> {
+  async browse(token: string, req: BrowseRequest, signal?: AbortSignal): Promise<BrowsePage> {
     const body: Record<string, unknown> = {view: req.view, layer: req.layer};
     if (req.level !== undefined) body.level = req.level;
     if (req.parent !== undefined) body.parent = req.parent.toString();
@@ -843,17 +776,17 @@ export class TesseraClient {
     if (req.filters) body.filters = req.filters;
     if (req.limit !== undefined) body.limit = req.limit;
     if (req.cursor !== undefined) body.cursor = req.cursor;
-    const response = await fetch(`${this.opts.viewerUrl}/v1/artifacts/browse`, {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/browse`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
     if (!response.ok) await fail(response);
     const page = (await response.json()) as RawBrowsePage;
     return {
       artifacts: (page.artifacts ?? []).map(browseRow),
-      // Present on the children form only and `[]` on the others — the server's own rule, read
-      // as given rather than inferred from which form was sent.
+      // Filled on the children form only.
       parents: (page.parents ?? []).map(browseRow),
       next: page.next ?? null
     };
@@ -888,9 +821,48 @@ function browseRow(r: RawBrowseRow): BrowseRow {
   };
 }
 
+/** The fields `/v1/meta` must carry, and those each of its blocks and list elements must. */
+const VIEW_FIELDS = ['id', 'display_name', 'quantisation', 'projection', 'world_aspect', 'tile_scheme', 'tile', 'group', 'key', 'metadata'];
+const GROUP_FIELDS = ['name', 'title', 'members_of', 'views'];
+const DECLARED_FIELDS = ['name', 'arrow_type', 'category', 'analyser', 'render', 'index', 'homes'];
+const SCOPED_FIELDS = ['name', 'arrow_type', 'scope', 'category', 'analyser', 'render', 'index', 'views'];
+const OPERAND_FIELDS = ['column', 'family', 'operands'];
+const LAYER_FIELDS = ['name', 'title', 'views', 'membership', 'hierarchy', 'levels', 'computed_content', 'shape', 'supplied_content', 'depends_on', 'version'];
+const LEVEL_FIELDS = ['level', 'title', 'zoom'];
+const META_FIELDS = ['api_version', 'bundle_format', 'idset', 'views', 'groups', 'declared_scalars', 'scoped_scalars', 'filter_operands', 'selection', 'layers'] as const;
+const SELECTION_FIELDS = [
+  'k_min',
+  'k_max_marks',
+  'max_k',
+  'theta_target_marks',
+  'max_underlay_offset',
+  'max_tiles_per_request',
+  'max_category_values',
+  'max_shape_vertices',
+  'max_region_vertices',
+  'max_region_cells',
+  'max_suggestions',
+  'max_suggestion_walk',
+  'max_suggest_set_entities',
+  'max_browse_rows',
+  'max_page_rows',
+  'max_page_bytes'
+] as const;
+
+/** Throws where `body` is not an object or lacks one of `fields`. */
+function requireFields(body: unknown, fields: readonly string[], where: string): void {
+  if (typeof body !== 'object' || body === null) throw new Error(`${where} is not an object; the server and this client are from different versions`);
+  for (const field of fields) {
+    if (!(field in body)) throw new Error(`${where} has no \`${field}\`, which the contract requires; the server and this client are from different versions`);
+  }
+}
+
+type RawCategory = {vocabulary: string; kind: 'declared' | 'discovered'; visibility: 'derived' | 'public'};
+
 /** `GET /v1/meta`'s snake_case wire shape, mapped to {@link Meta} above. */
 type RawMeta = {
   api_version: number;
+  bundle_format: number;
   idset: number;
   views: {
     id: string;
@@ -900,36 +872,46 @@ type RawMeta = {
     world_aspect: number | null;
     tile_scheme: TileScheme | null;
     tile: {z: number; x: number; y: number} | null;
-    /** The roster record (`views.md` §3.2); all three null together on a plain view. */
+    /** The roster record; all three null together on a plain view. */
     group: string | null;
     key: string | null;
     metadata: Record<string, ViewMetadataValue> | null;
   }[];
-  /** The view groups, each its view ids in creation order. Empty where there are none. */
   groups: {name: string; title: string | null; members_of: string | null; views: string[]}[];
   declared_scalars: {
     name: string;
     arrow_type: ArrowType;
-    category: {vocabulary: string; kind: 'declared' | 'discovered'; visibility: 'derived' | 'public'} | null;
+    category: RawCategory | null;
+    analyser: string | null;
     render: boolean;
     index: boolean;
+    homes: ('rendered' | 'value_column' | 'record')[];
   }[];
-  filter_operands?: {
+  scoped_scalars: {
+    name: string;
+    arrow_type: ArrowType;
+    scope: {group: string};
+    category: RawCategory | null;
+    analyser: string | null;
+    render: boolean;
+    index: boolean;
+    views: string[];
+  }[];
+  filter_operands: {
     column: string;
     family: FilterOperandSet['family'];
     operands: string[];
     scope?: {group: string};
   }[];
-  /** Absent on a deployment whose server predates layers; empty when this principal reaches none. */
-  layers?: {
+  layers: {
     name: string;
-    title: string;
+    title: string | null;
     views: string[];
     membership: Layer['membership'];
     hierarchy: {kind: Layer['hierarchy']['kind']; prune_children: boolean};
-    levels: {level: number; title: string; zoom: [number, number] | null}[];
+    levels: {level: number; title: string | null; zoom: [number, number] | null}[];
     computed_content: string[];
-    shape?: ShapeKind | null;
+    shape: ShapeKind | null;
     supplied_content: string[];
     depends_on: string[];
     version: number;
@@ -940,11 +922,17 @@ type RawMeta = {
     max_k: number;
     theta_target_marks: number;
     max_underlay_offset: number;
-    max_tiles_per_request?: number;
-    max_category_values?: number;
-    max_region_vertices?: number;
-    max_region_cells?: number;
-    max_browse_rows?: number;
+    max_tiles_per_request: number;
+    max_category_values: number;
+    max_shape_vertices: number;
+    max_region_vertices: number;
+    max_region_cells: number;
+    max_suggestions: number;
+    max_suggestion_walk: number;
+    max_suggest_set_entities: number;
+    max_browse_rows: number;
+    max_page_rows: number;
+    max_page_bytes: number;
   };
 };
 

@@ -76,22 +76,41 @@ export type DeclaredScalar = {
   render: boolean;
   /** Whether the column carries an entity-space filter index, as against being answered by a scan. */
   index: boolean;
+  /**
+   * For a `text` column, the `<name>/<version>` of the analyser that segmented its index; `null`
+   * for every other type.
+   */
+  analyser: string | null;
+  /** Where `/v1/items` reads the value from: `rendered`, `value_column`, `record`. */
+  homes: ('rendered' | 'value_column' | 'record')[];
 };
 
 /**
- * What a client may filter a column by, as `/v1/meta` publishes it (contracts §3.2).
- *
- * **`family` is what decides which control to draw**, and it is published rather than inferred
- * because two of the four cannot be derived from `arrowType`: a `text` column's type is a string
- * type and its operand is not a string predicate, and a `keyword`'s values are held in a dictionary
- * the server never serves. Concretely — a `category` has a value set, so `/v1/categories` fills a
- * dropdown; a `string` or `keyword` has none, because its values are row data rather than a
- * vocabulary, so the control is a free-text box and no endpoint will ever enumerate it.
+ * One group-scoped column family: one column per view of the group `scope` names, with the
+ * schema a {@link DeclaredScalar} carries.
+ */
+export type ScopedScalar = {
+  name: string;
+  arrowType: ArrowType;
+  scope: {group: string};
+  category: CategoryDescriptor | null;
+  analyser: string | null;
+  /** Whether the column arrives in the points frame under a view in {@link views}. */
+  render: boolean;
+  index: boolean;
+  /** Every view id whose rows carry this column and that this principal may reach. */
+  views: string[];
+};
+
+/**
+ * What a client may filter a column by, as `/v1/meta` publishes it. `family` decides the control:
+ * a `category` has a value set `/v1/categories` lists; a `keyword` has none, so its control is a
+ * text box; a `text` column is searched by analysed words; a `numeric` one by range.
  */
 export type FilterOperandSet = {
   column: string;
-  family: 'category' | 'keyword' | 'string' | 'text' | 'numeric';
-  /** The operator names this column accepts — `eq`, `in`, `prefix`, `contains`, `match`, `phrase`, `range`. */
+  family: 'category' | 'keyword' | 'text' | 'numeric';
+  /** The operator names this column accepts: `eq`, `in`, `prefix`, `contains`, `match`, `phrase`, `range`. */
   operands: string[];
   /**
    * Present only on a **group-scoped** attribute: the view group whose views this column's values
@@ -201,7 +220,8 @@ export type FilterOperator =
 export type Layer = {
   /** The layer's identity, and what a viewport request names to select it. */
   name: string;
-  title: string;
+  /** `null` where the declaration gave none. */
+  title: string | null;
   /** Which views the layer appears in. A layer is not answerable in a view it does not name. */
   views: string[];
   membership: 'enumerated' | 'spatial' | 'attribute';
@@ -222,7 +242,7 @@ export type Layer = {
    * The resolutions the layer declares. **Empty for a treed layer**, which declares none: its
    * lineage is in its edges, and a level number would say nothing about position in it.
    */
-  levels: {level: number; title: string; zoom: [number, number] | null}[];
+  levels: {level: number; title: string | null; zoom: [number, number] | null}[];
   /**
    * Which computed properties the layer **declares** — `centroid`, `box`, `hull` — as `/v1/meta`
    * publishes them in `computed_content` (contracts §3.2 r42). It is the declaration and not a
@@ -362,24 +382,21 @@ export type ViewGroup = {
 
 export type Meta = {
   apiVersion: number;
+  /** The bundle format version the server opened. */
+  bundleFormat: number;
   idset: number;
   /**
-   * The declared views in serving order (`views.md` §3.2) — the plain views first, then each
-   * group's views in creation order — each carrying its own frame, see
-   * {@link ViewInfo.quantisation}.
+   * The views this principal may reach, in serving order: the plain views, then each group's in
+   * creation order. Each carries its own frame; see {@link ViewInfo.quantisation}.
    */
   views: ViewInfo[];
-  /**
-   * The view groups and their orderings — see {@link ViewGroup}. Empty where the deployment
-   * declares plain views alone, which is the ordinary case.
-   */
+  /** The view groups and their orderings; see {@link ViewGroup}. Empty where there are none. */
   groups: ViewGroup[];
-  /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
+  /** The column schema in declaration order; see {@link DeclaredScalar}. */
   declaredScalars: DeclaredScalar[];
-  /**
-   * The annotation layers this principal reaches — see {@link Layer}. Empty when it reaches none,
-   * which is also what a deployment with no layers at all looks like.
-   */
+  /** The group-scoped column families this principal may reach; see {@link ScopedScalar}. */
+  scopedScalars: ScopedScalar[];
+  /** The annotation layers this principal reaches; see {@link Layer}. Empty when it reaches none. */
   layers: Layer[];
   selection: {
     kMin: number;
@@ -405,6 +422,18 @@ export type Meta = {
      * that means *the set ended* from one that means *the deployment truncated*.
      */
     maxBrowseRows: number;
+    /** The most vertices a published shape may carry. */
+    maxShapeVertices: number;
+    /** `/v1/categories/{column}/suggest`'s page ceiling and `limit`'s default. */
+    maxSuggestions: number;
+    /** The most values one suggestion request examines before it answers `more: true`. */
+    maxSuggestionWalk: number;
+    /** The visible-set size at or under which a suggestion is answered from the session's own values. */
+    maxSuggestSetEntities: number;
+    /** The most rows a `POST /v1/items` page holds. */
+    maxPageRows: number;
+    /** The most Arrow bytes a `POST /v1/items` page holds before compression. */
+    maxPageBytes: number;
   };
   /** `serve.max_tiles_per_request` — the client's own bound when it chooses a request depth. */
   maxTilesPerRequest: number;
@@ -935,8 +964,16 @@ export type MembershipColumn = {
  * to re-derive it would be joining two documents on every frame, and the one that matters —
  * whether a `u16` is a category or an integer — is a mistake that renders silently wrong.
  * `arrowType` here is the *storage* type; whether it is a category is `Meta`'s answer.
+ *
+ * **`present` says which points have a value.** The server sends an absent number, bool,
+ * timestamp or string as null; `present[i]` is `0` there, and `values[i]` is a zero that means
+ * nothing. Where `present` is missing or `null`, every point has a value; {@link hasValue} reads
+ * it. A category has no nulls; code 0 in `values` is its absence.
  */
-export type ScalarColumn =
+export type ScalarColumn = ScalarValues & {present?: Uint8Array | null};
+
+/** A column's declared type and its values, without {@link ScalarColumn.present}. */
+export type ScalarValues =
   | {arrowType: 'bool'; values: boolean[]}
   | {arrowType: 'utf8'; values: string[]}
   | {arrowType: 'u8'; values: Uint8Array}

@@ -1214,7 +1214,7 @@ components:
                 items: { type: string }
         declared_scalars:
           type: array
-          description: The entity-scoped column schema in full, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column — followed, under a view of a group, by that group's `render = true` scoped families (`scoped_scalars`). Readers take the columns by name.
+          description: The entity-scoped column schema in full, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column — followed, under a view of a group, by that group's `render = true` scoped families (`scoped_scalars`). Readers take the columns by name. Every such column is nullable, and a point whose item has no value is null, except in a category, where no value is code 0.
           items:
             $ref: "#/components/schemas/DeclaredScalar"
         scoped_scalars:
@@ -1295,7 +1295,7 @@ components:
           type: [string, "null"]
         render:
           type: boolean
-          description: The column arrives in the points frame.
+          description: The column arrives in the points frame, null where an item has no value, or code 0 for a category.
         index:
           type: boolean
           description: The column has an entity-space search structure. Neither flag set means blob-resident — returned at drill-down, never an operand.
@@ -1350,7 +1350,7 @@ components:
           type: [string, "null"]
         render:
           type: boolean
-          description: The column arrives in the points frame **under a view of this group**, or of a group sharing its views via `members`, and under no other view. Under those views it follows the entity-scoped render columns; a row with no value carries the type's zero, as every render column does.
+          description: The column arrives in the points frame **under a view of this group**, or of a group sharing its views via `members`, and under no other view. Under those views it follows the entity-scoped render columns; a row with no value is null, as in every render column but a category.
         index:
           type: boolean
           description: The family's columns carry an entity-space value column a filter may be answered from — which is the whole of whether it is an operand, a scoped column having no row route.
@@ -1449,7 +1449,7 @@ components:
           properties:
             kind:
               type: string
-              enum: [flat, nested, stacked, tiered]
+              enum: [flat, nested, dag, stacked, tiered]
             prune_children:
               type: boolean
               description: The layer's **default** cut policy; `artifact_budget` may ask for more.

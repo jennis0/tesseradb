@@ -1,12 +1,16 @@
 import {css, html, nothing} from 'lit';
 import {repeat} from 'lit/directives/repeat.js';
 import {activeCount, emptyDraft, isPopulated, memberKey, withVerb, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
-import {TesseraElement, emit} from './base.js';
+import {TesseraElement, UNNAMED, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
+import {exportparts} from './parts.js';
 import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './filter.js';
+
+/** Each control's parts, forwarded as `filter-<part>` (`parts.ts`). */
+const FILTER_PARTS = exportparts('filter');
 
 /**
  * `<tessera-filter-panel>` — every operand `meta` offers, as `<tessera-filter>`s, with the
@@ -40,7 +44,7 @@ export class TesseraFilterPanel extends TesseraElement {
       [part='clear'] {
         text-transform: none;
         letter-spacing: 0;
-        color: var(--tessera-accent);
+        color: var(--_tessera-accent);
         font-weight: 500;
         font-size: 12px;
       }
@@ -51,7 +55,6 @@ export class TesseraFilterPanel extends TesseraElement {
     switch (draft.family) {
       case 'text':
         return `${column}: ${draft.mode === 'phrase' ? '“' + draft.query + '”' : draft.query}`;
-      case 'string':
       case 'keyword':
         return `${column} ${draft.op} ${draft.needle}`;
       case 'category':
@@ -101,12 +104,13 @@ export class TesseraFilterPanel extends TesseraElement {
     s.setMembers(withoutMember(s.get('filters').members, clause.layer, clause.artifact));
   }
 
-  /** What a `member_of` chip says: the artifact's name where the map served it, else its layer. */
+  /**
+   * What a `member_of` chip says: the clause's own label, which is the only name an artifact of a
+   * filter layer ever has here since it is never served, else the served name, else unnamed.
+   */
   private memberText(clause: MemberClause): string {
-    // The clause's own label first: an artifact of a filter layer is never in the served set, so
-    // that is the only place a name for it can come from (§5.4).
     const served = this.resolvedStore?.get('artifacts').served.find((a) => a.tesseraId === clause.artifact && a.layer === clause.layer);
-    const name = clause.label ?? served?.content[0] ?? served?.key ?? clause.layer;
+    const name = clause.label ?? served?.content[0] ?? UNNAMED;
     return clause.outside ? `outside ${name}` : name;
   }
 
@@ -165,7 +169,7 @@ export class TesseraFilterPanel extends TesseraElement {
       ${repeat(
         operands,
         (o) => o.column,
-        (o) => html`<tessera-filter column=${o.column} .store=${s}></tessera-filter>`
+        (o) => html`<tessera-filter exportparts=${FILTER_PARTS} column=${o.column} .store=${s}></tessera-filter>`
       )}
     </div>`;
   }

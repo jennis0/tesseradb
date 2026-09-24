@@ -6,7 +6,7 @@ import '../src/item-card.js';
 import '../src/map.js';
 import '../src/explorer.js';
 import type {TesseraItemCard} from '../src/item-card.js';
-import {deep, deepAll, fakeStore, mount, settle, status, type FakeStore} from './fake-store.js';
+import {deep, deepAll, fakeStore, mount, settle, status, type FakeStore, meta, scalar} from './fake-store.js';
 
 /**
  * What the two pickers, the map and the item card **draw and wire**, against the fake store
@@ -45,28 +45,22 @@ const QUARTERS: {key: string; metadata: Record<string, ViewMetadataValue>}[] = [
   {key: '2026-Q4', metadata: {}}
 ];
 
-function meta(over: Partial<Meta> = {}): Meta {
+function deployment(over: Partial<Meta> = {}): Meta {
   const owner = QUARTERS.map((q) => view(`quarter:${q.key}`, q.key, FLAT, {group: 'quarter', key: q.key, metadata: q.metadata}));
   const members = QUARTERS.map((q) => view(`world:${q.key}`, q.key, GEO, {group: 'world', key: q.key, metadata: {}}));
-  return {
-    apiVersion: 1,
-    idset: 0,
+  return meta({
     views: [view('knn', 'knn', FLAT), view('pca64', 'pca64', GEO), ...owner, ...members],
     groups: [
       {name: 'quarter', title: 'Quarter', membersOf: null, views: owner.map((v) => v.id)},
       {name: 'world', title: 'Quarterly map', membersOf: 'quarter', views: members.map((v) => v.id)}
     ],
-    declaredScalars: [{name: 'title', arrowType: 'utf8', category: null, render: false, index: true}],
-    layers: [],
-    selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144, maxBrowseRows: 200},
-    maxTilesPerRequest: 4096,
-    filterOperands: [],
+    declaredScalars: [scalar('title', 'utf8')],
     ...over
-  };
+  });
 }
 
 /** A store on this fixture, already showing `id`, and the element that reads it. */
-async function picker(tag: 'tessera-view-picker' | 'tessera-key-picker', id: string, m: Meta = meta()) {
+async function picker(tag: 'tessera-view-picker' | 'tessera-key-picker', id: string, m: Meta = deployment()) {
   const store = fakeStore({meta: m, status: status({})});
   store.set('view', {...store.get('view'), id});
   store.setFrame(m.views.find((v) => v.id === id)?.quantisation ?? FLAT);
@@ -97,7 +91,7 @@ describe('<tessera-view-picker>', () => {
   });
 
   it('renders nothing — not an empty select — for a one-view corpus', async () => {
-    const one = meta({views: [view('s0', 'default', FLAT)], groups: []});
+    const one = deployment({views: [view('s0', 'default', FLAT)], groups: []});
     const {host} = await picker('tessera-view-picker', 's0', one);
     expect(deep(host, 'select')).toBeNull();
     expect(deep(host, '[part="field"]')).toBeNull();
@@ -139,7 +133,7 @@ describe('<tessera-view-picker>', () => {
     expect(select.value).toBe('g:quarter');
 
     // A group with no reachable view: no switch, and the select goes back to the current entry.
-    const empty = meta();
+    const empty = deployment();
     empty.groups = [...empty.groups, {name: 'ghost', title: 'Ghost', membersOf: null, views: []}];
     const gone = await picker('tessera-view-picker', 'knn', empty);
     const other = deep(gone.host, 'select') as HTMLSelectElement;
@@ -232,7 +226,7 @@ describe('<tessera-key-picker>', () => {
 describe('<tessera-map> at a switch', () => {
   /** The map, holding a store that has already pushed its first camera. */
   async function map(id: string) {
-    const m = meta();
+    const m = deployment();
     const store = fakeStore({meta: m, status: status({})});
     store.set('view', {...store.get('view'), id});
     store.setFrame(m.views.find((v) => v.id === id)!.quantisation);
@@ -290,7 +284,7 @@ describe('<tessera-item-card> and the views it reaches', () => {
   };
 
   async function card(id = 'knn') {
-    const m = meta();
+    const m = deployment();
     const store = fakeStore({meta: m, status: status({})});
     store.set('view', {...store.get('view'), id});
     const host = await mount('<tessera-item-card></tessera-item-card>');
@@ -344,7 +338,7 @@ describe('<tessera-explorer>', () => {
   async function following(id: string) {
     const host = await mount('<tessera-explorer></tessera-explorer>');
     const el = host.querySelector('tessera-explorer') as unknown as {store: unknown; map: {lookAt(x: number, y: number): boolean} | null};
-    const store = fakeStore({meta: meta(), status: status({})});
+    const store = fakeStore({meta: deployment(), status: status({})});
     store.set('view', {...store.get('view'), id});
     store.setFrame(FLAT);
     el.store = store;
@@ -362,7 +356,7 @@ describe('<tessera-explorer>', () => {
   it('puts both pickers at the top of the toolbar slot', async () => {
     const host = await mount('<tessera-explorer></tessera-explorer>');
     const el = host.querySelector('tessera-explorer') as unknown as {store: unknown};
-    const store = fakeStore({meta: meta(), status: status({})});
+    const store = fakeStore({meta: deployment(), status: status({})});
     store.set('view', {...store.get('view'), id: 'quarter:2026-Q3'});
     el.store = store;
     await settle(host);

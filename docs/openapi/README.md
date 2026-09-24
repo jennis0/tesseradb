@@ -54,7 +54,9 @@ skipped**; and **absence of the artifacts frame carries no reason** — no layer
 intersecting, none clearing its criterion are one outcome by design.
 
 The points batch is `(tessera_id: u64, code: u64, …render columns)`, the render columns in
-`/v1/meta`'s `declared_scalars` order, each named by its column. `code` is the position: 32 bits
+`/v1/meta`'s `declared_scalars` order, each named by its column. A render column is nullable: a
+point whose item has no value in it is null, and a zero is a value. A category is the exception:
+it has no nulls, and its code 0 means no value. `code` is the position: 32 bits
 per axis, Morton-interleaved; deinterleave and scale against `/v1/meta`'s `quantisation` to
 recover coordinates. `served` on the tiles batch is how many points each tile contributed, in
 order, which is how a reader splits the flat concatenation back into tiles.

@@ -1,4 +1,4 @@
-import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection} from '@tesseradb/client';
+import {NO_COUNT, NO_MASKED, regionOperand, servedLineage, SessionArtifactTable, withMembers, withRegion, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection, type DeclaredScalar, type Meta} from '@tesseradb/client';
 
 /**
  * A store with no network and no driver: projections a test sets directly, and the subscription
@@ -15,6 +15,45 @@ export type FakeStore = Store & {
   setBrowse(key: string, page: BrowsePage): void;
   calls: {name: string; args: unknown[]}[];
 };
+
+/** A declared column that is indexed, not rendered and read from the record, unless `over` says. */
+export function scalar(name: string, arrowType: DeclaredScalar['arrowType'], over: Partial<DeclaredScalar> = {}): DeclaredScalar {
+  return {name, arrowType, category: null, render: false, index: true, analyser: null, homes: ['record'], ...over};
+}
+
+/** A deployment of one plain view `s0` over the unit square with nothing declared, and whichever fields `over` names. */
+export function meta(over: Partial<Meta> = {}): Meta {
+  return {
+    apiVersion: 1,
+    bundleFormat: 1,
+    idset: 0,
+    views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
+    groups: [],
+    declaredScalars: [],
+    scopedScalars: [],
+    layers: [],
+    selection: {
+      kMin: 1,
+      kMaxMarks: 500,
+      maxK: 5000,
+      thetaTargetMarks: 10,
+      maxUnderlayOffset: 0,
+      maxCategoryValues: 1000,
+      maxRegionVertices: 10_000,
+      maxRegionCells: 262_144,
+      maxBrowseRows: 200,
+      maxShapeVertices: 50_000,
+      maxSuggestions: 20,
+      maxSuggestionWalk: 100_000,
+      maxSuggestSetEntities: 10_000_000,
+      maxPageRows: 65_536,
+      maxPageBytes: 16_777_216
+    },
+    maxTilesPerRequest: 4096,
+    filterOperands: [],
+    ...over
+  };
+}
 
 export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const projections: Projections = {
@@ -87,20 +126,12 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setBrowse(key: string, page: BrowsePage) {
       browsePages.set(key, page);
     },
-    // The composed request, as the store composes it: the filter-position leaves, the clauses in
-    // that position, and the drawn region's leaf. A test sets `region` and this follows, which is
-    // the drift the panel's question was hashing around.
+    // The composed request, from the projections a test sets, through the client's own
+    // composition: the filter-position expression, the clauses in that position, the region.
     requestFilters: () => {
       const {expr, members} = projections.filters;
-      const leaves: unknown[] = [];
-      if (expr) leaves.push(expr);
-      for (const c of members) {
-        if (c.verb !== 'filter') continue;
-        const leaf = {member_of: {layer: c.layer, artifact: c.artifact.toString()}};
-        leaves.push(c.outside ? {none_of: [leaf]} : leaf);
-      }
-      if (projections.region) leaves.push({region: {bbox: [0, 0, 1, 1]}});
-      return (leaves.length === 0 ? null : leaves.length === 1 ? leaves[0] : {all_of: leaves}) as never;
+      const region = projections.region;
+      return withRegion(withMembers(expr, members, 'filter'), region ? regionOperand(region.shape) : null, region?.shape.outside ?? false);
     },
     pick: async (...args: unknown[]) => {
       calls.push({name: 'pick', args});
@@ -121,7 +152,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     clear: spy('clear'),
     refresh: spy('refresh'),
     dispose: spy('dispose')
-  } as FakeStore;
+  };
   return store;
 }
 

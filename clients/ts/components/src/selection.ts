@@ -1,15 +1,14 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import {REGION_HELD_LIMIT, type RegionProjection} from '@tesseradb/client';
-import {TesseraElement, emit, idString} from './base.js';
+import {TesseraElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-selection>` — the selected region (design §5.3 tier 2, §5.11), as the boards draw it
- * (`SelectionFlow.png`): *Shown inside · Matched inside · Visible inside* through
+ * `<tessera-selection>`: the selected region. *Shown inside · Matched inside · Visible inside* through
  * `<tessera-count>` — `matched` as `Masked`, exact for the shape unless the server answered a
  * cover (`x-tessera-region`) or the frame did not cover the shape; `visible` only while no other
  * filter narrows the frame; `served` as the held marks inside against `matched`, both figures
@@ -48,7 +47,7 @@ export class TesseraSelection extends TesseraElement {
         overflow-y: auto;
       }
       [part='item'] {
-        font-family: var(--tessera-font-mono);
+        font-family: var(--_tessera-font-mono);
         font-size: 12px;
       }
       [part='actions'] {
@@ -113,7 +112,7 @@ export class TesseraSelection extends TesseraElement {
         <button part="action" class="btn" type="button" title=${r.shape.outside ? 'Filter to the inside of the shape' : 'Filter to the outside of the shape'} @click=${() => {
           const next = {...r.shape, outside: !r.shape.outside};
           this.resolvedStore?.select(next);
-          emit(this, 'tessera-selectchange', {shape: next, status: 'loading'});
+          emit(this, 'tessera-selectchange', {shape: shapeDetail(next), status: 'loading'});
         }}>${icon('filter', 13)}${r.shape.outside ? 'Inside' : 'Outside'}</button>
         ${waiting('Export', 'Needs the export verb (not yet served)')}
         ${waiting('Save as artifact', 'Needs the runtime-artifact path (not yet served)')}
