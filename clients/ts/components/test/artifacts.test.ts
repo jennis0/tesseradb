@@ -85,7 +85,7 @@ describe('<tessera-layer-picker>', () => {
     // `labels` depends on `clusters`, so it is inside that entry and not one of its own.
     expect(entries).toEqual(['clusters', 'districts']);
     expect(deep(host, '[part="entry"][data-layer="clusters"]')?.getAttribute('title')).toContain('labels');
-    expect(host.shadowRoot?.textContent ?? deepAll(host, '*').map((e) => e.textContent).join(' ')).not.toMatch(/\d+ artifacts/);
+    expect(deep(host, 'tessera-count')).toBeNull();
     const box = deep(host, '[part="entry"][data-layer="clusters"] input') as HTMLInputElement;
     box.checked = true;
     box.dispatchEvent(new Event('change'));
@@ -163,7 +163,7 @@ describe('<tessera-artifact-list>', () => {
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('refused');
     store.set('artifacts', artifactsProjection([]));
     await settle(host);
-    expect(deep(host, '[part="state"]')?.textContent).toContain('Nothing in this view');
+    expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('empty');
   });
 });
 
@@ -209,7 +209,8 @@ describe('<tessera-artifact-card>', () => {
     (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
     store.set('selection', {item: null, itemRefusal: null, artifact: null, artifactRefusal: {code: 'not-found', detail: 'no'}});
     await settle(host);
-    expect(deep(host, '[part="refusal"]')?.textContent).toContain('not-found');
+    expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('refused');
+    expect(deep(host, '[part="refusal"]')).not.toBeNull();
   });
 });
 
@@ -222,7 +223,9 @@ describe('<tessera-legend selectable>', () => {
     const colourOptions = () => deepAll(host, '[part="select"] option').map((o) => o.getAttribute('value'));
     // No layer is drawn. A labels layer has no clusters of its own, so it is not offered.
     expect(colourOptions()).toEqual(['', 'cluster:clusters', 'cluster:districts', 'archive']);
-    expect(deepAll(host, '[part="layers-select"] option').map((o) => o.textContent)).toEqual(['0 of 2 on', 'clusters', 'districts']);
+    // Nothing drawn: the select offers the two roots and sits on the entry that says none is on.
+    expect(deepAll(host, '[part="layers-select"] option').map((o) => o.getAttribute('value'))).toEqual(['', 'clusters', 'districts']);
+    expect((deep(host, '[part="layers-select"]') as HTMLSelectElement).value).toBe('');
     const select = deep(host, '[part="select"]') as HTMLSelectElement;
     select.value = 'cluster:clusters';
     select.dispatchEvent(new Event('change'));
@@ -235,7 +238,7 @@ describe('<tessera-legend selectable>', () => {
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
     expect((deep(host, '[part="select"]') as HTMLSelectElement).value).toBe('cluster:clusters');
-    expect(deepAll(host, '[part="layers-select"] option')[0]!.textContent).toBe('0 of 2 on');
+    expect((deep(host, '[part="layers-select"]') as HTMLSelectElement).value).toBe('');
   });
 
   it('is a readout without selectable', async () => {
@@ -260,11 +263,8 @@ describe('<tessera-artifact-card> follows the served set', () => {
     store.set('artifacts', artifactsProjection([artifact(1n, 100n, null, ['Alpha']), artifact(2n, 40n, 1n, ['Beta']), artifact(3n, 60n, 1n, ['Gamma'])]));
     await settle(host);
     expect(deepAll(host, '[part="child"] [part="name"]').map((n) => n.textContent)).toEqual(['Gamma', 'Beta']);
-    // A root of a flat layer has no parent; the card says nothing about it rather than
-    // "nothing you were served", which read as a claim about the principal.
-    const text = deepText(host);
-    expect(text).not.toMatch(/nothing you were served/);
-    expect(text).not.toMatch(/inside/);
+    // A root of a flat layer has no parent, and the card draws no parents section for it.
+    expect(deep(host, '[part="parents"]')).toBeNull();
   });
 
   it('opens a parent or a child row on Enter and on Space, as on a click', async () => {

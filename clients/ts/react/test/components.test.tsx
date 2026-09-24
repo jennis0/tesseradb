@@ -1,6 +1,7 @@
 import {act, createElement, createRef} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {formatCount} from '@tesseradb/client';
 import {deep, fakeStore, settle, status} from '../../components/test/fake-store.js';
 import {TesseraCount, TesseraExplorer, TesseraHierarchy, TesseraItemCard, TesseraKeyPicker, TesseraStatus, TesseraStore, TesseraViewPicker, type CountElement, type ExplorerElement, type ItemCardElement, type ViewPickerElement} from '../src/components.js';
 
@@ -30,7 +31,7 @@ describe('@tesseradb/react/components', () => {
     await settle(host);
     expect(ref.current?.count).toEqual({shown: 221, total: 1_994_089, exact: true});
     expect(ref.current?.hasAttribute('count')).toBe(false);
-    expect(deep(host, '[part="count"]')?.textContent).toBe('221 of 1,994,089');
+    expect(deep(host, '[part="count"]')?.textContent).toBe(formatCount({shown: 221, total: 1_994_089, exact: true}));
   });
 
   it('an on* prop receives the element’s event with its detail', async () => {

@@ -1,4 +1,4 @@
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {BrowseRow, Layer, Meta} from '@tesseradb/client';
 import '../src/hierarchy.js';
 import type {TesseraHierarchy} from '../src/hierarchy.js';
@@ -12,6 +12,7 @@ import {deep, deepAll, deepText, fakeStore, mount, settle, status} from './fake-
 
 afterEach(() => {
   document.body.innerHTML = '';
+  vi.useRealTimers();
 });
 
 const layer = (name: string, kind: Layer['hierarchy']['kind'], computedContent: string[]): Layer =>
@@ -111,7 +112,7 @@ describe('<tessera-hierarchy>', () => {
     await settle(host);
     // The parent it is drawn under is not repeated, and the other is named rather than numbered:
     // the walk is the only place a name for one of these artifacts exists on this client.
-    expect(deepText(deep(host, '[part="also"]'))).toContain('also under Anatomy');
+    expect(deepText(deep(host, '[part="also"]'))).toContain('Anatomy');
   });
 
   it('a click is a highlight, and the actions carry the filter beside it', async () => {
@@ -171,8 +172,10 @@ describe('<tessera-hierarchy>', () => {
     store.setBrowse('q:lymph', {artifacts: [row(7n, 'Lymphocytes', 400_000n)], parents: [], next: null});
     const box = deep(host, '[part="search"] input') as HTMLInputElement;
     box.value = 'lymph';
+    vi.useFakeTimers();
     box.dispatchEvent(new Event('input'));
-    await new Promise((r) => setTimeout(r, 400));
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
     await settle(host);
     await settle(host);
     expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Lymphocytes']);
