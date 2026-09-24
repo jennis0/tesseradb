@@ -12,6 +12,8 @@ export class HeldShapes {
   private held = new Map<bigint, Shape>();
   private kinds = new Map<bigint, ShapeKind>();
   private asked = new Set<bigint>();
+  /** Moved by {@link forget}, so an answer asked for before it is not held. */
+  private epoch = 0;
   private disposed = false;
 
   constructor(
@@ -29,10 +31,12 @@ export class HeldShapes {
   need(id: bigint): void {
     if (this.asked.has(id)) return;
     this.asked.add(id);
+    const epoch = this.epoch;
     void this.fetch(id).then(
       (shape) => {
-        // A forget while the request was out means it answers a principal no longer drawn.
-        if (this.disposed || !this.asked.has(id)) return;
+        // An answer asked for before a forget may be another principal's, even where the id has
+        // been asked for again since.
+        if (this.disposed || epoch !== this.epoch) return;
         this.hold(id, shape);
       },
       () => {}
@@ -50,6 +54,7 @@ export class HeldShapes {
   }
 
   forget(which: 'derived' | 'all'): void {
+    this.epoch += 1;
     if (this.held.size === 0 && this.asked.size === 0) return;
     if (which === 'all') {
       this.held = new Map();

@@ -40,6 +40,32 @@ describe('shapes are fetched by identifier', () => {
   });
 });
 
+describe('shapes across a change of principal', () => {
+  it('drops an answer asked for before a forget, even after the id is asked for again', async () => {
+    const answers: ((shape: Shape) => void)[] = [];
+    let published: ReadonlyMap<bigint, Shape> = new Map();
+    const part = new HeldShapes(
+      () => new Promise<Shape>((resolve) => answers.push(resolve)),
+      () => 'derived',
+      (held) => (published = held)
+    );
+    const before: Shape = [[[[0, 0], [1, 0], [1, 1]]]];
+    const after: Shape = [[[[0, 0], [2, 0], [2, 2]]]];
+
+    part.need(5n);
+    part.forget('derived');
+    part.need(5n);
+    expect(answers).toHaveLength(2);
+
+    answers[0]!(before);
+    await settle();
+    expect(published.has(5n)).toBe(false);
+    answers[1]!(after);
+    await settle();
+    expect(published.get(5n)).toEqual(after);
+  });
+});
+
 describe('the record a hover names', () => {
   it('asks for a record once, shares a request in flight, holds a refusal as none, and asks again after a forget', async () => {
     const fetch = vi.fn(async (id: bigint) => {
