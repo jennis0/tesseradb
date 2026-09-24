@@ -269,18 +269,17 @@ enum Command {
         #[command(subcommand)]
         command: CorpusCommand,
     },
-    /// Ask the server that `tessera.toml` names whether it is ready, and exit 0 if it is or 1 if
-    /// it is not.
+    /// Ask a running server whether it is ready, and exit 0 if it is or 1 if it is not.
     ///
     /// Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address
     /// in `[serve]`. The server answers 200 while its write side is running normally, and the
-    /// command then exits 0. It exits 1, with the reason on stderr, on any other answer, when
-    /// nothing is listening at the address (as while the server opens its bundle), when no
-    /// answer comes within `--timeout`, and when `tessera.toml` is refused or declares no viewer
-    /// address.
+    /// command then exits 0. It exits 1, with the reason on stderr, when the server gives another
+    /// answer, gives none within `--timeout` or is not listening, and when `tessera.toml` is
+    /// refused or declares no viewer address. A server starts listening only once it has opened
+    /// its bundle, so the check fails until then.
     ///
-    /// A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run it on the machine
-    /// or in the container the server runs in. The Docker image's health check runs it.
+    /// A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run the command on the
+    /// machine or in the container the server runs in. The Docker image's health check runs it.
     Health {
         /// Read this `tessera.toml` instead of searching for one upward from the working
         /// directory.
@@ -295,7 +294,11 @@ enum Command {
     /// Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and the
     /// write-ahead log, and listens on the viewer, session and control addresses in `[serve]`.
     /// When all three are bound it prints one line of JSON to stdout naming them. Diagnostics go
-    /// to stderr.
+    /// to stderr, in colour only when stderr is a terminal.
+    ///
+    /// SIGTERM or SIGINT stops the server at once, even while it opens the bundle, and it exits
+    /// 0. A write is acknowledged only once the write-ahead log holds it on disc, so stopping
+    /// loses no acknowledged write, and the next start replays the log.
     ///
     /// It refuses to start when `tessera.toml` is refused, as `tessera build` would refuse it;
     /// when the session or operator credential is not set, or its file cannot be read (set

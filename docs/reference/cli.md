@@ -2,9 +2,9 @@
 
 # CLI
 
-`tessera` is one binary with a subcommand for each job: `build` makes a bundle from a corpus declaration, `check` tests the declaration against its source files, `verify` checks a built bundle, `tokenise` shows how an analyser splits text, and `serve` serves the bundle. `tessera <subcommand> --help` prints the text on this page, and `tessera --version` prints the commit the binary was built from.
+`tessera` is one binary with a subcommand for each job: `build` makes a bundle from a corpus declaration, `check` tests the declaration against its source files, `verify` checks a built bundle, `tokenise` shows how an analyser splits text, `health` asks a running server whether it is ready, and `serve` serves the bundle. `tessera <subcommand> --help` prints the text on this page, and `tessera --version` prints the commit the binary was built from.
 
-`build`, `check` and `serve` read the deployment file `tessera.toml` from the working directory, or from the nearest directory above it that has one. `--deployment` names a different file.
+`build`, `check`, `health` and `serve` read the deployment file `tessera.toml` from the working directory, or from the nearest directory above it that has one. `--deployment` names a different file.
 
 ## `tessera build`
 
@@ -100,11 +100,11 @@ When a `match` filter returns nothing, this shows how the index split the text. 
 tessera health [OPTIONS]
 ```
 
-Ask the server that `tessera.toml` names whether it is ready, and exit 0 if it is or 1 if it is not.
+Ask a running server whether it is ready, and exit 0 if it is or 1 if it is not.
 
-Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address in `[serve]`. The server answers 200 while its write side is running normally, and the command then exits 0. It exits 1, with the reason on stderr, on any other answer, when nothing is listening at the address (as while the server opens its bundle), when no answer comes within `--timeout`, and when `tessera.toml` is refused or declares no viewer address.
+Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address in `[serve]`. The server answers 200 while its write side is running normally, and the command then exits 0. It exits 1, with the reason on stderr, when the server gives another answer, gives none within `--timeout` or is not listening, and when `tessera.toml` is refused or declares no viewer address. A server starts listening only once it has opened its bundle, so the check fails until then.
 
-A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run it on the machine or in the container the server runs in. The Docker image's health check runs it.
+A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run the command on the machine or in the container the server runs in. The Docker image's health check runs it.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
@@ -119,7 +119,9 @@ tessera serve [OPTIONS]
 
 Serve the bundle that `tessera.toml` names.
 
-Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and the write-ahead log, and listens on the viewer, session and control addresses in `[serve]`. When all three are bound it prints one line of JSON to stdout naming them. Diagnostics go to stderr.
+Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and the write-ahead log, and listens on the viewer, session and control addresses in `[serve]`. When all three are bound it prints one line of JSON to stdout naming them. Diagnostics go to stderr, in colour only when stderr is a terminal.
+
+SIGTERM or SIGINT stops the server at once, even while it opens the bundle, and it exits 0. A write is acknowledged only once the write-ahead log holds it on disc, so stopping loses no acknowledged write, and the next start replays the log.
 
 It refuses to start when `tessera.toml` is refused, as `tessera build` would refuse it; when the session or operator credential is not set, or its file cannot be read (set `session_credential_file` or `session_credential_env`, and the same for `operator`, under `[serve]`); when a `[serve]` address is missing; when the bundle cannot be read; and when the write-ahead log fails its checksum.
 

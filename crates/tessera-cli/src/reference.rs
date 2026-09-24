@@ -18,12 +18,14 @@ const REGENERATE: &str = "TESSERA_WRITE_CLI_REFERENCE=1 cargo test -p tessera-cl
 const INTRO: &str = "\
 `tessera` is one binary with a subcommand for each job: `build` makes a bundle from a corpus \
 declaration, `check` tests the declaration against its source files, `verify` checks a built \
-bundle, `tokenise` shows how an analyser splits text, and `serve` serves the bundle. \
+bundle, `tokenise` shows how an analyser splits text, `health` asks a running server whether \
+it is ready, and `serve` serves the bundle. \
 `tessera <subcommand> --help` prints the text on this page, and `tessera --version` prints the \
 commit the binary was built from.
 
-`build`, `check` and `serve` read the deployment file `tessera.toml` from the working directory, \
-or from the nearest directory above it that has one. `--deployment` names a different file.
+`build`, `check`, `health` and `serve` read the deployment file `tessera.toml` from the working \
+directory, or from the nearest directory above it that has one. `--deployment` names a different \
+file.
 ";
 
 fn page_path() -> PathBuf {
