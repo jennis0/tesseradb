@@ -10,8 +10,7 @@
 //!   `morton` column, which carries 16 and is widened without pretending otherwise. See
 //!   [`read_points`].
 //! * **access terms** — either the exploded `(entity_id, term_id)` relation ([`scan_pairs`]) or a
-//!   `list<string>` field of the points source itself ([`scan_access_field`]), which is where the
-//!   trim and the empty rule live.
+//!   `list<string>` field of the points source itself ([`scan_access_field`]).
 //!
 //! **Every column is named by the declaration, never by this module** ([`crate::config::Fields`]).
 //! A declared field the file does not carry is [`field_index`]'s refusal, and that refusal is the
@@ -32,6 +31,7 @@ use std::sync::mpsc;
 
 use arrow::array::{Array, Float32Array, Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, TimeUnit};
+use tessera_store::access_column::AccessBatch;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
@@ -809,7 +809,7 @@ pub fn read_access_vocabulary(
         let mut used: Vec<bool> = Vec::new();
         scan_access_column(src, field, |_, rows, batch| {
             used.clear();
-            used.resize(batch.distinct.len(), false);
+            used.resize(batch.distinct().len(), false);
             for &row in rows {
                 let terms = batch.row(row as usize);
                 if terms.is_empty() {
@@ -820,8 +820,8 @@ pub fn read_access_vocabulary(
                 }
             }
             for (term, &carried) in used.iter().enumerate() {
-                if carried && !distinct.contains(batch.distinct[term]) {
-                    distinct.insert(batch.distinct[term].to_string());
+                if carried && !distinct.contains(batch.distinct()[term]) {
+                    distinct.insert(batch.distinct()[term].to_string());
                 }
             }
             ControlFlow::Continue(())
@@ -841,9 +841,9 @@ pub fn read_access_vocabulary(
 ///   vocabulary pass (decision 0133), so a row reaching this scan with no terms and no default is
 ///   a file that changed underneath the build. The permissive misreading — *null is unspecified,
 ///   so unrestricted* — would put every unlabelled point in everyone's mask.
-/// - **Terms are trimmed**, matching what `builtin:passthrough` already does to the label it is
-///   handed, so ` cs.LG` and `cs.LG` are one term rather than two that no credential spells the
-///   same way. A term that is empty after trimming is not a term.
+/// - **Terms are trimmed** by the label rule every reader of labels applies
+///   ([`tessera_types::label`]), so ` cs.LG` and `cs.LG` are one term. A term that is empty after
+///   trimming is not a term.
 /// - **Filling never overrides.** A point carrying terms of its own keeps exactly those. A point's
 ///   terms are disjunctive — `M_auth` is a union of posting lists — so a label added to a point can
 ///   only widen it, which makes overriding inadmissible rather than merely unwise.
@@ -888,7 +888,7 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
     let mut positions: Vec<u64> = Vec::new();
     scan_access_column(src, field, |ids, rows, batch| {
         positions.clear();
-        positions.resize(batch.distinct.len(), u64::MAX);
+        positions.resize(batch.distinct().len(), u64::MAX);
         for &row in rows {
             let source_id = ids[row as usize];
             let terms = batch.row(row as usize);
@@ -915,7 +915,7 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
             for &term in terms {
                 let mut position = positions[term as usize];
                 if position == u64::MAX {
-                    let value = batch.distinct[term as usize];
+                    let value = batch.distinct()[term as usize];
                     let Ok(at) = vocabulary.binary_search_by(|t| t.as_str().cmp(value)) else {
                         changed = Some(BuildError::Schema {
                             path: points.to_path_buf(),
@@ -1019,9 +1019,6 @@ fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(src: Source<'_>, mut visit: F
     Ok(())
 }
 
-/// Walk `(entity_id, access field)` in file order, handing each row its **trimmed, non-empty**
-/// terms. Single-threaded: one string column against geometry's decode cost, and both passes over
-/// it must see the same rows in the same order.
 /// Walk the access column, handing the caller **one batch at a time**: its distinct values, and
 /// each selected row's indices into them.
 ///
@@ -1171,56 +1168,8 @@ fn open_access_reader(
         .map_err(|e| BuildError::parquet(path, e))
 }
 
-/// One batch's access column: its distinct values, and each row's indices into them.
-struct AccessBatch<'a> {
-    /// The batch's distinct values, **trimmed**. A value that is empty after trimming is not a
-    /// term and is not here, which is what makes an empty string and a null one case downstream.
-    distinct: Vec<&'a str>,
-    /// Row `i`'s values are `indices[bounds[i]..bounds[i + 1]]`.
-    bounds: Vec<usize>,
-    indices: Vec<u32>,
-}
-
-impl<'a> AccessBatch<'a> {
-    /// Row `row`'s values, as indices into [`Self::distinct`]. Empty where the row carries no
-    /// term — a null, an empty string, an empty list.
-    fn row(&self, row: usize) -> &[u32] {
-        &self.indices[self.bounds[row]..self.bounds[row + 1]]
-    }
-
-    fn with_rows(rows: usize) -> AccessBatch<'a> {
-        let mut batch = AccessBatch {
-            distinct: Vec::new(),
-            bounds: Vec::with_capacity(rows + 1),
-            indices: Vec::with_capacity(rows),
-        };
-        batch.bounds.push(0);
-        batch
-    }
-
-    /// Add one value to the row being built, under the distinct set `seen` indexes. Trimmed here,
-    /// once per distinct value on the dictionary route and once per row on the plain one.
-    fn push(&mut self, seen: &mut HashMap<&'a str, u32>, value: &'a str) {
-        let term = value.trim();
-        if term.is_empty() {
-            return;
-        }
-        let next = self.distinct.len() as u32;
-        let at = *seen.entry(term).or_insert_with(|| {
-            self.distinct.push(term);
-            next
-        });
-        self.indices.push(at);
-    }
-
-    fn end_row(&mut self) {
-        self.bounds.push(self.indices.len());
-    }
-}
-
-/// Each row's access labels, read as a points file's access column is read: a string, a list of
-/// strings or a dictionary of either, trimmed, with a null, an empty string and an empty list all
-/// no label. An artifact source's label column takes this.
+/// Each row's access labels, read as a points file's access column is read. An artifact source's
+/// label column takes this.
 pub(crate) fn access_labels(
     path: &Path,
     column: &arrow::array::ArrayRef,
@@ -1228,139 +1177,21 @@ pub(crate) fn access_labels(
 ) -> Result<Vec<Vec<String>>> {
     let batch = read_access_column(path, column, name)?;
     Ok((0..column.len())
-        .map(|row| {
-            batch
-                .row(row)
-                .iter()
-                .map(|&i| batch.distinct[i as usize].to_string())
-                .collect()
-        })
+        .map(|row| batch.labels(row).map(str::to_string).collect())
         .collect())
 }
 
-/// Decode one batch of the access column into [`AccessBatch`], applying the trim and the empty
-/// rule.
-///
-/// **A `list<string>`, or a plain `string` where a point carries one term** (`configuration.md`
-/// §1) — and a dictionary of either, which is what [`scan_access_column`] asks the reader for.
-/// The list width and the string width are the writer's choice and say nothing about the terms,
-/// so `list` and `large_list` of `utf8` and `large_utf8` are all read. Any other type is refused
-/// rather than coerced: a column of integers or of a nested struct is not a term list, and
-/// guessing what its rows meant would mint access terms nobody wrote.
+/// [`tessera_store::access_column::read_access_column`], refused as a schema error on `path`.
 fn read_access_column<'a>(
     path: &Path,
     column: &'a arrow::array::ArrayRef,
     name: &str,
 ) -> Result<AccessBatch<'a>> {
-    use crate::utf8::Utf8Column;
-    use arrow::array::{Array as _, DictionaryArray, LargeListArray, ListArray};
-    use arrow::datatypes::Int32Type;
-
-    let rows = column.len();
-    let mut batch = AccessBatch::with_rows(rows);
-    let mut seen: HashMap<&str, u32> = HashMap::new();
-
-    // **The dictionary route.** The keys are the indices already; all this pass does is trim each
-    // distinct value once and renumber, because a dictionary page may carry values no row uses
-    // and a trim may make two of them one.
-    if let Some(dictionary) = column.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
-        let values =
-            Utf8Column::new(dictionary.values().as_ref()).ok_or_else(|| BuildError::Schema {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "the access column '{name}' is a dictionary of {:?}, and an access term is a \
-                     string",
-                    dictionary.values().data_type()
-                ),
-            })?;
-        // One entry per dictionary value: where it landed in `distinct`, or absent where it is
-        // null or empty after trimming.
-        let mut mapped: Vec<Option<u32>> = Vec::with_capacity(values.len());
-        for key in 0..values.len() {
-            if values.is_null(key) {
-                mapped.push(None);
-                continue;
-            }
-            let term = values.value(key).trim();
-            if term.is_empty() {
-                mapped.push(None);
-                continue;
-            }
-            let next = batch.distinct.len() as u32;
-            let at = *seen.entry(term).or_insert_with(|| {
-                batch.distinct.push(term);
-                next
-            });
-            mapped.push(Some(at));
-        }
-        let keys = dictionary.keys();
-        for row in 0..rows {
-            if !keys.is_null(row) {
-                if let Some(at) = mapped[keys.value(row) as usize] {
-                    batch.indices.push(at);
-                }
-            }
-            batch.end_row();
-        }
-        return Ok(batch);
-    }
-
-    // A scalar column: one term per row, at either offset width.
-    if let Some(values) = Utf8Column::new(column.as_ref()) {
-        for i in 0..rows {
-            if !values.is_null(i) {
-                batch.push(&mut seen, values.value(i));
-            }
-            batch.end_row();
-        }
-        return Ok(batch);
-    }
-    // A list column: the row's terms, at either list width over either string width.
-    fn lists<'v, O: arrow::array::OffsetSizeTrait>(
-        path: &Path,
-        name: &str,
-        list: &'v arrow::array::GenericListArray<O>,
-        batch: &mut AccessBatch<'v>,
-        seen: &mut HashMap<&'v str, u32>,
-    ) -> Result<()> {
-        let values = list.values();
-        let strings = Utf8Column::new(values.as_ref()).ok_or_else(|| BuildError::Schema {
+    tessera_store::access_column::read_access_column(column, name).map_err(|detail| {
+        BuildError::Schema {
             path: path.to_path_buf(),
-            detail: format!(
-                "the access column '{name}' is a list of {:?}, and an access term is a string",
-                values.data_type()
-            ),
-        })?;
-        let offsets = list.value_offsets();
-        for i in 0..list.len() {
-            if !list.is_null(i) {
-                for j in offsets[i].as_usize()..offsets[i + 1].as_usize() {
-                    if !strings.is_null(j) {
-                        batch.push(seen, strings.value(j));
-                    }
-                }
-            }
-            batch.end_row();
+            detail,
         }
-        Ok(())
-    }
-    if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
-        lists(path, name, list, &mut batch, &mut seen)?;
-        return Ok(batch);
-    }
-    if let Some(list) = column.as_any().downcast_ref::<LargeListArray>() {
-        lists(path, name, list, &mut batch, &mut seen)?;
-        return Ok(batch);
-    }
-    Err(BuildError::Schema {
-        path: path.to_path_buf(),
-        detail: format!(
-            "the access column '{name}' has type {:?}. A point\'s access terms are a \
-             `list<string>`, or a plain `string` where a point carries one term \
-             (configuration.md §1). Refused rather than coerced: guessing what another type\'s \
-             rows meant would mint access terms nobody wrote",
-            column.data_type()
-        ),
     })
 }
 

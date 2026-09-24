@@ -2004,17 +2004,9 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                      it grows"
                 )));
             }
-            let labels = match &access {
-                None => None,
-                Some(access) => Some(
-                    access
-                        .labels_at("growth body", row)
-                        .map_err(|DecodeError(detail)| ApiError::Contract(detail))?
-                        .into_iter()
-                        .map(|label| String::from_utf8(label).expect("a utf8 array holds utf8"))
-                        .collect(),
-                ),
-            };
+            let labels = access
+                .as_ref()
+                .map(|access| access.labels(row).map(str::to_string).collect());
             // The Arrow form carries joining members and labels only; content, shapes and ranked
             // pages travel on the JSON form.
             artifacts.push(GrowingArtifactBody {
