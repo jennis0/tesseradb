@@ -29,9 +29,10 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::mpsc;
 
-use arrow::array::{Array, Float32Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, TimeUnit};
 use tessera_store::access_column::AccessBatch;
+use tessera_store::coordinates::{read_coordinates, ColumnError};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
@@ -485,11 +486,14 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             _ => None,
                         };
                         let geometry = match geometry {
-                            Geometry::Xy(xi, yi) => PointGeom::Xy(
-                                source_ids,
-                                read_f64_column(path, &batch, xi, x_name)?,
-                                read_f64_column(path, &batch, yi, y_name)?,
-                            ),
+                            Geometry::Xy(xi, yi) => {
+                                let at = |row| row_name(&batch, id_idx, id_name, row);
+                                PointGeom::Xy(
+                                    source_ids,
+                                    read_coordinate_column(path, &batch, xi, x_name, &at)?,
+                                    read_coordinate_column(path, &batch, yi, y_name, &at)?,
+                                )
+                            }
                             Geometry::Morton(mi) => PointGeom::Morton(
                                 source_ids,
                                 read_u64_column(path, &batch, mi, morton_name)?,
@@ -1415,12 +1419,9 @@ pub fn survey_points(
                 })
             }
         };
-        let name_of = |i: usize| match id_idx {
-            Some(idx) => crate::ids::display_at(batch.column(idx).as_ref(), i),
-            None => format!("row {i}"),
-        };
-        let xs = read_f64_column(path, &batch, x_idx, x_name)?;
-        let ys = read_f64_column(path, &batch, y_idx, y_name)?;
+        let name_of = |i: usize| row_name(&batch, id_idx, fields.of(ENTITY_ID), i);
+        let xs = read_coordinate_column(path, &batch, x_idx, x_name, &name_of)?;
+        let ys = read_coordinate_column(path, &batch, y_idx, y_name, &name_of)?;
         let keep = match (select, select_idx) {
             (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
             _ => None,
@@ -1439,9 +1440,8 @@ pub fn survey_points(
                 return Err(BuildError::Schema {
                     path: path.to_path_buf(),
                     detail: format!(
-                        "{} {} has a non-finite position ({x}, {y}), so no box fits the \
+                        "{} has a non-finite position ({x}, {y}), so no box fits the \
                          data. `extent = \"auto\"` reads every row it would place",
-                        fields.of(ENTITY_ID),
                         name_of(i)
                     ),
                 });
@@ -1460,12 +1460,11 @@ pub fn survey_points(
                     return Err(BuildError::Schema {
                         path: path.to_path_buf(),
                         detail: format!(
-                            "{} {} is at lon {x}, lat {y}, which is not a place: this view is \
+                            "{} is at lon {x}, lat {y}, which is not a place: this view is \
                              projected ({}), and the accepted input coordinate system is WGS84 \
                              degrees — longitude within ±180, latitude within ±90 \
                              (projections.md §2). Convert the source to WGS84 before building, or \
                              declare `projection = \"none\"` if this view's space is not the Earth",
-                            fields.of(ENTITY_ID),
                             name_of(i),
                             projection.name()
                         ),
@@ -1941,47 +1940,36 @@ fn read_u64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
     Ok(values)
 }
 
-/// Read a coordinate column as `f64`, **accepting both float widths and widening the narrower**.
-///
-/// This is the rule an attribute column declared `f64` is already read by — `f64` accepts `f32`
-/// and widens — and a coordinate takes only that half of it. The other half, `f32` accepting `f64`
-/// and rounding, has no counterpart here: an attribute's width is *declared*, so narrowing is what
-/// the declaration asked for, whereas a coordinate's width is a property of the corpus and nothing
-/// asks for it to be reduced.
-///
-/// **Widening rather than narrowing is what makes a deep frame honest.** A frame at zoom offset
-/// *k* resolves `2^(8−k)` `f32` steps per cell, so past roughly offset 8 a narrowing decides which
-/// **cell** a point occupies rather than merely its position within one — and no report downstream
-/// can see that it did, the quantiser having been handed a value the file did not hold
-/// (`projections.md` §6). A whole-world frame is served perfectly well by `f32` input, which is
-/// why the narrower width is accepted rather than refused.
-fn read_f64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> Result<Vec<f64>> {
-    let column = batch.column(idx);
-    if column.null_count() > 0 {
-        return Err(BuildError::Schema {
+/// A coordinate column, read by [`read_coordinates`]. `row_name` says how a refusal names a row of
+/// `batch`.
+fn read_coordinate_column(
+    path: &Path,
+    batch: &RecordBatch,
+    idx: usize,
+    name: &str,
+    row_name: &dyn Fn(usize) -> String,
+) -> Result<Vec<f64>> {
+    read_coordinates(batch.column(idx).as_ref()).map_err(|e| {
+        let at = match e {
+            ColumnError::Null { row } => format!("{}: ", row_name(row)),
+            ColumnError::Type(_) => String::new(),
+        };
+        BuildError::Schema {
             path: path.to_path_buf(),
-            detail: format!("column '{name}' contains nulls"),
-        });
-    }
-    match column.data_type() {
-        DataType::Float32 => Ok(column
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .expect("checked data type")
-            .values()
-            .iter()
-            .map(|v| f64::from(*v))
-            .collect()),
-        DataType::Float64 => Ok(column
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .expect("checked data type")
-            .values()
-            .to_vec()),
-        other => Err(BuildError::Schema {
-            path: path.to_path_buf(),
-            detail: format!("column '{name}' has unsupported type {other:?}"),
-        }),
+            detail: format!("{at}column '{name}' {e}"),
+        }
+    })
+}
+
+/// How a refusal names row `row` of `batch`: by its identity where the file carries a column
+/// `id_name` at `id_idx`, and by its position in the batch otherwise.
+fn row_name(batch: &RecordBatch, id_idx: Option<usize>, id_name: &str, row: usize) -> String {
+    match id_idx {
+        Some(idx) => format!(
+            "{id_name} {}",
+            crate::ids::display_at(batch.column(idx).as_ref(), row)
+        ),
+        None => format!("row {row}"),
     }
 }
 
@@ -2861,16 +2849,25 @@ pub fn read_roster_table(
                             })
                             .collect::<Result<_>>()?
                     }
+                    // Read at `f64` whatever the declared width, since a roster float is held
+                    // as one.
                     ScalarType::F32 | ScalarType::F64 => {
-                        let nulls = column.nulls().cloned();
-                        read_f64_column(path, &batch, idx, name)?
-                            .into_iter()
-                            .enumerate()
-                            .map(|(row, value)| {
-                                match nulls.as_ref().is_some_and(|n| n.is_null(row)) {
-                                    true => Err(missing(row)),
-                                    false => Ok(MetadataValue::Float(value)),
-                                }
+                        let read = ScalarColumn::new(column, ScalarType::F64).ok_or_else(|| {
+                            BuildError::Schema {
+                                path: path.to_path_buf(),
+                                detail: format!(
+                                    "the roster column '{name}' has type {:?}, and this group \
+                                     declares it '{}'; send float32 or float64",
+                                    column.data_type(),
+                                    declared.ty.arrow_type_name()
+                                ),
+                            }
+                        })?;
+                        (0..column.len())
+                            .map(|row| match read.value(row) {
+                                Ok(ScalarValue::F64(value)) => Ok(MetadataValue::Float(value)),
+                                Ok(_) => Err(missing(row)),
+                                Err(e) => unreachable!("an f64 read refuses nothing: {e}"),
                             })
                             .collect::<Result<_>>()?
                     }

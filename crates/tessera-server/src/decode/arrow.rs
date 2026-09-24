@@ -1,5 +1,6 @@
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
+use tessera_engine::coordinates;
 use tessera_engine::scalar_column::{self, ScalarColumn};
 use tessera_engine::utf8::Utf8Column;
 use tessera_engine::{
@@ -671,9 +672,8 @@ fn optional_binary_col<'a>(
     }
 }
 
-/// A coordinate column as `f64`: `float32` is widened, as the build reads a points file, and
-/// `float64` is never narrowed, since at deep zoom narrowing would move a point to another cell.
-/// `offset` is where this record batch's rows start in the request, so a null names its row.
+/// A coordinate column, read by the rule a build reads a points file's. `offset` is where this
+/// record batch's rows start in the request, so a null names its row.
 fn coordinate_col(
     batch: &arrow::record_batch::RecordBatch,
     name: &str,
@@ -681,26 +681,18 @@ fn coordinate_col(
 ) -> Result<Vec<f64>, DecodeError> {
     let column = batch.column_by_name(name).ok_or_else(|| {
         DecodeError(format!(
-            "ingest body: column '{name}' missing or not float32/float64"
+            "ingest body: column '{name}' is missing; send it as float32 or float64"
         ))
     })?;
-    if let Some(row) = (0..column.len()).find(|&row| column.is_null(row)) {
-        return Err(DecodeError(format!(
-            "ingest body: row {}, column '{name}' is null; write a number, since every row needs \
-             both coordinates",
+    coordinates::read_coordinates(column.as_ref()).map_err(|e| match e {
+        coordinates::ColumnError::Null { row } => DecodeError(format!(
+            "ingest body: row {}, column '{name}' {e}",
             offset + row
-        )));
-    }
-    let any = column.as_any();
-    if let Some(a) = any.downcast_ref::<arrow::array::Float64Array>() {
-        Ok(a.values().to_vec())
-    } else if let Some(a) = any.downcast_ref::<arrow::array::Float32Array>() {
-        Ok(a.values().iter().map(|v| f64::from(*v)).collect())
-    } else {
-        Err(DecodeError(format!(
-            "ingest body: column '{name}' missing or not float32/float64"
-        )))
-    }
+        )),
+        coordinates::ColumnError::Type(_) => {
+            DecodeError(format!("ingest body: column '{name}' {e}"))
+        }
+    })
 }
 
 /// The batch's labels column `name`, read by the rule the build reads a points file's access
