@@ -50,7 +50,7 @@ export class TesseraLegend extends TesseraElement {
       }
       [part='ramp'] {
         height: 8px;
-        border-radius: var(--tessera-radius);
+        border-radius: var(--_tessera-radius);
         margin: 10px 0 4px;
       }
       .v {

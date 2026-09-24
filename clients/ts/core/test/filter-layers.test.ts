@@ -1,24 +1,19 @@
 import {describe, expect, it} from 'vitest';
 import {drawableLayers, isFilterLayer, layerEntries} from '../src/layers.js';
 import type {Layer} from '../src/types.js';
+import {layer as declared} from './support.js';
 
 /**
  * §5.4's ruling, read off a declaration: **a layer declaring `computed = []` is a filter layer,
  * and a filter layer is still a layer.** It is in the roster and never presented for viewing.
  */
 const layer = (name: string, computedContent: string[]): Layer =>
-  ({
-    name,
-    title: name,
+  declared(name, {
     views: ['knn'],
-    hierarchy: {kind: 'flat', pruneChildren: false},
-    levels: [],
     computedContent,
     shape: computedContent.includes('hull') ? 'derived' : null,
-    suppliedContent: ['name'],
-    depsOn: [],
-    version: 1
-  }) as unknown as Layer;
+    suppliedContent: ['name']
+  });
 
 const CLUSTERS = layer('clusters/kmeans', ['centroid', 'box', 'hull']);
 const MESH = layer('mesh/descriptors', []);

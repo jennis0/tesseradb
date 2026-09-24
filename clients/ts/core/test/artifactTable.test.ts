@@ -23,15 +23,15 @@ describe('the session artifact table', () => {
     // The same id in a later response resolves to the same ordinal — ids are stable per session.
     expect(table.ordinalOf('clusters/x', 10n)).toBe(a);
     expect([...table.take([ref(10n)])]).toEqual([a]);
-    expect(table.entry(a)?.tesseraId).toBe(10n);
+    expect(table.entry(a!)?.tesseraId).toBe(10n);
   });
 
   it('links a child to a parent served in the same batch, and takes each rung from the wire', () => {
     const table = new SessionArtifactTable();
     const [parent, child] = table.take([ref(1n), ref(2n, 1n, 'clusters/x', 1)]);
-    expect(table.entry(child)?.parentOrdinals).toEqual([parent]);
-    expect(table.entry(child)?.rung).toBe(1);
-    expect(table.entry(parent)?.rung).toBe(0);
+    expect(table.entry(child!)?.parentOrdinals).toEqual([parent]);
+    expect(table.entry(child!)?.rung).toBe(1);
+    expect(table.entry(parent!)?.rung).toBe(0);
   });
 
   /**
@@ -46,12 +46,12 @@ describe('the session artifact table', () => {
       ref(1n, null, 'clusters/x', 0),
       ref(2n, 1n, 'clusters/x', 2)
     ]);
-    expect(table.entry(county)?.parentOrdinals).toEqual([country]);
-    expect(table.entry(county)?.rung).toBe(2);
+    expect(table.entry(county!)?.parentOrdinals).toEqual([country]);
+    expect(table.entry(county!)?.rung).toBe(2);
   });
 
   /**
-   * **A `dag` layer's child names several parents** (decision 0117): every one the table holds
+   * **A `dag` layer's child names several parents**: every one the table holds
    * is recorded, in the wire's ascending order, and the colour walk takes the first — so the
    * chain is the same on every rebuild. A parent the batch did not carry is simply not linked.
    */
@@ -111,7 +111,7 @@ describe('the session artifact table', () => {
   it('leaves a child a root when its parent is not in the batch — a link that does not resolve is no link', () => {
     const table = new SessionArtifactTable();
     const [child] = table.take([ref(2n, 7n)]);
-    expect(table.entry(child)?.parentOrdinals).toEqual([]);
+    expect(table.entry(child!)?.parentOrdinals).toEqual([]);
   });
 
   it('refcounts by band and recycles an ordinal at zero', () => {

@@ -5,7 +5,8 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 1  tiles      (tile, visible, matched, served,      exactly one, first
                         highlighted)
     kind 2  sub-cells  (cell, count)                          exactly one, iff underlay requested
-    kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order
+    kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order;
+                        a scalar with no value is null
     kind 4  trailer    JSON                                   exactly one, last
     kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and before
                         key, masked_count, the derived           any points; absent when none served

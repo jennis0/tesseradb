@@ -6,8 +6,11 @@ import {
   WORLD_SIZE,
   assertCompositionMatchesServed,
   dataToWorldXY,
+  hasValue,
   worldBbox,
+  type ArtifactsProjection,
   type FiltersProjection,
+  type MarksProjection,
   type RegionProjection,
   type Store,
   type SelectionShape,
@@ -15,9 +18,9 @@ import {
 } from '@tesseradb/client';
 import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, resolvePick, type ContourShape, type Picked} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
-import {TesseraElement, emit, idString} from './base.js';
+import {TesseraElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
-import type {PickOutcome} from './item-card.js';
+import {timestampText, type PickOutcome} from './item-card.js';
 import {renderState, stateOf, type PanelState} from './states.js';
 import {icon} from './icons.js';
 import {sameFrame} from './view-switch.js';
@@ -59,7 +62,10 @@ const FINALIZE_SETTLE_MS = 250;
  */
 const HOVER_DESCRIBE_MS = 140;
 
-/** What the map publishes for an instrument or a smoke script — mutated in place, one object. */
+/**
+ * What the map publishes for an instrument or a smoke script, mutated in place, one object.
+ * `timings.frame` and `cluster` are filled only while the map's `measure` is on.
+ */
 export type MapProbe = {
   paints: number;
   at: number;
@@ -162,14 +168,14 @@ export class TesseraMap extends TesseraElement {
       :host {
         display: block;
         position: relative;
-        height: var(--tessera-map-height);
+        height: var(--_tessera-map-height);
         min-height: 120px;
-        background: var(--tessera-map-bg);
+        background: var(--_tessera-map-bg);
         outline: none;
         overflow: hidden;
       }
       :host(:focus-visible) {
-        box-shadow: inset 0 0 0 2px var(--tessera-accent);
+        box-shadow: inset 0 0 0 2px var(--_tessera-accent);
       }
       [part='canvas'] {
         position: absolute;
@@ -184,7 +190,7 @@ export class TesseraMap extends TesseraElement {
         z-index: 2;
         display: flex;
         flex-direction: column;
-        gap: var(--tessera-space);
+        gap: var(--_tessera-space);
         max-width: 46%;
         pointer-events: none;
       }
@@ -192,29 +198,29 @@ export class TesseraMap extends TesseraElement {
         pointer-events: auto;
       }
       .top-left {
-        top: var(--tessera-space);
-        left: var(--tessera-space);
+        top: var(--_tessera-space);
+        left: var(--_tessera-space);
       }
       .top-right {
-        top: var(--tessera-space);
-        right: var(--tessera-space);
+        top: var(--_tessera-space);
+        right: var(--_tessera-space);
       }
       .bottom-left {
-        bottom: var(--tessera-space);
-        left: var(--tessera-space);
+        bottom: var(--_tessera-space);
+        left: var(--_tessera-space);
       }
       .bottom-right {
-        bottom: var(--tessera-space);
-        right: var(--tessera-space);
+        bottom: var(--_tessera-space);
+        right: var(--_tessera-space);
         align-items: flex-end;
       }
       [part='controls'] {
         display: flex;
         flex-direction: column;
-        background: var(--tessera-surface);
-        border: 1px solid var(--tessera-line);
-        border-radius: var(--tessera-radius);
-        box-shadow: var(--tessera-shadow);
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius);
+        box-shadow: var(--_tessera-shadow);
         overflow: hidden;
         pointer-events: auto;
       }
@@ -223,21 +229,21 @@ export class TesseraMap extends TesseraElement {
         height: 36px;
         display: grid;
         place-items: center;
-        color: var(--tessera-ink-2);
-        border-bottom: 1px solid var(--tessera-line-2);
+        color: var(--_tessera-ink-2);
+        border-bottom: 1px solid var(--_tessera-line-2);
         border-radius: 0;
       }
       [part='controls'] button:last-child {
         border-bottom: 0;
       }
       [part='controls'] button[aria-pressed='true'] {
-        background: var(--tessera-accent-soft);
-        color: var(--tessera-accent);
+        background: var(--_tessera-accent-soft);
+        color: var(--_tessera-accent);
       }
       [part='controls'] .sep {
         height: 6px;
-        background: var(--tessera-surface-2);
-        border-bottom: 1px solid var(--tessera-line-2);
+        background: var(--_tessera-surface-2);
+        border-bottom: 1px solid var(--_tessera-line-2);
       }
       [part='tooltip'] {
         position: absolute;
@@ -245,10 +251,10 @@ export class TesseraMap extends TesseraElement {
         pointer-events: none;
         padding: 8px 10px;
         max-width: 260px;
-        background: var(--tessera-surface);
-        border: 1px solid var(--tessera-line);
-        border-radius: var(--tessera-radius);
-        box-shadow: var(--tessera-shadow);
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius);
+        box-shadow: var(--_tessera-shadow);
         font-size: 12px;
         transform: translate(14px, 14px);
       }
@@ -259,7 +265,7 @@ export class TesseraMap extends TesseraElement {
       [part='tooltip'] .s {
         margin-top: 3px;
         font-size: 11px;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       [part='overlay'] {
         position: absolute;
@@ -273,16 +279,16 @@ export class TesseraMap extends TesseraElement {
       [part='overlay'] [part='state'] {
         pointer-events: auto;
         padding: 10px 14px;
-        background: var(--tessera-surface);
-        border: 1px solid var(--tessera-line);
-        border-radius: var(--tessera-radius);
-        box-shadow: var(--tessera-shadow);
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius);
+        box-shadow: var(--_tessera-shadow);
         font-size: 13px;
         font-weight: 600;
       }
       [part='overlay'] [part='state'][data-state='refused'],
       [part='overlay'] [part='state'][data-state='expired'] {
-        background: var(--tessera-refuse-soft);
+        background: var(--_tessera-refuse-soft);
       }
     `
   ];
@@ -296,7 +302,14 @@ export class TesseraMap extends TesseraElement {
   })
   accessor layers: string[] | null = null;
   @property({type: Number}) accessor budget = 0;
+  /** Columns the marks carry, shown beneath a hovered point's title. */
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
+  /**
+   * The record field a hovered point is titled by. Read off the marks where they carry it, else
+   * from the record once the pointer has rested. Unset, the title is the point's id and nothing
+   * is fetched.
+   */
+  @property({attribute: 'title-field'}) accessor titleField = '';
   @property({reflect: true}) accessor mode: 'pan' | 'box' | 'lasso' = 'pan';
   /** How served artifacts are coloured: by position about the extent's centre, or spread over the served set. */
   @property() accessor palette: PaletteKind = 'positional';
@@ -314,13 +327,14 @@ export class TesseraMap extends TesseraElement {
    * case, the host's `color-scheme` decides both.
    */
   @property({reflect: true}) accessor ground: 'light' | 'dark' | '' = '';
-  /**
-   * Whether the single-hue density wash is drawn under the points. **Off by default** (owner
-   * direction, 2026-08-26): how density should be rendered is its own conversation, and the wash
-   * was confounding a pass over the map's hierarchy. The machinery is untouched — `wash` turns it
-   * on and the layer still builds it from the exact tiles' counts (decision 0097).
-   */
+  /** Whether the single-hue density wash, built from the exact tiles' counts, is drawn under the points. */
   @property({type: Boolean}) accessor wash = false;
+  /**
+   * Whether the map measures itself for the probe: the frame-gap loop behind `probe.timings.frame`,
+   * the colour-by-cluster sample behind `probe.cluster`, and the check that each composition
+   * matches what was served. Off, none of the three runs.
+   */
+  @property({type: Boolean}) accessor measure = false;
   /** A fixed mark radius in pixels; unset, the marks are sized by their count and the zoom (`markStyle`). */
   @property({type: Number}) accessor radius: number | null = null;
   /** The mode and fit control cluster — the map's own, not a slot. */
@@ -390,7 +404,7 @@ export class TesseraMap extends TesseraElement {
     this.setAttribute('role', 'application');
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', 'map — arrow keys pan, + and - zoom');
     this.addEventListener('keydown', this.onKey);
-    this.startFrameLoop();
+    if (this.measure) this.startFrameLoop();
   }
 
   override disconnectedCallback(): void {
@@ -410,6 +424,11 @@ export class TesseraMap extends TesseraElement {
 
   protected override updated(changed: PropertyValues<this>): void {
     this.ensureDeck();
+    if (changed.has('measure')) {
+      if (this.measure && this.isConnected) this.startFrameLoop();
+      else this.stopFrameLoop();
+      if (this.measure && this.resolvedStore) this.measureStore(this.resolvedStore);
+    }
     const s = this.resolvedStore;
     if (s) {
       if (changed.has('colourBy') && this.colourBy !== '') s.setColourBy(this.colourBy === 'none' ? null : this.colourBy);
@@ -441,13 +460,17 @@ export class TesseraMap extends TesseraElement {
     return typeof matchMedia !== 'undefined' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
-  protected override onStoreAdopted(store: Store): void {
+  protected override onStoreAdopted(store: Store | null): void {
     this.slab.clear();
-    store.setScheme(this.scheme());
     this.metaSeen = false;
     this.selectedWorldXY = null;
     this.regionWorld = null;
     this.regionPolygon = null;
+    if (!store) {
+      this.paint();
+      return;
+    }
+    store.setScheme(this.scheme());
     if (this.colourBy !== '') store.setColourBy(this.colourBy === 'none' ? null : this.colourBy);
     if (this.layers) store.setLayers(this.layers);
     if (this.budget > 0) store.setBudget(this.budget);
@@ -463,8 +486,7 @@ export class TesseraMap extends TesseraElement {
       this.pushView();
     }
     const view = s.get('view');
-    // **Every switch drops the hover** (owner ruling, 2026-09-01), a switch within a group
-    // included: the marks under the cursor are different rows in the next view, and a tooltip
+    // **Every switch drops the hover**, a switch within a group included: the marks under the cursor are different rows in the next view, and a tooltip
     // held across the step would name a record that is no longer beneath the pointer.
     if (view.id !== this.cameraView) {
       this.cameraView = view.id;
@@ -497,16 +519,7 @@ export class TesseraMap extends TesseraElement {
     const legend = s.get('legend');
     const clusterLayer = clusterLayerOf(legend.colourBy);
     p.encoding = clusterLayer ? `cluster|${clusterLayer}` : encodingSignature(encodingOf(s.get('meta'), legend));
-    if (view.composition && !checkedCompositions.has(view.composition)) {
-      checkedCompositions.add(view.composition);
-      assertCompositionMatchesServed(view.composition);
-    }
-    const artifacts = s.get('artifacts');
-    if (artifacts !== this.probedArtifacts || view.composition !== this.probedComposition) {
-      this.probedArtifacts = artifacts;
-      this.probedComposition = view.composition;
-      p.cluster = this.clusterProbe(clusterLayer, artifacts, s.get('marks').bands);
-    }
+    if (this.measure) this.measureStore(s);
 
     // Events for what arrived: the picked record, the opened artifact, the region's counts.
     const sel = s.get('selection');
@@ -516,7 +529,7 @@ export class TesseraMap extends TesseraElement {
     }
     if (sel.artifact && sel.artifact !== this.announcedArtifact) {
       this.announcedArtifact = sel.artifact;
-      emit(this, 'tessera-artifactopen', {id: idString(sel.artifact.id), detail: sel.artifact.detail});
+      emit(this, 'tessera-artifactopen', {id: idString(sel.artifact.id), detail: {...sel.artifact.detail, maskedCount: sel.artifact.detail.maskedCount.toString(10)}});
     }
     const region = s.get('region');
     // The store's own view's frame (decision 0040): the extent is the view's, so the conversion
@@ -554,7 +567,7 @@ export class TesseraMap extends TesseraElement {
       if (region.status !== 'loading' && region !== this.regionAnnounced) {
         this.regionAnnounced = region;
         emit(this, 'tessera-selectchange', {
-          shape: region.shape,
+          shape: shapeDetail(region.shape),
           status: region.status,
           visible: region.visible,
           matched: region.matched,
@@ -577,14 +590,9 @@ export class TesseraMap extends TesseraElement {
       this.paintedOpened = opened;
       this.paint();
     }
-    // **The same rule, and the defect it was written for.** `highlighting` and `washChannel` are
-    // host-computed properties too: the layer subscribes to the store's projections and redraws
-    // itself when the marks move, but a property this element computed and handed it stays at
-    // whatever the last paint passed. So a highlight applied while the camera was still reached
-    // the wire, the response's bits reached the slab, and the layer went on drawing with
-    // `highlighting: false` — every mark lit, the dull uniform at 1.0 and the wash on the wrong
-    // channel — until something unrelated happened to repaint. On rung 3 that is the whole of
-    // *the highlight shows no visible difference*.
+    // The same rule for `highlighting` and `washChannel`: the layer redraws itself when the marks
+    // move, but a property this element computed and handed it keeps the value of the last paint,
+    // so a change in either repaints here.
     const wash = washChannel(s.get('filters'), view, region);
     if (view.highlighting !== this.paintedHighlighting || wash !== this.paintedWashChannel) {
       this.paintedHighlighting = view.highlighting;
@@ -603,9 +611,22 @@ export class TesseraMap extends TesseraElement {
   private paintedWashChannel: ReturnType<typeof washChannel> | null = null;
   private regionShape: SelectionShape | null = null;
 
+  /** What `measure` adds on a store change: the composition check and the cluster sample. */
+  private measureStore(s: Store): void {
+    const view = s.get('view');
+    if (view.composition && !checkedCompositions.has(view.composition)) {
+      checkedCompositions.add(view.composition);
+      assertCompositionMatchesServed(view.composition);
+    }
+    const artifacts = s.get('artifacts');
+    if (artifacts === this.probedArtifacts && view.composition === this.probedComposition) return;
+    this.probedArtifacts = artifacts;
+    this.probedComposition = view.composition;
+    this.probe.cluster = this.clusterProbe(clusterLayerOf(s.get('legend').colourBy), artifacts, s.get('marks').bands);
+  }
+
   /** See {@link MapProbe.cluster}: a sample of carried ordinals, each resolved through the table. */
-  private clusterProbe(clusterLayer: string | null, artifacts: ReturnType<Store['get']> & {layers: string[]}, bands: readonly {membership: Record<string, {distinct: Uint32Array}>}[]): MapProbe['cluster'] {
-    const a = artifacts as unknown as import('@tesseradb/client').ArtifactsProjection;
+  private clusterProbe(clusterLayer: string | null, a: ArtifactsProjection, bands: MarksProjection['bands']): MapProbe['cluster'] {
     const layer = clusterLayer ?? a.layers[0] ?? null;
     const rows = clusterLayer ? a.colourServed : a.served;
     const rowOrdinals = clusterLayer ? new Set(rows.map((x) => a.table.ordinalOf(x.layer, x.tesseraId))) : a.servedOrdinals;
@@ -797,18 +818,11 @@ export class TesseraMap extends TesseraElement {
 
   /**
    * What the pointer is over: the tooltip from the mark beneath it, and the hovered artifact from
-   * the frontier's own shapes ({@link hoverAt}), never from deck's pick.
-   *
-   * Deck answers a pick with whatever polygon its picking pass finds, which was every served
-   * artifact — ancestors included, at zero alpha — so crossing a cluster meant crossing its
-   * parent's invisible ring too and the highlight flipped between the two on a pixel of movement
-   * (the owner's review, 2026-08-27). The shapes are now the frontier's alone, the deepest one
-   * containing the pointer wins, and the one already hovered holds until the pointer is clear of
-   * it. The mark beneath the pointer is passed as the preference, so the highlighted contour is
-   * the cluster whose point the tooltip is describing.
-   *
-   * Deck cannot answer it at all: the outline layer holds the hovered and the opened artifact and
-   * is not pickable, so a contour is never in its pick pass.
+   * the frontier's own shapes ({@link hoverAt}). Deck's pick is not asked: its picking pass
+   * answers with any served polygon, ancestors included, and the outline layer is not pickable.
+   * The deepest shape containing the pointer wins, the one already hovered holds until the
+   * pointer is clear of it, and the mark beneath is the tie-break, so the highlighted contour is
+   * the cluster whose point the tooltip describes.
    */
   private onHover(info: PickingInfo): void {
     const picked = resolvePick(info as never);
@@ -829,75 +843,48 @@ export class TesseraMap extends TesseraElement {
       if (this.hover) this.hover = null;
       return;
     }
-    // The hint: the first tooltip field as the title (a `title` column, typically), the rest as
-    // one muted line beneath — the boards' `tooltip`. With no fields, the id.
-    const values: string[] = [];
-    const fields = this.tooltipFields.split(/[\s,]+/).filter(Boolean);
-    if (fields.length > 0 && slot) {
-      if (at) {
-        for (const f of fields) {
-          const column = at.band.scalars[f];
-          if (!column) continue;
-          const raw = (column.values as ArrayLike<unknown>)[at.i];
-          values.push(column.arrowType === 'timestamp_us' ? new Date(Number(raw) / 1000).toISOString().slice(0, 4) : String(raw));
-        }
-      }
-    }
-    const title = values[0] ?? `#${idString(picked.id)}`;
-    const lines = values.slice(1);
-    this.hover = {x: info.x, y: info.y, title, lines};
-    // Nothing the marks carry names the thing under the pointer, so ask the record — see
-    // {@link describeHovered}. The id stands until the answer lands, and stands for good where
-    // the corpus has no text column or the record cannot be reached.
-    if (values.length === 0) this.describeHovered(picked.id, info.x, info.y);
+    // An absent value reads as such beside the others; an absent title falls back as a missing one.
+    const carried = (name: string, absent: string | null): string | null => {
+      const column = at?.band.scalars[name];
+      if (!at || !column) return null;
+      if (!hasValue(column, at.i)) return absent;
+      const raw = (column.values as ArrayLike<unknown>)[at.i];
+      return raw === null || raw === undefined ? null : hoverText(raw, column.arrowType);
+    };
+    const lines = this.tooltipFields
+      .split(/[\s,]+/)
+      .filter(Boolean)
+      .map((name) => carried(name, 'absent'))
+      .filter((v): v is string => v !== null);
+    const title = this.titleField ? carried(this.titleField, null) : null;
+    this.hover = {x: info.x, y: info.y, title: title ?? `#${idString(picked.id)}`, lines};
+    if (this.titleField && title === null) this.describeHovered(picked.id, info.x, info.y);
     emit(this, 'tessera-hover', {id: idString(picked.id), x: info.x, y: info.y});
   }
 
   /**
-   * The hovered point's own name, fetched once the pointer rests on it.
+   * The hovered point's title field, from its record once the pointer rests on it: a text column
+   * lives in the record and never in the marks.
    *
-   * **A text column cannot be drawn**, so it is not in the response the marks came from: prose
-   * lives in the record blob and `render` on a text column is refused (records-and-search §3).
-   * The id is therefore the whole of what a mark knows about itself, and a tooltip reading
-   * `#31728047486770` is the honest rendering of that — and useless. One request per point, held
-   * by the store, is what turns it into a name.
-   *
-   * **After a dwell, not on the move.** A pointer crossing a dense map touches hundreds of marks a
-   * second and none of them is being looked at; {@link HOVER_DESCRIBE_MS} is the pause that says
-   * one of them is. A pointer that has moved on by the time the answer lands writes nothing.
+   * After a dwell, not on the move: a pointer crossing a dense map touches hundreds of marks a
+   * second, and {@link HOVER_DESCRIBE_MS} is the pause that says one of them is being looked at.
+   * A pointer that has moved on by the time the answer lands writes nothing.
    */
   private describeHovered(id: bigint, x: number, y: number): void {
-    const column = this.nameColumn();
-    if (column === null) return;
+    const field = this.titleField;
     if (this.describeTimer !== null) clearTimeout(this.describeTimer);
     this.describeTimer = setTimeout(() => {
       this.describeTimer = null;
       const store = this.resolvedStore;
       if (!store) return;
+      const arrowType = store.get('meta')?.declaredScalars.find((d) => d.name === field)?.arrowType ?? null;
       void store.describe(id).then((fields) => {
-        const name = fields?.[column];
-        if (typeof name !== 'string' || name === '') return;
-        // The pointer may have left, or moved to another mark, while this was in flight.
+        const value = fields?.[field];
+        if (value === null || value === undefined || value === '') return;
         if (!this.hover || this.hover.x !== x || this.hover.y !== y) return;
-        this.hover = {...this.hover, title: name};
+        this.hover = {...this.hover, title: hoverText(value, arrowType)};
       });
     }, HOVER_DESCRIBE_MS);
-  }
-
-  /**
-   * The column a hover names a point by: the first text column the bundle declares, or `null`
-   * where it declares none — every arXiv corpus answers `title`, this one answers `name`, and a
-   * corpus of bare points answers nothing and keeps its ids.
-   */
-  private nameColumn(): string | null {
-    const scalars = (this.resolvedStore?.get('meta') ?? null)?.declaredScalars ?? [];
-    // Prose first — a corpus with both a `text` title and a `keyword` code means the title — then
-    // whatever string column exists.
-    return (
-      scalars.find((d) => d.arrowType === 'text')?.name ??
-      scalars.find((d) => d.arrowType === 'utf8' || d.arrowType === 'keyword')?.name ??
-      null
-    );
   }
 
   private onClick(info: PickingInfo): void {
@@ -1031,7 +1018,7 @@ export class TesseraMap extends TesseraElement {
     this.regionAskedAt = performance.now();
     if (this.probe.region) this.probe.region = null;
     this.resolvedStore?.select(shape);
-    emit(this, 'tessera-selectchange', {shape, status: shape ? 'loading' : 'cleared'});
+    emit(this, 'tessera-selectchange', {shape: shapeDetail(shape), status: shape ? 'loading' : 'cleared'});
   }
 
   // ---- the camera -----------------------------------------------------------------------------
@@ -1134,7 +1121,7 @@ export class TesseraMap extends TesseraElement {
     e.preventDefault();
   };
 
-  // ---- the frame loop, for the probe ---------------------------------------------------------
+  // ---- the frame loop, for the probe while measuring -------------------------------------------
 
   private startFrameLoop(): void {
     if (this.frameLoop !== null || typeof requestAnimationFrame === 'undefined') return;
@@ -1207,6 +1194,12 @@ export class TesseraMap extends TesseraElement {
           </div>`
         : nothing}`;
   }
+}
+
+/** A value as the hover shows it; a timestamp in full, as an ISO date-time. */
+function hoverText(value: unknown, arrowType: string | null): string {
+  if (arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return timestampText(value);
+  return String(value);
 }
 
 /** Compositions whose fidelity check has run — once per frame object. */

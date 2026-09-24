@@ -43,7 +43,7 @@ describe('the authorise term encoding', () => {
       'Institut Ruđer Bošković'
     ];
     await client().authorise(terms);
-    expect(JSON.parse(decoded(seen[0]))).toEqual({terms});
+    expect(JSON.parse(decoded(seen[0]!))).toEqual({terms});
   });
 
   it('encodes an accented term as UTF-8 and not as Latin-1', async () => {
@@ -52,9 +52,9 @@ describe('the authorise term encoding', () => {
     await client().authorise(terms);
     // The bytes, not the code points: `é` is two bytes in UTF-8 and one in Latin-1, so a Latin-1
     // encoding round-trips through `atob` to the same string and is caught only on the bytes.
-    const bytes = Uint8Array.from(atob(seen[0]), (c) => c.charCodeAt(0));
+    const bytes = Uint8Array.from(atob(seen[0]!), (c) => c.charCodeAt(0));
     expect(bytes).toEqual(new TextEncoder().encode(JSON.stringify({terms})));
-    expect(JSON.parse(decoded(seen[0]))).toEqual({terms});
+    expect(JSON.parse(decoded(seen[0]!))).toEqual({terms});
   });
 
   it('encodes a plain ASCII list exactly as before', async () => {

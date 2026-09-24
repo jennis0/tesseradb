@@ -43,6 +43,9 @@
 // stops before the first write.
 import {Buffer} from 'node:buffer';
 import {tableFromIPC} from 'apache-arrow';
+// Loading a `.ts` module needs Node 22.18 or later, which strips its types.
+import {Control} from '../core/src/control.ts';
+import {accepted, clusterLayerDeclaration, labelLayerDeclaration} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -51,11 +54,11 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const control = args.control ?? 'http://127.0.0.1:45721';
 const sessionCred = process.env.TESSERA_SESSION_CRED;
 const operatorCred = process.env.TESSERA_OPERATOR_CRED;
 if (!sessionCred) throw new Error('set TESSERA_SESSION_CRED');
 if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
+const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', operatorCredential: operatorCred});
 
 const dryRun = 'dry-run' in args;
 
@@ -145,36 +148,16 @@ async function points(token, k) {
 }
 
 async function register(declaration) {
-  const r = await fetch(`${control}/control/layers`, {
-    method: 'PUT',
-    headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
-    body: JSON.stringify(declaration)
-  });
-  if (!r.ok) throw new Error(`register ${declaration.name}: ${r.status} ${await r.text()}`);
-  return r.json();
+  return accepted(`register ${declaration.name}`, await control.declareLayer(declaration));
 }
 
 async function publish(layer, artifactsToPublish) {
-  const r = await fetch(`${control}/control/layers/${encodeURIComponent(layer)}/artifacts`, {
-    method: 'PUT',
-    headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
-    body: JSON.stringify({
-      level: 0,
-      addressing: 'tessera',
-      idset: (await metaOf(await authorise(['0']))).idset,
-      artifacts: artifactsToPublish
-    })
-  });
-  if (!r.ok) throw new Error(`publish into ${layer}: ${r.status} ${await r.text()}`);
-  return r.json();
+  const idset = (await metaOf(await authorise(['0']))).idset;
+  return accepted(`publish into ${layer}`, await control.publish(layer, {level: 0, addressing: 'tessera', idset, artifacts: artifactsToPublish}));
 }
 
 async function status() {
-  const r = await fetch(`${control}/control/status`, {
-    headers: {authorization: `Bearer ${operatorCred}`}
-  });
-  if (!r.ok) throw new Error(`status: ${r.status} ${await r.text()}`);
-  return r.json();
+  return accepted('status', await control.status());
 }
 
 const line = (label, value) => console.log(`  ${String(label).padEnd(34)} ${value}`);
@@ -207,34 +190,19 @@ if (dryRun) {
   process.exit(0);
 }
 
-await register({
-  name: clusterLayer,
-  title: 'write-cycle demo clusters',
-  views: [meta.views[0].id],
-  membership: 'enumerated',
-  content: {derived: ['centroid'], supplied: [], on_member_deletion: 'withdraw_content'},
-  access: {label: null, artifacts_carry_own: false},
-  visible_when: null,
-  hierarchy: {kind: 'flat', prune_children: false}
-});
-await register({
-  name: labelLayer,
-  title: 'write-cycle demo labels',
-  views: [meta.views[0].id],
-  membership: 'enumerated',
-  content: {
-    derived: [],
-    supplied: [{kind: 'label_text', corpus_derived: true}],
-    // **The declaration under test.** Strict: a description whose source is deleted is withdrawn at
-    // the fold rather than re-based onto the survivors. `shrink_generating_set` is the other choice
-    // and would put the label back at step 4 — deliberately, and only because the publisher said so.
-    on_member_deletion: 'withdraw_content'
-  },
-  access: {label: null, artifacts_carry_own: false},
-  visible_when: null,
-  hierarchy: {kind: 'flat', prune_children: false},
-  depends_on: [clusterLayer]
-});
+// The label layer's content is withdrawn at the fold once a member it was generated from is
+// deleted, which is what step 4 checks.
+await register(
+  clusterLayerDeclaration({
+    name: clusterLayer,
+    title: 'write-cycle demo clusters',
+    view: meta.views[0].id,
+    visibility: null,
+    minVisible: null,
+    computed: ['centroid']
+  })
+);
+await register(labelLayerDeclaration({name: labelLayer, title: 'write-cycle demo labels', view: meta.views[0].id, clusters: clusterLayer}));
 
 await publish(clusterLayer, [{key: 'c0', members: members.map(String)}]);
 await publish(labelLayer, [
@@ -256,12 +224,7 @@ if (!before.has(`${labelLayer}::l-c0`)) {
 
 console.log('\n2. delete one of the three documents the label was written from');
 line('tessera_id', sources[0]);
-const deleted = await fetch(`${control}/control/changes`, {
-  method: 'POST',
-  headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
-  body: JSON.stringify([{tessera_id: sources[0].toString(), idset: meta.idset, op: 'delete'}])
-});
-if (!deleted.ok) throw new Error(`delete: ${deleted.status} ${await deleted.text()}`);
+accepted('delete', await control.changes([{tessera_id: sources[0].toString(), idset: meta.idset, op: 'delete'}]));
 
 const afterDelete = await artifacts(token, [clusterLayer, labelLayer]);
 line('cluster', describe(afterDelete.get(`${clusterLayer}::c0`)));
@@ -269,11 +232,7 @@ line('label', describe(afterDelete.get(`${labelLayer}::l-c0`)));
 
 console.log('\n3. run a fold — which a node holding artifacts used to refuse outright');
 const statusBefore = await status();
-const compacted = await fetch(`${control}/control/compact`, {
-  method: 'POST',
-  headers: {authorization: `Bearer ${operatorCred}`}
-});
-if (!compacted.ok) throw new Error(`compact: ${compacted.status} ${await compacted.text()}`);
+accepted('compact', await control.compact());
 const folds = (st) => st.compaction?.folds ?? st.folds ?? 0;
 const failures = (st) => st.compaction?.fold_failures ?? st.fold_failures ?? 0;
 const deadline = Date.now() + 30 * 60_000;

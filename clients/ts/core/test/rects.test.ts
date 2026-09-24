@@ -36,8 +36,11 @@ describe('rectSubtract', () => {
   });
 
   it('is exact, and its pieces are disjoint, for every overlap of two small rects', () => {
-    // Exhaustive over a 6x6 grid: the union of the pieces must equal want-minus-hole exactly, and
-    // no tile may appear twice — a duplicated tile would be requested and absorbed twice.
+    // Exhaustive over a 4x4 grid: the union of the pieces must equal want-minus-hole exactly, and
+    // no tile may appear twice, since a duplicated tile would be requested and absorbed twice.
+    // Failures are collected and asserted once: ten thousand cases of three `expect`s each took
+    // longer than the default timeout on a loaded machine.
+    const wrong: string[] = [];
     for (let ax0 = 0; ax0 < 4; ax0++)
       for (let ax1 = ax0; ax1 < 4; ax1++)
         for (let ay0 = 0; ay0 < 4; ay0++)
@@ -50,11 +53,13 @@ describe('rectSubtract', () => {
                     const hole = R(bx0, by0, bx1, by1);
                     const pieces = rectSubtract(want, hole);
                     const got = unionOf(pieces);
-                    expect(new Set(got).size).toBe(got.length); // disjoint
-                    const expected = [...tilesOf(want)].filter((t) => !tilesOf(hole).has(t));
-                    expect(new Set(got)).toEqual(new Set(expected)); // exact
-                    expect(pieces.length).toBeLessThanOrEqual(4);
+                    const holeTiles = tilesOf(hole);
+                    const expected = [...tilesOf(want)].filter((t) => !holeTiles.has(t)).sort();
+                    const disjoint = new Set(got).size === got.length;
+                    const exact = [...new Set(got)].sort().join() === expected.join();
+                    if (!disjoint || !exact || pieces.length > 4) wrong.push(JSON.stringify({want, hole, pieces}));
                   }
+    expect(wrong).toEqual([]);
   });
 
   it('produces the L-shape a pan actually generates', () => {

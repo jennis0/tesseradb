@@ -5,6 +5,7 @@ import {
   type PointsPart,
   type ViewportHead
 } from './decode.js';
+import {base64} from './control.js';
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
@@ -159,20 +160,8 @@ export class TesseraClient {
     if (!this.opts.sessionCredential) {
       throw new Error('authorise needs a sessionCredential');
     }
-    // **`btoa` takes bytes, not text, and a term is text.** It maps each UTF-16 code unit to one
-    // byte: it throws `InvalidCharacterError` above U+00FF, and below it silently emits Latin-1
-    // rather than UTF-8. The session plane base64-decodes this to a `Vec<u8>` and reads it as UTF-8
-    // JSON (`crates/tessera-server/src/session.rs`), so both halves of that are wrong — a term
-    // carrying an en-dash refuses the whole authorise, and one carrying an accent authorises
-    // against bytes no dictionary holds. Encode to UTF-8 first, then base64 the bytes.
-    const bytes = new TextEncoder().encode(JSON.stringify({terms}));
-    // Chunked because `String.fromCharCode(...bytes)` spreads one argument per byte and overflows
-    // the call stack on a candidate list of any size.
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += 0x8000) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    }
-    const authData = btoa(binary);
+    // The session plane reads `auth_data` as base64 of UTF-8 JSON.
+    const authData = base64(new TextEncoder().encode(JSON.stringify({terms})));
     const response = await fetch(`${this.opts.sessionUrl}/session/authorise`, {
       method: 'POST',
       headers: {
@@ -184,6 +173,22 @@ export class TesseraClient {
     if (!response.ok) await fail(response);
     const body = (await response.json()) as {token: string; token_id: number; expires_at: number};
     return {token: body.token, tokenId: body.token_id, expiresAt: body.expires_at};
+  }
+
+  /** End a session by its `tokenId`, so the token itself is not sent again. An id naming no live session is not refused. */
+  async revoke(tokenId: number): Promise<void> {
+    if (!this.opts.sessionCredential) {
+      throw new Error('revoke needs a sessionCredential');
+    }
+    const response = await fetch(`${this.opts.sessionUrl}/session/revoke`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.opts.sessionCredential}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({token_id: tokenId})
+    });
+    if (!response.ok) await fail(response);
   }
 
   async meta(token: string): Promise<Meta> {

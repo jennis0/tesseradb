@@ -1,48 +1,28 @@
 import {describe, expect, it} from 'vitest';
 import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tesseradb/client';
 import type {ScalarColumn, ViewportResult} from '@tesseradb/client';
-import {assemble, assembledMarks, assertAssemblyMatchesServed, foldBandColumn, refreshExact} from '../src/assemble.js';
+import {band as heldBand, refused} from '../../core/test/support.js';
+import {
+  assemble,
+  assembledMarks,
+  assertAssemblyMatchesServed,
+  foldBandColumn,
+  materialiseStandIn,
+  refreshExact
+} from '../src/assemble.js';
 
 /** A band at `depth`/`prefix` whose points all sit in cell `(cx, cy)`. */
 function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 0, cy: 0}): Band {
-  let morton = 0n;
-  for (let bit = 0; bit < 16; bit++) {
-    morton |= BigInt((cell.cx >> bit) & 1) << BigInt(2 * bit);
-    morton |= BigInt((cell.cy >> bit) & 1) << BigInt(2 * bit + 1);
-  }
-  const scalars: Record<string, ScalarColumn> = {
-    w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}
-  };
-  let x = 0;
-  let y = 0;
-  for (let bit = 0; bit < 16; bit++) {
-    x |= Number((prefix >> BigInt(2 * bit)) & 1n) << bit;
-    y |= Number((prefix >> BigInt(2 * bit + 1)) & 1n) << bit;
-  }
-  return {
-    depth,
-    prefix,
-    x,
-    y,
-    ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1)),
-    // World space already — the cell->world conversion happens when a band is built.
-    positions: Float32Array.from({length: n * 2}, (_, i) =>
-      (i % 2 === 0 ? cell.cx : cell.cy) / 128
-    ),
-    scalars,
+  const visible = BigInt(served * 3);
+  return heldBand(depth, prefix, n, {
+    // World space already: the cell-to-world conversion happens when a band is built.
+    positions: Float32Array.from({length: n * 2}, (_, i) => (i % 2 === 0 ? cell.cx : cell.cy) / 128),
+    scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}},
     served,
-    capUsed: 500,
-    visible: BigInt(served * 3),
-    matched: BigInt(served * 3),
-    highlighted: BigInt(served * 3),
-    highlightBits: null,
-    membership: {},
-    heldBelow: BigInt(n + 1),
-    identityKey: 'ik',
-    contentKey: 'ck',
-    bytes: n * 32,
-    touchedAt: 0
-  };
+    visible,
+    matched: visible,
+    highlighted: visible
+  });
 }
 
 const WHOLE = {x0: 0, y0: 0, x1: 65535, y1: 65535};
@@ -245,7 +225,7 @@ describe('assemble', () => {
 describe('assertAssemblyMatchesServed', () => {
   it('demotes a short band to a stand-in rather than failing the served count', () => {
     // A band holding fewer marks than `served` is what eviction truncation produces; counting it
-    // exact made this assert a crash-per-paint loop under memory pressure (review finding 2).
+    // exact made this assert a crash-per-paint loop under memory pressure.
     // Its head draws as a stand-in — counts suppressed — and the equality's domain excludes it.
     const short = band(2, 0n, 2, 3); // holds 2, server said it served 3
     const out = assemble(frame(2, [short]));
@@ -257,7 +237,7 @@ describe('assertAssemblyMatchesServed', () => {
   it('throws when a provisional tile carries counts', () => {
     const out = assemble(frame(2, [], [band(4, 0n, 2)]));
     out.tiles[0]!.counts = {visible: 1n, matched: 1n, highlighted: 1n, served: 1};
-    expect(() => assertAssemblyMatchesServed(out)).toThrow(/superset of marks must never be read as density/);
+    refused(() => assertAssemblyMatchesServed(out));
   });
 });
 
@@ -301,5 +281,31 @@ describe('refreshExact', () => {
     expect(out.provisional).toBe(0);
     expect(out.standIn.ids.length).toBe(0);
     assertAssemblyMatchesServed(out);
+  });
+});
+
+describe('a stand-in column with no value at some points', () => {
+  it('keeps each point\'s presence, through an index list, a prefix and a band without the column', () => {
+    const heat = (values: number[], present?: number[]): ScalarColumn => ({
+      arrowType: 'f64',
+      values: Float64Array.from(values),
+      ...(present ? {present: Uint8Array.from(present)} : {})
+    });
+    const whole = {...band(2, 0n, 3), scalars: {heat: heat([1, 2, 3])}};
+    const gappy = {...band(2, 1n, 3), scalars: {heat: heat([4, 0, 6], [1, 0, 1])}};
+    const bare = {...band(2, 2n, 2), scalars: {}};
+    const out = materialiseStandIn(
+      [
+        {band: whole, indices: null, limit: 2},
+        {band: gappy, indices: [2, 1], limit: Infinity},
+        {band: bare, indices: null, limit: 1}
+      ],
+      ['heat']
+    );
+    const column = out.scalars.heat!;
+    const read = Array.from(column.values as Float64Array, (v, i) =>
+      !column.present || column.present[i] === 1 ? v : null
+    );
+    expect(read).toEqual([1, 2, 6, null, null]);
   });
 });
