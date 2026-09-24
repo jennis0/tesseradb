@@ -341,13 +341,12 @@ export function createStore(options: StoreOptions): Store {
   const table = new SessionArtifactTable();
 
   let meta: Meta | null = null;
-  let viewId = options.view ?? '';
   let budget = options.budget ?? 500_000;
   let contentKeyAtFrame = '';
 
   /** One byte budget across every view's bands, evicted least recently drawn across them. */
   const bandBudget = new BandBudget(options.replica?.cacheBytes ?? DEFAULT_CACHE_BYTES);
-  const views = new HeldViews(clock, buildView);
+  const views = new HeldViews(clock, buildView, options.view ?? '');
 
   /** The layers drawn, with their closure, as `setLayers` last named them. */
   let layersOn: string[] = [];
@@ -379,7 +378,7 @@ export function createStore(options: StoreOptions): Store {
   const coverage = new ColourCoverage();
 
   const legend = new Legend(
-    async (column, codes) => client.categories(await tokens.get(), column, {codes, view: viewId}),
+    async (column, codes) => client.categories(await tokens.get(), column, {codes, view: views.id}),
     (value) => replaceProjection('legend', value)
   );
 
@@ -457,7 +456,7 @@ export function createStore(options: StoreOptions): Store {
   /** The token and the view a verb naming a view asks under, once the store has read its meta. */
   async function viewed(): Promise<{token: string; view: string}> {
     await ready();
-    return {token: await tokens.get(), view: viewId};
+    return {token: await tokens.get(), view: views.id};
   }
 
   /** The store's first `/v1/meta`, read once and shared. A failed warm-up is forgotten, so the next call runs it again. */
@@ -477,7 +476,7 @@ export function createStore(options: StoreOptions): Store {
 
   /** The current view's frame, or `null` before `meta`. Each view of a bundle may declare its own. */
   function frameOrNull(): Quantisation | null {
-    return quantisationOf(viewId);
+    return quantisationOf(views.id);
   }
 
   /** One named view's frame, or `null` where the bundle declares no such view. */
@@ -495,7 +494,7 @@ export function createStore(options: StoreOptions): Store {
   /** {@link frameOrNull} for a caller that holds `meta`. There is no default extent to fall back to. */
   function frame(): Quantisation {
     const q = frameOrNull();
-    if (!q) throw new Error(`the bundle declares no view '${viewId}'`);
+    if (!q) throw new Error(`the bundle declares no view '${views.id}'`);
     return q;
   }
 
@@ -511,7 +510,7 @@ export function createStore(options: StoreOptions): Store {
     if (!q) throw new Error(`the bundle declares no view '${id}'`);
     /** Assigned below; the fetch reads it. */
     let ownPresenter: Presenter | null = null;
-    const current = () => id === viewId;
+    const current = () => id === views.id;
 
     const built = new Replica(
       async (req, signal, background, onPart) => {
@@ -598,7 +597,7 @@ export function createStore(options: StoreOptions): Store {
     // Layers set before this view existed, including before meta.
     viewChannel.setLayers(layersAsked());
 
-    return {id, replica: built, presenter: ownPresenter, channel: viewChannel};
+    return {replica: built, presenter: ownPresenter, channel: viewChannel};
   }
 
   async function warm(): Promise<void> {
@@ -610,12 +609,12 @@ export function createStore(options: StoreOptions): Store {
     if (queuedCurrentView !== null) {
       const wanted = queuedCurrentView;
       queuedCurrentView = null;
-      if (meta.views.some((v) => v.id === wanted)) viewId = wanted;
+      if (meta.views.some((v) => v.id === wanted)) views.name(wanted);
       else onTrace('view-switch', {refused: 1, id: wanted});
     }
-    if (!viewId) viewId = meta.views[0]?.id ?? '';
+    if (!views.id) views.name(meta.views[0]?.id ?? '');
     replaceProjection('meta', meta);
-    replaceProjection('view', {...projections.view, id: viewId});
+    replaceProjection('view', {...projections.view, id: views.id});
     // One empty control per operand set the bundle publishes.
     if (Object.keys(projections.filters.draft).length === 0) {
       const draft = emptyDraft(meta.filterOperands);
@@ -624,7 +623,7 @@ export function createStore(options: StoreOptions): Store {
 
     layersOn = drawnOnly(layerClosure(meta.layers, layersOn));
     traceUnknownColourLayer();
-    views.enter(viewId);
+    views.enter(views.id);
 
     if (queuedView) {
       const q = queuedView;
@@ -711,7 +710,7 @@ export function createStore(options: StoreOptions): Store {
       if (projections.status.status === 'loading') replaceProjection('status', {...projections.status, status: 'shown'});
     }
     replaceProjection('view', {
-      id: viewId,
+      id: views.id,
       composition: frame,
       depth: frame.depth,
       visible: {value: Number(visible), exact: true},
@@ -872,20 +871,19 @@ export function createStore(options: StoreOptions): Store {
       queuedCurrentView = id;
       return;
     }
-    if (id === viewId) return;
+    if (id === views.id) return;
     if (!meta.views.some((v) => v.id === id)) {
       onTrace('view-switch', {refused: 1, id});
       return;
     }
 
-    const from = viewId;
+    const from = views.id;
     const kept = sameFrame(quantisationOf(from), quantisationOf(id));
     // A suggestion page answers one view.
     suggestions.reset();
 
-    // Bound before anything below publishes, so a subscriber's `setView` reaches the incoming view.
+    // Current before anything below publishes, so a subscriber's `setView` reaches the incoming view.
     const incoming = views.enter(id);
-    viewId = id;
     // A `setView` from a subscriber clears this, and its request then answers for the status.
     awaitingSwitchFrame = true;
     // The shared settings reach a view as it becomes current. Set on a held view, they would make it ask.
@@ -1150,7 +1148,7 @@ export function createStore(options: StoreOptions): Store {
     records.forget();
     clearSelection();
     contentKeyAtFrame = '';
-    replaceProjection('view', noFrame(viewId));
+    replaceProjection('view', noFrame(views.id));
     replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
     replaceProjection('tiles', {tiles: []});
     legend.clear();
