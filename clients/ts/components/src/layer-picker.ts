@@ -90,7 +90,7 @@ export class TesseraLayerPicker extends TesseraElement {
         ? html`<div part="group" class="xs muted">Filter layers</div>
             <div class="col">
               ${filters.map(
-                (e) => html`<div part="entry" data-layer=${e.root.name} data-filter-layer title="Listed, not drawn — reached through the hierarchy panel and applied as a clause">
+                (e) => html`<div part="entry" data-layer=${e.root.name} data-filter-layer title="Listed, not drawn. Reached through the hierarchy panel and applied as a clause">
                   <span part="name">${e.root.name}</span>
                 </div>`
               )}

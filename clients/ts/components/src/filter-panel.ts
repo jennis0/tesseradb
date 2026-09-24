@@ -71,7 +71,7 @@ export class TesseraFilterPanel extends TesseraElement {
       part="verb"
       type="button"
       data-verb=${verb}
-      aria-label=${`${label} — ${other} instead`}
+      aria-label=${`${label}; ${other} instead`}
       title=${verb === 'filter' ? 'Filtering: the map narrows to the matches. Highlight instead' : 'Highlighting: the map stays and the matches are lit. Filter instead'}
       @click=${move}
     >

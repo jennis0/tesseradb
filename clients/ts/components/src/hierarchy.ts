@@ -419,7 +419,7 @@ export class TesseraHierarchy extends TesseraElement {
           aria-label=${open ? `Collapse ${name ?? 'row'}` : `Expand ${name ?? 'row'}`}
           @click=${() => this.toggle(node)}>${icon(open ? 'chev' : 'chevr', 12)}</button>
         <button part="name" type="button" data-unnamed=${name === null ? '' : nothing}
-          title="Highlight this — the map stays and its members are lit"
+          title="Highlight this: the map stays and its members are lit"
           @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${name ?? UNNAMED}</button>
         <span part="counts">
           ${filtered && node.row.matchedCount !== null

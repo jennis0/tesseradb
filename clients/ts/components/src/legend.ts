@@ -179,7 +179,7 @@ export class TesseraLegend extends TesseraElement {
       const overflow = values.length - shown.length;
       return wrap(html`<span part="state" data-state="shown"></span>
         <div part="swatches">
-          ${shown.map(({value, rank}) => swatch(colourOfRank(rank), value.title && value.title !== value.key ? `${value.key} — ${value.title}` : value.key, `code ${value.code}`))}
+          ${shown.map(({value, rank}) => swatch(colourOfRank(rank), value.title && value.title !== value.key ? `${value.key}: ${value.title}` : value.key, `code ${value.code}`))}
           ${overflow > 0 ? swatch(UNMAPPED, `${overflow} rarer value${overflow === 1 ? '' : 's'}`) : nothing}
           ${swatch(UNMAPPED, 'other')}
         </div>`);

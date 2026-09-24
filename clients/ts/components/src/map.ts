@@ -366,7 +366,7 @@ export class TesseraMap extends TesseraElement {
     }
     if (!this.hasAttribute('tabindex')) this.tabIndex = 0;
     this.setAttribute('role', 'application');
-    if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', 'map — arrow keys pan, + and - zoom');
+    if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', 'map: arrow keys pan, + and - zoom');
     this.addEventListener('keydown', this.onKey);
     if (this.measure) this.startFrameLoop();
   }

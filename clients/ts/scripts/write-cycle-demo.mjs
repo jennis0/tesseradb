@@ -133,7 +133,7 @@ async function status() {
 }
 
 const line = (label, value) => console.log(`  ${String(label).padEnd(34)} ${value}`);
-const describe = (row) => (row ? `${row.masked}${row.text ? ` — "${row.text}"` : ''}` : 'absent');
+const describe = (row) => (row ? `${row.masked}${row.text ? `, "${row.text}"` : ''}` : 'absent');
 
 // The run.
 
@@ -158,7 +158,7 @@ line('label layer', labelLayer);
 line('members', members.length);
 line('the label’s generating set', `${sources.length} of them`);
 if (dryRun) {
-  console.log('\n(dry run — nothing was sent)');
+  console.log('\n(dry run: nothing was sent)');
   process.exit(0);
 }
 
@@ -202,7 +202,7 @@ const afterDelete = await artifacts(token, [clusterLayer, labelLayer]);
 line('cluster', describe(afterDelete.get(`${clusterLayer}::c0`)));
 line('label', describe(afterDelete.get(`${labelLayer}::l-c0`)));
 
-console.log('\n3. run a fold — which a node holding artifacts used to refuse outright');
+console.log('\n3. run a fold');
 const statusBefore = await status();
 accepted('compact', await control.compact());
 const folds = (st) => st.compaction?.folds ?? st.folds ?? 0;
@@ -215,7 +215,7 @@ for (;;) {
     break;
   }
   if (failures(now) > failures(statusBefore)) {
-    throw new Error('the fold was discarded — the server log names the gate that refused it');
+    throw new Error('the fold was discarded; the server log says which check refused it');
   }
   if (Date.now() > deadline) throw new Error('the fold did not publish within thirty minutes');
   await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -236,6 +236,6 @@ console.log(
 );
 if (!labelGone || !countFell) process.exitCode = 1;
 console.log(
-  'The fold wrote what it degraded to reports/fold-<prefix>.json in the bundle root — the notice\n' +
-    'the publisher is owed, written before anything retired.'
+  'The fold wrote what it withdrew to reports/fold-<prefix>.json in the bundle root, for the\n' +
+    'publisher, before any old data was removed.'
 );

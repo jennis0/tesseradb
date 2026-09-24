@@ -18,9 +18,9 @@ const onKeys = (press: () => void) => (e: KeyboardEvent) => {
 
 /** What each kind of drawn shape says on the card. */
 const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
-  derived: 'derived — the hull of the members you can see',
-  predicate: 'boundary — the same for every viewer',
-  authored: 'authored — the same for every viewer'
+  derived: 'derived: the hull of the members you can see',
+  predicate: 'boundary: the same for every viewer',
+  authored: 'authored: the same for every viewer'
 };
 
 /**
