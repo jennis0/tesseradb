@@ -73,7 +73,7 @@ env:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       # The runner fills its disk building the workspace's 261 test binaries, and reports it two
       # ways in the same run: `rustc-LLVM ERROR: IO failure on output stream: No space left on
@@ -88,7 +88,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Half of the fix: the runner ships ~25 GB of toolchains this build never touches. Measured
       # on this runner, the step takes / from 14 GB free to 32 GB. The build needed more than that
       # with debug info on, which is why the profile above turns it off.
@@ -131,7 +131,7 @@ jobs:
           source <(cargo llvm-cov show-env --sh)
           cargo llvm-cov report --lcov --output-path rust.lcov
           sed -i "s|^SF:$PWD/|SF:|" rust.lcov
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: coverage-rust
@@ -139,10 +139,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # The grep-based half of the architecture: forbidden dependency edges, the
@@ -153,12 +153,12 @@ jobs:
       - run: bash scripts/check-layers.sh
 
   conformance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # The suite spawns the real `tessera` binary as a subprocess and speaks the real API — it
@@ -202,17 +202,17 @@ jobs:
             --deselect tests/test_identity.py::test_fixture_bundle_sidecar_round_trips_through_the_locator
 
   clients:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Node >= 20, which both scripts below need: `check-clients.sh` refuses without npm on PATH,
       # and `clients/py/check.sh`'s wheel is built by a hatchling hook that shells out to npm.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: clients/ts/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # `tesseradb` depends on `tesseradb-native`, which carries the `tessera` binary and the
@@ -237,7 +237,7 @@ jobs:
       - name: coverage report
         if: ${{ !cancelled() }}
         run: sed -i 's|filename="|filename="clients/py/tesseradb/|' clients/py/coverage.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: coverage-python
@@ -248,10 +248,10 @@ jobs:
   coverage:
     needs: [rust, clients]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: coverage-*
           merge-multiple: true
@@ -259,8 +259,10 @@ jobs:
         env:
           TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
         run: echo "token=${TOKEN:+yes}" >> "$GITHUB_OUTPUT"
+      # A refused or failed upload is reported on the step and does not fail the gate.
       - uses: codacy/codacy-coverage-reporter-action@v1
         if: ${{ steps.codacy.outputs.token == 'yes' }}
+        continue-on-error: true
         with:
           project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
           coverage-reports: rust.lcov,coverage.xml
