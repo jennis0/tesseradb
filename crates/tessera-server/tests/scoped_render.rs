@@ -940,6 +940,53 @@ async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
     assert!(body.contains("'heat'"), "{body}");
 }
 
+/// **A scoped family is required on every row into a view of its own group, and on no row into a
+/// view of a group sharing its keys**, as a build reads it from the one and not the other. A row
+/// that joins an item already held is no exception: the family's value is the view's, not the
+/// item's.
+#[tokio::test]
+async fn a_scoped_family_is_required_on_its_own_groups_views_and_not_on_a_sharing_groups() {
+    let served = Served::build(build_with_families).await;
+    const NEW: u64 = 9_901;
+    let id = external_id_of(NEW);
+    let bare = || build_ingest_batch_optional(&[(Some(&id[..]), 250.0, 250.0, "0")]);
+    let post = |batch_id: &'static str, view: &'static str, body: Vec<u8>| {
+        let served = &served;
+        async move {
+            let resp = served
+                .server
+                .client
+                .post(served.server.control_url("/control/ingest"))
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .header("x-tessera-batch-id", batch_id)
+                .header("x-tessera-view", view)
+                .header("content-type", "application/vnd.apache.arrow.stream")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status().as_u16();
+            (status, resp.text().await.unwrap())
+        }
+    };
+    let (status, body) = post("owner-new", "quarter:2026-Q1", bare()).await;
+    assert_eq!(status, 422, "a new item into the owner's view: {body}");
+    assert_eq!(error_code(&body), "contract", "{body}");
+    let (status, body) = post("sharing-new", "quarter_map:2026-Q1", bare()).await;
+    assert_eq!(status, 200, "a new item into the sharing group's view: {body}");
+    let (status, body) = post("owner-join", "quarter:2026-Q1", bare()).await;
+    assert_eq!(status, 422, "the same item joining the owner's view: {body}");
+    assert_eq!(error_code(&body), "contract", "{body}");
+    ingest_with_heat(
+        &served,
+        "owner-join-carrying",
+        "quarter:2026-Q1",
+        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[None],
+    )
+    .await;
+}
+
 /// **A join row carries that view's scoped value, and it is the one thing it carries beyond
 /// geometry** (`views.md` §4, §5).
 ///

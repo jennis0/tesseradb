@@ -142,13 +142,24 @@ async fn post_ingest(
     content_type: &str,
     body: Vec<u8>,
 ) -> (u16, Value) {
+    post_ingest_into(served, "s0", batch_id, content_type, body).await
+}
+
+/// [`post_ingest`] into `view`.
+async fn post_ingest_into(
+    served: &Served,
+    view: &str,
+    batch_id: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> (u16, Value) {
     let resp = served
         .server
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
+        .header("x-tessera-view", view)
         .header("content-type", content_type)
         .body(body)
         .send()
@@ -405,6 +416,115 @@ async fn a_batch_carries_every_declared_column_and_every_reader_answers_it() {
         .map(|v| v["key"].as_str().unwrap())
         .collect();
     assert_eq!(keys, ["eng", "ops"]);
+}
+
+/// A batch of rows carrying their geometry and label and no declared column.
+fn geometry(ids: &[&str]) -> Vec<u8> {
+    let ids: Vec<Option<&[u8]>> = ids.iter().map(|id| Some(id.as_bytes())).collect();
+    let rows: Vec<(Option<&[u8]>, f32, f32, &str)> =
+        ids.iter().map(|id| (*id, 400.0, 400.0, "0")).collect();
+    build_ingest_batch_optional(&rows)
+}
+
+/// A JSON record carrying its geometry and label, and `score` where it is given.
+fn record(id: &str, score: Option<f32>) -> Value {
+    use base64::Engine as _;
+    let mut record = json!({
+        "external_id": base64::engine::general_purpose::STANDARD.encode(id),
+        "x": 400.0, "y": 400.0, "access": ["0"],
+    });
+    if let Some(score) = score {
+        record["score"] = json!(score);
+    }
+    record
+}
+
+/// **A row that joins an item already held needs no declared column; a row that creates one
+/// does**, at both doors. A join's values are the item's already, so a batch of joins into a
+/// second view may leave them out; a row creating an item without them is refused, alone or
+/// beside a join, and nothing is allocated. A JSON join record may leave a key out beside a new
+/// record that carries it.
+#[tokio::test]
+async fn a_row_joining_a_held_item_needs_no_declared_column_and_a_new_one_does() {
+    let served = Served::build(fixture).await;
+    let resp = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/extra"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "extent": { "x": [0.0, 1000.0], "y": [0.0, 1000.0] },
+            "point_visibility": { "default": "public" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the second view is created");
+    let held = |id| Row {
+        id,
+        score: 1.0,
+        sentiment: None,
+        tag: None,
+    };
+    ingest(
+        &served,
+        "held",
+        batch(&[held("h1"), held("h2"), held("h3")], false),
+    )
+    .await;
+    let high_water = control_status(&served.server).await["entity_id_high_water"].clone();
+
+    let json_body = |records: Vec<Value>| Value::Array(records).to_string().into_bytes();
+    for (batch_id, content_type, body) in [
+        ("new-arrow", ARROW, geometry(&["n1"])),
+        ("new-beside-join-arrow", ARROW, geometry(&["h1", "n1"])),
+        (
+            "new-beside-join-json",
+            JSON,
+            json_body(vec![record("h1", None), record("n1", None)]),
+        ),
+    ] {
+        let (status, body) = post_ingest_into(&served, "extra", batch_id, content_type, body).await;
+        assert_eq!(status, 422, "{batch_id}: {body}");
+        assert_eq!(body["error"], "contract", "{batch_id}: {body}");
+    }
+    assert_eq!(
+        control_status(&served.server).await["entity_id_high_water"],
+        high_water,
+        "no refused batch allocated an item"
+    );
+
+    let mut joined = Vec::new();
+    for (batch_id, content_type, body) in [
+        ("join-arrow", ARROW, geometry(&["h1"])),
+        ("join-json", JSON, json_body(vec![record("h2", None)])),
+        (
+            "join-beside-new-json",
+            JSON,
+            json_body(vec![record("h3", None), record("n2", Some(50.0))]),
+        ),
+    ] {
+        let (status, body) = post_ingest_into(&served, "extra", batch_id, content_type, body).await;
+        assert_eq!(status, 200, "{batch_id}: {body}");
+        joined.extend(ingested_ids(&body));
+    }
+    drain(&served.server).await;
+    let token = token_for(&served.server, &["0", "1"][..]).await;
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&json!({ "view": "extra", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let served_ids: BTreeSet<u64> = points.into_iter().map(|(id, _)| id).collect();
+    assert_eq!(served_ids, joined.iter().copied().collect(), "every accepted row is in `extra`");
+    // The joins kept the value each item was created with.
+    assert_eq!(item(&served, joined[0]).await["fields"]["score"], json!(1.0));
 }
 
 /// **The declaration survives a restart**, from the log alone before any publication and from

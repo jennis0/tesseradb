@@ -6,9 +6,7 @@ use tessera_engine::shapes::Bounds;
 use tessera_engine::scalar_column::{self, ScalarColumn};
 use tessera_engine::utf8::{Utf8Column, Utf8Values};
 use tessera_engine::vocabulary::{code_value, Resolved};
-use tessera_engine::{
-    check_declared_present, DeclaredScalar, Projection, ScopedScalar, Vocabularies,
-};
+use tessera_engine::{absent_scalar, DeclaredScalar, Projection, ScopedScalar, Vocabularies};
 use tessera_lifecycle::{BatchArtifacts, WalScalar};
 use tessera_types::layer::LayerDeclaration;
 use tessera_types::TesseraId;
@@ -35,6 +33,9 @@ pub(crate) struct RawIngestItem {
     /// Group-scoped values for the view's group, positional against the families the batch was
     /// parsed with; empty where the view's group owns none.
     pub(crate) scoped: Vec<WalScalar>,
+    /// The columns this row left out, as positions in the declared scalars followed by the scoped
+    /// families; each holds its absence in `scalars` or `scoped`.
+    pub(crate) omitted: Vec<usize>,
 }
 
 /// One ingest batch, decoded, with what its membership columns said.
@@ -78,27 +79,53 @@ fn category_code(
     }
 }
 
-/// The body's record batches. A JSON body becomes one record batch, read by the same rules as
-/// an Arrow one.
+/// Which of the columns in [`JsonColumns::required`] each row of a record batch leaves out, as
+/// positions in that list: one set for every row of an Arrow batch, which carries a column or does
+/// not, and one per record of a JSON body.
+enum Omitted {
+    Batch(Vec<usize>),
+    Rows(Vec<Vec<usize>>),
+}
+
+impl Omitted {
+    fn of(&self, row: usize) -> &[usize] {
+        match self {
+            Omitted::Batch(columns) => columns,
+            Omitted::Rows(rows) => &rows[row],
+        }
+    }
+}
+
+type Batches<'a> = Box<dyn Iterator<Item = Result<(RecordBatch, Omitted), DecodeError>> + 'a>;
+
+/// The body's record batches, each with the columns its rows leave out. A JSON body becomes one
+/// record batch, read by the same rules as an Arrow one.
 fn record_batches<'a>(
     body_name: &'static str,
     encoding: BodyEncoding,
     body: &'a [u8],
     json: &JsonColumns<'_>,
-) -> Result<Box<dyn Iterator<Item = Result<RecordBatch, DecodeError>> + 'a>, DecodeError> {
+) -> Result<Batches<'a>, DecodeError> {
     Ok(match encoding {
         BodyEncoding::Arrow => {
             let cursor = std::io::Cursor::new(body);
             let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
                 DecodeError(format!("{body_name} is not a valid Arrow IPC stream: {e}"))
             })?;
+            let required: Vec<String> = json.required.iter().map(|name| name.to_string()).collect();
             Box::new(reader.map(move |batch| {
-                batch.map_err(|e| DecodeError(format!("{body_name}: arrow decode error: {e}")))
+                let batch =
+                    batch.map_err(|e| DecodeError(format!("{body_name}: arrow decode error: {e}")))?;
+                let absent = (0..required.len())
+                    .filter(|&at| batch.column_by_name(&required[at]).is_none())
+                    .collect();
+                Ok((batch, Omitted::Batch(absent)))
             }))
         }
-        BodyEncoding::Json => Box::new(std::iter::once(super::json::record_batch(
-            body_name, body, json,
-        ))),
+        BodyEncoding::Json => Box::new(std::iter::once(
+            super::json::record_batch(body_name, body, json)
+                .map(|(batch, rows)| (batch, Omitted::Rows(rows))),
+        )),
     })
 }
 
@@ -309,11 +336,7 @@ pub(crate) fn parse_ingest_batch(
     let mut tally = MembershipTally::default();
     let (mut clipped, mut clamped) = (0u64, 0u64);
     for batch in batches {
-        let batch = batch?;
-        check_declared_present(required.iter().map(|name| (*name, *name)), |name| {
-            batch.column_by_name(name).is_some()
-        })
-        .map_err(|detail| DecodeError(format!("{body_name}: {detail}")))?;
+        let (batch, omitted) = batch?;
         // Where this record batch's rows start in the request's numbering, which a membership
         // names.
         let offset = items.len();
@@ -343,14 +366,14 @@ pub(crate) fn parse_ingest_batch(
 
         let memberships =
             check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
-        let cells_of = |d: &DeclaredScalar| {
-            let col = batch
-                .column_by_name(&d.name)
-                .expect("every required column was found above");
-            Cells::new(col, d)
+        // A column the batch leaves out holds its absence, which is what a null cell reads as.
+        let cells_of = |d: &DeclaredScalar| batch.column_by_name(&d.name).map(|col| Cells::new(col, d));
+        let declared_cells: Vec<Option<Cells>> = declared.iter().map(cells_of).collect();
+        let scoped_cells: Vec<Option<Cells>> = scoped_declared.iter().map(cells_of).collect();
+        let value_of = |cells: &Option<Cells>, i: usize, d: &DeclaredScalar| match cells {
+            Some(cells) => cell(body_name, cells, i, offset + i, d, vocabularies),
+            None => Ok(absent_scalar(d)),
         };
-        let declared_cells: Vec<Cells> = declared.iter().map(cells_of).collect();
-        let scoped_cells: Vec<Cells> = scoped_declared.iter().map(cells_of).collect();
 
         for i in 0..batch.num_rows() {
             let placed = coordinates::place(projection, Some(extent), x[i], y[i])
@@ -363,13 +386,13 @@ pub(crate) fn parse_ingest_batch(
             // In declared order, not schema order: the vector is read back by position.
             let mut scalars = Vec::with_capacity(declared.len());
             for (d, cells) in declared.iter().zip(&declared_cells) {
-                scalars.push(cell(body_name, cells, i, offset + i, d, vocabularies)?);
+                scalars.push(value_of(cells, i, d)?);
             }
             // The scoped values are a second positional list, in the families' order, since the
             // two lists are indexed against different declarations.
             let mut scoped_values = Vec::with_capacity(scoped.len());
             for (d, cells) in scoped_declared.iter().zip(&scoped_cells) {
-                scoped_values.push(cell(body_name, cells, i, offset + i, d, vocabularies)?);
+                scoped_values.push(value_of(cells, i, d)?);
             }
             // A missing column and a null cell both mean the item has no external id.
             let external_id = match &ext {
@@ -388,6 +411,7 @@ pub(crate) fn parse_ingest_batch(
                 labels: access.labels(i).map(|label| label.as_bytes().to_vec()).collect(),
                 scalars,
                 scoped: scoped_values,
+                omitted: omitted.of(i).to_vec(),
             });
         }
     }
@@ -448,7 +472,7 @@ pub(crate) fn parse_values_batch(
     let mut columns: Vec<String> = Vec::new();
     let mut tally = MembershipTally::default();
     for batch in batches {
-        let batch = batch?;
+        let (batch, _) = batch?;
         let offset = rows.len();
 
         // The batch's cells, in one order for every row: declared columns, then scoped families.

@@ -560,12 +560,12 @@ fn run_ingest(
     let extent = crate::filter_dto::view_extent(view);
     // A row with no label takes the view's `point_visibility.default`, as a built row does.
     let point_default = view.point_default.clone();
+    let own_group = view.roster.as_ref().map(|roster| roster.group.clone());
     let view = view.id.clone();
 
-    // The group-scoped families this batch carries, as it carries every declared column: those
-    // whose group owns this view's key, including a sharing group's view. A plain view gets none,
-    // so a scoped column on it is refused as undeclared. Layers are looked up per column in the
-    // engine's registry.
+    // The group-scoped families this batch may carry: those whose group owns this view's key,
+    // including a sharing group's view. A plain view gets none, so a scoped column on it is refused
+    // as undeclared. Layers are looked up per column in the engine's registry.
     let scoped: Vec<ScopedScalar> = meta
         .scoped_scalars
         .iter()
@@ -733,6 +733,33 @@ fn run_ingest(
             duplicate_ids.join(", ")
         )));
     }
+    // A row that creates an item carries every declared column. A join's entity-scoped values are
+    // the item's already, so it carries only the families of its view's own group, whose values
+    // are the view's; a sharing group's view is held to none, as a build reads it for none. A join
+    // whose item is deleted before the writer settles it lands as a new item holding absences.
+    let join_of: FxHashMap<usize, EntityId> = joins.into_iter().collect();
+    let columns: Vec<&str> = meta
+        .declared_scalars
+        .iter()
+        .map(|d| d.name.as_str())
+        .chain(scoped.iter().map(|f| f.name.as_str()))
+        .collect();
+    let declared_count = meta.declared_scalars.len();
+    for (index, item) in items.iter().enumerate() {
+        if item.omitted.is_empty() {
+            continue;
+        }
+        let creates = !join_of.contains_key(&index);
+        let required = columns.iter().enumerate().filter(|(at, _)| match at.checked_sub(declared_count) {
+            None => creates,
+            Some(family) => Some(&scoped[family].group) == own_group.as_ref(),
+        });
+        tessera_engine::check_declared_present(
+            required.map(|(_, name)| (*name, *name)),
+            |name| !item.omitted.iter().any(|&at| columns[at] == name),
+        )
+        .map_err(|detail| ApiError::Contract(format!("ingest body: row {index}: {detail}")))?;
+    }
     // The buffer bound: the command queue drains in milliseconds, so between flushes the buffer
     // is what grows. Checked before submission, so a 429 costs no entity id or WAL append; the
     // figure may lag by one apply. `Retry-After` is the next tick plus the observed flush cost.
@@ -750,7 +777,6 @@ fn run_ingest(
     // Rows go to the executor unallocated: entity ids are assigned on the writer, per commit
     // window. The decoded vectors are moved, not cloned, so one copy is live while the handler
     // waits. Every row keeps its descriptors, since the writer decides finally which rows join.
-    let join_of: FxHashMap<usize, EntityId> = joins.into_iter().collect();
     let rows: Vec<UnallocatedRow> = items
         .into_iter()
         .zip(terms_per_item)

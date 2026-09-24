@@ -266,11 +266,11 @@ fn compile(request: &AttributeRequest, manifest: &Manifest) -> Result<CompiledAt
     }))
 }
 
-/// The value a row carries for a declared column it was buffered without (`ingest.md` §6.3,
-/// §7.1): a category's absence is its reserved code 0 at the column's width, in band; every other
-/// family's is `Null`, which lands in the column's presence bitmap (decision 0064). The same
+/// The value a row carries for a declared column it was buffered or sent without (`ingest.md`
+/// §6.3, §7.1): a category's absence is its reserved code 0 at the column's width, in band; every
+/// other family's is `Null`, which lands in the column's presence bitmap (decision 0064). The same
 /// split the ingest boundary makes for a null cell.
-pub(crate) fn absent_scalar(declared: &DeclaredScalar) -> WalScalar {
+pub fn absent_scalar(declared: &DeclaredScalar) -> WalScalar {
     if declared.vocabulary.is_none() {
         return WalScalar::Null;
     }

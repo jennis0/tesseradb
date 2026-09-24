@@ -241,7 +241,8 @@ guard the entity from being silently changed by a second view's row:
 
 A **group-scoped** attribute may not appear on a plain view's batch at all — it is an undeclared
 column there. On a batch into any view whose key the attribute's group holds — the owner's own
-views, and every view of a group declaring `members` of it — it must: a join carries
+views, and every view of a group declaring `members` of it — it may, and on the owner's own views
+it must: a join carries
 geometry **and this key's scoped values**, and nothing else. It allocates no id, writes no
 descriptor and contributes no postings, which is what keeps a label supplied on a joining row inert
 rather than a quiet widening — but a scoped value belongs to the `(entity, attribute, key)` cell
@@ -357,9 +358,11 @@ x-tessera-view: quarter:2026-Q3
 external_id | x | y | access | kind | sentiment
 ```
 
-Nulls are absences and a category arrives as its **key** (never a code). The batch carries every
-family the view's group holds, as it carries every declared column: one it leaves out is refused,
-and a column of nulls says no row has a value. A view created while the service runs acquires its
+Nulls are absences and a category arrives as its **key** (never a code). Every row into a view of
+the family's own group carries the family, a join included, since the value is the view's: one it
+leaves out is refused, and a null says the row has no value. A batch into a view of a group
+sharing the keys may leave it out, as a build reads it from no such view. A view created while the
+service runs acquires its
 columns at the **first flush** that covers it, with no rebuild: from then on it filters, pins,
 renders and answers `/v1/categories` like any other, and `/v1/meta`'s `scoped_scalars[..].views`
 names it.

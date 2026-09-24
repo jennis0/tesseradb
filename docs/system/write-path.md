@@ -106,9 +106,11 @@ should be hidden.
 
 A request against `/control/ingest` is checked before the server commits any work to it. The
 operator credential, the body size, the row count and the declared columns are checked first, and
-a request that fails any of them takes no effect. A batch carries every declared column, and every
-group-scoped one of its view's group, with a null where a row has no value; a batch that leaves
-one out is refused. Beyond those, four checks apply:
+a request that fails any of them takes no effect. A row that creates an item carries every
+declared column, with a null where it has no value. A row that adds an item already held to
+another view may leave them out, since the item's values are held already, but a row into a view
+of a group carries that group's own scoped columns either way. A batch with a row that leaves out
+a column it must carry is refused. Beyond those, four checks apply:
 
 1. An admission limit bounds how many ingest requests run at once, and a buffer limit bounds how
    many rows may wait for a flush. Past either, the request is refused with a retry interval

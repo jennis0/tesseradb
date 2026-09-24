@@ -150,10 +150,11 @@ pub fn check_column_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Every declared column must be in an input that writes rows, a build's attribute source and an
-/// ingest batch alike; a column of nulls says no row has a value. A `/control/values` batch fills
-/// only the columns it names, so it is not held to this. `declared` is `(attribute, column)`,
-/// the column being the attribute's own name except where a build's `field` moves it.
+/// Every declared column must be carried where an item's values arrive: by a build's attribute
+/// source, and by an ingest row that creates an item, or places one in a view of a scoped
+/// column's own group. A null says there is no value. A `/control/values` batch fills only the
+/// columns it names, so it is not held to this. `declared` is `(attribute, column)`, the column
+/// being the attribute's own name except where a build's `field` moves it.
 pub fn check_declared_present<'a>(
     declared: impl IntoIterator<Item = (&'a str, &'a str)>,
     carries: impl Fn(&str) -> bool,

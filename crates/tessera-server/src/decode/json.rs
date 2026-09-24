@@ -17,9 +17,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use serde_json::{Map, Value};
-use tessera_engine::{
-    check_declared_present, member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar,
-};
+use tessera_engine::{member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::layer::LayerDeclaration;
 
 use super::{DecodeError, Fixed};
@@ -28,7 +26,8 @@ use super::{DecodeError, Fixed};
 pub(crate) struct JsonColumns<'a> {
     /// The route's own columns, in the order the batch carries them.
     pub fixed: &'a [Fixed<'a>],
-    /// The declared and scoped columns every record must name, `null` where it has no value.
+    /// The declared and scoped columns a row may be required to carry: which of them each record
+    /// leaves out is answered beside the batch, for the caller to hold its rows to.
     pub required: &'a [&'a str],
     pub declared: &'a [DeclaredScalar],
     pub scoped: &'a [ScopedScalar],
@@ -37,26 +36,26 @@ pub(crate) struct JsonColumns<'a> {
 
 /// One JSON body as one record batch: the route's fixed columns in its order (a coordinate and
 /// `access` always, the others where any row carries them), then declared scalars, the scoped
-/// families any row names, and layer columns in first-appearance order.
+/// families any row names, and layer columns in first-appearance order. Beside it, for each record,
+/// the positions in `columns.required` of the keys it leaves out.
 pub(crate) fn record_batch(
     body_name: &str,
     body: &[u8],
     columns: &JsonColumns<'_>,
-) -> Result<RecordBatch, DecodeError> {
+) -> Result<(RecordBatch, Vec<Vec<usize>>), DecodeError> {
     let rows = records(body_name, body)?;
-    for (row, record) in rows.iter().enumerate() {
-        check_declared_present(columns.required.iter().map(|name| (*name, *name)), |name| {
-            record.contains_key(name)
+    let omitted = rows
+        .iter()
+        .map(|record| {
+            (0..columns.required.len())
+                .filter(|&at| !record.contains_key(columns.required[at]))
+                .collect()
         })
-        .map_err(|detail| DecodeError(format!("{body_name}: row {row}: {detail}")))?;
-    }
+        .collect();
     let mut fields: Vec<Field> = Vec::new();
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
-    // A required column is built even for an empty body, so the Arrow decode finds it.
-    let has = |name: &str| {
-        columns.required.contains(&name) || rows.iter().any(|row| row.contains_key(name))
-    };
+    let has = |name: &str| rows.iter().any(|row| row.contains_key(name));
 
     for fixed in columns.fixed {
         let name = fixed.name();
@@ -69,8 +68,8 @@ pub(crate) fn record_batch(
         arrays.push(column);
     }
 
-    // A column is carried on every row, null where a row leaves it out, which only a values
-    // batch may do; one no row names and none requires is left out.
+    // A column some row names is carried on every row, null where a row leaves it out; one no row
+    // names is left out.
     for declared in columns.declared {
         if !has(&declared.name) {
             continue;
@@ -127,8 +126,9 @@ pub(crate) fn record_batch(
         arrays.push(column);
     }
 
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-        .map_err(|e| DecodeError(format!("{body_name}: {e}")))
+    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+        .map_err(|e| DecodeError(format!("{body_name}: {e}")))?;
+    Ok((batch, omitted))
 }
 
 /// One of a route's fixed columns, over every row.
