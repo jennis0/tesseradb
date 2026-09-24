@@ -120,16 +120,14 @@ from .harness import (
     CLI_BIN,
     REPO_ROOT,
     build_env,
-    bundle_format_matches,
     ensure_cli_built,
-    read_recipe,
+    fixture_dir,
+    recipe_matches,
     write_deployment,
     write_recipe,
 )
 
-#: Where the corpus and its bundle live between runs — a fixed path, so the build is paid once per
-#: machine rather than once per session.
-DEFAULT_WORK_DIR = Path("/tmp/tessera-multiview")
+WORK_DIR_NAME = "multiview"
 
 #: 6,144 entities in six compartments of 1,024. Small on purpose: every assertion here is a whole
 #: pass over a view's rows in Python, made once per (principal, view) pair, and the corpus's job is
@@ -598,7 +596,7 @@ def points_path(view_id: str, work_dir: Path | None = None) -> Path:
     (`Bundle.attach_source_geometry(..., view_id=...)`), and a single attachment would answer
     three of the four views against the fourth one's layout.
     """
-    work_dir = DEFAULT_WORK_DIR if work_dir is None else work_dir
+    work_dir = fixture_dir(WORK_DIR_NAME) if work_dir is None else work_dir
     if view_id == WORLD_VIEW:
         return work_dir / POINTS_NAME
     group, _, key = view_id.partition(":")
@@ -674,7 +672,7 @@ def build_multiview_bundle(work_dir: Path | None = None) -> Path:
 
     Reused rather than rebuilt only when the receipt beside the bundle matches [`recipe`] exactly.
     """
-    work_dir = DEFAULT_WORK_DIR if work_dir is None else work_dir
+    work_dir = fixture_dir(WORK_DIR_NAME) if work_dir is None else work_dir
     work_dir.mkdir(parents=True, exist_ok=True)
     bundle_root = work_dir / "bundle-multiview"
     wanted = recipe(work_dir, bundle_root)
@@ -704,19 +702,17 @@ def build_multiview_bundle(work_dir: Path | None = None) -> Path:
 
 
 def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
-    """The receipt matches, the bundle under it reads at this checkout's format, and nothing has
-    been published into it since the build — `catalogue.py`'s gates, for its reasons."""
+    """The receipt matches and nothing has been published into the bundle since the build:
+    `catalogue.py`'s gates, for its reasons."""
     import json  # noqa: PLC0415 — only the reuse test reads these files
 
-    if read_recipe(bundle_root) != wanted:
+    if not recipe_matches(bundle_root, wanted):
         return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
         prefix_dir = bundle_root / current["prefix"]
         manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
         if manifest.get("identity") is None:
-            return False
-        if not bundle_format_matches(prefix_dir):
             return False
         for partition in (prefix_dir / "partitions").iterdir():
             if len(list(partition.glob("SEGMENTS-*.json"))) > 1:
