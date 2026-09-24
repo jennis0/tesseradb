@@ -20,13 +20,19 @@ const TERMS = ['cs.LG', 'cs.CV', 'hep-ph'];
 
 let served: Served | string = 'the server has not started';
 let client: TesseraClient;
+/** The bulk-read requests `client` has sent, one per response. */
+let requests = 0;
 let session: Session;
 let meta: Meta;
 
 beforeAll(async () => {
   served = await start();
   if (typeof served === 'string') return;
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.sessionCredential});
+  const counting = (url: string | URL | Request, init?: RequestInit) => {
+    if (/\/v1\/(items|artifacts)$/.test(String(url))) requests += 1;
+    return fetch(url, init);
+  };
+  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.sessionCredential, fetch: counting});
   session = await client.authorise(TERMS);
   meta = await client.meta(session.token);
 }, 120_000);
@@ -48,38 +54,37 @@ async function viewportCounts(extra: Partial<ViewportRequest> = {}) {
   return {visible: sum('visible'), matched: sum('matched'), identityKey: response.identityKey};
 }
 
-/**
- * A whole read: `open` sends one request from `cursor`, and the read follows each response's
- * cursor until it is null. Returns every page, and each response's head and identity key.
- */
-async function readAll<Head>(open: (cursor: string | undefined) => Promise<RecordsRead<Head>>) {
+/** Every page of the read `opening` starts, which must end, and how many responses it took. */
+async function readAll<Head>(opening: () => Promise<RecordsRead<Head>>) {
+  const before = requests;
+  const read = await opening();
   const tables: Table[] = [];
-  const heads: Head[] = [];
-  const identityKeys: string[] = [];
-  let cursor: string | undefined;
-  for (;;) {
-    const read = await open(cursor);
-    heads.push(read.head);
-    identityKeys.push(read.identityKey);
-    for await (const table of read) tables.push(table);
-    expect(read.trailer).not.toBeNull();
-    if (read.cursor === null) break;
-    cursor = read.cursor;
-  }
-  return {tables, heads, identityKeys};
+  for await (const table of read) tables.push(table);
+  expect(read.trailer).not.toBeNull();
+  expect(read.cursor).toBeNull();
+  return {tables, read, responses: requests - before};
 }
 
-const items = (request: ItemsRequest) =>
-  readAll((cursor) => client.items(session.token, {...request, cursor, ...(cursor === undefined ? {} : {count: undefined})}));
+const items = (request: ItemsRequest) => readAll(() => client.items(session.token, request));
+const artifacts = (request: ArtifactsRequest) => readAll(() => client.artifacts(session.token, request));
 
-const artifacts = (request: ArtifactsRequest) =>
-  readAll((cursor) => client.artifacts(session.token, {...request, cursor, ...(cursor === undefined ? {} : {count: undefined})}));
+/** The server's bulk reads in flight reach none within five seconds, well inside its ten-second stall shed. */
+async function lanesFree(): Promise<void> {
+  const {controlUrl, operatorCredential} = served as Served;
+  const control = new Control({controlUrl, operatorCredential});
+  const deadline = Date.now() + 5_000;
+  while (((await control.status()).body.bulk as {in_flight: number}).in_flight > 0) {
+    expect(Date.now(), 'bulk reads still hold their slots').toBeLessThan(deadline);
+  }
+}
 
 /**
- * A proxy in front of the viewer plane that forwards a response as a chunked body and closes the
- * connection at the byte `cutAt` chooses, as the server does to a body that fails part-way.
+ * A proxy in front of the viewer plane that forwards responses whole, except the `nth` (from 1),
+ * which it forwards as a chunked body and cuts at the byte `cutAt` chooses, as the server does to
+ * a body that fails part-way.
  */
-async function cuttingProxy(target: string, cutAt: (body: Uint8Array) => number) {
+async function cuttingProxy(target: string, nth: number, cutAt: (body: Uint8Array) => number) {
+  let seen = 0;
   const server = createServer(async (req, res) => {
     const sent: Buffer[] = [];
     for await (const chunk of req) sent.push(chunk as Buffer);
@@ -93,8 +98,10 @@ async function cuttingProxy(target: string, cutAt: (body: Uint8Array) => number)
     upstream.headers.forEach((value, name) => {
       if (name.startsWith('x-tessera-') || name === 'content-type') headers[name] = value;
     });
-    // No length, so Node sends the body chunked, and the connection closes before its last chunk.
     res.writeHead(upstream.status, headers);
+    seen += 1;
+    if (seen !== nth) return void res.end(body);
+    // No length, so Node sends the body chunked, and the connection closes before its last chunk.
     res.write(body.subarray(0, cutAt(body)), () => res.socket?.destroy());
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -127,11 +134,11 @@ describe('bulk reads against a live server', () => {
   it('reads every item of a view once, across pages and responses, as the viewport counts and the item card holds them', async (ctx) => {
     live(ctx);
     const {visible, identityKey} = await viewportCounts();
-    const {tables, heads, identityKeys} = await items({view: 's0', fields: ['archive', 'title'], systemFields: ['position'], count: true, pageRows: 400, pages: 2});
-    expect(heads.length).toBeGreaterThan(2);
-    expect(heads[0]!.visible).toBe(visible);
-    // Every response names the principal and view as the viewport does.
-    expect(new Set(identityKeys)).toEqual(new Set([identityKey]));
+    const {tables, read, responses} = await items({view: 's0', fields: ['archive', 'title'], systemFields: ['position'], count: true, pageRows: 400, pages: 2});
+    expect(responses).toBeGreaterThan(2);
+    expect(read.head.visible).toBe(visible);
+    // The response names the principal and view as the viewport does.
+    expect(read.identityKey).toBe(identityKey);
     expect(identityKey).not.toBe('');
     for (const t of tables) expect(t.numRows).toBeLessThanOrEqual(400);
     const ids = column(tables, 'tessera_id') as bigint[];
@@ -154,6 +161,46 @@ describe('bulk reads against a live server', () => {
     }
   });
 
+  it('reads in one call across several responses what one response carries, and resumes where a caller stopped', async (ctx) => {
+    live(ctx);
+    const request: ItemsRequest = {view: 's0', fields: ['archive', 'title', 'submitted_at'], systemFields: ['position', 'labels'], pageRows: 300};
+    const one = await items(request);
+    expect(one.responses).toBe(1);
+    const several = await items({...request, pages: 2});
+    expect(several.responses).toBeGreaterThan(2);
+    expect(dump(several.tables)).toEqual(dump(one.tables));
+
+    // Stopped after five pages, the read goes on from its cursor in a new call.
+    const stopped = await client.items(session.token, {...request, pages: 2});
+    const first: Table[] = [];
+    for await (const table of stopped) {
+      first.push(table);
+      if (first.length === 5) break;
+    }
+    const rest = await items({...request, pages: 2, cursor: stopped.cursor!});
+    expect(dump([...first, ...rest.tables])).toEqual(dump(one.tables));
+  });
+
+  it('throws a refused follow-up’s TesseraError, and resumes from its cursor', async (ctx) => {
+    live(ctx);
+    const request: ItemsRequest = {view: 's0', fields: [], pageRows: 500, pages: 1};
+    const whole = column((await items(request)).tables, 'tessera_id');
+    const read = await client.items(session.token, request);
+    const first = await read.next();
+    expect(first.done).toBe(false);
+    await lanesFree();
+    // Two reads the client does not consume hold both slots of the lane, so the follow-up is shed.
+    const holders = await Promise.all([0, 1].map(() => client.items(session.token, {view: 's0', fields: ['title', 'abstract'], pageRows: 50})));
+    const thrown = await read.next().catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(TesseraError);
+    expect(thrown).toMatchObject({status: 429});
+    expect(typeof read.cursor).toBe('string');
+    for (const holder of holders) await holder.return();
+    await lanesFree();
+    const rest = await items({...request, cursor: read.cursor!});
+    expect([...column([first.value as Table], 'tessera_id'), ...column(rest.tables, 'tessera_id')]).toEqual(whole);
+  });
+
   it('reads the items a filter matches, as many as the viewport matches, and marks them under keepUnmatched', async (ctx) => {
     live(ctx);
     const filters = {archive: {in: ['cs']}};
@@ -161,7 +208,8 @@ describe('bulk reads against a live server', () => {
     expect(matched).toBeGreaterThan(0);
     expect(matched).toBeLessThan(visible);
     const only = await items({view: 's0', fields: ['archive'], filters, count: true, pageRows: 300, pages: 3});
-    expect(only.heads[0]).toMatchObject({visible, matched});
+    expect(only.responses).toBeGreaterThan(1);
+    expect(only.read.head).toMatchObject({visible, matched});
     expect(column(only.tables, 'archive')).toEqual(Array(matched).fill('cs'));
 
     const kept = await items({view: 's0', fields: [], filters, keepUnmatched: true, pageRows: 500});
@@ -173,8 +221,8 @@ describe('bulk reads against a live server', () => {
   it('returns the same rows in either order', async (ctx) => {
     live(ctx);
     const ids = async (order: 'map' | 'stored') => {
-      const {tables, heads} = await items({view: 's0', fields: [], order, pageRows: 600, pages: 2});
-      expect(heads.every((h) => h.order === order)).toBe(true);
+      const {tables, read} = await items({view: 's0', fields: [], order, pageRows: 600, pages: 2});
+      expect(read.head.order).toBe(order);
       return (column(tables, 'tessera_id') as bigint[]).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     };
     expect(await ids('stored')).toEqual(await ids('map'));
@@ -195,8 +243,8 @@ describe('bulk reads against a live server', () => {
 
   it('reads every artifact of a layer once, across pages and responses, as browse serves them', async (ctx) => {
     live(ctx);
-    const {tables, heads} = await artifacts({view: 's0', layer: 'taxonomy/arxiv', fields: ['key', 'level', 'masked_count', 'parents'], count: true, pageRows: 5, pages: 2});
-    expect(heads.length).toBeGreaterThan(2);
+    const {tables, read, responses} = await artifacts({view: 's0', layer: 'taxonomy/arxiv', fields: ['key', 'level', 'masked_count', 'parents'], count: true, pageRows: 5, pages: 2});
+    expect(responses).toBeGreaterThan(2);
 
     // Browse serves the layer by lineage: its roots, then each artifact's children.
     const browsed = new Map<bigint, BrowseRow>();
@@ -219,7 +267,7 @@ describe('bulk reads against a live server', () => {
     }
 
     const ids = column(tables, 'tessera_id') as bigint[];
-    expect(heads[0]!.served).toBe(ids.length);
+    expect(read.head.served).toBe(ids.length);
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(ids)).toEqual(new Set(browsed.keys()));
     const key = column(tables, 'key');
@@ -240,8 +288,8 @@ describe('bulk reads against a live server', () => {
 
   it('refuses a bad request with a TesseraError before any page', async (ctx) => {
     live(ctx);
-    const first = await client.items(session.token, {view: 's0', fields: [], pageRows: 10, pages: 1});
-    for await (const _ of first) void _;
+    const first = await client.items(session.token, {view: 's0', fields: [], pageRows: 10});
+    for await (const _ of first) break;
     const cursor = first.cursor!;
     const refusals: (() => Promise<unknown>)[] = [
       () => client.items(session.token, {view: 's0', fields: ['no_such_field']}),
@@ -262,11 +310,11 @@ describe('bulk reads against a live server', () => {
     }
   });
 
-  it('treats a connection cut before the trailer as an incomplete body, and resumes from the last page end', async (ctx) => {
+  it('treats a connection cut before a trailer as an incomplete body, in the first response or a later one, and resumes from the last page end', async (ctx) => {
     live(ctx);
-    const request: ItemsRequest = {view: 's0', fields: ['title'], pageRows: 50, pages: 5};
-    const whole = column((await items({...request, pages: undefined})).tables, 'tessera_id');
-    // After the second page end, and halfway through the third records frame.
+    const request: ItemsRequest = {view: 's0', fields: ['title'], pageRows: 200, pages: 5};
+    const whole = column((await items(request)).tables, 'tessera_id');
+    // After a response's second page end, and halfway through its third records frame.
     const cuts: Record<string, (body: Uint8Array) => number> = {
       'on a frame boundary': (body) => {
         const ends = frameStarts(body).filter((f) => f.kind === 8);
@@ -277,24 +325,28 @@ describe('bulk reads against a live server', () => {
         return records[2]!.at + 5 + Math.floor(records[2]!.length / 2);
       }
     };
-    for (const [name, cutAt] of Object.entries(cuts)) {
-      const proxy = await cuttingProxy((served as Served).viewerUrl, cutAt);
-      try {
-        const cutClient = new TesseraClient({viewerUrl: proxy.url, sessionUrl: (served as Served).sessionUrl});
-        const read = await cutClient.items(session.token, request);
-        const got: Table[] = [];
-        await rejectsAsRefused(
-          (async () => {
-            for await (const table of read) got.push(table);
-          })()
-        );
-        expect(got.map((t) => t.numRows), name).toEqual([50, 50]);
-        expect(read.trailer).toBeNull();
-        expect(typeof read.cursor, name).toBe('string');
-        const rest = await readAll((cursor) => client.items(session.token, {...request, cursor: cursor ?? read.cursor!}));
-        expect([...column(got, 'tessera_id'), ...column(rest.tables, 'tessera_id')], name).toEqual(whole);
-      } finally {
-        proxy.close();
+    for (const nth of [1, 2]) {
+      for (const [name, cutAt] of Object.entries(cuts)) {
+        const label = `response ${nth}, ${name}`;
+        const proxy = await cuttingProxy((served as Served).viewerUrl, nth, cutAt);
+        try {
+          const cutClient = new TesseraClient({viewerUrl: proxy.url, sessionUrl: (served as Served).sessionUrl});
+          const read = await cutClient.items(session.token, request);
+          const got: Table[] = [];
+          await rejectsAsRefused(
+            (async () => {
+              for await (const table of read) got.push(table);
+            })()
+          );
+          // The whole responses before the cut, then the cut one's two whole pages.
+          expect(got.map((t) => t.numRows), label).toEqual(Array(5 * (nth - 1) + 2).fill(200));
+          expect(read.trailer).toBeNull();
+          expect(read.cursor, label).toBe(read.pageEnd!.next);
+          const rest = await items({...request, cursor: read.cursor!});
+          expect([...column(got, 'tessera_id'), ...column(rest.tables, 'tessera_id')], label).toEqual(whole);
+        } finally {
+          proxy.close();
+        }
       }
     }
   });
@@ -315,14 +367,8 @@ describe('bulk reads against a live server', () => {
       expect(read.trailer).toBeNull();
     }
 
-    // The server frees a slot once it sees the connection close, which takes a moment. The limit is
-    // well inside the ten seconds after which the server sheds a response nobody reads.
-    const {controlUrl, operatorCredential} = served as Served;
-    const control = new Control({controlUrl, operatorCredential});
-    const deadline = Date.now() + 5_000;
-    while (((await control.status()).body.bulk as {in_flight: number}).in_flight > 0) {
-      expect(Date.now(), 'the aborted reads still hold their slots').toBeLessThan(deadline);
-    }
+    // The server frees a slot once it sees the connection close, which takes a moment.
+    await lanesFree();
     const {visible} = await viewportCounts();
     const again = await items({view: 's0', fields: [], pageRows: 5000});
     expect(column(again.tables, 'tessera_id').length).toBe(visible);

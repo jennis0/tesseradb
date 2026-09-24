@@ -71,19 +71,58 @@ function parts(ipc: (table: Table) => Uint8Array = (t) => tableToIPC(t, 'stream'
 /** `table`'s rows as plain objects, a category as its key. */
 const rowsOf = (table: Table) => table.toArray().map((row) => ({...row.toJSON()}));
 
-/** A client whose `fetch` answers `response` and records the request it was sent. */
-function clientFor(response: Response | (() => Response)) {
-  const sent: {url: string; body: unknown; signal: AbortSignal | null | undefined}[] = [];
+/**
+ * A client whose `fetch` answers each request with `answer`, and records the requests it was sent.
+ * More requests than any test here makes is a read going round in a loop, and fails.
+ */
+function clientFor(answer: Response | ((body: Record<string, unknown>) => Response)) {
+  const sent: {url: string; body: Record<string, unknown>; signal: AbortSignal | null | undefined}[] = [];
   const client = new TesseraClient({
     viewerUrl: 'http://viewer',
     sessionUrl: 'http://session',
     fetch: (async (url: string, init?: RequestInit) => {
-      sent.push({url, body: JSON.parse(init!.body as string), signal: init?.signal});
-      return typeof response === 'function' ? response() : response;
+      if (sent.length === 10) throw new Error('more requests than any test here makes');
+      const body = JSON.parse(init!.body as string) as Record<string, unknown>;
+      sent.push({url, body, signal: init?.signal});
+      return typeof answer === 'function' ? answer(body) : answer;
     }) as typeof fetch
   });
   return {client, sent};
 }
+
+/**
+ * Answers a request with the response for the cursor it carried, `''` standing for none, once
+ * each: a second request from one cursor is a read going round in a loop, and fails.
+ */
+function byCursor(answers: Record<string, () => Response>) {
+  const asked = new Set<string>();
+  return (body: Record<string, unknown>) => {
+    const key = (body.cursor as string | undefined) ?? '';
+    if (asked.has(key) || !answers[key]) throw new Error(`a request from cursor ${JSON.stringify(body.cursor)} was not expected`);
+    asked.add(key);
+    return answers[key]!();
+  };
+}
+
+/** One response's body: `pages`, each with the cursor of its page end, then a trailer naming `next`. */
+function responseOf(pages: [Table, string | null][], next: string | null, head: Record<string, unknown> = {order: 'map', page_rows: 3}): Uint8Array {
+  return framed([
+    json(HEAD, head),
+    ...pages.flatMap(([table, end]): Frame[] => [
+      {kind: RECORDS, payload: tableToIPC(table, 'stream')},
+      json(PAGE_END, {next: end, ended_by: end === null ? 'end' : 'rows'})
+    ]),
+    trailer(pages.length, pages.reduce((n, [t]) => n + t.numRows, 0), next)
+  ]);
+}
+
+const refusal = (status: number, error: string) => new Response(JSON.stringify({error, detail: 'refused'}), {status});
+
+/** The three pages over two responses: the first ends past its last page end, at `t2`. */
+const TWO = {
+  '': () => chunked(responseOf([[PAGES[0]!, 'c1'], [PAGES[1]!, 'c2']], 't2', {order: 'map', page_rows: 3, visible: 8, matched: 8})),
+  t2: () => chunked(responseOf([[PAGES[2]!, null]], null, {order: 'map', page_rows: 3}), 7)
+};
 
 /** Every page of `read`, with the page end the read reported after each. */
 async function drain<Head>(read: RecordsRead<Head>) {
@@ -188,18 +227,86 @@ describe('TesseraClient.items and artifacts', () => {
     }
   });
 
-  it('gives the page end’s cursor while the body is read and the trailer’s once it is whole', async () => {
-    const body = framed([
+  it('follows each response’s cursor until it is null, sending the caller’s request with only the cursor changed and no count', async () => {
+    const {client, sent} = clientFor(byCursor(TWO));
+    const request: ItemsRequest = {...REQUEST, systemFields: ['labels'], filters: {archive: {in: ['cs']}}, count: true, pageRows: 3, pages: 2, order: 'map', idset: 4};
+    const read = await client.items('tok', request);
+    const pages = await drain(read);
+    expect(pages.map((p) => p.rows)).toEqual(PAGES.map(rowsOf));
+    expect(pages.map((p) => p.next)).toEqual(['c1', 'c2', null]);
+    const first = {view: 's0', fields: ['archive', 'title', 'score'], system_fields: ['labels'], filters: {archive: {in: ['cs']}}, page_rows: 3, pages: 2, order: 'map', idset: 4};
+    expect(sent.map((s) => s.body)).toEqual([{...first, count: true}, {...first, cursor: 't2'}]);
+    // The first response's head, and the last response's trailer.
+    expect(read.head).toEqual<ItemsHead>({order: 'map', pageRows: 3, visible: 8, matched: 8});
+    expect(read.trailer).toEqual({pages: 1, rows: 2, next: null, endedBy: 'end', streamUs: 12});
+    expect(read.cursor).toBeNull();
+  });
+
+  it('throws a refused follow-up’s TesseraError after the pages that arrived, its cursor past the last page end', async () => {
+    for (const [status, code] of [[409, 'stale-idset'], [429, 'backpressure']] as const) {
+      const {client, sent} = clientFor(byCursor({'': TWO[''], t2: () => refusal(status, code)}));
+      const read = await client.items('tok', REQUEST);
+      const got: Table[] = [];
+      const thrown = await (async () => {
+        for await (const table of read) got.push(table);
+      })().then(
+        () => null,
+        (error: unknown) => error
+      );
+      expect(thrown).toBeInstanceOf(TesseraError);
+      expect(thrown).toMatchObject({status, code});
+      expect(got.map(rowsOf)).toEqual(PAGES.slice(0, 2).map(rowsOf));
+      expect(sent).toHaveLength(2);
+      // The first response went on past its last page end, and the read resumes from there.
+      expect(read.cursor).toBe('t2');
+      expect(read.trailer).toBeNull();
+    }
+  });
+
+  it('yields the whole pages of a follow-up cut before its trailer, then refuses it, resuming after its last page end', async () => {
+    // Cut inside the records frame of its second page.
+    const second = framed([
       json(HEAD, {order: 'map', page_rows: 3}),
-      {kind: RECORDS, payload: tableToIPC(PAGES[0]!, 'stream')},
-      json(PAGE_END, {next: 'c2', ended_by: 'rows'}),
-      trailer(1, 3, 'c3')
+      {kind: RECORDS, payload: tableToIPC(PAGES[2]!, 'stream')},
+      json(PAGE_END, {next: 'c3', ended_by: 'rows'}),
+      {kind: RECORDS, payload: tableToIPC(page([9n]), 'stream')}
     ]);
-    const read = await clientFor(chunked(body)).client.items('tok', REQUEST);
-    const seen: (string | null | undefined)[] = [];
-    for await (const _ of read) seen.push(read.cursor);
-    expect(seen).toEqual(['c2']);
+    const cut = second.subarray(0, second.byteLength - 10);
+    const {client} = clientFor(byCursor({'': TWO[''], t2: () => chunked(cut, 11, {cut: new TypeError('terminated')})}));
+    const read = await client.items('tok', REQUEST);
+    const got: Table[] = [];
+    await rejectsAsRefused(
+      (async () => {
+        for await (const table of read) got.push(table);
+      })()
+    );
+    expect(got.map(rowsOf)).toEqual(PAGES.map(rowsOf));
     expect(read.cursor).toBe('c3');
+  });
+
+  it('sends no further request once the caller stops', async () => {
+    const {client, sent} = clientFor(byCursor(TWO));
+    const read = await client.items('tok', REQUEST);
+    for await (const table of read) {
+      expect(table.numRows).toBe(3);
+      break;
+    }
+    expect(sent).toHaveLength(1);
+    expect(read.cursor).toBe('c1');
+    // A new call from that cursor reads on without repeating a row.
+    const rest = await drain(await clientFor(byCursor({c1: () => chunked(responseOf([[PAGES[1]!, 'c2'], [PAGES[2]!, null]], null))})).client.items('tok', {...REQUEST, cursor: read.cursor!}));
+    expect(rest.map((p) => p.rows)).toEqual(PAGES.slice(1).map(rowsOf));
+  });
+
+  it('takes a response of one page of no rows, which carries the read’s columns', async () => {
+    const empty = page([]);
+    const read = await clientFor(chunked(responseOf([[empty, null]], null))).client.items('tok', REQUEST);
+    const tables: Table[] = [];
+    for await (const table of read) tables.push(table);
+    expect(tables.map((t) => t.numRows)).toEqual([0]);
+    expect(tables[0]!.schema.fields.map((f) => f.name)).toEqual(['tessera_id', 'archive', 'title', 'score']);
+    expect(read.trailer).toMatchObject({pages: 1, rows: 0, next: null});
+    expect(read.cursor).toBeNull();
   });
 
   it('decodes pages whose buffers are zstd-compressed to the tables sent uncompressed', async () => {
@@ -235,12 +342,21 @@ describe('TesseraClient.items and artifacts', () => {
   });
 
   it('reads the artifacts head, whose counts are of artifacts served', async () => {
-    const body = framed([json(HEAD, {page_rows: 5, served: 3, matched: 1}), trailer(0, 0, 'c4')]);
-    const read = await clientFor(chunked(body)).client.artifacts('tok', {view: 's0', layer: 'l', fields: ['key'], count: true});
+    const {client, sent} = clientFor(
+      byCursor({
+        // A response that found no row can still move the cursor on.
+        '': () => chunked(framed([json(HEAD, {page_rows: 5, served: 3, matched: 1}), trailer(0, 0, 'c4')])),
+        c4: () => chunked(framed([json(HEAD, {page_rows: 5}), trailer(0, 0)]))
+      })
+    );
+    const read = await client.artifacts('tok', {view: 's0', layer: 'l', fields: ['key'], count: true, parent: 7n});
     expect(read.head).toEqual<ArtifactsHead>({pageRows: 5, served: 3, matched: 1});
     expect(await drain(read)).toEqual([]);
-    // A response that found no row can still move the cursor on.
-    expect(read.cursor).toBe('c4');
+    expect(sent.map((s) => s.body)).toEqual([
+      {view: 's0', layer: 'l', fields: ['key'], count: true, parent: '7'},
+      {view: 's0', layer: 'l', fields: ['key'], parent: '7', cursor: 'c4'}
+    ]);
+    expect(read.cursor).toBeNull();
     const uncounted = await clientFor(chunked(framed([json(HEAD, {page_rows: 5}), trailer(0, 0)]))).client.artifacts('tok', {view: 's0', layer: 'l', fields: []});
     expect(uncounted.head).toEqual<ArtifactsHead>({pageRows: 5, served: null, matched: null});
   });

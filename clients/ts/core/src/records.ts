@@ -5,43 +5,64 @@ import {parseRegionVerdict} from './region.js';
 import type {PageEnd, RecordsTrailer, RegionVerdict, Timings} from './types.js';
 
 /**
- * One response of `POST /v1/items` or `POST /v1/artifacts`: the head, then each page as an Arrow
- * table as it arrives, then the trailer.
+ * Sends the read's request, from `cursor` where one is given and as the caller wrote it where not,
+ * and answers the response, or throws the refusal.
+ */
+export type RecordsRequest = (cursor?: string) => Promise<Response>;
+
+/**
+ * A whole bulk read of `POST /v1/items` or `POST /v1/artifacts`: each page as an Arrow table as it
+ * arrives, response after response, each response requested from the cursor the one before it
+ * ended with, until that cursor is null.
  *
  * A page is yielded once its page end has arrived, so a records frame cut off before its page end
- * is never yielded. A body that ends or is cut without its trailer throws after the last whole
- * page, and {@link cursor} is then the last page end's cursor, from which the read resumes without
- * repeating a row.
+ * is never yielded. A body that ends or is cut without its trailer throws after its last whole
+ * page, and so does a follow-up request the server refuses. {@link cursor} is then where the read
+ * resumes without repeating a row.
  *
- * The body is read only as the caller iterates. Iterating to the end, breaking out of the loop,
- * calling `return()` or aborting the request's signal each release the connection. A `return()`
- * while a page is awaited ends that wait as the end of the read.
+ * The bodies are read only as the caller iterates. Iterating to the end, breaking out of the loop,
+ * calling `return()` or aborting the request's signal each release the connection and send no
+ * further request. A `return()` while a page is awaited ends that wait as the end of the read.
  */
 export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
-  /** The viewport's identity coordinate for this principal and view; empty where the response carried none. */
-  readonly identityKey: string;
-  /** The `x-tessera-region` verdict, present where `filters` carried a `region` leaf. */
-  readonly region: RegionVerdict | null;
-  /** The server's time from admission to the head, and the time admission took, in microseconds. */
-  readonly timings: Pick<Timings, 'serverUs' | 'admissionUs'>;
+  private at: string | null | undefined;
   private lastEnd: PageEnd | null = null;
   private ended: RecordsTrailer | null = null;
+  private stopped = false;
   private readonly pages: AsyncGenerator<Table, undefined, undefined>;
 
   constructor(
+    /** The first response's head. */
     readonly head: Head,
-    headers: Headers,
-    /** The cursor the request carried. */
-    private readonly from: string | undefined,
-    private readonly frames: Frames
+    /** The latest response's headers. */
+    private headers: Headers,
+    private frames: Frames,
+    /** The cursor the caller's request carried. */
+    from: string | undefined,
+    private readonly request: RecordsRequest,
+    private readonly signal: AbortSignal | undefined,
+    private readonly parseHead: (raw: unknown) => Head
   ) {
-    this.identityKey = headers.get('x-tessera-identity-key') ?? '';
-    this.region = parseRegionVerdict(headers.get('x-tessera-region'));
-    this.timings = {
-      serverUs: Number(headers.get('x-tessera-server-us') ?? 0),
-      admissionUs: Number(headers.get('x-tessera-admission-us') ?? 0)
-    };
+    this.at = from;
     this.pages = this.read();
+  }
+
+  /** The latest response's identity coordinate for this principal and view; empty where it carried none. */
+  get identityKey(): string {
+    return this.headers.get('x-tessera-identity-key') ?? '';
+  }
+
+  /** The latest response's `x-tessera-region` verdict, present where `filters` carried a `region` leaf. */
+  get region(): RegionVerdict | null {
+    return parseRegionVerdict(this.headers.get('x-tessera-region'));
+  }
+
+  /** The latest response's time from admission to its head, and the time admission took, in microseconds. */
+  get timings(): Pick<Timings, 'serverUs' | 'admissionUs'> {
+    return {
+      serverUs: Number(this.headers.get('x-tessera-server-us') ?? 0),
+      admissionUs: Number(this.headers.get('x-tessera-admission-us') ?? 0)
+    };
   }
 
   /** The page end after the page last yielded; `null` before the first. */
@@ -49,20 +70,18 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
     return this.lastEnd;
   }
 
-  /** `null` until the whole body has been read. */
+  /** The last response's trailer once the read has ended, and `null` until then. */
   get trailer(): RecordsTrailer | null {
     return this.ended;
   }
 
   /**
-   * Where the read continues: the trailer's `next` once the body is whole, the last page end's
-   * before that, and the request's own `cursor` before any page end. `null` means no row remains;
-   * `undefined` means from the beginning.
+   * Where the read continues: after the last page yielded, and past any stretch the server scanned
+   * beyond it once that response was whole. Before any page it is the caller's own `cursor`, so
+   * `undefined` means from the beginning. `null` means no row remains.
    */
   get cursor(): string | null | undefined {
-    if (this.ended) return this.ended.next;
-    if (this.lastEnd) return this.lastEnd.next;
-    return this.from;
+    return this.at;
   }
 
   next(): Promise<IteratorResult<Table, undefined>> {
@@ -71,6 +90,7 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
 
   return(): Promise<IteratorResult<Table, undefined>> {
     // A generator that never started skips its `finally`, so the body is released here too.
+    this.stopped = true;
     this.frames.release();
     return this.pages.return(undefined);
   }
@@ -80,19 +100,47 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
   }
 
   private async *read(): AsyncGenerator<Table, undefined, undefined> {
-    let open: Uint8Array | null = null;
+    for (;;) {
+      const trailer = yield* this.response();
+      if (trailer === null) return undefined;
+      this.at = trailer.next;
+      if (trailer.next === null) {
+        this.ended = trailer;
+        return undefined;
+      }
+      if (this.stopped) return undefined;
+      const response = await this.request(trailer.next);
+      if (this.stopped) {
+        void response.body?.cancel().catch(() => {});
+        return undefined;
+      }
+      const {frames} = await open(response, this.signal, this.parseHead);
+      if (this.stopped) {
+        frames.release();
+        return undefined;
+      }
+      this.frames = frames;
+      this.headers = response.headers;
+    }
+  }
+
+  /** The current response's pages, then its trailer, or `null` where the caller stopped the read. */
+  private async *response(): AsyncGenerator<Table, RecordsTrailer | null, undefined> {
+    const frames = this.frames;
+    let pending: Uint8Array | null = null;
     let trailer: RecordsTrailer | null = null;
     let pages = 0;
     let rows = 0;
     try {
-      for (let frame = await this.frames.next(); frame !== null; frame = await this.frames.next()) {
+      for (let frame = await frames.next(); frame !== null; frame = await frames.next()) {
         if (frame.kind === FRAME_RECORDS) {
-          open = frame.payload;
+          pending = frame.payload;
         } else if (frame.kind === FRAME_PAGE_END) {
           // The grammar puts a records frame before every page end.
-          const table = tableFromIPC(open!);
-          open = null;
+          const table = tableFromIPC(pending!);
+          pending = null;
           this.lastEnd = pageEndOf(frame.payload);
+          this.at = this.lastEnd.next;
           pages += 1;
           rows += table.numRows;
           yield table;
@@ -101,37 +149,42 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
         }
       }
     } finally {
-      this.frames.release();
+      frames.release();
     }
-    if (this.frames.released) return undefined;
+    if (frames.released) return null;
     // A complete body has a trailer: the grammar refuses one without.
     if (trailer!.pages !== pages || trailer!.rows !== rows) {
       throw new Error(`the trailer counts ${trailer!.pages} pages and ${trailer!.rows} rows, but the body carried ${pages} and ${rows}`);
     }
-    this.ended = trailer;
-    return undefined;
+    return trailer;
   }
 }
 
 /**
- * Read a bulk read's response up to its head. `parseHead` checks and translates the head's JSON.
- * A body that fails before its head, or whose head `parseHead` refuses, throws. The request's
- * `cursor` is where the read resumes before any page end, and a zstd decoder is registered only
- * where it asked for `compression: 'zstd'`.
+ * Start a bulk read: send the caller's request and read its response up to the head. `parseHead`
+ * checks and translates a head's JSON. A refusal, a body that fails before its head, and a head
+ * `parseHead` refuses each throw. A zstd decoder is registered only where the request asked for
+ * `compression: 'zstd'`.
  */
 export async function openRecords<Head>(
-  response: Response,
-  request: {cursor?: string; compression?: 'zstd'},
+  given: {cursor?: string; compression?: 'zstd'},
+  request: RecordsRequest,
   signal: AbortSignal | undefined,
   parseHead: (raw: unknown) => Head
 ): Promise<RecordsRead<Head>> {
-  if (request.compression === 'zstd') registerZstd();
+  if (given.compression === 'zstd') registerZstd();
+  const response = await request();
+  const {head, frames} = await open(response, signal, parseHead);
+  return new RecordsRead(head, response.headers, frames, given.cursor, request, signal, parseHead);
+}
+
+/** One response read up to its head. */
+async function open<Head>(response: Response, signal: AbortSignal | undefined, parseHead: (raw: unknown) => Head) {
   const frames = new Frames(response.body?.getReader(), signal);
   try {
     // The grammar refuses a body whose first frame is not the head, and one that ends before it.
     const first = (await frames.next())!;
-    const head = parseHead(JSON.parse(new TextDecoder().decode(first.payload)));
-    return new RecordsRead(head, response.headers, request.cursor, frames);
+    return {head: parseHead(JSON.parse(new TextDecoder().decode(first.payload))), frames};
   } catch (error) {
     frames.release();
     throw error;

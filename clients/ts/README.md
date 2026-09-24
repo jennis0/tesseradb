@@ -404,43 +404,49 @@ that matches a filter, with the fields the caller names. `client.artifacts(token
 `POST /v1/artifacts`: every artifact of one layer the principal is served, with the properties the
 caller names. `docs/openapi/tessera.yaml` says what each request field does.
 
-Each call reads one response. It resolves when the response's head has arrived, and a refusal
-throws `TesseraError` then. The result is an async iterator of apache-arrow `Table`s, one per page,
-and it carries:
+Each call reads the whole result. It resolves when the first response's head has arrived, and a
+refusal of the first request throws `TesseraError` then. The result is an async iterator of
+apache-arrow `Table`s, one per page. The server ends each response at its `pages` limit or its
+byte or time budget with a cursor, and the client sends the request again from that cursor until
+it is `null`.
+Each request after the first is the caller's own with `cursor` set and without `count`, which the
+server takes only on a read's first request. The result carries:
 
-- `head`: the order used and the page size after the cap, and the counts where the request asked
-  for `count`.
+- `head`: the first response's head: the order used and the page size after the cap, and the
+  counts where the request asked for `count`.
 - `pageEnd`: the page end after the page last yielded, with its cursor `next` and its `endedBy`.
-- `trailer`: `null` until the body has been read to its end.
-- `cursor`: where the read continues. It is the trailer's `next` once the body is whole, the last
-  page end's before that, and the request's own `cursor` before any page end, so it is `undefined`
-  before any page end of a read started without one. `null` means no row remains.
-- `identityKey`, `region` and `timings` (`serverUs`, `admissionUs`): the response's headers, read
-  as a viewport response reads them. A read and a viewport for the same principal and view carry
-  the same `identityKey`.
-
-To read a whole result, send the request again with `cursor` until it is `null`:
+- `trailer`: the last response's trailer, and `null` until the read has ended.
+- `cursor`: where the read continues. It is the cursor after the last page yielded, or past any
+  stretch the server scanned beyond it once that response was whole. Before any page it is the
+  request's own `cursor`, so it is `undefined` before any page of a read started without one.
+  `null` means no row remains.
+- `identityKey`, `region` and `timings` (`serverUs`, `admissionUs`): the latest response's
+  headers, read as a viewport response reads them. A read and a viewport for the same principal
+  and view carry the same `identityKey`.
 
 ```ts
-let cursor: string | undefined;
-for (;;) {
-  const read = await client.items(token, {view: 's0', fields: ['title'], pageRows: 10_000, cursor});
-  for await (const page of read) use(page);
-  if (read.cursor === null) break;
-  cursor = read.cursor;
-}
+const read = await client.items(token, {view: 's0', fields: ['title'], pageRows: 10_000});
+for await (const page of read) use(page);
 ```
 
 The request is sent as given. The client chooses no fields, order, page size or compression, and
 holds nothing between calls.
 
+To stop early, break out of the loop, call `return()` or abort the request's signal. Each closes
+the connection, the server stops the response, and no further request is sent. A `return()` while
+a page is awaited ends that wait as the end of the read. After an abort no further page is
+yielded, including pages already received. To go on later, pass `read.cursor` as the `cursor` of
+the same request in a new call, which repeats no row:
+
+```ts
+const rest = await client.items(token, {view: 's0', fields: ['title'], pageRows: 10_000, cursor: read.cursor!});
+```
+
 A page is yielded once its page end has arrived. A body that ends without its trailer, including
 one whose connection is cut, which is how the server ends a response that fails part-way, yields
-its whole pages and then throws; `cursor` is then the last page end's cursor, and a read resumed
-from it repeats no row. Breaking out of the loop, calling `return()` or aborting the request's signal
-closes the connection, and the server stops the response. A `return()` while a page is awaited
-ends that wait as the end of the read. After an abort no further page is yielded, including pages
-already received.
+its whole pages and then throws, and so does a later request the server refuses, with its
+`TesseraError`. `cursor` is then where the read resumes. A response with no rows carries one page
+of none, which gives the read's columns.
 
 Under `compression: 'zstd'` each page's Arrow buffers arrive compressed. On such a read the client
 registers a zstd decoder (`fzstd`) in apache-arrow's shared codec registry, so a compressed page

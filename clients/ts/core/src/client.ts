@@ -794,13 +794,14 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /v1/items`: one response of a bulk read of the items this principal may see in a view.
-   * Resolves when the head arrives; iterating the result then yields each page as an Arrow table.
-   * A refusal throws {@link TesseraError} here, before any page.
+   * `POST /v1/items`: a bulk read of the items this principal may see in a view. Resolves when the
+   * first response's head arrives, and a refusal of the first request throws {@link TesseraError}
+   * then. Iterating the result yields each page as an Arrow table, following each response's
+   * cursor until the read ends.
    *
-   * The request is sent as given. The read stops at this response's trailer, and the caller
-   * continues it by sending the request again with `cursor` set to the result's `cursor`, until
-   * that is `null`.
+   * Each request after the first is the caller's request with `cursor` set to the one the response
+   * before it ended with, and without `count`, which the server takes only on a read's first
+   * request.
    */
   items(token: string, req: ItemsRequest, signal?: AbortSignal): Promise<RecordsRead<ItemsHead>> {
     return this.bulkRead('items', token, req, signal, (raw) => {
@@ -811,8 +812,8 @@ export class TesseraClient {
   }
 
   /**
-   * `POST /v1/artifacts`: one response of a bulk read of the artifacts of one layer this principal
-   * is served, as {@link items} reads items.
+   * `POST /v1/artifacts`: a bulk read of the artifacts of one layer this principal is served, as
+   * {@link items} reads items.
    */
   artifacts(token: string, req: ArtifactsRequest, signal?: AbortSignal): Promise<RecordsRead<ArtifactsHead>> {
     return this.bulkRead('artifacts', token, req, signal, (raw) => {
@@ -822,27 +823,31 @@ export class TesseraClient {
     });
   }
 
-  private async bulkRead<Head>(
+  private bulkRead<Head>(
     route: 'items' | 'artifacts',
     token: string,
     req: ItemsRequest | ArtifactsRequest,
     signal: AbortSignal | undefined,
     parseHead: (raw: unknown) => Head
   ): Promise<RecordsRead<Head>> {
-    // Each field that is set, under its wire name. A `tessera_id` travels as a decimal string.
-    const body: Record<string, unknown> = {};
-    for (const [name, value] of Object.entries(req)) {
-      if (value === undefined) continue;
-      body[name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)] = typeof value === 'bigint' ? value.toString() : value;
-    }
-    const response = await this.send(`${this.opts.viewerUrl}/v1/${route}`, {
-      method: 'POST',
-      headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: JSON.stringify(body),
-      signal
-    });
-    if (!response.ok) await fail(response);
-    return openRecords(response, req, signal, parseHead);
+    const request = async (cursor?: string) => {
+      const given = cursor === undefined ? req : {...req, cursor, count: undefined};
+      // Each field that is set, under its wire name. A `tessera_id` travels as a decimal string.
+      const body: Record<string, unknown> = {};
+      for (const [name, value] of Object.entries(given)) {
+        if (value === undefined) continue;
+        body[name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)] = typeof value === 'bigint' ? value.toString() : value;
+      }
+      const response = await this.send(`${this.opts.viewerUrl}/v1/${route}`, {
+        method: 'POST',
+        headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+        body: JSON.stringify(body),
+        signal
+      });
+      if (!response.ok) await fail(response);
+      return response;
+    };
+    return openRecords(req, request, signal, parseHead);
   }
 }
 
