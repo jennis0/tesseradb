@@ -95,6 +95,7 @@ Most of the other tells are in the sentences.
 
 - **Compound sentences, one after another.** Two clauses joined by ", and", ", so", ", but", a semicolon or a colon, sentence after sentence. Join two clauses when they make one thought, not to avoid a full stop.
 - **Runs of short sentences in the same shape.** "It keeps shapes true. It stretches areas. It has no default." Four sentences in a row that begin "You'll". Chopped prose reads as mechanical as chained prose. Write as a person talks: mostly plain sentences of varied length, with a longer one where an idea needs carrying through and a short one where it lands.
+- **Symmetry.** Paragraphs of the same length, lists whose items all take the same shape, parallel clauses balanced against each other. Embrace asymmetry. Mix sentence lengths and styles: a statement, then a question the reader would ask, then an aside. Let one paragraph run long and the next be a single line. A page with some unevenness reads as written by someone.
 - **A colon followed by a list of three.** "One program does all the work: it checks, builds and serves." Say one thing, or show the three as they happen.
 - **Sentences about the text instead of the subject.** "There are six stages, and each one leaves something you can look at." "This is the step that decides what a viewer sees." Cut them, or replace them with the fact they gesture at.
 - **Framing that nobody would say aloud.** "The pieces every deployment is made of." "The whole path from a text file to a viewer's map." Name the actual things.
