@@ -521,7 +521,8 @@ struct IngestResp {
     /// Declared columns this batch omitted, each taken as absent in every row.
     padded_columns: u64,
     /// One `tessera_id` per row, in request order, whether or not the row carried an external id.
-    tessera_ids: Vec<u64>,
+    /// Decimal strings, since a JSON number loses `u64` precision past 2^53 in JavaScript.
+    tessera_ids: Vec<String>,
     /// Artifacts this batch's membership columns created, for keys no artifact held on an open
     /// layer. Reported because a minted artifact cannot be undone.
     minted: u64,
@@ -844,14 +845,14 @@ async fn ingest(
 
 /// Each entity's `tessera_id`, in order: entity ids never reach a response body, and clients see
 /// `tessera_id` instead. A failure is unreachable in practice and fails closed.
-fn tessera_ids_of(state: &AppState, entity_ids: &[EntityId]) -> Result<Vec<u64>, ApiError> {
+fn tessera_ids_of(state: &AppState, entity_ids: &[EntityId]) -> Result<Vec<String>, ApiError> {
     entity_ids
         .iter()
         .map(|&entity| {
             state
                 .engine
                 .tessera_id_of(entity)
-                .map(|id| id.raw())
+                .map(|id| id.raw().to_string())
                 .map_err(|e| ApiError::FailClosed(e.to_string()))
         })
         .collect()

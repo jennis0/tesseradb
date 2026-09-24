@@ -1356,6 +1356,21 @@ pub async fn flush_and_fold(server: &TestServer, view: Option<&str>) {
     fold(server).await;
 }
 
+/// The `tessera_id` an ingest answer gives each row, in row order. Panics unless each is sent as
+/// a decimal string.
+pub fn ingested_ids(answer: &serde_json::Value) -> Vec<u64> {
+    answer["tessera_ids"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the ingest answer carries tessera_ids: {answer}"))
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .and_then(|digits| digits.parse().ok())
+                .unwrap_or_else(|| panic!("{id} is not a tessera_id as a decimal string"))
+        })
+        .collect()
+}
+
 /// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).
 pub async fn post_item(server: &TestServer, token: &str, tessera_id: u64) -> reqwest::Response {
     server

@@ -134,7 +134,7 @@ def test_an_acked_ingest_is_not_an_applied_one(stub):
     """
     server, journal = stub
     server.high_water = 100
-    server.next_ingest = _Response(200, {"accepted": 3, "tessera_ids": [11, 12, 13]})
+    server.next_ingest = _Response(200, {"accepted": 3, "tessera_ids": ["11", "12", "13"]})
 
     journal.ingest(b"arrow-bytes", "batch-1")
 
