@@ -638,8 +638,9 @@ enum Spelling {
     Numbers,
 }
 
-/// Write the artifact source, its label column spelled as `spelling` says.
-fn write_teams(path: &std::path::Path, spelling: Spelling) {
+/// Write the artifact source, its label column spelled as `spelling` says. `padded` writes every
+/// label with spaces around it, and a list with an empty and a blank label beside its own.
+fn write_teams(path: &std::path::Path, spelling: Spelling, padded: bool) {
     use arrow::array::{
         ArrayRef, DictionaryArray, Int64Array, ListBuilder, StringArray, StringBuilder,
         UInt64Builder,
@@ -653,7 +654,9 @@ fn write_teams(path: &std::path::Path, spelling: Spelling) {
         }
         members.append(true);
     }
-    let first: Vec<Option<&str>> = BUILT.iter().map(|(_, _, labels)| labels.map(|l| l[0])).collect();
+    let pad = |label: &str| if padded { format!(" {label} ") } else { label.to_string() };
+    let first: Vec<Option<String>> =
+        BUILT.iter().map(|(_, _, labels)| labels.map(|l| pad(l[0]))).collect();
     let team: ArrayRef = match spelling {
         Spelling::List => {
             let mut team = ListBuilder::new(StringBuilder::new());
@@ -662,7 +665,11 @@ fn write_teams(path: &std::path::Path, spelling: Spelling) {
                     None => team.append(false),
                     Some(labels) => {
                         for label in *labels {
-                            team.values().append_value(label);
+                            team.values().append_value(pad(label));
+                        }
+                        if padded {
+                            team.values().append_value("");
+                            team.values().append_value("  ");
                         }
                         team.append(true);
                     }
@@ -672,7 +679,12 @@ fn write_teams(path: &std::path::Path, spelling: Spelling) {
         }
         Spelling::Plain => std::sync::Arc::new(StringArray::from(first)),
         Spelling::Dictionary => {
-            std::sync::Arc::new(first.into_iter().collect::<DictionaryArray<Int32Type>>())
+            std::sync::Arc::new(
+                first
+                    .iter()
+                    .map(Option::as_deref)
+                    .collect::<DictionaryArray<Int32Type>>(),
+            )
         }
         Spelling::Numbers => {
             std::sync::Arc::new(Int64Array::from(vec![Some(1i64); BUILT.len()]))
@@ -696,7 +708,15 @@ fn write_teams(path: &std::path::Path, spelling: Spelling) {
     w.close().unwrap();
 }
 
-fn built_config(field: &str) -> String {
+/// The declaration both layers are built from. `padded` spells every declared word and inline
+/// label with spaces around it, gives `teams` the named default ` red `, and gives the inline
+/// layer's unlabelled artifact a blank label.
+fn built_config(field: &str, padded: bool) -> String {
+    let (visibility, teams_default, inline_default, red, open) = if padded {
+        (" public ", " red ", " inherited ", " red ", r#", access = "  ""#)
+    } else {
+        ("public", "inherited", "inherited", "red", "")
+    };
     format!(
         r#"
 [sources]
@@ -714,8 +734,8 @@ title                     = "{LAYER}"
 views                     = ["s0"]
 source                    = "teams"
 membership                = "enumerated"
-visibility                = "public"
-artifact_visibility       = {{ field = "{field}", default = "inherited" }}
+visibility                = "{visibility}"
+artifact_visibility       = {{ field = "{field}", default = "{teams_default}" }}
 require_member_visibility = "none"
 hierarchy                 = {{ kind = "nested", prune_children = false }}
 content                   = {{ computed = ["centroid"] }}
@@ -725,13 +745,13 @@ name                      = "inline"
 title                     = "inline"
 views                     = ["s0"]
 membership                = "enumerated"
-visibility                = "public"
-artifact_visibility       = {{ field = "team", default = "inherited" }}
+visibility                = "{visibility}"
+artifact_visibility       = {{ field = "team", default = "{inline_default}" }}
 require_member_visibility = "none"
 hierarchy                 = {{ kind = "flat", prune_children = false }}
 artifacts = [
-  {{ key = "inline-red", members = [0, 1, 2], access = "red" }},
-  {{ key = "inline-open", members = [3, 4, 5] }},
+  {{ key = "inline-red", members = [0, 1, 2], access = "{red}" }},
+  {{ key = "inline-open", members = [3, 4, 5]{open} }},
 ]
 "#
     )
@@ -739,13 +759,23 @@ artifacts = [
 
 /// Build the fixture's points with the two layers above; the build's own answer.
 fn build_labelled(dir: &std::path::Path, spelling: Spelling, field: &str) -> Result<(), String> {
+    build_labelled_padded(dir, spelling, field, false)
+}
+
+/// [`build_labelled`], with every label and declared word padded where `padded` says so.
+fn build_labelled_padded(
+    dir: &std::path::Path,
+    spelling: Spelling,
+    field: &str,
+    padded: bool,
+) -> Result<(), String> {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points_n(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
-    write_teams(&dir.join("teams.parquet"), spelling);
+    write_teams(&dir.join("teams.parquet"), spelling, padded);
     let config_path = dir.join("config.toml");
-    std::fs::write(&config_path, built_config(field)).unwrap();
+    std::fs::write(&config_path, built_config(field, padded)).unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .map_err(|e| e.to_string())?;
     let args = tessera_build::BuildArgs {
@@ -836,6 +866,120 @@ async fn labels_built_and_labels_published_serve_alike() {
     }
 }
 
+/// **Padded labels and declared words, built and published, serve as their trimmed selves** on
+/// both paths: an artifact source's labels in every spelling, an inline label, a layer's
+/// `visibility` of ` public `, and a named and an `inherited` artifact default. A viewer holding
+/// `red` sees the red artifacts and one holding only `blue` does not.
+#[tokio::test]
+async fn padded_labels_built_and_published_serve_as_their_trimmed_selves() {
+    for spelling in [Spelling::List, Spelling::Plain, Spelling::Dictionary] {
+        let list = spelling == Spelling::List;
+        let built = TempDir::new().unwrap();
+        build_labelled_padded(built.path(), spelling, "team", true)
+            .expect("the padded build succeeds");
+        let built_server = open(&built).await;
+
+        let live = TempDir::new().unwrap();
+        let live_server = serve(&live).await;
+        let mut teams = teams_declaration(" red ");
+        teams["visibility"] = json!(" public ");
+        register(&live_server, teams).await;
+        let mut inline = teams_declaration("inherited");
+        inline["name"] = json!("inline");
+        inline["title"] = json!("inline");
+        inline["visibility"] = json!(" public ");
+        inline["hierarchy"]["kind"] = json!("flat");
+        inline["content"]["computed"] = json!([]);
+        register(&live_server, inline).await;
+        publish(
+            &live_server,
+            LAYER,
+            json!(BUILT
+                .iter()
+                .map(|(key, range, labels)| {
+                    let labels: Option<Vec<String>> = labels.map(|l| {
+                        let own = if list { l.to_vec() } else { vec![l[0]] };
+                        own.iter().map(|label| format!(" {label} ")).chain(["".into()]).collect()
+                    });
+                    json!({ "key": key, "members": members(range.clone()), "access": labels })
+                })
+                .collect::<Vec<_>>()),
+        )
+        .await;
+        publish(
+            &live_server,
+            "inline",
+            json!([
+                { "key": "inline-red", "members": members(0..3), "access": [" red "] },
+                { "key": "inline-open", "members": members(3..6), "access": ["  "] },
+            ]),
+        )
+        .await;
+        tick(&live_server).await;
+
+        for terms in [&["0"][..], &["0", "red"], &["0", "blue"], &["1", "red", "blue"]] {
+            let from_build = served_counts(&built_server, terms).await;
+            assert_eq!(
+                from_build,
+                served_counts(&live_server, terms).await,
+                "{terms:?}, {spelling:?}"
+            );
+        }
+        for server in [&built_server, &live_server] {
+            let keys = |rows: Vec<(String, String, u64)>| -> Vec<String> {
+                rows.into_iter().map(|(_, key, _)| key).collect()
+            };
+            let red = keys(served_counts(server, &["0", "red"]).await);
+            let blue = keys(served_counts(server, &["0", "blue"]).await);
+            for key in ["red", "open", "inline-red"] {
+                assert!(red.contains(&key.to_string()), "{key} to red: {red:?}, {spelling:?}");
+                assert!(!blue.contains(&key.to_string()), "{key} to blue: {blue:?}, {spelling:?}");
+            }
+            assert!(blue.contains(&"inline-open".to_string()), "{blue:?}, {spelling:?}");
+        }
+        built_server.shutdown().await;
+        live_server.shutdown().await;
+    }
+}
+
+/// A padded label fills as its trimmed self, on the JSON and the Arrow form of a growth: the
+/// trimmed spelling is then the same label, accepted again, and a blank label fills nothing.
+#[tokio::test]
+async fn a_padded_label_fills_as_its_trimmed_self() {
+    let d = deployment(false).await;
+    let server = &d.server;
+    let served_to = async |terms: &[&str], key: &str| {
+        let token = token_for(server, terms).await;
+        keys_served(&viewport_raw(server, &token, viewport(0, json!({}))).await)
+            .contains(&key.to_string())
+    };
+
+    let (status, body) =
+        patch(server, LAYER, json!([{ "key": "open", "access": [" red ", ""] }])).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = patch(server, LAYER, json!([{ "key": "open", "access": ["red"] }])).await;
+    assert_eq!(status, 200, "the trimmed spelling is the label held: {body}");
+    let resp = server
+        .client
+        .patch(artifacts_url(server, LAYER))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(arrow_growth("p-open", Some(&["  red"])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (status, body) = patch(server, LAYER, json!([{ "key": "c-open", "access": ["  "] }])).await;
+    assert_eq!(status, 200, "{body}");
+    tick(server).await;
+
+    for key in ["open", "p-open"] {
+        assert!(served_to(&["0", "red"], key).await, "{key}");
+        assert!(!served_to(&["0", "blue"], key).await, "{key}");
+    }
+    assert!(served_to(&["0", "blue"], "c-open").await, "a blank label is no label");
+}
+
 /// A declared label field its source does not carry is refused by the build.
 #[test]
 fn a_label_field_the_source_does_not_carry_is_refused() {
@@ -855,9 +999,9 @@ fn check_refuses_an_absent_or_non_text_label_column() {
     let checked = |spelling: Spelling, field: &str| {
         let dir = TempDir::new().unwrap();
         write_points_n(&dir.path().join("points.parquet"), N_ITEMS);
-        write_teams(&dir.path().join("teams.parquet"), spelling);
+        write_teams(&dir.path().join("teams.parquet"), spelling, false);
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, built_config(field)).unwrap();
+        std::fs::write(&path, built_config(field, false)).unwrap();
         let config = tessera_build::config::Config::parse(&path, &Default::default()).unwrap();
         tessera_build::check::check(&config).is_clean()
     };

@@ -98,7 +98,12 @@ async fn group_names(served: &Served) -> Vec<String> {
 }
 
 fn batch(rows: &[(&str, f32, f32)]) -> Vec<u8> {
-    let labels: Vec<&[&str]> = rows.iter().map(|_| &["0"][..]).collect();
+    labelled_batch(rows, &["0"])
+}
+
+/// [`batch`], every row carrying `labels`.
+fn labelled_batch(rows: &[(&str, f32, f32)], labels: &[&str]) -> Vec<u8> {
+    let labels: Vec<&[&str]> = rows.iter().map(|_| labels).collect();
     let access = access_lists(&labels);
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, true),
@@ -530,6 +535,104 @@ async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
     labelled["point_visibility"] = json!({ "default": "0" });
     assert_eq!(declare_view(&served, "labelled", labelled).await.0, 201);
     assert_eq!(declare_view(&served, "public_default", embedding()).await.0, 201);
+}
+
+/// **Declared words are stored trimmed**, on both routes: a padded gate is the same declaration
+/// as its trimmed spelling, a view gated ` 0 ` is reached by a credential holding `0`, a gate of
+/// ` public ` is no gate, and a padded point default is given to an unlabelled row as its label.
+#[tokio::test]
+async fn padded_gates_and_point_defaults_are_stored_trimmed() {
+    let served = Served::build(|dir| build_fixture(dir, N)).await;
+
+    let mut gated = embedding();
+    gated["visibility"] = json!(" 0 ");
+    assert_eq!(declare_view(&served, "gated", gated).await.0, 201);
+    let mut same = embedding();
+    same["visibility"] = json!("0");
+    assert_eq!(declare_view(&served, "gated", same).await.0, 200, "the gate is stored trimmed");
+
+    let mut open = embedding();
+    open["visibility"] = json!([" public "]);
+    assert_eq!(declare_view(&served, "open", open).await.0, 201);
+    assert_eq!(declare_view(&served, "open", embedding()).await.0, 200, "` public ` is no gate");
+
+    let mut group = quarter();
+    group["visibility"] = json!([" 0 ", "1 "]);
+    group["point_visibility"] = json!({ "default": " public " });
+    assert_eq!(declare_group(&served, "gated_group", group).await.0, 201);
+    let mut same = quarter();
+    same["visibility"] = json!(["0", "1"]);
+    assert_eq!(declare_group(&served, "gated_group", same).await.0, 200);
+    let (status, body) = put(
+        &served,
+        "/control/views/gated_group/k",
+        json!({ "visibility": [" 1 "], "metadata": { "label": "K" } }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let mut defaulted = embedding();
+    defaulted["point_visibility"] = json!({ "default": " 5 " });
+    assert_eq!(declare_view(&served, "defaulted", defaulted).await.0, 201);
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "blank")
+        .header("x-tessera-view", "defaulted")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(labelled_batch(&[("d1", 100.0, 100.0)], &["  "]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    drain(&served.server).await;
+
+    let views_for = async |terms: &[&str]| -> Vec<String> {
+        let token = token_for(&served.server, terms).await;
+        let resp = served
+            .server
+            .client
+            .get(served.server.viewer_url("/v1/meta"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        let meta: Value = resp.json().await.unwrap();
+        meta["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let zero = views_for(&["0"]).await;
+    assert!(zero.contains(&"gated".to_string()), "{zero:?}");
+    assert!(zero.contains(&"open".to_string()), "{zero:?}");
+    let one = views_for(&["1"]).await;
+    assert!(!one.contains(&"gated".to_string()), "{one:?}");
+    assert!(one.contains(&"open".to_string()), "{one:?}");
+    assert!(one.contains(&"gated_group:k".to_string()), "{one:?}");
+
+    let count_for = async |terms: &[&str]| -> usize {
+        let token = token_for(&served.server, terms).await;
+        let resp = served
+            .server
+            .client
+            .post(served.server.viewer_url("/v1/viewport"))
+            .bearer_auth(&token)
+            .json(&json!({
+                "view": "defaulted", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        decode_viewport(&resp.bytes().await.unwrap()).1.len()
+    };
+    assert_eq!(count_for(&["5"]).await, 1, "the default is stored as `5`");
+    assert_eq!(count_for(&["0"]).await, 0);
 }
 
 /// **Both declarations survive a restart and a fold** (`ingest.md` §1.3): from the log alone
