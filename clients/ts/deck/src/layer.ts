@@ -2,7 +2,6 @@ import {CompositeLayer, type BinaryAttribute as DeckBinaryAttribute, type Compos
 import {BitmapLayer, LineLayer, PolygonLayer, ScatterplotLayer, TextLayer} from '@deck.gl/layers';
 import {
   CLUSTER_PREFIX,
-  NEUTRAL,
   NO_ORDINAL,
   gridToWorld,
   gridToWorldXY,
@@ -18,6 +17,7 @@ import {
   type Store,
   type TilesProjection
 } from '@tesseradb/client';
+import {NEUTRAL} from '@tesseradb/client/internal';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {buildColourAttribute, type Encoding} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';

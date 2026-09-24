@@ -4,14 +4,13 @@ import {property, state} from 'lit/decorators.js';
 import {
   MAX_DEPTH,
   WORLD_SIZE,
-  assertCompositionMatchesServed,
   dataToWorldXY,
-  hasValue,
   type ArtifactsProjection,
   type MarksProjection,
   type Store,
   type SelectionShape
 } from '@tesseradb/client';
+import {assertCompositionMatchesServed, hasValue} from '@tesseradb/client/internal';
 import {TesseraLayer, resolvePick, viewInputOf, type Picked} from '@tesseradb/deck';
 import {MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, type ContourShape} from '@tesseradb/deck/internal';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';

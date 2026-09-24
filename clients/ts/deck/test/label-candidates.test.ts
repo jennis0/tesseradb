@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
+import {type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
+import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import {LABEL_CANDIDATE_CEILING, artifactName, displayName, frontier, labelBudget, labelCandidates} from '../src/layer.js';
 import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, placeLabels} from '../src/labels.js';
 import medcpt from './fixtures/medcpt-kmeans-labels.json' with {type: 'json'};

@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {SessionArtifactTable, gridToWorldXY, servedLineage, type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
+import {gridToWorldXY, type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
+import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import {contourShapes, focusOutlines, outlineOf} from '../src/layer.js';
 import {ringWithin, shapeContains} from '../src/contours.js';
 

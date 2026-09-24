@@ -1,5 +1,6 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
-import {enterGroup, hasOneLayout, viewPickerEntries, type Meta} from '@tesseradb/client';
+import {type Meta} from '@tesseradb/client';
+import {enterGroup, hasOneLayout, viewPickerEntries} from '@tesseradb/client/internal';
 import {TesseraElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {switchView} from './view-switch.js';

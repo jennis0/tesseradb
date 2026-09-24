@@ -1,6 +1,7 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import {SessionArtifactTable, mortonOfTile, servedLineage, type ArtifactsProjection, type ComposedTile, type MarksProjection, type TilesProjection} from '@tesseradb/client';
+import {type ArtifactsProjection, type ComposedTile, type MarksProjection, type TilesProjection} from '@tesseradb/client';
+import {SessionArtifactTable, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
 import {band} from '../../core/test/support.js';
 import {binDensity, filterDensity} from '../src/density.js';
 import {TesseraLayer, type TesseraLayerInternalProps} from '../src/layer.js';

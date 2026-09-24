@@ -1,16 +1,13 @@
 import {
-  assertCompositionMatchesServed,
-  compose,
-  fold,
   type Band,
   type ComposedTile,
   type Composition,
-  type ReplicaFrame,
   type ScalarColumn,
   type ScalarValues,
   type StandInPiece,
   type TileRect
 } from '@tesseradb/client';
+import {assertCompositionMatchesServed, compose, fold, type ReplicaFrame} from '@tesseradb/client/internal';
 
 /**
  * Materialising a core composition into the buffers one `ScatterplotLayer` draws. Core's

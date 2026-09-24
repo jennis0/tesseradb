@@ -1,6 +1,7 @@
 // A static harness for the highlight work's element screenshots: the built components against a
 // hand-made store, so the boards can be compared with what actually renders. Untracked.
-import {NO_COUNT, NO_MASKED, SessionArtifactTable, servedLineage, type BrowsePage, type Projections, type ProjectionName, type Store} from '@tesseradb/client';
+import {NO_COUNT, NO_MASKED, type BrowsePage, type Projections, type ProjectionName, type Store} from '@tesseradb/client';
+import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import '@tesseradb/components';
 
 const layer = (name: string, kind: string, computedContent: string[], title: string) =>

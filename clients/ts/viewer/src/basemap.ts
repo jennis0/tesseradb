@@ -1,6 +1,7 @@
 import {BitmapLayer} from '@deck.gl/layers';
 import type {Layer} from '@deck.gl/core';
-import {WORLD_SIZE, basemapScheme, type ViewInfo} from '@tesseradb/client';
+import {WORLD_SIZE, type ViewInfo} from '@tesseradb/client';
+import {basemapScheme} from '@tesseradb/client/internal';
 
 /**
  * The viewer's basemap, built from what `/v1/meta` says the view is a picture of. `<tessera-map>`

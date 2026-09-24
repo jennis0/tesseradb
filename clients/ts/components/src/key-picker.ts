@@ -1,5 +1,6 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
-import {stepView, viewLabel, viewsOfGroup, type Meta, type ViewInfo} from '@tesseradb/client';
+import {type Meta, type ViewInfo} from '@tesseradb/client';
+import {stepView, viewLabel, viewsOfGroup} from '@tesseradb/client/internal';
 import {TesseraElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';

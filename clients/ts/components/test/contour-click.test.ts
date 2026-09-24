@@ -1,5 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {GRID32_PER_WORLD_UNIT, SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection} from '@tesseradb/client';
+import {type Artifact, type ArtifactsProjection} from '@tesseradb/client';
+import {GRID32_PER_WORLD_UNIT, SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import '../src/map.js';
 import {fakeStore, mount, settle, status} from './fake-store.js';
 

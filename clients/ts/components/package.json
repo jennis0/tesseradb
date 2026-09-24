@@ -108,7 +108,7 @@
   },
   "dependencies": {
     "@lit/context": "^1.1.0",
-    "@tesseradb/client": "^0.1.0",
+    "@tesseradb/client": "0.1.0",
     "@tesseradb/deck": "0.1.0"
   },
   "peerDependencies": {

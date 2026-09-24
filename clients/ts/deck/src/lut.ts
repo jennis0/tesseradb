@@ -1,5 +1,6 @@
 import type {Device, Texture} from '@luma.gl/core';
-import {NEUTRAL, NO_ORDINAL, type ArtifactsProjection, type ArtifactTableChange, type Rgba} from '@tesseradb/client';
+import {NO_ORDINAL, type ArtifactsProjection, type ArtifactTableChange, type Rgba} from '@tesseradb/client';
+import {NEUTRAL} from '@tesseradb/client/internal';
 
 /**
  * The lookup texture: one RGBA texel per session ordinal, read by the mark shader as
