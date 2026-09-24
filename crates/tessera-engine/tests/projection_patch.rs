@@ -272,8 +272,9 @@ fn the_window_before_a_refresh_serves_stale_geometry_rather_than_rebuilding() {
     // silently falsify the ack→visibility bound. What stops it is the retention depth: at the next
     // publication the entry is two generations back, `prune_generations_below` removes it, and the
     // session's next request finds neither rung 1 nor rung 2 and builds. Fail-closed staleness is
-    // bounded at two publications, never permanent.
-    engine.set_background_refresh_for_test(true);
+    // bounded at two publications, never permanent. The refresh stays off: that is the session
+    // whose refresh never runs, and a refresh left free to run could patch from the entry before
+    // the publication drops it, which serves the same rows without the build.
     ingest(&engine, "ext-2", 500.0, 500.0);
     wait_until("the second flush", || {
         engine.write_executor_stats().flushes >= 2
@@ -423,3 +424,4 @@ fn wait_for_viewport(
         }
     }
 }
+
