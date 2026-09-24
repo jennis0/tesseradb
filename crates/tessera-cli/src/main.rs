@@ -397,57 +397,103 @@ enum ArtifactCensusLayer {
     Treed,
 }
 
-/// `GET /readyz` on the viewer plane, over one plain HTTP/1.1 connection.
+/// `GET /readyz` on the viewer plane, over one plain HTTP/1.1 connection, within `timeout` in all.
 fn readyz(mut addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<(), String> {
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
     if addr.ip().is_unspecified() {
         addr.set_ip(match addr {
             std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
             std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
         });
     }
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)
-        .map_err(|e| format!("no server answering at {addr}: {e}"))?;
+    let deadline = std::time::Instant::now() + timeout;
+    let failed = |e: std::io::Error| match e.kind() {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => format!(
+            "{addr} did not answer /readyz within {} s",
+            timeout.as_secs()
+        ),
+        _ => format!("{addr}: {e}"),
+    };
+    // A zero duration is refused as a socket timeout, so the last moment before the deadline
+    // waits a millisecond.
+    let remaining = || {
+        deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(std::time::Duration::from_millis(1))
+    };
+    let mut stream =
+        std::net::TcpStream::connect_timeout(&addr, remaining()).map_err(|e| match e.kind() {
+            ErrorKind::WouldBlock | ErrorKind::TimedOut => failed(e),
+            _ => format!("no server answering at {addr}: {e}"),
+        })?;
     stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .set_write_timeout(Some(remaining()))
         .and_then(|()| {
             stream.write_all(
                 format!("GET /readyz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
                     .as_bytes(),
             )
         })
-        .map_err(|e| format!("{addr}: {e}"))?;
+        .map_err(failed)?;
     let mut head = [0u8; 16];
     let mut read = 0;
     while read < head.len() {
+        stream.set_read_timeout(Some(remaining())).map_err(failed)?;
         match stream.read(&mut head[read..]) {
             Ok(0) => break,
             Ok(n) => read += n,
-            Err(e) => return Err(format!("{addr}: {e}")),
+            Err(e) => return Err(failed(e)),
         }
     }
     let status_line = String::from_utf8_lossy(&head[..read]);
-    match status_line.split(' ').nth(1) {
+    let code = status_line
+        .strip_prefix("HTTP/")
+        .and_then(|rest| rest.split(' ').nth(1));
+    match code {
         Some("200") => Ok(()),
         Some(code) => Err(format!("{addr} answered /readyz with {code}: not ready")),
         None => Err(format!("{addr} did not answer /readyz with HTTP")),
     }
 }
 
-/// The first of SIGTERM and SIGINT to arrive, by name.
-async fn termination() -> &'static str {
+/// Exit with success on the first SIGTERM or SIGINT, from a thread of its own so the handler is
+/// in place before the bundle opens. Inside a container the server is PID 1, which the kernel
+/// sends no signal it has no handler for.
+fn exit_on_termination() {
     use tokio::signal::unix::{signal, SignalKind};
-    let (Ok(mut term), Ok(mut int)) = (
-        signal(SignalKind::terminate()),
-        signal(SignalKind::interrupt()),
-    ) else {
-        return std::future::pending().await;
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("tessera serve: SIGTERM and SIGINT will not stop the server: {e}");
+            return;
+        }
     };
-    tokio::select! {
-        _ = term.recv() => "SIGTERM",
-        _ = int.recv() => "SIGINT",
-    }
+    let (term, int) = runtime.block_on(async {
+        (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        )
+    });
+    let (mut term, mut int) = match (term, int) {
+        (Ok(term), Ok(int)) => (term, int),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("tessera serve: SIGTERM and SIGINT will not stop the server: {e}");
+            return;
+        }
+    };
+    std::thread::spawn(move || {
+        let name = runtime.block_on(async {
+            tokio::select! {
+                _ = term.recv() => "SIGTERM",
+                _ = int.recv() => "SIGINT",
+            }
+        });
+        eprintln!("tessera serve: stopped on {name}");
+        std::process::exit(0);
+    });
 }
 
 fn parse_extent(raw: &str) -> Result<Bounds, String> {
@@ -2013,6 +2059,10 @@ fn main() -> ExitCode {
                 .with_writer(std::io::stderr)
                 .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
+            // SIGTERM or SIGINT ends the process at once, including while the bundle opens. A
+            // write is fsynced before it is acknowledged, so stopping loses only what no client
+            // was told had landed, and the next start replays the log.
+            exit_on_termination();
             let deployment = match tessera_config::discover(
                 deployment.as_deref(),
                 &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -2055,22 +2105,8 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            // SIGTERM or SIGINT ends the process at once. A write is fsynced before it is
-            // acknowledged, so stopping here loses only what no client was told had landed, and
-            // the next start replays the log.
-            let outcome = runtime.block_on(async {
-                tokio::select! {
-                    served = tessera_server::run(prepared) => served.map(|()| None),
-                    signal = termination() => Ok(Some(signal)),
-                }
-            });
-            runtime.shutdown_background();
-            match outcome {
-                Ok(Some(signal)) => {
-                    eprintln!("tessera serve: stopped on {signal}");
-                    ExitCode::SUCCESS
-                }
-                Ok(None) => ExitCode::SUCCESS,
+            match runtime.block_on(tessera_server::run(prepared)) {
+                Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("tessera serve: {e}");
                     ExitCode::FAILURE

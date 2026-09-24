@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 #
 # The `tessera` binary on a distroless glibc base. The server tunes glibc's malloc, so the runtime
-# is glibc rather than musl. See docker/README.md for how to run it.
+# is glibc. See docker/README.md for how to run it.
+#
+# The compiler is the one in the rust image named by RUST_VERSION; rust-toolchain.toml is left out
+# of the context so rustup does not fetch another.
 #
 #   docker build --build-arg TESSERA_BUILD_COMMIT=$(git rev-parse HEAD) -t tessera .
 
@@ -13,7 +16,7 @@ WORKDIR /src
 ARG TESSERA_BUILD_COMMIT=unknown
 ENV TESSERA_BUILD_COMMIT=${TESSERA_BUILD_COMMIT} \
     CARGO_PROFILE_RELEASE_STRIP=symbols
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
