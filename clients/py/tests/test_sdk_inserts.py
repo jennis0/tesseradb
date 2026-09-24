@@ -383,12 +383,37 @@ def test_a_committed_database_reopens_and_takes_the_next_commit(tmp_path):
         again.close()
 
 
-def test_inserted_labels_are_stripped_and_an_empty_one_is_no_label(tmp_path):
-    """The labels the SDK sends and records are read as the server reads them: each stripped, an
-    empty or blank one dropped, so a padded label and a credential for it name one term."""
-    db = create(tmp_path / "db")
-    db.declare_view("map", default_label=" sealed ")
-    access = [[" red ", ""], ["  "], [" blue "]]
-    db.insert("map", frame(access=access), x="x", y="y", access="access")
-    terms = db._inserted_terms(db._document())
-    assert terms == ["sealed", "red", "blue"]
+
+def test_a_padded_label_serves_trimmed_and_a_control_character_is_kept_at_each_commit(served):
+    """The server reads the labels the SDK sends: surrounding spaces are trimmed and an empty label
+    is no label, while U+001F is not white space and stays part of the label, on the build and on
+    a later commit alike."""
+
+    def labelled(first: int) -> pa.Table:
+        ids = [f"p{i}" for i in range(first, first + 3)]
+        return pa.table(
+            {
+                "id": ids,
+                "x": [float(i) for i in range(first, first + 3)],
+                "y": [1.0] * 3,
+                "access": [[" red ", ""], ["\x1fred"], ["  "]],
+            }
+        )
+
+    def first_commit(db):
+        db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]}, default_label=" sealed ")
+        db.insert("map", labelled(0), id="id", x="x", y="y", access="access")
+
+    db = served(first_commit)
+
+    def counts():
+        return {t: db.viewer([t]).view("map").count() for t in ("red", "\x1fred", "sealed")}
+
+    assert counts() == {"red": 1, "\x1fred": 1, "sealed": 1}
+
+    db.insert("map", labelled(10), id="id", x="x", y="y", access="access")
+    report = db.commit()
+    assert report.ok, report
+    assert counts() == {"red": 2, "\x1fred": 2, "sealed": 2}
+    assert {"red", "\x1fred", "sealed"} <= set(db.terms)
+    assert not {" red ", "", "  "} & set(db.terms)
