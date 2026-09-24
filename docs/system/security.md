@@ -121,14 +121,17 @@ the server is the external id the operator supplied and the `tessera_id` the cli
 The entity id MUST NOT appear in anything a client can read. What it would disclose is small.
 Entity ids are dense and, within one ingest batch, ordered by access terms, so a viewer holding a
 few could estimate a lower bound on how many items they cannot see and how the ones they can see
-group by access. No content is at stake: content is protected by the first property.
+group by access. A bulk read in stored order discloses the second of these, as
+[reading in bulk](#reading-in-bulk) states. No content is at stake: content is protected by the
+first property.
 
 The `tessera_id` a client receives is a keyed permutation of the entity id, so two of them reveal
 nothing about whether their items are adjacent. No request accepts an entity id, so a client cannot
-enumerate them by trying values. The permutation is not cryptographic, and it should not be assumed
-to resist a viewer who has obtained known pairs of an entity id and its `tessera_id`; no route on
-the viewer plane yields one, so what the permutation hides does not depend on cryptographic
-strength.
+enumerate them by trying values. A bulk read's cursor holds internal positions only inside its
+encryption, and a cursor the server did not issue for that read does not open. The permutation is
+not cryptographic, and it should not be assumed to resist a viewer who has obtained known pairs of
+an entity id and its `tessera_id`; no route on the viewer plane yields one, so what the
+permutation hides does not depend on cryptographic strength.
 
 ## An incomplete answer is refused
 
@@ -139,9 +142,66 @@ own response. That is allowed: the missing trailer frame makes the prefix detect
 rather than mistakable for a complete answer. What the rule forbids is a partial answer a client
 cannot tell from a complete one.
 
+A bulk read's response ends with a trailer that says why it ended and carries the cursor to
+continue from. A response that stops at its page limit, or at its byte or time budget, is complete
+as a response and says that the read is not. A response that finds no row still carries one page
+of no rows and a trailer, so a read that found nothing can be told from one that was not
+answered.
+
+A rendered value an item does not hold is sent as a null, on the viewport's points frame and on a
+bulk read, so a client cannot take an absence for a zero. A category's absence is its reserved
+code 0 on the points frame and a null on a bulk read.
+
+## Reading in bulk
+
+`POST /v1/items` and `POST /v1/artifacts` return in bulk what the map is computed from, under the
+properties above. Every page composes the visible set again and a filter only narrows it. An
+item's labels are served only where the viewer holds them, and an artifact is served on its
+layer's terms. An item's external id is returned only on request and only in that item's own row,
+as the item card returns it. Three further points are particular to these routes.
+
+**A read in stored order groups items by access.** A read of items in stored order returns a
+viewer's items in the order of their entity ids, which is the order the record store holds them
+in. Within each build batch and each ingest window, entity ids are assigned in order of each
+item's full set of access terms, the units its access labels resolve to, including terms the
+viewer does not hold. Within one set of terms, a build orders items by their Morton code, their
+place on the map, and an ingest orders them by external id. A viewer who reads positions or
+external ids can therefore see where one set ends and the next begins.
+
+From that a viewer learns which of their visible items carry the same full set of terms, and
+roughly in which batch or window each arrived. The sets are ordered by the terms' internal
+numbers, which follow the order in which terms first appeared, so the order of the sets hints at
+which terms the viewer does not hold appeared first. How long a stored-order page takes depends on
+how many items the viewer cannot see lie between the ones they can, a coarse timing signal of the
+kind the first row of the table below records. A viewer does not learn what the terms are, an
+exact count of the items they cannot see, or anything about an item outside their visible set.
+Map order returns the same rows with every field stored order serves, and discloses none of this
+grouping, so a viewer who reads in map order gives up speed and no data. The artifacts route has
+one order, the publisher's, which does not group artifacts by access label. **Not built yet:**
+restricting stored order to some viewers. Every viewer may ask for it.
+
+**The cursor is sealed to one read.** A cursor carries internal positions: a map cell and a
+`tessera_id` in map order, an entity id in stored order, and an artifact's level and publication
+ordinal on the artifacts route. It is sealed with XChaCha20-Poly1305, an authenticated cipher,
+under a key derived from the identity key, with a random nonce drawn for each cursor. A viewer can
+read nothing from a cursor, and two cursors for one position share no text. The route, the view
+and its incarnation, a hash of the credential's authorisation data and, on the artifacts route,
+the layer's name, its own internal identity and the level named are authenticated with the
+position. A cursor therefore opens only in the read it was issued for and for the credential that
+received it, and a viewer cannot use one to name an internal position, an item they were not
+served, or another viewer's read. Every such failure is one refusal with one message, and a cursor
+is refused before any position in it is used. A rotation of the identity key stops every cursor
+opening.
+
+**No stored block is sent as it is.** A compressed block of the record store, like a stored
+column, holds the values of items the viewer may not see beside those they may. Every page is
+therefore built afresh from the rows the read took inside the visible set: each value is decoded
+and written into a new Arrow batch, and a request for `zstd` compresses that new batch. A page
+carries values of the viewer's own rows and nothing else.
+
 ## Residual disclosure
 
-Five channels let a viewer learn something beyond the items they are entitled to see, past what
+Six channels let a viewer learn something beyond the items they are entitled to see, past what
 the properties above bound. Each row states its own status: most channels are accepted for the
 reason given, and one, the per-tile timing channel, remains open.
 
@@ -152,6 +212,7 @@ reason given, and one, the per-tile timing channel, remains open.
 | A lower bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count from below | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
 | That their visible items in a region group together, a fact about structure that includes unseen items | A minimum-visible-count threshold a layer declares bounds how finely a grouping's presence is exposed against the viewer's own visible set, and filtering cannot deepen it | Low | The threshold decides whether a grouping's existence is announced, not whether its count is protected: a viewport and the density layer already serve exact masked counts over any region a viewer can name, whatever threshold a layer declares | C1 |
 | That an item they were never entitled to see has been deleted, when a permissive annotation layer's membership set loses it | Under a layer declared permissive, content generated from a deleted item keeps serving until compaction removes the deleted member from the generating set. At that point the content stops serving for every viewer who satisfies the surviving members, including one who never satisfied the original generating set, telling them an item they were never entitled to see has been deleted | Medium | Bounded by the caller's own declaration: strict is the default and never shrinks, so an undeclared layer never signals this. Permissive is a caller's choice for a set where losing one member changes nothing the content asserts | C7 |
+| Which of their visible items carry the same full set of access terms, roughly in which build batch or ingest window each arrived, and a hint of the order in which terms they do not hold first appeared | A bulk read of items in stored order returns items in entity id order, which groups them by full term set, and their positions or external ids show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Low | Accepted as the price of reading record-store fields at the record store's own speed. Map order returns the same rows and fields and discloses none of it. What the terms are, the number of unseen items and anything about an unseen item stay hidden | none |
 
 A caller-declared quantity the service serves as declared, rather than a viewer's own inference, is
 not a residual channel and does not appear above: a caller-declared generating set, an authored
@@ -162,7 +223,7 @@ membership-requirement declaration are covered under what this does not claim, b
 
 | Not claimed | Why not |
 |---|---|
-| Cryptographic strength of the `tessera_id` | Not needed. The permutation hides a lower bound on the number of hidden items and their grouping by access, a low-severity channel. An adversary who recovered the key would be back at that channel and nothing more. |
+| Cryptographic strength of the `tessera_id` | Not needed. The permutation hides a lower bound on the number of hidden items, a low-severity channel. The grouping by access it would also hide is disclosed by a stored-order read. An adversary who recovered the key would be back at that channel and nothing more. |
 | A defence against a bundle holder | Anyone holding the bundle has the key, the term index and the coordinates. None of the properties above are claimed against them. |
 | Isolation of partitions | **Not built yet.** The design specifies that a partition a token cannot reach must contribute nothing to an answer, and a partition the system cannot reach through failure must be treated as an error rather than an empty contribution. A deployment today has one partition, so neither case can arise, and neither rule has anything to test it. |
 | Agreement between the two authorisation functions | Nothing checks that the function deriving terms from an item's access label and the one deriving terms from a viewer's credentials agree about what a term means. The only plugin that exists passes strings through unchanged, so they cannot disagree; a check needs a plugin whose functions could. |
@@ -175,11 +236,12 @@ membership-requirement declaration are covered under what this does not claim, b
 
 | Property | How it is checked | What is not covered |
 |---|---|---|
-| Every quantity computed from the viewer's own visible set | Compared, value for value, against an independent second implementation across three planted states, over the three surfaces the comparison covers: tiles, the points batch and the density layer's masked per-cell counts. The same property was probed manually against a running server across the request contract and the memory-safety surface beneath it, and no route past it was found | Served artifacts travel on their own frame and are not part of this comparison. Both the differential and the manual assessment ran only against the plugin that passes credentials through unchanged; no route has been checked against a plugin whose two functions could disagree |
-| A derived artifact served on the terms its layer declares | Compared against an independent implementation with two viewers differing by exactly one item inside an artifact's member set, under the strictest requirement, and the difference asserted before anything downstream rests on it. An artifact's own label is compared against an independent implementation over a built bundle and a service the artifacts were published into, across a restart and a fold; and a viewer lacking a label is shown to get byte-identical answers, on every viewer route, from a deployment holding the artifact and one that never published it | The other membership requirements are covered by Rust tests rather than the differential suite |
+| Every quantity computed from the viewer's own visible set | Compared, value for value, against an independent second implementation across three planted states, over the three surfaces the comparison covers: tiles, the points batch and the density layer's masked per-cell counts. The same property was probed manually against a running server across the request contract and the memory-safety surface beneath it, and no route past it was found. The identifier scan below also reads the bulk read of items whole over a synthetic catalogue of adversarial masks, in both orders and across several responses, and checks that it returns every visible item once, the same rows in each order, as many as the viewport counts, each with its own item's external id. Rust tests of both bulk routes plant a narrower viewer, a label the viewer does not hold, and a deletion and a suppression accepted between responses and between two pages of one response, and check every row, label and count against what that viewer may see | Served artifacts travel on their own frame and are not part of this comparison. A bulk read's values are not compared with the independent implementation: the Rust tests compare them with each fixture's own expected values. Both the differential and the manual assessment ran only against the plugin that passes credentials through unchanged; no route has been checked against a plugin whose two functions could disagree |
+| A derived artifact served on the terms its layer declares | Compared against an independent implementation with two viewers differing by exactly one item inside an artifact's member set, under the strictest requirement, and the difference asserted before anything downstream rests on it. An artifact's own label is compared against an independent implementation over a built bundle and a service the artifacts were published into, across a restart and a fold; and a viewer lacking a label is shown to get byte-identical answers, on every viewer route, from a deployment holding the artifact and one that never published it. The bulk read of artifacts is covered by Rust tests that plant an artifact withheld by its own label, an attached label whose target is withheld, content the viewer may not read and a parent the viewer is not served, and check that none of them leaves a row, a count, a parent entry or a page, and that a deny accepted during a read applies from the next response | The other membership requirements are covered by Rust tests rather than the differential suite. The bulk read of artifacts is not compared with the independent implementation |
 | Samples taken after masking | Compared against an independent implementation with a wrong-shaped stand-in, a sample taken in storage order rather than from the visible set, that the comparison is required to disagree with | None |
-| A client never sees an entity id | Scanned across every wire surface, including the density layer's sub-cell counts, and the logs, for a byte pattern matching the underlying identity, with a planted true positive on every scan confirming the scan itself works | None |
-| An incomplete answer is refused | The built half is covered by tests around shared in-progress work and cancellation, though not by the differential test form the design describes | The two partition rules have no test at all: a deployment has one partition, so neither can be exercised |
+| A client never sees an entity id | Scanned across every wire surface, including the density layer's sub-cell counts, and the logs, for a byte pattern matching the underlying identity, with a planted true positive on every scan confirming the scan itself works. The scan covers both bulk reads, each read whole across responses and the items read in both orders, and every cursor they issue, whose decoded bytes are swept at every offset | A cursor's bytes are swept for 8-byte values only |
+| An incomplete answer is refused | The built half is covered by tests around shared in-progress work and cancellation, though not by the differential test form the design describes. The server's tests end bulk-read responses at their byte budget, their time budget and the stream deadline, and check that each trailer carries a cursor to resume from. The TypeScript, Python and command-line clients' tests cut bulk-read responses before their trailers and check that each keeps the whole pages and the cursor after the last of them | The two partition rules have no test at all: a deployment has one partition, so neither can be exercised. A bulk-read response cut because its client stopped reading is tested only through the viewport, whose responses are sent by the same code |
+| A value an item does not hold is sent as absent | Compared with the source corpus on the viewport's points frame, for every item, over five rendered columns of numbers, a timestamp and a bool that hold both absences and genuine zeros, with absences written by the build and by a flush, live, after a restart and after a fold | A bulk read's nulls are checked by Rust tests, not by this comparison. A rendered string is not among the compared columns |
 
 ## Sources
 
