@@ -6,8 +6,8 @@ import {settle} from './support.js';
 
 describe('shapes are fetched by identifier', () => {
   /**
-   * On a pointer move `need` is called every frame, so a second request for a shape already held,
-   * or already in flight, is what the part exists to prevent.
+   * `need` is called on every pointer move, so a shape already held or in flight is not asked for
+   * again.
    */
   function shapesOf(shape: Shape | null) {
     const fetch = vi.fn(async () => shape);

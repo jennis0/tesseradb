@@ -38,13 +38,13 @@ describe('the encoding accumulators', () => {
     const counts = countCodes(u32([5, 5, 0, 7]));
     expect(counts.get(5)).toBe(2);
     expect(counts.get(7)).toBe(1);
-    expect(counts.has(0)).toBe(false); // 0 is *absent*, not a value
+    expect(counts.has(0)).toBe(false); // 0 is absent, not a value
   });
 
   it('ranks by frequency, most frequent first, and never reorders what it assigned', () => {
     const ranks = extendRanks({}, new Map([[5, 2], [7, 10], [9, 1]]));
     expect(ranks).toEqual({7: 0, 5: 1, 9: 2});
-    // A later count that makes 9 commonest must not move 7 or 5 — the palette is sticky.
+    // A later count that makes 9 commonest does not move 7 or 5.
     const next = extendRanks(ranks, new Map([[9, 100], [11, 3]]));
     expect(next[7]).toBe(0);
     expect(next[5]).toBe(1);

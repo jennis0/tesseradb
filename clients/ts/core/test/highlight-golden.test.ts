@@ -5,14 +5,14 @@ import {decodeViewport} from '../src/decode.js';
 import type {BrowsePage} from '../src/types.js';
 
 /**
- * **The highlight's three columns and the browse verb, against real bytes.**
+ * The highlight's three columns and the browse verb, against captured bytes.
  *
- * Recorded by `scripts/capture-golden.mjs` from a `tessera serve` over the notebook corpus. The
- * three viewport bodies are one request in three shapes: zoom 3 over the whole of view `s0`, `k =
- * 20`, the taxonomy layer with `computed: ["centroid"]`, and `filters` on `archive in [cs, math]`,
- * under a principal seeing about half the corpus. Two carry `highlight` on `archive in [cs]`, one
- * of them under `point_rows = "highlight"`, and the third carries none. The capture checks that
- * the three counts are distinct and above zero, so a decoder reading the wrong column fails.
+ * Recorded by `scripts/capture-golden.mjs` from `tessera serve` over the notebook corpus. The three
+ * viewport bodies are one request in three shapes: zoom 3 over the whole of view `s0`, `k = 20`,
+ * the taxonomy layer with `computed: ["centroid"]`, and `filters` on `archive in [cs, math]`, under
+ * a principal seeing about half the corpus. Two carry `highlight` on `archive in [cs]`, one of them
+ * under `point_rows = "highlight"`, and the third carries none. The capture checks that the three
+ * counts are distinct and above zero, so a decoder reading the wrong column fails.
  */
 
 const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
@@ -24,7 +24,7 @@ describe('the three highlighted columns, off a served body', () => {
   it('counts a tile’s highlighted inside its matched inside its visible', () => {
     const r = decodeViewport(fixture('viewport-highlight.bin'));
     expect(r.tiles.length).toBeGreaterThan(0);
-    // `highlighted ≤ matched ≤ visible`, and over the whole body all three differ.
+    // `highlighted <= matched <= visible`, and over the whole body all three differ.
     expect(sum(r.tiles, 'highlighted')).toBeGreaterThan(0);
     expect(sum(r.tiles, 'highlighted')).toBeLessThan(sum(r.tiles, 'matched'));
     expect(sum(r.tiles, 'matched')).toBeLessThan(sum(r.tiles, 'visible'));
@@ -55,18 +55,17 @@ describe('the three highlighted columns, off a served body', () => {
     expect(lit).toBeLessThan(matched);
     // The bit is the conjunction with the filter, so nothing the filter refused is lit.
     expect(r.artifacts.every((a) => !a.highlighted || a.matched)).toBe(true);
-    // Never null on a body whose request carried a highlight: the question was put of every row.
+    // Not null where the request carried a highlight: every row was asked.
     expect(r.artifacts.every((a) => a.highlighted !== null)).toBe(true);
   });
 
   it('answers a request with no highlight by the identity, and sends no bits at all', () => {
     const r = decodeViewport(fixture('viewport-no-highlight.bin'));
-    // **`highlighted` is always present and equal to `matched`** where none was asked — an absent
-    // highlight is the identity for that quantity, so a client reads a column and never an option.
+    // `highlighted` is present and equal to `matched` where no highlight was asked.
     expect(sum(r.tiles, 'highlighted')).toBe(sum(r.tiles, 'matched'));
     for (const t of r.tiles) expect(t.highlighted).toBe(t.matched);
-    // The points column is absent rather than all-false, and the artifacts' bit is null: a `false`
-    // would answer a question nobody asked.
+    // The points column is absent rather than all false, and the artifacts' bit is null: no question
+    // was asked.
     expect(r.highlighted).toBeNull();
     expect(r.artifacts.every((a) => a.highlighted === null)).toBe(true);
     expect(r.artifacts.some((a) => a.matched !== null)).toBe(true);
@@ -75,8 +74,8 @@ describe('the three highlighted columns, off a served body', () => {
 
 describe('point_rows = "highlight", against the full answer to the same request', () => {
   /**
-   * §2's claim that a highlight change re-sends bits and not points, checked where it can only be
-   * checked — against the two bodies a server produced for one request under the two projections.
+   * A highlight change re-sends bits and not points, checked against the two bodies a server
+   * produced for one request under the two projections.
    */
   it('is the same rows, in the same order, carrying the same bits', () => {
     const full = decodeViewport(fixture('viewport-highlight.bin'));
@@ -87,16 +86,15 @@ describe('point_rows = "highlight", against the full answer to the same request'
     expect([...bits.highlighted!]).toEqual([...full.highlighted!]);
   });
 
-  it('is the same per-tile answer — the served split and every count', () => {
+  it('is the same per-tile answer: the served split and every count', () => {
     const full = decodeViewport(fixture('viewport-highlight.bin'));
     const bits = decodeViewport(fixture('viewport-point-rows-highlight.bin'));
     expect(bits.tiles).toEqual(full.tiles);
   });
 
-  it('carries no position and no scalar — which is what a client joining by identifier wants', () => {
+  it('carries no position and no scalar: which is what a client joining by identifier wants', () => {
     const bits = decodeViewport(fixture('viewport-point-rows-highlight.bin'));
-    // The projection is read off the frame's schema and never off the request, so a decoder that
-    // demanded `code` refused a body the client can already ask for. It does not.
+    // The projection is read from the frame's schema: the highlight projection has no `code`.
     expect(bits.codes.length).toBe(0);
     expect(bits.positions.length).toBe(0);
     expect(bits.world.length).toBe(0);
@@ -116,8 +114,8 @@ describe('POST /v1/artifacts/browse, off served pages', () => {
     expect(roots.artifacts).toHaveLength(4);
     // `parents` is the children form's and is `[]` on the other two.
     expect(roots.parents).toEqual([]);
-    // A cursor, over an order that is total (count descending, then `tessera_id` ascending), so a
-    // walk over the pages neither duplicates nor drops.
+    // A cursor over a total order (count descending, then `tessera_id` ascending), so paging neither
+    // repeats nor drops.
     expect(typeof roots.next).toBe('string');
     const counts = roots.artifacts.map((a) => a.masked_count);
     expect([...counts].sort((a, b) => b - a)).toEqual(counts);
@@ -132,8 +130,8 @@ describe('POST /v1/artifacts/browse, off served pages', () => {
       expect(row.rung).toBe(1);
       expect(typeof row.matched_count).toBe('number');
     }
-    // **Existence and `masked_count` never move with the filter**, and a row the filter admits
-    // nothing of is still served, which is what a tree of counts has to be able to say.
+    // Existence and `masked_count` do not move with the filter, and a row the filter admits nothing
+    // of is still served.
     expect(children.artifacts.some((row) => row.matched_count === 0 && row.masked_count > 0)).toBe(true);
   });
 
@@ -150,7 +148,7 @@ describe('POST /v1/artifacts/browse, off served pages', () => {
   it('serves a search page with a cursor, and no matched count where no filter was sent', () => {
     expect(search.artifacts).toHaveLength(2);
     expect(typeof search.next).toBe('string');
-    // Absent rather than null or zero: *there was no question*.
+    // Absent rather than null or zero: there was no question.
     expect(search.artifacts.every((a) => a.matched_count === undefined)).toBe(true);
   });
 

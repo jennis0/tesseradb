@@ -7,10 +7,8 @@ const view = (id: string, group?: string, key?: string): ViewInfo =>
   plain(id, {roster: group === undefined ? null : {group, key: key!, metadata: {}}});
 
 /**
- * A roster whose **keys sort in a different order than the server lists them** — `2026-Q10` sorts
- * before `2026-Q2` as a string — which is what makes these two functions worth having: the
- * group's list is the order, and a client that compared keys would walk this group backwards
- * through its middle.
+ * A roster whose keys sort differently from the server's order: `2026-Q10` sorts before `2026-Q2`.
+ * The group's list is the order.
  */
 const meta = deployment({
   views: [
@@ -49,12 +47,8 @@ describe('the roster', () => {
 });
 
 /**
- * The picker's rules (`view-switching.md` §6.1–§6.2), here rather than in an element so a host
- * drawing its own control gets the same answers.
- *
- * The fixture is two plain views and two groups over one key set — an owner and a `members` layout
- * of it — with a different label arm on each of the owner's four views, so one roster exercises the
- * whole rule.
+ * The picker's rules. The fixture is two plain views and two groups over one key set, an owner and
+ * a `members` layout of it, with a different label rule on each of the owner's four views.
  */
 const at = (y: number, m: number, d: number) => Date.UTC(y, m - 1, d, 12) * 1000;
 
@@ -103,7 +97,7 @@ describe('a view\u2019s label', () => {
   });
 
   it('takes a members group\u2019s label from the owning group, through membersOf', () => {
-    // A `members` group's views carry no metadata of their own (`views.md` §3.3).
+    // A `members` group's views carry no metadata of their own.
     expect(labelOf('world:2026-Q10')).toEqual({label: 'Long quarter', key: '2026-Q10'});
     expect(labelOf('world:2026-Q4')).toEqual({label: null, key: '2026-Q4'});
   });
@@ -129,7 +123,7 @@ describe('the layout entries', () => {
     ]);
   });
 
-  it('are one layout — and the layout picker draws nothing — for one plain view and no groups', () => {
+  it('are one layout, and the layout picker draws nothing, for one plain view and no groups', () => {
     expect(hasOneLayout(deployment({views: [view('s0')]}))).toBe(true);
     expect(hasOneLayout(rich)).toBe(false);
   });
