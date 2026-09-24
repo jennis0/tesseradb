@@ -775,12 +775,7 @@ pub(crate) fn access_column_problem(field: &str, schema: &ArrowSchema) -> Option
             columns(schema)
         ));
     };
-    let ok = match found.data_type() {
-        DataType::List(inner) | DataType::LargeList(inner) => crate::utf8::is_utf8(inner.data_type()),
-        DataType::Dictionary(_, values) => crate::utf8::is_utf8(values),
-        other => crate::utf8::is_utf8(other),
-    };
-    (!ok).then(|| {
+    (!tessera_store::access_column::is_access_type(found.data_type())).then(|| {
         format!(
             "the access column '{field}' holds {:?}. Access labels are strings, one or a list of \
              them",

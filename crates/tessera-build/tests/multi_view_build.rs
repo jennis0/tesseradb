@@ -812,6 +812,101 @@ fields = { key = "quarter" }
     assert_eq!(gate_of(2), None, "a null row takes the group's gate");
 }
 
+/// **Declared words are stored trimmed** by the rule a running service stores them by: a plain
+/// view's and a group's gate, a roster table's gate, and a point default. ` public ` alone is no
+/// gate, and a padded point default is stored as its label.
+#[test]
+fn declared_gates_and_point_defaults_are_stored_trimmed() {
+    use arrow::array::{Int64Array, StringArray};
+
+    let dir = tempfile::tempdir().unwrap();
+    write_discriminated(
+        &dir.path().join("quarter-alt.parquet"),
+        &[("2026-Q2", WORLD), ("2026-Q3", QUARTER), ("2026-Q4", QUARTER)],
+    );
+    write_discriminated(&dir.path().join("world.parquet"), &[("world", WORLD)]);
+    let roster = dir.path().join("roster.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("visibility", DataType::Utf8, true),
+        Field::new("label", DataType::Utf8, false),
+        Field::new("starts", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["2026-Q2", "2026-Q3", "2026-Q4"])),
+            Arc::new(StringArray::from(vec![Some(" finance "), Some(" public "), None])),
+            Arc::new(StringArray::from(vec!["Q2", "Q3", "Q4"])),
+            Arc::new(Int64Array::from(vec![1i64, 2, 3])),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&roster).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let config = dir.path().join("corpus.toml");
+    std::fs::write(
+        &config,
+        r#"
+[sources]
+alt    = "quarter-alt.parquet"
+world  = "world.parquet"
+roster = "roster.parquet"
+
+[defaults]
+allocation_view = "world"
+
+[[view]]
+name             = "world"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "world"
+visibility       = [" 0 ", "1 "]
+point_visibility = { default = " 7 " }
+
+[[view]]
+name             = "open"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "world"
+visibility       = " public "
+point_visibility = { default = " public " }
+
+[[view_group]]
+name             = "quarter"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "alt"
+fields           = { view = "quarter" }
+visibility       = " 0 "
+point_visibility = { field = "access", default = " public " }
+metadata         = { label = "text", starts = "timestamp_us" }
+
+[view_group.views]
+source = "roster"
+fields = { key = "quarter" }
+"#,
+    )
+    .unwrap();
+    let config = tessera_build::config::Config::parse(&config, &Default::default())
+        .expect("the declaration parses");
+    let registry = config.build_views().expect("the registry compiles");
+    let view = |id: &str| registry.iter().find(|v| v.id == id).expect(id);
+    let labels = |l: &[&str]| Some(l.iter().map(|l| l.to_string()).collect::<Vec<_>>());
+
+    assert_eq!(view("world").visibility, labels(&["0", "1"]));
+    assert_eq!(view("world").point_visibility.default.as_deref(), Some("7"));
+    assert_eq!(view("open").visibility, None);
+    assert_eq!(view("open").point_visibility.default.as_deref(), Some("public"));
+    assert_eq!(view("quarter:2026-Q2").visibility, labels(&["finance"]));
+    // A roster row of ` public ` and a null row both take the group's gate, trimmed.
+    assert_eq!(view("quarter:2026-Q3").visibility, labels(&["0"]));
+    assert_eq!(view("quarter:2026-Q4").visibility, labels(&["0"]));
+    assert_eq!(
+        view("quarter:2026-Q4").point_visibility.default.as_deref(),
+        Some("public")
+    );
+}
+
 /// **A listed key with no rows is an empty view** (`views.md` §3.1) — declared, materialised, and
 /// holding nobody: its permutation is sentinel everywhere and its segment has no rows.
 #[test]

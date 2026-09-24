@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use tessera_engine::scalar_column::{self, ScalarColumn};
@@ -28,7 +26,7 @@ pub(crate) struct RawIngestItem {
     /// In the view's frame, never longitude and latitude: the projection has already run.
     pub(crate) x: f64,
     pub(crate) y: f64,
-    /// The row's `access` labels, verbatim. Empty for a row with none, which the view's
+    /// The row's `access` labels, trimmed. Empty for a row with none, which the view's
     /// `point_default` fills or refuses.
     pub(crate) labels: Vec<Vec<u8>>,
     pub(crate) scalars: Vec<WalScalar>,
@@ -363,9 +361,11 @@ pub(crate) fn parse_ingest_batch(
         // runs it on a points file.
         clipped += project_columns(projection, &mut x, &mut y)?;
         let access = labels_col(body_name, &batch, "access")?.ok_or_else(|| {
-            DecodeError(format!(
-                "ingest body: column 'access' is missing; send it as {LABELS_SHAPE}"
-            ))
+            DecodeError(
+                "ingest body: column 'access' is missing; send each row's labels as a list of \
+                 strings, an empty list for a row with no label"
+                    .to_string(),
+            )
         })?;
 
         let memberships =
@@ -421,7 +421,7 @@ pub(crate) fn parse_ingest_batch(
                 external_id,
                 x: x[i],
                 y: y[i],
-                labels: access.labels_at(body_name, i)?,
+                labels: access.labels(i).map(|label| label.as_bytes().to_vec()).collect(),
                 scalars,
                 scoped: scoped_values,
             });
@@ -703,117 +703,19 @@ fn coordinate_col(
     }
 }
 
-/// How an `access` column is spelled, for a refusal to name.
-const LABELS_SHAPE: &str = "list<utf8> or large_list<utf8>, one label per element, an empty list \
-                            for a row with no label";
-
-/// An `access` column, `list<utf8>` or `large_list<utf8>`: each element is one label, taken
-/// verbatim, so a label containing a separator is one term, as at the build. A scalar `utf8`
-/// column is refused rather than read as one label per row. The ingest body and the Arrow form of
-/// a growth both read theirs through it.
-pub(crate) enum LabelCells<'a> {
-    List(&'a arrow::array::ListArray),
-    Large(&'a arrow::array::LargeListArray),
-}
-
-impl LabelCells<'_> {
-    fn values(&self) -> &arrow::array::StringArray {
-        let values: &Arc<dyn Array> = match self {
-            LabelCells::List(list) => list.values(),
-            LabelCells::Large(list) => list.values(),
-        };
-        values
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .expect("labels_col checked the element type")
-    }
-
-    /// The range of `values()` row `row` occupies, or `None` where the row's list is null.
-    fn entries(&self, row: usize) -> Option<std::ops::Range<usize>> {
-        match self {
-            LabelCells::List(list) => (!list.is_null(row)).then(|| {
-                let offsets = list.value_offsets();
-                offsets[row] as usize..offsets[row + 1] as usize
-            }),
-            LabelCells::Large(list) => (!list.is_null(row)).then(|| {
-                let offsets = list.value_offsets();
-                offsets[row] as usize..offsets[row + 1] as usize
-            }),
-        }
-    }
-
-    /// Row `row`'s labels, verbatim and in order. A null or empty list is a row with no label,
-    /// as the JSON decode reads a null `access`; a null element is refused.
-    pub(crate) fn labels_at(
-        &self,
-        body_name: &str,
-        row: usize,
-    ) -> Result<Vec<Vec<u8>>, DecodeError> {
-        let Some(entries) = self.entries(row) else {
-            return Ok(Vec::new());
-        };
-        let values = self.values();
-        entries
-            .map(|index| {
-                if values.is_null(index) {
-                    return Err(DecodeError(format!(
-                        "{body_name}: column 'access' has a null element at row {row}; send \
-                         each label as a string and leave nulls out"
-                    )));
-                }
-                Ok(values.value(index).as_bytes().to_vec())
-            })
-            .collect()
-    }
-}
-
-/// The batch's labels column `name`, or `None` where the batch does not carry it.
+/// The batch's labels column `name`, read by the rule the build reads a points file's access
+/// column by, or `None` where the batch does not carry it.
 pub(crate) fn labels_col<'a>(
     body_name: &str,
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<Option<LabelCells<'a>>, DecodeError> {
-    use arrow::array::{LargeListArray, ListArray};
-    use arrow::datatypes::DataType;
-
+) -> Result<Option<tessera_engine::access_column::AccessBatch<'a>>, DecodeError> {
     let Some(column) = batch.column_by_name(name) else {
         return Ok(None);
     };
-    let cells = match column.data_type() {
-        DataType::List(_) => LabelCells::List(
-            column
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .expect("a List column downcasts to a ListArray"),
-        ),
-        DataType::LargeList(_) => LabelCells::Large(
-            column
-                .as_any()
-                .downcast_ref::<LargeListArray>()
-                .expect("a LargeList column downcasts to a LargeListArray"),
-        ),
-        DataType::Utf8 | DataType::LargeUtf8 => {
-            return Err(DecodeError(format!(
-                "{body_name}: column '{name}' is utf8, one string per row; send it as \
-                 {LABELS_SHAPE}"
-            )));
-        }
-        other => {
-            return Err(DecodeError(format!(
-                "{body_name}: column '{name}' is {other:?}; send it as {LABELS_SHAPE}"
-            )));
-        }
-    };
-    let element = match &cells {
-        LabelCells::List(list) => list.values().data_type().clone(),
-        LabelCells::Large(list) => list.values().data_type().clone(),
-    };
-    if element != DataType::Utf8 {
-        return Err(DecodeError(format!(
-            "{body_name}: column '{name}' is a list of {element:?}; send it as {LABELS_SHAPE}"
-        )));
-    }
-    Ok(Some(cells))
+    tessera_engine::access_column::read_access_column(column, name)
+        .map(Some)
+        .map_err(|detail| DecodeError(format!("{body_name}: {detail}")))
 }
 
 #[cfg(test)]

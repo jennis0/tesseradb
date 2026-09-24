@@ -178,7 +178,7 @@ pub fn declaration_error(detail: impl Into<String>) -> BuildError {
 /// first value.
 pub const ABSENT_CODE: u32 = 0;
 
-use tessera_plugin::{INHERITED, PUBLIC};
+use tessera_types::label::{is_inherited, INHERITED};
 /// **The canonical identity field** (`configuration.md` §8), which
 /// `[defaults].entity_id_field` moves for this declaration and each reader of one may move again.
 /// It is entity-space and shared: a point has one identity across every view it appears in, and it
@@ -3286,13 +3286,6 @@ fn compile_projected_fields(
     })
 }
 
-/// [`tessera_plugin::check_label`], with the refusal naming the declaring block: the same key is
-/// written on four kinds of block.
-fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
-    tessera_plugin::check_label(key, label)
-        .map_err(|detail| declaration_error(format!("{object}: {detail}")))
-}
-
 // ---------------------------------------------------------------------------------------------
 // View groups
 // ---------------------------------------------------------------------------------------------
@@ -3316,7 +3309,7 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 }
 
 /// A `[[view]]`'s, a `[[view_group]]`'s or a roster record's own `visibility` (`views.md` §6):
-/// a list of labels, each one term taken verbatim (decision 0132). A declaration spells one
+/// a list of labels, each one term, stored trimmed. A declaration spells one
 /// label as a string and several as a list; both arrive here as the list.
 ///
 /// **`public` compiles to `None`**, which is what every downstream reader takes as *no gate*: it
@@ -3676,12 +3669,12 @@ fn compile_point_visibility(
             default: None,
         });
     };
-    tessera_plugin::check_point_default(&tessera_plugin::Passthrough::new(), default)
+    let default = tessera_plugin::check_point_default(&tessera_plugin::Passthrough::new(), default)
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
     Ok(PointVisibility {
         field: point.field.clone(),
         source: labels,
-        default: Some(default.to_string()),
+        default: Some(default),
     })
 }
 
@@ -4633,11 +4626,7 @@ fn compile_layers(
 
         let hierarchy = compile_hierarchy(block)?;
         let visibility = match block.visibility.as_deref() {
-            Some(PUBLIC) => None,
-            Some(label) => {
-                check_label(&object, "visibility", label)?;
-                Some(label.to_string())
-            }
+            Some(label) => Some(label.to_string()),
             None => {
                 return Err(declaration_error(format!(
                     "layer '{}': `visibility` is required and has no default \
@@ -4684,10 +4673,9 @@ fn compile_layers(
         })?;
         let artifact_visibility = ArtifactVisibility {
             field: artifact.field.clone(),
-            default: if default == INHERITED {
+            default: if is_inherited(default) {
                 MemberDefault::Inherited
             } else {
-                check_label(&object, "artifact_visibility.default", default)?;
                 MemberDefault::Label(default.to_string())
             },
         };
@@ -5117,7 +5105,7 @@ fn compile_layers(
             })?),
         };
 
-        let declaration = LayerDeclaration {
+        let mut declaration = LayerDeclaration {
             // **The scope reaches the manifest on the declaration** (contracts §2.3): it was
             // compiled into `Scopes` alone, which is a build-time structure, so a bundle carried
             // no record of which of its layers were per-view (`views.md` §11).

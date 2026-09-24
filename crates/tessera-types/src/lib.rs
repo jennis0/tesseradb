@@ -189,9 +189,10 @@ pub struct GenerationStamp {
 // 18 manifest lacks the field and is refused as malformed.
 // 20: a packed artifact record of a group-scoped layer carries its view's incarnation after the
 // view. A 19 record read at 20 takes the content count and the membership's length for it.
+// 21: every access label and declared word is stored trimmed.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 20;
+pub const BUNDLE_FORMAT: u32 = 21;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

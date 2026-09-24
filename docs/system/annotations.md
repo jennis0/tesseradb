@@ -193,29 +193,30 @@ widens it.
 At a build the label is read from the artifact source's column the field names, a string, a list of
 strings or a dictionary of strings, or from an inline row's `access`. At a running service each
 record of a publication, and each row of a growth, carries its labels: `"access": ["team-a",
-"team-b"]` on a JSON row, or an `access` column of `list<utf8>` in the Arrow form of a growth, read
-as the ingest body's `access` column is. A record carrying labels on a layer that names no field is
-refused, and so are labels the plugin maps to no term.
+"team-b"]` on a JSON row, or an `access` column in the Arrow form of a growth, read as a points
+file's access column is: a string, a list of strings or a dictionary of strings. A record carrying
+labels on a layer that names no field is refused, and so are labels the plugin maps to no term.
 
 Every artifact created on a layer whose field is named states its labels, at a build and at a
 running service alike. At a build the artifact source carries the field's column, and an inline row
 carries `access`, `[]` for no label of its own. At a running service a publication record carries
-`access`, `null` or `[]` for no label of its own. A record without `access` is refused, as is a
-source without the column, and so is a key that a build's member file or an ingest's layer column
-would mint without an artifact row, since a minted artifact carries nothing but its name. A record that only adds members to an artifact that exists,
-or a growth, need not state labels. The Python client refuses an artifacts insert that names no
-`access=` column into a layer that reads labels, and before the layer's first commit a `key=` or
-`members=` insert naming a key no artifacts insert declares; after the first commit the server
-refuses the artifact that insert would create.
+`access`, `null` or `[]` for no label of its own. A label that is empty once trimmed is no label, so
+`[""]` states no label too. A record without `access` is refused, as is a source without the column,
+and so is a key that a build's member file or an ingest's layer column would mint without an
+artifact row, since a minted artifact carries nothing but its name. A record that only adds members
+to an artifact that exists, or a growth, need not state labels. The Python client refuses an
+artifacts insert that names no `access=` column into a layer that reads labels, and before the
+layer's first commit a `key=` or `members=` insert naming a key no artifacts insert declares; after
+the first commit the server refuses the artifact that insert would create.
 
-On a layer scoped to a group a growth names the view its artifact belongs to, as a
-publication does: `view` on a JSON row, or a `view` column in the Arrow form. A viewer is admitted
-by holding any one of the labels. An artifact with no label takes the layer's `default`: `inherited`
-leaves it to the layer's own label and membership requirement, and a label treats it as carrying
-that label. A label is set once: an artifact published with none may be given one later, the same
-label again changes nothing, and a different one is refused. It takes effect when the level is next
-published, as every fill does. Changing a label means deleting the artifact and publishing it again,
-under a new identifier.
+On a layer scoped to a group a growth names the view its artifact belongs to, as a publication
+does: `view` on a JSON row, or a `view` column in the Arrow form. A viewer is admitted by holding
+any one of the labels. An artifact with no label takes the layer's `default`: `inherited` leaves it
+to the layer's own label and membership requirement, and a label treats it as carrying that label.
+A label is set once: an artifact published with none may be given one later, the same label again
+changes nothing, and a different one is refused. It takes effect when the level is next published,
+as every fill does. Changing a label means deleting the artifact and publishing it again, under a
+new identifier.
 
 A label is compared with the descriptors the viewer's credential resolved to, so a label no item
 carries is still one a credential can hold. A layer's own label is compared the same way.

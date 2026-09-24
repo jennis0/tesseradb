@@ -1,0 +1,32 @@
+# tessera.toml for the Docker image. The image looks for this file in /etc/tessera.
+#
+# Put schema.toml and the source files it names in the same directory. A source path in
+# schema.toml is relative to schema.toml.
+
+[bundle]
+path  = "/var/lib/tessera/bundle"
+cache = "/var/lib/tessera/cache"
+wal   = "/var/lib/tessera/wal.log"
+
+[build]
+schema = "schema.toml"
+
+[plugin]
+module = "builtin:passthrough"
+
+# Read by `tessera build` only. The server reads the key from the bundle.
+[identity]
+env = "TESSERA_IDENTITY_KEY"
+
+[disclosure]
+token_max_lifetime = 3600
+
+# Inside a container the listeners bind every interface; which ports reach the host is decided
+# where the container is run. The control plane takes writes, so publish it to the host's
+# loopback only, or not at all.
+[serve]
+viewer  = "0.0.0.0:8080"
+session = "0.0.0.0:8081"
+control = "0.0.0.0:8082"
+session_credential_file  = "/run/secrets/tessera_session"
+operator_credential_file = "/run/secrets/tessera_operator"
