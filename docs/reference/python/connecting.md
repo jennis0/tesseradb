@@ -46,6 +46,8 @@
 
 ::: tesseradb._auth.Token
 
+::: tesseradb._auth.TokenSource
+
 ::: tesseradb._auth.authorise
 
 ::: tesseradb._auth.revoke

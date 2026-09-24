@@ -10,7 +10,7 @@ These are the names `tesseradb` exports:
 |---|---|---|
 | `connect` | A reader of a database someone else runs | [Connecting and creating](connecting.md) |
 | `create`, `open` | A new database in a directory, or one saved there | [Connecting and creating](connecting.md) |
-| `Database` | A database in a directory, with its own server | [Connecting and creating](connecting.md), with its methods on the page for what they do |
+| `Database` | A database in a directory, with its own server | [Connecting and creating](connecting.md); its methods are on the task pages |
 | `Token`, `authorise`, `revoke` | A token, and how an operator makes and ends one | [Connecting and creating](connecting.md) |
 | `Refusal` | The exception for a request that was refused | [Connecting and creating](connecting.md) |
 | `Viewer`, `Selection`, `Sample` | A reader, part of a view, and the points a map draws | [Reading](reading.md) |

@@ -64,6 +64,9 @@ plugins:
       lang: en
   - neoteroi.mkdocsoad:
       use_pymdownx: true
+  # No tooltip on a link to a documented object: it would repeat the heading and its module path.
+  - autorefs:
+      link_titles: false
   - mkdocstrings:
       handlers:
         python:
