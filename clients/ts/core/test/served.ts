@@ -8,11 +8,11 @@ import {createInterface} from 'node:readline';
 /**
  * A real `tessera serve` over the notebook corpus, for the live tests.
  *
- * The binary and the corpus are found as the Python suite finds them: `TESSERA_BIN`, then
- * `tessera` on `PATH`, then a checkout's `target/release` or `target/debug`; and
- * `TESSERA_NOTEBOOK_DATA`, then `data/notebook/` beside the git common directory, which every
- * worktree of a checkout shares. Where either is missing, `start` returns the reason instead of a
- * server, and each test skips with it.
+ * The binary is `TESSERA_BIN`, then this checkout's own `target/release` or `target/debug`, then
+ * `tessera` on `PATH`, then a target directory above the checkout; the one used is printed. The
+ * corpus is `TESSERA_NOTEBOOK_DATA`, then `data/notebook/` beside the git common directory, which
+ * every worktree of a checkout shares. Where either is missing, `start` returns the reason instead
+ * of a server, and each test skips with it. A `TESSERA_BIN` naming no file is an error.
  *
  * The declaration served is the notebook's own `schema.toml` with one view group added, two views
  * over the same points, so `/v1/meta` has a group and a roster to decode.
@@ -31,19 +31,27 @@ const here = import.meta.dirname;
 /** The view group the live declaration adds. */
 export const GROUP = {name: 'copies', title: 'Two copies', keys: ['first', 'second'], labels: ['First copy', 'Second copy']};
 
-function findBinary(): string | null {
+/** The binary and where it was found, or null where there is none. */
+function findBinary(): {path: string; from: string} | null {
   const named = process.env.TESSERA_BIN;
-  if (named) return existsSync(named) ? named : null;
+  if (named) {
+    if (!existsSync(named)) throw new Error(`TESSERA_BIN names ${named}, which does not exist; build it or unset TESSERA_BIN`);
+    return {path: named, from: 'TESSERA_BIN'};
+  }
+  const inTarget = (root: string) =>
+    ['release', 'debug'].map((profile) => join(root, 'target', profile, 'tessera')).find((candidate) => existsSync(candidate));
+  // This checkout's own build first, so a worktree tests the server built from its own sources.
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], {cwd: here, encoding: 'utf8'});
+  const own = top.status === 0 ? inTarget(top.stdout.trim()) : undefined;
+  if (own) return {path: own, from: "this checkout's target"};
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
-    if (dir && existsSync(join(dir, 'tessera'))) return join(dir, 'tessera');
+    if (dir && existsSync(join(dir, 'tessera'))) return {path: join(dir, 'tessera'), from: 'PATH'};
   }
-  for (let dir = here; ; dir = dirname(dir)) {
-    for (const profile of ['release', 'debug']) {
-      const candidate = join(dir, 'target', profile, 'tessera');
-      if (existsSync(candidate)) return candidate;
-    }
-    if (dirname(dir) === dir) return null;
+  for (let dir = here; dirname(dir) !== dir; dir = dirname(dir)) {
+    const found = inTarget(dir);
+    if (found) return {path: found, from: 'a target directory above this checkout'};
   }
+  return null;
 }
 
 function findCorpus(): string | null {
@@ -131,8 +139,10 @@ function listening(child: ChildProcess, errors: () => string, timeoutMs: number)
  * a serve that fails throws: those are failures, not absences.
  */
 export async function start(): Promise<Served | string> {
-  const binary = findBinary();
-  if (!binary) return 'no tessera binary: set TESSERA_BIN, put tessera on PATH, or run cargo build --release -p tessera-cli';
+  const found = findBinary();
+  if (!found) return 'no tessera binary: set TESSERA_BIN, put tessera on PATH, or run cargo build --release -p tessera-cli';
+  const binary = found.path;
+  console.log(`live test: serving with ${binary}, from ${found.from}`);
   const corpus = findCorpus();
   if (!corpus) return 'data/notebook/ is not in this checkout; set TESSERA_NOTEBOOK_DATA';
 

@@ -1,3 +1,4 @@
+import {expect} from 'vitest';
 import type {ArtifactChannelClock} from '../src/artifactChannel.js';
 import type {Band} from '../src/bands.js';
 import {tileXY} from '../src/coords.js';
@@ -9,17 +10,68 @@ import type {Artifact, Layer, Meta, TileCounts, ViewInfo, ViewportResponse, View
 
 // Held at import, so a test that fakes the global timers still settles on the real event loop.
 const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
 
 /**
- * Resolves once every promise chain already started has run as far as it can.
+ * The zero-delay timers set and not yet fired. The replica yields one between absorb slices, and a
+ * slice's budget is wall-clock time, so a loaded machine takes more of them.
+ */
+const yields = new Set<unknown>();
+
+globalThis.setTimeout = ((fire: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+  if (ms) return realSetTimeout(fire, ms, ...args);
+  const handle = realSetTimeout(() => {
+    yields.delete(handle);
+    fire(...args);
+  }, 0);
+  yields.add(handle);
+  return handle;
+}) as typeof setTimeout;
+
+globalThis.clearTimeout = ((handle?: Parameters<typeof clearTimeout>[0]) => {
+  yields.delete(handle);
+  realClearTimeout(handle);
+}) as typeof clearTimeout;
+
+/**
+ * Resolves once every promise chain already started has run as far as it can, and every
+ * zero-delay timer the code under test set along the way has fired.
  *
  * A macrotask turn runs only after the microtask queue is empty, however long the chains in it,
- * so this does not depend on how many `await`s the code under test takes. The turn is a zero-delay
- * timer, so one the code under test has already set, as the replica does between absorb slices,
- * fires first.
+ * so this does not depend on how many `await`s the code under test takes. It takes turns until no
+ * zero-delay timer is left, so an absorb that yields any number of times finishes first.
  */
-export function settle(): Promise<void> {
-  return new Promise((resolve) => realSetTimeout(resolve, 0));
+export async function settle(): Promise<void> {
+  for (let turns = 0; turns < 10_000; turns++) {
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+    if (yields.size === 0) return;
+  }
+  throw new Error('settle: zero-delay timers were still being set after 10,000 turns');
+}
+
+/**
+ * Asserts that `fn` throws a refusal: a plain `Error`, which is what the decoders raise on input
+ * they check. A `TypeError` or `RangeError` is a crash on input nothing checked, and fails this.
+ */
+export function refused(fn: () => unknown): void {
+  let thrown: unknown = null;
+  try {
+    fn();
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toBeInstanceOf(Error);
+  expect((thrown as Error).constructor).toBe(Error);
+}
+
+/** {@link refused} for a promise: it rejects with a plain `Error`. */
+export async function rejectsAsRefused(promise: Promise<unknown>): Promise<void> {
+  const thrown = await promise.then(
+    () => null,
+    (error: unknown) => error
+  );
+  expect(thrown).toBeInstanceOf(Error);
+  expect((thrown as Error).constructor).toBe(Error);
 }
 
 /** A clock whose timers fire only inside `advance`, each followed by a `settle`. */

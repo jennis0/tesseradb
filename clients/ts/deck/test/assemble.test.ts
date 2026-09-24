@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tesseradb/client';
 import type {ViewportResult} from '@tesseradb/client';
-import {band as heldBand} from '../../core/test/support.js';
+import {band as heldBand, refused} from '../../core/test/support.js';
 import {assemble, assembledMarks, assertAssemblyMatchesServed, foldBandColumn, refreshExact} from '../src/assemble.js';
 
 /** A band at `depth`/`prefix` whose points all sit in cell `(cx, cy)`. */
@@ -230,7 +230,7 @@ describe('assertAssemblyMatchesServed', () => {
   it('throws when a provisional tile carries counts', () => {
     const out = assemble(frame(2, [], [band(4, 0n, 2)]));
     out.tiles[0]!.counts = {visible: 1n, matched: 1n, highlighted: 1n, served: 1};
-    expect(() => assertAssemblyMatchesServed(out)).toThrow();
+    refused(() => assertAssemblyMatchesServed(out));
   });
 });
 

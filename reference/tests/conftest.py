@@ -1,5 +1,5 @@
-"""Spawns a real `tessera serve` process against the /tmp/tessera-250k fixture bundle and gives
-tests an HTTP-only handle to it.
+"""Spawns a real `tessera serve` process against the 250k fixture bundle and gives tests an
+HTTP-only handle to it.
 
 This is the "server spawned via a fixture" the task brief calls for: the harness runs the actual
 `tessera` binary (built via `cargo build --release -p tessera-cli`), not an in-process shortcut,
@@ -25,6 +25,7 @@ from oracle.harness import (  # noqa: F401 (re-exported for tests importing dire
     Server,
     ensure_cli_built,
     ensure_fixture_bundle,
+    fixture_dir,
     spawn_server,
     stop_server,
 )
@@ -35,18 +36,19 @@ from oracle.harness import (  # noqa: F401 (re-exported for tests importing dire
 # (a 10^9 build is never implicitly triggered by a test run) -- `ensure_fixture_bundle` is only
 # called for the default small fixture.
 _ENV_BUNDLE_ROOT = os.environ.get("TESSERA_BUNDLE_ROOT")
-BUNDLE_ROOT = Path(_ENV_BUNDLE_ROOT) if _ENV_BUNDLE_ROOT else Path("/tmp/tessera-250k")
 
 
 @pytest.fixture(scope="session")
 def bundle_root() -> Path:
     if _ENV_BUNDLE_ROOT:
-        assert BUNDLE_ROOT.joinpath("CURRENT").exists(), (
-            f"TESSERA_BUNDLE_ROOT={BUNDLE_ROOT} set but no bundle found there"
+        root = Path(_ENV_BUNDLE_ROOT)
+        assert root.joinpath("CURRENT").exists(), (
+            f"TESSERA_BUNDLE_ROOT={root} set but no bundle found there"
         )
-        return BUNDLE_ROOT
-    ensure_fixture_bundle(BUNDLE_ROOT)
-    return BUNDLE_ROOT
+        return root
+    root = fixture_dir("250k") / "bundle"
+    ensure_fixture_bundle(root)
+    return root
 
 
 @pytest.fixture(scope="session")

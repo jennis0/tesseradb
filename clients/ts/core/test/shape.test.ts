@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {Bool, Dictionary, Field, Float64, List, Table, Uint16, Uint32, Uint64, Utf8, makeData, makeVector, tableToIPC, vectorFromArray} from 'apache-arrow';
 import {decodeViewport} from '../src/decode.js';
+import {refused} from './support.js';
 
 /**
  * The shape on the wire (contracts §3.2 item 4, `polygon-membership.md` §7.1).
@@ -157,23 +158,23 @@ describe('a shape is parts of rings', () => {
     // The nesting is what makes a rings-of-vertices reader fail its downcast rather than read a
     // part as a ring. The same downcast in reverse is checked here, at the schema, so the skew is
     // a named refusal and not a shape read one level too shallow.
-    expect(() => decodeViewport(body([{x: [[0, 3, 3]] as never, y: [[0, 0, 3]] as never}], {x: RINGS, y: RINGS}))).toThrow();
-    expect(() => decodeViewport(body([{x: [0, 3, 3] as never, y: [0, 0, 3] as never}], {x: FLAT, y: FLAT}))).toThrow();
+    refused(() => decodeViewport(body([{x: [[0, 3, 3]] as never, y: [[0, 0, 3]] as never}], {x: RINGS, y: RINGS})));
+    refused(() => decodeViewport(body([{x: [0, 3, 3] as never, y: [0, 0, 3] as never}], {x: FLAT, y: FLAT})));
   });
 
   it('refuses axes that disagree on the part count', () => {
-    expect(() => decodeViewport(body([{x: [[[0, 3, 3]], [[5, 8, 8]]], y: [[[0, 0, 3]]]}]))).toThrow();
+    refused(() => decodeViewport(body([{x: [[[0, 3, 3]], [[5, 8, 8]]], y: [[[0, 0, 3]]]}])));
   });
 
   it('refuses axes that disagree on a part’s ring count', () => {
-    expect(() => decodeViewport(body([{x: [[[0, 9, 9], [3, 6, 6]]], y: [[[0, 0, 9]]]}]))).toThrow();
+    refused(() => decodeViewport(body([{x: [[[0, 9, 9], [3, 6, 6]]], y: [[[0, 0, 9]]]}])));
   });
 
   it('refuses axes that disagree on a ring’s length', () => {
-    expect(() => decodeViewport(body([{x: [[[0, 3, 3]], [[5, 8, 8, 5]]], y: [[[0, 0, 3]], [[5, 5, 8]]]}]))).toThrow();
+    refused(() => decodeViewport(body([{x: [[[0, 3, 3]], [[5, 8, 8, 5]]], y: [[[0, 0, 3]], [[5, 5, 8]]]}])));
   });
 
   it('refuses one axis null against the other present', () => {
-    expect(() => decodeViewport(body([{x: [[[0, 3, 3]]], y: null}]))).toThrow();
+    refused(() => decodeViewport(body([{x: [[[0, 3, 3]]], y: null}])));
   });
 });

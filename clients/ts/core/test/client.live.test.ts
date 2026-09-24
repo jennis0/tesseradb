@@ -145,6 +145,8 @@ describe('TesseraClient against a live server', () => {
     expect(all.length).toBeGreaterThan(3);
     expect(paged).toEqual(all);
     expect(new Set(all.map((v) => v.code)).size).toBe(all.length);
+    // The notebook's vocabularies give every value a title.
+    for (const v of all) expect(v.title).toMatch(/\S/);
     const some = all.slice(0, 2);
     expect(await client.categories(session.token, 'archive', {codes: some.map((v) => v.code)})).toEqual(some);
   });
@@ -156,6 +158,7 @@ describe('TesseraClient against a live server', () => {
     expect(page.q).toBe('cs');
     const cs = page.values.find((v) => v.key === 'cs')!;
     expect(cs.match).toEqual({field: 'key', start: 0, len: 2});
+    expect(cs.title).toMatch(/\S/);
     const filtered = await client.viewport(session.token, whole({k: 0, filters: {archive: {in: ['cs']}}}));
     expect(BigInt(cs.count!)).toBe(total(filtered.result.tiles, 'matched'));
     expect(cs.count).toBeGreaterThan(0);

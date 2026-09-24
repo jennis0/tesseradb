@@ -132,13 +132,13 @@ describe('plan', () => {
     expect(p.background.find((b) => b.kind === 'ring')).toBeUndefined();
   });
 
-  it('costs the same whatever the viewport spans', () => {
-    // The point of planning in rectangles: a view covering a quarter of a million tiles plans in
-    // the same handful of arithmetic as one covering four.
-    const wide = {...BASE, viewport: {...BASE.viewport, zoom: 0}};
-    const t = performance.now();
-    for (let i = 0; i < 200; i++) plan(wide);
-    expect(performance.now() - t).toBeLessThan(100); // 200 plans, not 200 enumerations
+  it('plans a view over the whole world in as many rectangles as a narrow one', () => {
+    // A plan is rectangles, never a tile list, so its size does not grow with the ground covered.
+    const narrow = plan(BASE);
+    const wide = plan({...BASE, viewport: {...BASE.viewport, zoom: 0}});
+    expect(wide.background.length).toBe(narrow.background.length);
+    const tiles = [wide.visible, wide.foreground, ...wide.background].reduce((n, f) => n + rectArea(f.rect), 0);
+    expect(tiles).toBeGreaterThan(20_000);
   });
 
   it('is deterministic', () => {

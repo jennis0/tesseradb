@@ -54,7 +54,7 @@ describe('compose: truncated bands', () => {
     expect(folded.exactServed).toBe(4);
     // Tile (0,0) became exact: its stand-in is gone. Tile (1,0) is the truncated head. The
     // second descendant (tile (0,4)) survives. Every non-exact tile entry's drawn matches a
-    // surviving piece — no carried entry can overstate.
+    // surviving piece, so no carried entry can overstate.
     const nonExact = folded.tiles.filter((t) => !t.exact);
     expect(folded.provisional).toBe(nonExact.reduce((a, t) => a + t.drawn, 0));
   });

@@ -1156,6 +1156,68 @@ describe('the token', () => {
     expect(viewport.mock.calls.at(-1)![0]).toBe('t2');
   });
 
+  it('stops renewing once disposed, even with a renewal in flight', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    let answer: (() => void) | null = null;
+    const authorise = vi.fn(async () => {
+      // The second ask is held open until the store has been disposed.
+      if (authorise.mock.calls.length === 2) await new Promise<void>((resolve) => (answer = resolve));
+      return {token: `t${authorise.mock.calls.length}`, expiresAt: (Date.now() + 60_000) / 1000};
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    await clock.advance(59_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+
+    store.dispose();
+    answer!();
+    await clock.advance(600_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(clock.pending).toBe(0);
+  });
+
+  it('forgets derived shapes and hovered records when the token changes, and keeps predicate shapes', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const served = [artifact(1n, {layer: 'hulls'}), artifact(2n, {layer: 'regions'})];
+    const {client} = fakeClient((req) => {
+      const r = response('ck');
+      return (req.layers ?? []).length === 0 ? r : {...r, result: {...r.result, artifacts: served}};
+    }, meta({
+      ...META,
+      layers: [
+        layer('hulls', {computedContent: ['centroid', 'box', 'hull'], shape: 'derived'}),
+        layer('regions', {membership: 'spatial', computedContent: ['centroid', 'box'], shape: 'predicate'})
+      ]
+    }));
+    const shapeOf = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}));
+    const item = vi.fn(async (token: string) => ({fields: {asked: token}, externalId: null, views: [], scoped: {}, labels: []}));
+    Object.assign(client, {artifact: shapeOf, item});
+    let issued = 0;
+    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    store.setLayers(['hulls', 'regions']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([1n, 2n]);
+    store.needShape(1n);
+    store.needShape(2n);
+    await clock.advance(1);
+    expect([...store.get('artifacts').shapes.keys()]).toEqual([1n, 2n]);
+    expect(await store.describe(7n)).toEqual({asked: 't1'});
+
+    // The renewal hands over another token, so another principal as far as the store knows.
+    await clock.advance(30_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect([...store.get('artifacts').shapes.keys()]).toEqual([2n]);
+    expect(await store.describe(7n)).toEqual({asked: 't2'});
+  });
+
   it('reports the session expired when the server refuses the token it holds as expired', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();

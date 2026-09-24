@@ -2,6 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {Bool, Dictionary, Field, Float64, List, Table, Type, Uint16, Uint32, Uint64, Utf8, makeData, makeVector, tableFromIPC, tableToIPC, vectorFromArray} from 'apache-arrow';
 import {decodeViewport} from '../src/decode.js';
 import {splitFramedStreams} from '../src/frame.js';
+import {refused} from './support.js';
 
 /**
  * The artifacts frame as contracts §3.2 r44 cuts it: `layer` dictionary-encoded, the fixed
@@ -185,13 +186,13 @@ describe('the shape columns trail, and are absent when no served layer draws a s
   });
 
   it('refuses one shape column without the other — the pair travels together by contract', () => {
-    expect(() => decodeViewport(fullBody([{...ROWS[0]!, shape: [[[0, 1]]]}], {shapes: true, oneAxis: true}))).toThrow();
+    refused(() => decodeViewport(fullBody([{...ROWS[0]!, shape: [[[0, 1]]]}], {shapes: true, oneAxis: true})));
   });
 
   it('refuses the columns under their old names — a server older than the shape columns', () => {
     // Read as *no drawn geometry*, a `hull_x` body would draw every cluster as its box and look
     // like a layer that declares none.
-    expect(() => decodeViewport(fullBody([{...ROWS[0]!, shape: [[[0, 1, 2]]]}], {shapes: true, oldNames: true}))).toThrow();
+    refused(() => decodeViewport(fullBody([{...ROWS[0]!, shape: [[[0, 1, 2]]]}], {shapes: true, oldNames: true})));
   });
 });
 
@@ -205,7 +206,7 @@ describe('the rung column', () => {
 
   it('refuses a body that still carries `level` — a server older than the rename', () => {
     // Reading a missing rung as 0 would draw a whole hierarchy at its coarsest and look like data.
-    expect(() => decodeViewport(fullBody(ROWS, {renameRung: 'level'}))).toThrow();
+    refused(() => decodeViewport(fullBody(ROWS, {renameRung: 'level'})));
   });
 });
 
@@ -224,7 +225,7 @@ describe('the parent list', () => {
   it('refuses a body that still carries the scalar `parent_id` — a server older than the list', () => {
     // Read as *no links*, a `parent_id` body would draw a hierarchy as a flat set and look like
     // data; the old column is not read beside the new one.
-    expect(() => decodeViewport(fullBody(ROWS, {oldParent: true}))).toThrow();
+    refused(() => decodeViewport(fullBody(ROWS, {oldParent: true})));
   });
 
   it('reads the filter bit beside it: true, false, and null where there was no question', () => {
@@ -245,7 +246,7 @@ describe('the target column', () => {
   it('refuses a body carrying no `target` column — a server older than the attachment', () => {
     // Read as *nothing is attached*, such a body would drop every topic label from the map and
     // look like a corpus that publishes none. There is no fallback to the old join by count.
-    expect(() => decodeViewport(fullBody(ROWS, {noTarget: true}))).toThrow();
+    refused(() => decodeViewport(fullBody(ROWS, {noTarget: true})));
   });
 });
 
