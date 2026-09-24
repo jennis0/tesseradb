@@ -375,8 +375,10 @@ impl Executor {
             );
         }
 
-        self.row_projection_cache
-            .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
+        self.row_projection_cache.prune_generations_below(
+            segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS),
+            &self.generation.load().prefix,
+        );
         self.prune_region_cache(segments_version);
         Ok(())
     }
