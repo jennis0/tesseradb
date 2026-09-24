@@ -74,7 +74,7 @@ describe('the category typeahead', () => {
     expect(state().suggestions['admin4']).toEqual({q: 'fr', values: [], more: false});
   });
 
-  it('churn re-asking the same q, faster than the debounce, does not starve it — the request still fires', async () => {
+  it('still asks when the same q is asked again faster than the debounce', async () => {
     const ask = vi.fn(async (column: string, q: string) => ok(column, q));
     const {clock, part, state} = typeahead(ask);
 
