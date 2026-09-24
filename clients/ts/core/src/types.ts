@@ -386,24 +386,17 @@ export type Meta = {
   bundleFormat: number;
   idset: number;
   /**
-   * The declared views in serving order (`views.md` §3.2) — the plain views first, then each
-   * group's views in creation order — each carrying its own frame, see
-   * {@link ViewInfo.quantisation}.
+   * The views this principal may reach, in serving order: the plain views, then each group's in
+   * creation order. Each carries its own frame; see {@link ViewInfo.quantisation}.
    */
   views: ViewInfo[];
-  /**
-   * The view groups and their orderings — see {@link ViewGroup}. Empty where the deployment
-   * declares plain views alone, which is the ordinary case.
-   */
+  /** The view groups and their orderings; see {@link ViewGroup}. Empty where there are none. */
   groups: ViewGroup[];
-  /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
+  /** The column schema in declaration order; see {@link DeclaredScalar}. */
   declaredScalars: DeclaredScalar[];
   /** The group-scoped column families this principal may reach; see {@link ScopedScalar}. */
   scopedScalars: ScopedScalar[];
-  /**
-   * The annotation layers this principal reaches — see {@link Layer}. Empty when it reaches none,
-   * which is also what a deployment with no layers at all looks like.
-   */
+  /** The annotation layers this principal reaches; see {@link Layer}. Empty when it reaches none. */
   layers: Layer[];
   selection: {
     kMin: number;

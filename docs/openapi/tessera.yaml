@@ -1449,7 +1449,7 @@ components:
           properties:
             kind:
               type: string
-              enum: [flat, nested, stacked, tiered]
+              enum: [flat, nested, dag, stacked, tiered]
             prune_children:
               type: boolean
               description: The layer's **default** cut policy; `artifact_budget` may ask for more.
