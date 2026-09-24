@@ -100,12 +100,12 @@ Four identifiers name an item or a view, one for each party that needs to addres
 | external id | the operator, before ingest | the operator, and any record of a write naming it | nothing, for the item's life |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
 
-The entity id is the server's own internal key: a dense integer, assigned as items are
-committed, in an order that groups together the items sharing the same access terms. A build
-starting from an empty corpus commits everything at once, producing one such dense, fully sorted
-range. A later ingest commits its own new items above what already exists, in a range sorted the
-same way within itself but appended after the corpus already on disc rather than interleaved with
-it.
+The entity id is the server's own internal key: a dense integer, assigned as items are committed,
+in an order that groups together the items sharing the same access terms. A build numbers its items
+in batches sized to its memory budget, each a dense range sorted that way, and a build that fits in
+one batch sorts the whole corpus as one range. A later ingest commits its own new items above what
+already exists, in a range sorted the same way within itself but appended after the corpus already
+on disc rather than interleaved with it.
 
 The `tessera_id` is what a client receives and holds instead of the entity id. It is stable for
 the item's life unless the operator rotates the deployment's key, and a rotation ends every
@@ -185,25 +185,32 @@ index  = true    # can be searched (default false)
 render = false   # draws on the map (default false)
 ```
 
-A field's value lives in exactly one of three homes: drawn on the map when `render` is set,
-searchable when `index` is set, or, always, stored compactly per item and read only when that
-item is opened. The last is the cheapest of the three, and the one a field takes by default.
+A field's value is kept in one or more of three homes, which `/v1/meta` lists for each field as its
+`homes`. A field with `render` set is stored beside every item's position in each view (`rendered`)
+and read for every point drawn. A field other than text with `index` set, and a category whose
+vocabulary is derived, has a column of one value per item (`value_column`), read by filters, counts
+and category listings. A field with neither, and every text field, is kept in the compact record
+store (`record`): the cheapest home, and the one a field takes by default. A text field's search
+index answers a search but cannot give its prose back, so its value stays in the record store. The
+record store is read when an item is opened, when a bulk read names the field, and to confirm a
+text phrase.
 
 ```mermaid
 flowchart LR
   decl["field declaration<br/>type, render, index"]
-  decl -- "render = true" --> hot["drawn on the map<br/>read for every point"]
-  decl -- "index = true" --> idx["searchable<br/>read for a filter or a<br/>category listing"]
-  decl -- "always" --> blob["stored per item<br/>read when it is opened"]
+  decl -- "render = true" --> hot["rendered<br/>beside every point"]
+  decl -- "index = true, or a<br/>derived vocabulary" --> idx["value column<br/>one value per item"]
+  decl -- "neither, or text" --> blob["record store<br/>compact, per item"]
   hot --> mark["a mark on the map"]
-  idx --> filter["a filter, a count, a typeahead"]
-  blob --> card["an item card"]
+  idx --> filter["a filter, a count, a listing"]
+  blob --> card["an item card, a bulk read"]
 ```
-*A field with neither flag still has a home: the compact record, read at drill-down.*
+*A field with neither flag still has a home: the record store, read by the item card and by a bulk
+read.*
 
-A category's record of which items carry which value exists whatever else the field's declaration
-says, because that record is what makes the category's own value list servable. Every other
-family builds a search structure only when `index` is set.
+A category over a derived vocabulary keeps its value column, and the record of which items carry
+each value, whatever its declaration says, because that record decides which of the vocabulary's
+values a viewer is shown. Every other field builds a search structure only when `index` is set.
 
 A field can be both drawable and searchable at once, since the two choices are independent.
 
