@@ -4,13 +4,12 @@ import {TesseraExplorer} from '@tesseradb/react/components';
 import {ItemCard} from './ItemCard.js';
 
 /**
- * The explorer in React 19 through the wrappers, with one slot replaced: the `detail` region
- * holds a host component reading `useProjection` instead of `<tessera-item-card>`.
+ * The explorer in React 19 through the wrappers, with the `detail` slot holding a host component
+ * that reads `useProjection` in place of `<tessera-item-card>`.
  *
- * The store is the host's (`useTesseraStore`) and handed to the explorer as a property, so the
- * host's own components read the same store the explorer draws — the same precedence the
- * elements decide at connection (a `.store` property outranks everything). The token comes from
- * the app server (`../plain-html/server.mjs`) through `authorise`, which the store renews.
+ * The host builds the store with `useTesseraStore` and passes it to the explorer as a property,
+ * so the host's components and the explorer read one store. The token comes from the app server
+ * (`../plain-html/server.mjs`) through `authorise`, which the store calls to renew.
  */
 type User = {name: string; label: string};
 

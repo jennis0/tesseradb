@@ -5,36 +5,19 @@
 //   TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node clients/ts/scripts/publish-clusters.mjs \
 //     --presets tessera-demo/presets/2m4.json --clusters 24 [--min-visible 400]
 //
-// The clustering is k-means over a sample of the corpus's own points, and it is deliberately
-// unremarkable: **what this exists to demonstrate is the masking, not the clustering.** Two
-// principals get different counts for the same cluster, and under `--min-visible` a cluster the
-// broad one sees is simply absent for the narrow one.
+// The clustering is k-means over a sample of the corpus's points, to show masking: two principals
+// get different counts for the same cluster, and under `--min-visible` a cluster the broad one sees
+// is absent for the narrow one.
 //
-// ## Why it publishes by `tessera_id` and not by external id
+// Members are published by `tessera_id` with the view's idset, since the ids come back from the
+// server in the same response as the positions clustered on, and external ids would need the
+// source corpus.
 //
-// Both are accepted (`addressing`, per request rather than per member). External ids would need
-// the source corpus; identifiers come back from the service itself, in the same response that
-// carries the positions this clusters on — so the script needs nothing but a running server. The
-// idset goes with them, because a `tessera_id` is only meaningful under the identity lineage that
-// minted it.
-//
-// ## Nothing is written beside the wire
-//
-// The viewer places, outlines and colours a cluster from the derived geometry the wire carries —
-// `centroid`, `box` and `hull`, recomputed per principal from `membership ∩ M_auth` — and from the
-// per-point membership column. The centroids this script computes over the publisher's own view
-// are used for nothing but the clustering; they are never written anywhere a viewer could read
-// them. **The declared membership size stays out of everything**: that is a corpus-wide count over
-// items a viewer may not see, and the whole point of the masked count beside a cluster is that
-// it is *not* that number. Sizes are printed here, for the operator
-// choosing a criterion, and go no further.
-//
-// **What the positions are, stated plainly**: centroids over the *publisher's* full view, for every
-// cluster including the ones a given viewer is not served. So the file is corpus-derived geometry
-// beside the wire — exactly the thing the wire refuses to carry — and it is safe here only because
-// the demo serves it to the operator's own browser. Real geometry arrives as derived content
-// (Stage 3), recomputed per viewer from `membership ∩ M_auth`; a deployment must delete this file
-// rather than promote it.
+// The viewer draws a cluster from the geometry the server derives per principal (`centroid`,
+// `box`, `hull`) and from the per-point membership column. The centroids computed here, over the
+// publisher's view, are used only for the clustering and are not published. The declared
+// membership sizes are printed for the operator choosing a criterion and published nowhere, since
+// they count items a viewer may not see.
 import {readFile} from 'node:fs/promises';
 import {tableFromIPC} from 'apache-arrow';
 // Loading a `.ts` module needs Node 22.18 or later, which strips its types.
@@ -58,38 +41,31 @@ const CLUSTERS = Number(args.clusters ?? 24);
 const SAMPLE_DEPTH = Number(args['sample-depth'] ?? 7);
 const SAMPLE_K = Number(args['sample-k'] ?? 64);
 const ITERATIONS = Number(args.iterations ?? 12);
-/** Members per publish request. The batch is the commit unit, and each one is an fsync. */
+/** Members per publish request. Each request is one commit and one fsync. */
 const BATCH = Number(args.batch ?? 50_000);
 
 /**
- * The layer name, which is an identity rather than a label: publication is append-only, a repeated
- * stable key is refused, and a dropped name is refused for ever. So a re-run publishes a **new
- * version** rather than editing the old one — which is also the shape a real pipeline has, an edit
- * being a delete plus a re-publish.
+ * The layer name. Publication is append-only, a repeated key is refused and a dropped name cannot
+ * be reused, so each run publishes under a new name.
  */
 const layerName = args.layer ?? `clusters/kmeans-${Date.now().toString(36)}`;
 const minVisible = args['min-visible'] === undefined ? null : Number(args['min-visible']);
 
 /**
- * With `--labels <name> --label-term <t>`, a second layer of **toponymy labels attached to those
- * clusters** is published beside them — the shape Stage 3 exists to demonstrate.
+ * With `--labels <name> --label-term <t>`, a second layer of labels attached to the clusters.
  *
  * Each label carries two ranked variations of one description: one generated from the cluster's
- * whole membership, one from the part of it a `--label-term` principal can see. A viewer is served
- * the first they contain **entirely**, and a viewer containing neither is served **no label at
- * all** — not a cluster's identity with its description missing.
+ * whole membership, one from the part a `--label-term` principal can see. A viewer is served the
+ * first whose generating set they can see entirely, and no label if neither.
  *
- * Each label is also **attached** to its cluster, which is a visibility term and not a navigation
- * aid: suppress the cluster and its labels stop serving on every route, the identifier route
- * included.
+ * Attachment is a visibility condition: suppressing a cluster stops its labels being served on
+ * every route, the identifier route included.
  */
 const labelLayer = args.labels ?? null;
 const labelTerm = args['label-term'] ?? null;
 if (labelLayer && !labelTerm) {
   throw new Error('--labels needs --label-term: the per-term variation is generated from what that principal can see');
 }
-
-// --------------------------------------------------------------------------------- the plumbing
 
 async function authorise(terms) {
   const r = await fetch(`${session}/session/authorise`, {
@@ -102,10 +78,8 @@ async function authorise(terms) {
 }
 
 /**
- * Split a viewport body into its frames — `u8 kind, u32 LE length, payload`, repeated.
- *
- * The same grammar `core/src/frame.ts` carries, in the same posture: an unknown kind throws rather
- * than being skipped, because skipping is how a future frame's data goes silently missing.
+ * Split a viewport body into its frames, `u8 kind, u32 LE length, payload`, repeated. An unknown
+ * kind throws, as in `core/src/frame.ts`, so a new frame's data is not dropped unnoticed.
  */
 function frames(buf) {
   const frame = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -131,7 +105,7 @@ async function viewport(token, body) {
   return frames(new Uint8Array(Buffer.from(await r.arrayBuffer())));
 }
 
-/** Gather the even bits of a u32 into the low 16 — the inverse of the Morton spread. */
+/** Gather the even bits of a u32 into the low 16, the inverse of the Morton spread. */
 function compact(v) {
   let x = v & 0x55555555;
   x = (x | (x >>> 1)) & 0x33333333;
@@ -141,21 +115,12 @@ function compact(v) {
   return x >>> 0;
 }
 
-// ------------------------------------------------------------------------------- the corpus half
-
 const presets = args.presets ? JSON.parse(await readFile(args.presets, 'utf8')) : null;
 /**
- * Cluster over the view of a principal **broader than any the viewer offers**, because a
- * clustering is a claim about the corpus rather than about a viewer.
- *
- * Two things follow from the choice, and the second is why `--ranks` is worth passing. A narrow
- * publisher would produce clusters whose members are mostly invisible to everyone else, so every
- * masked count would be near zero — counts that differ are the demonstration, counts that vanish
- * are not. And a publisher that is exactly the broadest *preset* would let that preset see 100% of
- * every cluster it published, so its masked count would coincide with the declared size — true,
- * unalarming, and the one coincidence that makes "the count is never the size" hard to read off
- * the screen. Publishing above the top preset removes it: every principal the viewer can be sees
- * strictly fewer members than the cluster holds.
+ * Cluster over the view of a principal broader than any the viewer offers (pass `--ranks`). A
+ * narrow publisher would make most members invisible to others, and publishing as the broadest
+ * preset would let that preset's masked count equal the declared size. Above the top preset, every
+ * principal the viewer offers sees fewer members than the cluster holds.
  */
 const publisherTerms = args.terms
   ? args.terms.split(',')
@@ -172,7 +137,7 @@ const metaResp = await fetch(`${viewer}/v1/meta`, {headers: {authorization: `Bea
 if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.text()}`);
 const meta = await metaResp.json();
 const view = meta.views[0].id;
-const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
+const q = meta.views[0].quantisation;
 
 console.log(`sampling points at depth ${SAMPLE_DEPTH}, k=${SAMPLE_K}, as the publishing principal`);
 const sampled = await viewport(token, {
@@ -180,8 +145,7 @@ const sampled = await viewport(token, {
   zoom: SAMPLE_DEPTH,
   bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
   k: SAMPLE_K,
-  // Nothing is being drawn against a layer here, so the artifact pass costs nothing: `[]` is not
-  // the same request as omitting the field, which asks for every layer this principal reaches.
+  // `[]` asks for no layers; omitting the field asks for every layer the principal reaches.
   layers: []
 });
 
@@ -206,11 +170,8 @@ if (ids.length < CLUSTERS) {
 }
 console.log(`sampled ${ids.length.toLocaleString()} points`);
 
-// ------------------------------------------------------------------------------- the clustering
-
-// Lloyd's algorithm from a deterministic stride-spread seeding. Deterministic on purpose: a re-run
-// against the same sample publishes the same clusters, so the numbers in a report are comparable
-// across runs, and nothing here needs a seeded RNG to be reproducible.
+// Lloyd's algorithm from a deterministic stride-spread seeding, so a re-run against the same
+// sample publishes the same clusters.
 const cx = new Float64Array(CLUSTERS);
 const cy = new Float64Array(CLUSTERS);
 for (let c = 0; c < CLUSTERS; c++) {
@@ -256,13 +217,11 @@ const members = Array.from({length: CLUSTERS}, () => []);
 for (let i = 0; i < ids.length; i++) members[assign[i]].push(ids[i]);
 const clusters = [];
 for (let c = 0; c < CLUSTERS; c++) {
-  // An empty cluster is dropped rather than published: an artifact with no members has a masked
-  // count of zero for everyone, which is a row on every wire that can never be anything but noise.
+  // An empty cluster is not published: its masked count is zero for everyone.
   if (members[c].length === 0) continue;
   clusters.push({
     key: `c-${String(c).padStart(4, '0')}`,
-    // Cell space, `[0, 65536)` per axis — the same units the points frame decodes into, so the
-    // viewer places a cluster with the transform it already applies to every mark.
+    // The centroid in cell space, `[0, 65536)` per axis. Not published.
     x: cx[c],
     y: cy[c],
     members: members[c]
@@ -275,8 +234,6 @@ console.log(
     .filter((_, i, all) => i === 0 || i === all.length - 1)
     .join('…')}`
 );
-
-// -------------------------------------------------------------------------------- the publishing
 
 // The layer's own access label (`--label`), or public, which each artifact inherits.
 const declaration = clusterLayerDeclaration({
@@ -298,8 +255,7 @@ const publish = async () => {
   if (batch.length === 0) return;
   const answer = await control.publish(layerName, {
     level: 0,
-    // Per request: a clustering names its whole corpus, and a per-member tag would be most of the
-    // body.
+    // Addressing is per request; a per-member tag would be most of the body.
     addressing: 'tessera',
     idset: meta.idset,
     artifacts: batch.map((c) => ({
@@ -319,17 +275,9 @@ for (const cluster of clusters) {
 await publish();
 console.log(`published ${published} artifacts`);
 
-// ------------------------------------------------------------------- the labels, and their edges
-
-/**
- * One label per cluster, attached to it, each carrying two ranked variations of one description.
- *
- * **The per-term variation is generated from what a `--label-term` principal can see**, taken from
- * the service rather than assumed: that principal's own sample, intersected with the cluster. So
- * every viewer holding that term contains the set entirely — visibility of an item is a
- * disjunction over terms — while a viewer holding other terms, however many, generally does not.
- * That is containment's whole claim: what decides is *which* documents, never how many.
- */
+// One label per cluster. The per-term variation is generated from the `--label-term` principal's
+// own sample intersected with the cluster. Visibility is a disjunction over terms, so every viewer
+// holding that term sees the set entirely, and a viewer holding only other terms generally does not.
 
 if (labelLayer) {
   console.log(`sampling as the term-${labelTerm} principal, for the per-term variation`);
@@ -359,10 +307,8 @@ if (labelLayer) {
   const labels = [];
   for (const cluster of clusters) {
     const seen = cluster.members.filter((id) => termVisible.has(id));
-    // **A cluster no `--label-term` document falls in gets no per-term variation, and no label.**
-    // An empty generating set is refused for corpus-derived content — a set that is never tested
-    // is a claim the service would carry without meaning — and a label with only the full-sample
-    // variation would serve to nobody, which is a row on the wire that can never be anything else.
+    // A cluster with no `--label-term` document gets no label: the server refuses an empty
+    // generating set for corpus-derived content.
     if (seen.length === 0) continue;
     labels.push({
       key: `l-${cluster.key}`,
@@ -391,7 +337,7 @@ if (labelLayer) {
           values: v.values,
           generated_from: v.generated_from.map((id) => id.toString())
         })),
-        // The target is named by its stable key, the only address a caller holds for it.
+        // The target is named by its key.
         attached_to: {layer: layerName, level: 0, key: l.cluster}
       }))
     });
@@ -409,19 +355,14 @@ if (labelLayer) {
   console.log(`published ${labels.length} labels into ${labelLayer}`);
 }
 
-// ----------------------------------------------------------------------------------- the report
-
 /**
- * What each principal is served for this layer, from the service.
- *
- * This is the stage's own check, run from outside the viewer: the same cluster, the same
- * identifier, and a count that differs per principal — none of them equal to the size printed
- * above. Under a criterion, some clusters are simply **absent** for the narrower principals, with
- * nothing in the response saying why.
+ * What each principal is served for this layer: the same cluster and identifier, with a masked
+ * count that differs per principal. Under a criterion, some clusters are absent for narrower
+ * principals, and the response does not say why.
  */
 if (presets) {
   const declaredSize = new Map(clusters.map((c) => [c.key, c.members.length]));
-  /** One cluster followed across every principal — the largest, so it survives a criterion longest. */
+  /** One cluster followed across every principal: the largest, which a criterion removes last. */
   const WITNESS = clusters.reduce((a, b) => (a.members.length >= b.members.length ? a : b)).key;
   const rows = [];
   for (const preset of presets) {
@@ -442,8 +383,7 @@ if (presets) {
       for (let i = 0; i < masked.length; i++) counts.set(String(keys.get(i)), Number(masked[i]));
     }
     const shown = [...counts.values()].sort((a, b) => a - b);
-    // The comparison the stage is judged on, per principal: what the same cluster is worth to each
-    // of them, against a size none of them is told.
+    // The witness cluster's masked count for this principal, against the declared size.
     const witness = counts.get(WITNESS) ?? null;
     rows.push({
       principal: preset.label,

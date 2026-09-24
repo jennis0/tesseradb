@@ -1,13 +1,12 @@
 /**
  * The mapping between deck.gl's non-geospatial tile indices and Tessera's Morton cell grid.
  *
- * The engine's world is a 2^16 x 2^16 cell grid, quantised per axis (design §2.5), so a tile is
- * square in CELL space and rectangular in data space. The viewer therefore uses cell space as its
- * deck.gl world, scaled down by CELLS_PER_WORLD_UNIT so that a tile is TILE_SIZE world units at
- * depth 0 — which makes a deck tile `z` identically a Morton depth.
+ * The engine's world is a 2^16 x 2^16 cell grid, quantised per axis, so a tile is square in cell
+ * space and rectangular in data space. The deck.gl world is cell space scaled down by
+ * CELLS_PER_WORLD_UNIT, so a tile is TILE_SIZE world units at depth 0 and a deck tile `z` is a
+ * Morton depth.
  *
- * Every constant here was checked against deck.gl's own Tileset2D in convention.test.ts. Change
- * them only with that test.
+ * convention.test.ts checks these constants against deck.gl's Tileset2D.
  */
 export const CELL_GRID = 65536;
 export const MAX_DEPTH = 16;
