@@ -25,8 +25,10 @@ pub fn to_bitmap(postings: &PostingsReader, term: TermId) -> std::io::Result<Bit
         PostingRef::Roaring(view) => (*view).clone(),
         PostingRef::Array(bytes) => {
             let mut values: Vec<u32> = bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
                 .collect();
             values.sort_unstable();
             let mut bitmap = Bitmap::new();

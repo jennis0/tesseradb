@@ -139,8 +139,10 @@ fn a_flushed_entity_resolves_in_both_external_id_directions() {
     // segment's entity range, sentinel where an item carried no external id.
     let locator = std::fs::read(prefix.join(&extent.path)).unwrap();
     let slots: Vec<u32> = locator
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect();
     assert_eq!(slots.len(), 3, "dense over [entity_lo, entity_hi]");
     assert_eq!(extent.entity_lo, 50);

@@ -425,18 +425,14 @@ fn emit_window(
         // O(rows) rather than O(width), which sounds better and is 250 million scattered writes
         // at 10⁹ against 122 MB of sequential ones. Also not separately measured, and stated as
         // reasoning rather than as a result.
-        for (container, words) in stamp.chunks_exact_mut(WORDS).enumerate() {
+        for (container, words) in stamp.as_chunks_mut::<WORDS>().0.iter_mut().enumerate() {
             if occupied & (1u64 << container) == 0 {
                 continue;
             }
             let cardinality: u32 = words.iter().map(|word| word.count_ones()).sum();
             let key = u16::try_from((base >> 16) + container as u32)
                 .expect("a row below 2^32 has a container key below 2^16");
-            sink.push_block(
-                key,
-                cardinality,
-                (&*words).try_into().expect("a bucket is whole containers"),
-            );
+            sink.push_block(key, cardinality, words);
             words.fill(0);
         }
     }
