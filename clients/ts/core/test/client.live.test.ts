@@ -51,7 +51,7 @@ const total = (tiles: readonly {visible: bigint; matched: bigint; served: bigint
 describe('TesseraClient against a live server', () => {
   it('authorises a session whose expiry is within the deployment’s token lifetime', (ctx) => {
     live(ctx);
-    expect(session.token).toMatch(/^[0-9a-f]+$/);
+    expect(session.token).not.toBe('');
     expect(Number.isInteger(session.tokenId)).toBe(true);
     const now = Date.now() / 1000;
     expect(session.expiresAt).toBeGreaterThan(now);

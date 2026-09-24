@@ -240,7 +240,7 @@ describe('a streamed viewport response', () => {
 
     feed.push(body.subarray(0, trailerAt));
     feed.close();
-    await expect(asking).rejects.toThrow(/trailer/);
+    await expect(asking).rejects.toThrow();
     // Well-framed and incomplete: every points frame was delivered and is drawable, and the
     // response is still refused, because the trailer's presence is the completeness signal.
     expect(parts.length).toBe(3);

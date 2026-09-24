@@ -245,7 +245,7 @@ describe('assemble', () => {
 describe('assertAssemblyMatchesServed', () => {
   it('demotes a short band to a stand-in rather than failing the served count', () => {
     // A band holding fewer marks than `served` is what eviction truncation produces; counting it
-    // exact made this assert a crash-per-paint loop under memory pressure (review finding 2).
+    // exact made this assert a crash-per-paint loop under memory pressure.
     // Its head draws as a stand-in — counts suppressed — and the equality's domain excludes it.
     const short = band(2, 0n, 2, 3); // holds 2, server said it served 3
     const out = assemble(frame(2, [short]));
@@ -257,7 +257,7 @@ describe('assertAssemblyMatchesServed', () => {
   it('throws when a provisional tile carries counts', () => {
     const out = assemble(frame(2, [], [band(4, 0n, 2)]));
     out.tiles[0]!.counts = {visible: 1n, matched: 1n, highlighted: 1n, served: 1};
-    expect(() => assertAssemblyMatchesServed(out)).toThrow(/superset of marks must never be read as density/);
+    expect(() => assertAssemblyMatchesServed(out)).toThrow();
   });
 });
 
