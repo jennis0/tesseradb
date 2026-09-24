@@ -308,7 +308,7 @@ fn an_items_read_written_as_ipc_and_as_parquet_is_the_read_over_http() {
     let from_ipc = read_ipc(&ipc);
     assert_eq!(from_ipc.len(), paged.len(), "one batch for each page");
     for (written, page) in from_ipc.iter().zip(&paged) {
-        assert_eq!(plain(&[written.clone()]), plain(&[page.clone()]));
+        assert_eq!(plain(std::slice::from_ref(written)), plain(std::slice::from_ref(page)));
     }
     let from_parquet = read_parquet(&parquet);
     assert_eq!(from_parquet[0].schema().fields(), whole[0].schema().fields());
