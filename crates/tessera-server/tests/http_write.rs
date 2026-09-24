@@ -3730,6 +3730,499 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
 }
 
 // =================================================================================================
+// The shape of /control/status
+// =================================================================================================
+
+/// Every key path `/control/status` serves and each JSON type it takes there across the reads
+/// [`control_status_serves_its_pinned_shape`] makes. `*` stands for every element of an array.
+const STATUS_SHAPE: &[(&str, &str)] = &[
+    ("/bulk", "object"),
+    ("/bulk/admission", "integer"),
+    ("/bulk/in_flight", "integer"),
+    ("/bulk/queue", "integer"),
+    ("/bulk/shed_total", "integer"),
+    ("/bulk/waiting", "integer"),
+    ("/compaction", "object"),
+    ("/compaction/fold_failures", "integer"),
+    ("/compaction/fold_refusals", "integer"),
+    ("/compaction/fold_refusals_by_gate", "object"),
+    ("/compaction/fold_refusals_by_gate/insufficient_disc", "integer"),
+    ("/compaction/fold_refusals_by_gate/insufficient_memory", "integer"),
+    ("/compaction/fold_refusals_by_gate/nothing_to_fold", "integer"),
+    ("/compaction/fold_refusals_by_gate/overlay_diverged", "integer"),
+    ("/compaction/fold_refusals_by_gate/stepped_down", "integer"),
+    ("/compaction/fold_refusals_by_gate/wal_poisoned", "integer"),
+    ("/compaction/fold_requested", "bool"),
+    ("/compaction/folds", "integer"),
+    ("/compaction/last_attr_bytes_read", "integer"),
+    ("/compaction/last_attr_bytes_written", "integer"),
+    ("/compaction/last_refusal", "null|object"),
+    ("/compaction/last_refusal/at_unix", "integer"),
+    ("/compaction/last_refusal/gate", "string"),
+    ("/compaction/last_refusal/had_bytes", "integer|null"),
+    ("/compaction/last_refusal/need_bytes", "integer|null"),
+    ("/compaction/last_rss_bytes", "integer"),
+    ("/compaction/last_secs", "integer"),
+    ("/compaction/live_rows", "integer"),
+    ("/compaction/passes", "array"),
+    ("/compaction/passes/*", "object"),
+    ("/compaction/passes/*/anon_bytes", "integer"),
+    ("/compaction/passes/*/ms", "integer"),
+    ("/compaction/passes/*/pass", "string"),
+    ("/compaction/passes/*/rss_bytes", "integer"),
+    ("/compute", "object"),
+    ("/compute/admission", "integer"),
+    ("/compute/in_flight", "integer"),
+    ("/compute/queue", "integer"),
+    ("/compute/shed_total", "integer"),
+    ("/compute/streaming", "integer"),
+    ("/compute/waiting", "integer"),
+    ("/derived_cache", "object"),
+    ("/derived_cache/bytes", "integer"),
+    ("/derived_cache/entries", "integer"),
+    ("/derived_cache/evictions", "integer"),
+    ("/derived_cache/hit_rate", "float|null"),
+    ("/derived_cache/hits", "integer"),
+    ("/derived_cache/misses", "integer"),
+    ("/entity_id_high_water", "integer"),
+    ("/fragment_cache", "object"),
+    ("/fragment_cache/bound_bytes", "integer"),
+    ("/fragment_cache/building_refusals", "integer"),
+    ("/fragment_cache/bytes", "integer"),
+    ("/fragment_cache/entries", "integer"),
+    ("/fragment_cache/evictions", "integer"),
+    ("/fragment_cache/hits", "integer"),
+    ("/fragment_cache/misses", "integer"),
+    ("/fragment_cache/oversized_admissions", "integer"),
+    ("/fragment_cache/rebuilds", "integer"),
+    ("/fragment_cache/thrashing", "bool"),
+    ("/fragment_cache/young_evictions", "integer"),
+    ("/fragmentation", "object"),
+    ("/fragmentation/allocation", "object"),
+    ("/fragmentation/allocation/containers", "integer"),
+    ("/fragmentation/allocation/postings", "integer"),
+    ("/fragmentation/allocation/rows", "integer"),
+    ("/fragmentation/allocation/runs", "integer"),
+    ("/fragmentation/allocation/scope", "string"),
+    ("/fragmentation/allocation/windows", "integer"),
+    ("/fragmentation/containers", "integer"),
+    ("/fragmentation/postings", "integer"),
+    ("/fragmentation/postings_per_container", "float|null"),
+    ("/fragmentation/rows", "integer"),
+    ("/fragmentation/run_ratio", "float|null"),
+    ("/fragmentation/runs", "integer"),
+    ("/fragmentation/scope", "string"),
+    ("/fragmentation/tiers", "integer"),
+    ("/heap", "object"),
+    ("/heap/anon_bytes", "integer"),
+    ("/heap/file_bytes", "integer"),
+    ("/heap/last_trim_micros", "integer"),
+    ("/heap/last_trim_returned_bytes", "integer"),
+    ("/heap/resident_bytes", "integer"),
+    ("/heap/trim_baseline_bytes", "integer"),
+    ("/heap/trim_growth_bytes", "integer"),
+    ("/heap/trims", "integer"),
+    ("/ingest", "object"),
+    ("/ingest/admission", "integer"),
+    ("/ingest/in_flight", "integer"),
+    ("/ingest/shed_total", "integer"),
+    ("/limits", "object"),
+    ("/limits/changes", "object"),
+    ("/limits/changes/max_body_bytes", "integer"),
+    ("/limits/changes/max_changes_per_request", "integer"),
+    ("/limits/changes/route", "string"),
+    ("/limits/declarations", "object"),
+    ("/limits/declarations/max_body_bytes", "integer"),
+    ("/limits/declarations/max_records_per_request", "integer"),
+    ("/limits/declarations/route", "string"),
+    ("/limits/grow", "object"),
+    ("/limits/grow/max_body_bytes", "integer"),
+    ("/limits/grow/max_members_per_request", "integer"),
+    ("/limits/grow/route", "string"),
+    ("/limits/ingest", "object"),
+    ("/limits/ingest/max_batch_bytes", "integer"),
+    ("/limits/ingest/max_batch_rows", "integer"),
+    ("/limits/ingest/route", "string"),
+    ("/limits/publish", "object"),
+    ("/limits/publish/max_artifacts_per_request", "integer"),
+    ("/limits/publish/max_body_bytes", "integer"),
+    ("/limits/publish/max_excluded_per_request", "integer"),
+    ("/limits/publish/max_shape_vertices", "integer"),
+    ("/limits/publish/route", "string"),
+    ("/limits/values", "object"),
+    ("/limits/values/max_batch_bytes", "integer"),
+    ("/limits/values/max_batch_rows", "integer"),
+    ("/limits/values/route", "string"),
+    ("/masked_count_cache", "object"),
+    ("/masked_count_cache/bytes", "integer"),
+    ("/masked_count_cache/entries", "integer"),
+    ("/masked_count_cache/evictions", "integer"),
+    ("/masked_count_cache/hits", "integer"),
+    ("/masked_count_cache/misses", "integer"),
+    ("/occupancy", "object"),
+    ("/occupancy/bound_bytes", "integer"),
+    ("/occupancy/bytes", "integer"),
+    ("/occupancy/entries", "integer"),
+    ("/occupancy/evictions", "integer"),
+    ("/occupancy/hits", "integer"),
+    ("/occupancy/misses", "integer"),
+    ("/occupancy/walks", "integer"),
+    ("/overlay", "object"),
+    ("/overlay/depth", "integer"),
+    ("/overlay/retirable", "integer"),
+    ("/overlay/soft_limit_alarms", "integer"),
+    ("/partitions", "array"),
+    ("/partitions/*", "object"),
+    ("/partitions/*/partition", "string"),
+    ("/partitions/*/readiness", "bool"),
+    ("/partitions/*/segments_version", "integer"),
+    ("/partitions/*/watermark", "integer"),
+    ("/projection_builds_by_route", "object"),
+    ("/projection_builds_by_route/complement", "integer"),
+    ("/projection_builds_by_route/split", "integer"),
+    ("/projection_builds_by_route/walk", "integer"),
+    ("/projection_builds_by_route/whole_domain", "integer"),
+    ("/publication", "integer"),
+    ("/region_cache", "object"),
+    ("/region_cache/bound_bytes", "integer"),
+    ("/region_cache/building_refusals", "integer"),
+    ("/region_cache/bytes", "integer"),
+    ("/region_cache/entries", "integer"),
+    ("/region_cache/evictions", "integer"),
+    ("/region_cache/hits", "integer"),
+    ("/region_cache/misses", "integer"),
+    ("/region_cache/waits_satisfied", "integer"),
+    ("/row_projection_cache", "object"),
+    ("/row_projection_cache/bound_bytes", "integer"),
+    ("/row_projection_cache/building_refusals", "integer"),
+    ("/row_projection_cache/bytes", "integer"),
+    ("/row_projection_cache/entries", "integer"),
+    ("/row_projection_cache/evictions", "integer"),
+    ("/row_projection_cache/hits", "integer"),
+    ("/row_projection_cache/misses", "integer"),
+    ("/row_projection_cache/oversized_admissions", "integer"),
+    ("/row_projection_cache/thrashing", "bool"),
+    ("/row_projection_cache/waiters_now", "integer"),
+    ("/row_projection_cache/waits_satisfied", "integer"),
+    ("/row_projection_cache/young_evictions", "integer"),
+    ("/segments", "array"),
+    ("/segments/*", "object"),
+    ("/segments/*/count", "integer"),
+    ("/segments/*/partition", "string"),
+    ("/segments/*/view", "string"),
+    ("/sessions", "object"),
+    ("/sessions/retained", "integer"),
+    ("/sessions/sweep_at", "integer"),
+    ("/sessions/sweeps", "integer"),
+    ("/sessions/swept_total", "integer"),
+    ("/suggest_sets", "object"),
+    ("/suggest_sets/builds", "integer"),
+    ("/suggest_sets/bytes", "integer"),
+    ("/suggest_sets/declined", "integer"),
+    ("/suggest_sets/discarded", "integer"),
+    ("/suggest_sets/entries", "integer"),
+    ("/suggest_sets/evictions", "integer"),
+    ("/suggest_sets/hits", "integer"),
+    ("/suggest_sets/in_flight", "integer"),
+    ("/suggest_sets/misses", "integer"),
+    ("/write_executor", "object"),
+    ("/write_executor/apply_nanos_max", "integer"),
+    ("/write_executor/apply_nanos_total", "integer"),
+    ("/write_executor/bench_timing", "bool"),
+    ("/write_executor/coalesce_in_flight", "bool"),
+    ("/write_executor/coalesces", "integer"),
+    ("/write_executor/deny_submitted", "integer"),
+    ("/write_executor/flush", "object"),
+    ("/write_executor/flush/buffered_items", "integer"),
+    ("/write_executor/flush/flush_failures", "integer"),
+    ("/write_executor/flush/flush_requested", "bool"),
+    ("/write_executor/flush/flush_skips", "integer"),
+    ("/write_executor/flush/flushable_items", "integer"),
+    ("/write_executor/flush/flushes", "integer"),
+    ("/write_executor/flush/in_flight", "bool"),
+    ("/write_executor/flush/overlay_publications", "integer"),
+    ("/write_executor/flush/refresh_in_flight", "bool"),
+    ("/write_executor/flush/refreshes", "integer"),
+    ("/write_executor/flush/ticks", "integer"),
+    ("/write_executor/flush_stages", "object"),
+    ("/write_executor/flush_stages/bench_timing", "bool"),
+    ("/write_executor/flush_stages/executions", "integer"),
+    ("/write_executor/flush_stages/executor_nanos", "object"),
+    ("/write_executor/flush_stages/executor_nanos/  .deny_state", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/  .manifest_clone", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/  .vocab_extensions", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/artifacts", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/buffer_rebase", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/compose", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/denied", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/discarded", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/dispatch", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/drop_superseded", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/manifest", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/manifest_commit", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/plan", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/publish_wall", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/rotate", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/shapes_install", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/swap", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/with_segment", "integer"),
+    ("/write_executor/flush_stages/flushes", "integer"),
+    ("/write_executor/flush_stages/pool_nanos", "object"),
+    ("/write_executor/flush_stages/pool_nanos/delta_tier", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/digests", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/drop_plan", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/entity_terms", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/failed", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/filter_extents", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/pool_wall", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/promote", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/record_extent", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/reopen", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/rows", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/scoped_extents", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/segment", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/shapes", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_dict", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_extents", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_postings", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_presence", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_rows", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_tokenise_terms", "integer"),
+    ("/write_executor/flush_stages/rows_executed", "integer"),
+    ("/write_executor/flush_stages/rows_published", "integer"),
+    ("/write_executor/foreign_side_manifests", "integer"),
+    ("/write_executor/merge_in_flight", "bool"),
+    ("/write_executor/merges", "integer"),
+    ("/write_executor/posture", "string"),
+    ("/write_executor/ready", "bool"),
+    ("/write_executor/stage_nanos", "object"),
+    ("/write_executor/stage_nanos/.buf_insert", "integer"),
+    ("/write_executor/stage_nanos/.est_fwd", "integer"),
+    ("/write_executor/stage_nanos/.est_inv", "integer"),
+    ("/write_executor/stage_nanos/.wal_pos", "integer"),
+    ("/write_executor/stage_nanos/admit", "integer"),
+    ("/write_executor/stage_nanos/allocate", "integer"),
+    ("/write_executor/stage_nanos/apply_rows", "integer"),
+    ("/write_executor/stage_nanos/buffer_clone", "integer"),
+    ("/write_executor/stage_nanos/derive_records", "integer"),
+    ("/write_executor/stage_nanos/record_batch", "integer"),
+    ("/write_executor/stage_nanos/submit→receipt", "integer"),
+    ("/write_executor/stage_nanos/swap", "integer"),
+    ("/write_executor/stage_nanos/vocab_mint", "integer"),
+    ("/write_executor/stage_nanos/wal_append", "integer"),
+    ("/write_executor/stage_nanos/wal_fsync", "integer"),
+    ("/write_executor/wal", "object"),
+    ("/write_executor/wal/bytes", "integer"),
+    ("/write_executor/wal/members", "integer"),
+    ("/write_executor/wal/pin_span_bytes", "integer"),
+    ("/write_executor/wal/pinned_at", "integer|null"),
+    ("/write_executor/wal/pinned_by", "null|string"),
+    ("/write_executor/wal/position", "integer"),
+    ("/write_executor/wal/samples", "integer"),
+    ("/write_executor/wal_appends", "integer"),
+    ("/write_executor/wal_fsyncs", "integer"),
+    ("/write_executor/wal_recoveries", "integer"),
+    ("/write_executor/work_completed", "integer"),
+    ("/write_executor/work_depth", "integer"),
+    ("/write_executor/work_in_flight_nanos", "integer"),
+    ("/write_executor/work_service_nanos_ewma", "integer"),
+    ("/write_executor/work_submitted", "integer"),
+];
+
+/// Types in [`STATUS_SHAPE`] that no read in the test shows: a fold is refused with byte figures
+/// only when the host is short of memory or disc.
+const STATUS_TYPES_UNREACHED: &[(&str, &str)] = &[
+    ("/compaction/last_refusal/had_bytes", "integer"),
+    ("/compaction/last_refusal/need_bytes", "integer"),
+];
+
+type Shape = std::collections::BTreeMap<String, std::collections::BTreeSet<&'static str>>;
+
+/// Records each key path under `path` in `value` with the JSON type found there.
+fn status_shape(value: &serde_json::Value, path: &str, shape: &mut Shape) {
+    use serde_json::Value;
+    let kind = match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_f64() => "float",
+        Value::Number(_) => "integer",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    shape.entry(path.to_owned()).or_default().insert(kind);
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                status_shape(item, &format!("{path}/*"), shape);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, field) in fields {
+                status_shape(field, &format!("{path}/{key}"), shape);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `/control/status` serves only the key paths and types in [`STATUS_SHAPE`], serves a key
+/// whenever it serves the object holding it, and shows every pinned type in one of three reads:
+/// fresh, with a pinned log and a derived-geometry lookup, and after a flush, a fold and a refused
+/// fold.
+#[tokio::test]
+async fn control_status_serves_its_pinned_shape() {
+    const LAYER: &str = "clusters/status";
+    let tmp = TempDir::new().unwrap();
+    // A one-second tick samples the log's gauge each second, so a pin shows within one.
+    let mut config = default_engine_config();
+    config.flush_max_age_secs = 1;
+    let (server, faults) = serve_with_faults_and_config(&tmp, config).await;
+    let mut reads = vec![control_status(&server).await];
+
+    // A growth holds the log until a fold, and a hull is derived for each artifact a viewport
+    // serves.
+    let mut layer = flat_layer(LAYER);
+    layer["content"]["computed"] = serde_json::json!(["hull"]);
+    register(&server, layer).await;
+    let artifacts_url = server.control_url(&format!(
+        "/control/layers/{}/artifacts",
+        LAYER.replace('/', "%2F")
+    ));
+    let resp = server
+        .client
+        .put(&artifacts_url)
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!({
+            "addressing": "external",
+            "artifacts": [{ "key": "a", "members": members(0..100) }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "{}", resp.text().await.unwrap());
+    tick(&server).await;
+    let resp = server
+        .client
+        .patch(&artifacts_url)
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!({
+            "addressing": "external",
+            "artifacts": [{ "key": "a", "members": members(100..200) }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    tick(&server).await;
+    let token = token_for(&server, &["0"]).await;
+    for _ in 0..2 {
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "layers": [LAYER]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+    let pinned_and_derived = wait_for(
+        "a pinned log and a derived-geometry lookup",
+        std::time::Duration::from_secs(60),
+        async || {
+            let status = control_status(&server).await;
+            let wal = &status["write_executor"]["wal"];
+            let hit_rate = &status["derived_cache"]["hit_rate"];
+            match wal["pinned_by"].is_string() && hit_rate.is_f64() {
+                true => Ok(status),
+                false => Err(format!("wal {wal}, hit_rate {hit_rate}")),
+            }
+        },
+    )
+    .await;
+    reads.push(pinned_and_derived);
+
+    flush_and_fold(&server, None).await;
+    // A torn append poisons the log for good, so the next fold is refused.
+    faults.fail_next_appends(1);
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([{ "external_id": member(5), "op": "suppress" }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 500);
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_for_executor(&server, "the fold refused", |now| now.fold_refusals > 0).await;
+    reads.push(control_status(&server).await);
+
+    let pinned: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> = STATUS_SHAPE
+        .iter()
+        .map(|(path, kinds)| (*path, kinds.split('|').collect()))
+        .collect();
+    let served: Vec<Shape> = reads
+        .iter()
+        .map(|status| {
+            let mut shape = Shape::new();
+            status_shape(status, "", &mut shape);
+            shape.remove("");
+            shape
+        })
+        .collect();
+    let mut seen = Shape::new();
+    for shape in &served {
+        for (path, kinds) in shape {
+            seen.entry(path.clone()).or_default().extend(kinds);
+        }
+    }
+    let listing: String = seen
+        .iter()
+        .map(|(path, kinds)| {
+            let kinds: Vec<&str> = kinds.iter().copied().collect();
+            format!("    ({path:?}, {:?}),\n", kinds.join("|"))
+        })
+        .collect();
+    for (read, shape) in served.iter().enumerate() {
+        for (path, kinds) in shape {
+            assert!(
+                pinned.get(path.as_str()).is_some_and(|pin| kinds.is_subset(pin)),
+                "read {read} serves {path} as {kinds:?}, pinned as {:?}; every read:\n{listing}",
+                pinned.get(path.as_str())
+            );
+        }
+        for path in pinned.keys() {
+            let holder = &path[..path.rfind('/').unwrap()];
+            let held = holder.is_empty() || shape.get(holder).is_some_and(|k| k.contains("object"));
+            assert!(
+                !held || shape.contains_key(*path),
+                "read {read} serves {holder} without {path}"
+            );
+        }
+    }
+    for (path, kinds) in &pinned {
+        for kind in kinds {
+            let shown = seen.get(*path).is_some_and(|k| k.contains(kind));
+            assert!(
+                shown || STATUS_TYPES_UNREACHED.contains(&(*path, *kind)),
+                "no read serves {path} as {kind}; every read:\n{listing}"
+            );
+        }
+    }
+}
+
+// =================================================================================================
 // The fragmentation figure on /control/status, and admin-plane hygiene
 // =================================================================================================
 
