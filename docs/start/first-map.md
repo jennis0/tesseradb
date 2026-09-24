@@ -1,31 +1,30 @@
 # Your first map from files
 
-This tutorial is for someone who has never used Tessera. We'll take the 29,935 places GeoNames
-lists for Ireland and put them on a map in your browser. Among them are 12,159 towns and villages,
-3,970 hills and mountains, and 3,241 lakes and rivers. You'll search them by name and filter them
-by kind of place and by population.
+This tutorial is for someone who has never used Tessera. We'll take the 29,935 places GeoNames lists
+for Ireland and put them on a map in your browser, where you can search them by name and filter them
+by kind of place and by population. Among them are 12,159 towns and villages, 3,970 hills and
+mountains, and 3,241 lakes and rivers.
 
-On the way you'll write a declaration, the file that tells Tessera what your data means. You'll
-build a bundle, the form of the data that the server reads. You'll give every place an access
-label, which decides who may see it. You'll also see why a web page showing the map needs a small
-server of its own.
+Along the way you'll write a declaration, the file that tells Tessera what your data means, and turn
+it into a bundle, which is what the server reads. Every place will get an access label saying who
+may see it. We'll also see why a web page that shows the map needs a small server of its own.
 
-Allow half an hour. The commands take about three minutes to run. Two of those minutes go on
-compiling Tessera. You need Rust installed with rustup, `git`, `curl`, `unzip`, `openssl`,
-Python 3, Node.js with npm, and a web browser. We ran every command on Linux with Rust 1.97,
+Allow half an hour. The commands themselves take about three minutes, and two of those go on
+compiling Tessera. You'll need Rust (installed with rustup), `git`, `curl`, `unzip`, `openssl`,
+Python 3, Node.js with npm, and a web browser. We ran everything here on Linux, with Rust 1.97,
 Python 3.12 and Node 22.
 
 ## What we'll do
 
 1. Build the `tessera` program from its source code.
 2. Download the GeoNames file for Ireland and convert it to Parquet.
-3. Write a declaration that describes the data. Check it with `tessera check`.
-4. Build a bundle with `tessera build`. Here we meet a place that GeoNames has put in the wrong
+3. Write a declaration that describes the data, and check it with `tessera check`.
+4. Build a bundle with `tessera build`, and meet a place that GeoNames has put in the wrong
    country.
 5. Start the server with `tessera serve`.
 6. Open the map in a browser and filter it.
 
-This diagram shows what will be running at the end.
+At the end, this is what will be running.
 
 ```mermaid
 flowchart LR
@@ -41,8 +40,8 @@ flowchart LR
   browser["your browser"] <--> page
 ```
 
-*Your browser talks only to the page's server. That server holds the session secret. This tutorial
-doesn't use the control address.*
+*Your browser only ever talks to the page's server, which holds the session secret. We won't use the
+control address in this tutorial.*
 
 ## Build Tessera
 
@@ -61,8 +60,8 @@ cargo install --path crates/tessera-cli
 ...
 ```
 
-That took two minutes on a 12-core machine. Cargo puts the program in `~/.cargo/bin`. Rustup has
-already added that directory to your `PATH`. Check that the program runs.
+That took two minutes on a 12-core machine. Cargo puts the program in `~/.cargo/bin`, which rustup
+has already added to your `PATH`, so you can check straight away that it runs.
 
 ```bash
 tessera --version
@@ -72,12 +71,12 @@ tessera --version
 tessera 310920847827ba735cd8e953c898784853e84291
 ```
 
-The long number is the commit your copy was built from. Yours will be different.
+The long number is the commit your copy was built from, so yours will be different.
 
 ## Get the data
 
-GeoNames is a free gazetteer of the world's place names. It publishes a file for each country.
-Make a directory for the project and download Ireland's file.
+GeoNames is a free gazetteer of the world's place names, published as one file per country. Make a
+directory for the project and download the file for Ireland.
 
 ```bash
 mkdir ~/ireland && cd ~/ireland
@@ -91,8 +90,8 @@ Archive:  IE.zip
   inflating: IE.txt                  
 ```
 
-`IE.txt` has one place on each line. Each line has 19 columns separated by tabs. There is no header
-row. `readme.txt` says what each column holds. Look at the first line.
+`IE.txt` has one place per line, with 19 columns separated by tabs and no header row. `readme.txt`
+explains what each column holds. Have a look at the first line.
 
 ```bash
 head -n 1 IE.txt
@@ -102,23 +101,24 @@ head -n 1 IE.txt
 2635367	Tullyrossmearan	Tullyrossmearan	Tullyrosmearn,Tullyrossmearan	54.33333	-7.98333	P	PPL	IE	GB	C	14			0		53	Europe/Dublin	2015-05-15
 ```
 
-This is Tullyrossmearan, in County Leitrim. The line starts with its GeoNames id. Then come its
-name, the same name in plain ASCII, and other spellings. Next are its latitude and longitude. The
-`P` marks it as a populated place. Further along, its population is `0`.
+That's Tullyrossmearan, in County Leitrim. The line starts with its GeoNames id, followed by its
+name, the same name in plain ASCII, and a list of other spellings. Then come its latitude and
+longitude, and a `P` that marks it as a populated place. Further along, its population is given as
+`0`.
 
-A population of 0 means GeoNames has no figure. That is true of most places. Only 1,119 of the
-29,935 have a population. This will matter when we filter by population.
+A population of 0 means GeoNames doesn't have a figure, which is true of most places here. Only
+1,119 of the 29,935 have a population at all. That will matter when we come to filter by it.
 
-We'll keep six of the 19 columns. They are the id, the name, the latitude, the longitude, the class
-of place and the population.
+We'll keep six of the 19 columns: the id, the name, the latitude and longitude, the class of place
+and the population.
 
 ## Convert it to Parquet
 
-Tessera's build reads Parquet files. Parquet is a file format for tables. It stores the name and
-type of each column inside the file. A program can find out what columns a file has without reading
-any rows. `tessera check` relies on this later.
+Tessera's build reads Parquet, a file format for tables. A Parquet file records the name and type of
+every column inside the file itself, so a program can see what columns it has without reading any
+rows. `tessera check` makes use of that later on.
 
-We'll convert the file with pyarrow, a Python library for Parquet. Make a Python environment and
+We'll do the conversion with pyarrow, a Python library for Parquet. Make a Python environment and
 install pyarrow in it.
 
 ```bash
@@ -161,15 +161,15 @@ pq.write_table(points, "points.parquet")
 print(f"wrote {points.num_rows} places to points.parquet")
 ```
 
-The file has no header. The script names the 19 columns itself, in the order `readme.txt` lists
-them. GeoNames doesn't put quotes around its fields. The script tells pyarrow not to look for any.
-It reads the id and the population as whole numbers. Then it writes six columns to
-`points.parquet`, under the names Tessera looks for.
+Because the file has no header, the script supplies the 19 column names itself, in the order
+`readme.txt` lists them. GeoNames doesn't quote its fields, so the script tells pyarrow not to look
+for quotes. It reads the id and the population as whole numbers, then writes six columns to
+`points.parquet` under the names Tessera expects.
 
-- `entity_id` holds a value that tells each row apart from every other. Tessera looks for a column
-  with this name. We use the GeoNames id, which is already unique.
-- `lon` and `lat` hold the place's position in degrees.
-- `name`, `feature_class` and `population` hold the values we want to see, search and filter.
+- `entity_id` is a value that tells each row apart from every other. Tessera looks for a column
+  with this name, and the GeoNames id is already unique, so we use that.
+- `lon` and `lat` are the place's position in degrees.
+- `name`, `feature_class` and `population` are what we want to see, search and filter on.
 
 Run it.
 
@@ -185,9 +185,9 @@ Every line of `IE.txt` is now a row in `points.parquet`.
 
 ## Describe the data
 
-Next we tell Tessera what the data means. We do that in a declaration. A declaration is a TOML file.
-It names the files to read and says how to place each row on a map. It lists the columns to keep and
-the kind of value in each. It also says who may see each row. Save this as `corpus.toml` beside
+Next we tell Tessera what the data means, in a file called a declaration. It's written in TOML. It
+names the files to read and says how to place each row on a map. It lists the columns to keep and
+the kind of value each holds, and it says who may see each row. Save this as `corpus.toml` beside
 `points.parquet`.
 
 ```toml
@@ -227,30 +227,31 @@ type   = "i64"
 render = true
 ```
 
-**The sources.** `[sources]` gives each file a short name. The path is relative to `corpus.toml`.
-`[defaults]` makes `points` the source for every block below.
+**The sources.** `[sources]` gives each file a short name, with its path relative to `corpus.toml`.
+`[defaults]` makes `points` the source for every block below it, so we don't have to repeat it.
 
 **The view.** A [view](../system/data-model.md#views-and-view-groups) is one way of laying the
 places out on a flat map. It has a projection, which turns longitude and latitude into a position on
-the map. It also has an extent, the part of the map it covers. One set of places can have several
-views. A collection of documents might have a geographic map and an embedding layout, for example.
-A viewer can switch between them. We need one view, called `ireland`.
+the map, and an extent, which is the part of the map it covers. A corpus can have several views. A
+collection of documents might have a geographic map and a layout drawn from an embedding, for
+instance, and a viewer can switch between them. We only need one, which we'll call `ireland`.
 
-`web_mercator` is the projection almost every web map uses. It keeps shapes true. It stretches
-areas more the further they are from the equator.
+`web_mercator` is the projection almost every web map uses. It keeps shapes true, but stretches
+areas more and more the further they are from the equator. That's why Greenland looks nearly as big
+as Africa on most web maps.
 
-The `extent` is a range of longitude and a range of latitude, in degrees. Ours is a rectangle
-around Ireland. The extent has no default. Every view has to state one.
+The `extent` gives a range of longitude and a range of latitude, in degrees. Ours is a rectangle
+around Ireland. There's no default, so every view has to state one.
 
-`point_visibility` decides who may see each place. Tessera does this by giving each place an access
-label. Each viewer holds a set of labels and sees only the places that carry one of them. A label
-usually comes from a column in your data. We have no such column, so every place gets the default
-label, `public`. Every viewer holds `public`. Everyone will see every place. A later tutorial on
-access control gives places different labels. It shows two viewers two different maps.
+`point_visibility` decides who may see each place. Tessera gives each place an access label, and
+each viewer holds a set of labels. A viewer sees only the places whose label they hold. Labels
+usually come from a column in your data, but we don't have one, so every place gets the default
+label, `public`. Every viewer holds `public`, so everyone will see every place. The tutorial on
+access control gives places different labels and shows two people two different maps.
 
-**The vocabulary.** The feature class is one letter from a list that GeoNames defines. The table
-shows what each letter covers and how many Irish places carry it. The
-[GeoNames feature codes page](http://www.geonames.org/export/codes.html) has the details.
+**The vocabulary.** The feature class is a single letter from a list GeoNames defines. Here is what
+each letter covers, and how many Irish places carry it. The [GeoNames feature codes
+page](http://www.geonames.org/export/codes.html) has more detail.
 
 | Class | What GeoNames files under it | Places |
 |---|---|---|
@@ -264,37 +265,38 @@ shows what each letter covers and how many Irish places carry it. The
 | U | undersea features | 0 |
 | V | forests and heaths | 118 |
 
-A column whose values come from a fixed list is called a category. Tessera keeps the list itself as
-a [vocabulary](../system/data-model.md#vocabularies).
+A column whose values come from a fixed list like this is a category. Tessera keeps the list itself
+as a [vocabulary](../system/data-model.md#vocabularies).
 
-`width = "u8"` stores each place's class as a one-byte code. One byte leaves room for 255 values.
+`width = "u8"` stores each place's class as a one-byte code, which leaves room for 255 values.
 
-`value_set = "closed"` says the list is complete. The build refuses any place whose class is not on
-it.
+`value_set = "closed"` says the list is complete. The build will refuse any place whose class isn't
+on it.
 
-`visibility = "public"` lets every viewer see the whole list. That includes `U`, which no Irish
-place carries. The other setting, `derived`, shows each viewer only the values on places they can
-see. This `public` is a setting on the list. It is separate from the access label on each place.
+`visibility = "public"` lets every viewer see the whole list, including `U`, which no Irish place
+carries. The alternative, `derived`, would show each viewer only the values found on places they can
+see. This `public` is a setting on the list, and has nothing to do with the access label on each
+place.
 
-**The attributes.** An attribute is a column that Tessera keeps for every place. We declare three.
-A `text` attribute holds words. A `category` attribute holds a value from a vocabulary. An `i64`
-attribute holds a whole number.
+**The attributes.** An attribute is a column Tessera keeps for every place. We declare three. The
+name is `text`, the feature class is a `category` drawn from the vocabulary above, and the
+population is an `i64`, which is a whole number.
 
-Tessera stores every attribute with its place. The server reads it when someone opens that place.
-Two settings add more.
+Every attribute is stored with its place, and the server reads it when someone opens that place. Two
+settings add to that.
 
-- `index = true` builds a search index. On `name`, it lets you search for the words in a place's
+- `index = true` builds a search index. On `name`, that lets you search for words in a place's
   name.
-- `render = true` stores the value next to each place's position on the map. The value then travels
-  with every point drawn. The map can colour points by it and filter on it. We set it on
-  `feature_class` and `population`.
+- `render = true` stores the value beside each place's position on the map, so it travels with
+  every point that's drawn. That's what lets the map colour points by it and filter on it. We set
+  it on `feature_class` and `population`.
 
 ## Describe the deployment
 
-The declaration describes the data. A second file, `tessera.toml`, describes this deployment. It
-says where the bundle goes and which declaration to build. It also sets up the server.
-`tessera check`, `tessera build` and `tessera serve` look for this file in the directory you run
-them from. If it isn't there, they look in the directories above. Save this beside `corpus.toml`.
+The declaration describes the data. A second file, `tessera.toml`, describes this particular
+deployment of it. It says where the bundle goes and which declaration to build, and it sets up the
+server. `tessera check`, `tessera build` and `tessera serve` all look for it in the directory you
+run them from, and then in the directories above. Save this beside `corpus.toml`.
 
 ```toml
 [bundle]
@@ -321,25 +323,26 @@ operator_credential_file = "operator.secret"
 
 `[bundle]` names three places on disc. `path` is the directory the build writes and the server
 opens. `cache` is where the server keeps work it can reuse, such as each viewer's set of places.
-`wal` is the server's write-ahead log. The server records each change to the data there before
-applying it. A change then survives a crash.
+`wal` is the server's write-ahead log, where it records every change to the data before applying it,
+so that a change survives a crash.
 
 `[build]` names the declaration to build.
 
-`[plugin]` names the code that decides what each viewer may see. `builtin:passthrough` is the only
-one there is. The tutorial on access control will explain it.
+`[plugin]` names the code that decides what each viewer may see. There's only one so far,
+`builtin:passthrough`, and the tutorial on access control explains it.
 
-`token_max_lifetime` sets how long a browser's permission to read the map lasts. Ours lasts an hour.
+`token_max_lifetime` is how long a browser's permission to read the map lasts, in seconds. An hour
+is plenty here.
 
-`[serve]` gives the server three addresses and names two secret files. We'll create the files and
-explain the addresses when we start the server.
+`[serve]` gives the server's three addresses and the names of two files holding secrets. We'll
+create the files, and explain the addresses, when we start the server.
 
 ## Check the declaration
 
 Before building anything, ask Tessera what it makes of the two files. `tessera check` reads the
-declaration. It opens each Parquet file the declaration names. It compares the columns the
-declaration asks for with the columns in the file. It reads only names and types, never rows. On
-our file it takes 18 milliseconds.
+declaration, opens each Parquet file it names, and compares the columns the declaration asks for
+with the columns each file actually has. It only reads names and types, never rows, so it's quick.
+On our file it took 18 milliseconds.
 
 ```bash
 tessera check
@@ -365,26 +368,25 @@ attributes (in declaration order, which is the stored column order)
 check OK: 2 source(s), 1 view(s), 0 view group(s) over 0 declared view(s), 1 vocabulary(ies), 3 attribute(s), 0 layer(s), 0 warning(s)
 ```
 
-`check OK` on the last line is the result we want. The lines above it describe what the build will
-do.
+`check OK` on the last line is what we want to see. Above it, the check describes what the build is
+going to do.
 
-The first section has a surprise. We asked for a rectangle. The check says the view has been
+The first section holds a surprise. We asked for a rectangle, but the check says the view has been
 snapped outward to a square. Tessera stores positions on a grid that lines up with the standard map
-tiles. Every tile the map asks for, at any zoom, then falls exactly on the grid. So Tessera widens
-our extent to the smallest standard tile that contains it. At zoom level 5 the world is 32 tiles
-across. Our tile is in column 15 and row 10, counting from zero at the top left. The numbers in
-square brackets give the same tile in the projection's own units. In those units the whole world
+tiles, so that any tile the map asks for, at any zoom, falls exactly on the grid. To make that work
+it widens our extent to the smallest standard tile that contains it. At zoom level 5 the world is 32
+tiles across, and ours is the tile in column 15, row 10, counting from zero at the top left. The
+numbers in square brackets are the same tile in the projection's own units, where the whole world
 runs from 0 to 1 in each direction.
 
-The other sections repeat what we declared. `labels from default_only` means that no column
-supplies access labels. Every place gets the default, `public`. `hot` is the check's word for
-`render = true`.
+The rest repeats what we declared. `labels from default_only` means no column supplies access
+labels, so every place gets the default, `public`. `hot` is the check's word for `render = true`.
 
-The last line counts two sources, though we have one file. The check read the file's schema twice.
-It read it once for the attributes and once for the view's positions.
+The last line counts two sources, though we only have one file. The check reads the file's schema
+twice, once for the attributes and once for the view's positions.
 
-Try a mistake while nothing depends on it. Open `corpus.toml` and change the last attribute's name
-to `populaton`. Run the check again.
+While nothing depends on it yet, try making a mistake. Open `corpus.toml`, change the last
+attribute's name to `populaton`, and run the check again.
 
 ```bash
 tessera check
@@ -397,38 +399,38 @@ tessera check
 check FAILED: 1 finding(s) across 2 source(s). Nothing was read but Parquet schemas, so a clean check is not a clean build: it cannot see a value against a closed vocabulary, a member id that resolves to nothing, or where the data sits inside a view's extent
 ```
 
-The check names the attribute and the column it looked for. It lists the columns the file actually
-has. Its last line admits what it cannot see. It has read only names and types. A class missing
-from our closed vocabulary would get past it. The build would catch that. Change the name back to
-`population` and run `tessera check` again. It says `check OK`.
+The check names the attribute, says which column it went looking for, and lists the columns the file
+does have. Its last line is honest about its limits. It has only seen names and types, so a class
+missing from our closed vocabulary would get past it, and only the build would catch that. Change
+the name back to `population` and run `tessera check` once more to get `check OK` back.
 
 ## Build the bundle
 
-The build needs a secret key first. Inside the server, every place gets a number of Tessera's own.
-That number never leaves the server. A viewer holding a few of them could estimate how many places
-they are not allowed to see. A browser gets a `tessera_id` for each place instead. The build makes
-it by scrambling the internal number with a secret key, called the identity key. The
-[security chapter](../system/security.md#a-client-never-sees-an-entity-id) explains what the
-scrambling hides and what it doesn't.
+The build needs one more thing first, which is a secret key. Inside the server, every place is
+identified by a number of Tessera's own. That number never leaves the server, because a viewer who
+collected a few of them could estimate how many places they aren't allowed to see. Browsers get a
+`tessera_id` for each place instead. It's the internal number scrambled with a secret called the
+identity key. The [security chapter](../system/security.md#a-client-never-sees-an-entity-id)
+explains what the scrambling hides and what it doesn't.
 
-The build reads the key from a file named `.env` beside `tessera.toml`. Create one with a random key
-that only you can read.
+The build reads the key from a file called `.env` beside `tessera.toml`. Create one holding a random
+key that only you can read.
 
 ```bash
 echo "TESSERA_IDENTITY_KEY=$(openssl rand -hex 16)" > .env
 chmod 600 .env
 ```
 
-Keep `.env`. A build with a different key gives every place a different `tessera_id`. Any
-`tessera_id` a viewer had saved would no longer mean the same place. Without a key, the build
-refuses to start. Its message lists the ways to supply one.
+Keep `.env` safe. If you rebuild with a different key, every place gets a different `tessera_id`,
+and any `tessera_id` a viewer had saved will no longer point at the same place. If there's no key at
+all, the build refuses to start and tells you the ways to supply one.
 
-Now build the bundle. The build reads every row of `points.parquet`. It works out where each place
-sits on the map. It stores neighbouring places next to each other on disc. The places in any map
-tile, at any zoom, end up in one run of rows. The build also checks each feature class against the
-vocabulary. It builds the search index over the names. It records which places carry which access
-label. The result goes into the `bundle` directory. From now on the server reads only the bundle,
-never your Parquet file.
+Now build the bundle. The build reads every row of `points.parquet` and works out where each place
+sits on the map. It stores neighbouring places next to each other on disc, so that the places in any
+map tile, at any zoom, form one unbroken run of rows. Along the way it checks every feature class
+against the vocabulary, builds the search index over the names and records which places carry which
+access label. Everything goes into the `bundle` directory. From here on the server reads only the
+bundle, and never looks at your Parquet file again.
 
 ```bash
 tessera build
@@ -450,28 +452,27 @@ attribute 'population': 29,935 of 29,935 entities have a value
   view ireland: 29935 row(s)
 ```
 
-It takes a few seconds. Most of the report is what we expected. All 29,935 places took the default
-label. Every place has a value for each attribute. The view holds 29,935 rows. Every feature class
-was one of our nine letters. Otherwise the build would have stopped and named the stray value.
+It takes a few seconds. Most of the report confirms what we expected. All 29,935 places took the
+default label, and every one of them has a value for each attribute. Every feature class was one of
+our nine letters, too. If one hadn't been, the build would have stopped and named it.
 
-The second line gives the snapped tile in degrees. It runs from longitude −11.25 to 0 and from
-latitude 48.9 to 55.8. The fourth line reports one place outside that tile. The build has clamped
-it. It moved the place onto the nearest edge of the tile and kept it.
+The second line gives the snapped tile in degrees, from longitude −11.25 to 0 and latitude 48.9 to
+55.8. The fourth line says one place fell outside that tile. The build has clamped it, which means
+it moved the place onto the nearest edge of the tile instead of dropping it.
 
-The place is Saint Patrick's Bridge. GeoNames lists three places of that name in Ireland. One is a
-spit on the Wexford coast. One is the bridge over the Lee in Cork, filed as a historic site at
-longitude −8.47036. The third has the spit's class and the Cork bridge's position. Its
-longitude, though, is 8.47036. The minus sign is missing. That puts it east of Greenwich, in Germany. The
-build has pinned it to the eastern edge of our map.
+That place is Saint Patrick's Bridge. GeoNames lists three places of that name in Ireland. One is a
+spit on the Wexford coast, and another is the bridge over the Lee in Cork, filed as a historic site
+at longitude −8.47036. The third has the spit's class and the Cork bridge's position, except that
+its longitude is 8.47036. The minus sign has gone missing, which puts it east of Greenwich, in
+Germany. The build has pinned it to the eastern edge of our map.
 
-We'll leave it there. It makes a useful landmark on the map. To correct it, you would fix the
-longitude in `IE.txt` and run `convert.py` again. Then you would delete the `bundle` directory and
-build again. The build refuses to write over an existing bundle.
+We'll leave it there, since it makes a handy landmark. To correct it, you'd fix the longitude in
+`IE.txt`, run `convert.py` again, delete the `bundle` directory and build again. The build won't
+write over an existing bundle.
 
 ## Serve it
 
-The server needs the two secret files that `tessera.toml` names. Create them the same way as the
-key.
+The server needs the two secret files `tessera.toml` names. Create them the same way as the key.
 
 ```bash
 openssl rand -hex 16 > session.secret
@@ -479,19 +480,19 @@ openssl rand -hex 16 > operator.secret
 chmod 600 session.secret operator.secret
 ```
 
-The server listens on three addresses. Each has its own job.
+The server listens on three addresses, each with its own job.
 
-- The viewer address, port 9141, serves the map to browsers. Each browser gets only the places it is
-  allowed to see.
-- The session address, port 9142, grants a browser permission to read the map. It answers only
-  callers that hold the session secret.
-- The control address, port 9143, takes changes to the data, such as new places and deletions. It
-  answers only callers that hold the operator secret. We won't use it here.
+- The viewer address, port 9141, serves the map to browsers. Each browser gets only the places
+  it's allowed to see.
+- The session address, port 9142, gives a browser permission to read the map. It only answers
+  callers holding the session secret.
+- The control address, port 9143, takes changes to the data, such as new places and deletions.
+  It only answers callers holding the operator secret. We won't use it here.
 
-Keeping them apart lets you open each address only to the callers that need it.
+Keeping them apart means you can open each address only to the callers that need it.
 
-`tessera serve` opens the bundle and starts answering on all three addresses. It runs until you stop
-it. Give it a terminal of its own.
+`tessera serve` opens the bundle and starts answering on all three. It keeps running until you stop
+it, so give it a terminal of its own.
 
 ```bash
 cd ~/ireland
@@ -505,13 +506,14 @@ tessera serve
 {"event":"listening","viewer":"127.0.0.1:9141","session":"127.0.0.1:9142","control":"127.0.0.1:9143"}
 ```
 
-The three `INFO` lines describe the server's own set-up. They need nothing from you. The last line
-is the one to look for. It shows all three addresses open.
+The three `INFO` lines are the server describing its own set-up, and you can ignore them. The last
+line is the one to look for. It means all three addresses are open.
 
 ## Open the map
 
-Tessera's browser components draw the map. They live in the repository's `clients/ts` directory.
-They aren't published as a package yet. Build them from the clone, in a second terminal.
+The map itself is drawn by Tessera's browser components, which live in the repository's `clients/ts`
+directory. They aren't published as a package yet, so build them from the clone. Use a second
+terminal for this.
 
 ```bash
 cd ~/tesseradb/clients/ts
@@ -528,19 +530,18 @@ dist/tessera-components.js             1,857.60 kB │ gzip: 444.08 kB
 ...
 ```
 
-`examples/plain-html` holds a web page with the map on it. It also holds a small Node server for
-the page.
+`examples/plain-html` holds a web page with the map on it, and a small Node server to go with it.
 
-The page needs its own server because of the session secret. Anyone holding that secret can get
-permission to see any place. The secret must never reach a browser. The page's server keeps it
-instead. When you open the page, that server uses the secret to get you permission to read the map.
-It passes the browser only the permission, which lasts an hour. It also forwards the browser's map
-requests to the viewer address. The page and the map then come from one address.
+The page needs its own server because of the session secret. Anyone with that secret can get
+permission to see any place, so it must never reach a browser. The page's server keeps it instead.
+When you open the page, the server uses the secret to get you permission to read the map, and passes
+the browser only that permission, which lasts an hour. It also forwards the browser's map requests
+to the viewer address, so the page and the map come from the same place.
 
-The page's server offers the people listed in `users.json`. Each person has a display name and a
-list of the labels they hold, under `terms`. A real application would take these from its own
-sign-in. The example's list belongs to another dataset. Replace it with one person, Everyone, who
-holds no labels.
+The page's server offers a choice of the people listed in `users.json`. Each has a display name and
+a list of the labels they hold, under `terms`. A real application would get these from its own
+sign-in. The list that comes with the example belongs to a different dataset, so replace it with a
+single person, Everyone, who holds no labels of their own.
 
 ```bash
 cd examples/plain-html
@@ -549,7 +550,8 @@ echo '{"everyone": {"label": "Everyone", "terms": []}}' > users.json
 
 Everyone will still see every place, because every viewer holds `public`.
 
-Tell the page's server where Tessera is listening and where the session secret is. Then start it.
+Tell the page's server where Tessera is listening and where to find the session secret, then start
+it.
 
 ```bash
 export TESSERA_VIEWER_URL=http://127.0.0.1:9141
@@ -562,71 +564,75 @@ node server.mjs
 plain-html example on http://localhost:5180
 ```
 
-Open <http://localhost:5180>. The page signs in as Everyone and draws every place in blue. There is
-no base map yet. The places themselves draw the outline of Ireland. The gap in the north-east is
-Northern Ireland, which GeoNames files under the United Kingdom. The single point far out to the
-east is Saint Patrick's Bridge, on the edge of our tile. Scroll to zoom in. Hold the pointer over a
-point to see its name.
+Open <http://localhost:5180>. The page signs you in as Everyone and draws every place in blue.
+There's no base map yet, so the outline of Ireland is drawn by the places themselves. The gap in the
+north-east is Northern Ireland, which GeoNames files under the United Kingdom, and the lone point
+far out to the east is Saint Patrick's Bridge on the edge of our tile. Scroll to zoom in, and hover
+over a point to see its name.
 
 The strip along the bottom reads 29,935 shown, 29,935 matched and 29,935 visible. Visible is how
-many places you may see in the part of the map on screen. Matched is how many of those pass your
-filters. With no filters set, that is all of them. Shown is how many points the page has drawn.
-Shown can be lower than matched. Where an area holds more matches than the page draws at once, the
-server sends a sample.
+many places you're allowed to see in the part of the map on screen. Matched is how many of those
+pass your filters, which with no filters set is all of them. Shown is how many points the page has
+actually drawn. It can be lower than matched, because where an area holds more matches than the page
+draws at once, the server sends a sample.
 
-If you leave the page open for more than an hour, the strip reads Session expired. The permission
-has run out. Reload the page and its server gets a new one.
+If you leave the page open for more than an hour, the strip will say Session expired, because the
+permission has run out. Reloading the page gets a fresh one.
 
 ## Filter the map
 
-The panel on the left has a filter for each attribute we declared. There is a search box for the
-name. There is a tick box for each feature class. There is a range for the population.
+The panel on the left has a filter for each attribute we declared. There's a search box for the name
+and a range for the population. Each feature class has its own tick box, and that's where we'll
+start.
 
-Tick P. The matched count falls to 12,159. Those are the cities, towns and villages, the same number
-as in the table.
+Tick P. The matched count drops to 12,159, the same number of cities, towns and villages as in the
+table.
 
-Now type 10000 in the first Population box and press Enter. The count falls to 72. These are the
-places with ten thousand people or more. The largest is Dublin, with 1,024,027. A village with no
-population figure counts as 0 here. It falls outside the range.
+Now type 10000 in the first Population box and press Enter. The count falls to 72, the places with
+ten thousand people or more. The largest of them is Dublin, with 1,024,027. A village with no
+population figure counts as 0, so it falls outside the range.
 
-The visible count drops while a filter is on. With P ticked it fell to 29,687 in our window. The
-page counts visible places only where it has drawn something. Some stretches of the map hold no town
-at all. Matched is the number to watch.
+The visible count drops while a filter is on. With P ticked it fell to 29,687 in our window, because
+the page only counts visible places where it has drawn something, and some stretches of the map have
+no town at all. Matched is the number to watch.
 
-Choose Clear all. Type `kilkenny` in the Name box and press Enter. Twelve places match. They are the
-county, the city and a village of the same name in County Mayo. The rest are seven hotels, the
-airport and the Smithwick's brewery. The search matches whole words. The locality of Kilkennybeg is
-not among the results.
+Choose Clear all, type `kilkenny` in the Name box and press Enter. Twelve places match. There's the
+county, the city and a village of the same name over in County Mayo, and then seven hotels, the
+airport and the Smithwick's brewery. The search matches whole words, so the locality of Kilkennybeg
+isn't among them.
 
-Choose Clear all again. Then choose `feature_class` under Colour by. Each class gets its own colour.
-The colour comes from the value that `render = true` sends with every point.
+Choose Clear all again, then pick `feature_class` under Colour by. Each class gets its own colour,
+using the value that `render = true` sends with every point.
 
-When you've finished, press Ctrl-C in each terminal. That stops the page's server and Tessera.
+When you've finished, press Ctrl-C in each terminal to stop the page's server and Tessera.
 
 ## What you built
 
-`~/ireland` now holds a working deployment. The data is in `points.parquet`. The declaration is in
-`corpus.toml`. `tessera.toml` describes the deployment. `.env`, `session.secret` and
-`operator.secret` hold its three secrets. The `bundle` directory holds what the build made. To bring
-the map back, start `tessera serve` in `~/ireland`. Then run the three `export` lines and
-`node server.mjs` in the example's directory.
+`~/ireland` now holds a working deployment. The data is in `points.parquet` and the declaration in
+`corpus.toml`. `tessera.toml` holds the deployment's settings, and `.env`, `session.secret` and
+`operator.secret` hold its three secrets. The `bundle` directory is what the build made from all of
+that. To bring the map back, start `tessera serve` in `~/ireland`, then run the three `export` lines
+and `node server.mjs` in the example's directory.
 
 ## What you learned
 
 - A declaration tells Tessera what your data means. `tessera check` compares it with the column
-  names and types in your files. `tessera build` reads every row.
+  names and types in your files, and `tessera build` reads every row.
 - The bundle is what the server serves. The build sorts the places into map order and writes the
-  indexes the server needs. The server never opens your source files.
-- Every place carries an access label. Ours all carry `public`. Every viewer holds that label.
-- The server listens on three addresses. Browsers read the map from the viewer address. Your own
-  server gets them permission from the session address, using the session secret. Changes to the
-  data go to the control address.
-- Everything a viewer is sent is computed from the places their labels allow.
+  indexes the server needs, and after that the server never opens your source files.
+- Every place carries an access label, and a viewer sees only the places whose label they hold.
+  Ours all carry `public`, which everyone holds.
+- The server listens on three addresses. Browsers read the map from the viewer address, your own
+  server gets them permission from the session address, and changes to the data go to the
+  control address.
+- Everything a viewer is sent, every count and every point, is computed from the places their
+  labels allow.
 
 ## Next
 
-The next tutorial covers access control. It gives places different labels and signs in two viewers
-who hold different ones. It also explains the permission a browser gets, which Tessera calls a
-token. That tutorial isn't written yet. Meanwhile, the [overview](../system/overview.md) describes
-the whole system. [The data model](../system/data-model.md) says more about views, attributes and
-vocabularies. [Access control](../system/access-control.md) explains labels and tokens.
+The next tutorial is about access control. It gives places different labels, signs in two people who
+hold different ones, and compares their maps. It also explains the permission a browser gets, which
+Tessera calls a token. That tutorial isn't written yet. In the meantime, the
+[overview](../system/overview.md) describes the whole system, and [the data
+model](../system/data-model.md) says more about views, attributes and vocabularies. [Access
+control](../system/access-control.md) covers labels and tokens.
