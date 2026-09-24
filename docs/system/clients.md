@@ -199,10 +199,9 @@ nothing in another.
 
 ## Reading in bulk
 
-The bulk reads, `POST /v1/items` and `POST /v1/artifacts`, sit beside the store and do not pass
-through it: a caller asks for a whole result and receives it page by page, with no replica and no
-camera. Each client follows each response's cursor until the read ends, and passes the caller's
-request through as given, choosing no fields and no order on the caller's behalf.
+The bulk reads, `POST /v1/items` and `POST /v1/artifacts`, do not pass through the store. Each
+client follows each response's cursor until the read ends, and passes the caller's request through
+as given, choosing no fields and no order on the caller's behalf.
 
 | Client | Call | What it gives back |
 |---|---|---|
@@ -245,9 +244,7 @@ to 5 and 7 through what is actually on screen, not through a transcript of what 
 is covered by unit tests; rules 8 to 12 are not screen-checkable and are not covered there.
 
 The bulk reads live in `@tesseradb/client`'s `records` module, in the Python package's viewer
-reader, and in the CLI's `records` module. Each client's tests read whole results across
-responses against a running server, and cut responses before their trailers to check that a read
-keeps its whole pages and the cursor after the last of them.
+reader, and in the CLI's `records` module.
 
 ## Sources
 
