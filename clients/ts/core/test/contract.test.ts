@@ -2,14 +2,17 @@ import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient} from '../src/client.js';
+import {Control} from '../src/control.js';
 import {headersOf} from './support.js';
 
 /**
- * `TesseraClient` reaches the operations the HTTP contract publishes.
+ * `TesseraClient` and `Control` reach the operations the HTTP contract publishes.
  *
- * The contract file is read here rather than a list kept beside it. An operation is reached by the
- * client method of the same name, or the one `REACHED_AS` gives, and each such method is called
- * against a recording `fetch` to check that it sends the operation's method and path.
+ * The contract file is read here rather than a list kept beside it. An operation on the viewer or
+ * session plane is reached by the `TesseraClient` method of the same name, and one on the control
+ * plane by the `Control` method of the same name, or in either case the one `REACHED_AS` gives.
+ * Each such method is called against a recording `fetch` to check that it sends the operation's
+ * method and path to its plane's listener.
  */
 
 const CONTRACT = join(import.meta.dirname, '../../../../docs/openapi/tessera.yaml');
@@ -45,10 +48,19 @@ function operations(text: string): Operation[] {
   return out;
 }
 
-/** Each plane's route prefix, from the `servers` descriptions: `viewer` → `/v1/`, `session` → `/session/`. */
+/** Each plane's route prefix, from the `x-tessera-plane` and `x-tessera-route-prefix` of each server. */
 function planes(text: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const m of text.matchAll(/description: The (\w+) plane listener .*Routes under `(\/[^`]*)`/g)) out.set(m[1]!, m[2]!);
+  let inServers = false;
+  let plane: string | null = null;
+  for (const line of text.split('\n')) {
+    if (/^\S/.test(line)) inServers = line.startsWith('servers:');
+    if (!inServers) continue;
+    const named = /^ {4}x-tessera-plane:\s*(\S+)\s*$/.exec(line);
+    if (named) plane = named[1]!;
+    const prefix = /^ {4}x-tessera-route-prefix:\s*(\S+)\s*$/.exec(line);
+    if (prefix && plane) out.set(plane, prefix[1]!);
+  }
   return out;
 }
 
@@ -59,18 +71,31 @@ function operationOf(ops: Operation[], method: string, path: string): string | n
   return matching[0]?.id ?? null;
 }
 
-/** Operations the client reaches under another name. */
+/** Operations reached under another name. */
 const REACHED_AS: Record<string, string> = {
   suggestCategoryValues: 'suggest',
-  browseArtifacts: 'browse'
+  browseArtifacts: 'browse',
+  addVocabularyValues: 'vocabularyValues',
+  declarePlainView: 'declareView',
+  registerLayer: 'declareLayer',
+  publishArtifacts: 'publish',
+  growMemberships: 'grow'
 };
 
-/** Operations the client does not reach. Adding a method for one of them fails this test until it is removed here. */
-const NOT_REACHED = new Set(['healthz', 'readyz', 'items', 'artifacts']);
+/**
+ * Operations neither client reaches, each with the reason. Adding a method for one of them fails
+ * this test until it is removed here.
+ */
+const NOT_REACHED = new Map([
+  ['healthz', 'a probe for a supervisor, unauthenticated, on the viewer and session listeners'],
+  ['readyz', 'a probe for a supervisor, unauthenticated, on the viewer and session listeners'],
+  ['items', 'the TypeScript client has no bulk read of records'],
+  ['artifacts', 'the TypeScript client has no bulk read of records']
+]);
 
 /**
- * One call of each method that reaches an operation, with arguments enough to send its request, and
- * the signal where one is given.
+ * One call of each `TesseraClient` method that reaches an operation, with arguments enough to send
+ * its request, and the signal where one is given.
  */
 const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<unknown>> = {
   authorise: (c, signal) => c.authorise(['t'], signal),
@@ -84,7 +109,31 @@ const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<
   browse: (c, signal) => c.browse('tok', {view: 's0', layer: 'l'}, signal)
 };
 
+/** One call of each `Control` method that reaches an operation, with arguments enough to send its request. */
+const CONTROL_CALLS: Record<string, (c: Control) => Promise<unknown>> = {
+  ingest: (c) => c.ingest(new Uint8Array()),
+  values: (c) => c.values(new Uint8Array()),
+  changes: (c) => c.changes([]),
+  status: (c) => c.status(),
+  flush: (c) => c.flush(),
+  compact: (c) => c.compact(),
+  declareAttribute: (c) => c.declareAttribute({}),
+  declareVocabulary: (c) => c.declareVocabulary('genre', {}),
+  vocabularyValues: (c) => c.vocabularyValues('genre', {}),
+  declareViewGroup: (c) => c.declareViewGroup('quarter', {}),
+  declareView: (c) => c.declareView('s1', {}),
+  createView: (c) => c.createView('quarter', 'q1', {}),
+  dropView: (c) => c.dropView('quarter', 'q1'),
+  declareLayer: (c) => c.declareLayer({}),
+  dropLayer: (c) => c.dropLayer('clusters'),
+  publish: (c) => c.publish('clusters', {}),
+  grow: (c) => c.grow('clusters', {})
+};
+
 const methodOf = (operation: string) => REACHED_AS[operation] ?? operation;
+
+/** The client class whose methods reach operations under `path`. */
+const surfaceOf = (path: string) => (path.startsWith('/control/') ? Control : TesseraClient);
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -97,17 +146,25 @@ describe('the client against the HTTP contract', () => {
   });
 
   it('has a method for every operation but the ones listed as not reached', () => {
-    const missing = ops.map((op) => op.id).filter((id) => typeof (TesseraClient.prototype as unknown as Record<string, unknown>)[methodOf(id)] !== 'function');
-    expect(new Set(missing)).toEqual(NOT_REACHED);
+    const missing = ops
+      .filter((op) => typeof (surfaceOf(op.path).prototype as unknown as Record<string, unknown>)[methodOf(op.id)] !== 'function')
+      .map((op) => op.id);
+    expect(new Set(missing)).toEqual(new Set(NOT_REACHED.keys()));
   });
 
   it('names the plane each route prefix is served on', () => {
-    expect(planes(readFileSync(CONTRACT, 'utf8'))).toEqual(new Map([['viewer', '/v1/'], ['session', '/session/']]));
+    expect(planes(readFileSync(CONTRACT, 'utf8'))).toEqual(
+      new Map([
+        ['viewer', '/v1/'],
+        ['session', '/session/'],
+        ['control', '/control/']
+      ])
+    );
   });
 
   it('sends each operation’s method and path, to its plane, from the method that reaches it', async () => {
     const prefixes = planes(readFileSync(CONTRACT, 'utf8'));
-    const origins: Record<string, string> = {viewer: 'http://viewer', session: 'http://session'};
+    const origins: Record<string, string> = {viewer: 'http://viewer', session: 'http://session', control: 'http://control'};
     const planeOf = (path: string) => [...prefixes].find(([, prefix]) => path.startsWith(prefix))?.[0];
     const sent: {method: string; path: string; origin: string}[] = [];
     vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
@@ -116,11 +173,16 @@ describe('the client against the HTTP contract', () => {
       return new Response(JSON.stringify({error: 'contract', detail: 'recorded'}), {status: 422});
     });
     const client = new TesseraClient({viewerUrl: origins.viewer!, sessionUrl: origins.session!, sessionCredential: 'cred'});
+    const control = new Control({controlUrl: origins.control!, operatorCredential: 'operator'});
     for (const op of ops.filter((o) => !NOT_REACHED.has(o.id))) {
-      const call = CALLS[methodOf(op.id)];
-      expect(call, `a call for ${methodOf(op.id)}`).toBeDefined();
+      const method = methodOf(op.id);
+      const call: (() => Promise<unknown>) | undefined =
+        surfaceOf(op.path) === Control
+          ? CONTROL_CALLS[method] && (() => CONTROL_CALLS[method]!(control))
+          : CALLS[method] && (() => CALLS[method]!(client));
+      expect(call, `a call for ${method}`).toBeDefined();
       sent.length = 0;
-      await call!(client).catch(() => {});
+      await call!().catch(() => {});
       expect(sent.map((s) => operationOf(ops, s.method, s.path)), op.id).toEqual([op.id]);
       expect(sent[0]!.origin, op.id).toBe(origins[planeOf(op.path)!]);
     }

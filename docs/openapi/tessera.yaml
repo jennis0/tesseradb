@@ -7,6 +7,10 @@
 # `additionalProperties: false`. Where this file and the server disagree, the server is right and
 # this file is wrong.
 #
+# Each server names its plane and the prefix of the routes it serves in `x-tessera-plane` and
+# `x-tessera-route-prefix`, which `clients/ts/core/test/contract.test.ts` reads to send each
+# operation to its listener.
+#
 # What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`, `POST /v1/items` and
 # `POST /v1/artifacts`, and the Arrow IPC forms of `POST /control/ingest`, `POST /control/values`
 # and `PATCH /control/layers/{name}/artifacts`. They are not JSON, so each is declared as a binary
@@ -57,16 +61,22 @@ info:
 servers:
   - url: http://{viewer-host}
     description: The viewer plane's listener, `serve.viewer`. Routes under `/v1/`, and the probes.
+    x-tessera-plane: viewer
+    x-tessera-route-prefix: /v1/
     variables:
       viewer-host:
         default: 127.0.0.1:8080
   - url: http://{session-host}
     description: The session plane's listener, `serve.session`. Routes under `/session/`, and the probes.
+    x-tessera-plane: session
+    x-tessera-route-prefix: /session/
     variables:
       session-host:
         default: 127.0.0.1:8081
   - url: http://{control-host}
     description: "The control plane's listener, `serve.control`: a TCP address, or a Unix socket written `unix:<path>`. The server does not check that a TCP address is loopback. Routes under `/control/`."
+    x-tessera-plane: control
+    x-tessera-route-prefix: /control/
     variables:
       control-host:
         default: 127.0.0.1:8082
