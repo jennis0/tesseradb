@@ -3,16 +3,16 @@ import {refusalOf, type Refusal} from './presented.js';
 import type {SuggestResult, SuggestValue} from './types.js';
 
 /** How long a column's typeahead waits after a keystroke before it asks. */
-export const SUGGEST_DEBOUNCE_MS = 120;
+const SUGGEST_DEBOUNCE_MS = 120;
 
 /**
  * The floor on a `superseded` retry's delay. `retry_after_s` may be `0`, and a filter panel's
  * controls all ask in the same tick, so without a floor they would collide again on every retry.
  */
-export const SUGGEST_MIN_RETRY_S = 0.25;
+const SUGGEST_MIN_RETRY_S = 0.25;
 
 /** How many `superseded` retries one `q` gets before it is published as a `backpressure` refusal. */
-export const SUGGEST_MAX_RETRIES = 5;
+const SUGGEST_MAX_RETRIES = 5;
 
 /** What the typeahead publishes into the `filters` projection. */
 export type SuggestState = {

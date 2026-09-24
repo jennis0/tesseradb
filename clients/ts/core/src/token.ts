@@ -8,7 +8,7 @@ import type {Refusal} from './presented.js';
  */
 export type TokenSupplier = () => Promise<{token: string; expiresAt: number}>;
 
-export function disposedError(): Error {
+function disposedError(): Error {
   return new Error('the store is disposed; create another store to ask again');
 }
 
