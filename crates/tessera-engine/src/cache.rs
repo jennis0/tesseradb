@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use croaring::Portable;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use tessera_authz::FrozenFragment;
 use tessera_types::TermId;
@@ -423,8 +423,8 @@ impl RowProjectionCache {
     }
 
     /// Drop every projection built against a generation older than `floor`, keeping `floor` and
-    /// everything above it. Called by the publication, with
-    /// `live - `[`KEEP_SUPERSEDED_GENERATIONS`].
+    /// everything above it, **and keeping each session's newest projection of each view whatever
+    /// its generation**. Called by the publication, with `live - `[`KEEP_SUPERSEDED_GENERATIONS`].
     ///
     /// # Why a retention depth rather than a reclaim hook
     ///
@@ -434,27 +434,44 @@ impl RowProjectionCache {
     /// was standing in for — **an explicit N-generations-back policy, stated where the cache is
     /// bounded**.
     ///
-    /// **Pruning at the swap, with depth zero, would be wrong**, and it is worth being precise
-    /// about why since the pin argument for that is gone. A flush *extends* row space: the new
-    /// generation's projection for a session is the old one plus the new extent's rows, so the
+    /// **Pruning at the swap, with depth zero, would be wrong.** A flush *extends* row space: the
+    /// new generation's projection for a session is the old one plus the new extent's rows, so the
     /// superseded entry is both the input the background refresh extends and the entry rung 2 of
     /// `Engine::session_geometry`'s ladder serves while the refresh runs. Deleting it at the
     /// instant of the swap deletes both, and every session pays the full rebuild at every tick.
     ///
-    /// **The depth is also what bounds stale-serve.** Rung 2 inserts nothing, so a session whose
-    /// refresh never runs would sit one generation behind for ever; at the next publication its
-    /// entry is two back, this removes it, and its next request builds. Fail-closed staleness,
-    /// bounded at two publications.
+    /// **The newest entry is kept because it is the refresh's only base.** Two publications can
+    /// land before the refresh for the first has produced anything, a flush and then a merge under
+    /// load. The depth alone would then drop the entry both refreshes derive from, both would find
+    /// nothing, and every resident session would pay the full rebuild at its next request. Keeping
+    /// it lets a refresh derive across the gap; the rungs of `crate::refresh` are exact at any
+    /// distance within a prefix and rebuild across one. It costs nothing in the steady state,
+    /// where the refresh keeps every session's newest entry at the live generation anyway, and at
+    /// most one entry per session and view until the next publication otherwise.
+    ///
+    /// **Stale-serve stays bounded at two publications**, because rung 2 serves only the
+    /// generation immediately below the live one. A session whose refresh never runs keeps its
+    /// entry, rung 2 stops finding it at the next publication, and its next request builds.
     ///
     /// Pruning on `segments_version` alone, ignoring the prefix, rests on [`RowProjectionKey`]'s
     /// fact 2 — and a merge is why it must: row ids inside a merged span name different entities
     /// afterwards, so the prefix is *not* a safe discriminator and `segments_version` is
-    /// (`geometry-pinning.md` §4).
+    /// (`geometry-pinning.md` §4). Only `Ready` entries count as newer: a build in flight may yet
+    /// fail, and the entry it derives from is then still the base.
     ///
     /// Same cost note as [`Self::prune_token`], with one difference in its favour: this runs on the
     /// publication path, not on a request handler.
     pub(crate) fn prune_generations_below(&self, floor: u64) -> usize {
-        self.inner.retain_keys(|key| key.segments_version >= floor)
+        let ready = self.inner.ready_entries();
+        let mut newest: FxHashMap<(u64, &str), u64> = FxHashMap::default();
+        for (key, _) in &ready {
+            let version = newest.entry((key.token_id, key.view.as_str())).or_insert(0);
+            *version = (*version).max(key.segments_version);
+        }
+        self.inner.retain_keys(|key| {
+            key.segments_version >= floor
+                || newest.get(&(key.token_id, key.view.as_str())) == Some(&key.segments_version)
+        })
     }
 }
 
@@ -462,7 +479,8 @@ impl RowProjectionCache {
 ///
 /// **One, and the number is the patch's input rather than a margin.** A flush appends, so the
 /// generation immediately below the live one holds exactly the projection the next request's patch
-/// derives from; a second one back is derivable from the first and is never consulted. Raising this
-/// buys nothing and costs a *measured* 125.12 MB per entry per session at 10⁹; lowering it to zero
-/// forfeits the patch and reinstates the full rebuild at every tick.
+/// derives from; a second one back is derivable from the first and is kept only while it is its
+/// session's newest ([`RowProjectionCache::prune_generations_below`]). Raising this buys nothing
+/// and costs a *measured* 125.12 MB per entry per session at 10⁹; lowering it to zero forfeits the
+/// patch and reinstates the full rebuild at every tick.
 pub(crate) const KEEP_SUPERSEDED_GENERATIONS: u64 = 1;
