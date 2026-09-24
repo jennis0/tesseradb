@@ -14,9 +14,9 @@ The table is required.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `path` | path | required | The bundle directory, which `tessera build` writes unless `--out` names another, and `tessera serve` opens. |
-| `cache` | path | required | A directory outside the bundle for files the server derives: cached visibility masks, which survive a restart, and suggestion indexes and scratch files, which are rebuilt at each start. |
-| `wal` | path | required | The write-ahead log. Every write through the control plane is appended and synced to disc here before it is acknowledged, and the log is replayed when the server starts. The path names a series of files: `wal.log` is written as `wal-000001.log`, `wal-000002.log` and so on, and is never itself a file. |
+| `path` | string (a path) | required | The bundle directory, which `tessera build` writes unless `--out` names another, and `tessera serve` opens. |
+| `cache` | string (a path) | required | A directory outside the bundle for files the server derives: cached visibility masks, which survive a restart, and suggestion indexes and scratch files, which are rebuilt at each start. |
+| `wal` | string (a path) | required | The write-ahead log. Every write through the control plane is appended and synced to disc here before it is acknowledged, and the log is replayed when the server starts. The path names a series of files: `wal.log` is written as `wal-000001.log`, `wal-000002.log` and so on, and is never itself a file. |
 
 ## `[build]`
 
@@ -24,7 +24,7 @@ What `tessera build` and `tessera check` read.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `schema` | path | `"schema.toml"` | The corpus declaration. `--config` names another. |
+| `schema` | string (a path) | `"schema.toml"` | The corpus declaration. `--config` names another. |
 
 ## `[identity]`
 
@@ -32,7 +32,7 @@ Where `tessera build` finds the identity key, which it needs to compute each ite
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `env` | string | `"TESSERA_IDENTITY_KEY"` | The environment variable holding the identity key. `tessera build` also reads it from a `.env` file beside `tessera.toml`, and the process environment takes precedence over the file. An empty value takes the default. |
+| `env` | string | `"TESSERA_IDENTITY_KEY"` | The environment variable holding the identity key. `tessera build` also reads it from a `.env` file beside `tessera.toml`, and the process environment takes precedence over the file. An empty value, and a value that is not a string, take the default. |
 
 ## `[plugin]`
 
@@ -63,10 +63,10 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `viewer` | string | not set | The viewer plane's address and port, such as `"127.0.0.1:8141"`: `/v1/meta`, `/v1/viewport`, `/v1/items`, `/v1/artifacts` and `/v1/categories`, for requests carrying a viewer token. `tessera serve` refuses to start without it, and `tessera health` probes it. Port 0 takes a free port, which the server prints when it starts. |
 | `session` | string | not set | The session plane's address and port: `POST /session/authorise`, which issues viewer tokens, and `POST /session/revoke`. `tessera serve` refuses to start without it. |
 | `control` | string | not set | The control plane's address and port, or `"unix:<path>"` for a Unix socket: ingest, deletion and suppression, declarations, flush, compaction and status, all under `/control`. `tessera serve` refuses to start without it. A relative socket path is read from the server's working directory, not from this file's directory, and a file already at the path is removed. |
-| `session_credential_file` | path | not set | A file holding the session credential, the bearer token the session plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file cannot be read, and when neither this nor `session_credential_env` is set. When both are set, the file is used. |
+| `session_credential_file` | string (a path) | not set | A file holding the session credential, the bearer token the session plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file cannot be read, and when neither this nor `session_credential_env` is set. When both are set, the file is used. |
 | `session_credential_env` | string | not set | An environment variable holding the session credential. `tessera serve` refuses to start when it is unset. |
-| `operator_credential_file` | path | not set | A file holding the operator credential, the bearer token every request to the control plane requires. It is read and refused as `session_credential_file` is. |
-| `operator_credential_env` | string | not set | An environment variable holding the operator credential. |
+| `operator_credential_file` | string (a path) | not set | A file holding the operator credential, the bearer token every request to the control plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file cannot be read, and when neither this nor `operator_credential_env` is set. When both are set, the file is used. |
+| `operator_credential_env` | string | not set | An environment variable holding the operator credential. `tessera serve` refuses to start when it is unset. |
 | `cors_origins` | array of strings | `[]` | Browser origins, such as `"https://maps.example.org"`, whose pages may call the viewer plane with a viewer token. `"*"` is refused. |
 | `cors_loopback` | boolean | `false` | Admit a page served from `localhost`, `127.0.0.1` or `[::1]`, on any port, to the viewer plane, as for a notebook whose port is not known in advance. |
 | `dev_cors_origins` | array of strings | `[]` | Browser origins whose pages may call both the viewer plane and the session plane, so a page in development can hold the session credential. The server logs a warning at start when it is set. `"*"` is refused. |
@@ -75,7 +75,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `compute_queue` | integer | twice `compute_admission` | Requests that may wait for an admission slot beyond those running. A request finding no place is refused with 429 at once. `compute_admission` and `compute_queue` together may not exceed 2305843009213693951. |
 | `admission_timeout_ms` | integer | `250` | Milliseconds a queued request waits for an admission slot before it is refused with 429. |
 | `single_flight_wait_ms` | integer | `6000` | Milliseconds a request waits for another request's build of a shared cached structure before it is refused with 429. |
-| `max_k` | integer | `1000` | The most marks one tile of `POST /v1/viewport` may draw. A larger `k` is lowered to it. |
+| `max_k` | integer | `1000` | The largest `k` a viewport request may name; a larger one is lowered to it. A tile draws at most the smaller of this and `k_max_marks`. |
 | `k_min` | integer | `2` | The fewest marks a tile with a visible point draws. `tessera serve` refuses to start with `0`. |
 | `k_max_marks` | integer | `500` | The most marks a tile draws, and the `k` of a request that names none. |
 | `theta_target_marks` | integer | `16` | The marks the average occupied tile draws at any zoom; the threshold that samples points is derived from it. |
@@ -94,7 +94,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `max_suggestion_walk` | integer | `100000` | The most values one suggestion request examines, hidden ones included, before it stops and answers `more: true`. |
 | `max_suggest_set_entities` | integer | `10000000` | The size of a viewer's visible set at or below which suggestions are answered from a set of the values that viewer can see, built once per session, rather than by checking each value in turn. |
 | `max_browse_rows` | integer | `200` | The most rows one page of `POST /v1/artifacts/browse` returns, and the page size of a request that names none. |
-| `max_shape_vertices` | integer | `1000000` | The most vertices a shape published through `/control/layers/{name}/artifacts` may have. A shape with more is refused with 422. A build does not read this key. |
+| `max_shape_vertices` | integer | `1000000` | The most vertices a shape published through `/control/layers/{name}/artifacts` may have. A shape with more is refused with 422. A build does not read this key: it refuses a shape of more than 1000000 vertices whatever the key says. |
 | `max_page_rows` | integer | `100000` | The most rows one page of a bulk read, `POST /v1/items` or `POST /v1/artifacts`, holds. `0` is refused. |
 | `max_page_bytes` | integer | `67108864` (64 MiB) | The most bytes one page of a bulk read holds, as Arrow before compression. A row larger than this is sent alone. `0` is refused, and so is a value above 2147483648. |
 | `bulk_admission` | integer | `2` | Bulk reads running at once. One more is refused with 429 at once, and `0` refuses every bulk read. Bulk reads may hold seven times `max_page_bytes` of memory each. A value above 2305843009213693951 is refused. |

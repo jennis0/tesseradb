@@ -274,6 +274,7 @@ eras_roster   = "eras_roster.parquet"
 topics        = "topics.parquet"
 topic_members = "topic_members.parquet"
 topic_labels  = "topic_labels.parquet"
+zones         = "zones.parquet"
 
 [defaults]
 source = "points"
@@ -311,11 +312,22 @@ type = "text"
 index = true
 
 [[layer]]
+name = "zones"
+views = ["map"]
+source = "zones"
+membership = "spatial"
+hierarchy.kind = "flat"
+hierarchy.prune_children = true
+visibility = "public"
+artifact_visibility.default = "inherited"
+require_member_visibility = "none"
+shape.kind = "bbox"
+
+[[layer]]
 name = "regions"
 views = ["map"]
 membership = "spatial"
 hierarchy.kind = "flat"
-hierarchy.prune_children = true
 visibility = "public"
 artifact_visibility.default = "inherited"
 require_member_visibility = "none"
@@ -331,7 +343,7 @@ views = ["map"]
 source = "topics"
 membership = "enumerated"
 hierarchy.kind = "stacked"
-visibility = "public"
+visibility = "staff"
 artifact_visibility.default = "inherited"
 require_member_visibility = "any"
 
@@ -361,7 +373,8 @@ content.require_member_visibility = "all"
 
 /// Where a table's keys are written in [`FIXTURE`]: after `anchor`, each key behind `prefix`.
 fn place(path: &str) -> (&'static str, &'static str) {
-    const REGIONS: &str = "[[layer]]\nname = \"regions\"\n";
+    // A spatial layer reading a file, the one on which `default_space` has an effect.
+    const ZONES: &str = "[[layer]]\nname = \"zones\"\n";
     match path {
         "defaults" => ("[defaults]\n", ""),
         "view" => ("[[view]]\n", ""),
@@ -372,16 +385,15 @@ fn place(path: &str) -> (&'static str, &'static str) {
         "vocabulary" => ("[[vocabulary]]\n", ""),
         // The text column, the one `analyser` may be written on.
         "attribute" => ("[[attribute]]\nname = \"body\"\n", ""),
-        // The spatial layer, the one that may write `default_space`.
-        "layer" => (REGIONS, ""),
+        "layer" => (ZONES, ""),
         "layer.artifacts" => ("[[layer.artifacts]]\n", ""),
         "layer.members" => ("[layer.members]\n", ""),
-        "layer.hierarchy" => (REGIONS, "hierarchy."),
+        "layer.hierarchy" => (ZONES, "hierarchy."),
         "layer.levels" => ("[[layer.levels]]\n", ""),
-        "layer.artifact_visibility" => (REGIONS, "artifact_visibility."),
+        "layer.artifact_visibility" => (ZONES, "artifact_visibility."),
         "layer.content" => ("[layer.content]\n", ""),
         "layer.content.supplied" => ("[[layer.content.supplied]]\n", ""),
-        "layer.shape" => (REGIONS, "shape."),
+        "layer.shape" => (ZONES, "shape."),
         "layer.labels" => ("[layer.labels]\n", ""),
         "layer.labels.content" => ("[layer.labels]\n", "content."),
         other => panic!("no place in FIXTURE for `{other}`; add one to `place`"),
@@ -447,9 +459,38 @@ fn refusal(text: &str) -> String {
     }
 }
 
-/// Keys whose stated default the compiled declaration does not record: an inline artifact row is
-/// kept as written, and its `space` is resolved when the build reads it. Every build test writing
-/// an inline shape on an unprojected view without a `space` depends on that default.
+/// A compiled declaration as text two compilations can be compared by. `Debug` prints a hash map
+/// in an order that differs between two maps of the same contents, so the vocabularies, the one
+/// hash map in a `Config`, are printed by name and by code first, and left out of the rest.
+fn canonical(mut config: Config) -> String {
+    let vocabularies: BTreeMap<String, String> = config
+        .schema
+        .vocabularies
+        .drain()
+        .map(|(name, v)| {
+            let values: Vec<(&str, u32, Option<&str>)> = v
+                .values
+                .bindings()
+                .map(|(key, code)| (key, code, v.values.title_of(key)))
+                .collect();
+            let text = format!(
+                "{:?} {:?} {:?} {:?} {:?} {:?} {values:?}",
+                v.title,
+                v.value_set,
+                v.width,
+                v.reserved,
+                v.values.kind(),
+                v.values.visibility()
+            );
+            (name, text)
+        })
+        .collect();
+    format!("{vocabularies:?} {config:?}")
+}
+
+/// Keys whose stated default the compiled declaration does not record. An inline artifact row is
+/// kept as written, and its `space` is applied when the build reads the row, so
+/// `the_space_of_an_inline_row_defaults_to_the_one_the_page_states` checks it there.
 const APPLIED_AT_BUILD: [(&str, &str); 1] = [("layer.artifacts", "space")];
 
 #[test]
@@ -501,10 +542,9 @@ fn each_default_the_reference_states_is_the_one_the_parser_applies() {
             // One directory for both, since each source's resolved path is part of the declaration.
             let dir = tempfile::tempdir().expect("a temporary directory");
             let compiled = |text: &str| {
-                format!(
-                    "{:?}",
+                canonical(
                     parsed_in(dir.path(), text)
-                        .unwrap_or_else(|e| panic!("{}.{}: {e}", table.path, key.name))
+                        .unwrap_or_else(|e| panic!("{}.{}: {e}", table.path, key.name)),
                 )
             };
             assert_eq!(
@@ -537,4 +577,124 @@ fn each_key_the_reference_requires_is_refused_when_absent() {
             );
         }
     }
+}
+
+#[test]
+fn the_space_of_an_inline_row_defaults_to_the_one_the_page_states() {
+    let files = Files::read();
+    let stated = files
+        .config
+        .keys("InlineArtifact")
+        .into_iter()
+        .find(|k| k.name == "space")
+        .and_then(|k| k.stated_value().map(str::to_string))
+        .expect("the page states a default `space`");
+    let stated: toml::Value = toml::from_str(&format!("space = {stated}")).expect("a TOML value");
+    let stated = stated["space"].as_str().expect("a string").to_string();
+
+    let config = parsed(FIXTURE).expect("FIXTURE compiles");
+    let frame = tessera_store::derived::ViewFrame::new(
+        "map",
+        Projection::None,
+        Bounds {
+            x_min: 0.0,
+            x_max: 16.0,
+            y_min: 0.0,
+            y_max: 16.0,
+        },
+    );
+    // The `regions` layer's rows, as the build reads them with `space` set to `space`.
+    let read = |space: Option<&str>| {
+        let mut inputs: Vec<LayerSources> = config
+            .layer_sources
+            .iter()
+            .filter(|s| s.name == "regions")
+            .cloned()
+            .collect();
+        let Some(ArtifactSource::Inline(rows)) = &mut inputs[0].artifacts else {
+            panic!("`regions` writes its artifacts inline");
+        };
+        for row in rows.iter_mut() {
+            row.space = space.map(str::to_string);
+        }
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        crate::layers::read(
+            &config.layers,
+            &inputs,
+            &crate::ids::IdSpace::Integer,
+            &BTreeMap::new(),
+            std::slice::from_ref(&frame),
+            tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+            scratch.path(),
+            1 << 30,
+        )
+        .map(|plan| plan.shape_reports)
+        .unwrap_or_else(|e| panic!("reading `regions` with space {space:?}: {e}"))
+    };
+    assert_eq!(
+        read(None),
+        read(Some(&stated)),
+        "an inline row without `space` is not read as `space = \"{stated}\"`"
+    );
+}
+
+/// The keys whose default the page states in words, each checked by the test below.
+const WORDED: [&str; 7] = [
+    "view.source",
+    "attribute.field",
+    "attribute.source",
+    "attribute.entity_id_field",
+    "layer.layout",
+    "layer.levels.zoom",
+    "layer.labels.visibility",
+];
+
+#[test]
+fn each_default_stated_in_words_is_the_one_the_parser_applies() {
+    let worded: Vec<String> = tables(&Files::read())
+        .iter()
+        .flat_map(|table| {
+            table
+                .keys
+                .iter()
+                .filter(|k| {
+                    k.doc
+                        .default
+                        .as_deref()
+                        .is_some_and(|d| !d.starts_with('`') && d != "not set")
+                })
+                .map(|k| format!("{}.{}", table.path, k.name))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        worded, WORDED,
+        "each default stated in words needs a check in this test"
+    );
+
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let config = parsed_in(dir.path(), FIXTURE).expect("FIXTURE compiles");
+    // `[defaults].source` is `points`, and the view and the attributes name no source.
+    assert_eq!(
+        config.views[0].source,
+        Some(dir.path().join("points.parquet"))
+    );
+    assert_eq!(config.attribute_sources.len(), 1);
+    assert_eq!(config.attribute_sources[0].name, "points");
+    for attribute in &config.schema.attributes {
+        assert_eq!(attribute.column(), attribute.name);
+    }
+    let renamed = with_line(FIXTURE, "defaults", "entity_id_field = \"id\"");
+    let renamed = parsed(&renamed).expect("the declaration compiles");
+    assert_eq!(renamed.attribute_sources[0].fields.of(ENTITY_ID), "id");
+    assert!(config.layers.iter().all(|layer| layer.layout.is_none()));
+    let topics = config.layers.iter().find(|l| l.name == "topics").unwrap();
+    assert!(topics.levels.iter().all(|level| level.zoom.is_none()));
+    let labels = config
+        .layers
+        .iter()
+        .find(|l| l.name == "topic_labels")
+        .unwrap();
+    assert_eq!(topics.visibility.as_deref(), Some("staff"));
+    assert_eq!(labels.visibility, topics.visibility);
 }

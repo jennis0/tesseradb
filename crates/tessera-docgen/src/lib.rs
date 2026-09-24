@@ -337,7 +337,7 @@ fn toml_type(ty: &syn::Type, table: &dyn Fn(&str) -> bool) -> Option<String> {
             Some(
                 match name.as_str() {
                     "String" => "string",
-                    "PathBuf" => "path",
+                    "PathBuf" => "string (a path)",
                     "bool" => "boolean",
                     "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" => {
                         "integer"
@@ -354,6 +354,9 @@ fn toml_type(ty: &syn::Type, table: &dyn Fn(&str) -> bool) -> Option<String> {
 }
 
 fn plural(kind: &str) -> String {
+    if kind == "string (a path)" {
+        return "strings (paths)".to_string();
+    }
     for (one, many) in [("array of ", "arrays of "), ("table of ", "tables of ")] {
         if let Some(rest) = kind.strip_prefix(one) {
             return format!("{many}{rest}");

@@ -195,8 +195,9 @@ pub const ENTITY_ID: &str = "entity_id";
 /// `corpus.toml` declares a corpus: the files a build reads, the views that place each item on a
 /// map, the vocabularies and attributes each item carries, and the annotation layers drawn over
 /// the items. `tessera build` and `tessera check` read the file that `[build] schema` in
-/// `tessera.toml` names, or the one `--config` names. `tessera check --payloads` prints the same
-/// declaration as the request bodies that declare it on a running service.
+/// `tessera.toml` names, `schema.toml` by default, or the one `--config` names. `tessera check
+/// --payloads` prints the same declaration as the request bodies that declare it on a running
+/// service.
 ///
 /// Every table refuses a key it does not know. Where a key is refused beside another, or needs
 /// another, its description says so.
@@ -449,8 +450,8 @@ struct PointVisibilityBlock {
     #[serde(default)]
     field: Option<String>,
     /// A name in `[sources]`: a file of integer `entity_id` and `term_id` columns, one row per
-    /// point and access term. Every view of a build that reads labels this way must name the
-    /// same file.
+    /// point and access term. If one view of a build reads labels this way, every view must, from
+    /// the same file.
     ///
     /// Default: not set.
     #[serde(default)]

@@ -2,7 +2,7 @@
 
 # corpus.toml
 
-`corpus.toml` declares a corpus: the files a build reads, the views that place each item on a map, the vocabularies and attributes each item carries, and the annotation layers drawn over the items. `tessera build` and `tessera check` read the file that `[build] schema` in `tessera.toml` names, or the one `--config` names. `tessera check --payloads` prints the same declaration as the request bodies that declare it on a running service.
+`corpus.toml` declares a corpus: the files a build reads, the views that place each item on a map, the vocabularies and attributes each item carries, and the annotation layers drawn over the items. `tessera build` and `tessera check` read the file that `[build] schema` in `tessera.toml` names, `schema.toml` by default, or the one `--config` names. `tessera check --payloads` prints the same declaration as the request bodies that declare it on a running service.
 
 Every table refuses a key it does not know. Where a key is refused beside another, or needs another, its description says so.
 
@@ -79,7 +79,7 @@ Where each point's access label comes from. A viewer sees a point when they hold
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `field` | string | not set | A column of the view's points file holding each point's access label, as a string or a list of strings. A null or an empty list is no label. An empty name is refused. |
-| `source` | string | not set | A name in `[sources]`: a file of integer `entity_id` and `term_id` columns, one row per point and access term. Every view of a build that reads labels this way must name the same file. |
+| `source` | string | not set | A name in `[sources]`: a file of integer `entity_id` and `term_id` columns, one row per point and access term. If one view of a build reads labels this way, every view must, from the same file. |
 | `default` | string | not set | The label a point with none of its own takes: `public` for every viewer, or an access label the plugin maps to a term. `inherited` is refused. Without it, a point with no label is refused, at a build and at `/control/ingest` alike. |
 
 ## `[[view_group]]`

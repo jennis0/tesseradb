@@ -38,13 +38,13 @@ module = \"builtin:passthrough\"
 token_max_lifetime = 3600
 ";
 
-/// `[identity]` is read by hand in `parse`, so no struct there names its keys. This one does, for
-/// the page and for the tests below.
+/// `[identity]` is read by hand in `parse` against `IDENTITY_KEYS`, so no struct there describes
+/// its keys. This one does, for the page, and a test holds it to `IDENTITY_KEYS`.
 #[allow(dead_code)]
 struct RawIdentity {
     /// The environment variable holding the identity key. `tessera build` also reads it from a
     /// `.env` file beside `tessera.toml`, and the process environment takes precedence over the
-    /// file. An empty value takes the default.
+    /// file. An empty value, and a value that is not a string, take the default.
     ///
     /// Default: `"TESSERA_IDENTITY_KEY"`.
     env: Option<String>,
@@ -194,10 +194,7 @@ fn the_reference_lists_the_keys_parse_accepts() {
                 parse(&probe),
                 Err(ConfigError::UnknownIdentityKey(_))
             ));
-            for key in &keys {
-                parse(&with_line(MINIMAL, "identity", &format!("{key} = \"X\"")))
-                    .unwrap_or_else(|e| panic!("[identity] {key}: {e}"));
-            }
+            assert_eq!(keys, IDENTITY_KEYS, "[identity]");
             continue;
         }
         let accepted = tessera_docgen::accepted_keys(&refusal(&probe));
@@ -226,6 +223,78 @@ fn each_default_the_reference_states_is_the_one_parse_applies() {
                 key.name
             );
         }
+    }
+}
+
+/// The keys whose default the page states in words, each checked by the test below.
+const WORDED: [&str; 5] = [
+    "serve.compute_threads",
+    "serve.compute_admission",
+    "serve.compute_queue",
+    "serve.max_merged_segment_bytes",
+    "ingest.compaction_after_deletions",
+];
+
+#[test]
+fn each_default_stated_in_words_is_the_one_parse_applies() {
+    let (_, sections) = sections();
+    let key = |section: &str, name: &str| -> &Key {
+        let table = sections
+            .iter()
+            .find(|s| s.name == section)
+            .expect("a table");
+        table.keys.iter().find(|k| k.name == name).expect("a key")
+    };
+    let worded: Vec<String> = sections
+        .iter()
+        .flat_map(|section| {
+            section
+                .keys
+                .iter()
+                .filter(|k| {
+                    k.doc
+                        .default
+                        .as_deref()
+                        .is_some_and(|d| !d.starts_with('`') && d != "not set")
+                })
+                .map(|k| format!("{}.{}", section.name, k.name))
+        })
+        .collect();
+    assert_eq!(
+        worded, WORDED,
+        "each default stated in words needs a check in this test"
+    );
+
+    let config = parse(MINIMAL).expect("the minimal file parses");
+    let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    assert_eq!(config.compute_threads, cpus, "compute_threads");
+    assert_eq!(config.compute_admission, 4 * cpus, "compute_admission");
+    assert_eq!(config.compute_queue, 8 * cpus, "compute_queue");
+    assert_eq!(config.max_merged_segment_bytes, None);
+    let merge_cap = tessera_engine::DEFAULT_MAX_MERGED_SEGMENT_BYTES.to_string();
+    assert!(
+        key("serve", "max_merged_segment_bytes")
+            .default_column()
+            .is_ok_and(|d| d.contains(&merge_cap)),
+        "max_merged_segment_bytes: the engine merges up to {merge_cap} bytes"
+    );
+    let followed = parse(&with_line(MINIMAL, "ingest", "overlay_soft_limit = 7")).unwrap();
+    assert_eq!(followed.compaction.after_deletions, Some(7));
+
+    // Stated in descriptions, and held to the code here too.
+    let shape_cap = tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES.to_string();
+    assert!(
+        key("serve", "max_shape_vertices")
+            .description()
+            .is_ok_and(|d| d.contains(&shape_cap)),
+        "max_shape_vertices: a build caps a shape at {shape_cap} vertices"
+    );
+    for env in ["\"\"", "5"] {
+        let config = parse(&with_line(MINIMAL, "identity", &format!("env = {env}"))).unwrap();
+        assert_eq!(
+            config.identity_env, DEFAULT_IDENTITY_ENV,
+            "[identity] env = {env}"
+        );
     }
 }
 

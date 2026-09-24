@@ -39,7 +39,7 @@ struct RawConfig {
     /// Where `tessera build` finds the identity key, which it needs to compute each item's
     /// `tessera_id`. This file names only the variable; `key = "…"` is refused, so the key itself
     /// cannot be written here. `tessera build --identity-file` reads the key from a file instead.
-    // Read by hand in `parse`, so that `key` gets a refusal of its own.
+    // Read by hand in `parse` against `IDENTITY_KEYS`, so that `key` gets a refusal of its own.
     identity: Option<toml::Value>,
     /// The authorisation plugin, which turns an access label into the terms a viewer's token is
     /// checked against.
@@ -138,11 +138,14 @@ struct RawServe {
     /// Default: not set.
     session_credential_env: Option<String>,
     /// A file holding the operator credential, the bearer token every request to the control
-    /// plane requires. It is read and refused as `session_credential_file` is.
+    /// plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file
+    /// cannot be read, and when neither this nor `operator_credential_env` is set. When both are
+    /// set, the file is used.
     ///
     /// Default: not set.
     operator_credential_file: Option<PathBuf>,
-    /// An environment variable holding the operator credential.
+    /// An environment variable holding the operator credential. `tessera serve` refuses to start
+    /// when it is unset.
     ///
     /// Default: not set.
     operator_credential_env: Option<String>,
@@ -187,7 +190,8 @@ struct RawServe {
     ///
     /// Default: `6000`.
     single_flight_wait_ms: Option<u64>,
-    /// The most marks one tile of `POST /v1/viewport` may draw. A larger `k` is lowered to it.
+    /// The largest `k` a viewport request may name; a larger one is lowered to it. A tile draws at
+    /// most the smaller of this and `k_max_marks`.
     ///
     /// Default: `1000`.
     max_k: Option<usize>,
@@ -283,7 +287,8 @@ struct RawServe {
     /// Default: `200`.
     max_browse_rows: Option<usize>,
     /// The most vertices a shape published through `/control/layers/{name}/artifacts` may have.
-    /// A shape with more is refused with 422. A build does not read this key.
+    /// A shape with more is refused with 422. A build does not read this key: it refuses a shape
+    /// of more than 1000000 vertices whatever the key says.
     ///
     /// Default: `1000000`.
     max_shape_vertices: Option<u64>,
@@ -626,6 +631,9 @@ pub const DEPLOYMENT_FILE: &str = "tessera.toml";
 /// The environment variable holding the identity key when `[identity]` names none.
 pub const DEFAULT_IDENTITY_ENV: &str = "TESSERA_IDENTITY_KEY";
 
+/// The keys `[identity]` takes. It is read by hand, so that `key` is refused with its own message.
+const IDENTITY_KEYS: [&str; 1] = ["env"];
+
 /// The corpus declaration when `[build]` names none.
 pub const DEFAULT_SCHEMA_FILE: &str = "schema.toml";
 
@@ -695,10 +703,11 @@ fn parse(text: &str) -> Result<Config> {
         Some(value) => {
             let table = value.as_table().ok_or(ConfigError::IdentityNotATable)?;
             for key in table.keys() {
-                match key.as_str() {
-                    "env" => {}
-                    "key" => return Err(ConfigError::IdentityKeyInline),
-                    other => return Err(ConfigError::UnknownIdentityKey(other.to_string())),
+                if key == "key" {
+                    return Err(ConfigError::IdentityKeyInline);
+                }
+                if !IDENTITY_KEYS.contains(&key.as_str()) {
+                    return Err(ConfigError::UnknownIdentityKey(key.clone()));
                 }
             }
             match table.get("env").and_then(toml::Value::as_str) {
