@@ -236,6 +236,6 @@ console.log(
 );
 if (!labelGone || !countFell) process.exitCode = 1;
 console.log(
-  'The fold wrote what it withdrew to reports/fold-<prefix>.json in the bundle root, for the\n' +
-    'publisher, before any old data was removed.'
+  'The fold wrote how many members each artifact lost, and which descriptions it withdrew, to\n' +
+    'reports/fold-<prefix>.json in the bundle root, before the deletions took effect.'
 );

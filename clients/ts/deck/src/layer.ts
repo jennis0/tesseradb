@@ -497,10 +497,10 @@ const TOPIC_SIZE = 12;
  * with a drawn child is an ancestor of something on the map and is not labelled.
  *
  * With no level this is the leaves of the served set. With one it is that level's artifacts and
- * every shallower artifact with no child at or above the level, so a branch that ends above the
- * level is still named. The level compared is the served `rung`, which the server computes per
- * layer kind; a levelled layer's edges may skip a level, so a client-side depth count would be
- * wrong.
+ * every shallower artifact whose children are all deeper than the level, so a branch that ends
+ * above the level is still named. The level compared is the served `rung`, which the server
+ * computes per layer kind; a levelled layer's edges may skip a level, so a client-side depth count
+ * would be wrong.
  */
 export function frontier(a: ArtifactsProjection, level: number | undefined): Set<bigint> {
   const out = new Set<bigint>();
@@ -598,8 +598,8 @@ export type Outline = {parts: Part[]; source: OutlineSource};
 
 /**
  * A served artifact's outline in world space, with the served vertices unsmoothed: the parts of
- * `fetched` (the shape fetched by identifier) or of the artifact's own shape, else its box, else
- * null. `source` says which, since a square shape and a box both have four corners and are drawn
+ * `fetched` (the shape fetched by identifier) where given, else of the artifact's own shape, else
+ * its box, else null. `source` says which, since a square shape and a box both have four corners and are drawn
  * differently.
  *
  * A part is an outer ring and its holes. A ring of fewer than three vertices has no area and is

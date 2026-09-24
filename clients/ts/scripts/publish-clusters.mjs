@@ -9,9 +9,10 @@
 // get different counts for the same cluster, and under `--min-visible` a cluster the broad one sees
 // is absent for the narrow one.
 //
-// Members are published by `tessera_id` with the view's idset, since the ids come back from the
-// server in the same response as the positions clustered on, and external ids would need the
-// source corpus.
+// Members are published by `tessera_id`, since the ids come back from the server in the same
+// response as the positions clustered on, and external ids would need the source corpus. The
+// view's idset goes with them, because a `tessera_id` means something only under the identity
+// lineage that minted it.
 //
 // The viewer draws a cluster from the geometry the server derives per principal (`centroid`,
 // `box`, `hull`) and from the per-point membership column. The centroids computed here, over the

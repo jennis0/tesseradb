@@ -12,8 +12,10 @@
  *
  * Stand-in bands change extent with every response and are concatenated in `assemble.ts`.
  *
- * A band that pans out of the render rectangle keeps its slot and is still drawn, off screen,
- * until residency passes {@link SLACK} times the frame and the partition compacts.
+ * A band that pans out of the render rectangle keeps its slot and is still drawn. It is off
+ * screen, since the frame's exact set is every band at this depth inside the render rectangle.
+ * The partition compacts once residency passes the larger of {@link MIN_RESIDENT} and
+ * {@link SLACK} times the frame.
  *
  * With a `Device` attached, each partition owns a luma.gl `Buffer` per attribute and writes only
  * the span a band landed in; deck binds the buffer without copying. deck's own binary attribute
