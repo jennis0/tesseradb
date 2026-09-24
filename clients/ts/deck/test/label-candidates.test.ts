@@ -91,7 +91,7 @@ describe('frontier', () => {
 
   it('at a chosen level it is that level and every branch that stopped above it', () => {
     // 1 → 2 → 3 is three deep; 4 is a child of 1 and stops there. At level 1 the frontier is 2
-    // (the level) and 4 (a branch the level did not reach) — never 1, whose child 2 is drawn.
+    // (the level) and 4 (a branch the level did not reach), not 1, whose child 2 is drawn.
     const p = projection([artifact(1n, 900n), artifact(2n, 500n, [], 'clusters', 1n), artifact(3n, 300n, [], 'clusters', 2n), artifact(4n, 200n, [], 'clusters', 1n)]);
     expect(ids(frontier(p, 1))).toEqual(['2', '4']);
     expect(ids(frontier(p, 0))).toEqual(['1']);
@@ -249,7 +249,7 @@ describe('the candidate list is held per served set, not per zoom bucket', () =>
     const first = labelCandidates(p, META, undefined, 9, 10).byId;
     expect(labelCandidates(p, META, undefined, 9, 2).byId).not.toBe(first);
     expect(labelCandidates(p, META, 0, 9, 10).byId).not.toBe(first);
-    // A new served set under the same object identity — a response replacing it — is a new list.
+    // A response replacing the served set under the same object identity makes a new list.
     expect(labelCandidates({...p, version: p.version + 1}, META, undefined, 9, 10).byId).not.toBe(first);
   });
 });

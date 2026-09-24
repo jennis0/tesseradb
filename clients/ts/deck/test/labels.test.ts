@@ -57,7 +57,7 @@ describe('label placement (§5.10)', () => {
     // The moved ones carry a leader; the one at its centroid does not.
     expect(placed.find((p) => p.id === 1n)!.leader).toBe(false);
     expect(placed.filter((p) => p.leader).map((p) => p.id)).toEqual([2n, 3n]);
-    // A wider bound admits the sideways try — the rule is the bound, not the ring.
+    // A wider bound admits the sideways try: the rule is the bound, not the ring.
     const loose = placeLabels([wide(1, 100), wide(2, 90), wide(3, 80), wide(4, 70)], 300);
     expect(loose.length).toBe(4);
     expect(Math.abs(loose.find((p) => p.id === 4n)!.dx)).toBe(206);
@@ -82,7 +82,7 @@ describe('label placement (§5.10)', () => {
     const midway = (labelSize(29_369, 176, 380_069) - LABEL_SIZE_MIN) / (LABEL_SIZE_MAX - LABEL_SIZE_MIN);
     expect(midway).toBeGreaterThan(0.55);
     expect(midway).toBeLessThan(0.75);
-    // A count ten times another is a fixed step whatever the decade — the point of the band.
+    // A count ten times another is a fixed step, whatever the decade.
     const step = (n: number) => labelSize(n * 10, 1, 1e6) - labelSize(n, 1, 1e6);
     expect(step(10)).toBeCloseTo(step(10_000), 6);
     // Out-of-range and absurd inputs land inside the band rather than off it: a count of zero is

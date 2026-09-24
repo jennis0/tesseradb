@@ -87,7 +87,7 @@ function drawer(
         const ns = t.stageNs![index] ?? 0;
         return row(name.replace(/_ns$/, ''), `${(ns / 1e6).toFixed(2)} ms`);
       }).join('')
-    : `<div class="muted">stage timings absent — the server was built without the
+    : `<div class="muted">stage timings absent: the server was built without the
         <code>bench-timing</code> feature, or <code>[serve] stage_timing</code> is false. Not an
         error.</div>`;
 
@@ -98,8 +98,8 @@ function drawer(
       ${row('admission', t ? `${(t.admissionUs / 1000).toFixed(1)} ms` : '—')}
       ${row('in flight', String(state.inFlight))}
       ${row('tiles in view', String(state.frame?.tiles.length ?? 0))}
-      ${row('— of which provisional', provisional.toLocaleString('en-GB'))}
-      ${row('— retained off-view', residency.departed.toLocaleString('en-GB'))}
+      ${row('of which provisional', provisional.toLocaleString('en-GB'))}
+      ${row('retained off-view', residency.departed.toLocaleString('en-GB'))}
       ${row('replica points', (state.replicaPoints ?? 0).toLocaleString('en-GB'))}
       ${row('replica bands', (state.replicaBands ?? 0).toLocaleString('en-GB'))}
       ${row('bytes/point', state.replicaPoints ? `${Math.round((state.replicaBytes ?? 0) / state.replicaPoints)} B` : '—')}

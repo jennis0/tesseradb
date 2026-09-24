@@ -41,7 +41,7 @@ export function renderSource(state: AppState, datasets: Dataset[], presets: Pres
               )}</option>`
           )
           .join('')}</select>`
-      : `<div class="muted">no measured presets — run_demo.sh writes them per bundle</div>`;
+      : `<div class="muted">no measured presets; run_demo.sh writes them per bundle</div>`;
 
   const active = presets.find((p) => p.label === state.termsLabel);
   const fmt = (n: number) => n.toLocaleString('en-GB');
@@ -54,6 +54,6 @@ export function renderSource(state: AppState, datasets: Dataset[], presets: Pres
      ${row('mark budget', fmt(state.budget))}
      ${row('visible at build', active ? fmt(active.visible) : '—')}
      ${row('prose indexed', current?.prose.length ? current.prose.join(', ') : 'none')}
-     ${state.switching ? '<div class="muted">switching — establishing a session…</div>' : ''}`
+     ${state.switching ? '<div class="muted">switching: establishing a session…</div>' : ''}`
   );
 }

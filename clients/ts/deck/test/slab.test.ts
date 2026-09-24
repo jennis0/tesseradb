@@ -50,8 +50,7 @@ describe('MarkSlab', () => {
     const first = slab.sync([a], 2, UNIFORM_ENCODING, null);
     const second = slab.sync([a], 2, UNIFORM_ENCODING, null);
 
-    // Identical object, so deck.gl compares references, finds them equal and uploads nothing. This
-    // is the whole mechanism — a defensive copy here would silently undo it.
+    // The same object, so deck.gl's reference comparison uploads nothing; a copy would upload.
     expect(second).toBe(first);
     expect(drawnIds(slab, first)).toEqual([1000n, 1001n, 1002n]);
   });
@@ -77,8 +76,8 @@ describe('MarkSlab', () => {
     const b = band(2, 2);
     slab.sync([a, b], 2, UNIFORM_ENCODING, null);
 
-    // b leaves the render rectangle. It keeps its slot and keeps being drawn — off screen, since
-    // the frame's exact set is by construction everything at this depth inside the rectangle.
+    // b leaves the render rectangle. It keeps its slot and is still drawn, off screen, since the
+    // frame's exact set is every band at this depth inside the rectangle.
     const away = slab.sync([a], 2, UNIFORM_ENCODING, null);
     expect(drawnIds(slab, away)).toEqual([1000n, 1001n, 1002n, 2000n, 2001n]);
     expect(slab.departed).toBe(2);
@@ -133,7 +132,7 @@ describe('MarkSlab', () => {
     expect(drawnIds(slab, deeper)).toEqual([2000n, 2001n]);
     expect(slab.holds(shallow)).toBe(false); // holds() answers for the active partition
 
-    // Flipping back returns the identical draw object — nothing rebuilt, nothing re-uploaded.
+    // Flipping back returns the same draw object, so nothing is rebuilt or re-uploaded.
     expect(slab.sync([shallow], 2, UNIFORM_ENCODING, null)).toBe(first);
     expect(slab.holds(shallow)).toBe(true);
   });
@@ -159,7 +158,7 @@ describe('MarkSlab', () => {
     const shallow = band(1, 3);
     slab.sync([shallow], 2, UNIFORM_ENCODING, null); // depth 2
     slab.sync([band(2, 2, 'ik', 3)], 3, UNIFORM_ENCODING, null); // depth 3
-    slab.sync([band(3, 1, 'ik', 4)], 4, UNIFORM_ENCODING, null); // depth 4 — depth 2 goes
+    slab.sync([band(3, 1, 'ik', 4)], 4, UNIFORM_ENCODING, null); // depth 4; depth 2 is evicted
     // Coming back to depth 2 is now a rebuild, not a reuse.
     const back = slab.sync([shallow], 2, UNIFORM_ENCODING, null);
     expect(drawnIds(slab, back)).toEqual([1000n, 1001n, 1002n]);
@@ -212,8 +211,8 @@ describe('MarkSlab', () => {
     const a = band(1, 1);
     const first = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}}, 'c');
     const second = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}}, 'c');
-    // Same colouring, freshly constructed object — comparing by reference would re-upload the
-    // whole colour buffer on every response.
+    // The same colouring in a new object; a reference comparison would re-upload the colour
+    // buffer on every response.
     expect(second).toBe(first);
   });
 
@@ -245,7 +244,7 @@ describe('MarkSlab', () => {
     slab.sync([first, band(2, 2)], 2, UNIFORM_ENCODING, null);
 
     // The same tile, refetched: a new band object with the same served set. Its slot is reused, so
-    // the tile is drawn once — keying slots by band object would have drawn it twice.
+    // the tile is drawn once; slots keyed by band object would draw it twice.
     const refetched = {...first, ids: BigUint64Array.from([7n, 8n, 9n])};
     const draw = slab.sync([refetched, band(2, 2)], 2, UNIFORM_ENCODING, null);
     expect(drawnIds(slab, draw)).toEqual([7n, 8n, 9n, 2000n, 2001n]);
@@ -258,7 +257,7 @@ describe('MarkSlab', () => {
     slab.sync([first], 2, UNIFORM_ENCODING, null);
 
     // A larger band cannot reuse the slot, so the slab compacts rather than leaving the old marks
-    // in the draw range — they are a subset of the new ones and would be drawn twice.
+    // in the draw range, where they would be drawn twice as a subset of the new ones.
     const bigger = {...first, ids: BigUint64Array.from([7n, 8n, 9n]), served: 3};
     const draw = slab.sync([bigger], 2, UNIFORM_ENCODING, null);
     expect(drawnIds(slab, draw)).toEqual([7n, 8n, 9n]);

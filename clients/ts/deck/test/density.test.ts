@@ -107,7 +107,7 @@ describe('resolvePick — a miss is not a broken pick', () => {
 
 import {DENSITY_SUPERSAMPLE, filterDensity} from '../src/density.js';
 
-describe('filterDensity — the tile grid is never shown (decision 0097)', () => {
+describe('filterDensity: the tile grid is not shown', () => {
   it('turns a single non-zero bin into a halo with no one-texel step from nothing to full', () => {
     const binned = binDensity([tile(4, 6, 3, true, 100)], 3)!;
     const soft = filterDensity(binned, 3);

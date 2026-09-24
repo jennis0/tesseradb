@@ -193,7 +193,7 @@ await browser.close();
 console.log('--- requests ---');
 console.log(`  suggest requests total: ${suggestRequests.length}`);
 console.log(`  viewport requests total: ${viewportRequests}`);
-console.log(`  suggest 429s (single-flight admission shedding a concurrent ask, retried by the store — value-suggestion.md §5.1): ${suggest429s}`);
+console.log(`  suggest 429s (a concurrent ask shed by the server and retried by the store): ${suggest429s}`);
 console.log('--- screenshots ---');
 for (const s of shots) console.log(`  ${s}`);
 // A 429 from `/v1/categories/*/suggest` is not a fault: every category control asks an empty `q`

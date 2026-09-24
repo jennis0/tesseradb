@@ -50,7 +50,7 @@ describe('assemble', () => {
     const b = band(2, 1n, 2);
     const out = assemble(frame(2, [a, b]));
 
-    // The bands themselves, by reference — the copy is the slab's job and happens once per band.
+    // The bands themselves, by reference; the slab copies each band once.
     expect(out.bands).toEqual([a, b]);
     expect(out.exactDrawn).toBe(5);
     expect(out.exactServed).toBe(5);
@@ -68,8 +68,8 @@ describe('assemble', () => {
 
   it('restricts an ancestor band to the region asked for, and marks it provisional', () => {
     // A depth-4 parent holding points in two different depth-6 tiles. At depth 6 a tile spans
-    // 512/64 = 8 world units, so tile (1,0) is x in [8,16) and tile (2,0) is x in [16,24) —
-    // containment is decided on the positions, which is what the restriction actually tests.
+    // 512/64 = 8 world units, so tile (1,0) is x in [8,16) and tile (2,0) is x in [16,24).
+    // Containment is decided on the positions, which is what the restriction tests.
     const parent = band(4, 0n, 0);
     const enriched: Band = {
       ...parent,
@@ -108,12 +108,10 @@ describe('assemble', () => {
   });
 
   it('admits no stand-in over a tile an exact band answers, whatever coverage says', () => {
-    // The replica clips stand-ins by coverage RECTS; exact bands can precede their rect. The
-    // assembly is the last line: a descendant whose drawn tile is exactly answered contributes
-    // nothing — the disagreement between the two granularities oscillated thousands of tiles up
-    // to 12x per frame through an arrival stream.
+    // The replica clips stand-ins by coverage rectangles, and an exact band can arrive before its
+    // rectangle. The assembly drops a descendant whose drawn tile an exact band answers.
     const exact = band(3, 0n, 4);
-    const kid = band(5, 0n, 8); // projects to drawn tile (0,0) — the exact band's own tile
+    const kid = band(5, 0n, 8); // projects to drawn tile (0,0), the exact band's own tile
     const out = assemble(frame(3, [exact], [kid]));
     expect(out.provisional).toBe(0);
     expect(out.exactDrawn).toBe(4);
@@ -122,8 +120,7 @@ describe('assemble', () => {
 
   it('bounds a drawn tile by its own density however many deep bands stand in for it', () => {
     // Sixteen five-mark bands four levels down, all under drawn tile 0: the tile's own depth
-    // would serve ~16·5/256 ≈ 0.3 marks. The per-band floor drew sixteen — the "patches at a
-    // totally different zoom level" a rapid zoom-out left behind at 10^9 scale.
+    // would serve about 16·5/256 = 0.3 marks, so one is drawn, not one per band.
     const kids = Array.from({length: 16}, (_, i) => band(7, BigInt(i), 5));
     const out = assemble(frame(3, [], kids));
     expect(out.provisional).toBe(1);
@@ -172,10 +169,9 @@ describe('assemble', () => {
   });
 
   it('folds a column across exact bands and stand-ins alike', () => {
-    // The colour domain and the category ranks are accumulators, so they fold rather than needing
-    // the concatenated column exact bands no longer build.
-    // The stand-in sits at drawn tile (0,1) — ground neither exact band answers, so it survives
-    // the exact-supersession rule.
+    // The colour domain and the category ranks are accumulators, so they fold across bands
+    // without a concatenated column.
+    // The stand-in sits at drawn tile (0,1), which neither exact band answers, so it is kept.
     const out = assemble(frame(2, [band(2, 0n, 2), band(2, 1n, 3)], [band(4, 32n, 1)]), ['w']);
     const seen = foldBandColumn(out, 'w', [] as number[], (held, values) => [
       ...held,
@@ -223,9 +219,8 @@ describe('assemble', () => {
 
 describe('assertAssemblyMatchesServed', () => {
   it('demotes a short band to a stand-in rather than failing the served count', () => {
-    // A band holding fewer marks than `served` is what eviction truncation produces; counting it
-    // exact made this assert a crash-per-paint loop under memory pressure.
-    // Its head draws as a stand-in — counts suppressed — and the equality's domain excludes it.
+    // Eviction can truncate a band below `served`. Counted exact, it would make this assertion throw
+    // on every paint. Its head draws as a stand-in with no counts, outside the equality's domain.
     const short = band(2, 0n, 2, 3); // holds 2, server said it served 3
     const out = assemble(frame(2, [short]));
     expect(out.exactDrawn).toBe(0);
@@ -242,8 +237,8 @@ describe('assertAssemblyMatchesServed', () => {
 
 describe('refreshExact', () => {
   it('folds fresh exact bands in while keeping the stand-ins by reference', () => {
-    // The stand-in's marks sit in drawn tile (2,0) — ground no fresh band covers — so the buffers
-    // must survive the fold untouched.
+    // The stand-in's marks sit in drawn tile (2,0), which no fresh band covers, so the buffers
+    // survive the fold untouched.
     const held = assemble(frame(2, [band(2, 0n, 3)], [band(4, 8n, 2, 2, {cx: 32768, cy: 0})]), ['w']);
     const fresh = [band(2, 0n, 3), band(2, 1n, 2)];
 
@@ -253,8 +248,8 @@ describe('refreshExact', () => {
     expect(out.exactDrawn).toBe(5);
     expect(out.exactServed).toBe(5);
     expect(out.visibleInView).toBe(15);
-    // The stand-in buffers ride along untouched — same object, so the memoised binary descriptors
-    // and colour buffer stay valid and nothing re-uploads.
+    // The stand-in buffers are the same object, so the memoised descriptors and colour buffer stay
+    // valid and nothing re-uploads.
     expect(out.standIn).toBe(held.standIn);
     expect(out.provisional).toBe(held.provisional);
     // Non-exact tile entries survive; exact ones are rebuilt from the fresh bands.
@@ -271,9 +266,8 @@ describe('refreshExact', () => {
   });
 
   it('drops stand-in marks over ground an arriving band now answers exactly', () => {
-    // The stand-in's one density-matched mark sits in drawn tile (0,0); the fold brings an exact
-    // band for that very tile. Keeping the mark would draw the ground twice — the ~2x flash the
-    // density audit measured on every arrival — so the fold removes it.
+    // The stand-in's one density-matched mark sits in drawn tile (0,0), and the fold brings an
+    // exact band for that tile. Keeping the mark would draw the ground twice, so the fold drops it.
     const held = assemble(frame(2, [], [band(4, 0n, 2)]));
     expect(held.provisional).toBe(1);
     const out = refreshExact(held, [band(2, 0n, 3)], 1);

@@ -7,9 +7,9 @@ import type {Device} from '@luma.gl/core';
 export type FakeDevice = Device & {
   bufferWrites: number;
   textureWrites: number;
-  /** Writes per buffer, keyed by creation order — the slab creates positions, colours, picking, ordinals. */
+  /** Writes per buffer, by creation order: the slab creates positions, colours, picking, ordinals. */
   writesByBuffer: number[];
-  /** The region of each texture write, in rows — what a test asserts a patch wrote and no more. */
+  /** The rows of each texture write, so a test can assert what a patch wrote. */
   textureRegions: {y: number; height: number}[];
 };
 

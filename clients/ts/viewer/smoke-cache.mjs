@@ -43,7 +43,7 @@ const snap = async (tag) => {
     const lim = text.match(/limited by\s*\n\s*(\w+)/)?.[1] ?? '?';
     const mt = text.match(/m_target \(calibrated\)\s*\n\s*([\d.]+)/)?.[1] ?? '?';
     const cache = text.match(/tiles from cache\s*\n\s*([\d]+ of [\d]+)/)?.[1] ?? '?';
-    return {drawn: g('marks drawn'), prov: g('— of which provisional'), held: g('replica held'), depth, tiles, lim, mt, cache};
+    return {drawn: g('marks drawn'), prov: g('of which provisional'), held: g('replica held'), depth, tiles, lim, mt, cache};
   });
   console.log(
     `  [${tag.padEnd(10)}] requests=${String(requests).padStart(2)} drawn=${t.drawn.padStart(9)} ` +

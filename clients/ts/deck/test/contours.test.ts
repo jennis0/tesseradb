@@ -49,7 +49,7 @@ function projection(input: Artifact[]): ArtifactsProjection {
   return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
-/** The area of a closed ring — the shoelace, unsigned. */
+/** The unsigned area of a closed ring, by the shoelace formula. */
 const area = (ring: readonly [number, number][]) => {
   let twice = 0;
   for (let i = 0; i < ring.length; i++) {
@@ -60,7 +60,7 @@ const area = (ring: readonly [number, number][]) => {
   return Math.abs(twice) / 2;
 };
 
-/** Whether a point is inside a closed ring — a crossing count, for the containment check below. */
+/** Whether a point is inside a closed ring, by a crossing count. */
 const inside = (p: [number, number], ring: readonly [number, number][]) => {
   let odd = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -86,8 +86,8 @@ describe('outlineOf', () => {
     const side = drawn[1]![0];
     // Three quarters of the square: the notch is out, and nothing rounded it back in.
     expect(area(drawn) / (side * side)).toBeCloseTo(0.75, 6);
-    // And nothing in the notch is inside the drawn ring — the point three Chaikin rounds put
-    // there sits at (0.47, 0.55) of the side, which is where this check is aimed.
+    // Nothing in the notch is inside the drawn ring. Three rounds of Chaikin corner cutting would
+    // put a point at (0.47, 0.55) of the side, where this check is aimed.
     for (const [fx, fy] of [[0.47, 0.55], [0.4, 0.6], [0.25, 0.75], [0.49, 0.51]] as [number, number][]) {
       expect(inside([fx * side, fy * side], drawn)).toBe(false);
     }
@@ -98,9 +98,8 @@ describe('outlineOf', () => {
   });
 
   it('says which shape it answered with, and falls back to the box, then to nothing', () => {
-    // The two are indistinguishable by counting vertices — a box is four corners and so is a
-    // square hull — and they are drawn differently, so the caller is told rather than left to
-    // guess (a box through the smoothing is an oval).
+    // A box and a square hull both have four corners but are drawn differently (a box through
+    // the smoothing would be an oval), so the caller is told which it has.
     const a = artifact(1n, null);
     expect(outlineOf(a)!.source).toBe('shape');
     expect(outlineOf({...a, shape: null})!.source).toBe('box');
@@ -158,7 +157,7 @@ describe('contourShapes — what may be hovered', () => {
   it('a level moves the frontier up: the deepest artifact the level admits answers', () => {
     const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
     expect(ids(p, {level: 1})).toEqual(['2']);
-    // A branch that stops above the level is still on the frontier — `frontier`'s own rule.
+    // A branch that stops above the level is still on the frontier, as in `frontier`.
     const stops = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n), artifact(4n, 1n)]);
     expect(new Set(ids(stops, {level: 1}))).toEqual(new Set(['2', '4']));
   });
@@ -188,8 +187,8 @@ describe('contourShapes — what may be hovered', () => {
   });
 
   it('a pointer in a hole is outside the part, and inside a hole’s own island', () => {
-    // Even-odd over a part's rings: an enclave is not the enclosing artifact, and a served
-    // island inside it — its own part — is.
+    // Even-odd over a part's rings: an enclave is not the enclosing artifact, and an island inside
+    // it, a part of its own, is.
     const g = 2 ** 32 - 1;
     const outer: [number, number][] = [[0, 0], [g, 0], [g, g], [0, g]];
     const hole: [number, number][] = [[g / 4, g / 4], [(3 * g) / 4, g / 4], [(3 * g) / 4, (3 * g) / 4], [g / 4, (3 * g) / 4]];
@@ -203,8 +202,7 @@ describe('contourShapes — what may be hovered', () => {
 
   it('answers against the box until the shape fetched by identifier arrives', () => {
     // The viewport carries no shape (`artifactChannel.ts` asks for centroid and box), so a served
-    // row's shape is its box until `TesseraStore.needShape` answers for it — which is what the
-    // hover over that box asks for.
+    // row's shape is its box until `TesseraStore.needShape` answers; a hover over the box asks.
     const g = 2 ** 32 - 1;
     const ring: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [g / 4, g / 3], [0, g / 2]];
     const p = projection([{...artifact(1n, null), shape: null}, {...artifact(2n, null), shape: null}]);
@@ -288,8 +286,8 @@ describe('focusOutlines — what draws', () => {
     // The smoothed curve is a summary of the served ring, not a claim beyond it at the convex
     // corners: every vertex of the served ring's own quadrants stays where the members are.
     expect(ringWithin(notched.map(gridToWorldXY), notched.map(gridToWorldXY))).toBe(true);
-    // The box: the wire's four corners, unchanged and unsmoothed, and drawn as a hairline with
-    // no fill — a box is the bounds of the visible members and not their shape.
+    // The box: the served four corners, unsmoothed, drawn as a hairline with no fill, since a box
+    // is the bounds of the visible members and not their shape.
     const box = focusOutlines(p, options({hovered: 2n}))[0]!;
     expect(box.source).toBe('box');
     expect(box.polygon).toEqual([[
@@ -325,8 +323,8 @@ describe('focusOutlines — what draws', () => {
   it('draws nothing where the layer draws a shape and none has arrived, and the shape when it has', () => {
     // The viewport carries no shape, so a served row on a shape-drawing layer has a box and a
     // shape on its way by identifier. A rectangle that becomes the shape a moment later reads as
-    // the shape changing under the pointer, so nothing is drawn until it lands — while the hover
-    // still resolves against that box, which is what asks for the shape.
+    // the shape changing under the pointer, so nothing is drawn until it lands. The hover still
+    // resolves against the box, and asks for the shape.
     const g = 2 ** 32 - 1;
     const ring: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [g / 4, g / 3], [0, g / 2]];
     const p = projection([{...artifact(1n, null), shape: null}]);

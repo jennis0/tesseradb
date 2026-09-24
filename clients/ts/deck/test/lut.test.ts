@@ -87,8 +87,8 @@ describe('buildLut', () => {
     const whole = artifactColours(named, 'positional');
     expect([...buildLut({artifacts: {table, colours: whole}}).data.subarray(a * 4, a * 4 + 4)]).toEqual([...whole.get(a)!]);
 
-    // And where a colour genuinely is not known for the ordinal — an artifact evicted from the
-    // table's colour map — the walk goes *up* to the parent that is, not to neutral.
+    // Where no colour is known for the ordinal (an artifact evicted from the colour map), the walk
+    // goes up to a parent that has one, not to neutral.
     const parentOnly = new Map(whole);
     parentOnly.delete(a);
     expect([...buildLut({artifacts: {table, colours: parentOnly}}).data.subarray(a * 4, a * 4 + 4)]).toEqual([...whole.get(root)!]);
@@ -156,7 +156,7 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     colours.set(fresh!, positionalEntry(table.entry(fresh!)!.centroid));
     expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(true);
     expect(device.textureWrites).toBe(2);
-    // Row 1 alone — the row the new ordinal falls in — and not the two the texture holds.
+    // Row 1 alone, where the new ordinal falls, not both rows the texture holds.
     expect(device.textureRegions[1]).toEqual({y: fresh! >> 10, height: 1});
     expect(texel(lut, fresh!)).toEqual([...colours.get(fresh!)!]);
     expect(texel(lut, 7)).toEqual(settled);
@@ -208,10 +208,10 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
     );
     lut.update({artifacts: {table, colours}}, 'k');
 
-    // Named by the point frame alone — no colour of its own — under a parent already held.
+    // Named by the point frame alone, with no colour of its own, under a parent already held.
     const [late] = table.take([{tesseraId: 9001n, layer: 'l', parentIds: [1n], rung: 1}]);
     expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(true);
-    // Patched — its row alone — and coloured by the ancestor the walk reaches, not neutral.
+    // Patched, its row alone, and coloured by the ancestor the walk reaches, not neutral.
     expect(device.textureRegions[1]).toEqual({y: late! >> 10, height: 1});
     expect([...lut.colourOf(late!)]).toEqual([...colours.get(parent)!]);
   });
@@ -253,7 +253,7 @@ describe('every colouring interaction is a texture rewrite, never an attribute u
     const lut = new LookupTexture();
     lut.attach(device);
 
-    // Two bands land: positions, colours and ordinals upload — the ordinary write path.
+    // Two bands land: positions, colours and ordinals upload by the ordinary write path.
     const bands = [band(1, [a, a, 0]), band(2, [b, root])];
     slab.sync(bands, 2, {kind: 'uniform'}, null, 'l');
     const uploadsAfterBands = device.bufferWrites;
@@ -279,9 +279,9 @@ describe('every colouring interaction is a texture rewrite, never an attribute u
     // The same inputs again: nothing is written.
     expect(lut.update(inputs('spread', 0, a), `v1|spread|0|${a}`)).toBe(false);
     expect(device.textureWrites).toBe(4);
-    // A different colour map object under the same key is a recolour — the palette or the ground
-    // moved — and rewrites though its contents happen to match: the store extends a map in place
-    // while the palette holds, so a new object is the signal that every colour may have moved.
+    // A new colour map object under the same key rewrites the texture even if its contents match:
+    // the store extends a map in place while the palette holds, so a new object means every
+    // colour may have changed.
     expect(lut.update({artifacts: {table, colours: artifactColours(named, 'spread')}, level: 0, highlight: a}, `v1|spread|0|${a}`)).toBe(true);
     expect(device.textureWrites).toBe(5);
 
