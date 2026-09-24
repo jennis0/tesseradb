@@ -58,7 +58,7 @@ const META = {
 /** A layer points can be coloured by: it declares geometry and depends on nothing. */
 const clusters = (name: string) => ({name, title: name, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: [], depsOn: [], version: 1});
 
-const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400};
+const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
 
 /** A model initialised and one view rendered, so there is a store: the store is per view. */
 function setUp(initial: Record<string, unknown> = {}) {
@@ -110,6 +110,14 @@ describe('the token protocol', () => {
     const p = supplier()();
     model.fire('msg:custom', {type: 'refused', detail: 'no credential'});
     await expect(p).rejects.toThrow('no credential');
+  });
+
+  it('hands title_field to every view’s explorer, and follows a change to it', async () => {
+    const {model, el} = setUp({title_field: 'title'});
+    const explorer = el.querySelector('tessera-explorer') as unknown as {titleField: string};
+    expect(explorer.titleField).toBe('title');
+    model.set('title_field', null);
+    expect(explorer.titleField).toBe('');
   });
 
   it('two views of one model: a store each, one supplier, and one ready', async () => {

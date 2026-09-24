@@ -331,6 +331,8 @@ def write_points(scale: str, total: int) -> None:
         "scale": scale,
         "items": total,
         "prose": (["title", "abstract"] if with_abstract else ["title"] if with_title else []),
+        # The column the viewer titles a record by, where the bundle declares one.
+        **({"titleField": "title"} if with_title else {}),
         "archive_codes": len(archive_codes),
         "primary_codes": len(primary_codes),
         "submitted_at_min": int(stamps.min()),
