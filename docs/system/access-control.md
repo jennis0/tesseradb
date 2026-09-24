@@ -127,7 +127,7 @@ A request loads one generation, one version of the corpus published as a whole
 ([write path](write-path.md#generations)), once, at the start, and answers entirely from what it
 names: the tiles, the columns and the overlay a request reads all come from that one generation. A
 filter then narrows which of the visible set is drawn or counted, and can only remove from it,
-never add to it ([queries](queries.md#the-authorised-set-and-the-filtered-set)).
+never add to it ([queries](queries.md#the-visible-set-and-the-filtered-set)).
 
 Composing the visible set touches only the items a session's authorised set could ever contain,
 not the whole corpus, so the work stays cheap on every request even though the overlay itself can

@@ -1,6 +1,6 @@
 import react from '@vitejs/plugin-react';
-import {defineConfig} from 'vite';
-import {tesseraDecorators} from '@tesseradb/components/vite-plugin-decorators';
+import {defaultClientConditions, defineConfig} from 'vite';
+import {tesseraDecorators} from '../../components/vite-plugin-decorators.js';
 
 /**
  * Same-origin, as the page will be in production: `/v1/*` is proxied to the viewer plane with
@@ -10,6 +10,8 @@ import {tesseraDecorators} from '@tesseradb/components/vite-plugin-decorators';
  */
 export default defineConfig({
   plugins: [react(), tesseraDecorators()],
+  // The workspace packages resolve to their sources, so the page runs without a library build.
+  resolve: {conditions: ['tessera-source', ...defaultClientConditions]},
   server: {
     port: 5181,
     strictPort: true,

@@ -1,23 +1,19 @@
-import {LitElement, css, html, nothing} from 'lit';
+import {LitElement, css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {formatCount, formatMasked, type Count, type Masked} from '@tesseradb/client';
 import {attachContextRoot, defineOnce} from './define.js';
 import {tokens} from './tokens.js';
 
 /**
- * `<tessera-count>` — renders a `Count` or a `Masked` correctly and nothing else (design §5.3
- * tier 3, §4). Both figures or neither for a sample; one figure or none for a scalar, an inexact
- * one marked approximate; neither against a stale view. The rule is the formatter's
- * (`@tesseradb/client`), so a host writing its own status line uses this and gets it for free —
- * "12,040 of 12,040" against a cluster is false, not secret, and this element cannot render it.
+ * `<tessera-count>`: renders a `Count` or a `Masked` through the client's formatter. A sample shows
+ * both figures or neither; a scalar one figure or none, marked approximate when inexact; nothing
+ * against a stale view.
  *
  * `figure="shown"` renders a sample's shown figure alone, for a strip whose next cell is the
- * total: the element still carries the total on `data-total`, so *both figures or neither* holds
- * — the cell is empty exactly when the pair would be — and a reader of the parts can check it.
+ * total, and carries the total on `data-total`. The cell is empty exactly when the pair would be.
  *
  * `part="count"` carries `data-kind` (`sample` or `scalar`), `data-exact`, and `data-empty` when
- * the rule rendered nothing, so the acceptance harness can read the decision and not just the
- * text.
+ * nothing was rendered.
  */
 export class TesseraCount extends LitElement {
   static override styles = [
@@ -45,7 +41,7 @@ export class TesseraCount extends LitElement {
   @property() accessor label = '';
   @property() accessor figure: 'both' | 'shown' = 'both';
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const kind = this.count ? 'sample' : this.masked ? 'scalar' : 'none';
     const pair = this.count ? formatCount(this.count, {stale: this.stale}) : this.masked ? formatMasked(this.masked, {stale: this.stale}) : '';
     const text = this.count && this.figure === 'shown' && pair !== '' ? pair.split(' of ')[0]! : pair;

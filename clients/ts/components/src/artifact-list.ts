@@ -1,7 +1,7 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {type Artifact, type ArtifactsProjection, type Masked, type ServedLineage} from '@tesseradb/client';
-import {attachedTopics, displayName} from '@tesseradb/deck';
+import {attachedTopics, displayName} from '@tesseradb/deck/internal';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState} from './states.js';
@@ -9,16 +9,13 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-artifact-list>` — what the layers served for this view (design §5.3 tier 2, §6): the
- * boards' *IN VIEW · N clusters* list, a tree built from `parentIds` with a row's children beneath
- * it, each with its name and its `Masked` count, the opened one highlighted. A click selects —
- * the card and the outline — and never moves the camera.
+ * `<tessera-artifact-list>`: the artifacts served for this view as a tree built from `parentIds`,
+ * each row with its name and `Masked` count, the opened one highlighted. A click opens the card
+ * and the outline without moving the camera. An artifact with no text and no topic shows
+ * {@link UNNAMED}, not its key.
  *
- * A row for an artifact with no name — no supplied text and no topic attached — shows its count
- * beside {@link UNNAMED} and never its key, which is an id (the owner's review, 2026-08-26).
- *
- * The count is over the whole membership as this principal sees it and does not move with the
- * viewport; only *whether* an artifact appears depends on where you are looking.
+ * The count covers the artifact's whole membership as this principal sees it, not the viewport;
+ * only whether an artifact appears depends on the view.
  */
 export class TesseraArtifactList extends TesseraElement {
   static override styles = [
@@ -64,7 +61,7 @@ export class TesseraArtifactList extends TesseraElement {
     emit(this, 'tessera-artifactselect', {id: idString(a.tesseraId), layer: a.layer});
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const a = this.shown;
     const heading = (summary: unknown = nothing) => html`<h2 part="title">In view<span class="summary">${summary}</span></h2>`;
     if (!a) return html`<div class="panel">${heading()}${renderState('detached', null)}</div>`;
@@ -112,17 +109,14 @@ export class TesseraArtifactList extends TesseraElement {
 }
 
 /**
- * The served tree as a list: parents immediately above their own children, largest count first
- * at every level — a row's position says what contains it, which a flat sort by count loses.
+ * The served tree as a list: parents immediately above their children, largest count first at
+ * every level.
  *
- * **An artifact appears once.** On a `dag` layer a child is served under several parents
- * (decision 0117), and it is listed beneath the first one this walk reaches — a depth-first walk
- * from the roots in count order, ties by lowest identifier, so the row it lands under is a
- * function of the served set alone and never of the wire's row order. Whether it should instead
- * appear under each served parent, and how a row would say *also under X*, is the components
- * work's and is not decided here (`dag-hierarchies.md` §7).
+ * An artifact appears once. On a `dag` layer a child may be served under several parents; it is
+ * listed under the first this depth-first walk reaches (roots in count order, ties by lowest
+ * identifier), so the placement depends on the served set and not on row order.
  */
-export function flatten(lineage: ServedLineage): {artifact: Artifact; depth: number}[] {
+function flatten(lineage: ServedLineage): {artifact: Artifact; depth: number}[] {
   const out: {artifact: Artifact; depth: number}[] = [];
   const bigger = (a: Artifact, b: Artifact) =>
     a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : a.tesseraId < b.tesseraId ? -1 : a.tesseraId > b.tesseraId ? 1 : 0;

@@ -1,18 +1,12 @@
 /**
- * Label placement (design §5.10): names and counts at each artifact's centroid, placed by
- * priority into a spatial hash — O(K) for K labels, so 10⁴ labels cost what a few hundred
- * do — with a leader line when a label had to move off its centroid to fit.
+ * Label placement: names and counts at each artifact's centroid, placed by priority into a
+ * spatial hash in O(K) for K labels, with a leader line when a label moved off its centroid.
  *
- * A label moves at most `MAX_DISPLACEMENT` pixels from its centroid. Beyond that a leader
- * would cross the map from a name to a shape it does not sit on, which the boards never show,
- * so the label is dropped instead and waits for a zoom.
+ * A label moves at most `MAX_DISPLACEMENT` pixels. One that fits nowhere within that is dropped
+ * until a zoom in makes room, so a leader never crosses the map to a shape the name does not sit on.
  *
- * Everything here is in **screen pixels relative to the centroids**, so the answer is
- * translation-invariant: a pan moves every centroid by the same vector and changes no overlap,
- * and the caller re-places only when the zoom bucket or the served set changes.
- *
- * A label that fits nowhere within its ring of tries is not placed: it waits for a zoom in, as
- * the design says, rather than being drawn over its neighbours.
+ * Everything is in screen pixels relative to the centroids, so a pan changes no overlap and the
+ * caller re-places only when the zoom bucket or the served set changes.
  */
 
 export type LabelCandidate = {
@@ -23,13 +17,13 @@ export type LabelCandidate = {
   /** The label's box, in pixels. */
   width: number;
   height: number;
-  /** Larger wins the ground — the masked count, in practice. */
+  /** Larger is placed first; the caller passes the masked count. */
   priority: number;
 };
 
 export type PlacedLabel = {id: bigint; dx: number; dy: number; leader: boolean};
 
-/** How far a label may sit from its centroid, in pixels — a nudge with a short leader, never a line across the map. */
+/** How far a label may sit from its centroid, in pixels. */
 export const MAX_DISPLACEMENT = 40;
 
 /** The spatial hash's cell, in pixels: a few labels a cell, so an overlap check reads a few. */
@@ -67,9 +61,8 @@ class SpatialHash {
 }
 
 /**
- * The offsets tried, in order: the centroid itself, then a ring one label away, then a wider
- * one — keeping only those within `maxDisplacement` of the centroid, so a wide label's sideways
- * tries (a label's own width away) are never taken.
+ * The offsets tried, in order: the centroid, a ring one label away, then a wider ring, keeping
+ * only those within `maxDisplacement`. A wide label's sideways tries fall outside it.
  */
 function offsetsFor(width: number, height: number, maxDisplacement: number): [number, number][] {
   const out: [number, number][] = [[0, 0]];
@@ -104,30 +97,19 @@ export function placeLabels(candidates: readonly LabelCandidate[], maxDisplaceme
   return placed;
 }
 
-/**
- * The pixel size of an artifact's name: **its masked count**, on a logarithmic band over the
- * counts the drawn frontier holds.
- *
- * **Level is not encoded, and was for a day.** Stepping the size by depth assumed depth in the
- * tree tracks scale; that holds in a balanced tree and HDBSCAN's condensed tree is not one. On
- * the 2.4M map *image object video* at 29,369 members drew a step larger than *algebras equations
- * spaces* at 380,069 because it sat one level shallower. Size reads as importance and the eye
- * reads the count, so the two encodings were fighting each other. What carries the hierarchy is
- * the frontier rule instead: only the frontier is labelled, a frontier partitions the drawn view,
- * so the counts on screen are directly comparable and the count is the thing worth drawing.
- *
- * The band is **logarithmic** because these counts span three or four orders of magnitude —
- * 380,069 against 176 on one screen. A linear map, and a square-root one, spend the range on the
- * top few and leave everything else on the floor. Its ends are the level ladder's ends,
- * {@link LABEL_SIZE_MIN} to {@link LABEL_SIZE_MAX}, so nothing else about the map's weight moves.
- *
- * A frontier of one artifact, and one whose counts are all equal, have no range to divide by:
- * the name takes the top of the band. The largest count on screen draws at the largest size, and
- * where every count is the largest that holds of all of them.
- */
+/** The ends of the label size band, in pixels. */
 export const LABEL_SIZE_MIN = 12.5;
 export const LABEL_SIZE_MAX = 24;
 
+/**
+ * The pixel size of an artifact's name, from its masked count on a logarithmic band between the
+ * smallest and largest counts on the drawn frontier. Depth in the tree is not encoded: a condensed
+ * tree is unbalanced, so depth does not track size. Only the frontier is labelled and it
+ * partitions the view, so the counts on screen are comparable.
+ *
+ * The band is logarithmic because the counts on one screen span three or four orders of
+ * magnitude. With no range (one artifact, or equal counts) every name takes {@link LABEL_SIZE_MAX}.
+ */
 export function labelSize(count: number, smallest: number, largest: number): number {
   const c = Math.max(1, count);
   const lo = Math.max(1, Math.min(smallest, c));
@@ -139,9 +121,7 @@ export function labelSize(count: number, smallest: number, largest: number): num
 
 /**
  * How many characters a line of a name may hold before it wraps, and how many lines a name may
- * take. A name at these sizes ran to three hundred pixels on one line over the map's own marks;
- * two or three short lines read at a glance and pack far better into the spatial hash, which
- * sees the wrapped box.
+ * take. Short lines pack better into the spatial hash, which sees the wrapped box.
  */
 export const MAX_LABEL_LINE_CHARS = 14;
 export const MAX_LABEL_LINES = 3;
@@ -149,9 +129,9 @@ export const MAX_LABEL_LINES = 3;
 export const LABEL_LINE_HEIGHT = 1.15;
 
 /**
- * A name as up to {@link MAX_LABEL_LINES} lines of at most `maxChars` each — greedy over words,
- * never hyphenating, so a word longer than the limit takes a line of its own. What will not fit
- * is elided onto the last line, because a name cut off without a mark reads as a different name.
+ * A name as up to {@link MAX_LABEL_LINES} lines of at most `maxChars` each, greedy over words and
+ * without hyphenation, so a longer word takes a line of its own. What does not fit is cut from
+ * the last line and marked with an ellipsis, so a shortened name does not read as another name.
  */
 export function wrapLabel(text: string, maxChars = MAX_LABEL_LINE_CHARS, maxLines = MAX_LABEL_LINES): string[] {
   const words = text.split(/\s+/).filter((w) => w.length > 0);
@@ -165,7 +145,6 @@ export function wrapLabel(text: string, maxChars = MAX_LABEL_LINE_CHARS, maxLine
       lines.push(line);
       line = word;
     } else {
-      // The last line takes what is left, marked as elided rather than silently truncated.
       line = `${line} ${word}`;
       if (line.length > maxChars + 2) return [...lines, `${line.slice(0, maxChars + 1).trimEnd()}…`];
     }

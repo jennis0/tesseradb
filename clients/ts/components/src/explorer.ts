@@ -1,9 +1,9 @@
 import {ContextProvider} from '@lit/context';
-import {css, html, nothing, type PropertyValues} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import type {Store} from '@tesseradb/client';
 import {activeCount, artifactBudgetFor, browsableLayers, emptyDraft, levelForBudget} from '@tesseradb/client';
-import {clusterLayerOf} from '@tesseradb/deck';
+import {clusterLayerOf} from '@tesseradb/deck/internal';
 import './hierarchy.js';
 import {TesseraElement} from './base.js';
 import {storeContext} from './context.js';
@@ -25,7 +25,7 @@ import './artifact-list.js';
 import './artifact-card.js';
 import './legend.js';
 
-/** Every part of every element the explorer renders, forwarded (`parts.ts`). */
+/** Every part of every element the explorer renders, forwarded. */
 const FORWARD = {
   map: exportparts('map'),
   status: exportparts('status'),
@@ -317,7 +317,7 @@ export class TesseraExplorer extends TesseraElement {
   @state() accessor level: number | null = null;
 
   private provider = new ContextProvider(this, {context: storeContext, initialValue: null});
-  /** Which of the two selections changed last — what the detail region shows. */
+  /** Which selection changed last, which the detail region shows. */
   private lastDetail: 'item' | 'artifact' = 'item';
   private seenItem: object | null = null;
   private seenArtifact: object | null = null;
@@ -339,9 +339,7 @@ export class TesseraExplorer extends TesseraElement {
   }
 
   override disconnectedCallback(): void {
-    // **A follow in flight is released here, not only at dispose.** The base class drops this
-    // element's own subscription; the follow's is a second one, and a callback left running on a
-    // detached explorer would eventually centre a map that is no longer in the document.
+    // A follow in flight holds its own subscription, which the base class does not drop.
     this.following?.();
     super.disconnectedCallback();
   }
@@ -361,7 +359,7 @@ export class TesseraExplorer extends TesseraElement {
     return this.panels.split(/[\s,]+/).includes(panel);
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const region = s?.get('region') ?? null;
     const selection = s?.get('selection');
@@ -369,23 +367,20 @@ export class TesseraExplorer extends TesseraElement {
     const active = s ? activeCount(s.get('filters').draft) : 0;
     const artifacts = s?.get('artifacts');
     const inView = artifacts && artifacts.status === 'shown' ? (artifacts.lineage.linked ? artifacts.lineage.roots.length : artifacts.served.length) : 0;
-    // The level drawn: the one chosen through the legend, else, for a tiered layer the server
-    // served whole, the level the view's budget would have cut at, else the deepest served. The
-    // legend shows which; the map colours, outlines and labels at it.
+    // The level drawn: the one chosen through the legend, else, for a levelled layer served
+    // whole, the level the view's budget would cut at, else the deepest served.
     const autoLevel = this.autoLevel();
     const level = this.level ?? autoLevel;
     const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick);
     // The detail region shows whichever changed last.
     const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
     const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']}></tessera-artifact-card>` : html`<tessera-item-card exportparts=${FORWARD['item-card']} title-field=${this.titleField || nothing} .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
-    // The two view pickers head the toolbar slot, which the docked sidebar, the overlay's left
-    // card and the narrow layout's Layers sheet all render. Both draw nothing for a one-view corpus.
+    // Every layout renders the toolbar slot. The view pickers draw nothing for a one-view bundle.
     const toolbar = html`<slot name="toolbar"><tessera-view-picker exportparts=${FORWARD['view-picker']}></tessera-view-picker><tessera-key-picker exportparts=${FORWARD['key-picker']}></tessera-key-picker><tessera-legend exportparts=${FORWARD.legend} selectable .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
     const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']}></tessera-filter-panel></slot>`;
     const hierarchy = html`<slot name="hierarchy"><tessera-hierarchy exportparts=${FORWARD.hierarchy}></tessera-hierarchy></slot>`;
-    // Drawn only where there is a lineage to walk: a bundle of flat clusterings has none, and an
-    // empty section reads as a panel that failed rather than one with nothing to say.
+    // Drawn only where there is a hierarchy to walk; an empty section would look broken.
     const hasHierarchy = browsableLayers(meta?.layers ?? []).length > 0;
     const list = html`<slot name="artifacts"><tessera-artifact-list exportparts=${FORWARD['artifact-list']}></tessera-artifact-list></slot>`;
     const selectionPanel = this.has('selection') && region ? html`<slot name="selection"><tessera-selection exportparts=${FORWARD.selection}></tessera-selection></slot>` : nothing;
@@ -505,7 +500,7 @@ export class TesseraExplorer extends TesseraElement {
     else if (before) this.renderRoot.querySelector<HTMLElement>(`[role="tab"][data-sheet="${before}"]`)?.focus();
   }
 
-  /** See `render`: the level a tiered layer draws at when nothing was chosen. */
+  /** The level a levelled layer draws at when none was chosen; see `render`. */
   private autoLevel(): number | null {
     const s = this.resolvedStore;
     const meta = s?.get('meta');
@@ -515,9 +510,7 @@ export class TesseraExplorer extends TesseraElement {
     const layer = coloured ?? a.layers[0] ?? null;
     const declared = layer ? meta.layers.find((l) => l.name === layer) : null;
     if (!declared || declared.levels.length === 0) return null;
-    // **The served artifact's own `rung`**, straight off the wire — on a levelled layer, which is
-    // the only kind reaching here, that is its declared level (contracts §3.2 r44), and never a
-    // count of parent links, which answered a different question.
+    // On a levelled layer, the only kind reaching here, the served `rung` is the declared level.
     const counts: number[] = [];
     for (const x of coloured ? a.colourServed : a.served) {
       if (x.layer !== layer) continue;
@@ -532,14 +525,9 @@ export class TesseraExplorer extends TesseraElement {
   private following: (() => void) | null = null;
 
   /**
-   * Follow an item into another view (`view-switching.md` §6.4): switch, then centre the camera on
-   * the position the item's detail already held for that view.
-   *
-   * **The wait is for the frame, not for a timer.** Across frames the map refits under the new
-   * view and the store answers a fresh viewport, so centring before that composition is drawn
-   * would put the camera where the *old* frame's extent said, and the refit would then move it
-   * again. Within one frame — a step along a group's roster — there is nothing to wait for and the
-   * camera moves at once.
+   * Follow an item into another view: switch, then centre the camera on the position the item's
+   * detail holds for that view. Across frames the map refits under the new view, so the camera
+   * waits for the new view's first composition; within one frame it moves at once.
    */
   private followItem(detail: {view: string; x: number; y: number}): void {
     const s = this.resolvedStore;
@@ -562,15 +550,13 @@ export class TesseraExplorer extends TesseraElement {
     }
     const stop = s.subscribe(() => {
       const view = s.get('view');
-      // Another switch took over — the user chose elsewhere while this one was waiting.
+      // Another switch took over while this one waited.
       if (view.id !== detail.view) {
         this.following?.();
         return;
       }
       if (!view.composition) {
-        // **A view that answers without a frame ends the wait.** A refusal, an expiry, or a mask
-        // that leaves this principal nothing to draw are all settled answers: there will be no
-        // composition to centre on, and a subscription left waiting for one never ends.
+        // A refusal, an expiry or an empty view is final: no composition will come to centre on.
         const status = s.get('status');
         if (status.status === 'refused' || status.status === 'empty' || status.expired) this.following?.();
         return;
@@ -584,7 +570,7 @@ export class TesseraExplorer extends TesseraElement {
     };
   }
 
-  /** The card's `×`: drop the selection it shows. */
+  /** The card's close button: drop the selection it shows. */
   private closeDetail(): void {
     const s = this.resolvedStore;
     if (!s) return;

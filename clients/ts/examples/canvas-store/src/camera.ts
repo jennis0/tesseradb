@@ -1,10 +1,9 @@
 import {WORLD_SIZE} from '@tesseradb/client';
 
 /**
- * A hand-rolled camera over the store's world space — the 512-unit square every band's
- * positions are in — and nothing of Tessera's. `scale` is pixels per world unit; `cx, cy` is
- * the world point at the canvas centre. What the store is told is the world bbox of the canvas,
- * converted to data coordinates by the host through `store.dataXY`.
+ * A hand-rolled camera over the store's world space, the 512-unit square every band's positions
+ * are in. `scale` is pixels per world unit; `cx, cy` is the world point at the canvas centre. The
+ * store is told the canvas's world bbox, converted to data coordinates through `store.dataXY`.
  */
 export type Camera = {cx: number; cy: number; scale: number};
 

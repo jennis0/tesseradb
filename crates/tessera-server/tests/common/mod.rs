@@ -287,9 +287,16 @@ pub async fn serve_standard(dir: impl AsRef<Path>) -> TestServer {
 /// [`serve_standard`] with a write executor that takes a fault switchboard, so a test can park
 /// the executor at a pause site.
 pub async fn serve_with_faults(dir: impl AsRef<Path>) -> (TestServer, Arc<FaultSwitchboard>) {
+    serve_with_faults_and_config(dir, default_engine_config()).await
+}
+
+/// [`serve_with_faults`] under `config`.
+pub async fn serve_with_faults_and_config(
+    dir: impl AsRef<Path>,
+    config: EngineConfig,
+) -> (TestServer, Arc<FaultSwitchboard>) {
     let dir = dir.as_ref();
     let bundle_root = standard_fixture(dir);
-    let config = default_engine_config();
     let max_k = config.max_k;
     let mut engine = Engine::open(
         &bundle_root,

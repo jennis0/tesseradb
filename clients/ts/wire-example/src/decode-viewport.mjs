@@ -1,17 +1,16 @@
-// A worked decode of a `POST /v1/viewport` body, in JavaScript with `apache-arrow` and nothing
-// of Tessera's. The framing is contracts §5; this file is the whole of what a stranger needs to
-// read one, and `docs/openapi/README.md` walks it.
+// A worked decode of a `POST /v1/viewport` body in JavaScript, using `apache-arrow` and no
+// Tessera code. `docs/openapi/README.md` walks through it.
 //
 //   node src/decode-viewport.mjs <body.bin>
 //
-// prints every frame — kind, payload length, and for an Arrow payload its row count, column
-// names and first row — then the first rows of each batch. `tessera_id` is a `u64`: it comes off
-// Arrow as a `BigInt` and is printed as a decimal string, never narrowed to a JS number.
+// prints every frame (kind, payload length, and for an Arrow payload its row count, column names
+// and first row), then the first rows of each batch. `tessera_id` is a `u64`: Arrow gives a
+// `BigInt`, printed as a decimal string, since a JS number would lose precision.
 
 import {readFileSync} from 'node:fs';
 import {tableFromIPC} from 'apache-arrow';
 
-/** Frame kinds, contracts §5. Anything else is a decoder error, never skipped. */
+/** Frame kinds. Any other kind is a decoder error, not skipped. */
 export const KIND = Object.freeze({
   TILES: 1,
   SUB_CELLS: 2,
@@ -25,11 +24,10 @@ const KIND_NAMES = Object.freeze({1: 'tiles', 2: 'sub-cells', 3: 'points', 4: 't
 
 /**
  * Split a body into its frames: `u8 kind`, `u32 little-endian payload length`, payload,
- * repeated. Nothing here parses Arrow; a reader dispatches on `kind` alone.
+ * repeated. A reader dispatches on `kind` alone.
  *
- * Strict on purpose. A body that ends mid-frame, or ends without a trailer, is incomplete
- * whatever the transport said — every prefix of a stream is sound to *draw* (the counts are
- * exact from the first frame), but it must not be mistaken for the whole answer.
+ * A body that ends mid-frame or without a trailer throws. Every prefix of a stream can be drawn,
+ * since counts are exact from the first frame, but it is not the whole answer.
  *
  * @param {Uint8Array} body
  * @returns {{kind: number, payload: Uint8Array}[]}
@@ -90,7 +88,7 @@ export function decodeViewport(body) {
         artifacts = tableFromIPC(payload);
         break;
       case KIND.POINTS:
-        // Whole tiles per frame, boundaries not contract: the frames concatenate.
+        // Each frame holds whole tiles; where frames split is not fixed, and they concatenate.
         points.push(tableFromIPC(payload));
         break;
       case KIND.TRAILER:
@@ -119,7 +117,7 @@ export function rowOf(table, i) {
 }
 
 /**
- * The first `n` rows across a list of tables that concatenate — the points frames.
+ * The first `n` rows across tables that concatenate, such as the points frames.
  *
  * @param {import('apache-arrow').Table[]} tables
  * @param {number} n

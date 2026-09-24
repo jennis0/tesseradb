@@ -4,14 +4,12 @@ import {ScatterplotLayer, type ScatterplotLayerProps} from '@deck.gl/layers';
 import {LUT_SHIFT, LUT_WIDTH} from './lut.js';
 
 /**
- * The mark layer: deck's `ScatterplotLayer` with one more per-instance attribute — the session
- * ordinal — and the lookup-texture read in its vertex shader (design §5.10).
+ * The mark layer: deck's `ScatterplotLayer` with two more per-instance attributes, the session
+ * ordinal and the highlight bit, and a lookup-texture read in its vertex shader.
  *
- * When `useLut` is on, the fill colour is `lut[ordinal]`; off, it is the column colour the slab
- * wrote per point. The switch is a uniform, so cluster-to-column and back cost no upload at all.
- * The ordinal travels as a `float32` attribute: integers are exact to 2²⁴ there, which is far
- * past any range the texture could hold, and it spares the integer-attribute path deck does not
- * otherwise use.
+ * With `useLut` on, the fill colour is `lut[ordinal]`; off, it is the colour the slab wrote per
+ * mark. The switch is a uniform, so changing colouring uploads nothing. The ordinal is a `float32`
+ * attribute, exact to 2²⁴, which covers any range the texture can hold.
  */
 
 const lutUniforms = {
@@ -44,40 +42,20 @@ uniform sampler2D lutTexture;
 };
 
 /**
- * What an unmatched mark's alpha is multiplied by while a highlight is set
- * (`highlight-and-hierarchy.md` §5.3).
+ * What an unmatched mark's alpha is multiplied by while a highlight is set.
  *
- * The dulled marks are still drawn — the map does not move and nothing is removed, which is the
- * whole difference between a highlight and a filter — so they have to stay legible as ground
- * while the matched ones read as the answer.
- *
- * **Recalibrated on the owner's reading of the rung 3 map, 2026-09-02, where the highlight was
- * reported as showing no visible difference.** 0.22 is a mark's own alpha times 0.22, which on a
- * dense region is nothing of the sort: a million marks at 1.1 px overdraw the same pixels several
- * times over, and several coats of 0.22 composite back to a wash barely below the undulled one.
- * Three things carry the distinction instead of one, and the two new ones are what make it read
- * where overdraw is highest:
- *
- * - the alpha, now {@link DULL_ALPHA};
- * - the radius, {@link DULL_RADIUS_SCALE} against {@link LIT_RADIUS_SCALE} — a lit mark is drawn
- *   larger than an unlit one, so a lit point in dense ground is not the same disc in a different
- *   shade;
- * - the colour, pulled {@link DULL_GREY} of the way to neutral. The earlier note here argued
- *   against any desaturation, on the ground that a mark's colour is the palette's answer about
- *   which cluster it belongs to. That still holds for the lit marks, which keep their colour
- *   exactly; the dulled ones are ground, and reading a cluster's colour off ground the highlight
- *   has pushed to the back is not something the interface offers anyway.
- *
- * **The draw order carries the rest** — see {@link MarksLayerProps.highlightPass}. None of it
- * moves a single mark in or out of the draw: every mark the server served is still drawn, which
- * is `budget.ts`'s rule and I7's.
+ * Under a highlight every served mark is still drawn. The unmatched ones are set back four ways,
+ * because on a dense region overdraw composites a lower alpha alone back to nearly full: this
+ * alpha, a smaller radius ({@link DULL_RADIUS_SCALE} against {@link LIT_RADIUS_SCALE}), a colour
+ * pulled {@link DULL_GREY} of the way to grey, and a separate draw pass under the matched marks
+ * ({@link HighlightPass}). Matched marks keep their colour exactly.
  */
 export const DULL_ALPHA = 0.12;
 
 /** How far a dulled mark's colour is pulled to neutral grey, 0 = its own colour, 1 = grey. */
 export const DULL_GREY = 0.8;
 
-/** The neutral a dulled mark is pulled towards — mid grey, so it reads on a light or dark ground. */
+/** The grey a dulled mark is pulled towards, mid grey so it reads on a light or dark ground. */
 export const DULL_NEUTRAL = 0.5;
 
 /** A dulled mark's radius, as a fraction of the frame's mark radius. */
@@ -87,13 +65,12 @@ export const DULL_RADIUS_SCALE = 0.8;
 export const LIT_RADIUS_SCALE = 1.7;
 
 /**
- * Which marks a pass draws. `'all'` is every map with no highlight set and costs nothing extra.
+ * Which marks a pass draws. With no highlight there is one pass, `'all'`.
  *
- * Under a highlight the marks are drawn **twice**: `'dull'` over the whole set, then `'lit'` over
- * the whole set again. Instances are rasterised in buffer order, so a lit mark drawn in the one
- * pass is buried under every unlit mark that happens to sit later in the slab — which at a
- * million marks is most of them. The second pass puts every lit mark over every dulled one for
- * the cost of a vertex shader that collapses the marks it is not drawing to zero size.
+ * Under a highlight the marks are drawn twice, `'dull'` then `'lit'`, each over the whole set.
+ * Instances are rasterised in buffer order, so in one pass a lit mark is buried under every
+ * unlit mark later in the slab. Each pass collapses the marks it does not draw to zero size in
+ * the vertex shader.
  */
 export type HighlightPass = 'all' | 'dull' | 'lit';
 
@@ -106,19 +83,13 @@ export type MarksLayerProps = ScatterplotLayerProps & {
   /** Whether the fill colour comes from the lookup texture rather than the colour attribute. */
   useLut?: boolean;
   lutTexture?: Texture | null;
-  /** The ordinal per mark — bound as a buffer through `data.attributes`, never read per mark. */
+  /** The ordinal per mark, bound as a buffer through `data.attributes`. */
   getOrdinal?: number | ((d: unknown) => number);
-  /**
-   * Whether a highlight is set. Off — the ordinary map — every mark draws at its own alpha and
-   * the attribute is not read at all, so a client with no highlight pays nothing for this.
-   */
+  /** Whether a highlight is set. Off, every mark draws at its own alpha and size. */
   highlighting?: boolean;
   /** The highlight bit per mark, bound as a buffer the same way the ordinal is. */
   getHighlight?: number | ((d: unknown) => number);
-  /**
-   * Which half of the highlight this pass draws (see {@link HighlightPass}). `'all'` — the
-   * default, and the only value a map with no highlight ever uses — draws every mark.
-   */
+  /** Which half of the highlight this pass draws; see {@link HighlightPass}. */
   highlightPass?: HighlightPass;
 };
 
@@ -146,15 +117,14 @@ in float instanceHighlights;
 float tesseraInPass(float lit) {
   return tesseraLut.pass < 0.5 ? 1.0 : step(abs(tesseraLut.pass - 1.0 - lit), 0.5);
 }`,
-        // A lit mark is drawn larger than a dulled one, and the pass that is not drawing this
-        // mark collapses it to nothing — the cheapest discard there is, before rasterisation.
+        // A lit mark is drawn larger than a dulled one; the pass not drawing this mark collapses
+        // it to zero size before rasterisation.
         'vs:DECKGL_FILTER_SIZE': /* glsl */ `\
 float tesseraLit = step(0.5, instanceHighlights);
 size *= mix(tesseraLut.dullRadius, tesseraLut.litRadius, tesseraLit) * tesseraInPass(tesseraLit);
 `,
-        // The colour first, from whichever source is on, then the highlight over it — so a
-        // dulled mark is the same colour it would have been, at a lower alpha, under either
-        // colouring. `dull` is 1.0 with no highlight set, which is the whole of the switch.
+        // The colour from whichever source is on, then the highlight over it. With no highlight
+        // `dull` is 1.0 and `dullGrey` 0.0, so the colour passes through.
         'vs:DECKGL_FILTER_COLOR': /* glsl */ `\
 if (tesseraLut.useLut > 0.5) {
   int o = int(instanceOrdinals + 0.5);
@@ -174,7 +144,7 @@ color.a *= mix(tesseraLut.dull, 1.0, lit) * tesseraInPass(lit);
     super.initializeState();
     this.getAttributeManager()!.addInstanced({
       instanceOrdinals: {size: 1, type: 'float32', accessor: 'getOrdinal', defaultValue: 0},
-      // Defaults to 1 — *matched*, which is what every mark is when no highlight is set.
+      // 1 is matched, which every mark is when no highlight is set.
       instanceHighlights: {size: 1, type: 'float32', accessor: 'getHighlight', defaultValue: 1}
     });
   }

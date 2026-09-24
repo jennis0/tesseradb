@@ -96,8 +96,8 @@ pub(crate) use sweep::{
 pub(crate) use geometry::OpenView;
 use out::{emit_points, CollectSink, FilterBits, PointSchema};
 use sweep::{
-    gather_tile_columns, resolve_scalars, scoped_render_scalars, tile_ranges, Swept, TileSweepOut,
-    Tiling, MAX_POINTS_FRAME_BYTES,
+    resolve_scalars, scoped_render_scalars, tile_ranges, Gather, Swept, TileSweepOut, Tiling,
+    MAX_POINTS_FRAME_BYTES,
 };
 
 /// `Err(EngineError::Cancelled)` once `cancel` has flipped, `Ok(())` otherwise (`None` never
@@ -313,6 +313,7 @@ impl Engine {
             &swept,
             &PointSchema {
                 render_scalars,
+                segments: &served.segments,
                 membership,
             },
             &mask,

@@ -1,9 +1,9 @@
 import {useProjection, type Store} from '@tesseradb/react';
 
 /**
- * A host's own item card: the selected item's record from the `selection` projection, its
- * fields **by name in declaration order** from `meta` — `/v1/items` omits a field the item has
- * no value for, so position lies. A refusal is shown as one, never as an empty item.
+ * A host's own item card: the selected item's record from the `selection` projection, its fields
+ * by name in declaration order from `meta`, since `/v1/items` omits a field with no value. A
+ * refusal is shown as a refusal.
  */
 export function ItemCard({store}: {store: Store}) {
   const selection = useProjection(store, 'selection');

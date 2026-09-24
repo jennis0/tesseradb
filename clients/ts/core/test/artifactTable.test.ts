@@ -20,7 +20,7 @@ describe('the session artifact table', () => {
     expect(a).toBeGreaterThan(NO_ORDINAL);
     expect(b).toBeGreaterThan(NO_ORDINAL);
     expect(a).not.toBe(b);
-    // The same id in a later response resolves to the same ordinal — ids are stable per session.
+    // The same id in a later response resolves to the same ordinal.
     expect(table.ordinalOf('clusters/x', 10n)).toBe(a);
     expect([...table.take([ref(10n)])]).toEqual([a]);
     expect(table.entry(a!)?.tesseraId).toBe(10n);
@@ -35,10 +35,8 @@ describe('the session artifact table', () => {
   });
 
   /**
-   * **The rung is the wire's and never the chain's** (contracts §3.2 r44). A tiered layer's edge
-   * may skip a level — a city directly under a country because that country has no states — so a
-   * child one link below a root is served at rung 2. Counting links said 1 and drew it with the
-   * wrong siblings; the count no longer exists here to disagree.
+   * The rung is the wire's, not a count of links. A tiered layer's edge may skip a level (a city
+   * directly under a country with no states), so a child one link below a root can be at rung 2.
    */
   it('keeps a rung that the parent chain would have disagreed with', () => {
     const table = new SessionArtifactTable();
@@ -51,15 +49,15 @@ describe('the session artifact table', () => {
   });
 
   /**
-   * **A `dag` layer's child names several parents**: every one the table holds
-   * is recorded, in the wire's ascending order, and the colour walk takes the first — so the
-   * chain is the same on every rebuild. A parent the batch did not carry is simply not linked.
+   * A `dag` layer's child names several parents: every one the table holds is recorded in the
+   * wire's ascending order, and the colour walk takes the first. A parent the batch did not carry
+   * is not linked.
    */
   it('records every parent it holds, in the wire’s order, and resolves through the first', () => {
     const table = new SessionArtifactTable();
     const [a, b, child] = table.take([ref(1n), ref(3n), {...ref(7n, null, 'clusters/x', 1), parentIds: [1n, 3n, 9n]}]);
     expect(table.entry(child!)?.parentOrdinals).toEqual([a, b]);
-    // Both parents served: the walk to level 0 ends at the first, never the second.
+    // Both parents served: the walk to level 0 ends at the first.
     expect(table.resolve(child!, new Set([a!, b!, child!]), 0)).toBe(a);
     // The walk is over the first entry alone: with only the second parent served, the child
     // resolves to neutral rather than to a parent the walk does not take.
@@ -74,11 +72,10 @@ describe('the session artifact table', () => {
   });
 
   /**
-   * **The two batches a settle brings.** The point path's, built from the membership column, lands
-   * first and rarely holds every parent; the channel's follows with the whole served set. The
-   * second completing the list is not a colour moving: the walk reads the first entry alone, so
-   * the journal says `named` for the new parent and nothing for the child, and a texel resolving
-   * through the child wears the same colour before and after.
+   * The two batches a settle brings. The point path's, from the membership column, lands first and
+   * rarely holds every parent; the channel's follows with the whole served set. The second
+   * completing the list moves no colour, since the walk reads the first entry alone: the journal
+   * says `named` for the new parent and nothing for the child.
    */
   it('completes a partial parent list without journalling `linked`, and the first parent does not flip', () => {
     const table = new SessionArtifactTable();
@@ -108,7 +105,7 @@ describe('the session artifact table', () => {
     expect(table.version).toBe(settled);
   });
 
-  it('leaves a child a root when its parent is not in the batch — a link that does not resolve is no link', () => {
+  it('leaves a child a root when its parent is not in the batch: a link that does not resolve is no link', () => {
     const table = new SessionArtifactTable();
     const [child] = table.take([ref(2n, 7n)]);
     expect(table.entry(child!)?.parentOrdinals).toEqual([]);
@@ -148,12 +145,12 @@ describe('the session artifact table', () => {
   it('terminates a resolve over a response that named a cycle', () => {
     const table = new SessionArtifactTable();
     const [a, b] = table.take([ref(1n, 2n), ref(2n, 1n)]);
-    // Neither is served: the walk must end, not spin.
+    // Neither is served: the walk ends.
     expect(table.resolve(a!, new Set())).toBe(NO_ORDINAL);
     expect(b).toBeGreaterThan(NO_ORDINAL);
   });
 
-  it('drops everything on clear — a new identity key may not reuse a name', () => {
+  it('drops everything on clear: a new identity key may not reuse a name', () => {
     const table = new SessionArtifactTable();
     table.take([ref(10n)]);
     table.clear();
@@ -174,16 +171,13 @@ describe('the level walk and retained references', () => {
     expect(table.resolve(leaf!, served)).toBe(leaf);
     expect(table.resolve(leaf!, served, 1)).toBe(mid);
     expect(table.resolve(leaf!, served, 0)).toBe(root);
-    // A level above everything served resolves to neutral, never to a deeper artifact.
+    // A level above everything served resolves to neutral, not to a deeper artifact.
     expect(table.resolve(leaf!, new Set([leaf!]), 0)).toBe(NO_ORDINAL);
   });
 
   /**
-   * **A treed layer, as the wire now gives it** (contracts §3.2 r44): every artifact declared at
-   * level 0, and `rung` the response-local chain depth the server computed after the cut. The
-   * table used to count that depth from the links itself and pick between the count and the
-   * declared level per layer kind (trap 5.4); it now records the wire's number, and the walk
-   * coarsens by it — so a treed layer still offers the rungs it has and the walk still coarsens.
+   * A treed layer: every artifact declared at level 0, and `rung` the chain depth the server
+   * computed after the cut. The table records the wire's number and the walk coarsens by it.
    */
   it('coarsens a treed layer by the wire’s rungs, which are its chain depths', () => {
     const table = new SessionArtifactTable();
@@ -199,9 +193,8 @@ describe('the level walk and retained references', () => {
   });
 
   /**
-   * **A levelled layer whose edge skips a rung** — the case where a chain count is the wrong
-   * answer, and the reason the count no longer exists here: the wire's `rung` is the declared
-   * level, and a child one link below a root is at 2 because that is what was declared.
+   * A levelled layer whose edge skips a rung: the wire's `rung` is the declared level, so a child
+   * one link below a root is at 2.
    */
   it('coarsens a levelled layer by the declared level, never by a link count', () => {
     const table = new SessionArtifactTable();
@@ -226,7 +219,7 @@ describe('the level walk and retained references', () => {
   });
 });
 
-describe('the table is what a colour is built from (§5.10)', () => {
+describe('the table is what a colour is built from', () => {
   it('carries geometry, lists what is live, and stamps a version when it changes', () => {
     const table = new SessionArtifactTable();
     const before = table.version;
@@ -236,8 +229,8 @@ describe('the table is what a colour is built from (§5.10)', () => {
     ]);
     expect(table.version).toBeGreaterThan(before);
     expect(table.entry(a!)!.centroid).toEqual([10, 20]);
-    // An artifact first named by a frame that declared no centroid takes one when a later frame
-    // does — geometry arriving late is a colour arriving late, not a second identity.
+    // An artifact first named without a centroid takes one when a later frame declares it, on the
+    // same identity.
     expect(table.entry(b!)!.centroid).toBeNull();
     const named = table.version;
     table.take([{tesseraId: 2n, layer: 'l', parentIds: [1n], centroid: [30, 40]}]);
@@ -259,9 +252,9 @@ describe('the table is what a colour is built from (§5.10)', () => {
 });
 
 /**
- * The change journal: what a colour map and a lookup texture derive their per-settle work from
- * (`store.ts`, `lut.ts`). The kinds matter to those readers — only `named` says *nothing but this
- * ordinal's own value moved* — so each is asserted for the batch that produces it.
+ * The change journal, from which a colour map and a lookup texture derive their per-settle work.
+ * Only `named` means that nothing but this ordinal's own value moved, so each kind is asserted for
+ * the batch that produces it.
  */
 describe('changesSince', () => {
   it('reports naming, late geometry, a late link and a free, each against the version it moved at', () => {
@@ -281,17 +274,15 @@ describe('changesSince', () => {
     table.take([{tesseraId: 1n, layer: 'l', parentIds: [], centroid: [10, 20]}]);
     expect(table.changesSince(named)).toEqual([]);
 
-    // A centroid arriving for an entry named without one is a colour arriving; a parent link
-    // arriving for an entry that was already here moves what its descendants resolve to. Both are
-    // reported, and neither is `named`.
+    // A centroid arriving for an entry named without one, and a parent link arriving for an entry
+    // already here, are both reported, and neither as `named`.
     table.take([{tesseraId: 2n, layer: 'l', parentIds: [1n], centroid: [30, 40]}]);
     expect(table.changesSince(named)).toEqual([
       {ordinal: b, kind: 'placed'},
       {ordinal: b, kind: 'linked'}
     ]);
 
-    // A link set on an ordinal the same batch named is part of naming it: a reader told `linked`
-    // would rebuild for an entry it has never seen.
+    // A link set on an ordinal the same batch named is part of naming it, not `linked`.
     const linked = table.version;
     table.take([{tesseraId: 3n, layer: 'l', parentIds: [1n], centroid: [1, 1]}]);
     expect(table.changesSince(linked)!.map((c) => c.kind)).toEqual(['named']);
@@ -309,7 +300,7 @@ describe('changesSince', () => {
     expect(table.changesSince(0)).toBeNull();
     expect(table.changesSince(table.version - 10)).toHaveLength(10);
 
-    // A clear renames nothing it held, so no reader may patch across it.
+    // No reader patches across a clear.
     const held = table.version;
     table.clear();
     expect(table.changesSince(held)).toBeNull();

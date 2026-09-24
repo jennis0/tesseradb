@@ -124,8 +124,10 @@ a request that fails any of them takes no effect. Beyond those, four checks appl
    succeeds. A suppressed item's binding still collides, because suppression is temporary and a
    copy ingested past it would defeat it.
 
-A row whose coordinates fall outside the view's frame causes the request to be refused before
-anything is acknowledged, written to the WAL, or allocated an entity id.
+A row whose coordinates fall outside the view's frame is stored on the frame's edge, as a build
+stores one, and the response counts it as `clamped`. A coordinate that is not a finite number, or
+on a projected view is outside WGS84's range, causes the request to be refused before anything is
+acknowledged, written to the WAL, or allocated an entity id.
 
 ### The commit window
 
@@ -152,7 +154,7 @@ nothing: every waiter is refused, and a caller retries under the same batch id.
 |---|---|---|
 | 200 | Every row is durable in the WAL, with its identity allocated. It is not yet visible | Not needed |
 | 409 | A duplicate external id, or the same batch id with different bytes. Nothing in the batch took effect | After fixing the request |
-| 422 | Validation failed: an undeclared column, a wrong type, too many rows, or coordinates outside the view's frame. Nothing took effect | After fixing the request |
+| 422 | Validation failed: an undeclared column, a wrong type, too many rows, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
 | 503 | The executor is not running | Later |
@@ -237,9 +239,9 @@ put every one of them back on the map.
 
 ### When live state reaches a manifest
 
-Everything a manifest carries that no segment does — the deny records, the layers, views,
+A manifest carries some state that no segment does: the deny records, the layers, views,
 attributes and vocabularies declared while the service runs, and the artifact memberships and
-supplied content published since the last one — is written by one routine, and whatever is
+supplied content published since the last manifest. One routine writes all of it, and whatever is
 outstanding goes into whichever manifest it writes next. What differs is when that is.
 
 A deny, a declaration and an operator's own publication or growth of artifacts reach a manifest at

@@ -13,29 +13,23 @@ import {
 } from './rects.js';
 
 /**
- * The replica: what a client holds, as per-tile bands of points.
+ * The replica: the points a client holds, as one band per tile.
  *
- * **The unit is the (tile, cut) band, not the point** (`caching.md` §6). Design §7.2 serves a
- * prefix of each tile's visible set in `tessera_id` order, and those prefixes nest across depth, so
- * a point served at depth 3 is served again by every deeper fetch covering it. Storing points
- * independently would carry per-point metadata over 10^7 points and fight the nesting the sampler
- * already paid for; storing prefixes means one bound per tile describes everything held.
+ * The server sends a prefix of each tile's visible set in `tessera_id` order, and the prefixes
+ * nest across depth: a point served at depth 3 is served again by every deeper fetch that covers
+ * it. A band is such a prefix, so one bound describes everything held for a tile: every member of
+ * its visible set with `tessera_id` below `heldBelow`. The bound is an identity rather than a count
+ * because it means the same at every depth, so one declaration against a parent answers for its
+ * four children.
  *
- * That bound is what a client declares (`delta-serving.md` §3): *I hold every member of this tile's
- * visible set with `tessera_id` below X*. It is an identity bound rather than a count because the
- * same value is meaningful at every depth — one declaration against a parent answers for all four
- * children — and because a band assembled from several responses still describes itself exactly.
- *
- * Nothing here fetches. This is the replica store `client-interaction.md` §10 places above the
- * stateless client, and it is in `core` because its rules are invariant-bearing: the eviction
- * order, the prefix-only truncation, and the identity-key partition are each load-bearing and each
- * testable without a browser.
+ * Nothing here fetches. Eviction keeps a prefix of each band, and a change of principal drops
+ * every band.
  */
 
 /** A tile's address: its Morton prefix at a depth. Depth is not recoverable from the prefix. */
 export type TileAddress = {depth: number; prefix: bigint};
 
-/** `${depth}:${prefix}` — the map key. Depth leads so a scan can stop at a depth boundary. */
+/** `${depth}:${prefix}`, the map key. */
 export type BandKey = string;
 
 export function bandKey(depth: number, prefix: bigint): BandKey {
@@ -43,68 +37,49 @@ export function bandKey(depth: number, prefix: bigint): BandKey {
 }
 
 /**
- * One tile's held points, ascending by `tessera_id` — the wire's own order (contracts §3.2), kept
- * because every operation here is a prefix operation over it.
+ * One tile's held points, ascending by `tessera_id` as the wire sends them.
  *
- * **The arrays are copies, never views onto a response buffer.** A `subarray` keeps the whole
- * response alive, so evicting a band would free nothing and `bytes` would be fiction — and the
- * byte ledger is the only thing standing between a 30-minute session and 2–6 GB of accumulation
- * (`caching.md` §6).
+ * Every array is a copy. A view onto the response buffer would keep the whole response alive, so
+ * evicting the band would free nothing and `bytes` would be wrong.
  */
 export type Band = {
   depth: number;
   prefix: bigint;
   /**
-   * The tile's `(x, y)` index, de-interleaved once when the band is built.
-   *
-   * **Every region query needs it and none of them should pay for it.** Recovering it from the
-   * prefix is a per-bit `BigInt` loop, and `bandsForRegion` runs over every held band on every
-   * redraw — so at 2.4 × 10^4 bands that was ~2.4 × 10^5 `BigInt` allocations per frame, measured
-   * at 14–20 ms of redraw for a view drawing as few as 5,700 marks. It scaled with what the cache
-   * *held* rather than with what was drawn, which is why a small mark budget did not help.
+   * The tile's `(x, y)` index, computed once when the band is built. Recovering it from the prefix
+   * is a `BigInt` loop per bit, and region queries run over every held band on every redraw.
    */
   x: number;
   y: number;
   ids: BigUint64Array;
   /**
-   * Interleaved x,y in **deck.gl world space**, `f32` — two entries per point.
-   *
-   * Converted once when the band is built rather than on every assembly. The wire carries `f64`
-   * cell space and the renderer wants `f32` world space; doing that per point per redraw is the
-   * single most expensive thing in the render path, and it produces the same numbers every time.
-   * Storing the converted form also halves the bytes: 8 per point rather than 16.
+   * Interleaved x, y in deck.gl world space, two `f32` entries a point, converted once from the
+   * wire's `f64` cell space.
    */
   positions: Float32Array;
   scalars: Record<string, ScalarColumn>;
   /**
-   * The session ordinal per point, per layer the response was asked for (design §5.10): `0` for
-   * a point under no served artifact of that layer. Named on the main thread as the band was
-   * built, from the decoder's response-local index. A layer absent here was not named when the
-   * band was fetched, which is what makes the band colour-stale for it; a layer turned off keeps
-   * its column until eviction, so turning it back on is free.
+   * Per layer the response named, each point's session ordinal, `0` for a point under no served
+   * artifact of that layer. A layer missing here was not named when the band was fetched, so the
+   * band is colour-stale for it. A layer turned off keeps its column until eviction.
    *
-   * `distinct` is the band's reference on the table — one per ordinal it carries — released when
-   * the band is evicted or truncated, and the list colour coverage is checked over (a dozen
-   * entries, never the points).
+   * `distinct` holds the band's references on the table, one per ordinal it carries, released when
+   * the band is evicted or truncated.
    */
   membership: Record<string, BandMembership>;
   /**
-   * The per-point highlight bit, one byte a point (`highlight-and-hierarchy.md` §2): `1` where
-   * the point satisfies the request's `highlight`, `0` where it does not.
-   *
-   * **`null` where the response carried no highlight**, which is a different state from every
-   * point reading `0` — nothing is dulled when no question was put. A band held from a request
-   * that carried one and drawn under a request that does not is re-fetched like any other
-   * question change, so this never carries a stale answer into a frame.
+   * One byte a point: `1` where the point satisfies the request's `highlight`, `0` where it does
+   * not. `null` where the request carried no highlight, and then nothing is dulled. A change of
+   * highlight refetches the band, so the bits answer the highlight being drawn.
    */
   highlightBits: Uint8Array | null;
   /** `m(T)` as the server reported it: how many points the definition serves for this tile. */
   served: number;
-  /** `min(k, k_max_marks)` in force when this band was fetched — see {@link isComplete}. */
+  /** `min(k, k_max_marks)` when this band was fetched; see {@link isComplete}. */
   capUsed: number;
   visible: bigint;
   matched: bigint;
-  /** The tile's own `highlighted` count, exact — equal to `matched` where no highlight is set. */
+  /** The tile's exact `highlighted` count; equal to `matched` where no highlight is set. */
   highlighted: bigint;
   /** The declaration: every held identity is strictly below this. `0n` for an empty band. */
   heldBelow: bigint;
@@ -116,7 +91,7 @@ export type Band = {
 
 export type BandMembership = {ordinals: Uint32Array; distinct: Uint32Array};
 
-/** The distinct non-zero ordinals of a slice, ascending — a band's reference on the table. */
+/** The distinct non-zero ordinals of a slice, ascending: a band's references on the table. */
 export function distinctOrdinals(ordinals: Uint32Array): Uint32Array {
   const seen = new Set<number>();
   for (let i = 0; i < ordinals.length; i++) {
@@ -127,19 +102,13 @@ export function distinctOrdinals(ordinals: Uint32Array): Uint32Array {
 }
 
 /**
- * Does this band hold the whole of `served(T)`, and will it still at `k`?
+ * Whether the band holds all of `served(T)` and would still at `k`.
  *
- * θ is viewport-invariant — design §7.2's threshold depends on the mask, the generation and the
- * view, never on the bounding box or the zoom — so at a fixed content key and fixed depth `m(T)`
- * does not move, and the `served` the server already reported is still current. Two clauses:
- *
- * 1. the band holds every point the definition serves; and
- * 2. `served` is below the cap that was in force, so the **cap was not the binding clause** and a
- *    larger `k` cannot grow `m(T)`. Where `served` equals that cap the cap *was* binding, and a
- *    larger `k` yields more — so the tile must be requested again.
- *
- * A tile passing both need not appear in a request at all, which is the only mechanism that makes
- * server work scale with novelty rather than with viewport area (`delta-serving.md` §1).
+ * The server's sampling threshold depends on the mask, the generation and the view, not on the
+ * bounding box or the zoom, so at a fixed content key and depth the reported `served` stays current. The band is
+ * complete when it holds every served point and either `served` was below the cap in force or
+ * that cap was already at least `k`; then a larger `k` cannot serve more. A complete tile is left
+ * out of the request.
  */
 export function isComplete(band: Band, contentKey: string, k: number): boolean {
   if (band.contentKey !== contentKey) return false;
@@ -147,7 +116,7 @@ export function isComplete(band: Band, contentKey: string, k: number): boolean {
   return band.served < band.capUsed || band.capUsed >= k;
 }
 
-/** How many bytes a band's buffers occupy, for the ledger eviction runs against. */
+/** How many bytes a band's buffers occupy, the figure eviction counts. */
 function bandBytes(
   ids: BigUint64Array,
   positions: Float32Array,
@@ -159,17 +128,14 @@ function bandBytes(
   for (const column of Object.values(scalars)) {
     bytes += scalarBytes(column);
   }
-  // The ordinal column is 4 B a point per layer on (§5.10's table); the ledger counts it.
   for (const m of Object.values(membership)) bytes += m.ordinals.byteLength + m.distinct.byteLength;
-  // One byte a point where a highlight is set, and nothing at all where none is.
   bytes += highlightBits?.byteLength ?? 0;
   return bytes;
 }
 
 function scalarBytes(column: ScalarColumn): number {
-  // `bool` and `utf8` decode to boxed arrays rather than typed ones. Their true cost is a heap
-  // object per value; the estimates here are deliberately generous rather than accurate, because
-  // undercounting them is what would let the ledger drift above the bound it exists to hold.
+  // `bool` and `utf8` decode to arrays of heap values. The estimates err high, so the ledger does
+  // not report less than is held.
   if (column.arrowType === 'bool') return column.values.length * 4 + (column.present?.byteLength ?? 0);
   if (column.arrowType === 'utf8') {
     let bytes = 0;
@@ -193,56 +159,33 @@ function sliceScalars(
   return out;
 }
 
-/**
- * Split a response into bands, one per tile it reports.
- *
- * The wire orders points by tile in the order the tile stream lists them, and `served` gives each
- * tile's length — so this is a prefix-sum walk, and `served` is the *only* way to recover the
- * grouping without recomputing the selection (contracts §3.2).
- *
- * Tiles reporting no served points yield no band: an empty band would declare a bound of zero,
- * which is what a client with nothing declares anyway.
- */
-/**
- * A resumable split, so a large response need not block the thread that draws.
- *
- * Splitting is the last big block of main-thread work per response — measured at 18.5 ms mean and
- * 49 ms max per response, landing in the same frame as deriving and uploading, which is the p95
- * hitch. The work itself cannot move (bands must be copies, and 10^4 of them will not transfer to a
- * worker cheaply), but it slices: each {@link BandSplitter.step} builds bands until its deadline
- * and returns, and the caller yields to the frame loop between steps.
- */
+/** A resumable split of a response into bands; see {@link bandSplitter}. */
 export type BandSplitter = {
   done(): boolean;
-  /** Build bands until `performance.now()` passes `deadline`. Never returns an empty array early. */
+  /** Builds bands until `performance.now()` passes `deadline`. Returns at least one band while any remain. */
   step(deadline: number): Band[];
 };
 
 /**
- * The main thread's half of naming (design §5.10): the decoder's distinct-id list maps to
- * session ordinals through the table — a few thousand lookups, once per response — and each
- * band's points are remapped from local index to ordinal with a tight loop as the band is
- * built. Parent links come from the same response's artifacts frame, which is the only place a
- * `parentIds` is ever named (decision 0087).
+ * One layer's membership column, mapped to session ordinals. The decoder's distinct ids map
+ * through the table once per response, and each band's points are remapped from response-local
+ * index to ordinal as the band is built.
  *
- * The response holds one temporary reference per distinct ordinal while its bands are being
- * built, so an ordinal named by the distinct list cannot be recycled between two slices; each
- * band then takes its own references, and the temporary ones go when the split completes.
+ * The response holds one reference per distinct ordinal until the split completes, so no ordinal
+ * it names is recycled between two slices.
  */
 type ResponseNaming = {
   layer: string;
   index: Uint16Array | Uint32Array;
-  /** Local index → session ordinal; `map[0] = 0`. */
+  /** Response-local index to session ordinal; `map[0] = 0`. */
   map: Uint32Array;
-  /** Scratch over local indices, for collecting a band's distinct set without a `Set` per band. */
+  /** Scratch over local indices, for collecting a band's distinct ordinals without a `Set`. */
   mark: Uint8Array;
 };
 
 function nameResponse(result: ViewportResult, table: SessionArtifactTable): {naming: ResponseNaming[]; release: () => void} {
-  // The response's own artifacts frame is the only source of a `parentIds` (decision 0087) and,
-  // for the artifacts this response's points belong to, of a centroid — which is what colours
-  // them. Feeding both here is what lets a band be coloured by the response that carried it,
-  // rather than waiting on the `k = 0` channel two hundred milliseconds behind the gesture.
+  // Parent links and centroids come from this response's artifacts frame, so a band can be coloured
+  // from the response that carried it.
   const frameOf = new Map<string, {parentIds: readonly bigint[]; centroid: readonly [number, number] | null; rung: number}>();
   for (const a of result.artifacts) frameOf.set(`${a.layer} ${a.tesseraId}`, {parentIds: a.parentIds, centroid: a.centroid, rung: a.rung});
   const naming: ResponseNaming[] = [];
@@ -252,10 +195,8 @@ function nameResponse(result: ViewportResult, table: SessionArtifactTable): {nam
     for (let d = 0; d < column.ids.length; d++) {
       const id = column.ids[d]!;
       const known = frameOf.get(`${layer} ${id}`);
-      // **`rung` only where the artifacts frame named it.** A membership column may name an
-      // artifact this response's artifacts frame also carries, and then the rung is the wire's; a
-      // reference built from the column alone has no rung to give and takes 0, which is what a
-      // flat layer's — and a treed root's — is. It is never counted from the links.
+      // `rung` is the wire's where the artifacts frame carries the artifact, and absent otherwise; it
+      // is not counted from parent links.
       refs.push({tesseraId: id, layer, parentIds: known?.parentIds ?? [], centroid: known?.centroid ?? null, rung: known?.rung});
     }
     const ordinals = table.take(refs);
@@ -272,7 +213,7 @@ function nameResponse(result: ViewportResult, table: SessionArtifactTable): {nam
   };
 }
 
-/** One band's membership for one layer: the remap loop, and its distinct list, retained. */
+/** One band's ordinals for one layer, and the distinct list it retains on the table. */
 function remapBand(n: ResponseNaming, from: number, to: number, table: SessionArtifactTable): BandMembership {
   const ordinals = new Uint32Array(to - from);
   const {index, map, mark} = n;
@@ -299,6 +240,15 @@ function remapBand(n: ResponseNaming, from: number, to: number, table: SessionAr
   return {ordinals, distinct};
 }
 
+/**
+ * Splits a response into one band per tile, in slices, so a large response does not block the
+ * thread that draws: each `step` builds bands until its deadline and the caller yields between
+ * steps. Bands must be copies, and ten thousand of them do not transfer from a worker cheaply, so
+ * the split runs on the main thread.
+ *
+ * The wire orders points by tile in the order the tile list gives, and a tile's `served` is its
+ * length, so the split is a running sum. A tile with nothing served yields no band.
+ */
 export function bandSplitter(
   result: ViewportResult,
   depth: number,
@@ -313,8 +263,7 @@ export function bandSplitter(
     done: () => i >= result.tiles.length,
     step(deadline: number): Band[] {
       const bands: Band[] = [];
-      // The clock every 64 tiles, not every tile: a `performance.now()` per band would be a
-      // meaningful share of the work being sliced.
+      // The clock is read every 64 tiles; once per band would be a noticeable share of the work.
       while (i < result.tiles.length) {
         if ((i & 63) === 0 && bands.length > 0 && performance.now() >= deadline) break;
         const tile = result.tiles[i++]!;
@@ -322,23 +271,19 @@ export function bandSplitter(
         if (served === 0) continue;
         const end = offset + served;
         const ids = result.ids.slice(offset, end);
-        // **Ascending order asserted at the one gate every band passes.** Every prefix operation
-        // in the client — eviction truncation, density-matched subsets, the declaration bound —
-        // rests on the wire's ascending-identity contract (contracts §3.2); until here it was an
-        // unchecked premise (review, Question E). O(n) over bytes already being copied.
+        // Truncation and the declared bound rely on ascending ids, so a response out of order is
+        // refused here.
         for (let p = 1; p < ids.length; p++) {
           if (ids[p]! <= ids[p - 1]!) {
             throw new Error(
-              `band ${tile.tile}: ids out of ascending order at ${p} — every client subset rule ` +
-                `rests on this, so a violation must refuse loudly rather than serve quietly.`
+              `band ${tile.tile}: ids out of ascending order at ${p}; a response lists each tile's ` +
+                `ids in ascending \`tessera_id\` order.`
             );
           }
         }
-        // Already in world space — the decoder produced it, which in a browser means a worker did.
         const positions = result.world.slice(offset * 2, end * 2);
         const scalars = sliceScalars(result.scalars, offset, end);
-        // A copy, never a view: a `subarray` would keep the whole response alive and the byte
-        // ledger would be fiction, which is the rule every other array here follows.
+
         const highlightBits = result.highlighted ? result.highlighted.slice(offset, end) : null;
         const membership: Record<string, BandMembership> = {};
         if (named) {
@@ -379,7 +324,7 @@ export function bandSplitter(
   };
 }
 
-/** {@link bandSplitter}, drained in one call — the form every synchronous caller wants. */
+/** {@link bandSplitter}, drained in one call. */
 export function bandsOfResult(
   result: ViewportResult,
   depth: number,
@@ -395,18 +340,16 @@ export type Resolved = {
   provenance: Provenance;
   bands: Band[];
   /**
-   * False where the points came from anywhere but this tile at this depth, in which case the drawn
-   * marks are a superset of `served(T)`. Presentation only: no number-channel value may be shown
-   * against such a tile, and the drawn-count assertion does not range over it
-   * (`delta-serving.md` §7).
+   * False where the points came from another depth, so the marks drawn are a superset of
+   * `served(T)`. No count may be shown against such a tile.
    */
   exact: boolean;
 };
 
 export type PlannedRequest = {
-  /** The novel regions, in tile-index space at the planned depth. Empty means nothing to ask for. */
+  /** The regions to fetch, in tile-index space at the planned depth. Empty means nothing to fetch. */
   fetch: TileRect[];
-  /** Tiles the wanted region spans, and how many of them the request covers — for reporting only. */
+  /** Tiles the wanted region spans, and how many of them the request covers. For reporting only. */
   wanted: number;
   novel: number;
 };
@@ -415,52 +358,39 @@ export type EvictionFocus = {
   depth: number;
   prefix: bigint;
   /**
-   * The bands that are on screen at this depth, which eviction never truncates. Before the
-   * response landed part by part every band of one answer shared a touch time and the tie broke
-   * on distance from the focus, so the periphery went first; streamed, the first rows to land are
-   * the least recently touched and were halved while the rest of the same view kept every point —
-   * strips at half density across the map, their coverage retracted, refetched and halved again
-   * (GeoNames, 2026-08-28). What is being looked at is not a candidate.
+   * The bands on screen at this depth, which eviction does not truncate. A streamed response lands
+   * in parts, so its first rows are the least recently touched; without this they would be halved
+   * while the rest of the same view kept every point.
    */
   protect?: {depth: number; rect: TileRect};
 };
 
 /**
- * One byte budget over every view's bands (`view-switching.md` §3).
+ * One byte budget over every view's band cache.
  *
- * A store holds one {@link BandCache} per view — bands are geometry quantised under one frame, so
- * they cannot share an index — but **one number bounds the total**, and the victim is chosen
- * least-recently-drawn across every view rather than within one. A view the user left an hour ago
- * yields its bytes to the view they are in; the view they are in never yields the rectangle it is
- * drawing.
- *
- * The accountant, rather than a view axis on the band key, because the per-depth indexes, the
- * coverage rectangles and every band-key site then stay exactly as they are: what is shared is the
- * arithmetic, not the storage. Registered caches are the whole of its state.
- *
- * **A held view is a bystander here, never a participant.** Eviction runs on the fetch that
- * overflowed the budget, which is always the current view's — a view that is not current issues
- * nothing (§8) — so `from` is the evicting cache and its protected rectangle is the one that
- * applies.
+ * Each view has its own {@link BandCache}, because positions from different views are in
+ * different coordinate systems and cannot share an index, but one number bounds their total.
+ * Eviction runs on the fetch that overflowed the budget, which is always the current view's, so
+ * the evicting cache's protected rectangle is the one that applies.
  */
 export class BandBudget {
   private readonly caches = new Set<BandCache>();
 
   constructor(readonly budgetBytes: number) {}
 
-  /** Called by {@link BandCache}'s constructor; a cache belongs to exactly one budget. */
+  /** Called by {@link BandCache}'s constructor; a cache belongs to one budget. */
   register(cache: BandCache): void {
     this.caches.add(cache);
   }
 
-  /** Bytes held across every registered cache — the figure {@link budgetBytes} bounds. */
+  /** Bytes held across every registered cache, the figure {@link budgetBytes} bounds. */
   get bytes(): number {
     let held = 0;
     for (const cache of this.caches) held += cache.bytes;
     return held;
   }
 
-  /** How many caches hold any band — the `replica` projection's `views` (`view-switching.md` §3). */
+  /** How many caches hold any band. */
   get views(): number {
     let n = 0;
     for (const cache of this.caches) if (cache.bandCount > 0) n++;
@@ -468,15 +398,9 @@ export class BandBudget {
   }
 
   /**
-   * Evict to the budget across every cache, deepest / least-recently-touched / farthest-from-focus
-   * first — see {@link BandCache.evict} for what a single eviction does and why it truncates.
-   *
-   * **Every other view's bands are offered before the evicting view's**, which is the cross-view
-   * half of least-recently-drawn: a view that is not current was, by construction, drawn less
-   * recently than the one being fetched for. Within each group the single-cache order stands, so a
-   * store with one view evicts byte for byte as it did before this existed. **View-first rather
-   * than one merged ordering across views**: a held view's recent band yields before the current
-   * view's older one, which is the intent — the current view is the one being drawn.
+   * Evicts to `lowWaterFraction` of the budget. Other views' bands go before the evicting view's,
+   * so a view left an hour ago gives up its bytes first. Within each group the order is
+   * {@link evictionOrder}. See {@link BandCache.evict} for what one eviction does.
    */
   evict(focus: EvictionFocus, from: BandCache, lowWaterFraction = 0.9): void {
     if (this.bytes <= this.budgetBytes) return;
@@ -498,8 +422,7 @@ export class BandBudget {
     const protect = focus.protect;
     for (const {cache, band} of order) {
       if (this.bytes <= target) return;
-      // The protected rectangle is the evicting view's: another view's bands at the same tile
-      // coordinates are not what is on screen.
+      // Another view's band at the same tile coordinates is not on screen.
       if (cache === from && protect && band.depth === protect.depth && rectContainsTile(protect.rect, band.x, band.y)) continue;
       cache.shed(band);
     }
@@ -507,9 +430,8 @@ export class BandBudget {
 }
 
 /**
- * The order eviction takes bands in: deepest first, then least recently touched, then farthest
- * from the focus. Coarse points are the head of every band, so depth-first is what keeps overview
- * rendering from blanking (`caching.md` §6).
+ * Deepest first, then least recently touched, then farthest from the focus. Coarse points are
+ * the head of every band and live in the shallow bands, so this order keeps the overview drawn.
  */
 function evictionOrder(a: Band, b: Band, focus: EvictionFocus): number {
   if (a.depth !== b.depth) return b.depth - a.depth;
@@ -518,67 +440,39 @@ function evictionOrder(a: Band, b: Band, focus: EvictionFocus): number {
 }
 
 /**
- * The held bands for one principal, under one byte budget.
+ * The held bands for one view and one principal, under a byte budget.
  *
- * Partitioned by identity key: a change of principal drops the whole partition rather than
- * filtering it, so cross-principal reuse is impossible by construction rather than by discipline
- * (`client-interaction.md` §10). A cache keyed too loosely here serves one principal's authorised
- * data to another — a disclosure, not a staleness bug (decision 0029).
+ * A change of principal drops every band rather than filtering them. Serving one principal's
+ * bands to another would disclose data the second may not see.
  *
- * **One cache per view, one budget over them all** (`view-switching.md` §3): the budget is a
- * {@link BandBudget} the caller may share between caches, or a plain number, which makes this
- * cache its own budget's only member.
+ * `budget` is a {@link BandBudget} shared with other views' caches, or a number, which gives this
+ * cache a budget of its own.
  */
 export class BandCache {
   private bands = new Map<BandKey, Band>();
   /**
-   * The same bands, grouped by depth.
-   *
-   * **A frame needs one depth's bands and a walk over every band was finding them.** Deriving a
-   * frame scanned the whole store — measured at 2.3 x 10^5 held bands, 0.09 us each rising to
-   * 0.43 us as the store filled, so 7 ms early in a session and 98–148 ms late in one, on every
-   * derive. It scaled with what is *held*, which a mark budget cannot bound and which panning only
-   * makes worse: the second time this exact shape of fault has been measured in this file.
-   *
-   * Stand-ins still need the other depths, so this does not remove the walk — it removes the
-   * majority of it, because the working depth holds the bulk of the store, and it makes a frame
-   * whose region is fully held cost one depth's bands rather than all of them.
+   * The same bands grouped by depth. A frame needs one depth's bands, and a walk over the store
+   * costs in proportion to what is held, which a mark budget does not bound.
    */
   private byDepth = new Map<number, Map<BandKey, Band>>();
   /**
-   * Bumped by every change to what is held or covered.
-   *
-   * **A frame derived from this cache stays valid exactly as long as this does not move**, which is
-   * what lets a redraw skip re-deriving one. Deriving a frame is per-band work — restricting stand-in
-   * bands, concatenating them, folding their columns — and at 3.9 × 10^4 stand-in bands it measured
-   * ~35 ms, on every animation frame of a drag, for a result that could not have changed. A counter
-   * is the whole of the fix: it is exact rather than heuristic, and a missed bump would draw a
-   * stand-in over ground that has since been covered, which is a fault this client has had once
-   * already.
+   * Incremented by every change to what is held or covered. A frame derived from this cache stays
+   * valid while this does not move, so a redraw can skip re-deriving it. A missed increment draws a
+   * stand-in over ground that has since been covered.
    */
   private changes = 0;
   /**
-   * The regions this client has asked for and absorbed the answer to.
-   *
-   * **This is how emptiness is cached, and caching emptiness is what makes any of the rest work.**
-   * A response omits a tile whose visible count is zero, so without a record of having asked, every
-   * empty tile is re-requested on every view — and a viewport is overwhelmingly empty tiles:
-   * measured on the 2.4M demo corpus, 454 of 16,524 tiles in a settled view carry any data at all.
-   * The other 16,070 would put a request on the wire forever and no revisit would ever be free.
-   *
-   * **Rectangles rather than one entry per tile**, which an earlier version of this did. That
-   * version was unbounded — one map entry per empty tile ever looked at, ~16k per viewport, never
-   * evicted and never counted against `budgetBytes` — and it forced planning to enumerate every
-   * tile in the viewport to consult it. A covered rectangle asserts the same thing over its whole
-   * area in four integers: *we asked here and absorbed the answer, so anything we were not sent is
-   * empty*.
+   * The regions asked for whose answers have been absorbed. A response omits tiles with nothing
+   * visible, and most tiles in a viewport are empty, so this is how empty ground is remembered:
+   * anything inside a covered rectangle that was not sent is empty. Rectangles, rather than an
+   * entry per tile, keep this small and let a plan subtract regions without listing tiles.
    */
   private covered: Coverage[] = [];
   private identityKey: string | null = null;
   private held = 0;
   private heldPoints = 0;
 
-  /** The budget this cache is accounted against — its own where the caller passed a number. */
+  /** The budget this cache counts against; its own where the caller passed a number. */
   private readonly budget: BandBudget;
 
   constructor(
@@ -590,7 +484,7 @@ export class BandCache {
     this.budget.register(this);
   }
 
-  /** The budget bounding this cache and every other view's — see {@link BandBudget}. */
+  /** The budget over this cache and every other view's; see {@link BandBudget}. */
   get budgetBytes(): number {
     return this.budget.budgetBytes;
   }
@@ -600,12 +494,12 @@ export class BandCache {
     return this.budget.bytes;
   }
 
-  /** How many views hold any band — see {@link BandBudget.views}. */
+  /** How many views hold any band. */
   get heldViews(): number {
     return this.budget.views;
   }
 
-  /** Give back every reference a band's membership holds. */
+  /** Releases every table reference a band's membership holds. */
   private releaseMembership(band: Band): void {
     if (!this.table) return;
     for (const m of Object.values(band.membership)) this.table.release(m.distinct);
@@ -616,12 +510,9 @@ export class BandCache {
   }
 
   /**
-   * Points held, which is the figure to size a replica against — bytes hide how much of the budget
-   * is per-band overhead rather than payload, and bands here are small (`m_target` is single
-   * digits, so a band is ~10 points) so that overhead is not a rounding error.
-   *
-   * A maintained counter, not a walk: this is read on every store update, and a walk scaled with
-   * the 10^5 bands a long session holds rather than with the update that asked.
+   * Points held, the figure to size a replica against. A band is around ten points, so per-band
+   * overhead is a large share of `bytes`. Kept as a counter because it is read on every store
+   * update.
    */
   get points(): number {
     return this.heldPoints;
@@ -631,7 +522,7 @@ export class BandCache {
     return this.bands.size;
   }
 
-  /** Keep {@link byDepth} in step with a `bands` write. The only place either is inserted into. */
+  /** Keeps {@link byDepth} in step with a `bands` write. */
   private index(band: Band, key: BandKey): void {
     let atDepth = this.byDepth.get(band.depth);
     if (!atDepth) {
@@ -641,17 +532,13 @@ export class BandCache {
     atDepth.set(key, band);
   }
 
-  /** Held bands at one depth, or nothing — never the whole store. */
   private atDepth(depth: number): Iterable<Band> {
     return this.byDepth.get(depth)?.values() ?? [];
   }
 
   /**
-   * The exact bands inside a region — the fast half of {@link bandsForRegion} on its own.
-   *
-   * For the caller that already has a drawn frame and needs only to fold a fresh arrival into it:
-   * the stand-in walk is the expensive half, and a frame whose stand-ins are one arrival stale is
-   * drawable while the full derivation waits for a quiet moment.
+   * The exact bands inside a region: {@link bandsForRegion} without the stand-ins, for folding a
+   * fresh arrival into a frame already drawn.
    */
   exactIn(want: TileRect, depth: number): Band[] {
     const exact: Band[] = [];
@@ -661,7 +548,7 @@ export class BandCache {
     return exact;
   }
 
-  /** See {@link changes}. Opaque and monotonic — compare for equality, never for order. */
+  /** See {@link changes}. Compare for equality only. */
   get version(): number {
     return this.changes;
   }
@@ -675,13 +562,11 @@ export class BandCache {
   }
 
   /**
-   * Admit a band, dropping every other principal's first.
+   * Admits a band, first dropping every band of another principal.
    *
-   * A band whose content key differs from the held one **replaces** it rather than merging into it.
-   * Unioning would let an item suppressed since the held band was fetched survive into a band the
-   * client now marks fresh — a client-side fail-open, and against the property that the server
-   * names the complete served set, so an item it does not name is one the client drops
-   * (`delta-serving.md` §7).
+   * A band under a new content key replaces the held one. A merge would keep an item suppressed
+   * since the held band was fetched: the server names the whole served set, so an item it does not
+   * name is dropped.
    */
   put(band: Band): void {
     if (this.identityKey !== band.identityKey) {
@@ -691,11 +576,8 @@ export class BandCache {
     const key = bandKey(band.depth, band.prefix);
     const previous = this.bands.get(key);
     if (previous) {
-      // **A layer's column survives a refetch that did not name the layer.** A band refetched
-      // for another layer's column carries the same served set (same content key and length),
-      // so the columns it lacks are carried over from the band it replaces with their references
-      // — which is what makes switching a layer back on free (§5.10). A replacement under a
-      // moved content key carries nothing over: the served set may differ.
+      // A layer's column survives a refetch that did not name the layer, provided the served set is
+      // the same, so turning a layer back on costs nothing. Under a new content key nothing carries.
       const sameSet = previous.contentKey === band.contentKey && previous.ids.length === band.ids.length;
       for (const [layer, held] of Object.entries(previous.membership)) {
         if (sameSet && !(layer in band.membership)) {
@@ -716,27 +598,23 @@ export class BandCache {
   }
 
   /**
-   * Record that a region was asked for and its answer absorbed.
-   *
-   * Called only *after* the response's bands are in, never before: a region marked covered before
-   * its points are held would let the next plan omit tiles whose data never arrived.
+   * Records that a region was asked for and its answer absorbed. Call it only once the response's
+   * bands are in, or the next plan skips tiles whose data never arrived.
    */
   markCovered(rect: TileRect, depth: number, contentKey: string, capUsed: number): void {
     this.covered = coverageAdd(this.covered, {rect, depth, contentKey, capUsed});
     this.changes++;
   }
 
-  /** Regions held at this depth, content key and cap — the holes a plan subtracts. */
+  /** Regions held at this depth, content key and cap: the holes a plan subtracts. */
   coverageFor(depth: number, contentKey: string, k: number): TileRect[] {
     return coverageAt(this.covered, depth, contentKey, k);
   }
 
   /**
-   * Withdraw the coverage claim over each of `bands`' tiles, so the next plan fetches them
-   * again — the colour-stale refetch (§5.10): a band whose ordinals no longer resolve to
-   * anything served, or that lacks the column for a layer now on, is asked for again after novel
-   * ground, centre-first, by the same path a stale-content band takes. The band stays held and
-   * drawn meanwhile; the arrival replaces it.
+   * Withdraws coverage over each band's tile so the next plan fetches it again. Used for a band
+   * that is colour-stale: its ordinals no longer resolve, or it lacks the column for a layer now
+   * on. The band stays drawn until its replacement arrives.
    */
   retract(bands: readonly Band[]): void {
     for (const band of bands) {
@@ -744,7 +622,7 @@ export class BandCache {
     }
   }
 
-  /** Drop everything. Called on a token change, where the whole partition becomes unrenderable. */
+  /** Drops everything. Called when the token changes. */
   dropIdentity(): void {
     for (const band of this.bands.values()) this.releaseMembership(band);
     this.bands.clear();
@@ -757,41 +635,32 @@ export class BandCache {
   }
 
   /**
-   * Decide, for a tile set at one depth, what need not be asked for and what must be.
+   * The parts of `want` to fetch at one depth: `want` less what is covered.
    *
-   * Declarations are computed **from the cache**, never from a record of what the server named:
-   * eviction is normal operation, and a client that declared a band it had since evicted would get
-   * a silent hole (`caching.md` §7.1). Understating is safe in the other direction — it costs
-   * bytes, never correctness.
+   * Coverage is read from the cache, not from a record of what the server sent, because eviction
+   * withdraws coverage. Understating what is held costs bytes and nothing else.
    */
   planRegion(want: TileRect, depth: number, contentKey: string, k: number): PlannedRequest {
     const wanted = rectArea(want);
 
-    // A counts-only request (`k = 0`) subtracts nothing. Its whole purpose is to refresh the number
-    // channel and the content key over ground the client already holds — which is what keeps the
-    // staleness bound reachable once look-ahead has emptied the request (`delta-serving.md` §8).
+    // A count-only request (`k = 0`) subtracts nothing: it refreshes counts and the content key
+    // over ground already held.
     if (k === 0) return {fetch: [want], wanted, novel: wanted};
 
-    // **At most two pieces, because each piece is a request.** The per-request floor is ~170 µs and
-    // a tile the client already holds costs the server essentially nothing to be asked for again —
-    // so past two, one slightly-too-large request beats four exact ones. Measured the wrong way
-    // round first: unbounded subtraction turned a single pan into six requests.
+    // At most two pieces, because each piece is a request, and asking again for a held tile costs
+    // the server almost nothing.
     const fetch = rectSubtractAll(want, this.coverageFor(depth, contentKey, k), 2);
     return {fetch, wanted, novel: fetch.reduce((n, r) => n + rectArea(r), 0)};
   }
 
   /**
-   * The bands to draw for a region, and on what authority.
+   * The bands to draw for a region. Exact bands come from this depth. Stand-ins, an ancestor
+   * clipped to a rectangle or a held descendant, are admitted only over the part of the region not
+   * covered, so they do not draw over ground an exact band answers. A stand-in draws a superset of
+   * `served(T)`: the caller marks it stale and shows no count against it.
    *
-   * **Iterates what is held, not what is wanted**, which is the whole reason this is affordable: a
-   * settled viewport spans ~16.5k tiles of which ~450 carry any data, so walking the held bands is
-   * two orders of magnitude cheaper than walking the viewport and asking about each tile.
-   *
-   * Exact bands come from the region the client has covered at this depth. Fallbacks — an ancestor
-   * band restricted by prefix, or held descendants — are admitted **only over the part of the
-   * region that is not covered**, which is what keeps them from double-drawing ground an exact band
-   * already answers. Both are supersets of `served(T)` and are presentation, never selection
-   * (`caching.md` §6, I7): the caller stale-marks them and shows no count against them.
+   * Walks the held bands rather than the tiles wanted: a settled viewport spans about 16,500 tiles,
+   * of which about 450 hold data.
    */
   bandsForRegion(
     want: TileRect,
@@ -800,35 +669,24 @@ export class BandCache {
     k: number
   ): {exact: Band[]; fallback: {band: Band; clip: TileRect}[]} {
     const uncovered = rectSubtractAll(want, this.coverageFor(depth, contentKey, k));
-    // The requested depth, by index rather than by scan.
     const exact = this.exactIn(want, depth);
-    /** Candidate stand-ins, bucketed by how far their depth is from the one being drawn. */
+    /** Stand-ins bucketed by distance from the drawn depth, coarsest first. */
     const byRank: {band: Band; clip: TileRect}[][] = [];
 
-    // **Nothing else is needed when the region is wholly held**, which is the settled case and now
-    // costs one depth's bands rather than every band in the store.
     if (uncovered.length === 0) return {exact, fallback: []};
 
     for (const band of this.bands.values()) {
       if (band.depth === depth) continue;
-      // Project the band's tile onto this depth's grid and admit it only where the view is not
-      // already answered. An ancestor covers a block; a descendant collapses to a single tile.
+      // An ancestor's tile projects to a block of this depth's grid, a descendant's to one tile.
       const shift = Math.abs(band.depth - depth);
       const {x, y} = band;
       const box: TileRect =
         band.depth < depth
           ? {x0: x << shift, y0: y << shift, x1: ((x + 1) << shift) - 1, y1: ((y + 1) << shift) - 1}
           : {x0: x >> shift, y0: y >> shift, x1: x >> shift, y1: y >> shift};
-      // **Clipped to the uncovered part, not to the whole region.** A stand-in exists to fill
-      // ground that has no exact band; drawn across the rest it overlays coarse marks on fine ones,
-      // and a frame that is mostly stand-in reads as a lower-density patch that never refines —
-      // because as far as the plan is concerned that ground is answered, and it is.
-      // Ordered coarsest-first by depth distance, bucketed rather than sorted because a settled
-      // broad view offers up to 1.5 x 10^5 candidates. **Bounding the total was tried and
-      // reverted**: capping marks drops whole bands, and a stand-in exists to cover ground, so what
-      // the cap produced was bare background in the shape of the coverage subtraction that asked
-      // for it — black rectangles that filled in only when real data arrived. Density is not what a
-      // stand-in spends marks on.
+      // Clipped to the uncovered part, since a stand-in drawn over covered ground overlays coarse
+      // marks on fine ones. Bucketed rather than sorted because a broad view offers up to 1.5 x 10^5
+      // candidates. The total is not capped: a cap drops whole bands and leaves bare ground.
       const rank = band.depth < depth ? depth - band.depth : MAX_DEPTH + (band.depth - depth);
       for (const r of uncovered) {
         const clip = rectIntersection(r, box);
@@ -836,8 +694,7 @@ export class BandCache {
       }
     }
 
-    // Appended rather than spread: `push(...bucket)` passes one argument per entry, and a settled
-    // broad view offers upwards of 10^5 of them — which is a `RangeError`, not a slow path.
+    // `push(...bucket)` with 10^5 entries throws a `RangeError`.
     const fallback: {band: Band; clip: TileRect}[] = [];
     for (const bucket of byRank) {
       if (!bucket) continue;
@@ -847,11 +704,9 @@ export class BandCache {
   }
 
   /**
-   * The best available answer for a tile: its own band, else the nearest ancestor holding one, else
-   * whatever descendants are held.
-   *
-   * Both fallbacks draw a superset of `served(T)` and are presentation, never selection
-   * (`caching.md` §6, I7). The caller must stale-mark them and show no count against them.
+   * The best answer held for one tile: its own band, else the nearest ancestor's, else any held
+   * descendants. A fallback draws a superset of `served(T)`; the caller marks it stale and shows no
+   * count against it.
    */
   resolve(depth: number, prefix: bigint): Resolved | null {
     const exact = this.get(depth, prefix);
@@ -874,14 +729,9 @@ export class BandCache {
   }
 
   /**
-   * The same, to a *region* rather than a single tile — what a zoom-in fallback actually needs.
-   *
-   * **Tested in world space, not in identity space.** A tile rectangle at a depth is a world-space
-   * box, and the band already holds each point's world position, so containment is four `f32`
-   * comparisons. Deriving each point's tile instead — a `BigInt` shift and a per-bit `BigInt` loop
-   * — is around twenty `BigInt` allocations per point, which at 10^6 points is the difference
-   * between a redraw and a two-second freeze. This is the zoom path, so it runs on exactly the
-   * interaction least able to afford it.
+   * Indices of the band's points inside a tile rectangle at `depth`, or `null` where the whole band
+   * is inside. Tests world positions, four `f32` comparisons a point, because deriving each point's
+   * tile costs about twenty `BigInt` allocations.
    */
   static restrictToRect(band: Band, depth: number, rect: TileRect): number[] | null {
     const span = WORLD_SIZE / 2 ** depth;
@@ -890,14 +740,8 @@ export class BandCache {
     const y0 = rect.y0 * span;
     const y1 = (rect.y1 + 1) * span;
 
-    // **A band wholly inside the rectangle needs no restriction at all**, and saying so is the
-    // difference between a memcpy and a per-point loop with an index array behind it. It is also
-    // the common case rather than an optimisation for a corner: a descendant band drawn on zoom-out
-    // occupies a tile far smaller than the region, and an ancestor drawn on zoom-in is clipped to
-    // ground that is uncovered precisely because nothing finer has arrived, so the parent's whole
-    // tile usually falls inside it. Measured with 39,121 stand-in bands carrying 203,547 marks
-    // between them — five marks each — where the per-band overhead, not the per-mark work, was the
-    // whole 29.8 ms of a frame.
+    // A band wholly inside needs no per-point loop. This is the common case: a descendant's tile is
+    // far smaller than the region, and an ancestor is clipped to ground nothing finer covers.
     const own = WORLD_SIZE / 2 ** band.depth;
     if (
       band.x * own >= x0 &&
@@ -919,35 +763,21 @@ export class BandCache {
   }
 
   /**
-   * Evict to the budget by **truncating band tails**, deepest / least-recently-touched /
-   * farthest-from-focus first.
-   *
-   * **Never the head.** Coarse points are the low-identity head of every band, so keeping heads is
-   * what keeps overview rendering from blanking — and it delivers "top-level points never get
-   * bumped" without any per-point priority bookkeeping (`caching.md` §6). Truncating rather than
-   * dropping is why: a band reduced to its head still answers for the zoomed-out view and still
-   * declares a sound, lower bound.
-   *
-   * Runs to a low-water mark rather than to the budget exactly, so a steady stream of `put`s does
-   * not re-sort the whole cache on each one.
-   *
-   * The pass itself is the budget's, because the budget may span several views' caches
-   * (`view-switching.md` §3); this cache's protected rectangle is the one that applies, since this
-   * is the cache being fetched into.
+   * Evicts to the budget by truncating band tails. The low-identity head of each band holds its
+   * coarse points, so a truncated band still draws the overview and still declares a sound, lower
+   * bound. Runs to a low-water mark so a stream of `put`s does not sort the cache on each one. The
+   * pass belongs to the budget, which may span several views; see {@link BandBudget.evict}.
    */
   evict(focus: EvictionFocus, lowWaterFraction = 0.9): void {
     this.budget.evict(focus, this, lowWaterFraction);
   }
 
-  /** Every held band, for the budget's cross-view ordering. */
+  /** Every held band, for the budget's ordering. */
   heldBands(): Band[] {
     return [...this.bands.values()];
   }
 
-  /**
-   * Halve one band, keeping its head — the unit of eviction. False where the band is a single
-   * point and there is nothing left to give.
-   */
+  /** Halves one band, keeping its head. False where the band is one point. */
   shed(band: Band): boolean {
     const keep = Math.max(1, Math.floor(band.ids.length / 2));
     if (keep >= band.ids.length) return false;
@@ -955,18 +785,10 @@ export class BandCache {
     return true;
   }
 
-  /** Cut a band to its first `keep` points, lowering its bound to match exactly. */
   /**
-   * Withdraw the coverage claim over a tile.
-   *
-   * **Eviction must retract coverage or it becomes a silent hole.** A covered rectangle asserts
-   * *we asked here and hold the answer*; once a band inside it has been truncated that is no longer
-   * true, and a plan would go on subtracting the region so the discarded points were never fetched
-   * again. The client would draw short for the rest of the session and nothing would say so.
-   *
-   * The whole containing rectangle goes, not the tile's share of it — a rectangle minus a point is
-   * not a rectangle, and the alternative is to start storing the holes. It is self-healing and it
-   * costs a refetch of ground the cache had already decided to give up.
+   * Withdraws coverage over a tile. Truncation calls this, or the plan would go on subtracting the
+   * region and the discarded points would not be fetched again. The whole containing rectangle
+   * goes, since a rectangle less one tile is not a rectangle; the cost is a refetch.
    */
   private retractCoverage(depth: number, x: number, y: number): void {
     this.covered = this.covered.filter(
@@ -975,12 +797,13 @@ export class BandCache {
     this.changes++;
   }
 
+  /** Cuts a band to its first `keep` points and lowers its bound to match. */
   private truncate(band: Band, keep: number): void {
     this.retractCoverage(band.depth, band.x, band.y);
     const ids = band.ids.slice(0, keep);
     const positions = band.positions.slice(0, keep * 2);
     const scalars = sliceScalars(band.scalars, 0, keep);
-    // The head's membership, re-referenced: the distinct list may shrink with the tail.
+    // The distinct list may shrink with the tail.
     const membership: Record<string, BandMembership> = {};
     for (const [layer, held] of Object.entries(band.membership)) {
       const ordinals = held.ordinals.slice(0, keep);
@@ -1001,7 +824,7 @@ export class BandCache {
   }
 }
 
-/** Morton distance from a band to the focus tile, at the focus's depth. Ties are broken by depth. */
+/** Morton distance from a band to the focus tile, at the focus's depth. */
 function distance(band: Band, focus: EvictionFocus): bigint {
   const at = band.depth >= focus.depth ? band.prefix >> BigInt(2 * (band.depth - focus.depth)) : band.prefix;
   const delta = at - focus.prefix;

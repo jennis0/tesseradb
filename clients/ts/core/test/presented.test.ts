@@ -5,16 +5,12 @@ import {Replica} from '../src/replica.js';
 import type {Quantisation, ViewportResponse} from '../src/types.js';
 import {fakeClock, fakeScheduler, response, servedResult, tile} from './support.js';
 
-/**
- * The presented frame under a fake clock and a fake frame scheduler — the two injected clocks, so
- * the whole path from a driver verdict to a held composition runs in node.
- */
+/** The presented frame under a fake clock and a fake frame scheduler, so the whole path runs in node. */
 
 const Q: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
 
 function servedResponse(n: number): ViewportResponse {
-  // A large visible count, so the budget does not read the response as saturation and move the
-  // depth under the test.
+  // A large visible count, so the budget does not read saturation and move the depth.
   return response(servedResult(n, [tile(0n, 10_000_000n)]));
 }
 
@@ -74,8 +70,8 @@ describe('the presented frame', () => {
     const h = harness();
     h.presenter.schedule(h.view, 400, 300);
     await h.clock.advance(600);
-    // A fold arriving while a derive is queued rides along with it: the derive is what the
-    // driver's handle now describes, and dropping it would leave the screen behind the handle.
+    // A fold arriving while a derive is queued does not replace it: the driver's handle describes the
+    // derive.
     (h.presenter as unknown as {apply(v: unknown): void}).apply({
       tier: 'fold',
       plan: h.presented[0]?.plan

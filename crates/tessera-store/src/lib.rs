@@ -5,6 +5,7 @@
 pub mod access_column;
 pub mod coalesce;
 pub mod columns;
+pub mod coordinates;
 pub mod declaration;
 pub mod derived;
 pub mod entity_terms;

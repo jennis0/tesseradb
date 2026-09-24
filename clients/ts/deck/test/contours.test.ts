@@ -22,18 +22,16 @@ const artifact = (id: bigint, parent: bigint | null, count = 10n): Artifact => (
 });
 
 /**
- * The layer roster as `/v1/meta` publishes it: each layer's declared computed set — the wire's
- * `computed_content` (contracts §3.2 r42) — the kind of shape it draws (`polygon-membership.md`
- * §7.1), and what it depends on.
+ * The layer roster as `/v1/meta` publishes it: each layer's `computed_content`, the kind of shape
+ * it draws, and what it depends on.
  */
 const meta = (layers: {name: string; computedContent?: string[]; shape?: 'derived' | 'predicate' | 'authored' | null; depsOn?: string[]}[]): Meta =>
   ({layers: layers.map((l) => ({name: l.name, computedContent: l.computedContent ?? [], shape: l.shape ?? null, depsOn: l.depsOn ?? []}))}) as unknown as Meta;
 
 /**
- * The served set as the wire delivers it (contracts §3.2 r44): on this treed fixture `rung` is the
- * response-local parent-chain depth, computed here exactly as the server computes it after the cut
- * — a root, and a child of an unserved parent, at 0. It stands in for the server; nothing under
- * test derives it again.
+ * The served set as the server delivers it: on this treed fixture `rung` is the response-local
+ * parent-chain depth, computed here as the server computes it (a root, and a child of an unserved
+ * parent, at 0). Nothing under test derives it again.
  */
 function withRungs(served: Artifact[]): Artifact[] {
   const byId = new Map(served.map((a) => [a.tesseraId, a]));
@@ -51,7 +49,7 @@ function projection(input: Artifact[]): ArtifactsProjection {
   return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
-/** The area of a closed ring — the shoelace, unsigned. */
+/** The unsigned area of a closed ring, by the shoelace formula. */
 const area = (ring: readonly [number, number][]) => {
   let twice = 0;
   for (let i = 0; i < ring.length; i++) {
@@ -62,7 +60,7 @@ const area = (ring: readonly [number, number][]) => {
   return Math.abs(twice) / 2;
 };
 
-/** Whether a point is inside a closed ring — a crossing count, for the containment check below. */
+/** Whether a point is inside a closed ring, by a crossing count. */
 const inside = (p: [number, number], ring: readonly [number, number][]) => {
   let odd = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -75,12 +73,8 @@ const inside = (p: [number, number], ring: readonly [number, number][]) => {
 
 describe('outlineOf', () => {
   it('draws the wire’s own vertices, in order, and covers no ground the served shape does not', () => {
-    // A notched ring — the shape the concave (alpha) hull now produces (annotations §4.2). Its
-    // reflex corner is where corner cutting used to bulge: Chaikin replaces a corner with a chord
-    // between points on the two edges, and at a **reflex** corner the triangle that chord spans
-    // lies outside the polygon, so the drawn ring reached into the notch by up to a quarter of the
-    // shorter adjacent edge. (The ring's total area still fell — the convex corners take more off
-    // than the reflex one puts on — so an area comparison alone would have missed it.)
+    // A notched ring, as a concave hull produces. Its reflex corner is where a smoothing could
+    // reach into the notch; a smaller total area would not show that.
     const g = 2 ** 32 - 1;
     const notched: [number, number][] = [[0, 0], [g, 0], [g, g], [g / 2, g], [g / 2, g / 2], [0, g / 2]];
     const outline = outlineOf({...artifact(1n, null), shape: [[notched]]})!;
@@ -92,8 +86,8 @@ describe('outlineOf', () => {
     const side = drawn[1]![0];
     // Three quarters of the square: the notch is out, and nothing rounded it back in.
     expect(area(drawn) / (side * side)).toBeCloseTo(0.75, 6);
-    // And nothing in the notch is inside the drawn ring — the point three Chaikin rounds put
-    // there sits at (0.47, 0.55) of the side, which is where this check is aimed.
+    // Nothing in the notch is inside the drawn ring. Three rounds of Chaikin corner cutting would
+    // put a point at (0.47, 0.55) of the side, where this check is aimed.
     for (const [fx, fy] of [[0.47, 0.55], [0.4, 0.6], [0.25, 0.75], [0.49, 0.51]] as [number, number][]) {
       expect(inside([fx * side, fy * side], drawn)).toBe(false);
     }
@@ -104,16 +98,14 @@ describe('outlineOf', () => {
   });
 
   it('says which shape it answered with, and falls back to the box, then to nothing', () => {
-    // The two are indistinguishable by counting vertices — a box is four corners and so is a
-    // square hull — and they are drawn differently, so the caller is told rather than left to
-    // guess (a box through the smoothing is an oval).
+    // A box and a square hull both have four corners but are drawn differently (a box through
+    // the smoothing would be an oval), so the caller is told which it has.
     const a = artifact(1n, null);
     expect(outlineOf(a)!.source).toBe('shape');
     expect(outlineOf({...a, shape: null})!.source).toBe('box');
     expect(outlineOf({...a, shape: null})!.parts.map((p) => p.map((r) => r.length))).toEqual([[4]]);
     expect(outlineOf({...a, shape: null, box: null})).toBeNull();
-    // A degenerate group is its own members (`artifact-shapes.md` §1) — a ring of one or two
-    // vertices has no area to draw or to pick, so the box answers for the artifact instead.
+    // A ring of one or two vertices has no area to draw or pick, so the box answers instead.
     expect(outlineOf({...a, shape: [[[[0, 0], [1, 1]]]]})!.source).toBe('box');
     expect(outlineOf({...a, shape: []})!.source).toBe('box');
     // A part whose outer is degenerate goes whole, its holes with it: a surviving hole drawn
@@ -137,9 +129,8 @@ describe('outlineOf', () => {
   });
 
   it('keeps a hole with its part — a boundary’s enclave is not a second shape', () => {
-    // A part is its outer ring and then its holes (`polygon-membership.md` §7.1): one drawn
-    // polygon with a hole, which is what a renderer's polygon-with-holes takes. Flattened to a
-    // ring list, the hole would draw as a second, smaller shape over the first.
+    // A part is its outer ring and then its holes: one polygon with a hole. Flattened to a ring
+    // list, the hole would draw as a second, smaller shape over the first.
     const g = 2 ** 32 - 1;
     const outer: [number, number][] = [[0, 0], [g, 0], [g, g], [0, g]];
     const hole: [number, number][] = [[g / 4, g / 4], [(3 * g) / 4, g / 4], [(3 * g) / 4, (3 * g) / 4], [g / 4, (3 * g) / 4]];
@@ -156,10 +147,7 @@ describe('contourShapes — what may be hovered', () => {
     contourShapes(a, {level: o.level, meta: o.meta ?? null}).map((s) => String(s.id));
 
   it('holds the frontier and nothing above it — an ancestor answers nothing', () => {
-    // Three levels of one chain. Only the leaf is on the map, so only the leaf may be pointed at:
-    // an artifact nobody can see is not a thing a viewer can point at (the owner's review,
-    // 2026-08-27). Keeping the ancestors made the hover flip between a cluster and its
-    // sub-cluster as the pointer crossed the child's ring inside the parent's.
+    // Three levels of one chain. Only the leaf is drawn, so only the leaf may be pointed at.
     const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
     expect(ids(p)).toEqual(['3']);
     // A flat layer is all frontier.
@@ -169,7 +157,7 @@ describe('contourShapes — what may be hovered', () => {
   it('a level moves the frontier up: the deepest artifact the level admits answers', () => {
     const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
     expect(ids(p, {level: 1})).toEqual(['2']);
-    // A branch that stops above the level is still on the frontier — `frontier`'s own rule.
+    // A branch that stops above the level is still on the frontier, as in `frontier`.
     const stops = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n), artifact(4n, 1n)]);
     expect(new Set(ids(stops, {level: 1}))).toEqual(new Set(['2', '4']));
   });
@@ -177,7 +165,7 @@ describe('contourShapes — what may be hovered', () => {
   it('leaves a dependent layer’s artifacts out — they have no shape, and their box is not one', () => {
     // A clustering's topic labels carry no shape, so `outlineOf` would fall back to their box and
     // put a rectangle over the map with nothing drawn on it, hoverable and pointing at a thing
-    // the viewer cannot see. Their text is drawn beneath the name they attach to (§5.10).
+    // the viewer cannot see. Their text is drawn beneath the name they attach to.
     const topic: Artifact = {...artifact(9n, null), layer: 'topics', shape: null};
     const p = projection([artifact(1n, null), topic]);
     expect(ids(p, {meta: meta([{name: 'clusters'}, {name: 'topics', depsOn: ['clusters']}])})).toEqual(['1']);
@@ -199,8 +187,8 @@ describe('contourShapes — what may be hovered', () => {
   });
 
   it('a pointer in a hole is outside the part, and inside a hole’s own island', () => {
-    // Even-odd over a part's rings: an enclave is not the enclosing artifact, and a served
-    // island inside it — its own part — is.
+    // Even-odd over a part's rings: an enclave is not the enclosing artifact, and an island inside
+    // it, a part of its own, is.
     const g = 2 ** 32 - 1;
     const outer: [number, number][] = [[0, 0], [g, 0], [g, g], [0, g]];
     const hole: [number, number][] = [[g / 4, g / 4], [(3 * g) / 4, g / 4], [(3 * g) / 4, (3 * g) / 4], [g / 4, (3 * g) / 4]];
@@ -214,8 +202,7 @@ describe('contourShapes — what may be hovered', () => {
 
   it('answers against the box until the shape fetched by identifier arrives', () => {
     // The viewport carries no shape (`artifactChannel.ts` asks for centroid and box), so a served
-    // row's shape is its box until `TesseraStore.needShape` answers for it — which is what the
-    // hover over that box asks for.
+    // row's shape is its box until `TesseraStore.needShape` answers; a hover over the box asks.
     const g = 2 ** 32 - 1;
     const ring: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [g / 4, g / 3], [0, g / 2]];
     const p = projection([{...artifact(1n, null), shape: null}, {...artifact(2n, null), shape: null}]);
@@ -238,9 +225,7 @@ describe('focusOutlines — what draws', () => {
   const options = (o: Partial<Parameters<typeof focusOutlines>[1]>) => ({opened: null, hovered: null, level: undefined, scheme: 'light' as const, ...o});
 
   it('holds the hovered and the opened artifact, and nothing else', () => {
-    // The rest of the frontier used to be in this data at zero alpha so that it answered deck's
-    // pick, which put every served ring through the tessellator on every hover change. The pick
-    // is resolved against `contourShapes` now, so the layer holds only what draws.
+    // Hover and click resolve against `contourShapes`, so this holds only what draws.
     const p = projection([artifact(1n, null), artifact(2n, null), artifact(3n, null)]);
     expect(focusOutlines(p, options({}))).toEqual([]);
     expect(focusOutlines(p, options({hovered: 2n})).map((d) => String(d.id))).toEqual(['2']);
@@ -301,8 +286,8 @@ describe('focusOutlines — what draws', () => {
     // The smoothed curve is a summary of the served ring, not a claim beyond it at the convex
     // corners: every vertex of the served ring's own quadrants stays where the members are.
     expect(ringWithin(notched.map(gridToWorldXY), notched.map(gridToWorldXY))).toBe(true);
-    // The box: the wire's four corners, unchanged and unsmoothed, and drawn as a hairline with
-    // no fill — a box is the bounds of the visible members and not their shape.
+    // The box: the served four corners, unsmoothed, drawn as a hairline with no fill, since a box
+    // is the bounds of the visible members and not their shape.
     const box = focusOutlines(p, options({hovered: 2n}))[0]!;
     expect(box.source).toBe('box');
     expect(box.polygon).toEqual([[
@@ -316,9 +301,8 @@ describe('focusOutlines — what draws', () => {
   });
 
   it('draws a predicate or an authored shape as the wire sent it — unsmoothed, holes kept — in the hull’s style', () => {
-    // A boundary somebody drew is already generalised to the pixel by the server's vertex rule
-    // (`polygon-membership.md` §7.2); a spline through it would move a border and could cross its
-    // own holes. It draws through the same path and in the same style as a hull.
+    // A drawn boundary is already generalised to the pixel by the server; a spline through it
+    // would move the border and could cross its holes. It draws in the same style as a hull.
     const g = 2 ** 32 - 1;
     const outer: [number, number][] = [[0, 0], [g, 0], [g, g], [0, g]];
     const hole: [number, number][] = [[g / 4, g / 4], [(3 * g) / 4, g / 4], [(3 * g) / 4, (3 * g) / 4], [g / 4, (3 * g) / 4]];
@@ -339,8 +323,8 @@ describe('focusOutlines — what draws', () => {
   it('draws nothing where the layer draws a shape and none has arrived, and the shape when it has', () => {
     // The viewport carries no shape, so a served row on a shape-drawing layer has a box and a
     // shape on its way by identifier. A rectangle that becomes the shape a moment later reads as
-    // the shape changing under the pointer, so nothing is drawn until it lands — while the hover
-    // still resolves against that box, which is what asks for the shape.
+    // the shape changing under the pointer, so nothing is drawn until it lands. The hover still
+    // resolves against the box, and asks for the shape.
     const g = 2 ** 32 - 1;
     const ring: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [g / 4, g / 3], [0, g / 2]];
     const p = projection([{...artifact(1n, null), shape: null}]);

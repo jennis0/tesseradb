@@ -1,7 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
 import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection, type Layer, type Meta} from '@tesseradb/client';
 import '../src/layer-picker.js';
-import {flatten} from '../src/artifact-list.js';
 import '../src/artifact-card.js';
 import '../src/legend.js';
 import '../src/explorer.js';
@@ -104,10 +103,8 @@ describe('<tessera-artifact-list>', () => {
   });
 
   /**
-   * A `dag` layer's child served under two parents (decision 0117): it is beneath both in the
-   * lineage, and the list shows it **once**, under the first parent the count-ordered walk
-   * reaches — the larger parent here — with nothing under the other. What a second position
-   * would look like is the components work's, not this test's.
+   * A `dag` layer's child served under two parents is beneath both in the lineage; the list shows
+   * it once, under the first parent the count-ordered walk reaches (the larger one here).
    */
   it('lists a child of two served parents once, beneath the first reached, and the walk is by count then id', async () => {
     const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
@@ -123,8 +120,10 @@ describe('<tessera-artifact-list>', () => {
     expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['1', '3', '2']);
     expect(rows.map((r) => (r as HTMLElement).style.getPropertyValue('--depth'))).toEqual(['0', '1', '0']);
     // Two roots of equal count list by lowest id, so the order is the served set's and not the wire's row order.
-    const tied = flatten(servedLineage([artifact(5n, 7n), artifact(4n, 7n)]));
-    expect(tied.map(({artifact}) => artifact.tesseraId)).toEqual([4n, 5n]);
+    const tied = [artifact(5n, 7n, null, ['Epsilon']), artifact(4n, 7n, null, ['Delta'])];
+    store.set('artifacts', artifactsProjection(tied));
+    await settle(host);
+    expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['4', '5']);
   });
 
   it('shows a count and a neutral placeholder where a row has no name — never the key', async () => {
@@ -305,8 +304,8 @@ describe('<tessera-artifact-card> follows the served set', () => {
 
 describe('<tessera-explorer> and the map’s tooltip slot', () => {
   it('forwards the tooltip slot only when the host supplied one, so the map’s fallback survives', async () => {
-    // A slot assigned an empty slot counts as filled and hides the fallback: the hover rendered as
-    // an empty bordered box beside the pointer (the owner's review, 2026-08-28).
+    // A slot assigned an empty slot counts as filled and would hide the fallback, leaving an
+    // empty box beside the pointer.
     const bare = await mount('<tessera-explorer></tessera-explorer>');
     (bare.querySelector('tessera-explorer') as unknown as {store: unknown}).store = fakeStore({meta: META, status: status({})});
     await settle(bare);

@@ -1919,7 +1919,11 @@ def _member_addresses(insert: Insert, levelled: bool) -> set[tuple]:
         return table[name].combine_chunks() if name else pa.nulls(rows, of)
 
     view = column("view", pa.string())
-    if pa.types.is_list(key.type) or pa.types.is_fixed_size_list(key.type):
+    if (
+        pa.types.is_list(key.type)
+        or pa.types.is_large_list(key.type)
+        or pa.types.is_fixed_size_list(key.type)
+    ):
         lengths = pc.fill_null(pc.list_value_length(key), 0)
         starts = pc.subtract(pc.cumulative_sum(lengths), lengths)
         parents = pc.list_parent_indices(key)

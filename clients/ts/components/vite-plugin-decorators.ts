@@ -2,19 +2,16 @@ import {transform} from 'esbuild';
 import type {Plugin} from 'vite';
 
 /**
- * Lower the standard decorators (`@property() accessor x`) the elements are written with.
+ * Lower the standard decorators (`@property() accessor x`) the elements are written with, where
+ * Vite serves or bundles the component sources: the viewer, the examples and the single-file
+ * bundle. The npm build lowers them with `tsc`, so a host consuming `dist/` needs no transform.
  *
- * The elements use TC39 stage-3 decorators with `accessor`, as design §5.9 decides — under the
- * workspace's ES2022 target a legacy `@property` on a plain field is shadowed by class-field
- * definition and silently does nothing. Vite 8 transforms TypeScript with oxc, which lowers only
- * the legacy (`experimentalDecorators`) form and passes the standard form through untouched, so
- * the browser receives `accessor` and a decorator it cannot parse ("Invalid or unexpected token"
- * at the first element). Found by the smoke script on the first dev run of the components.
- *
- * esbuild lowers the standard form (since 0.21.3), so this runs it first — `enforce: 'pre'` —
- * over the component sources only, with types stripped in the same pass; oxc then sees plain
- * ES2022. The dev server and the single-file bundle share it. Remove it when oxc lowers
- * stage-3 decorators.
+ * The elements use stage-3 decorators with `accessor`, since under the ES2022 target a legacy
+ * `@property` on a plain field is shadowed by the class field and has no effect. Vite 8's oxc
+ * lowers only the legacy form and passes the standard form through, which the browser cannot
+ * parse. esbuild (0.21.3 and later) lowers it, so this plugin runs esbuild first
+ * (`enforce: 'pre'`) over the component sources, stripping types in the same pass. It can go once
+ * oxc lowers stage-3 decorators.
  */
 export function tesseraDecorators(): Plugin {
   return {

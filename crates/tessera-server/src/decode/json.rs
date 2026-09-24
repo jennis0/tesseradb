@@ -17,7 +17,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use serde_json::{Map, Value};
-use tessera_engine::{scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
+use tessera_engine::{member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::layer::LayerDeclaration;
 
 use super::{DecodeError, Fixed};
@@ -92,12 +92,18 @@ pub(crate) fn record_batch(
             || columns.scoped.iter().any(|f| f.name == name)
     };
     let mut layers: Vec<String> = Vec::new();
+    let mut levels = false;
     for (row, record) in rows.iter().enumerate() {
         for name in record.keys() {
             if known(name) || layers.iter().any(|l| l == name) {
                 continue;
             }
             if (columns.layer_of)(name).is_none() {
+                // Read as a member table's `level` column where the batch carries a layer column.
+                if name == member_key::LEVEL {
+                    levels = true;
+                    continue;
+                }
                 return Err(DecodeError(format!(
                     "{body_name}: row {row}, column '{name}' is not a declared scalar, a \
                      registered layer or a group-scoped attribute of this batch's view; declare \
@@ -110,6 +116,11 @@ pub(crate) fn record_batch(
     for name in &layers {
         let column = membership_column(body_name, &rows, name)?;
         fields.push(Field::new(name, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+    if levels {
+        let column = u32_column(body_name, &rows, member_key::LEVEL)?;
+        fields.push(Field::new(member_key::LEVEL, column.data_type().clone(), true));
         arrays.push(column);
     }
 
@@ -248,31 +259,29 @@ fn fixed_column(
             }
             Arc::new(builder.finish())
         }
-        Fixed::IdSet => {
-            let mut builder = UInt32Builder::new();
-            for (row, record) in rows.iter().enumerate() {
-                match record.get("idset") {
-                    None | Some(Value::Null) => builder.append_null(),
-                    other => {
-                        match integer(body_name, other.unwrap_or(&Value::Null), row, "idset")? {
-                            None => builder.append_null(),
-                            Some(value) => {
-                                builder.append_value(u32::try_from(value).map_err(|_| {
-                                    refusal(
-                                        body_name,
-                                        row,
-                                        "idset",
-                                        "is out of range for an identifier set",
-                                    )
-                                })?)
-                            }
-                        }
-                    }
-                }
-            }
-            Arc::new(builder.finish())
-        }
+        Fixed::IdSet => u32_column(body_name, rows, "idset")?,
     })
+}
+
+/// A column of `uint32`, null where a row omits it.
+fn u32_column(
+    body_name: &str,
+    rows: &[Map<String, Value>],
+    name: &str,
+) -> Result<ArrayRef, DecodeError> {
+    let mut builder = UInt32Builder::new();
+    for (row, record) in rows.iter().enumerate() {
+        match record.get(name) {
+            None | Some(Value::Null) => builder.append_null(),
+            Some(value) => match integer(body_name, value, row, name)? {
+                None => builder.append_null(),
+                Some(value) => builder.append_value(u32::try_from(value).map_err(|_| {
+                    refusal(body_name, row, name, "is out of range; send a uint32")
+                })?),
+            },
+        }
+    }
+    Ok(Arc::new(builder.finish()))
 }
 
 /// The body's records: a JSON array of objects, or one object per line.
@@ -344,20 +353,31 @@ fn scalar_column(
             None => Ok(&Value::Null),
         }
     };
+    // An integer outside the declared type's range is refused; inside it, the cast is exact.
+    let in_range = |row: usize, value: i128| {
+        let (min, max) = wire
+            .integer_range()
+            .expect("only an integer declaration is read as integers");
+        if (min..=max).contains(&value) {
+            return Ok(value);
+        }
+        Err(refusal(
+            body_name,
+            row,
+            name,
+            &format!(
+                "is {value}, outside {}'s {min}..={max}; send a value that fits",
+                wire.arrow_type_name()
+            ),
+        ))
+    };
     macro_rules! integers {
-        ($builder:ty, $ty:ty, $spelling:literal) => {{
+        ($builder:ty, $ty:ty) => {{
             let mut builder = <$builder>::new();
             for row in 0..rows.len() {
                 match integer(body_name, cell(row)?, row, name)? {
                     None => builder.append_null(),
-                    Some(value) => builder.append_value(<$ty>::try_from(value).map_err(|_| {
-                        refusal(
-                            body_name,
-                            row,
-                            name,
-                            concat!("is out of range for ", $spelling),
-                        )
-                    })?),
+                    Some(value) => builder.append_value(in_range(row, value)? as $ty),
                 }
             }
             Arc::new(builder.finish()) as ArrayRef
@@ -375,26 +395,15 @@ fn scalar_column(
             }
             Arc::new(builder.finish())
         }
-        ScalarType::U8 => integers!(UInt8Builder, u8, "u8"),
-        ScalarType::U16 => integers!(UInt16Builder, u16, "u16"),
-        ScalarType::U32 => integers!(UInt32Builder, u32, "u32"),
-        ScalarType::U64 => integers!(UInt64Builder, u64, "u64"),
-        ScalarType::I8 => integers!(Int8Builder, i8, "i8"),
-        ScalarType::I16 => integers!(Int16Builder, i16, "i16"),
-        ScalarType::I32 => integers!(Int32Builder, i32, "i32"),
-        ScalarType::I64 => integers!(Int64Builder, i64, "i64"),
-        ScalarType::TimestampUs => {
-            let mut builder = TimestampMicrosecondBuilder::new();
-            for row in 0..rows.len() {
-                match integer(body_name, cell(row)?, row, name)? {
-                    None => builder.append_null(),
-                    Some(value) => builder.append_value(i64::try_from(value).map_err(|_| {
-                        refusal(body_name, row, name, "is out of range for timestamp_us")
-                    })?),
-                }
-            }
-            Arc::new(builder.finish())
-        }
+        ScalarType::U8 => integers!(UInt8Builder, u8),
+        ScalarType::U16 => integers!(UInt16Builder, u16),
+        ScalarType::U32 => integers!(UInt32Builder, u32),
+        ScalarType::U64 => integers!(UInt64Builder, u64),
+        ScalarType::I8 => integers!(Int8Builder, i8),
+        ScalarType::I16 => integers!(Int16Builder, i16),
+        ScalarType::I32 => integers!(Int32Builder, i32),
+        ScalarType::I64 => integers!(Int64Builder, i64),
+        ScalarType::TimestampUs => integers!(TimestampMicrosecondBuilder, i64),
         ScalarType::F32 => {
             let mut builder = Float32Builder::new();
             for row in 0..rows.len() {
