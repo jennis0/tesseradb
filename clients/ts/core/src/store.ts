@@ -638,6 +638,7 @@ export function createStore(options: StoreOptions): Store {
    * asks through this, so a verb called before the first token lands waits for it.
    */
   async function ensureToken(): Promise<string> {
+    if (disposed) throw disposedError();
     if (token && Date.now() < expiresAtMs - 5_000) return token;
     if (!options.authorise) {
       if (!token) throw new TesseraError(401, 'bad-credential', 'no token');
@@ -658,7 +659,7 @@ export function createStore(options: StoreOptions): Store {
 
   async function renewOnce(authorise: TokenSupplier): Promise<string> {
     const got = await authorise();
-    if (disposed) return got.token;
+    if (disposed) throw disposedError();
     // A derived shape is a function of the principal's own visible members, so one held across a
     // change of token would draw the previous principal's shape against the new one's identifiers.
     // A hover's record is an answer to the principal too. Before the first token nothing is held
@@ -670,6 +671,8 @@ export function createStore(options: StoreOptions): Store {
     token = got.token;
     expiresAtMs = got.expiresAt * 1000;
     armRenewal();
+    // A warm-up that failed for want of a token runs again now there is one.
+    if (meta === null) void ready().catch(() => {});
     return token;
   }
 
@@ -689,8 +692,30 @@ export function createStore(options: StoreOptions): Store {
 
   /** The token and the view a verb naming a view asks under, once the store has read its meta. */
   async function viewed(): Promise<{token: string; view: string}> {
-    await warming;
+    await ready();
     return {token: await ensureToken(), view: viewId};
+  }
+
+  /**
+   * The store's first `/v1/meta`, read once and shared. A warm-up that failed is forgotten, so the
+   * next call runs it again.
+   */
+  let warming: Promise<void> | null = null;
+
+  function ready(): Promise<void> {
+    warming ??= warm().catch((error: unknown) => {
+      warming = null;
+      if (!disposed) {
+        const refusal = refusalOf(error);
+        replaceProjection('status', {...projections.status, status: 'refused', refusal, expired: isExpiry(refusal)});
+      }
+      throw error;
+    });
+    return warming;
+  }
+
+  function disposedError(): Error {
+    return new Error('the store is disposed; create another store to ask again');
   }
 
   /** Whether a refusal means the session ended (design §5.4's expired row). */
@@ -843,7 +868,7 @@ export function createStore(options: StoreOptions): Store {
       clock,
       view: id,
       quantisation: q,
-      token: () => token,
+      token: ensureToken,
       // The drawn depth, from the projection the frame handler has just replaced — the presenter's
       // own handle is assigned after it hands the frame over, so it is one frame behind here. A
       // view that is not current has no drawn depth in the projection and reads its own.
@@ -889,7 +914,9 @@ export function createStore(options: StoreOptions): Store {
     tokenEverUsed = true;
     // The host may have read this document already (see {@link StoreOptions.meta}); a second
     // fetch of it is a round trip for something in hand.
-    meta = options.meta ?? (await client.meta(t));
+    const read = options.meta ?? (await client.meta(t));
+    if (disposed) return;
+    meta = read;
     // A `setCurrentView` before meta names the view to open with, in place of `options.view` (§3);
     // an id the bundle does not declare is refused here exactly as it is afterwards.
     if (queuedCurrentView !== null) {
@@ -1300,6 +1327,7 @@ export function createStore(options: StoreOptions): Store {
     if (wanted.length === 0) return;
     try {
       const resolved = await client.categories(await ensureToken(), column, {codes: wanted, view: viewId});
+      if (disposed) return;
       const byCode = new Map((projections.legend.categories[column] ?? []).map((v) => [v.code, v]));
       for (const v of resolved) byCode.set(v.code, v);
       replaceProjection('legend', {
@@ -1307,6 +1335,7 @@ export function createStore(options: StoreOptions): Store {
         categories: {...projections.legend.categories, [column]: [...byCode.values()]}
       });
     } catch (error) {
+      if (disposed) return;
       replaceProjection('legend', {
         ...projections.legend,
         categoryErrors: {...projections.legend.categoryErrors, [column]: refusalOf(error)}
@@ -1580,7 +1609,7 @@ export function createStore(options: StoreOptions): Store {
   }
 
   async function browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage> {
-    const t = await ensureToken();
+    const asked = await viewed();
     // The map's own filter unless the caller named one — including `null`, which asks for the
     // unfiltered counts explicitly. The view is the store's own current one: a masked count is an
     // intersection in row space and row space is per view, so a panel that named none would be
@@ -1588,7 +1617,7 @@ export function createStore(options: StoreOptions): Store {
     const filters = 'filters' in req ? (req.filters ?? null) : requestFilters();
     // `req.view ?? viewId`, never a spread: an explicit `view: undefined` in the caller's object
     // would clobber the store's own with a spread and the request would go out without one.
-    return client.browse(t, {...req, view: req.view ?? viewId, filters});
+    return client.browse(asked.token, {...req, view: req.view ?? asked.view, filters});
   }
 
   function setMembers(clauses: readonly MemberClause[]): void {
@@ -1797,10 +1826,10 @@ export function createStore(options: StoreOptions): Store {
     const epoch = clears;
     try {
       const detail = await client.item(await ensureToken(), id);
-      if (epoch !== clears) return;
+      if (disposed || epoch !== clears) return;
       replaceProjection('selection', {...projections.selection, item: {id, detail}, itemRefusal: null});
     } catch (error) {
-      if (epoch !== clears) return;
+      if (disposed || epoch !== clears) return;
       replaceProjection('selection', {
         ...projections.selection,
         item: null,
@@ -1908,9 +1937,9 @@ export function createStore(options: StoreOptions): Store {
         // The view's own zoom, so the shape is generalised to this screen's pixel.
         const zoom = presenter?.view?.view.zoom;
         const detail = await client.artifact(asked.token, id, {view: asked.view, ...(zoom === undefined ? {} : {zoom})});
-        // The principal may have changed under the request — a renewal, a cleared store — in which
-        // case this answer describes a mask that is no longer the one being drawn.
-        if (!askedShapes.has(id)) return;
+        // The principal may have changed under the request, by a renewal or a clear, and then
+        // this answer describes a mask no longer drawn.
+        if (disposed || !askedShapes.has(id)) return;
         if (!detail.shape) return;
         heldShapes = new Map(heldShapes).set(id, detail.shape);
         heldKinds = new Map(heldKinds).set(id, shapeKindOf(id) ?? 'derived');
@@ -1951,12 +1980,12 @@ export function createStore(options: StoreOptions): Store {
     try {
       const asked = await viewed();
       const detail = await client.artifact(asked.token, id, {view: asked.view});
-      if (epoch !== clears) return;
+      if (disposed || epoch !== clears) return;
       // A renewal may have changed the principal under the request, and a shape can be theirs.
       if (token === asked.token) holdShape(id, detail.shape);
       replaceProjection('selection', {...projections.selection, artifact: {id, detail}, artifactRefusal: null, item: null, itemRefusal: null});
     } catch (error) {
-      if (epoch !== clears) return;
+      if (disposed || epoch !== clears) return;
       replaceProjection('selection', {
         ...projections.selection,
         artifact: null,
@@ -2254,11 +2283,7 @@ export function createStore(options: StoreOptions): Store {
     dispose
   };
 
-  const warming = warm();
-  void warming.catch((error) => {
-    const refusal = refusalOf(error);
-    replaceProjection('status', {...projections.status, status: 'refused', refusal, expired: isExpiry(refusal)});
-  });
+  void ready().catch(() => {});
 
   return store;
 }

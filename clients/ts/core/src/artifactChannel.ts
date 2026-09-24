@@ -246,8 +246,8 @@ function withoutBit(a: Artifact): Artifact {
 export type ArtifactChannelOptions = {
   view: string;
   quantisation: Quantisation;
-  /** How to authorise the request — the store watches the token, so it hands one in per ask. */
-  token(): string | null;
+  /** The token to ask with, renewed where it needs to be; a rejection is the ask's refusal. */
+  token(): Promise<string>;
   /** The depth the map is drawn at, or undefined before the first frame. */
   depth(): number | undefined;
   /**
@@ -682,14 +682,15 @@ export class ArtifactChannel {
    * hold's, and rotation is the per-view path's to observe.
    */
   private async promote(): Promise<void> {
-    const token = this.opts.token();
-    if (!token || this.inFlight) return;
+    if (this.inFlight) return;
     const candidate = this.promotionCandidates()[0];
     if (!candidate) return;
     const signal = new AbortController();
     this.promoting?.abort();
     this.promoting = signal;
     try {
+      const token = await this.opts.token();
+      if (this.promoting !== signal) return;
       const response = await this.client.viewport(
         token,
         {
@@ -729,9 +730,8 @@ export class ArtifactChannel {
 
   private async request(): Promise<void> {
     const view = this.view;
-    const token = this.opts.token();
     const layers = this.state.layers;
-    if (!token || !view) return;
+    if (!view) return;
     this.inFlight?.abort();
     // No layer selected is not a request. It is also not an error, and not an empty answer to a
     // question that was asked — so the held set is simply cleared.
@@ -775,7 +775,7 @@ export class ArtifactChannel {
     this.inFlight = signal;
     this.state = {...this.state, status: 'loading'};
     this.emit();
-    const ask = (rows: 'identity' | null) =>
+    const ask = (token: string, rows: 'identity' | null) =>
       this.client.viewport(
         token,
         {
@@ -804,7 +804,9 @@ export class ArtifactChannel {
         signal.signal
       );
     try {
-      let response = await ask(identityAsk ? 'identity' : null);
+      const token = await this.opts.token();
+      if (this.inFlight !== signal) return;
+      let response = await ask(token, identityAsk ? 'identity' : null);
       if (this.inFlight !== signal) return;
       let drawn: Artifact[] | null = null;
       const identityRows = response.result.artifactsIdentity;
@@ -815,7 +817,7 @@ export class ArtifactChannel {
         // back ONCE to a full ask for the same view, under the same in-flight token so a
         // superseding gesture aborts it like any other request.
         if (identityRows !== null) {
-          response = await ask(null);
+          response = await ask(token, null);
           if (this.inFlight !== signal) return;
         }
         drawn = this.hold(response.result.artifacts, response.identityKey, response.contentKey);
