@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The TypeScript half of the gate: typecheck every package and the operator scripts, run the unit
-# suites, run core's live test against a real `tessera serve`, then the components' browser suite
-# in headless Chromium.
+# The TypeScript half of the gate: typecheck every package and the operator scripts, build the four
+# library packages and import each from `dist/` in Node, run the unit suites, run core's live test
+# against a real `tessera serve`, then the components' browser suite in headless Chromium.
 #
 # The operator scripts are plain `.mjs` and are checked with `checkJs`, so a block-scoped variable
 # used before its declaration (TS2448) fails here rather than at run time.
@@ -26,6 +26,10 @@ fi
 
 echo "check-clients: typechecking every package and the operator scripts"
 npm --prefix clients/ts run typecheck --silent
+
+echo "check-clients: building the packages and importing each from dist/"
+npm --prefix clients/ts run build --silent
+node clients/ts/scripts/smoke-dist.mjs
 
 echo "check-clients: running the client test suites"
 npm --prefix clients/ts test --silent
