@@ -366,161 +366,8 @@ describe('the drops', () => {
   });
 });
 
-describe('suggest — the typeahead action (value-suggestion.md §5.1)', () => {
-  it('debounces per column: a burst of keystrokes issues one request, for the last q named', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {client} = fakeClient(() => response('ck'));
-    const suggest = vi.fn(async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}));
-    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    await clock.advance(1);
-
-    store.suggest('admin4', 'm');
-    store.suggest('admin4', 'ma');
-    store.suggest('admin4', 'mac');
-    await clock.advance(200);
-    expect(suggest).toHaveBeenCalledTimes(1);
-    expect(suggest).toHaveBeenCalledWith('tok', 'admin4', 'mac', {view: 's0'});
-    expect(store.get('filters').suggestions['admin4']).toEqual({q: 'mac', values: [], more: false});
-  });
-
-  it('discards a slower page that answers an earlier keystroke once a later one has landed', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {client} = fakeClient(() => response('ck'));
-    const releases = new Map<string, () => void>();
-    const suggest = vi.fn(
-      (_token: string, column: string, q: string) =>
-        new Promise((resolve) => {
-          releases.set(q, () => resolve({status: 'ok' as const, column, q, values: [{code: 1, key: q, title: null, match: {field: 'key' as const, start: 0, len: q.length}}], more: false}));
-        })
-    );
-    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    await clock.advance(1);
-
-    // Two distinct columns' worth of debounce windows, so both requests are actually in flight
-    // together rather than one superseding the other before either is sent.
-    store.suggest('admin4', 'ma');
-    await clock.advance(200);
-    store.suggest('admin4', 'mac');
-    await clock.advance(200);
-    expect(releases.size).toBe(2);
-
-    // The later request (mac) lands first; the earlier one (ma) lands after it — and must not
-    // overwrite the fresher answer with a stale one.
-    releases.get('mac')!();
-    await clock.advance(1);
-    expect(store.get('filters').suggestions['admin4']?.q).toBe('mac');
-    releases.get('ma')!();
-    await clock.advance(1);
-    expect(store.get('filters').suggestions['admin4']?.q).toBe('mac');
-  });
-
-  it('retries a superseded (429) suggest after retryAfterS, and still applies the q-echo guard', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {client} = fakeClient(() => response('ck'));
-    let calls = 0;
-    const suggest = vi.fn(async (_token: string, column: string, q: string) => {
-      calls++;
-      if (calls === 1) return {status: 'superseded' as const, retryAfterS: 1};
-      return {status: 'ok' as const, column, q, values: [], more: false};
-    });
-    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    await clock.advance(1);
-
-    store.suggest('admin4', 'fr');
-    await clock.advance(200); // the debounce fires, the session's other suggest sheds it
-    expect(calls).toBe(1);
-    expect(store.get('filters').suggestions['admin4']).toBeUndefined();
-    await clock.advance(1000); // retryAfterS
-    expect(calls).toBe(2);
-    expect(store.get('filters').suggestions['admin4']).toEqual({q: 'fr', values: [], more: false});
-  });
-
-  it('churn re-asking the same q, faster than the debounce, does not starve it — the request still fires', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {client} = fakeClient(() => response('ck'));
-    const suggest = vi.fn(async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}));
-    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    await clock.advance(1);
-
-    // The shape a caller that does not dedupe its own asks takes: a store tick unrelated to this
-    // control re-asks the identical q, faster than the debounce window, indefinitely. Before the
-    // fix, every ask cancelled and re-armed the timer, so it never got to fire.
-    for (let i = 0; i < 50; i++) {
-      store.suggest('admin4', 'fr');
-      await clock.advance(10);
-    }
-    expect(suggest).toHaveBeenCalledTimes(1);
-    expect(suggest).toHaveBeenCalledWith('tok', 'admin4', 'fr', {view: 's0'});
-    expect(store.get('filters').suggestions['admin4']).toEqual({q: 'fr', values: [], more: false});
-  });
-
-  it('a landed success clears a refusal the same column carried, and a refusal clears a stale page', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {client} = fakeClient(() => response('ck'));
-    let fail = true;
-    const suggest = vi.fn(async (_token: string, column: string, q: string) => {
-      if (fail) throw new TesseraError(500, 'fail-closed', 'admin4 postings unreadable');
-      return {status: 'ok' as const, column, q, values: [], more: false};
-    });
-    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    await clock.advance(1);
-
-    store.suggest('admin4', 'fr');
-    await clock.advance(200);
-    expect(store.get('filters').suggestErrors['admin4']).toEqual({code: 'fail-closed', detail: 'admin4 postings unreadable'});
-    expect(store.get('filters').suggestions['admin4']).toBeUndefined();
-
-    // A later ask that lands cleanly must not leave the earlier refusal showing beside it.
-    fail = false;
-    store.suggest('admin4', 'fra');
-    await clock.advance(200);
-    expect(store.get('filters').suggestErrors['admin4']).toBeUndefined();
-    expect(store.get('filters').suggestions['admin4']).toEqual({q: 'fra', values: [], more: false});
-  });
-
-  it('a 429 with retry_after_s = 0 floors the retry delay rather than spinning, and stops after a bounded number of retries', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {client} = fakeClient(() => response('ck'));
-    let calls = 0;
-    const suggest = vi.fn(async () => {
-      calls++;
-      return {status: 'superseded' as const, retryAfterS: 0};
-    });
-    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    await clock.advance(1);
-
-    store.suggest('admin4', 'fr');
-    await clock.advance(120); // the debounce fires: call 1, superseded, at t=~121
-    expect(calls).toBe(1);
-    // retry_after_s = 0 is floored at 250 ms from call 1 (~t=371) — 200 ms further is short of it.
-    await clock.advance(200);
-    expect(calls).toBe(1);
-    await clock.advance(100); // past the floor
-    expect(calls).toBe(2);
-
-    // Every retry is superseded too: the session gives up after a bounded number of them rather
-    // than retrying forever, and surfaces the last refusal.
-    await clock.advance(5_000);
-    const stalled = calls;
-    await clock.advance(5_000);
-    expect(calls).toBe(stalled); // no further retries once the cap is reached
-    expect(store.get('filters').suggestErrors['admin4']?.code).toBe('backpressure');
-    expect(store.get('filters').suggestions['admin4']).toBeUndefined();
-  });
-
-  it('clear() (a re-authorise) drops every column’s held page and refusal, and its debounce dedupe', async () => {
+describe('suggest in the store', () => {
+  it('asks under the store’s token and view, and clear() drops every column’s held page, refusal and debounce dedupe', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {client} = fakeClient(() => response('ck'));
@@ -531,6 +378,7 @@ describe('suggest — the typeahead action (value-suggestion.md §5.1)', () => {
 
     store.suggest('archive', '');
     await clock.advance(200);
+    expect(suggest).toHaveBeenCalledWith('tok', 'archive', '', {view: 's0'});
     expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
 
     store.clear();
@@ -543,51 +391,6 @@ describe('suggest — the typeahead action (value-suggestion.md §5.1)', () => {
     await clock.advance(200);
     expect(suggest).toHaveBeenCalledTimes(2);
     expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
-  });
-
-  it('an in-flight response straddling a reset is dropped, even where its (column, q) matches a fresh ask that followed the reset', async () => {
-    // The race `resetSuggestions`'s own doc explains: a request is still in flight when `clear()`
-    // (or a view switch) invalidates it, and a caller — a mounted `<tessera-filter>`, here played
-    // by hand — re-asks the identical `q` right after, because that is what the empty-`q` page
-    // asks for both on mount and after an invalidation. The `q` echo alone cannot tell the stale
-    // response from the fresh ask's; only the epoch can.
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {client} = fakeClient(() => response('ck'));
-    const calls: {resolve: (v: {status: 'ok'; column: string; q: string; values: never[]; more: boolean}) => void}[] = [];
-    const suggest = vi.fn(
-      (_token: string, column: string, q: string) =>
-        new Promise((resolve) => {
-          calls.push({resolve: (v) => resolve(v)});
-        })
-    );
-    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    await clock.advance(1);
-
-    // Request A: in flight, unresolved.
-    store.suggest('archive', '');
-    await clock.advance(200);
-    expect(calls.length).toBe(1);
-
-    // Invalidated before A lands — and the caller re-asks the identical q straight away, arming
-    // request B.
-    store.clear();
-    store.suggest('archive', '');
-    await clock.advance(200);
-    expect(calls.length).toBe(2);
-
-    // B lands first, saying `more: true` — this session's answer under the new epoch.
-    calls[1]!.resolve({status: 'ok', column: 'archive', q: '', values: [], more: true});
-    await clock.advance(1);
-    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: true});
-
-    // A lands after it, saying `more: false` — the old epoch's answer, sharing B's exact (column, q).
-    // Applying it would silently overwrite B's landed page with a stale one a shape decision could
-    // have already been taken from.
-    calls[0]!.resolve({status: 'ok', column: 'archive', q: '', values: [], more: false});
-    await clock.advance(1);
-    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: true});
   });
 });
 

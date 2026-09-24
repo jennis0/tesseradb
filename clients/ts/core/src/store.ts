@@ -20,6 +20,7 @@ import type {Band, BandKey} from './bands.js';
 import {BandBudget, bandKey} from './bands.js';
 import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
 import {TesseraClient, type TesseraClientOptions} from './client.js';
+import {Suggestions} from './suggestions.js';
 import {TokenSupply, type TokenSupplier} from './token.js';
 import type {DepthChoice} from './budget.js';
 import type {Presented} from './presented.js';
@@ -485,27 +486,6 @@ export const REGION_HELD_LIMIT = 500;
  */
 const VIEW_SETTLE_MS = 140;
 
-/**
- * How long a category typeahead waits, after a keystroke, before it asks (`value-suggestion.md`
- * §5.1: keystroke cadence, 10–100 ms of server work). Short enough that the control still reads
- * as live, long enough that a held key or a fast typist spends one request rather than one per
- * character — and short of the debounce mattering less than it looks: the session's own
- * single-flight admission (one suggest in flight at a time) is what actually bounds the request
- * rate under a control that fires faster than this.
- */
-const SUGGEST_DEBOUNCE_MS = 120;
-
-/**
- * The floor on a `superseded` retry's delay. `retry_after_s` may be `0`, and a filter panel mounts
- * a control per category column in the same tick — every one's first ask can be shed by the same
- * in-flight suggest and, with no floor, would retry in the same tick again, colliding in lockstep
- * indefinitely rather than spreading out.
- */
-const SUGGEST_MIN_RETRY_S = 0.25;
-
-/** How many `superseded` retries one `q` gets before the session gives up and surfaces it as a refusal. */
-const SUGGEST_MAX_RETRIES = 5;
-
 const NO_STATUS: StatusProjection = {
   status: 'idle',
   sessionWarm: false,
@@ -534,6 +514,15 @@ export function createStore(options: StoreOptions): Store {
     new TesseraClient({viewerUrl: options.viewerUrl, sessionUrl: '', ...options.clientOptions});
 
   const table = new SessionArtifactTable();
+
+  const suggestions = new Suggestions(
+    clock,
+    async (column, q) => {
+      const asked = await viewed();
+      return client.suggest(asked.token, column, q, {view: asked.view});
+    },
+    (state) => replaceProjection('filters', {...projections.filters, ...state})
+  );
 
   const tokens = new TokenSupply(options.authorise, options.token, clock, (changed) => {
     // A derived shape and a hovered record answer one principal; a new token may be another.
@@ -1326,7 +1315,7 @@ export function createStore(options: StoreOptions): Store {
     // A category's suggestion page is per `(column, view)` — the vocabulary a `derived` column
     // walks is view-addressed (`value-suggestion.md` §5.1) — so the page held for the view being
     // left answers nothing about the one being entered, whether or not the two share a frame.
-    resetSuggestions();
+    suggestions.reset();
 
     // Nothing of a view that is not current may be in flight, and nothing of it may be scheduled:
     // a debounce left armed would put a request on the wire for a view nobody is looking at.
@@ -1558,146 +1547,6 @@ export function createStore(options: StoreOptions): Store {
     // A region's `matched` is under the filters, so its numbers are to a question just changed.
     if (selection) projectRegionLoading(selection);
     requery();
-  }
-
-  /** Per column: the debounce or retry timer armed by the most recent {@link suggest} call. */
-  const suggestTimers = new Map<string, unknown>();
-  /**
-   * Per column: the `q` the *last* {@link suggest} call named — not what was last sent, what was
-   * last *asked for*. A landed response is applied only when its echoed `q` still matches this,
-   * which is what makes a response stale by keystroke rather than by request order: a debounce
-   * collapses same-column bursts to one request, but a slow response to request *N* can still
-   * land after a fast response to request *N+1* has, and the echo is what tells the two apart
-   * without a sequence number either side has to invent.
-   */
-  const suggestWant = new Map<string, string>();
-  /** Per column: how many `superseded` retries the current `q` has spent (§ the retry cap below). */
-  const suggestRetries = new Map<string, number>();
-
-  /**
-   * Bumped by every {@link resetSuggestions}, and checked by {@link runSuggest} against the value
-   * it captured at its own start — an in-flight request that straddles a reset must not land, even
-   * where its `(column, q)` pair coincidentally matches a fresh ask under the new epoch.
-   *
-   * **Why the existing `q` echo is not enough on its own.** `resetSuggestions` publishes the
-   * cleared `filters` projection synchronously, and a mounted `<tessera-filter>` reacts inside that
-   * same publish (`onStoreChange` runs from `subscribe`'s callback) — so by the time this function
-   * returns, a control has often already re-asked the identical `q` (most commonly `''`, the
-   * empty-q page every category control asks on mount and after an invalidation alike). That
-   * repopulates `suggestWant` with the same value the stale in-flight request is still carrying, so
-   * the `suggestWant.get(column) !== q` guard alone cannot tell the two apart — only the epoch can.
-   */
-  let suggestEpoch = 0;
-
-  /**
-   * Drop every column's held suggestion page and refusal, and the debounce/retry bookkeeping
-   * behind them — a view switch or a re-authorise invalidates them (`value-suggestion.md` §5.1):
-   * a category's visible values, and so its empty-`q` page, are per `(column, view)`, and a mask
-   * change can only narrow or widen who a value is served to. Clearing `suggestWant` alongside the
-   * projection is what lets the next `ask('')` actually reach the server — otherwise the debounce
-   * dedupe (`suggestWant.get(column) === q`) would read the old `q` as already asked and answer
-   * from a page that no longer applies. A control re-derives its shape (checklist or lookahead)
-   * from whatever page lands next, the same as on first mount.
-   */
-  function resetSuggestions(): void {
-    // Bumped unconditionally — even where nothing is held in `suggestions`/`suggestErrors` there
-    // may be a request in flight (a fetch already sent, its result not yet landed), and the epoch
-    // is exactly what tells that stale landing apart from a fresh ask sharing its `(column, q)`.
-    suggestEpoch++;
-    for (const timer of suggestTimers.values()) clock.cancel(timer);
-    suggestTimers.clear();
-    suggestWant.clear();
-    suggestRetries.clear();
-    replaceProjection('filters', {...projections.filters, suggestions: {}, suggestErrors: {}, suggestEpoch});
-  }
-
-  function suggest(column: string, q: string): void {
-    if (disposed) return;
-    // Idempotent per (column, q): a caller re-asking for the identical q it already asked for —
-    // the shape a store tick that has nothing to do with this control takes, if the caller does
-    // not itself dedupe — must not re-arm the debounce, or churn frequent enough holds the timer
-    // just out of reach of firing, ever. Asking for the identical q a second time is a no-op
-    // whether the first ask is still debouncing, in flight, retrying or already landed.
-    if (suggestWant.get(column) === q) return;
-    const pending = suggestTimers.get(column);
-    if (pending !== undefined) clock.cancel(pending);
-    suggestWant.set(column, q);
-    suggestRetries.delete(column);
-    suggestTimers.set(
-      column,
-      clock.after(SUGGEST_DEBOUNCE_MS, () => {
-        suggestTimers.delete(column);
-        void runSuggest(column, q);
-      })
-    );
-  }
-
-  /** A record with `key` removed — used to drop the *other* half of the suggestion pair on a landing. */
-  function without<T>(record: Record<string, T>, key: string): Record<string, T> {
-    if (!(key in record)) return record;
-    const next = {...record};
-    delete next[key];
-    return next;
-  }
-
-  async function runSuggest(column: string, q: string): Promise<void> {
-    if (disposed) return;
-    // Captured once, at entry: every landing below — success, the catch, and the superseded
-    // re-arm — requires this unchanged against the live `suggestEpoch`, which is what `resetSuggestions`'s
-    // doc above explains is not the same question the `q` echo answers.
-    const epoch = suggestEpoch;
-    try {
-      const asked = await viewed();
-      const result = await client.suggest(asked.token, column, q, {view: asked.view});
-      if (disposed || suggestWant.get(column) !== q || suggestEpoch !== epoch) return; // a later keystroke, or a reset, already wants something else
-      if (result.status === 'superseded') {
-        // The session already has one suggest in flight (§5.1's one-in-flight rule): retry once
-        // it should have returned, still guarded by the same `q` check, rather than surface the
-        // 429 as a refusal a picker would have to render. `retry_after_s` may be `0`, and every
-        // category control in a panel mounts in the same tick and asks together, so a floor keeps
-        // a lockstep collision from spinning; a cap stops a session stuck superseded from retrying
-        // forever, surfacing the last refusal instead.
-        const attempt = (suggestRetries.get(column) ?? 0) + 1;
-        if (attempt > SUGGEST_MAX_RETRIES) {
-          suggestRetries.delete(column);
-          replaceProjection('filters', {
-            ...projections.filters,
-            suggestions: without(projections.filters.suggestions, column),
-            suggestErrors: {
-              ...projections.filters.suggestErrors,
-              [column]: {code: 'backpressure', detail: `still superseded after ${SUGGEST_MAX_RETRIES} retries`}
-            }
-          });
-          return;
-        }
-        suggestRetries.set(column, attempt);
-        suggestTimers.set(
-          column,
-          clock.after(Math.max(result.retryAfterS, SUGGEST_MIN_RETRY_S) * 1000, () => {
-            suggestTimers.delete(column);
-            void runSuggest(column, q);
-          })
-        );
-        return;
-      }
-      suggestRetries.delete(column);
-      replaceProjection('filters', {
-        ...projections.filters,
-        suggestions: {...projections.filters.suggestions, [column]: {q: result.q, values: result.values, more: result.more}},
-        // A landed page answers the question a prior refusal was about; carrying that refusal
-        // forward would leave "values not listable" showing beside a page that just listed some.
-        suggestErrors: without(projections.filters.suggestErrors, column)
-      });
-    } catch (error) {
-      if (disposed || suggestWant.get(column) !== q || suggestEpoch !== epoch) return;
-      replaceProjection('filters', {
-        ...projections.filters,
-        // A refusal answers the question a prior page was about too — a stale page must not
-        // render as though it still does.
-        suggestions: without(projections.filters.suggestions, column),
-        suggestErrors: {...projections.filters.suggestErrors, [column]: refusalOf(error)}
-      });
-    }
   }
 
   function setLayers(names: string[]): void {
@@ -2111,7 +1960,7 @@ export function createStore(options: StoreOptions): Store {
     // A re-authorise moves the mask, and a category's suggestion page answers `visible(code)`
     // under the mask it was fetched against (`value-suggestion.md` §5.1) — held across a mask
     // change it would show values the new mask does not, or hide ones it now does.
-    resetSuggestions();
+    suggestions.reset();
     // **Every held view, not the current one alone**: a mask change invalidates all of them
     // (`view-switching.md` §4), and a view left warm across it would draw the previous
     // principal's marks the moment it was returned to.
@@ -2158,8 +2007,7 @@ export function createStore(options: StoreOptions): Store {
     }
     if (switchTimer !== null) clock.cancel(switchTimer);
     switchTimer = null;
-    for (const timer of suggestTimers.values()) clock.cancel(timer);
-    suggestTimers.clear();
+    suggestions.dispose();
     client.close();
   }
 
@@ -2187,7 +2035,7 @@ export function createStore(options: StoreOptions): Store {
     requestFilters,
     setFilters,
     setMembers,
-    suggest,
+    suggest: (column, q) => suggestions.suggest(column, q),
     setLayers,
     setColourBy,
     setPalette,
