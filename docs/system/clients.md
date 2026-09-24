@@ -197,6 +197,23 @@ next view. Between views that use different layouts, a switch drops the selectio
 camera to the new view's own extent, because a shape or a camera position in one layout means
 nothing in another.
 
+## Reading in bulk
+
+The bulk reads, `POST /v1/items` and `POST /v1/artifacts`, sit beside the store and do not pass
+through it: a caller asks for a whole result and receives it page by page, with no replica and no
+camera. Each client follows each response's cursor until the read ends, and passes the caller's
+request through as given, choosing no fields and no order on the caller's behalf.
+
+| Client | Call | What it gives back |
+|---|---|---|
+| TypeScript | `client.items(token, request)` and `client.artifacts(token, request)` | an async iterator of Arrow tables, one per page, with the cursor after each; a caller who stops, or whose read is cut or refused part-way, resumes from that cursor |
+| Python | `db.items`, `db.artifacts` and `selection.items`, and the same reads on a `Viewer` | one `pyarrow` table of the whole read, or with `batches=True` the pages one at a time; a read that stops part-way raises `PartialRead`, which holds the rows read and the cursor to read on from |
+| CLI | `tessera items` and `tessera artifacts` | Arrow IPC or Parquet, to a file or to standard output, written page by page; a read cut short leaves whole pages and names the cursor to read on from |
+
+A Python `Database` gives `tessera:external_id` back as the type of its id column, as its item card
+does. `selection.items` sends the selection's own filters and box as the read's filter, so
+its rows are the items the selection counts.
+
 ## Not built
 
 Switching between two views that use different layouts refits the camera without animating an
@@ -226,6 +243,11 @@ inside a notebook widget rather than reimplementing any of this in Python. An ac
 drives the built components against a running deployment and checks nine claims against rules 1
 to 5 and 7 through what is actually on screen, not through a transcript of what was sent. Rule 6
 is covered by unit tests; rules 8 to 12 are not screen-checkable and are not covered there.
+
+The bulk reads live in `@tesseradb/client`'s `records` module, in the Python package's viewer
+reader, and in the CLI's `records` module. Each client's tests read whole results across
+responses against a running server, and cut responses before their trailers to check that a read
+keeps its whole pages and the cursor after the last of them.
 
 ## Sources
 
