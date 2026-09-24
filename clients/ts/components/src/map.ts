@@ -441,13 +441,17 @@ export class TesseraMap extends TesseraElement {
     return typeof matchMedia !== 'undefined' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
-  protected override onStoreAdopted(store: Store): void {
+  protected override onStoreAdopted(store: Store | null): void {
     this.slab.clear();
-    store.setScheme(this.scheme());
     this.metaSeen = false;
     this.selectedWorldXY = null;
     this.regionWorld = null;
     this.regionPolygon = null;
+    if (!store) {
+      this.paint();
+      return;
+    }
+    store.setScheme(this.scheme());
     if (this.colourBy !== '') store.setColourBy(this.colourBy === 'none' ? null : this.colourBy);
     if (this.layers) store.setLayers(this.layers);
     if (this.budget > 0) store.setBudget(this.budget);

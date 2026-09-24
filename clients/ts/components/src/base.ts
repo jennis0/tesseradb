@@ -7,28 +7,32 @@ import {storeContext} from './context.js';
 /**
  * What every element shares: how it finds its store, and how it follows it.
  *
- * **Store precedence, decided synchronously at connection** (design §5.3, §5.9): a `.store`
- * property; else a context answer — the protocol's request is a one-shot event, so no answer at
- * connection means no provider, and a provider that connects *later* is adopted only if the
- * element built none; else, for the map and the explorer only, its own store from `viewer-url`
- * and `token` or an `authorise` property; else detached, which renders nothing rather than
- * "empty" or "refused", both of which are answers.
+ * **Store precedence**: a `.store` property; else a context answer (a provider that connects
+ * after an element built its own store is not adopted); else, for the map, the explorer and
+ * `<tessera-store>`, its own store from `viewer-url` and `token` or an `authorise` property; else
+ * detached, which renders nothing rather than "empty" or "refused", both of which are answers.
+ * An element that may build its own store follows those three: it builds one when they become
+ * sufficient after connection, and disposes the one it built and builds another when any of them
+ * changes. A store handed in by property or context is never disposed here.
  *
- * **Never disposes the store on disconnect.** Frameworks reorder and keep-alive elements by
+ * **Disconnecting never disposes the store.** Frameworks reorder and keep-alive elements by
  * disconnecting and reconnecting them, and JupyterLab's windowed notebooks scroll cells out of
  * the DOM; a store torn down on each would refetch its whole view on every scroll-past. An own
- * store lives until `dispose()` is called on the element that built it.
+ * store lives until `dispose()` is called on the element that built it, or until its attributes
+ * change.
  *
  * Following the store is one subscription over every projection; Lit coalesces the resulting
- * update requests into one render per microtask, and its templating keeps a control's DOM
- * identity across renders, which is what keeps a control from being rebuilt under the user.
+ * update requests into one render per microtask.
  */
 export type StoreSource = 'property' | 'context' | 'own' | 'detached';
 
+/** What an own store was built from; a change in any of the three rebuilds it. */
+type OwnConfig = {viewerUrl: string; token: string; authorise: TokenSupplier | null};
+
 export abstract class TesseraElement extends LitElement {
-  /** A store handed in directly — the first rung of the precedence. */
+  /** A store handed in directly, which outranks every other source. */
   @property({attribute: false}) accessor store: Store | null = null;
-  /** For an element that may build its own store (the map and the explorer). */
+  /** For an element that may build its own store (the map, the explorer, `<tessera-store>`). */
   @property({attribute: 'viewer-url'}) accessor viewerUrl = '';
   @property() accessor token = '';
   @property({attribute: false}) accessor authorise: TokenSupplier | null = null;
@@ -38,10 +42,13 @@ export abstract class TesseraElement extends LitElement {
   protected resolvedStore: Store | null = null;
   protected storeSource: StoreSource = 'detached';
   private ownStore: Store | null = null;
+  private ownConfig: OwnConfig | null = null;
+  /** The last store a provider answered with, adopted where nothing outranks it. */
+  private contextStore: Store | null = null;
   private consumer: ContextConsumer<typeof storeContext, this> | null = null;
   private unsubscribe: (() => void) | null = null;
 
-  /** The store this element reads, and where it came from — for a test, and for a host's probe. */
+  /** The store this element reads, and where it came from, for a test and for a host's probe. */
   get activeStore(): Store | null {
     return this.resolvedStore;
   }
@@ -51,7 +58,16 @@ export abstract class TesseraElement extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.resolveStore();
+    // A reconnect keeps what was resolved; `resolve` then catches up with anything that changed
+    // while disconnected.
+    if (this.resolvedStore) this.subscribeTo(this.resolvedStore);
+    // The request goes out now, synchronously, and a provider above answers before this returns.
+    this.consumer ??= new ContextConsumer(this, {
+      context: storeContext,
+      subscribe: true,
+      callback: (value) => this.onContext(value)
+    });
+    this.resolve();
   }
 
   override disconnectedCallback(): void {
@@ -61,52 +77,47 @@ export abstract class TesseraElement extends LitElement {
   }
 
   protected override willUpdate(changed: PropertyValues<this>): void {
-    if (changed.has('store') && this.isConnected) {
-      if (this.store) this.adopt(this.store, 'property');
-    }
+    if (!this.isConnected) return;
+    if (changed.has('store') || changed.has('viewerUrl') || changed.has('token') || changed.has('authorise')) this.resolve();
   }
 
-  private resolveStore(): void {
+  /**
+   * Adopt the store the precedence names now. An own store already drawing is kept over a
+   * provider that arrived later, and rebuilt when its attributes change. A replaced own store is
+   * disposed after its successor is adopted, so nothing reads a disposed store.
+   */
+  private resolve(): void {
+    const wanted: OwnConfig | null =
+      this.canBuildOwn && this.viewerUrl && (this.token || this.authorise) ? {viewerUrl: this.viewerUrl, token: this.token, authorise: this.authorise} : null;
+    const held = this.ownConfig;
+    const same = wanted !== null && held !== null && wanted.viewerUrl === held.viewerUrl && wanted.token === held.token && wanted.authorise === held.authorise;
+    const old = this.ownStore;
+    let next: Store | null = null;
+    let source: StoreSource = 'detached';
     if (this.store) {
-      this.adopt(this.store, 'property');
-      return;
+      next = this.store;
+      source = 'property';
+    } else if (wanted && (this.storeSource === 'own' || !this.contextStore)) {
+      next = old && same ? old : createStore({viewerUrl: wanted.viewerUrl, ...(wanted.authorise ? {authorise: wanted.authorise} : {token: wanted.token})});
+      source = 'own';
+    } else if (this.contextStore) {
+      next = this.contextStore;
+      source = 'context';
     }
-    if (this.resolvedStore) {
-      // A reconnect: keep what was resolved, and re-subscribe.
-      this.subscribeTo(this.resolvedStore);
-      return;
-    }
-    // The request goes out now, synchronously, and a provider above answers before this returns.
-    this.consumer ??= new ContextConsumer(this, {
-      context: storeContext,
-      subscribe: true,
-      callback: (value) => this.onContext(value)
-    });
-    if (this.resolvedStore) return;
-    const own = this.buildOwn();
-    if (own) {
-      this.ownStore = own;
-      this.adopt(own, 'own');
-      return;
-    }
-    this.storeSource = 'detached';
-  }
-
-  /** Build a store from attributes — only where the element is allowed one and has enough to. */
-  protected buildOwn(): Store | null {
-    if (!this.canBuildOwn || !this.viewerUrl || (!this.token && !this.authorise)) return null;
-    return createStore({
-      viewerUrl: this.viewerUrl,
-      ...(this.authorise ? {authorise: this.authorise} : {token: this.token})
-    });
+    this.ownStore = source === 'own' ? next : null;
+    this.ownConfig = source === 'own' ? wanted : null;
+    if (next) this.adopt(next, source);
+    else this.detach();
+    if (old && old !== this.ownStore) old.dispose();
   }
 
   private onContext(value: Store | null | undefined): void {
-    if (!value) return;
-    // A property outranks context; an own store, once built, is kept — a provider that arrives
+    this.contextStore = value ?? null;
+    // A property outranks context; an own store, once built, is kept, so a provider that arrives
     // later does not take over a map that is already drawing.
     if (this.store || this.storeSource === 'own') return;
-    this.adopt(value, 'context');
+    if (value) this.adopt(value, 'context');
+    else if (this.storeSource === 'context') this.detach();
   }
 
   protected adopt(store: Store, source: StoreSource): void {
@@ -119,13 +130,23 @@ export abstract class TesseraElement extends LitElement {
     this.requestUpdate();
   }
 
+  private detach(): void {
+    if (!this.resolvedStore && this.storeSource === 'detached') return;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.resolvedStore = null;
+    this.storeSource = 'detached';
+    this.onStoreAdopted(null);
+    this.requestUpdate();
+  }
+
   private subscribeTo(store: Store): void {
     this.unsubscribe?.();
     this.unsubscribe = store.subscribe(() => this.onStoreChange());
   }
 
-  /** A hook for an element that wires more than a render to its store (the map, the provider). */
-  protected onStoreAdopted(_store: Store): void {}
+  /** A hook for an element that wires more than a render to its store; `null` when it detaches. */
+  protected onStoreAdopted(_store: Store | null): void {}
 
   /** Every projection change lands here; the default asks for a render. */
   protected onStoreChange(): void {
@@ -134,15 +155,11 @@ export abstract class TesseraElement extends LitElement {
 
   /** Release the store this element built. A host that handed one in disposes it itself. */
   dispose(): void {
-    this.unsubscribe?.();
-    this.unsubscribe = null;
-    if (this.ownStore) {
-      this.ownStore.dispose();
-      this.ownStore = null;
-    }
-    this.resolvedStore = null;
-    this.storeSource = 'detached';
-    this.requestUpdate();
+    const own = this.ownStore;
+    this.ownStore = null;
+    this.ownConfig = null;
+    this.detach();
+    own?.dispose();
   }
 }
 

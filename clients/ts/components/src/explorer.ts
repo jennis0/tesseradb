@@ -314,7 +314,7 @@ export class TesseraExplorer extends TesseraElement {
   private seenItem: object | null = null;
   private seenArtifact: object | null = null;
 
-  protected override onStoreAdopted(store: Store): void {
+  protected override onStoreAdopted(store: Store | null): void {
     this.provider.setValue(store);
   }
 
@@ -342,7 +342,6 @@ export class TesseraExplorer extends TesseraElement {
     this.following?.();
     this.map?.dispose();
     super.dispose();
-    this.provider.setValue(null);
   }
 
   /** The map this explorer renders, for a host that wants `fit`, `fitTo`, `select` or the probe. */

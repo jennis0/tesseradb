@@ -1,4 +1,5 @@
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
+import type {Store} from '@tesseradb/client';
 import '../src/store-element.js';
 import '../src/status.js';
 import {TesseraStatus} from '../src/status.js';
@@ -8,9 +9,8 @@ import {emit} from '../src/base.js';
 import {fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
- * The mechanics of §5.9 a test can hold: store precedence — property, context, own, detached —
- * decided at connection with a later provider adopted only where the element built none;
- * `defineOnce` on a double import; events bubbling composed with decimal-string ids.
+ * Store precedence (property, context, own, detached), an own store that follows its attributes,
+ * `defineOnce` on a double import, and events bubbling composed with decimal-string ids.
  */
 
 afterEach(() => {
@@ -89,6 +89,113 @@ describe('store precedence', () => {
     await settle(host);
     expect(el.activeStore).toBe(provided);
   });
+});
+
+describe('configuration after connection', () => {
+  type Provider = HTMLElement & {source: string; activeStore: Store | null; store: Store | null; viewerUrl: string; token: string; authorise: (() => Promise<string>) | null; dispose(): void};
+
+  async function bare(markup = '<tessera-store><tessera-status></tessera-status></tessera-store>') {
+    const host = await mount(markup);
+    const el = host.querySelector('tessera-store') as Provider;
+    return {host, el, child: host.querySelector('tessera-status') as TesseraStatus};
+  }
+
+  it('builds a store once viewer-url and a token arrive after insertion, and provides it', async () => {
+    const {host, el, child} = await bare();
+    expect(el.source).toBe('detached');
+    el.setAttribute('viewer-url', 'http://127.0.0.1:1');
+    await settle(host);
+    expect(el.source).toBe('detached');
+    el.setAttribute('token', 't');
+    await settle(host);
+    expect(el.source).toBe('own');
+    expect(el.activeStore).not.toBeNull();
+    expect(child.activeStore).toBe(el.activeStore);
+    el.dispose();
+  });
+
+  it('builds one from an authorise supplier set after insertion', async () => {
+    const {host, el} = await bare('<tessera-store viewer-url="http://127.0.0.1:1"></tessera-store>');
+    el.authorise = async () => 't';
+    await settle(host);
+    expect(el.source).toBe('own');
+    el.dispose();
+  });
+
+  it('rebuilds on a changed token, viewer-url or authorise, disposing the store it built', async () => {
+    const {host, el, child} = await bare('<tessera-store viewer-url="http://127.0.0.1:1" token="a"><tessera-status></tessera-status></tessera-store>');
+    const built: Store[] = [el.activeStore!];
+    const disposed: Store[] = [];
+    const watch = (s: Store) => vi.spyOn(s, 'dispose').mockImplementation(() => void disposed.push(s));
+    watch(built[0]!);
+    for (const change of [() => (el.token = 'b'), () => (el.viewerUrl = 'http://127.0.0.1:2'), () => (el.authorise = async () => 'c')]) {
+      change();
+      await settle(host);
+      const next = el.activeStore!;
+      expect(next).not.toBe(built.at(-1));
+      expect(disposed).toEqual(built);
+      expect(child.activeStore).toBe(next);
+      built.push(next);
+      watch(next);
+    }
+    // Nothing that names a store left: detached, and the last one disposed.
+    el.viewerUrl = '';
+    await settle(host);
+    expect(el.source).toBe('detached');
+    expect(el.activeStore).toBeNull();
+    expect(child.activeStore).toBeNull();
+    expect(disposed).toEqual(built);
+  });
+
+  it('keeps a store handed in by property through a configuration change, and never disposes it', async () => {
+    const {host, el} = await bare('<tessera-store viewer-url="http://127.0.0.1:1" token="a"></tessera-store>');
+    const own = el.activeStore!;
+    const ownDisposed = vi.spyOn(own, 'dispose');
+    const given = fakeStore({status: status({})});
+    el.store = given;
+    await settle(host);
+    expect(el.source).toBe('property');
+    expect(ownDisposed).toHaveBeenCalled();
+    el.token = 'b';
+    await settle(host);
+    expect(el.activeStore).toBe(given);
+    // Withdrawn, the element falls back to building its own from what it is configured with.
+    el.store = null;
+    await settle(host);
+    expect(el.source).toBe('own');
+    el.dispose();
+    expect(given.calls.some((c) => c.name === 'dispose')).toBe(false);
+  });
+
+  it('keeps a store from a provider through its own configuration, and never disposes it', async () => {
+    const provided = fakeStore({status: status({})});
+    const host = await mount('<tessera-store><tessera-store id="inner"></tessera-store></tessera-store>');
+    (host.querySelector('tessera-store') as Provider).store = provided;
+    await settle(host);
+    const inner = host.querySelector('#inner') as Provider;
+    expect(inner.source).toBe('context');
+    inner.viewerUrl = 'http://127.0.0.1:1';
+    inner.token = 't';
+    await settle(host);
+    expect(inner.activeStore).toBe(provided);
+    inner.dispose();
+    expect(provided.calls.some((c) => c.name === 'dispose')).toBe(false);
+  });
+
+  for (const tag of ['tessera-map', 'tessera-explorer']) {
+    it(`${tag} builds its own store from attributes set after insertion`, async () => {
+      await import('../src/explorer.js');
+      const host = await mount(`<${tag}></${tag}>`);
+      const el = host.querySelector(tag) as unknown as Provider;
+      expect(el.source).toBe('detached');
+      el.viewerUrl = 'http://127.0.0.1:1';
+      el.token = 't';
+      await settle(host);
+      expect(el.source).toBe('own');
+      el.dispose();
+      expect(el.activeStore).toBeNull();
+    });
+  }
 });
 
 describe('defineOnce', () => {
