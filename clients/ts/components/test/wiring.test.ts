@@ -147,6 +147,28 @@ describe('configuration after connection', () => {
     expect(disposed).toEqual(built);
   });
 
+  it('keeps its store when the authorise function alone is replaced, and asks the latest one', async () => {
+    const {host, el} = await bare('<tessera-store viewer-url="http://127.0.0.1:1"></tessera-store>');
+    const asked: string[] = [];
+    // An expiry in the past, so the store asks its supplier on every request.
+    const supplier = (name: string) => async () => {
+      asked.push(name);
+      return {token: name, expiresAt: 1};
+    };
+    el.authorise = supplier('first');
+    await settle(host);
+    const built = el.activeStore!;
+    const disposed = vi.spyOn(built, 'dispose');
+    el.authorise = supplier('second');
+    await settle(host);
+    expect(el.activeStore).toBe(built);
+    expect(disposed).not.toHaveBeenCalled();
+    asked.length = 0;
+    await built.browse({layer: 'x'}).catch(() => {});
+    expect(asked).toEqual(['second']);
+    el.dispose();
+  });
+
   it('keeps a store handed in by property through a configuration change, and never disposes it', async () => {
     const {host, el} = await bare('<tessera-store viewer-url="http://127.0.0.1:1" token="a"></tessera-store>');
     const own = el.activeStore!;

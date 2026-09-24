@@ -3,7 +3,7 @@ import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {formatCount} from '@tesseradb/client';
 import {deep, fakeStore, settle, status} from '../../components/test/fake-store.js';
-import {TesseraCount, TesseraExplorer, TesseraHierarchy, TesseraItemCard, TesseraKeyPicker, TesseraStatus, TesseraStore, TesseraViewPicker, type CountElement, type ExplorerElement, type ItemCardElement, type ViewPickerElement} from '../src/components.js';
+import {TesseraCount, TesseraExplorer, TesseraHierarchy, TesseraItemCard, TesseraKeyPicker, TesseraStatus, TesseraStore, TesseraViewPicker, type CountElement, type ExplorerElement, type ItemCardElement, type StoreElement, type ViewPickerElement} from '../src/components.js';
 
 /**
  * The wrappers: an object prop lands as a property (never an attribute), an `on*` prop receives
@@ -148,6 +148,25 @@ describe('@tesseradb/react/components', () => {
     await settle(host);
     (deep(host, '[part="row"] [part="name"]') as HTMLButtonElement).click();
     expect(seen).toEqual([{id: '9223372036854775808', verb: 'highlight', on: true}]);
+  });
+
+  it('an inline authorise arrow does not rebuild the element’s own store on a re-render', async () => {
+    // The store opens a session at once; there is no server here.
+    const fetched = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new Error('no server in this test');
+    };
+    const ref = createRef<StoreElement>();
+    const draw = (n: number) => root.render(createElement(TesseraStore, {ref, viewerUrl: 'http://127.0.0.1:1', authorise: async () => ({token: `t${n}`, expiresAt: 1})}));
+    await act(async () => draw(1));
+    await settle(host);
+    const built = ref.current?.activeStore;
+    expect(built).not.toBeNull();
+    await act(async () => draw(2));
+    await settle(host);
+    expect(ref.current?.activeStore).toBe(built);
+    ref.current?.dispose();
+    globalThis.fetch = fetched;
   });
 
   it('a TesseraStore above provides by context to a wrapped panel below', async () => {

@@ -13,8 +13,9 @@ import {storeContext} from './context.js';
  * `<tessera-store>`, its own store from `viewer-url` and `token` or an `authorise` property; else
  * detached, which renders nothing rather than "empty" or "refused", both of which are answers.
  * An element that may build its own store follows those three: it builds one when they become
- * sufficient after connection, and disposes the one it built and builds another when any of them
- * changes. A store handed in by property or context is never disposed here.
+ * sufficient after connection, and disposes the one it built and builds another when `viewer-url`
+ * or `token` changes or `authorise` is set or cleared. A store handed in by property or context is
+ * never disposed here.
  *
  * **Disconnecting never disposes the store.** Frameworks reorder and keep-alive elements by
  * disconnecting and reconnecting them, and JupyterLab's windowed notebooks scroll cells out of
@@ -27,8 +28,8 @@ import {storeContext} from './context.js';
  */
 export type StoreSource = 'property' | 'context' | 'own' | 'detached';
 
-/** What an own store was built from; a change in any of the three rebuilds it. */
-type OwnConfig = {viewerUrl: string; token: string; authorise: TokenSupplier | null};
+/** What an own store was built from; a change in any of these rebuilds it. */
+type OwnConfig = {viewerUrl: string; token: string; supplied: boolean};
 
 export abstract class TesseraElement extends LitElement {
   /** A store handed in directly, which outranks every other source. */
@@ -36,6 +37,12 @@ export abstract class TesseraElement extends LitElement {
   /** For an element that may build its own store (the map, the explorer, `<tessera-store>`). */
   @property({attribute: 'viewer-url'}) accessor viewerUrl = '';
   @property() accessor token = '';
+  /**
+   * A token supplier, used in place of `token`. The store this element builds always calls the
+   * supplier set now, so replacing the function (an inline arrow in a framework's render) does not
+   * rebuild the store. Setting or clearing it does. A different principal needs a new `token`, a
+   * new `viewer-url` or a new element.
+   */
   @property({attribute: false}) accessor authorise: TokenSupplier | null = null;
 
   /** Whether this element builds its own store from attributes when nothing else supplies one. */
@@ -89,9 +96,9 @@ export abstract class TesseraElement extends LitElement {
    */
   private resolve(): void {
     const wanted: OwnConfig | null =
-      this.canBuildOwn && this.viewerUrl && (this.token || this.authorise) ? {viewerUrl: this.viewerUrl, token: this.token, authorise: this.authorise} : null;
+      this.canBuildOwn && this.viewerUrl && (this.token || this.authorise) ? {viewerUrl: this.viewerUrl, token: this.token, supplied: this.authorise !== null} : null;
     const held = this.ownConfig;
-    const same = wanted !== null && held !== null && wanted.viewerUrl === held.viewerUrl && wanted.token === held.token && wanted.authorise === held.authorise;
+    const same = wanted !== null && held !== null && wanted.viewerUrl === held.viewerUrl && wanted.token === held.token && wanted.supplied === held.supplied;
     const old = this.ownStore;
     let next: Store | null = null;
     let source: StoreSource = 'detached';
@@ -99,7 +106,10 @@ export abstract class TesseraElement extends LitElement {
       next = this.store;
       source = 'property';
     } else if (wanted && (this.storeSource === 'own' || !this.contextStore)) {
-      next = old && same ? old : createStore({viewerUrl: wanted.viewerUrl, ...(wanted.authorise ? {authorise: wanted.authorise} : {token: wanted.token})});
+      next =
+        old && same
+          ? old
+          : createStore({viewerUrl: wanted.viewerUrl, ...(wanted.supplied ? {authorise: () => this.authorise!()} : {token: wanted.token})});
       source = 'own';
     } else if (this.contextStore) {
       next = this.contextStore;
