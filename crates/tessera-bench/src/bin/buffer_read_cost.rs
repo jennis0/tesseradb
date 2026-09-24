@@ -665,6 +665,7 @@ fn synth_rows(fx: &Fixture, count: usize, start: u64, terms: &[TermId]) -> Vec<U
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
+                join_only: false,
                 external_id: Some(format!("buffer-read-{n}").into_bytes()),
                 view: fx.view.clone(),
                 join: None,

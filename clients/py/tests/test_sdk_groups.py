@@ -260,9 +260,14 @@ def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_
     fresh = list(range(9001, 9021))
     added = list(range(9101, 9131))
     db.insert("slices", roster=roster(["c"]), key="key", label="label", starts="starts")
+    # The group's scoped columns travel with its rows, with no value here: `coverage` is filled
+    # below through the values route, on items the build placed.
+    rows = pa.concat_tables([points(fresh, 40.0, "b"), points(added, 20.0, "c")])
+    rows = rows.append_column("quality", pa.nulls(rows.num_rows))
+    rows = rows.append_column("coverage", pa.nulls(rows.num_rows))
     db.insert(
         "slices",
-        pa.concat_tables([points(fresh, 40.0, "b"), points(added, 20.0, "c")]),
+        rows,
         id="entity_id",
         x="x",
         y="y",

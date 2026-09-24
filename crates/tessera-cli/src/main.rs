@@ -1681,10 +1681,6 @@ fn main() -> ExitCode {
                     }
                 };
                 eprintln!("{}", frame.report());
-                if let Some(detail) = frame.refusal() {
-                    eprintln!("build refused: {detail}");
-                    return ExitCode::FAILURE;
-                }
                 frames.push(index);
                 extents.push(frame.extent);
             }

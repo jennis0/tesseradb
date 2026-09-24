@@ -362,15 +362,33 @@ impl RowProjectionCache {
             .map(|(_, geometry)| Arc::clone(&geometry.fragment))
     }
 
-    /// Every `Ready` entry, as `(key, value)` — what the background refresh iterates.
+    /// Each session's newest `Ready` entry per view, as `(key, value)` — what the background
+    /// refresh iterates.
     ///
     /// **O(cache residency), never O(sessions)** (decision 0035's shape, and 0044's D1): the
     /// refresh's whole cost model is that it is bounded by what is resident rather than by how
     /// many sessions exist, and this is where that becomes true. A session with no resident entry
     /// is not refreshed and pays a build on its next request, which is establishment, not
     /// update-induced work.
+    ///
+    /// **Only each session's newest entry per view.** Retention leaves an older entry beside a
+    /// newer one — the one-back entry beside the live one, or a kept base beside what a refresh
+    /// has since derived from it — and deriving from both would produce the same key twice and
+    /// count it twice.
     pub(crate) fn resident(&self) -> Vec<(RowProjectionKey, Arc<SessionGeometry>)> {
-        self.inner.ready_entries()
+        let ready = self.inner.ready_entries();
+        let newest = newest_per_view(&ready);
+        let bases: Vec<bool> = ready
+            .iter()
+            .map(|(key, _)| {
+                newest.get(&(key.token_id, key.view.as_str())) == Some(&key.segments_version)
+            })
+            .collect();
+        ready
+            .into_iter()
+            .zip(bases)
+            .filter_map(|(entry, base)| base.then_some(entry))
+            .collect()
     }
 
     /// Remove every projection belonging to `token_id`. Called when a session is revoked.
@@ -478,11 +496,7 @@ impl RowProjectionCache {
     /// the removal, and both run on the publication path, not on a request handler.
     pub(crate) fn prune_generations_below(&self, floor: u64, live_prefix: &str) -> usize {
         let ready = self.inner.ready_entries();
-        let mut newest: FxHashMap<(u64, &str), u64> = FxHashMap::default();
-        for (key, _) in &ready {
-            let version = newest.entry((key.token_id, key.view.as_str())).or_insert(0);
-            *version = (*version).max(key.segments_version);
-        }
+        let newest = newest_per_view(&ready);
         self.inner.retain_keys(|key| {
             key.segments_version >= floor
                 || (key.prefix == live_prefix
@@ -490,6 +504,18 @@ impl RowProjectionCache {
                         == Some(&key.segments_version))
         })
     }
+}
+
+/// Each session's newest generation per view among `entries`, keyed by token and view.
+fn newest_per_view(
+    entries: &[(RowProjectionKey, Arc<SessionGeometry>)],
+) -> FxHashMap<(u64, &str), u64> {
+    let mut newest: FxHashMap<(u64, &str), u64> = FxHashMap::default();
+    for (key, _) in entries {
+        let version = newest.entry((key.token_id, key.view.as_str())).or_insert(0);
+        *version = (*version).max(key.segments_version);
+    }
+    newest
 }
 
 /// How many superseded generations' projections the cache keeps after a publication.

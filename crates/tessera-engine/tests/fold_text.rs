@@ -170,6 +170,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
     for i in 0..FLUSHED {
         let external = format!("fresh-{i}");
         let row = UnallocatedRow {
+            join_only: false,
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
@@ -496,6 +497,7 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
     let second = {
         let external = "flight-0".to_string();
         let row = UnallocatedRow {
+            join_only: false,
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
@@ -569,6 +571,7 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
 
     let ingest = |engine: &Engine, name: &str, value: WalScalar| {
         let row = UnallocatedRow {
+            join_only: false,
             external_id: Some(name.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,

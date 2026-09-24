@@ -562,7 +562,10 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
         alone.extent
     );
     // Nothing clamps: the box was fitted to every row it will place.
-    assert!(group.refusal().is_none());
+    let tessera_build::input::PointSurvey::Coordinates(survey) = &group.survey else {
+        panic!("the group's sources carry coordinates");
+    };
+    assert_eq!(survey.clamped, 0);
 }
 
 /// **The roster as a table** (`views.md` §3.1's form B): the keys are rows of a file, read before

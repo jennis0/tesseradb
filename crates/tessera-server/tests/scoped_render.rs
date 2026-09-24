@@ -315,11 +315,9 @@ async fn viewport_bytes(served: &Served, token: &str, view: &str) -> (u16, Vec<u
 }
 
 /// One ingest batch into `view`. The fixture declares no entity-scoped attribute, so a row is its
-/// external id, its position, its access label — and, where `heat` is non-empty, the group-scoped
-/// family's value **under its plain name** (`views.md` §5): the view is known from the header, so
-/// the column is not qualified and the view decides which of the family's columns the value is
-/// for. An empty `heat` is a batch that names no such column at all, which is a family every row
-/// is absent in rather than a malformed batch.
+/// external id, its position, its access label and the group-scoped families' values **under
+/// their plain names** (`views.md` §5): the view is known from the header, so the column is not
+/// qualified and the view decides which of the family's columns the value is for.
 async fn ingest_with_heat(
     served: &Served,
     batch_id: &str,
@@ -327,29 +325,8 @@ async fn ingest_with_heat(
     rows: &[(Vec<u8>, f32, f32, &str)],
     heat: &[Option<f32>],
 ) {
-    let body = if heat.is_empty() {
-        build_ingest_batch_optional(
-            &rows
-                .iter()
-                .map(|(id, x, y, access)| (Some(id.as_slice()), *x, *y, *access))
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        batch_with_heat(rows, heat)
-    };
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 200, "the batch is accepted");
+    let (status, body) = try_ingest_with_heat(served, batch_id, view, rows, heat).await;
+    assert_eq!(status, 200, "the batch is accepted: {body}");
 }
 
 /// The same batch, refused or not, with its status and body returned — for the cases where the
@@ -361,27 +338,12 @@ async fn try_ingest_with_heat(
     rows: &[(Vec<u8>, f32, f32, &str)],
     heat: &[Option<f32>],
 ) -> (u16, String) {
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(batch_with_heat(rows, heat))
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    (status, resp.text().await.unwrap())
+    try_ingest_families(served, batch_id, view, rows, Some(heat), None, None).await
 }
 
-/// One ingest batch naming any subset of the group's three families, with its status and body —
-/// the general form of [`ingest_with_heat`], for the cases that write `note` or `tag`.
-///
-/// A `None` list is a batch that names no such column at all, which is a family every row is
-/// absent in rather than a malformed batch.
+/// One ingest batch carrying the group's three families, with its status and body — the general
+/// form of [`ingest_with_heat`], for the cases that write `note` or `tag`. A `None` list is a
+/// family null on every row.
 async fn try_ingest_families(
     served: &Served,
     batch_id: &str,
@@ -393,13 +355,17 @@ async fn try_ingest_families(
 ) -> (u16, String) {
     use arrow::array::{BinaryArray, StringArray};
     let access = access_column(rows.iter().map(|(_, _, _, a)| *a));
-    let mut fields = vec![
+    let nulls = vec![None; rows.len()];
+    let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
-    ];
-    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Field::new("heat", DataType::Float32, true),
+        Field::new("note", DataType::Utf8, true),
+        Field::new("tag", DataType::Float32, true),
+    ]));
+    let columns: Vec<arrow::array::ArrayRef> = vec![
         Arc::new(BinaryArray::from_iter(
             rows.iter().map(|(id, _, _, _)| Some(id.as_slice())),
         )),
@@ -410,20 +376,12 @@ async fn try_ingest_families(
             rows.iter().map(|(_, _, y, _)| *y),
         )),
         Arc::new(access),
+        Arc::new(Float32Array::from(heat.unwrap_or(&nulls).to_vec())),
+        Arc::new(StringArray::from(
+            note.map_or_else(|| vec![None; rows.len()], <[_]>::to_vec),
+        )),
+        Arc::new(Float32Array::from(tag.unwrap_or(&nulls).to_vec())),
     ];
-    if let Some(heat) = heat {
-        fields.push(Field::new("heat", DataType::Float32, true));
-        columns.push(Arc::new(Float32Array::from(heat.to_vec())));
-    }
-    if let Some(note) = note {
-        fields.push(Field::new("note", DataType::Utf8, true));
-        columns.push(Arc::new(StringArray::from(note.to_vec())));
-    }
-    if let Some(tag) = tag {
-        fields.push(Field::new("tag", DataType::Float32, true));
-        columns.push(Arc::new(Float32Array::from(tag.to_vec())));
-    }
-    let schema = Arc::new(ArrowSchema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
     let mut w = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
     w.write(&batch).unwrap();
@@ -442,39 +400,6 @@ async fn try_ingest_families(
         .unwrap();
     let status = resp.status().as_u16();
     (status, resp.text().await.unwrap())
-}
-
-/// An Arrow ingest body carrying the reserved columns and a nullable `heat`.
-fn batch_with_heat(rows: &[(Vec<u8>, f32, f32, &str)], heat: &[Option<f32>]) -> Vec<u8> {
-    use arrow::array::BinaryArray;
-    let access = access_column(rows.iter().map(|(_, _, _, a)| *a));
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access),
-        Field::new("heat", DataType::Float32, true),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter(
-                rows.iter().map(|(id, _, _, _)| Some(id.as_slice())),
-            )),
-            Arc::new(Float32Array::from_iter_values(
-                rows.iter().map(|(_, x, _, _)| *x),
-            )),
-            Arc::new(Float32Array::from_iter_values(
-                rows.iter().map(|(_, _, y, _)| *y),
-            )),
-            Arc::new(access),
-            Arc::new(Float32Array::from(heat.to_vec())),
-        ],
-    )
-    .unwrap();
-    let mut w = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    w.write(&batch).unwrap();
-    w.into_inner().unwrap()
 }
 
 /// The points frames' column names, and `heat` per `tessera_id` where the frame carries it, `None`
@@ -1013,6 +938,53 @@ async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
     assert_eq!(status, 422, "an undeclared column is a malformed request");
     assert_eq!(error_code(&body), "contract", "{body}");
     assert!(body.contains("'heat'"), "{body}");
+}
+
+/// **A scoped family is required on every row into a view of its own group, and on no row into a
+/// view of a group sharing its keys**, as a build reads it from the one and not the other. A row
+/// that joins an item already held is no exception: the family's value is the view's, not the
+/// item's.
+#[tokio::test]
+async fn a_scoped_family_is_required_on_its_own_groups_views_and_not_on_a_sharing_groups() {
+    let served = Served::build(build_with_families).await;
+    const NEW: u64 = 9_901;
+    let id = external_id_of(NEW);
+    let bare = || build_ingest_batch_optional(&[(Some(&id[..]), 250.0, 250.0, "0")]);
+    let post = |batch_id: &'static str, view: &'static str, body: Vec<u8>| {
+        let served = &served;
+        async move {
+            let resp = served
+                .server
+                .client
+                .post(served.server.control_url("/control/ingest"))
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .header("x-tessera-batch-id", batch_id)
+                .header("x-tessera-view", view)
+                .header("content-type", "application/vnd.apache.arrow.stream")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status().as_u16();
+            (status, resp.text().await.unwrap())
+        }
+    };
+    let (status, body) = post("owner-new", "quarter:2026-Q1", bare()).await;
+    assert_eq!(status, 422, "a new item into the owner's view: {body}");
+    assert_eq!(error_code(&body), "contract", "{body}");
+    let (status, body) = post("sharing-new", "quarter_map:2026-Q1", bare()).await;
+    assert_eq!(status, 200, "a new item into the sharing group's view: {body}");
+    let (status, body) = post("owner-join", "quarter:2026-Q1", bare()).await;
+    assert_eq!(status, 422, "the same item joining the owner's view: {body}");
+    assert_eq!(error_code(&body), "contract", "{body}");
+    ingest_with_heat(
+        &served,
+        "owner-join-carrying",
+        "quarter:2026-Q1",
+        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[None],
+    )
+    .await;
 }
 
 /// **A join row carries that view's scoped value, and it is the one thing it carries beyond

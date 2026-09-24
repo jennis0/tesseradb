@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, BinaryArray, Float32Array, Float64Array, Int64Array, StringArray,
+    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, Int64Array, StringArray,
     TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -239,6 +239,47 @@ fn arrow_body(rows: &[Row]) -> Vec<u8> {
         ],
     )
     .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// The fixed columns of an ingest batch over `ids`, every row at one place and labelled `0`.
+fn placed(ids: &[u64]) -> Vec<(Field, ArrayRef)> {
+    let access = access_column(ids.iter().map(|_| "0"));
+    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
+    vec![
+        column(
+            "external_id",
+            true,
+            BinaryArray::from_iter_values(external.iter().map(|v| v.as_slice())),
+        ),
+        column("x", false, Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
+        column("y", false, Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
+        (access_field(&access), Arc::new(access)),
+    ]
+}
+
+/// An Arrow ingest body of `columns`, and a null column for each of the fixture's declared tail
+/// the batch does not otherwise carry.
+fn body_of(mut columns: Vec<(Field, ArrayRef)>) -> Vec<u8> {
+    let rows = columns[0].1.len();
+    let tail = [
+        ("score", DataType::Int64),
+        ("weight", DataType::Float32),
+        ("big", DataType::UInt64),
+        ("seen", DataType::Timestamp(TimeUnit::Microsecond, None)),
+        ("tag", DataType::Utf8),
+    ];
+    for (name, ty) in tail {
+        if !columns.iter().any(|(field, _)| field.name() == name) {
+            let nulls = arrow::array::new_null_array(&ty, rows);
+            columns.push((Field::new(name, ty, true), nulls));
+        }
+    }
+    let (fields, arrays): (Vec<Field>, Vec<ArrayRef>) = columns.into_iter().unzip();
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();
     writer.into_inner().unwrap()
@@ -1136,40 +1177,20 @@ async fn a_content_type_naming_neither_encoding_is_refused() {
 async fn a_null_coordinate_in_an_arrow_batch_is_refused() {
     let (_tmp, server) = served_declared().await;
     let high_water = control_status(&server).await["entity_id_high_water"].clone();
-    for column in ["x", "y"] {
-        let ids = [500u64, 501, 502];
-        let access = access_column(ids.iter().map(|_| "0"));
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("external_id", DataType::Binary, true),
-            Field::new("x", DataType::Float64, true),
-            Field::new("y", DataType::Float64, true),
-            access_field(&access),
-        ]));
+    for nulled in ["x", "y"] {
         let with_null = |name: &str| -> Float64Array {
-            if name == column {
+            if name == nulled {
                 Float64Array::from(vec![Some(1.0), None, Some(3.0)])
             } else {
                 Float64Array::from(vec![1.0, 2.0, 3.0])
             }
         };
-        let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(BinaryArray::from_iter_values(
-                    external.iter().map(|v| v.as_slice()),
-                )),
-                Arc::new(with_null("x")),
-                Arc::new(with_null("y")),
-                Arc::new(access),
-            ],
-        )
-        .unwrap();
-        let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-        writer.write(&batch).unwrap();
-        let body = writer.into_inner().unwrap();
-        let (status, resp) = ingest(&server, &format!("null-{column}"), Some(ARROW), body).await;
-        assert_eq!(status, 422, "{column}: {resp}");
+        let mut columns = placed(&[500, 501, 502]);
+        columns[1] = column("x", true, with_null("x"));
+        columns[2] = column("y", true, with_null("y"));
+        let body = body_of(columns);
+        let (status, resp) = ingest(&server, &format!("null-{nulled}"), Some(ARROW), body).await;
+        assert_eq!(status, 422, "{nulled}: {resp}");
     }
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
@@ -1194,48 +1215,29 @@ async fn declare(server: &TestServer, body: Value) {
 
 /// Three attributes declared live whose Arrow columns below arrive at another width.
 async fn declare_widths(server: &TestServer) {
-    declare(server, json!({ "name": "level", "type": "u8", "index": true })).await;
+    declare(server, json!({ "name": "grade", "type": "u8", "index": true })).await;
     declare(server, json!({ "name": "precise", "type": "f64", "index": true })).await;
     declare(server, json!({ "name": "label", "type": "keyword", "index": true })).await;
 }
 
 /// An ingest batch whose declared columns are each at a width other than the declaration's:
-/// `level` (`u8`) as `int64`, `weight` (`f32`) as `float64`, `precise` (`f64`) as `float32` and
+/// `grade` (`u8`) as `int64`, `weight` (`f32`) as `float64`, `precise` (`f64`) as `float32` and
 /// `label` (`keyword`, a string on the wire) as `large_utf8`.
-fn widths_body(ids: &[u64], levels: &[Option<i64>]) -> Vec<u8> {
-    let access = access_column(ids.iter().map(|_| "0"));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access),
-        Field::new("level", DataType::Int64, true),
-        Field::new("weight", DataType::Float64, true),
-        Field::new("precise", DataType::Float32, true),
-        Field::new("label", DataType::LargeUtf8, true),
-    ]));
-    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter_values(
-                external.iter().map(|v| v.as_slice()),
-            )),
-            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
-            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
-            Arc::new(access),
-            Arc::new(Int64Array::from(levels.to_vec())),
-            Arc::new(Float64Array::from_iter_values(ids.iter().map(|_| 0.5))),
-            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 2.5))),
-            Arc::new(arrow::array::LargeStringArray::from_iter_values(
+fn widths_body(ids: &[u64], grades: &[Option<i64>]) -> Vec<u8> {
+    let mut columns = placed(ids);
+    columns.extend([
+        column("grade", true, Int64Array::from(grades.to_vec())),
+        column("weight", true, Float64Array::from_iter_values(ids.iter().map(|_| 0.5))),
+        column("precise", true, Float32Array::from_iter_values(ids.iter().map(|_| 2.5))),
+        column(
+            "label",
+            true,
+            arrow::array::LargeStringArray::from_iter_values(
                 ids.iter().map(|id| format!("wide-{id}")),
-            )),
-        ],
-    )
-    .unwrap();
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    writer.into_inner().unwrap()
+            ),
+        ),
+    ]);
+    body_of(columns)
 }
 
 /// One item's drill-down fields.
@@ -1262,10 +1264,10 @@ async fn an_arrow_column_at_another_width_is_read_as_a_build_reads_it() {
     assert_eq!(answer["accepted"], 2);
     drain(&server).await;
 
-    let (matched, _) = viewport(&server, &["0"], Some(json!({ "level": { "eq": 255 } }))).await;
+    let (matched, _) = viewport(&server, &["0"], Some(json!({ "grade": { "eq": 255 } }))).await;
     assert_eq!(matched.len(), 1, "the u8 is filterable at its value");
     let fields = fields_of(&server, ingested_ids(&answer)[0]).await;
-    assert_eq!(fields["level"], json!(7));
+    assert_eq!(fields["grade"], json!(7));
     assert_eq!(fields["weight"], json!(0.5));
     assert_eq!(fields["precise"], json!(2.5));
     assert_eq!(fields["label"], json!("wide-600"));
@@ -1288,7 +1290,7 @@ async fn an_arrow_integer_outside_its_declaration_is_refused_naming_the_row() {
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract");
     let detail = answer["detail"].as_str().unwrap();
-    assert!(names_cell(detail, 1, "level"), "{detail}");
+    assert!(names_cell(detail, 1, "grade"), "{detail}");
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water,
@@ -1296,17 +1298,17 @@ async fn an_arrow_integer_outside_its_declaration_is_refused_naming_the_row() {
     );
 }
 
-/// A values batch over an existing entity, as Arrow, filling `level` from an `int64` column.
-fn level_values_body(external_id: u64, level: i64) -> Vec<u8> {
+/// A values batch over an existing entity, as Arrow, filling `grade` from an `int64` column.
+fn grade_values_body(external_id: u64, grade: i64) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, true),
-        Field::new("level", DataType::Int64, true),
+        Field::new("grade", DataType::Int64, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(BinaryArray::from_iter_values([external_id_of(external_id)])),
-            Arc::new(Int64Array::from(vec![level])),
+            Arc::new(Int64Array::from(vec![grade])),
         ],
     )
     .unwrap();
@@ -1341,16 +1343,16 @@ async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
     let tessera_id = ingested_ids(&answer)[0];
     drain(&server).await;
 
-    let (status, answer) = post_values(&server, "too-wide", level_values_body(800, 300)).await;
+    let (status, answer) = post_values(&server, "too-wide", grade_values_body(800, 300)).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract");
     let detail = answer["detail"].as_str().unwrap();
-    assert!(names_cell(detail, 0, "level"), "{detail}");
+    assert!(names_cell(detail, 0, "grade"), "{detail}");
 
-    let (status, answer) = post_values(&server, "fits", level_values_body(800, 42)).await;
+    let (status, answer) = post_values(&server, "fits", grade_values_body(800, 42)).await;
     assert_eq!(status, 200, "{answer}");
     drain(&server).await;
-    assert_eq!(fields_of(&server, tessera_id).await["level"], json!(42));
+    assert_eq!(fields_of(&server, tessera_id).await["grade"], json!(42));
 }
 
 /// A closed vocabulary `venues` and a category column `venue` over it, both declared live.
@@ -1378,31 +1380,13 @@ async fn declare_venue(server: &TestServer) {
 
 /// An ingest batch whose `venue` keys arrive as `large_utf8`, null where a row has none.
 fn venue_ingest_body(ids: &[u64], venues: &[Option<&str>]) -> Vec<u8> {
-    let access = access_column(ids.iter().map(|_| "0"));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access),
-        Field::new("venue", DataType::LargeUtf8, true),
-    ]));
-    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter_values(
-                external.iter().map(|v| v.as_slice()),
-            )),
-            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
-            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
-            Arc::new(access),
-            Arc::new(arrow::array::LargeStringArray::from(venues.to_vec())),
-        ],
-    )
-    .unwrap();
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    writer.into_inner().unwrap()
+    let mut columns = placed(ids);
+    columns.push(column(
+        "venue",
+        true,
+        arrow::array::LargeStringArray::from(venues.to_vec()),
+    ));
+    body_of(columns)
 }
 
 /// A values batch setting one entity's `venue`, its key as `large_utf8`.
@@ -1472,6 +1456,26 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
     assert_eq!(answer["error"], "contract");
 }
 
+/// **A column of Arrow's `null` type carries any declared column, every row without a value**:
+/// what `pa.nulls(n)` gives a writer with nothing to send, for a scalar and a category alike.
+#[tokio::test]
+async fn a_column_of_the_null_type_is_a_declared_column_with_no_values() {
+    let (_tmp, server) = served_declared().await;
+    declare_venue(&server).await;
+    let ids = [1100u64, 1101];
+    let mut columns = placed(&ids);
+    for name in ["score", "weight", "big", "seen", "tag", "venue"] {
+        columns.push(column(name, true, arrow::array::NullArray::new(ids.len())));
+    }
+    let (status, answer) = ingest(&server, "null-type", Some(ARROW), body_of(columns)).await;
+    assert_eq!(status, 200, "{answer}");
+    drain(&server).await;
+    for tessera_id in ingested_ids(&answer) {
+        let fields = fields_of(&server, tessera_id).await;
+        assert_eq!(fields, json!({}), "no row holds a value: {fields}");
+    }
+}
+
 /// A `uint64` past `i64::MAX`, which an `i64` cannot hold.
 const PAST_I64: u64 = 1 << 63;
 
@@ -1482,33 +1486,9 @@ const PAST_I64: u64 = 1 << 63;
 async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
     let (_tmp, server) = served_declared().await;
     let high_water = control_status(&server).await["entity_id_high_water"].clone();
-    let ids = [900u64, 901];
-    let access = access_column(ids.iter().map(|_| "0"));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access),
-        Field::new("score", DataType::UInt64, true),
-    ]));
-    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter_values(
-                external.iter().map(|v| v.as_slice()),
-            )),
-            Arc::new(Float32Array::from(vec![10.0, 11.0])),
-            Arc::new(Float32Array::from(vec![20.0, 21.0])),
-            Arc::new(access),
-            Arc::new(UInt64Array::from(vec![7, PAST_I64])),
-        ],
-    )
-    .unwrap();
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    let body = writer.into_inner().unwrap();
-    let (status, answer) = ingest(&server, "past-i64", Some(ARROW), body).await;
+    let mut columns = placed(&[900, 901]);
+    columns.push(column("score", true, UInt64Array::from(vec![7, PAST_I64])));
+    let (status, answer) = ingest(&server, "past-i64", Some(ARROW), body_of(columns)).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract");
     let detail = answer["detail"].as_str().unwrap();
@@ -1540,29 +1520,9 @@ async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
 #[tokio::test]
 async fn a_wrong_typed_column_in_an_empty_batch_is_refused() {
     let (_tmp, server) = served_declared().await;
-    let access = access_column(std::iter::empty());
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access),
-        Field::new("weight", DataType::Utf8, true),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter_values(std::iter::empty::<&[u8]>())),
-            Arc::new(Float32Array::from(Vec::<f32>::new())),
-            Arc::new(Float32Array::from(Vec::<f32>::new())),
-            Arc::new(access),
-            Arc::new(StringArray::from(Vec::<&str>::new())),
-        ],
-    )
-    .unwrap();
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    let (status, answer) =
-        ingest(&server, "empty", Some(ARROW), writer.into_inner().unwrap()).await;
+    let mut columns = placed(&[]);
+    columns.push(column("weight", true, StringArray::from(Vec::<&str>::new())));
+    let (status, answer) = ingest(&server, "empty", Some(ARROW), body_of(columns)).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
 
@@ -1587,31 +1547,9 @@ async fn a_wrong_typed_column_in_an_empty_batch_is_refused() {
 
 /// An ingest batch carrying `weight` (`f32`) as a `float64` column.
 fn weights_body(ids: &[u64], weights: &[f64]) -> Vec<u8> {
-    let access = access_column(ids.iter().map(|_| "0"));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access),
-        Field::new("weight", DataType::Float64, true),
-    ]));
-    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter_values(
-                external.iter().map(|v| v.as_slice()),
-            )),
-            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
-            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
-            Arc::new(access),
-            Arc::new(Float64Array::from(weights.to_vec())),
-        ],
-    )
-    .unwrap();
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    writer.into_inner().unwrap()
+    let mut columns = placed(ids);
+    columns.push(column("weight", true, Float64Array::from(weights.to_vec())));
+    body_of(columns)
 }
 
 /// **A finite number too large for an `f32` attribute is refused at every path**: an Arrow batch,

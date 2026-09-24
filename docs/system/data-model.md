@@ -148,19 +148,16 @@ exact at every zoom level.
 Two distinct things can move a stored position onto the frame's edge, and each is reported on its
 own:
 
-| | Cause | Refused? |
-|---|---|---|
-| Clamping | The coordinate is outside the view's declared frame | Past half the corpus |
-| Clipping | The coordinate is outside the projection's own domain, beyond `web_mercator`'s polar cut, for instance | Never |
+| | Cause |
+|---|---|
+| Clamping | The coordinate is outside the view's declared frame |
+| Clipping | The coordinate is outside the projection's own domain, beyond `web_mercator`'s polar cut, for instance |
 
-A build refuses past half the corpus clamping, because a frame that misplaces most of a corpus
-describes some other dataset. No frame can bring a clipped point back inside a projection that
-does not reach it, so clipping is never a reason to refuse.
-
-A live ingest stores an out-of-frame coordinate on the frame's edge in the same way, and its
-receipt counts the rows it clamped as `clamped` and the rows it clipped as `clipped`. The
-half-corpus refusal applies to a build only, because a batch is a part of a corpus. Both refuse a
-coordinate that is not a finite number, and under a projection one outside WGS84's range.
+Neither is a reason to refuse. A build stores the point on the frame's edge and its report counts
+how many points clamped and how many clipped, whatever the proportion. A live ingest does the
+same, and its receipt counts the rows it clamped as `clamped` and the rows it clipped as
+`clipped`. Both refuse a coordinate that is not a finite number, and under a projection one
+outside WGS84's range.
 
 ## Fields: five families, one declaration
 
@@ -214,6 +211,13 @@ position, whether or not that item carries one.
 A field that draws but carries no value for some item is stored as absent rather than as a
 numeric zero, so a range query that happens to include zero does not wrongly match items that
 have no value at all.
+
+Every declared field is required wherever an item arrives with its fields. A build refuses a
+source file that lacks the column, or that has no row for an item the build creates, and an
+ingest refuses a row that creates an item without it; a null is how either says an item has no
+value. A row that adds an item already held to another view carries its fields already, so it may
+leave them out, and a values batch fills only the columns it names. A field may not take the name
+of a column the system reads itself, `level` among them.
 
 ## Vocabularies
 

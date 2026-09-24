@@ -307,8 +307,8 @@ class Database:
     ) -> dict:
         """Declare a column the items carry, and return its block.
 
-        Its values come from a column of the same name in the table inserted into the anchor view,
-        or from `insert(name, table, id=, value=)`.
+        Its values come from a column of the same name in the table inserted into the anchor view
+        (after the first commit, in any view's table), or from `insert(name, table, id=, value=)`.
 
         - `name`: the column's name.
         - `type`: `"bool"`, `"u8"`, `"u16"`, `"u32"`, `"u64"`, `"i8"`, `"i16"`, `"i32"`,
@@ -614,16 +614,18 @@ class Database:
           which is read where it lies.
         - `roster`, `artifacts`, `members`: tables of a view group's views, a layer's annotations,
           and a layer's memberships. Each is its own insert, since their columns share names.
-        - `columns`: on the anchor view's insert, `{attribute: column}` for an attribute filled
-          from a column with another name.
+        - `columns`: `{attribute: column}` for an attribute filled from a column with another
+          name, on the anchor view's insert, and after the first commit on any view's.
         - the other keywords: which column of the table holds each thing the target needs, such as
           `id=`, `x=`, `y=` and `access=` for a view.
 
         A categorical column (a pandas `Categorical` or an Arrow dictionary column) is read as the
         values it holds, wherever a column of those values is read. A column the call does not
-        name is ignored, and the record returned says what was read and what was ignored. On the
-        anchor view, a column named like a declared attribute fills that attribute. Several
-        inserts into one target add up. Nothing is sent until `commit()`.
+        name is ignored, and the record returned says what was read and what was ignored. A column
+        named like a declared attribute fills that attribute: at the first commit on the anchor
+        view alone, and after it on any view's rows, where a row that creates an item carries
+        every declared column. Several inserts into one target add up. Nothing is sent until
+        `commit()`.
 
         A target that is not declared, a keyword the target does not read, a column the target
         needs and the call does not name, and a name that is not a column of the table are
@@ -850,35 +852,45 @@ class Database:
     def _attribute_columns(
         self, target: str, kind: str, role: str, data: Any, columns: dict | None, named: dict
     ) -> dict:
-        """The attributes a table inserted into the anchor view fills, as `{attribute: column}`.
+        """The declared attributes a table's rows carry, as `{attribute: column}`.
 
-        A column fills the declared attribute of the same name, or the one `columns=` maps it to.
-        Attribute-named columns in any other view's table are ignored.
+        A column carries the declared attribute of the same name, or the one `columns=` maps it
+        to. The first commit's build reads an attribute from the anchor view's table alone, so
+        there attribute-named columns in any other view's table are ignored. After it, every
+        view's points carry the declared columns their table holds, those declared since and the
+        scoped columns of the view's group included.
         """
-        if columns and not (kind == "view" and role == "rows"):
-            raise Refusal(
-                f"insert into {kind} {target!r}: columns= names an attribute's value column on "
-                f"the allocation view's own insert, which this is not"
-            )
-        if kind != "view" or role != "rows":
-            return {}
-        if target != self.blocks.allocation_view():
+        if kind not in ("view", "view_group") or role != "rows":
             if columns:
                 raise Refusal(
-                    f"insert into view {target!r}: an attribute is filled from the allocation "
-                    f"view's frame, which is {self.blocks.allocation_view()!r}. Insert the values "
-                    f"into the attribute itself: insert(<attribute>, table, id=…, value=…)"
+                    f"insert into {kind} {target!r}: columns= maps an attribute to a column of a "
+                    f"view's rows, which this insert is not; drop it"
                 )
             return {}
+        anchor = kind == "view" and target == self.blocks.allocation_view()
+        if not anchor and not self.built:
+            if columns:
+                raise Refusal(
+                    f"insert into {kind} {target!r}: the first commit reads an attribute from "
+                    f"the allocation view's frame, which is {self.blocks.allocation_view()!r}; "
+                    f"map the column there, or insert the values into the attribute itself: "
+                    f"insert(<attribute>, table, id=…, value=…)"
+                )
+            return {}
+        # The groups whose scoped columns this table's views take: its own, and the one it shares.
+        groups = set()
+        if kind == "view_group":
+            groups = {target, self.blocks.group(target).get("members")} - {None}
         schema = _inserts.schema_of(data)
         matched = {}
         for block in self.blocks.blocks["attribute"]:
-            if block.get("scope") or block.get(D.FILLED):
+            group = C._scoped_to(block)
+            if group is not None and (not self.built or group not in groups):
                 continue
             name = block["name"]
             column = (columns or {}).get(name, name)
-            # The id column never fills an attribute. A coordinate or label column can.
-            if column in schema and column != named.get("id"):
+            # The id and view columns never fill an attribute. A coordinate or label column can.
+            if column in schema and column not in (named.get("id"), named.get("view")):
                 matched[name] = column
         for name, column in (columns or {}).items():
             if column not in schema:

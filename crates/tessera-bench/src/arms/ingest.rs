@@ -373,6 +373,7 @@ pub(crate) fn synth_rows(
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
+                join_only: false,
                 external_id: Some(format!("bench-{n}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
@@ -1100,6 +1101,7 @@ fn rate_rows(
                 .map(|j| ((n as usize).wrapping_mul(7).wrapping_add(j * 137)) % p)
                 .collect();
             UnallocatedRow {
+                join_only: false,
                 external_id: Some(format!("rate-{n}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,

@@ -143,6 +143,10 @@ pub use tessera_store::member_key;
 // and each row's value arrives as the build's value type.
 pub use tessera_spatial::tiler::ScalarValue;
 pub use tessera_store::scalar_column;
+// A batch must carry every declared column, by the rule a build holds an attribute source to,
+// and a join row that leaves one out holds the absence a buffered row is padded with.
+pub use attributes::absent_scalar;
+pub use tessera_store::declaration::check_declared_present;
 // A batch's coordinate columns are read and placed by the rule a build reads a points file's by.
 pub use tessera_store::coordinates;
 // A batch's access column is read by the rule a build reads a points file's access column by.

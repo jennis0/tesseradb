@@ -5,8 +5,7 @@ mod arrow;
 mod json;
 mod membership;
 
-use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar, ABSENT_CODE};
-use tessera_lifecycle::WalScalar;
+use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::TesseraId;
 
 pub(crate) use self::arrow::{
@@ -73,30 +72,7 @@ pub(crate) fn scoped_as_declared(family: &ScopedScalar) -> DeclaredScalar {
     }
 }
 
-/// [`scoped_as_declared`]'s inverse, so an omitted declared column takes a family's absence.
-pub(crate) fn declared_as_scoped(d: &DeclaredScalar) -> ScopedScalar {
-    ScopedScalar {
-        name: d.name.clone(),
-        group: String::new(),
-        arrow_type: d.arrow_type,
-        vocabulary: d.vocabulary.clone(),
-        analyser: d.analyser.clone(),
-        index: d.index,
-        render: d.render,
-        views: Vec::new(),
-    }
-}
-
 /// A family's wire type: a scoped category arrives as its key, as an entity-scoped one does.
 pub(crate) fn scoped_wire_type(family: &ScopedScalar) -> ScalarType {
     scoped_as_declared(family).wire_type()
-}
-
-/// The value a row carries for a column the batch omits: a category's reserved code 0, which
-/// its vocabulary keeps out of the value space, and `Null` for every other type.
-pub(crate) fn scoped_absent(family: &ScopedScalar) -> WalScalar {
-    match family.vocabulary {
-        Some(_) => tessera_engine::vocabulary::code_value(family.arrow_type, ABSENT_CODE),
-        None => WalScalar::Null,
-    }
 }

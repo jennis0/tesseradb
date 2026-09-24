@@ -591,6 +591,11 @@ impl<'de> Deserialize<'de> for ContentDeclaration {
 /// the principal reaches. A layer may not be registered under it ([`DeclarationError::ReservedName`]).
 pub const RESERVED_LAYER_SELECTION: &str = "all";
 
+/// The column beside a scalar member key that places it at a level: `uint32`, a null being level 0.
+/// A list's positions carry its levels, so it reads no such column. No attribute or layer may take
+/// the name, so a column under it is always a level.
+pub const LEVEL: &str = "level";
+
 /// One declared resolution. Present only on layers whose resolutions are semantic and balanced —
 /// a tiered geography — or whose levels are independent analyses. **A treed layer declares
 /// none** and sits entirely at level 0 (decision 0082).
@@ -1077,9 +1082,8 @@ pub enum DeclarationError {
     Label(String),
     /// A layer naming itself in `depends_on`.
     SelfDependency,
-    /// A layer named `all`, which the viewport request's `layers` field reserves for *every layer
-    /// this principal reaches* (contracts §3.2; owner ruling 2026-08-25). Refused at registration
-    /// so the word can never be ambiguous on the wire.
+    /// A layer named `all`, which a viewport request's `layers` field reserves for every layer the
+    /// principal reaches, or `level`, the column that places a batch's member keys.
     ReservedName(String),
     /// The same view, level title or supplied-content name declared twice.
     Duplicate(String),
@@ -1099,8 +1103,8 @@ impl std::fmt::Display for DeclarationError {
             DeclarationError::EmptyName => write!(f, "a layer name may not be empty"),
             DeclarationError::ReservedName(name) => write!(
                 f,
-                "'{name}' is reserved: a viewport request's `layers: \"{RESERVED_LAYER_SELECTION}\"` \
-                 names every layer the principal reaches, so no layer may carry that name"
+                "'{name}' is reserved, since `layers: \"{RESERVED_LAYER_SELECTION}\"` names every \
+                 layer and a `{LEVEL}` column places member keys; give the layer another name"
             ),
             DeclarationError::TreeWithLevels => write!(
                 f,
@@ -1226,6 +1230,7 @@ impl LayerDeclaration {
             .name
             .trim()
             .eq_ignore_ascii_case(RESERVED_LAYER_SELECTION)
+            || self.name == LEVEL
         {
             return Err(DeclarationError::ReservedName(self.name.clone()));
         }
@@ -1798,6 +1803,16 @@ mod tests {
         let mut d = decl(HierarchyKind::Flat, Vec::new());
         d.name = "all/of/them".into();
         assert!(d.validate().is_ok(), "only the bare word is reserved");
+    }
+
+    #[test]
+    fn the_member_level_column_is_refused_as_a_name() {
+        let mut d = decl(HierarchyKind::Flat, Vec::new());
+        d.name = LEVEL.into();
+        assert!(matches!(
+            d.validate(),
+            Err(DeclarationError::ReservedName(_))
+        ));
     }
 
     #[test]

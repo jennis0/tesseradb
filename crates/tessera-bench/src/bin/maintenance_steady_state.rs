@@ -124,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (vec![b"0".to_vec()], common.clone())
                     };
                     UnallocatedRow {
+                        join_only: false,
                         external_id: Some(key),
                         view: VIEW.to_string(),
                         join: None,

@@ -2595,6 +2595,8 @@ fn read_one_attribute_source(
         filled.iter().map(|&i| &args.schema.attributes[i]).collect();
     let attributes = &columns;
     let mut matched_rows = 0u64;
+    // Which of the build's items met a row, by ordinal, so one that met none is refused.
+    let mut met = vec![0u64; (n as usize).div_ceil(64)];
     // **Counted, not refused** (`configuration.md` §1). A row naming an entity this build did not
     // load is what a join does with a source that covers a superset — which every legitimate
     // attribute table over a limited build is — and ignoring it is fail-closed in both directions
@@ -2653,6 +2655,7 @@ fn read_one_attribute_source(
                  value_lanes: &mut [Option<ValueLane>],
                  matched: &mut u64,
                  unknown: &mut u64,
+                 met: &mut [u64],
                  present: &mut [u64]|
      -> Result<()> {
         resolved.clear();
@@ -2661,6 +2664,7 @@ fn read_one_attribute_source(
                 None => *unknown += 1,
                 Some(ordinal) => {
                     *matched += 1;
+                    met[ordinal as usize / 64] |= 1 << (ordinal % 64);
                     resolved.push((entity_of_ordinal[ordinal as usize], pos));
                 }
             }
@@ -2806,6 +2810,7 @@ fn read_one_attribute_source(
                     value_lanes,
                     &mut matched_rows,
                     &mut unknown_rows,
+                    &mut met,
                     &mut present,
                 )?;
             }
@@ -2846,8 +2851,22 @@ fn read_one_attribute_source(
             value_lanes,
             &mut matched_rows,
             &mut unknown_rows,
+            &mut met,
             &mut present,
         )?;
+    }
+    let unmet = met.iter().enumerate().find_map(|(word, &bits)| {
+        (bits != u64::MAX)
+            .then(|| word * 64 + (!bits).trailing_zeros() as usize)
+            .filter(|&ordinal| ordinal < n as usize)
+    });
+    if let Some(ordinal) = unmet {
+        return Err(input::item_without_a_row(
+            &group.path,
+            attributes,
+            id_space,
+            ids.id_of(ordinal),
+        ));
     }
     drop(staged);
     drop(chunk);

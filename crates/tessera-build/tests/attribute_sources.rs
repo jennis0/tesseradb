@@ -6,11 +6,12 @@
 //! read from a second file, joined on a column that file spells differently, lands on exactly the
 //! entities it names and on no others.
 //!
-//! **The join's misses are counted, not refused.** A source covering a superset of this build's
-//! entities is the ordinary case for a column that lives elsewhere, and a source covering a subset
-//! is a column that is simply absent for the rest. Both build; both are reported; a source that
-//! meets nothing builds too, loudly. The cases below drive each through the real declaration
-//! parser, so the surface and the pass are exercised together.
+//! **Every item the build creates has a row in each attribute source**, as a new item at a running
+//! service carries every declared column; a null in that row is how the source says it has no
+//! value. A source that leaves an item out is refused naming it. Rows naming entities this build
+//! did not load are ignored, which is the ordinary case for a table covering a superset. The cases
+//! below drive each through the real declaration parser, so the surface and the pass are exercised
+//! together.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -34,42 +35,61 @@ const N: u64 = 40;
 
 /// The points file: identity spelled `id`, geometry, and one column of its own.
 fn write_points(path: &Path) {
-    let schema = Arc::new(ArrowSchema::new(vec![
+    write_points_counting(path, Count::Values(|e| Some((e * 11) as i64)));
+}
+
+/// How a points file carries `count`.
+enum Count {
+    Omitted,
+    Values(fn(u64) -> Option<i64>),
+    /// A column of Arrow's `null` type.
+    NullType,
+}
+
+/// [`write_points`] with `count` carried as `count` says.
+fn write_points_counting(path: &Path, count: Count) {
+    let mut fields = vec![
         Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
-        Field::new("count", DataType::Int64, true),
-    ]));
+    ];
     let ids: Vec<u64> = (0..N).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids.clone())),
-            Arc::new(Float64Array::from(
-                ids.iter()
-                    .map(|e| ((e * 37) % 1000) as f64)
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                ids.iter()
-                    .map(|e| ((e * 53) % 1000) as f64)
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(Int64Array::from(
-                ids.iter()
-                    .map(|&e| Some((e * 11) as i64))
-                    .collect::<Vec<_>>(),
-            )),
-        ],
-    )
-    .unwrap();
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(UInt64Array::from(ids.clone())),
+        Arc::new(Float64Array::from(
+            ids.iter()
+                .map(|e| ((e * 37) % 1000) as f64)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            ids.iter()
+                .map(|e| ((e * 53) % 1000) as f64)
+                .collect::<Vec<_>>(),
+        )),
+    ];
+    match count {
+        Count::Omitted => {}
+        Count::Values(count) => {
+            fields.push(Field::new("count", DataType::Int64, true));
+            columns.push(Arc::new(Int64Array::from(
+                ids.iter().map(|&e| count(e)).collect::<Vec<_>>(),
+            )));
+        }
+        Count::NullType => {
+            fields.push(Field::new("count", DataType::Null, true));
+            columns.push(Arc::new(arrow::array::NullArray::new(ids.len())));
+        }
+    }
+    let schema = Arc::new(ArrowSchema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
     let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
 }
 
-/// A second file, keyed on a column it calls `doc_id`, carrying `score` for exactly `ids`.
-fn write_scores(path: &Path, ids: &[u64]) {
+/// A second file, keyed on a column it calls `doc_id`, with a row for each of `ids` carrying
+/// `score` where `covered` holds the id and null elsewhere.
+fn write_scores(path: &Path, ids: &[u64], covered: &[u64]) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("doc_id", DataType::UInt64, false),
         Field::new("score", DataType::Float64, true),
@@ -79,7 +99,9 @@ fn write_scores(path: &Path, ids: &[u64]) {
         vec![
             Arc::new(UInt64Array::from(ids.to_vec())),
             Arc::new(Float64Array::from(
-                ids.iter().map(|&e| Some(score_of(e))).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|&e| covered.contains(&e).then(|| score_of(e)))
+                    .collect::<Vec<_>>(),
             )),
         ],
     )
@@ -139,10 +161,11 @@ source          = "scores"
 entity_id_field = "doc_id"
 "#;
 
-/// Write the declaration and both data files into `dir`, with `scores` covering `covered`.
-fn project(dir: &Path, covered: &[u64]) -> Config {
+/// Write the declaration and both data files into `dir`, with `scores` holding a row for each of
+/// `ids`, valued where `covered` holds the id.
+fn project(dir: &Path, ids: &[u64], covered: &[u64]) -> Config {
     write_points(&dir.join("points.parquet"));
-    write_scores(&dir.join("scores.parquet"), covered);
+    write_scores(&dir.join("scores.parquet"), ids, covered);
     write_empty_pairs(&dir.join("pairs.parquet"));
     let path = dir.join("schema.toml");
     std::fs::write(&path, DECLARATION).unwrap();
@@ -270,7 +293,8 @@ fn rows_by_source(out: &Path) -> BTreeMap<u64, Vec<(u16, RecordValue)>> {
 fn a_column_from_a_second_source_lands_on_the_entities_it_names() {
     let dir = tempfile::tempdir().unwrap();
     let covered: Vec<u64> = (0..N).filter(|e| e.is_multiple_of(3)).collect();
-    let config = project(dir.path(), &covered);
+    let all: Vec<u64> = (0..N).collect();
+    let config = project(dir.path(), &all, &covered);
     let out = dir.path().join("bundle");
     build(&args(&config, out.clone())).expect("a two-source build succeeds");
 
@@ -295,15 +319,45 @@ fn a_column_from_a_second_source_lands_on_the_entities_it_names() {
     }
 }
 
+/// **Every declared column is required.** A points file without `count` is refused, and one that
+/// carries `count` as nulls, typed or of Arrow's `null` type, builds with no entity holding a
+/// value.
+#[test]
+fn a_declared_column_the_file_omits_is_refused_and_a_column_of_nulls_builds() {
+    let dir = tempfile::tempdir().unwrap();
+    let all: Vec<u64> = (0..N).collect();
+    let config = project(dir.path(), &all, &[]);
+    let points = dir.path().join("points.parquet");
+
+    write_points_counting(&points, Count::Omitted);
+    let out = dir.path().join("omitted");
+    assert!(build(&args(&config, out.clone())).is_err());
+    assert!(!out.join("CURRENT").is_file(), "a refused build writes no bundle");
+
+    for (name, count) in [("nulls", Count::Values(|_| None)), ("null-type", Count::NullType)] {
+        write_points_counting(&points, count);
+        let out = dir.path().join(name);
+        build(&args(&config, out.clone())).expect("a column of nulls builds");
+        let rows = rows_by_source(&out);
+        assert_eq!(rows.len(), N as usize, "{name}");
+        assert!(
+            rows.values().all(|fields| fields.iter().all(|(t, _)| *t != 0)),
+            "{name}"
+        );
+    }
+}
+
 /// **A source naming entities this build did not load is ignored, not refused.** That is what a
 /// join does, and it is the ordinary shape of a table covering a superset of one build's corpus.
 #[test]
 fn rows_naming_entities_this_build_did_not_load_are_ignored() {
     let dir = tempfile::tempdir().unwrap();
-    // Half of this build's entities, plus a thousand ids no build here ever assigns.
+    // A row for each of this build's entities, half of them valued, and a thousand ids no build
+    // here ever assigns.
     let mut covered: Vec<u64> = (0..N).filter(|e| e.is_multiple_of(2)).collect();
     covered.extend(1_000..2_000);
-    let config = project(dir.path(), &covered);
+    let ids: Vec<u64> = (0..N).chain(1_000..2_000).collect();
+    let config = project(dir.path(), &ids, &covered);
     let out = dir.path().join("bundle");
     build(&args(&config, out.clone())).expect("unmatched rows are ignored, never refused");
 
@@ -323,28 +377,25 @@ fn rows_naming_entities_this_build_did_not_load_are_ignored() {
     }
 }
 
-/// **A source that meets nothing still builds.** Zero coverage is reported emphatically and never
-/// refused: the ids may simply be another corpus's, and only the operator knows which — refusing
-/// would block the legitimate superset as loudly as the broken join.
+/// **A source without a row for an item the build creates is refused, at both builds**, naming
+/// the item, as a new item at a running service that leaves out a declared column is. The same
+/// item with a row of nulls builds.
 #[test]
-fn a_source_that_meets_nothing_still_builds() {
+fn a_source_without_a_row_for_an_item_the_build_creates_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let covered: Vec<u64> = (1_000..1_050).collect();
-    let config = project(dir.path(), &covered);
-    let out = dir.path().join("bundle");
-    build(&args(&config, out.clone())).expect("zero coverage warns and builds");
-
-    let rows = rows_by_source(&out);
-    for source in 0..N {
-        assert!(
-            rows[&source].iter().all(|(t, _)| *t != 1),
-            "no entity has a score, and every one still has its own count"
-        );
-        assert!(
-            rows[&source].iter().any(|(t, _)| *t == 0),
-            "source {source}"
-        );
+    let rows: Vec<u64> = (0..N - 1).collect();
+    let config = project(dir.path(), &rows, &rows);
+    for (name, result) in [
+        ("streamed", build(&args(&config, dir.path().join("streamed")))),
+        ("linear", build_in_memory(&args(&config, dir.path().join("linear")))),
+    ] {
+        let err = result.expect_err("an item with no row in `scores` is refused");
+        assert!(err.to_string().contains(&format!("item {}", N - 1)), "{name}: {err}");
     }
+
+    let all: Vec<u64> = (0..N).collect();
+    let config = project(dir.path(), &all, &rows);
+    build(&args(&config, dir.path().join("nulls"))).expect("a row of nulls builds");
 }
 
 /// The two builds must agree byte for byte here as everywhere: the streaming pipeline's per-source
@@ -354,7 +405,8 @@ fn a_source_that_meets_nothing_still_builds() {
 fn both_build_paths_place_a_second_sources_values_identically() {
     let dir = tempfile::tempdir().unwrap();
     let covered: Vec<u64> = (0..N).filter(|e| !e.is_multiple_of(4)).collect();
-    let config = project(dir.path(), &covered);
+    let all: Vec<u64> = (0..N).collect();
+    let config = project(dir.path(), &all, &covered);
 
     let streamed = dir.path().join("streamed");
     let linear = dir.path().join("linear");

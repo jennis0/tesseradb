@@ -259,7 +259,7 @@ layouts stop being an assertion.
 
 Three numbers make that a healthy build. The data's bounds sit **inside** the frame with headroom.
 Nothing **clamps** — quantisation clamps rather than filters, so a point outside the frame is stored
-on its edge, and past half the corpus the build refuses outright. And nearly every point keeps **a
+on its edge, and the build counts every one it stored there. And nearly every point keeps **a
 position of its own**, so two papers far apart in the embedding are far apart on the map.
 
 **What the failure looks like, since this pipeline used to produce it.** Writing raw UMAP
