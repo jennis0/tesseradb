@@ -12,7 +12,6 @@
   "scripts": {
     "test": "vitest run",
     "test:live": "vitest run --config vitest.live.config.ts",
-    "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

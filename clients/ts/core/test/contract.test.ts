@@ -44,6 +44,13 @@ function operations(text: string): Operation[] {
   return out;
 }
 
+/** Each plane's route prefix, from the `servers` descriptions: `viewer` → `/v1/`, `session` → `/session/`. */
+function planes(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of text.matchAll(/description: The (\w+) plane listener .*Routes under `(\/[^`]*)`/g)) out.set(m[1]!, m[2]!);
+  return out;
+}
+
 /** The operation a request is, preferring the most literal path: `/v1/artifacts/browse` over `/v1/artifacts/{tessera_id}`. */
 function operationOf(ops: Operation[], method: string, path: string): string | null {
   const matching = ops.filter((op) => op.method === method && op.pattern.test(path));
@@ -89,19 +96,28 @@ describe('the client against the HTTP contract', () => {
     expect(new Set(missing)).toEqual(NOT_REACHED);
   });
 
-  it('sends each operation’s method and path from the method that reaches it', async () => {
-    const sent: {method: string; path: string}[] = [];
+  it('names the plane each route prefix is served on', () => {
+    expect(planes(readFileSync(CONTRACT, 'utf8'))).toEqual(new Map([['viewer', '/v1/'], ['session', '/session/']]));
+  });
+
+  it('sends each operation’s method and path, to its plane, from the method that reaches it', async () => {
+    const prefixes = planes(readFileSync(CONTRACT, 'utf8'));
+    const origins: Record<string, string> = {viewer: 'http://viewer', session: 'http://session'};
+    const planeOf = (path: string) => [...prefixes].find(([, prefix]) => path.startsWith(prefix))?.[0];
+    const sent: {method: string; path: string; origin: string}[] = [];
     vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
-      sent.push({method: init?.method ?? 'GET', path: new URL(url).pathname});
+      const at = new URL(url);
+      sent.push({method: init?.method ?? 'GET', path: at.pathname, origin: at.origin});
       return new Response(JSON.stringify({error: 'contract', detail: 'recorded'}), {status: 422});
     });
-    const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', sessionCredential: 'cred'});
+    const client = new TesseraClient({viewerUrl: origins.viewer!, sessionUrl: origins.session!, sessionCredential: 'cred'});
     for (const op of ops.filter((o) => !NOT_REACHED.has(o.id))) {
       const call = CALLS[methodOf(op.id)];
       expect(call, `a call for ${methodOf(op.id)}`).toBeDefined();
       sent.length = 0;
       await call!(client).catch(() => {});
       expect(sent.map((s) => operationOf(ops, s.method, s.path)), op.id).toEqual([op.id]);
+      expect(sent[0]!.origin, op.id).toBe(origins[planeOf(op.path)!]);
     }
   });
 });
