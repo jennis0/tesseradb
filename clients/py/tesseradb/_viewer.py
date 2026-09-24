@@ -76,7 +76,8 @@ def _read_up_to(stream, size: int) -> bytes:
     """`size` bytes of `stream`, or fewer where it ends first."""
     parts = []
     while size:
-        part = stream.read(size)
+        # In pieces, so that a length the body states is not allocated before the bytes arrive.
+        part = stream.read(min(size, 1 << 20))
         if not part:
             break
         parts.append(part)
@@ -152,10 +153,12 @@ class Batches:
                     elif kind == FRAME_TRAILER:
                         trailer = json.loads(payload)
             if trailer is None:
-                raise Refusal(
-                    f"{self._route}: the response ended before its trailer. Pass "
-                    f"cursor={self.next!r} to read on from the last whole page"
+                where = (
+                    "Read again from the start"
+                    if self.next is None
+                    else f"Pass cursor={self.next!r} to read on from the last whole page"
                 )
+                raise Refusal(f"{self._route}: the response ended before its trailer. {where}")
             self.next = trailer["next"]
             if self.next is None:
                 return
