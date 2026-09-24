@@ -187,7 +187,7 @@ def column_sample(
     other than `view`'s own points file, only the rows of the entities `view` holds, `entities()`,
     are kept, so every value is one `view` has."""
     for candidate in candidates:
-        _, attributes, joined = wire_columns(rung, candidate)
+        _, attributes, joined, _ = wire_columns(rung, candidate)
         if column not in attributes:
             continue
         source = next(

@@ -24,6 +24,12 @@ def papers(ids, x=None, labels="public"):
     )
 
 
+def unscored(ids, x):
+    """Rows inserted after the first commit, carrying the declared `score` with no value."""
+    rows = papers(ids, x=x)
+    return rows.append_column("score", pa.nulls(rows.num_rows, pa.float64()))
+
+
 def small(db) -> None:
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
     db.declare_attribute("score", type="f64", index=True, render=False)
@@ -118,7 +124,7 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
     db = served(small)
     capsys.readouterr()
     # A row outside the view's frame commits on the frame's edge, and the summary counts it.
-    db.insert("map", papers(["far"], x=[9_000.0]), id="id", x="x", y="y", access="labels")
+    db.insert("map", unscored(["far"], x=[9_000.0]), id="id", x="x", y="y", access="labels")
     report = db.commit()
     assert report.ok and report.clamped == 1
     assert "clamped" in str(report)
@@ -150,7 +156,7 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
         id="id",
         value="score",
     )
-    db.insert("map", papers(["q0", "q1"], x=[1.5, 2.5]), id="id", x="x", y="y", access="labels")
+    db.insert("map", unscored(["q0", "q1"], x=[1.5, 2.5]), id="id", x="x", y="y", access="labels")
     report = db.commit()
     summary = str(report)
     assert report.rows_accepted == {"map": 2} and "2 rows to map" in summary

@@ -307,6 +307,8 @@ def test_a_commit_of_rows_and_values_flushes_between_them(served, corpus):
                 "x": pa.array([20.0, 21.0], pa.float64()),
                 "y": pa.array([0.0, 0.0], pa.float64()),
                 "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+                # Every declared column travels with the rows, null until the values fill it.
+                "score": pa.nulls(2, pa.float64()),
             }
         ),
         id="id",
@@ -526,6 +528,7 @@ def test_a_partly_refused_commit_returns_its_report_and_serves_what_landed(serve
                 "x": pa.array([1.5, 2.5], pa.float64()),
                 "y": pa.array([1.0, 1.0], pa.float64()),
                 "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+                "score": pa.nulls(2, pa.float64()),
             }
         ),
         id="id",
@@ -675,6 +678,7 @@ def test_a_row_outside_the_frame_commits_on_the_frames_edge_and_is_reported(serv
                 "x": pa.array([9_000.0, 3.5], pa.float64()),
                 "y": pa.array([0.0, 0.0], pa.float64()),
                 "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+                "score": pa.nulls(2, pa.float64()),
             }
         ),
         id="id",
