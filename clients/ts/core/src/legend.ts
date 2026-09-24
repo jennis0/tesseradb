@@ -3,17 +3,35 @@ import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDoma
 import {refusalOf, type Refusal} from './presented.js';
 import type {CategoryValue, DeclaredScalar} from './types.js';
 
-/** The `colourBy` prefix that names a layer's cluster colour rather than a column. */
+/**
+ * The prefix of a `colourBy` value that names a layer's cluster colours in place of a column, as in
+ * `cluster:<layer>`.
+ *
+ * @category Layers and views
+ */
 export const CLUSTER_PREFIX = 'cluster:';
 
+/**
+ * The colour column's legend, accumulated from the marks drawn, which are drawn from this viewer's
+ * visible set. A category column gets ranks and names, a numeric column a domain, and colouring by
+ * `cluster:<layer>` accumulates nothing. {@link Store.clear} empties it and keeps `colourBy`.
+ *
+ * @category Projections
+ */
 export type LegendProjection = {
-  /** Palette rank per code, per column, assigned by observed frequency and never reordered. */
+  /**
+   * Palette rank per category code, per column. Codes are ranked by how often they appear among the
+   * marks drawn, most frequent first, and a rank once given does not change, so panning does not
+   * recolour the map.
+   */
   ranks: Record<string, Ranks>;
-  /** Numeric domains per column, widened as marks arrive and never narrowed. */
+  /** The numeric range per column, widened as marks arrive and never narrowed. */
   domains: Record<string, Domain>;
-  /** The codes drawn, per column, with their names. */
+  /** The codes drawn, per category column, with their names as `/v1/categories` resolves them. */
   categories: Record<string, CategoryValue[]>;
+  /** The refusal per category column whose names could not be fetched. A refused column is not asked again. */
   categoryErrors: Record<string, Refusal>;
+  /** What the points are coloured by, as `setColourBy` last set it: a column, `cluster:<layer>`, or `null` for uniform. */
   colourBy: string | null;
 };
 

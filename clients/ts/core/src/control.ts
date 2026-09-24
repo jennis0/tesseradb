@@ -1,82 +1,159 @@
 /**
- * The control plane of one served database, as an operator calls it with the operator credential.
- *
- * `Control` is the routes and nothing else. It keeps no record of what it sent, so what a database
- * holds is asked of the database. A body is sent as the caller gave it: Arrow IPC stream bytes on
- * the two row routes, JSON on declarations, publications and changes, and on a growth whichever the
- * caller passed. A JSON body is serialised once per call, so every attempt of one call sends the
- * same bytes.
- *
- * A batch id names one request on the row routes. It is the caller's, or a fresh random id made
- * once per call, and it is never derived from the body: the same rows sent in two calls land twice.
- * The server holds a batch id against the SHA-256 of its body, so an attempt after a `429` resends
- * the same id and the same bytes, and the answer names the id so the caller can resend it too.
- *
- * A `429` is backpressure: the call waits the `Retry-After` it carries and resends, at most
- * {@link MAX_ATTEMPTS} times. Every other status is returned as an {@link Answer}, not thrown and not
- * retried. A request no server answered is returned with status {@link UNANSWERED}. A call whose
- * `signal` aborts rejects with the signal's reason, during a request or a wait.
- *
- * `wait: true` on a write asks the server to hold its answer until the write is visible, and the
- * answer's `visible` says whether it was. It is sent only where the caller sets it.
- *
- * This file imports nothing, so the operator scripts can load it under Node's type stripping.
+ * The control plane client. This file imports nothing, so the operator scripts can load it under
+ * Node's type stripping.
  */
 
 const ARROW = 'application/vnd.apache.arrow.stream';
 const JSON_TYPE = 'application/json';
 
-/** The shortest a `429` makes one call wait between attempts, in seconds: the server's own floor. */
+/**
+ * The shortest wait between attempts after a `429`, in seconds. A `429` that names no wait, or
+ * one shorter than this, waits this long.
+ *
+ * @category Control plane
+ */
 export const MIN_BACKOFF = 1;
 
-/** The longest a `429` makes one call wait between attempts, in seconds. */
+/**
+ * The longest wait between attempts after a `429`, in seconds. A longer `Retry-After` is cut to
+ * this.
+ *
+ * @category Control plane
+ */
 export const MAX_BACKOFF = 30;
 
-/** How many times one call sends its request before a `429` is returned as the answer. */
+/**
+ * How many times one call sends its request while the server answers `429`. The last `429` is
+ * returned as the answer.
+ *
+ * @category Control plane
+ */
 export const MAX_ATTEMPTS = 600;
 
-/** The status of an answer to a request that reached no server. It is not an HTTP status. */
+/**
+ * The `status` of an {@link Answer} to a request that reached no server. It is not an HTTP status.
+ *
+ * @category Control plane
+ */
 export const UNANSWERED = 0;
 
 /**
- * One request's answer: the status, the body decoded where it was a JSON object, and the whole
- * response text.
+ * One call's answer. Every status, a refusal included, is returned here; none is thrown.
+ *
+ * @category Control plane
  */
 export type Answer = {
+  /** The HTTP status, or {@link UNANSWERED} where no server answered. */
   status: number;
+  /** Whether `status` is in the 2xx range. */
   ok: boolean;
+  /**
+   * The body parsed as JSON: the object itself, any other JSON value wrapped as `{value}`, or `{}`
+   * where the body is not JSON. A refusal carries `error` and `detail`.
+   */
   body: Record<string, unknown>;
+  /** The body as text. Where no server answered, a sentence naming the URL and the error. */
   text: string;
+  /** How many times the request was sent, counting each retry after a `429`. */
   attempts: number;
+  /** Seconds from the first attempt to the answer, including every wait. */
   seconds: number;
 };
 
-/** A row route's answer, with the batch id every attempt carried. */
-export type RowAnswer = Answer & {batch: string};
+/**
+ * The answer of `ingest` or `values`, with the batch id the request carried.
+ *
+ * @category Control plane
+ */
+export type RowAnswer = Answer & {
+  /** The batch id every attempt carried. Pass it as `batch` to send the same body again. */
+  batch: string;
+};
 
-/** One `POST /control/changes` item, in the wire's own names. */
-export type ChangeItem = {op: 'delete' | 'suppress' | 'unsuppress'} & (
+/**
+ * One item of a `POST /control/changes` request, in the route's own field names. The item is
+ * addressed by `external_id`, base64 of the id's bytes as {@link addressed} makes it, or by
+ * `tessera_id`, a decimal string, with the `idset` from {@link TesseraClient.meta} that it was
+ * issued under.
+ *
+ * @category Control plane
+ */
+export type ChangeItem = {
+  /**
+   * `delete` removes the item from every answer, and a compaction removes its rows. `suppress`
+   * hides it from every answer until an `unsuppress` lifts the suppression. Both apply from the
+   * moment the request is accepted.
+   */
+  op: 'delete' | 'suppress' | 'unsuppress';
+} & (
   | {external_id: string}
   | {tessera_id: string; idset: number}
 );
 
+/**
+ * Where a {@link Control} sends its requests, and how.
+ *
+ * @category Control plane
+ */
 export type ControlOptions = {
+  /** The control listener's base URL. Trailing slashes are removed. */
   controlUrl: string;
+  /** The operator credential, sent as the bearer token on every request. */
   operatorCredential: string;
   /** Used for every request in place of the global `fetch`. */
   fetch?: typeof fetch;
-  /** Sent on every request. A route's own `authorization` and `content-type` are set after these. */
+  /**
+   * Headers sent on every request. The headers a route sets itself (`authorization`,
+   * `content-type`, and on the row routes `x-tessera-batch-id` and `x-tessera-view`) replace one of
+   * the same name here.
+   */
   headers?: Record<string, string>;
 };
 
-/** What every call takes: a signal that ends it. */
-export type CallOptions = {signal?: AbortSignal};
+/**
+ * What every {@link Control} call takes.
+ *
+ * @category Control plane
+ */
+export type CallOptions = {
+  /**
+   * Aborts the call, during a request or a wait between attempts. The call then rejects with the
+   * signal's reason.
+   */
+  signal?: AbortSignal;
+};
 
-/** What a write takes: `wait` holds the answer until the write is visible. */
-export type WriteOptions = CallOptions & {wait?: boolean};
+/**
+ * What a write takes.
+ *
+ * @category Control plane
+ */
+export type WriteOptions = CallOptions & {
+  /**
+   * Sends `wait=visible`. The server brings the next publication forward and holds its answer until
+   * the write is visible to viewers, or until `serve.visible_wait_max_secs` passes; the answer's
+   * `visible` says which. Defaults to `false`.
+   */
+  wait?: boolean;
+};
 
-/** Where a row page goes: the batch id to send it under, and the view it is a page of. */
-export type RowOptions = WriteOptions & {batch?: string; view?: string};
+/**
+ * What `ingest` and `values` take.
+ *
+ * @category Control plane
+ */
+export type RowOptions = WriteOptions & {
+  /**
+   * The batch id, sent in `x-tessera-batch-id`. Defaults to a random id made once per call. Pass
+   * the `batch` of an earlier {@link RowAnswer} to send its body again.
+   */
+  batch?: string;
+  /**
+   * The view the rows belong to, sent in `x-tessera-view`. Required where the database has more
+   * than one view; an unknown view is refused with `404`.
+   */
+  view?: string;
+};
 
 /** Base64 of bytes. `btoa` takes one byte per character, so text is encoded to UTF-8 before this. */
 export function base64(bytes: Uint8Array): string {
@@ -92,12 +169,18 @@ const INTEGER_MIN = -(2n ** 63n);
 const INTEGER_END = 2n ** 64n;
 
 /**
- * An external id as a JSON route carries it: base64 of the bytes the id column holds.
+ * An external id as a JSON control route carries it, such as {@link ChangeItem}'s `external_id`:
+ * base64 of the bytes the id column holds. A string is taken as its UTF-8 bytes, an integer as
+ * eight little-endian bytes (two's complement when negative), and a `Uint8Array` as it stands. A
+ * build reads an id column to the same bytes, so a row has one address whichever path stored it.
  *
- * A string is its UTF-8, an integer its eight little-endian bytes (two's complement when
- * negative), and bytes are taken as they stand. The build reads an id column to the same bytes, so
- * one row has one address at both. An integer is a bigint in [-2^63, 2^64), or a number that is a
- * safe integer; anything else is refused, since it has no eight bytes of its own.
+ * @param id - A string, a `Uint8Array`, a `bigint` in [-2^63, 2^64), or a `number` that is a safe
+ *   integer.
+ * @throws `RangeError` for a `number` that is not a safe integer, or a `bigint` outside
+ *   [-2^63, 2^64).
+ * @throws `TypeError` for a value of any other type.
+ *
+ * @category Control plane
  */
 export function addressed(id: string | bigint | number | Uint8Array): string {
   if (typeof id === 'string') return base64(new TextEncoder().encode(id));
@@ -164,6 +247,27 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
   });
 }
 
+/**
+ * The control plane of one served database, called with the operator credential: one method per
+ * route. It keeps no record of what it sent, so what a database holds is asked of the database.
+ * A body is sent as the caller gave it: Arrow IPC stream bytes on `ingest` and `values`, JSON on
+ * declarations, publications and changes, and either on `grow`. A JSON body is serialised once per
+ * call, so every attempt of one call sends the same bytes.
+ *
+ * A `429` is backpressure. The call waits the `Retry-After` it carries, between
+ * {@link MIN_BACKOFF} and {@link MAX_BACKOFF} seconds, and sends the request again, at most
+ * {@link MAX_ATTEMPTS} times in all. Every other status is returned as an {@link Answer}, neither
+ * thrown nor retried. A request that reaches no server is returned with status
+ * {@link UNANSWERED}. A call whose `signal` aborts rejects with the signal's reason.
+ *
+ * `ingest` and `values` send a batch id: the caller's `batch`, or a random id made once per call.
+ * The server holds each accepted batch id against its body, so the same bytes sent again under it
+ * are answered as a replay with `replayed: true` and no effect, and different bytes under it are
+ * refused with `409`. The id is never derived from the body, so the same rows sent in two calls
+ * are stored twice.
+ *
+ * @category Control plane
+ */
 export class Control {
   private readonly base: string;
   private readonly credential: string;
@@ -227,70 +331,121 @@ export class Control {
     return {...(await this.send('POST', withQuery(path, waiting(options)), options, body, headers)), batch};
   }
 
-  /** `GET /control/status`. */
+  /**
+   * `GET /control/status`: the running database's state as JSON in `body`, including its
+   * publication counter, write executor, caches, admission and `limits`.
+   */
   status(options: CallOptions = {}): Promise<Answer> {
     return this.send('GET', '/control/status', options);
   }
 
-  /** The `limits` block of `/control/status`, or `{}` where the status request was refused. */
+  /**
+   * The `limits` object of `GET /control/status`: the caps each write route puts on rows, items
+   * and body bytes, one object per route. `{}` where the status request was refused or reached no
+   * server.
+   */
   async limits(options: CallOptions = {}): Promise<Record<string, unknown>> {
     const limits = (await this.status(options)).body.limits;
     return limits !== null && typeof limits === 'object' ? (limits as Record<string, unknown>) : {};
   }
 
-  /** `POST /control/ingest`: one page of points, as an Arrow IPC stream. */
+  /**
+   * `POST /control/ingest`: inserts one page of points, given as an Arrow IPC stream. The answer's
+   * body counts the rows accepted, clipped and clamped, lists each row's `tessera_id` in request
+   * order as a decimal string, and names the `publication` the rows become visible in. A duplicate
+   * external id is refused with `409`, and nothing in the page is stored.
+   */
   ingest(body: Uint8Array, options: RowOptions = {}): Promise<RowAnswer> {
     return this.rows('/control/ingest', body, options);
   }
 
-  /** `POST /control/values`: one page of cells on rows the database holds, as an Arrow IPC stream. */
+  /**
+   * `POST /control/values`: fills attribute values on rows the database holds, one page given as an
+   * Arrow IPC stream. It creates no point. A cell that holds no value takes the one given, a cell
+   * already holding the same value is left as it is, and a cell holding a different value refuses
+   * the whole page. The answer's body counts the cells `filled` and `held`.
+   */
   values(body: Uint8Array, options: RowOptions = {}): Promise<RowAnswer> {
     return this.rows('/control/values', body, options);
   }
 
-  /** `PUT /control/layers`: one layer declaration. */
+  /**
+   * `PUT /control/layers`: declares one annotation layer. The answer is `201` with the layer's
+   * `name` and `tessera_id`; a declaration that breaks the deployment's rules is refused with `422`
+   * saying why.
+   */
   declareLayer(declaration: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery('/control/layers', waiting(options)), declaration, options);
   }
 
-  /** `PUT /control/view_groups/{name}`: the group, with an empty roster. */
+  /**
+   * `PUT /control/view_groups/{name}`: declares a view group, with no views yet. The answer is `201`
+   * when the group is new and `200` when the name already has this declaration; another
+   * declaration under the name is refused with `409`.
+   */
   declareViewGroup(name: string, body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery(`/control/view_groups/${segment(name)}`, waiting(options)), body, options);
   }
 
-  /** `PUT /control/attributes`: one column, named in the body. */
+  /**
+   * `PUT /control/attributes`: declares one attribute column, named in the body. A batch sent after
+   * the answer may carry it. `201` when new, `200` when the name already has this declaration,
+   * `409` when it has another.
+   */
   declareAttribute(body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery('/control/attributes', waiting(options)), body, options);
   }
 
-  /** `PUT /control/vocabularies/{name}`: the value set, with a closed set's values on it. */
+  /**
+   * `PUT /control/vocabularies/{name}`: declares a vocabulary, the value set of a category column,
+   * with a closed set's values in the body. `201` when new, `200` when the name already has this
+   * declaration and its values are added as a page, `409` when it has another.
+   */
   declareVocabulary(name: string, body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery(`/control/vocabularies/${segment(name)}`, waiting(options)), body, options);
   }
 
-  /** `PATCH /control/vocabularies/{name}/values`: one page of `{key, title?}` values. */
+  /**
+   * `PATCH /control/vocabularies/{name}/values`: adds one page of `{key, title?}` values to a
+   * vocabulary. No value is removed, and a title given for a held key replaces its title. An
+   * unknown vocabulary is refused with `404`.
+   */
   vocabularyValues(name: string, body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PATCH', withQuery(`/control/vocabularies/${segment(name)}/values`, waiting(options)), body, options);
   }
 
-  /** `PUT /control/views/{name}`: one plain view. */
+  /**
+   * `PUT /control/views/{name}`: declares one plain view, with no rows yet. The statuses are
+   * `declareViewGroup`'s.
+   */
   declareView(name: string, body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery(`/control/views/${segment(name)}`, waiting(options)), body, options);
   }
 
-  /** `PUT /control/views/{group}/{key}`: the roster record, which creates the group's view. */
+  /**
+   * `PUT /control/views/{group}/{key}`: creates a view of `group` from its roster record in `body`.
+   * An unknown group is refused with `404` and a key already in use with `409`. A dropped key may
+   * be used again, and the new view starts empty.
+   */
   createView(group: string, key: string, body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery(`/control/views/${segment(group)}/${segment(key)}`, waiting(options)), body, options);
   }
 
-  /** `PUT /control/layers/{name}/artifacts`: publish artifacts into one level of a layer. */
+  /**
+   * `PUT /control/layers/{name}/artifacts`: publishes artifacts into one level of a layer, with a
+   * first page of each one's members. The request is applied whole or not at all, and the answer
+   * gives each artifact a `tessera_id`.
+   */
   publish(layer: string, body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery(`/control/layers/${segment(layer)}/artifacts`, waiting(options)), body, options);
   }
 
   /**
-   * `PATCH /control/layers/{name}/artifacts`: page members into artifacts the layer holds, and fill
-   * parts they lack. Bytes are sent as an Arrow IPC stream, anything else as JSON.
+   * `PATCH /control/layers/{name}/artifacts`: adds a page of members to artifacts the layer holds,
+   * and fills parts they lack. A part that differs from the one held is refused with `409`. The
+   * request is applied whole or not at all.
+   *
+   * @param body - A `Uint8Array` is sent as an Arrow IPC stream, anything else as JSON.
    */
   grow(layer: string, body: object | Uint8Array, options: WriteOptions = {}): Promise<Answer> {
     const path = withQuery(`/control/layers/${segment(layer)}/artifacts`, waiting(options));
@@ -298,23 +453,27 @@ export class Control {
     return this.sendJson('PATCH', path, body, options);
   }
 
-  /** `POST /control/changes`: deletions, suppressions and the lifting of suppressions. */
+  /**
+   * `POST /control/changes`: deletes, suppresses and unsuppresses items. A deletion or suppression
+   * applies to every request from the moment it is accepted, without waiting for a publication.
+   * Every item is checked before any is applied, so a refused request applies nothing.
+   */
   changes(items: ChangeItem[], options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('POST', withQuery('/control/changes', waiting(options)), items, options);
   }
 
   /**
-   * `DELETE /control/layers/{name}`: the inverse of `declareLayer`. The name stays taken, so a
-   * later declaration under it is refused.
+   * `DELETE /control/layers/{name}`: drops a layer that `declareLayer` declared. The name stays
+   * taken, so a later declaration under it is refused.
    */
   dropLayer(name: string, options: WriteOptions = {}): Promise<Answer> {
     return this.send('DELETE', withQuery(`/control/layers/${segment(name)}`, waiting(options)), options);
   }
 
   /**
-   * `DELETE /control/views/{group}/{key}`: the inverse of `createView`. It deletes no entity unless
-   * `deleteDangling` is set, which deletes those holding a row in no other view and reports how
-   * many in `deleted`.
+   * `DELETE /control/views/{group}/{key}`: drops a view that `createView` made, and frees its key.
+   * It deletes no item unless `deleteDangling` is set, which deletes the view's items that have a
+   * row in no other view and reports how many in the answer's `deleted`.
    */
   dropView(group: string, key: string, options: WriteOptions & {deleteDangling?: boolean} = {}): Promise<Answer> {
     const path = withQuery(`/control/views/${segment(group)}/${segment(key)}`, {
@@ -324,14 +483,19 @@ export class Control {
     return this.send('DELETE', path, options);
   }
 
-  /** `POST /control/compact`: asks for a compaction, which removes deleted rows. Answered before it runs. */
+  /**
+   * `POST /control/compact`: asks for a compaction, which removes deleted rows, and is answered
+   * `202` before it runs. A request made while a compaction runs is dropped; the `compaction`
+   * object of `status()` shows what happened.
+   */
   compact(options: CallOptions = {}): Promise<Answer> {
     return this.send('POST', '/control/compact', options, '');
   }
 
   /**
-   * `POST /control/flush`: arm a publication cycle. With `wait` the answer is held until the cycle
-   * that covers every request sent before it is published.
+   * `POST /control/flush`: brings the next publication forward and answers `202`. The answer's
+   * `publication` names the first publication that includes every write sent before the flush;
+   * with `wait`, the answer is held until it is published.
    */
   flush(options: WriteOptions = {}): Promise<Answer> {
     return this.send('POST', withQuery('/control/flush', waiting(options)), options, '');

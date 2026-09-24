@@ -172,7 +172,7 @@ function concatScalarValues(pieces: ScalarColumn[], total: number): ScalarValues
   }
 }
 
-/** The name prefix of a points-frame membership column, `membership:<layer>`. */
+/** The name prefix of a points-frame membership column, `membership:<layer>`. @internal */
 export const MEMBERSHIP_PREFIX = 'membership:';
 
 /**
@@ -642,9 +642,15 @@ export function checkTrailerCounts(
 }
 
 /**
- * Decodes a whole framed `/v1/viewport` body. `ids` stays a `BigUint64Array`, since a u64 does not
- * survive a double. The streaming client takes the same frames one at a time instead (`client.ts`);
- * this is for tests, scripts, count-only asks and anything holding a whole body.
+ * Decodes a whole `/v1/viewport` body into typed arrays on the calling thread, for a test, a
+ * script, a counts-only request or any caller holding a whole body. `ids` stays a
+ * `BigUint64Array`, since a `u64` does not survive conversion to a double.
+ *
+ * @throws `Error` for a body that is truncated, lacks its tiles frame or trailer, has a frame of
+ *   unknown kind or out of order, carries a column this client cannot read, or whose trailer counts
+ *   disagree with its frames.
+ *
+ * @category HTTP client
  */
 export function decodeViewport(body: Uint8Array): ViewportResult {
   const parts = splitFramedStreams(body);

@@ -14,13 +14,13 @@ import type {Replica, ReplicaFrame} from './replica.js';
  * the renderer's work.
  */
 
-/** Schedules work for the next paint. */
+/** Schedules work for the next paint. @internal */
 export type FrameScheduler = {
   request(fire: () => void): unknown;
   cancel(handle: unknown): void;
 };
 
-/** `requestAnimationFrame` in a browser; a 16 ms timeout, one 60 Hz frame, elsewhere. */
+/** `requestAnimationFrame` in a browser; a 16 ms timeout, one 60 Hz frame, elsewhere. @internal */
 export function defaultFrameScheduler(): FrameScheduler {
   if (typeof requestAnimationFrame === 'function' && typeof cancelAnimationFrame === 'function') {
     return {
@@ -35,16 +35,39 @@ export function defaultFrameScheduler(): FrameScheduler {
 }
 
 /**
- * The display states. `empty` (the principal sees nothing here) and `refused` (not known) must not
- * be shown alike; `loading` and `retrying` are neither. Only `shown` may display counts.
+ * What the map is showing, as the store's `status` projection reports it:
+ *
+ * - `idle`: no view has been asked for yet.
+ * - `loading`: a request for the view is in flight.
+ * - `retrying`: the server answered `429` or `503`, and the request will be sent again.
+ * - `shown`: a frame is on screen. Counts may be displayed in this state only.
+ * - `empty`: the answer holds no point this principal may see in view.
+ * - `refused`: the request failed, so what is here is not known.
+ *
+ * A host shows `empty` and `refused` differently, since only `empty` is an answer.
+ *
+ * @category Projections
  */
 export type PresentedStatus = 'idle' | 'loading' | 'retrying' | 'shown' | 'empty' | 'refused';
 
-export type Refusal = {code: string; detail: string};
+/**
+ * Why a request failed, as the store's projections report it. Made by {@link refusalOf}.
+ *
+ * @category Projections
+ */
+export type Refusal = {
+  /** A {@link TesseraError}'s `code`, or `fetch-failed` for any other error. */
+  code: string;
+  /** A {@link TesseraError}'s `detail`, or the other error's message. */
+  detail: string;
+};
 
 /**
- * The refusal a thrown error stands for: the `code` and `detail` a `TesseraError` carries, or
- * `fetch-failed` and the message for an error that reached no server.
+ * The {@link Refusal} a thrown error stands for: the `code` and `detail` of a {@link TesseraError},
+ * or `fetch-failed` and the message for any other error, such as one from a request that reached
+ * no server.
+ *
+ * @category Projections
  */
 export function refusalOf(error: unknown): Refusal {
   const e = (error ?? {}) as {code?: string; detail?: string; message?: string};
@@ -54,7 +77,7 @@ export function refusalOf(error: unknown): Refusal {
 /** The driver's verdict; see `DriverEvents.onFrame`. */
 type Verdict = {tier: 'fold'; plan: Plan} | {tier: 'derive'; plan: Plan; frame: ReplicaFrame};
 
-/** What accompanied a presented frame: the plan that chose it and the fetch that fed it. */
+/** What accompanied a presented frame: the plan that chose it and the fetch that fed it. @internal */
 export type Presented = {
   frame: Composition;
   tier: 'fold' | 'derive';
@@ -64,6 +87,7 @@ export type Presented = {
   calibration: {mTarget: number; visibleInView: number | undefined};
 };
 
+/** @internal */
 export type PresenterEvents = {
   /** A frame reached the presented slot. Fires at most once per scheduler tick. */
   onPresented(presented: Presented): void;
@@ -77,6 +101,8 @@ export type PresenterEvents = {
  * Throws where the picture differs from what was served: where exact tiles draw a different number
  * of marks than were served, or a tile that is not exact carries counts, since a superset read as
  * density overstates. A dropped mark discloses nothing, but it is the sign of an assembly bug.
+ *
+ * @internal
  */
 export function assertCompositionMatchesServed(c: Composition): void {
   if (c.exactDrawn !== c.exactServed) {
@@ -95,6 +121,7 @@ export function assertCompositionMatchesServed(c: Composition): void {
   }
 }
 
+/** @internal */
 export class Presenter {
   private readonly driver: Driver;
   private held: Composition | null = null;

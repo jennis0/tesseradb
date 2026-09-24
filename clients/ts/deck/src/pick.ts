@@ -1,9 +1,15 @@
 import {NO_ORDINAL, type ArtifactsProjection, type Band} from '@tesseradb/client';
 
 /**
- * What a deck.gl pick on a `TesseraLayer` resolved to. `miss` is deck reporting nothing under the
- * cursor. `broken` is a hit on a sublayer with no identity array, or an index past its end: a
- * defect in the layer, reported apart from a miss so the host can show it.
+ * What {@link resolvePick} found under the pointer, by `kind`:
+ *
+ * - `mark`: an item's mark. `id` is the item's `tesseraId`. `worldXY` is the mark's position in
+ *   world units, or the pointer's where the sublayer holds no positions, or `null` with neither.
+ * - `artifact`: an artifact's name label. `id` is the artifact's `tesseraId`.
+ * - `miss`: nothing under the pointer.
+ * - `broken`: a hit on a sublayer with no id array, or at an `index` past its end. This is a defect
+ *   in the layer, reported apart from a miss so the host can show it. `layer` is the sublayer's
+ *   id, `hasIds` whether it has an id array and `idCount` that array's length.
  */
 export type Picked =
   | {kind: 'mark'; id: bigint; worldXY: [number, number] | null}
@@ -11,14 +17,23 @@ export type Picked =
   | {kind: 'miss'}
   | {kind: 'broken'; index: number; layer: string | null; hasIds: boolean; idCount: number};
 
-/** The part of deck's `PickingInfo` a pick reads, typed narrowly so a test can build one. */
+/** The fields of deck.gl's `PickingInfo` that {@link resolvePick} reads. A `PickingInfo` can be passed as it is. */
 export type PickInfo = {
+  /** The index of the hit within the sublayer's data, or -1 for no hit. */
   index: number;
+  /** The layer deck reports, read when `sourceLayer` is absent. */
   layer?: {id: string; props: object} | null;
+  /** The sublayer that drew the hit. */
   sourceLayer?: {id: string; props: object} | null;
+  /** The pointer's position in world units, used as a mark's `worldXY` when the sublayer holds no positions. */
   coordinate?: number[] | null;
 };
 
+/**
+ * Resolves a deck.gl pick on a {@link TesseraLayer} to the item's mark or the artifact's name under
+ * the pointer. Pass the pick info deck gives `onClick` or `onHover`. Only marks and artifact names
+ * are pickable, so a pointer over an outline, a count or the wash away from any mark is a `miss`.
+ */
 export function resolvePick(info: PickInfo): Picked {
   if (info.index < 0) return {kind: 'miss'};
   const layer = info.sourceLayer ?? info.layer;
