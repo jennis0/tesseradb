@@ -1,0 +1,23 @@
+{# essentials-openapi's partial with `markdown` attributes, so descriptions render as Markdown. #}
+## {{texts.security_schemes}}
+
+<table markdown="1">
+<thead>
+<tr>
+<th>{{texts.name}}</th>
+<th>{{texts.type}}</th>
+<th>{{texts.scheme}}</th>
+<th>{{texts.description}}</th>
+</tr>
+</thead>
+<tbody markdown="1">
+{%- for name, definition in components.securitySchemes.items() %}
+<tr markdown="1">
+<td>{{name}}</td>
+<td>{{definition.type}}</td>
+<td>{{definition.scheme}}</td>
+<td markdown="block">{{definition.description}}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>

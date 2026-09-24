@@ -36,6 +36,7 @@ exclude_docs: |
   /guides/views.md
   /pytest.ini
   /tests/
+  /openapi/templates/
 
 validation:
   omitted_files: warn
@@ -58,12 +59,18 @@ markdown_extensions:
         - name: mermaid
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
+  # The HTTP API page's response tabs.
+  - pymdownx.tabbed:
+      alternate_style: true
 
 plugins:
   - search:
       lang: en
   - neoteroi.mkdocsoad:
       use_pymdownx: true
+      # Overrides of the plugin's table templates, which otherwise print descriptions as raw
+      # Markdown. The path is relative to the directory mkdocs runs in.
+      templates_path: docs/openapi/templates
   - mkdocstrings:
       handlers:
         python:
