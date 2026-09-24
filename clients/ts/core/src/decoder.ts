@@ -42,10 +42,14 @@ export function inlineDecoder(): Decoder {
 }
 
 /**
- * How the worker is made where a bundle cannot resolve a relative worker file. The default,
- * `new URL('./decode.worker.js', import.meta.url)`, suits any bundler that serves the package as
- * files. A single-file build inlines the worker as a Blob or data URL and installs a factory here
- * before any decoder is built; without it, decoding falls back to the main thread.
+ * How the worker is made where the default cannot load it. The default loads `decode.worker.js`
+ * from beside this module, which Vite and webpack follow and bundle. The package build writes that
+ * file with Arrow bundled into it, because a page's import map does not apply inside a worker, so
+ * it also loads unbundled. esbuild does not follow the URL: a host copies the file beside its
+ * output or installs a factory here. The single-file bundle installs one that makes the worker
+ * from a Blob or data URL.
+ *
+ * The factory is read each time a worker is made.
  */
 let workerFactory: (() => Worker) | null = null;
 
@@ -64,16 +68,29 @@ function detachable(bytes: Uint8Array): ArrayBuffer {
   ) as ArrayBuffer;
 }
 
+/** One decode: the message for the worker, and the same decode on the main thread. */
+type Job<T> = {request: () => {message: object; transfer: ArrayBuffer[]}; inline: () => Promise<T>};
+
+/** The worker's messages: `ready` once, when its module has evaluated, then one reply per request. */
+type Reply = {ready: true} | {id: number; result?: never; error?: string; ms?: number};
+
 /**
  * Decodes in workers: two foreground lanes and a background lane made on first use. `null` where
- * `Worker` is unavailable.
+ * `Worker` is unavailable or no worker can be constructed.
+ *
+ * A lane holds its requests until its worker says `ready`, without transferring their buffers. A
+ * worker that fails before `ready` did not load, so the lane decodes what it holds, and everything
+ * after, on the main thread. A worker that fails after `ready` loses the requests it holds, which
+ * are rejected, and the lane decodes everything after on the main thread.
  */
 export function workerDecoder(): Decoder | null {
   if (typeof Worker === 'undefined') return null;
 
   let lastWorkerMs: number | null = null;
+  const inline = inlineDecoder();
+
   /** One serial lane: a worker, its pending replies, and its id counter. */
-  function lane(): {send: <T>(request: object, transfer: Transferable[]) => Promise<T>; close: () => void} | null {
+  function lane(): {send: <T>(job: Job<T>) => Promise<T>; close: () => void} | null {
     let worker: Worker;
     try {
       worker = workerFactory
@@ -83,35 +100,59 @@ export function workerDecoder(): Decoder | null {
       // A bundler that cannot resolve the worker URL, or a runtime that forbids module workers.
       return null;
     }
+    let state: 'loading' | 'ready' | 'dead' = 'loading';
     let nextId = 1;
+    const held: {job: Job<never>; resolve: (r: never) => void; reject: (e: Error) => void}[] = [];
     const pending = new Map<number, {resolve: (r: never) => void; reject: (e: Error) => void}>();
-    worker.onmessage = (event: MessageEvent<{id: number; result?: never; error?: string; ms?: number}>) => {
-      const {id, result, error, ms} = event.data;
-      const waiter = pending.get(id);
+
+    function post<T>(job: Job<T>, resolve: (r: T) => void, reject: (e: Error) => void): void {
+      const id = nextId++;
+      const {message, transfer} = job.request();
+      pending.set(id, {resolve: resolve as (r: never) => void, reject});
+      // Every buffer named here is transferred; the caller does not read it afterwards.
+      worker.postMessage({id, ...message}, transfer);
+    }
+
+    worker.onmessage = (event: MessageEvent<Reply>) => {
+      const reply = event.data;
+      if ('ready' in reply) {
+        if (state !== 'loading') return;
+        state = 'ready';
+        for (const h of held.splice(0)) post(h.job, h.resolve, h.reject);
+        return;
+      }
+      const waiter = pending.get(reply.id);
       if (!waiter) return;
-      pending.delete(id);
-      if (ms !== undefined) lastWorkerMs = ms;
-      if (error !== undefined) waiter.reject(new Error(error));
-      else waiter.resolve(result!);
+      pending.delete(reply.id);
+      if (reply.ms !== undefined) lastWorkerMs = reply.ms;
+      if (reply.error !== undefined) waiter.reject(new Error(reply.error));
+      else waiter.resolve(reply.result!);
     };
-    worker.onerror = (event) => {
-      // A dead worker answers nothing outstanding, so every waiting caller is rejected.
-      const failure = new Error(`decode worker failed: ${event.message}`);
+    worker.onerror = () => {
+      const loaded = state === 'ready';
+      state = 'dead';
+      worker.terminate();
+      for (const h of held.splice(0)) h.job.inline().then(h.resolve, h.reject);
+      if (!loaded) return;
+      const failure = new Error('the decode worker stopped before replying; later decodes run on the main thread');
       for (const waiter of pending.values()) waiter.reject(failure);
       pending.clear();
     };
+
     return {
-      send<T>(request: object, transfer: Transferable[]): Promise<T> {
-        // Every buffer named here is transferred; the caller does not read it afterwards.
-        const id = nextId++;
+      send<T>(job: Job<T>): Promise<T> {
+        if (state === 'dead') return job.inline();
         return new Promise<T>((resolve, reject) => {
-          pending.set(id, {resolve: resolve as (r: never) => void, reject});
-          worker.postMessage({id, ...request}, transfer);
+          if (state === 'ready') post(job, resolve, reject);
+          else held.push({job: job as Job<never>, resolve: resolve as (r: never) => void, reject});
         });
       },
       close() {
+        state = 'dead';
         worker.terminate();
-        for (const waiter of pending.values()) waiter.reject(new Error('decoder closed'));
+        const closed = new Error('decoder closed');
+        for (const h of held.splice(0)) h.reject(closed);
+        for (const waiter of pending.values()) waiter.reject(closed);
         pending.clear();
       }
     };
@@ -125,30 +166,54 @@ export function workerDecoder(): Decoder | null {
   let next = 0;
   let backgroundLane: ReturnType<typeof lane> | undefined;
 
-  function send<T>(request: object, transfer: Transferable[], background: boolean): Promise<T> {
+  function send<T>(job: Job<T>, background: boolean): Promise<T> {
     if (background) {
       backgroundLane ??= lane();
-      if (backgroundLane) return backgroundLane.send<T>(request, transfer);
+      if (backgroundLane) return backgroundLane.send(job);
     }
     next = (next + 1) % foreground.length;
-    return foreground[next]!.send<T>(request, transfer);
+    return foreground[next]!.send(job);
   }
 
   return {
     decode(bytes, background = false) {
-      const buffer = detachable(bytes);
-      return send<ViewportResult>({bytes: buffer}, [buffer], background);
+      return send(
+        {
+          request: () => {
+            const buffer = detachable(bytes);
+            return {message: {bytes: buffer}, transfer: [buffer]};
+          },
+          inline: () => inline.decode(bytes)
+        },
+        background
+      );
     },
     decodeHead(frames, background = false) {
-      const tiles = detachable(frames.tiles);
-      const subCells = frames.subCells ? detachable(frames.subCells) : null;
-      const artifacts = frames.artifacts ? detachable(frames.artifacts) : null;
-      const transfer = [tiles, subCells, artifacts].filter((b) => b !== null);
-      return send<ViewportHead>({kind: 'head', tiles, subCells, artifacts}, transfer, background);
+      return send(
+        {
+          request: () => {
+            const tiles = detachable(frames.tiles);
+            const subCells = frames.subCells ? detachable(frames.subCells) : null;
+            const artifacts = frames.artifacts ? detachable(frames.artifacts) : null;
+            const transfer = [tiles, subCells, artifacts].filter((b) => b !== null);
+            return {message: {kind: 'head', tiles, subCells, artifacts}, transfer};
+          },
+          inline: () => inline.decodeHead(frames)
+        },
+        background
+      );
     },
     decodePoints(frame, background = false) {
-      const buffer = detachable(frame);
-      return send<PointsPart>({kind: 'points', bytes: buffer}, [buffer], background);
+      return send(
+        {
+          request: () => {
+            const buffer = detachable(frame);
+            return {message: {kind: 'points', bytes: buffer}, transfer: [buffer]};
+          },
+          inline: () => inline.decodePoints(frame)
+        },
+        background
+      );
     },
     close() {
       for (const l of foreground) l.close();

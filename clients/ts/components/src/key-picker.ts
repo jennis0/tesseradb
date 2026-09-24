@@ -1,4 +1,4 @@
-import {css, html, nothing, type PropertyValues} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {stepView, viewLabel, viewsOfGroup, type Meta, type ViewInfo} from '@tesseradb/client';
 import {TesseraElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -78,7 +78,7 @@ export class TesseraKeyPicker extends TesseraElement {
     if (s && next) switchView(this, s, meta, next.id);
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const meta = s?.get('meta') ?? null;
     if (!s || !meta) return nothing;

@@ -1,5 +1,5 @@
 import {Deck, OrthographicView, type Layer, type PickingInfo} from '@deck.gl/core';
-import {css, html, nothing, type PropertyValues} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {
   MAX_DEPTH,
@@ -8,22 +8,20 @@ import {
   dataToWorldXY,
   hasValue,
   type ArtifactsProjection,
-  type FiltersProjection,
   type MarksProjection,
-  type RegionProjection,
   type Store,
-  type SelectionShape,
-  type ViewProjection
+  type SelectionShape
 } from '@tesseradb/client';
-import {MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, resolvePick, viewInputOf, type ContourShape, type Picked} from '@tesseradb/deck';
+import {TesseraLayer, resolvePick, viewInputOf, type Picked} from '@tesseradb/deck';
+import {MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, type ContourShape} from '@tesseradb/deck/internal';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
-import {TesseraElement, emit, idString, shapeDetail} from './base.js';
+import {TesseraElement, emit, idString, shapeDetail, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
-import {timestampText, type PickOutcome} from './item-card.js';
 import {renderState, stateOf, type PanelState} from './states.js';
 import {icon} from './icons.js';
 import {sameFrame} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
+import {washChannel} from './wash.js';
 
 /**
  * `<tessera-map>` is the canvas: points, the density wash, the artifact outlines and labels,
@@ -117,22 +115,6 @@ export type MapProbe = {
 type ViewState = {target: [number, number, number]; zoom: number; minZoom: number; maxZoom: number};
 
 const VIEW = new OrthographicView({id: 'ortho', flipY: true});
-
-/**
- * Which count the density wash reads, and so its label: `highlighted` under a highlight, `matched`
- * when the request's `filters` carries anything (the filter clauses, `member_of` clauses and the
- * drawn region), `visible` otherwise. The choice follows what was asked, since the counts are
- * equal when nothing narrows them.
- */
-export function washChannel(
-  filters: FiltersProjection,
-  view: ViewProjection,
-  region: RegionProjection | null
-): 'visible' | 'matched' | 'highlighted' {
-  if (view.highlighting) return 'highlighted';
-  const filtering = filters.expr !== null || filters.members.some((c) => c.verb === 'filter') || region !== null;
-  return filtering ? 'matched' : 'visible';
-}
 
 export class TesseraMap extends TesseraElement {
   static override styles = [
@@ -1035,7 +1017,7 @@ export class TesseraMap extends TesseraElement {
     this.frameLoop = null;
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const status = this.resolvedStore?.get('status') ?? null;
     const state: PanelState = stateOf(status);
     // Loading and retrying are the status strip's; the map draws the states that could otherwise

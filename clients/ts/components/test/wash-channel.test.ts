@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {NO_COUNT, NO_MASKED, type FiltersProjection, type RegionProjection, type ViewProjection} from '@tesseradb/client';
-import {washChannel} from '../src/map.js';
+import {washChannel} from '../src/wash.js';
 
 /**
  * The wash reads the count the request asked for. The tests check the choice, not the image: the

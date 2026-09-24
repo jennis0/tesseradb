@@ -1,4 +1,4 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {NO_COUNT, NO_MASKED, type StatusProjection, type ViewProjection} from '@tesseradb/client';
 import {TesseraElement, emit} from './base.js';
@@ -167,7 +167,7 @@ export class TesseraStatus extends TesseraElement {
     return parts.join(' · ');
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const status = this.status;
     const state = stateOf(status);
     const stale = status?.stale ?? false;

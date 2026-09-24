@@ -1,4 +1,4 @@
-import {css, html, nothing, type PropertyValues} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {browsableLayers, isFilterLayer, refusalOf, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
@@ -363,7 +363,7 @@ export class TesseraHierarchy extends TesseraElement {
     emit(this, 'tessera-clausechange', {id: idString(id), layer: layer.name, outside: false, verb, on: !on});
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const heading = html`<h2 part="title">Hierarchy</h2>`;
     const meta = s?.get('meta') ?? null;

@@ -241,7 +241,7 @@ export class TesseraFilter extends TesseraElement {
     return name.charAt(0).toUpperCase() + name.slice(1);
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const o = this.resolvedOperand;
     if (!o) return nothing;
     const draft = this.currentDraft(o);

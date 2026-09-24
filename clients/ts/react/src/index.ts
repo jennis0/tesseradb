@@ -61,5 +61,4 @@ export function useProjection<K extends ProjectionName>(store: Store | null, nam
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-export type {Count, Masked, ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@tesseradb/client';
-export {formatCount, formatMasked, NO_COUNT, NO_MASKED} from '@tesseradb/client';
+export type {ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@tesseradb/client';

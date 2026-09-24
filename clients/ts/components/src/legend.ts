@@ -1,7 +1,7 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {CLUSTER_PREFIX, NEUTRAL, colourLayers, layerEntries, type Rgba} from '@tesseradb/client';
-import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck';
+import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck/internal';
 import {TesseraElement, UNNAMED, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf} from './states.js';
@@ -95,7 +95,7 @@ export class TesseraLegend extends TesseraElement {
     emit(this, 'tessera-layerchange', {layers: roots});
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const meta = s?.get('meta') ?? null;
     if (!s || !meta) return html`<div class="panel">${this.selectable ? nothing : html`<h2 part="title">Colour</h2>`}${renderState(stateOf(s?.get('status')), s?.get('status'))}</div>`;

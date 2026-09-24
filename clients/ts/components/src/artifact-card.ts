@@ -1,7 +1,7 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {isFilterLayer, withMember, withoutMember, type Artifact, type ArtifactDetail, type ClauseVerb, type Masked, type Refusal} from '@tesseradb/client';
-import {attachedTopics, displayName} from '@tesseradb/deck';
+import {attachedTopics, displayName} from '@tesseradb/deck/internal';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -165,7 +165,7 @@ export class TesseraArtifactCard extends TesseraElement {
     </button>`;
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const {artifact, refusal} = this.shown;
     // The heading is the level's title on a levelled layer (County, Admin 2), else the layer's.
     const metaLayers = this.resolvedStore?.get('meta')?.layers ?? [];

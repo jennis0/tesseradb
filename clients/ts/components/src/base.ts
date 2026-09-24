@@ -183,6 +183,17 @@ export function idString(id: bigint): string {
   return id.toString(10);
 }
 
+/** A `timestamp_us` value in full, as an ISO date-time. */
+export function timestampText(value: number | bigint): string {
+  return new Date(Number(value) / 1000).toISOString();
+}
+
+/** What the map's pick resolved to where it found no item: a miss, or a broken pick. */
+export type PickOutcome =
+  | {kind: 'miss'}
+  | {kind: 'broken'; index: number; layer: string | null; hasIds: boolean; idCount: number}
+  | null;
+
 /** A selection shape as an event carries it, an artifact's id as a decimal string. */
 export function shapeDetail(shape: SelectionShape | null): SelectionShapeDetail | null {
   if (!shape || shape.kind !== 'artifact') return shape;
