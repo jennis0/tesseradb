@@ -46,9 +46,10 @@ fn a_published_flush_rotates_the_log() {
     });
     // The buffer is empty — everything ingested has geometry — so the whole durable prefix was
     // reclaimable and member 1 goes. What survives is the member the snapshot was just written to.
-    // One rotation opens that member and deletes member 1, so both are waited for as one state.
+    // Only a rotation deletes a member, and it opens the next one in the same call, so the two
+    // are waited for as one state.
     wait_until("the rotation to follow it and reclaim member 1", WAIT, || {
-        members(tmp.path()) == ["wal-000002.log"]
+        !members(tmp.path()).contains(&"wal-000001.log".to_string())
     });
 }
 
@@ -78,9 +79,10 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
         // Acked after that flush consumed the first row, so it is buffered when the rotation runs.
         let second = ingest(&engine, "ext-2");
         assert!(engine.generation().buffer.contains(second));
-        // A later flush may take the second row too and reclaim member 1 in the same rotation.
+        // The first flush's rotation opened member 2 before this ingest was acked; the member
+        // the next rotation opens is the one that follows the second row's flush.
         wait_until("a rotation", WAIT, || {
-            members(tmp.path()).iter().any(|m| m != "wal-000001.log")
+            members(tmp.path()).iter().any(|m| m.as_str() >= "wal-000003.log")
         });
         second
     };

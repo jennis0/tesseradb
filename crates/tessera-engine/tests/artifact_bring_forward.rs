@@ -128,6 +128,18 @@ fn publish(engine: &Engine, key: &str, members: Vec<EntityId>) {
     tick(engine);
 }
 
+/// Release a flush held by `set_flush_paused_for_test` and wait for it to publish.
+fn release_held_flush(engine: &Engine) {
+    let before = engine.write_executor_stats().flushes;
+    engine.set_flush_paused_for_test(false);
+    tick_until(
+        engine,
+        "the held flush to publish",
+        std::time::Duration::from_secs(60),
+        || engine.write_executor_stats().flushes > before,
+    );
+}
+
 fn grow(engine: &Engine, key: &str, members: Vec<EntityId>) {
     engine
         .grow_memberships(
@@ -477,7 +489,9 @@ fn a_window_that_mints_and_grows_one_level_rebuilds_nothing() {
     let warm = engine.artifact_cache_builds().0;
 
     // One batch, two rows: the first names the artifact that exists (a growth), the second a key
-    // no artifact holds (a mint, which publishes). One window, two records, one level.
+    // no artifact holds (a mint, which publishes). One window, two records, one level. The tick
+    // that publishes them also flushes the rows, so the flush is held while they are buffered.
+    engine.set_flush_paused_for_test(true);
     assert_eq!(
         ingest_naming(&engine, "mixed", &["a0", "made-by-a-point"]),
         1,
@@ -497,7 +511,7 @@ fn a_window_that_mints_and_grows_one_level_rebuilds_nothing() {
 
     // And the rows the window ingested reach both artifacts at their flush, still without a
     // rebuild: the mint's delta and the growth's are both in the form the flush then extends.
-    flush(&engine);
+    release_held_flush(&engine);
     assert_eq!(
         served(&engine),
         vec![("a0".to_string(), 101), ("made-by-a-point".to_string(), 1)],
@@ -538,14 +552,7 @@ fn an_ingested_member_counts_at_its_flush_and_the_fold_changes_nothing() {
         "buffered: the member has no row anywhere, so it is in no count"
     );
 
-    let before = engine.write_executor_stats().flushes;
-    engine.set_flush_paused_for_test(false);
-    tick_until(
-        &engine,
-        "the held flush to publish",
-        std::time::Duration::from_secs(60),
-        || engine.write_executor_stats().flushes > before,
-    );
+    release_held_flush(&engine);
     assert_eq!(
         served(&engine),
         vec![("a0".to_string(), 101)],
