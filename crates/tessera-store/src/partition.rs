@@ -188,8 +188,8 @@ pub fn read_bucket(receipt: &SpillReceipt) -> Result<Vec<u64>> {
     }
     let mut values = Vec::with_capacity(bytes.len() / 8);
     let mut anchor = 0u64;
-    for chunk in bytes.chunks_exact(8) {
-        let value = u64::from_le_bytes(chunk.try_into().expect("chunks_exact(8) yields 8 bytes"));
+    for chunk in bytes.as_chunks::<8>().0 {
+        let value = u64::from_le_bytes(*chunk);
         anchor = anchor.wrapping_add(mix64(value));
         values.push(value);
     }
@@ -701,7 +701,7 @@ mod tests {
             );
             let bytes = store.load(k).expect("load");
             let mut previous: Option<u32> = None;
-            for chunk in bytes.chunks_exact(8) {
+            for chunk in bytes.as_chunks::<8>().0 {
                 let key = u32::from_le_bytes(chunk[..4].try_into().unwrap());
                 let payload = u32::from_le_bytes(chunk[4..].try_into().unwrap());
                 assert!(

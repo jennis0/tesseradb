@@ -22,8 +22,10 @@ fn posting(path: &std::path::Path, term: u32) -> Option<Vec<u32>> {
     tier.posting(TermId::new(term)).unwrap().map(|p| match p {
         tessera_authz::PostingRef::Roaring(view) => view.iter().collect(),
         tessera_authz::PostingRef::Array(bytes) => bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect(),
     })
 }

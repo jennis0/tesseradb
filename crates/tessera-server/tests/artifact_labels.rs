@@ -128,9 +128,9 @@ async fn deployment(red: bool) -> Deployment {
             &server,
             LAYER,
             json!([
-                { "key": "open", "members": members(0..40) },
-                { "key": "p-open", "members": members(40..120) },
-                { "key": "c-open", "members": members(0..20) },
+                { "key": "open", "members": members(0..40), "access": null },
+                { "key": "p-open", "members": members(40..120), "access": null },
+                { "key": "c-open", "members": members(0..20), "access": null },
                 { "key": "shared", "members": members(120..160), "access": ["blue"] },
             ]),
         )
@@ -580,6 +580,49 @@ async fn an_arrow_growth_fills_a_label_as_the_json_form_does() {
     assert_eq!(resp.status().as_u16(), 409);
 }
 
+/// On a layer that reads labels, a publication record without `access` is refused with nothing
+/// created, alone or beside one that states its labels, and one stating `null`, `[]` or only a
+/// blank label publishes an artifact with no label of its own. A record that only adds members to
+/// a held artifact needs none.
+#[tokio::test]
+async fn a_record_without_access_on_a_layer_reading_labels_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, teams_declaration("inherited")).await;
+    let put = |artifacts: serde_json::Value| {
+        server
+            .client
+            .put(artifacts_url(&server, LAYER))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+            .send()
+    };
+    for refused in [
+        json!([{ "key": "bare", "members": members(0..10) }]),
+        json!([{ "key": "bare", "members": members(0..10) },
+               { "key": "red", "members": members(10..20), "access": ["red"] }]),
+    ] {
+        let resp = put(refused).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 422);
+    }
+    let resp = put(json!([
+        { "key": "nulled", "members": members(0..10), "access": null },
+        { "key": "emptied", "members": members(10..20), "access": [] },
+        { "key": "blank", "members": members(30..40), "access": ["  "] },
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 201);
+    let resp = put(json!([{ "key": "nulled", "members": members(20..30) }])).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    tick(&server).await;
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(
+        keys_served(&viewport_raw(&server, &token, viewport(0, json!({}))).await),
+        vec!["blank".to_string(), "emptied".to_string(), "nulled".to_string()]
+    );
+}
+
 /// An artifact with no label takes the layer's default: a named default admits only a viewer
 /// holding it.
 #[tokio::test]
@@ -591,7 +634,7 @@ async fn an_unlabelled_artifact_takes_a_named_default() {
         &server,
         LAYER,
         json!([
-            { "key": "bare", "members": members(0..40) },
+            { "key": "bare", "members": members(0..40), "access": null },
             { "key": "blue", "members": members(0..40), "access": ["blue"] },
         ]),
     )
@@ -715,7 +758,7 @@ fn built_config(field: &str, padded: bool) -> String {
     let (visibility, inline_visibility, teams_default, inline_default, red, open) = if padded {
         (" public ", " team ", " red ", " inherited ", " red ", r#", access = "  ""#)
     } else {
-        ("public", "public", "inherited", "inherited", "red", "")
+        ("public", "public", "inherited", "inherited", "red", ", access = []")
     };
     format!(
         r#"
@@ -769,13 +812,23 @@ fn build_labelled_padded(
     field: &str,
     padded: bool,
 ) -> Result<(), String> {
+    build_config(dir, spelling, padded, &built_config(field, padded))
+}
+
+/// The fixture's points and teams source, padded where `padded` says so, built under `toml`.
+fn build_config(
+    dir: &std::path::Path,
+    spelling: Spelling,
+    padded: bool,
+    toml: &str,
+) -> Result<(), String> {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points_n(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
     write_teams(&dir.join("teams.parquet"), spelling, padded);
     let config_path = dir.join("config.toml");
-    std::fs::write(&config_path, built_config(field, padded)).unwrap();
+    std::fs::write(&config_path, toml).unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .map_err(|e| e.to_string())?;
     let args = tessera_build::BuildArgs {
@@ -846,7 +899,7 @@ async fn labels_built_and_labels_published_serve_alike() {
             "inline",
             json!([
                 { "key": "inline-red", "members": members(0..3), "access": ["red"] },
-                { "key": "inline-open", "members": members(3..6) },
+                { "key": "inline-open", "members": members(3..6), "access": null },
             ]),
         )
         .await;
@@ -1021,6 +1074,97 @@ fn a_label_field_the_source_does_not_carry_is_refused() {
     );
 }
 
+/// At a build, an inline row without `access` on a layer that reads labels is refused, where the
+/// same row with `access = []` builds.
+#[test]
+fn an_inline_row_stating_no_labels_is_refused_at_a_build() {
+    let unstated =
+        built_config("team", false).replace("members = [3, 4, 5], access = []", "members = [3, 4, 5]");
+    let dir = TempDir::new().unwrap();
+    assert!(build_config(dir.path(), Spelling::List, false, &unstated).is_err());
+    let dir = TempDir::new().unwrap();
+    assert!(build_config(dir.path(), Spelling::List, false, &built_config("team", false)).is_ok());
+}
+
+/// At a build, a key a member file names on an open layer that reads labels, with no row in the
+/// artifact source, would be minted with no labels and is refused; a member file naming only
+/// declared keys builds.
+#[test]
+fn a_key_a_member_file_would_mint_on_a_labelled_layer_is_refused_at_a_build() {
+    use arrow::array::{ArrayRef, StringArray, UInt64Array};
+    use arrow::datatypes::{Field, Schema};
+    use std::sync::Arc;
+
+    fn write(path: &std::path::Path, columns: Vec<(&str, ArrayRef)>) {
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(name, array)| Field::new(*name, array.data_type().clone(), false))
+                .collect::<Vec<_>>(),
+        ));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema.clone(),
+            columns.into_iter().map(|(_, array)| array).collect(),
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut w = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+    }
+    fn with_members(dir: &std::path::Path, keys: &[&str]) -> Result<(), String> {
+        write(
+            &dir.join("minted.parquet"),
+            vec![
+                ("key", Arc::new(StringArray::from(vec!["declared"])) as ArrayRef),
+                ("team", Arc::new(StringArray::from(vec!["red"])) as ArrayRef),
+            ],
+        );
+        write(
+            &dir.join("minted_members.parquet"),
+            vec![
+                ("key", Arc::new(StringArray::from(keys.to_vec())) as ArrayRef),
+                (
+                    "entity",
+                    Arc::new(UInt64Array::from((0..keys.len() as u64).collect::<Vec<_>>()))
+                        as ArrayRef,
+                ),
+            ],
+        );
+        let toml = r#"
+[sources]
+points         = "points.parquet"
+minted         = "minted.parquet"
+minted_members = "minted_members.parquet"
+
+[[view]]
+name             = "s0"
+extent           = { min = 0.0, max = 1000.0 }
+point_visibility = { default = "public" }
+
+[[layer]]
+name                      = "minted"
+title                     = "minted"
+views                     = ["s0"]
+source                    = "minted"
+membership                = "enumerated"
+value_set                 = "open"
+visibility                = "public"
+artifact_visibility       = { field = "team", default = "inherited" }
+require_member_visibility = "none"
+hierarchy                 = { kind = "flat", prune_children = false }
+
+  [layer.members]
+  source = "minted_members"
+"#;
+        build_config(dir, Spelling::List, false, toml)
+    }
+    let dir = TempDir::new().unwrap();
+    assert!(with_members(dir.path(), &["declared", "stray"]).is_err());
+    let dir = TempDir::new().unwrap();
+    with_members(dir.path(), &["declared", "declared"]).expect("declared keys only");
+}
+
 /// `tessera check` refuses a label column its source does not carry, and one that holds no
 /// strings, and passes each spelling the build reads.
 #[test]
@@ -1111,7 +1255,12 @@ async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_non
         .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
 
-    publish(&server, LAYER, json!([{ "key": "bare", "members": members(0..40) }])).await;
+    publish(
+        &server,
+        LAYER,
+        json!([{ "key": "bare", "members": members(0..40), "access": null }]),
+    )
+    .await;
     let (status, _) = patch(&server, LAYER, json!([{ "key": "bare", "access": ["nothing"] }])).await;
     assert_eq!(status, 422);
     tick(&server).await;

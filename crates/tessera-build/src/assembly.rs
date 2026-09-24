@@ -615,7 +615,9 @@ pub(crate) fn write_segment(
         let bytes = rows.store.load(bucket)?;
         rows.store.delete(bucket)?;
         let mut loaded: Vec<RowRec> = bytes
-            .chunks_exact(ROW_RECORD_BYTES)
+            .as_chunks::<ROW_RECORD_BYTES>()
+            .0
+            .iter()
             .map(|record| {
                 let read = |at: usize| {
                     u32::from_le_bytes(record[at..at + 4].try_into().expect("four bytes"))

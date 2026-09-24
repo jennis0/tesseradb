@@ -237,8 +237,10 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
             .expect("the term has one");
         let mut got: Vec<u32> = match posting {
             tessera_authz::postings::PostingRef::Array(bytes) => bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
                 .collect(),
             tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
         };
