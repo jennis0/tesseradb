@@ -62,7 +62,7 @@ fn section(out: &mut String, sub: &mut Command) {
     let about = sub
         .get_long_about()
         .or(sub.get_about())
-        .map(|text| sentence(&text.to_string()))
+        .map(|text| outside_code(&sentence(&text.to_string()), escape_angles))
         .unwrap_or_default();
     let _ = writeln!(out, "\n## `tessera {}`\n", sub.get_name());
     let _ = writeln!(out, "```text\n{usage}\n```\n");
@@ -93,20 +93,25 @@ fn section(out: &mut String, sub: &mut Command) {
             (Some(_), true) => format!("`{value}`"),
             _ => String::new(),
         };
-        // A switch's default of `false` says nothing its description does not.
-        let default = match arg.get_action() {
-            ArgAction::SetTrue => &[][..],
-            _ => arg.get_default_values(),
-        }
-        .iter()
-        .map(|v| format!("`{}`", v.to_string_lossy()))
-        .collect::<Vec<_>>()
-        .join(", ");
         let help = arg
             .get_long_help()
             .or(arg.get_help())
             .map(|text| cell(&sentence(&text.to_string())))
             .unwrap_or_default();
+        // A switch's default of `false` says nothing its description does not. A value computed
+        // at run time has no clap default, and its help states it after "Default:".
+        let default = match arg.get_action() {
+            ArgAction::SetTrue => String::new(),
+            _ if arg.get_default_values().is_empty() && help.contains("Default:") => {
+                "derived".to_string()
+            }
+            _ => arg
+                .get_default_values()
+                .iter()
+                .map(|v| format!("`{}`", v.to_string_lossy()))
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
         let _ = writeln!(out, "| {name} | {value} | {default} | {help} |");
     }
 }
@@ -132,12 +137,27 @@ fn sentence(text: &str) -> String {
     }
 }
 
-/// A help text as one table cell: its paragraphs on one line, and any `|` escaped.
+/// A help text as one table cell: its paragraphs on one line, with `|`, `<` and `>` escaped
+/// outside code spans.
 fn cell(text: &str) -> String {
-    text.split_whitespace()
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    outside_code(&line, |plain| escape_angles(plain).replace('|', "\\|"))
+}
+
+/// `text` with `escape` applied to the parts outside backtick code spans.
+fn outside_code(text: &str, escape: impl Fn(&str) -> String) -> String {
+    text.split('`')
+        .enumerate()
+        .map(|(i, part)| match i % 2 {
+            0 => escape(part),
+            _ => part.to_string(),
+        })
         .collect::<Vec<_>>()
-        .join(" ")
-        .replace('|', "\\|")
+        .join("`")
+}
+
+fn escape_angles(text: &str) -> String {
+    text.replace('<', "&lt;").replace('>', "&gt;")
 }
 
 #[test]
