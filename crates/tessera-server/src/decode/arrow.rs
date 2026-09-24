@@ -1,6 +1,7 @@
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use tessera_engine::coordinates;
+use tessera_engine::shapes::Bounds;
 use tessera_engine::scalar_column::{self, ScalarColumn};
 use tessera_engine::utf8::Utf8Column;
 use tessera_engine::{
@@ -36,16 +37,6 @@ pub(crate) struct RawIngestItem {
     pub(crate) scoped: Vec<WalScalar>,
 }
 
-/// A projected view's coordinate columns are `lon` and `lat`, an unprojected view's `x` and `y`,
-/// as at the build. Naming the axes for what they hold catches a corpus written with the two
-/// exchanged, which would otherwise be silently mirrored.
-fn coordinate_columns(projection: Projection) -> (&'static str, &'static str) {
-    match projection {
-        Projection::None => ("x", "y"),
-        _ => ("lon", "lat"),
-    }
-}
-
 /// One ingest batch, decoded, with what its membership columns said.
 pub(crate) struct ParsedBatch {
     pub(crate) items: Vec<RawIngestItem>,
@@ -56,6 +47,8 @@ pub(crate) struct ParsedBatch {
     /// Rows whose latitude lay outside the projection's domain and were moved onto the frame's
     /// edge; always `0` for an unprojected view.
     pub(crate) clipped: u64,
+    /// Rows outside the view's extent, moved onto its edge.
+    pub(crate) clamped: u64,
 }
 
 /// One category cell: its key resolved to the bound code, at the column's declared width. Codes
@@ -286,14 +279,15 @@ fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
     Ok(())
 }
 
-/// Decodes a `/control/ingest` body against the view's projection, its declared scalars, its
-/// group's scoped families and the layer registry. `node_id` is accepted and not stored. Any
-/// refusal refuses the whole batch.
+/// Decodes a `/control/ingest` body against the view's projection and extent, its declared
+/// scalars, its group's scoped families and the layer registry. `node_id` is accepted and not
+/// stored. Any refusal refuses the whole batch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_ingest_batch(
     encoding: BodyEncoding,
     body: &[u8],
     projection: Projection,
+    extent: &Bounds,
     declared: &[DeclaredScalar],
     // The families of the group that owns the view, in manifest order; empty outside a group.
     scoped: &[ScopedScalar],
@@ -303,7 +297,7 @@ pub(crate) fn parse_ingest_batch(
     view_in: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ParsedBatch, DecodeError> {
     let body_name = "ingest body";
-    let (x_name, y_name) = coordinate_columns(projection);
+    let (x_name, y_name) = coordinates::axis_names(projection);
     let fixed = [
         Fixed::ExternalId,
         Fixed::Coordinate(x_name),
@@ -326,7 +320,7 @@ pub(crate) fn parse_ingest_batch(
     let scoped_declared: Vec<DeclaredScalar> = scoped.iter().map(scoped_as_declared).collect();
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
-    let mut clipped = 0u64;
+    let (mut clipped, mut clamped) = (0u64, 0u64);
     let mut padded: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for batch in batches {
         let batch = batch?;
@@ -341,26 +335,20 @@ pub(crate) fn parse_ingest_batch(
         let offset = items.len();
 
         let ext = optional_binary_col(body_name, &batch, "external_id")?;
-        // Only where the right column is absent, so an unprojected view with a declared scalar
-        // called `lon` is unaffected.
-        for (wrong, right) in wrong_spellings(projection) {
-            if batch.column_by_name(wrong).is_some() && batch.column_by_name(right).is_none() {
-                return Err(DecodeError(format!(
-                    "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}'; \
-                     rename '{wrong}' to '{right}'",
-                    match projection {
-                        Projection::None =>
-                            "this view declares no projection, so it has no longitude".to_string(),
-                        _ => format!("this view is projected `{}`", projection.name()),
-                    }
-                )));
-            }
+        let has_column = |name: &str| batch.column_by_name(name).is_some();
+        if let Some((wrong, right)) = coordinates::misnamed_axis(projection, has_column) {
+            return Err(DecodeError(format!(
+                "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}'; \
+                 rename '{wrong}' to '{right}'",
+                match projection {
+                    Projection::None =>
+                        "this view declares no projection, so it has no longitude".to_string(),
+                    _ => format!("this view is projected `{}`", projection.name()),
+                }
+            )));
         }
-        let mut x = coordinate_col(&batch, x_name, offset)?;
-        let mut y = coordinate_col(&batch, y_name, offset)?;
-        // The projection runs here, before anything else reads the coordinates, as the build
-        // runs it on a points file.
-        clipped += project_columns(projection, &mut x, &mut y)?;
+        let x = coordinate_col(&batch, x_name, offset)?;
+        let y = coordinate_col(&batch, y_name, offset)?;
         let access = labels_col(body_name, &batch, "access")?.ok_or_else(|| {
             DecodeError(
                 "ingest body: column 'access' is missing; send each row's labels as a list of \
@@ -381,6 +369,10 @@ pub(crate) fn parse_ingest_batch(
             .collect();
 
         for i in 0..batch.num_rows() {
+            let placed = coordinates::place(projection, Some(extent), x[i], y[i])
+                .map_err(|e| DecodeError(format!("ingest body: row {} {e}", offset + i)))?;
+            clipped += u64::from(placed.clipped);
+            clamped += u64::from(placed.clamped());
             for column in &memberships {
                 tally.read(body_name, column, i, offset)?;
             }
@@ -420,8 +412,8 @@ pub(crate) fn parse_ingest_batch(
             }
             items.push(RawIngestItem {
                 external_id,
-                x: x[i],
-                y: y[i],
+                x: placed.x,
+                y: placed.y,
                 labels: access.labels(i).map(|label| label.as_bytes().to_vec()).collect(),
                 scalars,
                 scoped: scoped_values,
@@ -433,6 +425,7 @@ pub(crate) fn parse_ingest_batch(
         artifacts: tally.into_artifacts(),
         padded_columns: padded.len() as u64,
         clipped,
+        clamped,
     })
 }
 
@@ -614,44 +607,6 @@ pub(crate) fn parse_values_batch(
     })
 }
 
-/// The coordinate columns a batch for this view must not carry, each paired with its right name.
-fn wrong_spellings(projection: Projection) -> [(&'static str, &'static str); 2] {
-    match projection {
-        Projection::None => [("lon", "x"), ("lat", "y")],
-        _ => [("x", "lon"), ("y", "lat")],
-    }
-}
-
-/// Projects the coordinate columns in place, returning how many rows were clipped. A point
-/// outside WGS84's range is refused, as at the build; one outside only the projection's domain
-/// is moved onto the frame's edge and counted, never refused.
-fn project_columns(
-    projection: Projection,
-    x: &mut [f64],
-    y: &mut [f64],
-) -> Result<u64, DecodeError> {
-    if projection == Projection::None {
-        return Ok(0);
-    }
-    let mut clipped = 0u64;
-    for (row, (lon, lat)) in x.iter_mut().zip(y.iter_mut()).enumerate() {
-        if !lon.is_finite() || !lat.is_finite() || lon.abs() > 180.0 || lat.abs() > 90.0 {
-            return Err(DecodeError(format!(
-                "ingest body: row {row} is at lon {lon}, lat {lat}, which is not a place; this \
-                 view is projected ({}), so send WGS84 degrees with longitude within ±180 and \
-                 latitude within ±90",
-                projection.name()
-            )));
-        }
-        // Counted here because the engine's out-of-frame check reads the frame's edge as inside,
-        // so at the whole-world frame it never sees a clipped row.
-        clipped += u64::from(projection.is_clipped(*lat));
-        let (px, py) = projection.forward(*lon, *lat);
-        (*lon, *lat) = (px, py);
-    }
-    Ok(clipped)
-}
-
 /// An optional binary column: `None` when absent, refused when present at another type.
 fn optional_binary_col<'a>(
     body_name: &str,
@@ -720,6 +675,12 @@ mod category_wire {
     use tessera_engine::{DeclaredScalar, Vocabularies};
 
     const CODE_OPS: u32 = 4711;
+    const EXTENT: Bounds = Bounds {
+        x_min: 0.0,
+        x_max: 1.0,
+        y_min: 0.0,
+        y_max: 1.0,
+    };
 
     fn declared() -> Vec<DeclaredScalar> {
         vec![
@@ -807,6 +768,7 @@ mod category_wire {
             BodyEncoding::Arrow,
             &body(column, nullable),
             Projection::None,
+            &EXTENT,
             &declared(),
             &[],
             &vocabularies(),
@@ -877,6 +839,7 @@ mod category_wire {
             BodyEncoding::Arrow,
             &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
             Projection::None,
+            &EXTENT,
             &declared(),
             &[],
             &vocabularies_of(VocabularyKind::Discovered),
@@ -899,6 +862,7 @@ mod category_wire {
             BodyEncoding::Arrow,
             &body(Arc::new(StringArray::from(vec!["ops"])), false),
             Projection::None,
+            &EXTENT,
             &declared(),
             &[],
             &vocabularies_of(VocabularyKind::Discovered),

@@ -1273,6 +1273,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.artifacts_minted += int(body.get("minted", 0))
         report.tessera_ids += [str(i) for i in body.get("tessera_ids", [])]
         report.clipped += int(body.get("clipped", 0))
+        report.clamped += int(body.get("clamped", 0))
     elif page.kind == "values":
         report.values_filled += int(body.get("filled", 0))
         report.already_present += int(body.get("held", 0))

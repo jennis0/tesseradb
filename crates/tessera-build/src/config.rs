@@ -150,6 +150,7 @@ use serde::Deserialize;
 use tessera_spatial::frame::{snap_outward, Snap};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{cell, Bounds, Projection};
+use tessera_store::coordinates::{axis_names, other_axis_names};
 use tessera_store::declaration::{
     check_attribute, check_value_keys, check_vocabulary, AttributeSpec, DECLARABLE_TYPES,
 };
@@ -3097,6 +3098,7 @@ fn compile_views(
         } else {
             compile_projected_fields(
                 &object,
+                projection,
                 source.as_ref(),
                 block.fields.as_ref(),
                 defaults,
@@ -3162,7 +3164,7 @@ fn compile_unprojected_fields(
     extra: Vec<KnownField>,
 ) -> Result<Fields> {
     if let Some(declared) = declared_fields {
-        for (geographic, axis) in [("lon", "x"), ("lat", "y")] {
+        for (geographic, axis) in other_axis_names(Projection::None) {
             if declared.contains_key(geographic) {
                 return Err(declaration_error(format!(
                     "{object}: `fields.{geographic}` on a view that declares no projection. There \
@@ -3174,10 +3176,11 @@ fn compile_unprojected_fields(
             }
         }
     }
+    let (x, y) = axis_names(Projection::None);
     let mut known = vec![
         KnownField::always(ENTITY_ID),
-        KnownField::always("x"),
-        KnownField::always("y"),
+        KnownField::always(x),
+        KnownField::always(y),
         KnownField::always("morton"),
         KnownField::always("residual"),
     ];
@@ -3221,13 +3224,14 @@ fn compile_unprojected_fields(
 /// the ambiguity rather than documenting it.
 fn compile_projected_fields(
     object: &str,
+    projection: Projection,
     source: Option<&PathBuf>,
     declared_fields: Option<&BTreeMap<String, String>>,
     defaults: &Defaults,
     extra: Vec<KnownField>,
 ) -> Result<Fields> {
     if let Some(declared) = declared_fields {
-        for (axis, geographic) in [("x", "lon"), ("y", "lat")] {
+        for (axis, geographic) in other_axis_names(projection) {
             if declared.contains_key(axis) {
                 return Err(declaration_error(format!(
                     "{object}: `fields.{axis}` on a projected view. A projected view's \
@@ -3250,10 +3254,11 @@ fn compile_projected_fields(
             }
         }
     }
+    let (lon, lat) = axis_names(projection);
     let mut known = vec![
         KnownField::always(ENTITY_ID),
-        KnownField::always("lon"),
-        KnownField::always("lat"),
+        KnownField::always(lon),
+        KnownField::always(lat),
     ];
     known.extend(extra);
     let fields = check_fields(
@@ -3266,7 +3271,7 @@ fn compile_projected_fields(
     // `lon` and `lat` become the canonical `x` and `y`, defaulting to their own names — which is
     // what makes `lon`/`lat` the columns a projected view reads with no `fields` map at all.
     let mut map = fields.map;
-    for (axis, geographic) in [("x", "lon"), ("y", "lat")] {
+    for (axis, geographic) in other_axis_names(projection) {
         let column = map
             .remove(geographic)
             .unwrap_or_else(|| geographic.to_string());
@@ -3523,6 +3528,7 @@ fn compile_view_group(
     } else {
         compile_projected_fields(
             &object,
+            projection,
             source.as_ref(),
             block.fields.as_ref(),
             defaults,

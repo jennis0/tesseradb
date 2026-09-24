@@ -32,7 +32,7 @@ use std::sync::mpsc;
 use arrow::array::{Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, TimeUnit};
 use tessera_store::access_column::AccessBatch;
-use tessera_store::coordinates::{read_coordinates, ColumnError};
+use tessera_store::coordinates::{place, read_coordinates, ColumnError};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
@@ -549,21 +549,17 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             if limit.is_some_and(|l| ids[i] >= l) || !selected(i) {
                                 continue;
                             }
-                            // The one place a coordinate is placed, reached in the width the file
-                            // was read at: the column arrives as `f64` whatever width it was
-                            // stored at, so nothing narrows between the Parquet page and the
-                            // fixed-point grid. The transform runs here, at the boundary, in the
-                            // same place a write does it (`projections.md` §3);
-                            // `Projection::None` is the exact identity, so an unprojected view's
-                            // stored positions are the bits they always were. A coordinate outside
-                            // the projection's input domain is refused, and one outside its
-                            // *output* domain clipped and counted, by the survey pass that every
-                            // build runs before this one (`survey_points`).
-                            let (x, y) = projection.forward(xs[i], ys[i]);
+                            // Counted by the survey every build runs before this pass.
+                            let placed = place(projection, Some(extent), xs[i], ys[i]).map_err(
+                                |e| BuildError::Schema {
+                                    path: path.to_path_buf(),
+                                    detail: format!("{} {} {e}", fields.of(ENTITY_ID), ids[i]),
+                                },
+                            )?;
                             if visit(PointRow {
                                 source_id: ids[i],
-                                qx: fixed32(x, extent.x_min, extent.x_max),
-                                qy: fixed32(y, extent.y_min, extent.y_max),
+                                qx: fixed32(placed.x, extent.x_min, extent.x_max),
+                                qy: fixed32(placed.y, extent.y_min, extent.y_max),
                             })
                             .is_break()
                             {
@@ -1432,63 +1428,21 @@ pub fn survey_points(
             {
                 continue;
             }
-            // A non-finite coordinate would poison every comparison below and produce a box the
-            // extent validator then refuses with no mention of the row that caused it. Named
-            // here, where the file and the value are both in hand.
-            let (x, y) = (xs[i], ys[i]);
-            if !x.is_finite() || !y.is_finite() {
-                return Err(BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "{} has a non-finite position ({x}, {y}), so no box fits the \
-                         data. `extent = \"auto\"` reads every row it would place",
-                        name_of(i)
-                    ),
-                });
-            }
-            // **The transform runs here, and the two things it can find are different.** A
-            // coordinate outside WGS84's own range is not a coordinate and is refused
-            // (`projections.md` §2); a latitude inside that range but outside the *projection's*
-            // domain is clipped onto the frame's edge, counted, and never refused (§7) — the
-            // clamp counter below structurally cannot see one, because the edge is exactly where
-            // it says nothing is clamped. Every build takes this pass before any work, so it is
-            // the one place the check has to be.
-            let (x, y) = if projection == Projection::None {
-                (x, y)
-            } else {
-                if x.abs() > 180.0 || y.abs() > 90.0 {
-                    return Err(BuildError::Schema {
-                        path: path.to_path_buf(),
-                        detail: format!(
-                            "{} is at lon {x}, lat {y}, which is not a place: this view is \
-                             projected ({}), and the accepted input coordinate system is WGS84 \
-                             degrees — longitude within ±180, latitude within ±90 \
-                             (projections.md §2). Convert the source to WGS84 before building, or \
-                             declare `projection = \"none\"` if this view's space is not the Earth",
-                            name_of(i),
-                            projection.name()
-                        ),
-                    });
-                }
-                survey.clipped += u64::from(projection.is_clipped(y));
-                projection.forward(x, y)
-            };
+            let placed = place(projection, against, xs[i], ys[i]).map_err(|e| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!("{} {e}", name_of(i)),
+            })?;
+            let (x, y) = placed.projected;
+            survey.clipped += u64::from(placed.clipped);
+            survey.clamped_x += u64::from(placed.clamped_x);
+            survey.clamped_y += u64::from(placed.clamped_y);
+            survey.clamped += u64::from(placed.clamped());
             found = true;
             survey.rows += 1;
             x_min = x_min.min(x);
             x_max = x_max.max(x);
             y_min = y_min.min(y);
             y_max = y_max.max(y);
-            if let Some(frame) = against {
-                // `v == max` is **not** a clamp: cells are half-open and the maximum lands in the
-                // top cell by construction, so a tightly-fitted corpus must not report its own
-                // boundary rows as misplaced.
-                let out_x = x < frame.x_min || x > frame.x_max;
-                let out_y = y < frame.y_min || y > frame.y_max;
-                survey.clamped_x += u64::from(out_x);
-                survey.clamped_y += u64::from(out_y);
-                survey.clamped += u64::from(out_x || out_y);
-            }
         }
     }
     survey.bounds = found.then_some(Bounds {
