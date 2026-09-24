@@ -150,17 +150,26 @@ describe('decodeViewport', () => {
     }
   });
 
-  it('reads a null rendered value into present, where Arrow reads it null, and nowhere else', () => {
-    // Held to Arrow's own reading of the same frames.
+  it('reads every rendered value as Arrow reads it, and a null into present', () => {
+    // Held to Arrow's own reading of the same frames, row by row and column by column.
     const body = fixture('viewport-plain.bin');
     const r = decodeViewport(body);
     const points = splitFramedStreams(body).points.map((payload) => tableFromIPC(payload));
+    const rendered = (meta.declared_scalars as {name: string; render: boolean}[]).filter((c) => c.render);
+    expect(Object.keys(r.scalars).sort()).toEqual(rendered.map((c) => c.name).sort());
     let withNulls = 0;
     for (const [name, column] of Object.entries(r.scalars)) {
-      const valid = points.flatMap((t) => {
+      // Arrow reads a timestamp as a millisecond number; its stored microseconds are the values.
+      const cells = points.flatMap((t) => {
         const vector = t.getChild(name)!;
-        return Array.from({length: vector.length}, (_, i) => (vector.isValid(i) ? 1 : 0));
+        const micros = column.arrowType === 'timestamp_us' ? vector.data.flatMap((d) => Array.from(d.values as BigInt64Array)) : null;
+        return Array.from({length: vector.length}, (_, i) => ({valid: vector.isValid(i), value: micros ? micros[i] : vector.get(i)}));
       });
+      expect(column.values.length, `column ${name}`).toBe(cells.length);
+      cells.forEach(({valid, value}, i) => {
+        if (valid) expect(column.values[i], `column ${name}, row ${i}`).toBe(value);
+      });
+      const valid = cells.map((c) => (c.valid ? 1 : 0));
       if (valid.every((v) => v === 1)) {
         expect(column.present ?? null, `column ${name}`).toBeNull();
         continue;

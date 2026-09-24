@@ -1,5 +1,6 @@
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
+import {tableFromIPC} from 'apache-arrow';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import {decodeArtifactsFrame, decodeViewport} from '../src/decode.js';
@@ -233,9 +234,10 @@ describe('the artifacts frame, decoded from a captured response', () => {
   const fixture = (name: string) =>
     new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 
-  it('refuses a body captured before the shape columns, rather than reading it as shapeless', () => {
-    // A real body from a server that sent the hull as `hull_x`/`hull_y`. Its tiles frame predates
-    // other columns too, so the artifacts frame is decoded alone: the old names are the refusal.
+  it('refuses an artifacts frame captured before the shape columns', () => {
+    // A real body from a server that sent the hull as `hull_x`/`hull_y` and had no `rung` column.
+    // Its tiles frame predates other columns too, so the artifacts frame is decoded alone. The
+    // refusal of the old names by themselves is tested in `artifacts-frame.test.ts`.
     refused(() => decodeArtifactsFrame(splitFramedStreams(fixture('viewport-artifacts-pre-r40.bin')).artifacts!));
   });
 
@@ -305,6 +307,24 @@ describe('the artifacts frame, decoded from a captured response', () => {
     // decoder read row 0 for everybody.
     const centroids = new Set(result.artifacts.map((a) => a.centroid!.join(',')));
     expect(centroids.size).toBe(result.artifacts.length);
+  });
+
+  it('reads every shape part, ring and vertex as Arrow reads the nested lists', () => {
+    const body = fixture('viewport-artifacts.bin');
+    const result = decodeViewport(body);
+    const table = tableFromIPC(splitFramedStreams(body).artifacts!);
+    const nested = (name: string, i: number) =>
+      Array.from(table.getChild(name)!.get(i) as Iterable<Iterable<Iterable<number>>>, (rings) => Array.from(rings, (ring) => Array.from(ring)));
+    expect(result.artifacts.length).toBe(table.numRows);
+    result.artifacts.forEach((a, i) => {
+      const xs = nested('shape_x', i);
+      const ys = nested('shape_y', i);
+      expect(a.shape, `artifact ${i}`).toEqual(xs.map((rings, p) => rings.map((ring, r) => ring.map((x, v) => [x, ys[p]![r]![v]]))));
+    });
+    // The capture holds a shape of several parts and a ring of several vertices, so reading only
+    // the first of either is caught.
+    expect(result.artifacts.some((a) => a.shape!.length > 1)).toBe(true);
+    expect(result.artifacts.some((a) => a.shape!.some((part) => part.some((ring) => ring.length > 1)))).toBe(true);
   });
 });
 

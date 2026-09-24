@@ -36,6 +36,13 @@ import {
 import {base64} from '../core/src/control.ts';
 import {start} from '../core/test/served.ts';
 
+/**
+ * The identity key both servers are built with. It and the wide declaration's pinned category
+ * codes make a recapture over unchanged corpora serve the same ids and codes, so every file but
+ * the trailers' timings is rewritten byte for byte.
+ */
+const IDENTITY_KEY = '00112233445566778899aabbccddeeff';
+
 const FIXTURES = join(import.meta.dirname, '..', 'core', 'test', 'fixtures');
 const EXPECTED = join(import.meta.dirname, '..', 'wire-example', 'test', 'expected.json');
 
@@ -146,20 +153,21 @@ name       = "colour"
 width      = "u8"
 value_set  = "closed"
 visibility = "public"
-values     = ["red", "green", "blue", "amber"]
+values     = { red = 1, green = 2, blue = 3, amber = 4 }
 
 [[vocabulary]]
 name       = "family"
 width      = "u16"
 value_set  = "closed"
 visibility = "public"
-values     = [${Array.from({length: 20}, (_, i) => `"f${String(i).padStart(3, '0')}"`).join(', ')}]
+values     = { ${Array.from({length: 20}, (_, i) => `f${String(i).padStart(3, '0')} = ${i + 1}`).join(', ')} }
 
 [[vocabulary]]
 name       = "tag"
 width      = "u16"
 value_set  = "open"
 visibility = "derived"
+values     = { ${Array.from({length: 37}, (_, i) => `t${i} = ${i + 1}`).join(', ')} }
 
 ${[
   category('colour'),
@@ -194,7 +202,7 @@ async function captureWide() {
   const directory = mkdtempSync(join(tmpdir(), 'tessera-goldens-'));
   try {
     writeParquet(wideTable(), join(directory, 'points.parquet'));
-    const served = await start({directory, schema: WIDE_SCHEMA});
+    const served = await start({corpus: {directory, schema: WIDE_SCHEMA}, identityKey: IDENTITY_KEY});
     if (typeof served === 'string') throw new Error(served);
     try {
       const golden = await session(served, ['golden']);
@@ -213,9 +221,8 @@ async function captureWide() {
         check(points[0].getChild(name) !== null, `the points frame carries no column ${name}`);
         if (category === null) check(points.some((t) => t.getChild(name).nullCount > 0), `no served point is null in ${name}`);
       }
-      // The worked decodes check a tessera_id survives past 2^53, which a random blinding key
-      // misses about once in two thousand builds.
-      check(ids[0] > 2n ** 53n, 'the first served tessera_id is below 2^53; run the capture again');
+      // The worked decodes check a tessera_id survives past 2^53.
+      check(ids[0] > 2n ** 53n, 'the first served tessera_id is below 2^53; change IDENTITY_KEY');
       captured.set('meta.json', JSON.stringify(meta, null, 2) + '\n');
       captured.set('viewport-plain.bin', plain);
       captured.set('viewport-underlay.bin', underlay);
@@ -241,7 +248,7 @@ const PRINCIPAL = [
  * browse pages, over the notebook corpus as `PRINCIPAL`.
  */
 async function captureNotebook() {
-  const served = await start();
+  const served = await start({identityKey: IDENTITY_KEY});
   if (typeof served === 'string') throw new Error(served);
   try {
     const reader = await session(served, PRINCIPAL);
@@ -259,6 +266,15 @@ async function captureNotebook() {
     check(artifacts?.getChild('shape_x') != null, 'the clusters carry no shape');
     const centroids = new Set(column(artifacts, 'centroid_x').map((x, i) => `${x},${artifacts.getChild('centroid_y').get(i)}`));
     check(artifacts.numRows >= 3 && centroids.size === artifacts.numRows, 'the clusters do not have distinct centroids');
+    // Every row of the `k = 0` body carries a shape, and between them they hold a shape of several
+    // parts and a ring of several vertices, so a decoder reading only the first of either fails.
+    const shapes = column(tables(channel, 5)[0], 'shape_x');
+    check(shapes.every((parts) => parts !== null), 'an artifact of the k = 0 capture carries no shape');
+    check(shapes.some((parts) => parts.length > 1), 'no artifact of the k = 0 capture has a shape of several parts');
+    check(
+      shapes.some((parts) => Array.from(parts).some((rings) => Array.from(rings).some((ring) => ring.length > 1))),
+      'no ring of the k = 0 capture has several vertices'
+    );
     const members = tables(membership, 3).flatMap((t) => column(t, 'membership:clusters/kmeans'));
     check(members.some((m) => m !== null), 'no served point is named a member');
 
@@ -287,9 +303,12 @@ async function captureNotebook() {
     const [root] = (await reader.browse({view: 's0', layer: 'clusters/hdbscan', limit: 1})).artifacts;
     const children = await reader.browse({view: 's0', layer: 'clusters/hdbscan', parent: root.tessera_id, filters: {archive: {in: ['q-fin']}}});
     check(children.artifacts.every((a) => a.parent_ids.includes(root.tessera_id)), 'a child does not name the root it was asked under');
+    check(children.artifacts.every((a) => a.rung === 1), 'a child of the root is not at rung 1');
     check(children.artifacts.some((a) => a.matched_count === 0 && a.masked_count > 0), 'no child is one the filter admits nothing of');
     const search = await reader.browse({view: 's0', layer: 'clusters/hdbscan', q: 'hdb', limit: 2});
     check(typeof search.next === 'string', 'the search page has no next page');
+    const browsed = [roots, children, search].flatMap((p) => [...p.artifacts, ...p.parents].flatMap((a) => [a.tessera_id, ...a.parent_ids]));
+    check(browsed.some((id) => BigInt(id) > 2n ** 53n), 'no browsed tessera_id is past 2^53');
 
     captured.set('viewport-artifacts.bin', channel);
     captured.set('viewport-membership.bin', membership);

@@ -221,9 +221,14 @@ the `tessera` binary and `data/notebook/`), captures from each, and writes every
   children, and a search.
 
 Each capture checks what its tests rely on: a null in every rendered column that is not a
-category, a first point id past 2^53, distinct cluster centroids and a named member,
-`highlighted < matched < visible` above zero, and a next page where one is expected. Where one
-fails the script writes nothing. `viewport-artifacts-pre-r40.bin` is never recaptured: it is a body
+category, a first point id past 2^53, distinct cluster centroids and a named member, a shape on
+every cluster with one of several parts and a ring of several vertices, `highlighted < matched <
+visible` above zero, children at rung 1, and a next page where one is expected. Where one fails
+the script writes nothing.
+
+Both servers are built with one fixed identity key and the wide declaration pins every category
+code, so a recapture where nothing changed rewrites every file byte for byte except each viewport
+body's trailer, which carries timings. `viewport-artifacts-pre-r40.bin` is never recaptured: it is a body
 from before the shape columns, kept for the test that refuses it.
 
 ## Annotation layers, and the number beside a cluster
