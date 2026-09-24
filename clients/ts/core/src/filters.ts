@@ -146,38 +146,27 @@ export function withVerb(draft: FilterDraft, column: string, verb: ClauseVerb): 
 }
 
 /**
- * A draft with one control per filterable column, every one empty.
+ * A draft with one empty control per filterable column, from `/v1/meta`'s `filter_operands`. A
+ * column that publishes no operator a control here can send gets no control. A keyword control
+ * starts on whichever of `eq`, `prefix` and `contains` the column publishes first.
  *
- * Seeded from `/v1/meta`'s `filter_operands` rather than from the declared columns, so a bundle
- * without an `abstract` simply has no abstract control — the client special-cases nothing, and a
- * column that gains a filter placement in a rebuild gains its control with no code change.
- *
- * A column whose published operator set contains none this draft has a shape for is skipped
- * rather than given a control that cannot be sent; silently drawing a box whose operator the
- * column refuses would produce a 422 on the first keystroke.
- *
- * **A key is a leaf's name, verbatim** — which is what makes a group-scoped attribute's pin
- * (`views.md` §5) need no machinery here: a draft keyed `sentiment@2026-Q3` composes that leaf.
- * What this function cannot decide is *when* to pin, because that depends on the view the request
- * will name: a column whose operand entry carries a `scope` is answerable bare only under a view
- * of that group, or of a group sharing its views. The bare key is what is seeded, and a caller
- * that draws the control on an unrelated view re-keys it with the view it means.
+ * A key is the leaf's name as sent. A group-scoped column is seeded under its bare name, which the
+ * server answers only under a view of its group; a caller drawing it under another view re-keys it
+ * as `column@key`.
  */
 export function emptyDraft(operands: FilterOperandSet[]): FilterDraft {
   const draft: FilterDraft = {};
   for (const {column, family, operands: ops} of operands) {
     switch (family) {
       case 'text':
-        // `match` is the operand every text column has; `phrase` rides the same index and is
-        // offered only when published, so a column indexed without positions keeps its box.
         if (ops.includes('match')) draft[column] = {family: 'text', query: '', mode: 'all', verb: 'filter'};
         break;
       case 'string':
-      case 'keyword':
-        if (ops.includes('contains')) draft[column] = {family, needle: '', op: 'contains', verb: 'filter'};
-        else if (ops.includes('prefix')) draft[column] = {family, needle: '', op: 'prefix', verb: 'filter'};
-        else if (ops.includes('eq')) draft[column] = {family, needle: '', op: 'eq', verb: 'filter'};
+      case 'keyword': {
+        const op = ops.find((o): o is 'eq' | 'prefix' | 'contains' => o === 'eq' || o === 'prefix' || o === 'contains');
+        if (op) draft[column] = {family, needle: '', op, verb: 'filter'};
         break;
+      }
       case 'category':
         if (ops.includes('in')) draft[column] = {family: 'category', keys: [], verb: 'filter'};
         break;
