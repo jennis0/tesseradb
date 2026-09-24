@@ -82,7 +82,7 @@ export type MapProbe = {
     outlinesMs: number;
     labelsMs: number;
     layersMs: number;
-    /** Lookup-texture writes since the map was made — what a colouring interaction costs. */
+    /** Writes to the layer's lookup texture since the layer made it. */
     lutWrites: number;
     /**
      * What the last paint drew of the artifacts: the **rings** the outline layer carries, the

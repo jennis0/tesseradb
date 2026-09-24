@@ -43,12 +43,18 @@ function draw(): void {
   deck.setProps({layers: [worldEdge(), store ? new TesseraLayer({id: 'tessera', store}) : null]});
 }
 
+/** The newest sign-in asked for; an older one's token that lands later is dropped. */
+let opening = 0;
+
 async function open(user: string): Promise<void> {
+  const ticket = ++opening;
   unsubscribe?.();
+  unsubscribe = null;
   store?.dispose();
   store = null;
   draw();
   const {token} = (await (await fetch(`/token?user=${encodeURIComponent(user)}`, {method: 'POST'})).json()) as {token: string};
+  if (ticket !== opening) return;
   const s = createStore({viewerUrl: location.origin, token});
   store = s;
   // The first view goes out once `meta` has arrived: the store's frame comes with it.
