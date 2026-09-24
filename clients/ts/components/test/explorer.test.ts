@@ -125,3 +125,13 @@ describe('<tessera-explorer> narrow layout', () => {
     expect(shadow.activeElement).toBe(tabs(shadow)[0]);
   });
 });
+
+describe('<tessera-explorer> detail', () => {
+  it('drops the selection when the card is closed', async () => {
+    const {host, shadow, store} = await explorer();
+    store.set('selection', {item: {id: 5n, detail: {fields: {}, externalId: null, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
+    await settle(host);
+    (shadow.querySelector('tessera-item-card')!.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
+    expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
+  });
+});

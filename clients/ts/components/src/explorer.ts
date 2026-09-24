@@ -372,19 +372,17 @@ export class TesseraExplorer extends TesseraElement {
     const active = s ? activeCount(s.get('filters').draft) : 0;
     const artifacts = s?.get('artifacts');
     const inView = artifacts && artifacts.status === 'shown' ? (artifacts.lineage.linked ? artifacts.lineage.roots.length : artifacts.served.length) : 0;
-    // The level drawn: the one chosen through the legend, else — for a tiered layer the server
-    // served whole — the level the view's budget would have cut at (design §6), else the deepest
-    // served. The legend shows which; the map colours, outlines and labels at it.
+    // The level drawn: the one chosen through the legend, else, for a tiered layer the server
+    // served whole, the level the view's budget would have cut at, else the deepest served. The
+    // legend shows which; the map colours, outlines and labels at it.
     const autoLevel = this.autoLevel();
     const level = this.level ?? autoLevel;
     const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick);
     // The detail region shows whichever changed last.
     const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
     const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']}></tessera-artifact-card>` : html`<tessera-item-card exportparts=${FORWARD['item-card']} title-field=${this.titleField || nothing} .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
-    // The two pickers sit at the top of the toolbar slot, above *Colour by* and *Layers*
-    // (`view-switching.md` §6.3) — in the docked sidebar, the overlay's left card and the narrow
-    // layout's *Layers* sheet alike, all three of which render this slot. Both draw nothing for
-    // the one-view corpus that every demo corpus is today.
+    // The two view pickers head the toolbar slot, which the docked sidebar, the overlay's left
+    // card and the narrow layout's Layers sheet all render. Both draw nothing for a one-view corpus.
     const toolbar = html`<slot name="toolbar"><tessera-view-picker exportparts=${FORWARD['view-picker']}></tessera-view-picker><tessera-key-picker exportparts=${FORWARD['key-picker']}></tessera-key-picker><tessera-legend exportparts=${FORWARD.legend} selectable .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
     const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']}></tessera-filter-panel></slot>`;
@@ -453,10 +451,8 @@ export class TesseraExplorer extends TesseraElement {
               ? detail
               : nothing;
 
-    // **The tooltip slot is forwarded only when the host supplied one.** A slot assigned another
-    // slot counts as filled even when that slot has nothing in it, so forwarding unconditionally
-    // suppressed the map's own fallback — the hover rendered as an empty bordered box beside the
-    // pointer (the owner's review, 2026-08-28).
+    // The tooltip slot is forwarded only when the host supplied one: a slot assigned another slot
+    // counts as filled even when that slot is empty, which would hide the map's own tooltip.
     return html`<div part="frame" @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))} @tessera-viewfollow=${(e: CustomEvent<{view: string; x: number; y: number}>) => this.followItem(e.detail)} @tessera-close=${() => this.closeDetail()}>
       <tessera-map
         exportparts=${FORWARD.map}
@@ -469,7 +465,6 @@ export class TesseraExplorer extends TesseraElement {
         .clusterLevel=${level}
         @tessera-viewchange=${() => this.requestUpdate()}
         @tessera-pick=${() => this.requestUpdate()}
-        @tessera-hover=${() => nothing}
         @click=${() => this.requestUpdate()}
       >
         <div slot="bottom-left" class="in-map-strip"><slot name="status"><tessera-status exportparts=${FORWARD.status}></tessera-status></slot></div>
@@ -481,7 +476,6 @@ export class TesseraExplorer extends TesseraElement {
         : nothing}
       <div part="strip-row"><tessera-status exportparts=${FORWARD.status}></tessera-status></div>
       <div part="tabs" role="tablist" aria-label="Explorer panels" @keydown=${this.onTabKey}>${tabs.map(tab)}</div>
-      ${meta ? nothing : nothing}
     </div>`;
   }
 
@@ -599,7 +593,7 @@ export class TesseraExplorer extends TesseraElement {
     if (!s) return;
     const m = this.map;
     if (m) m.lastPick = null;
-    s.clearSelection?.();
+    s.clearSelection();
     this.requestUpdate();
   }
 }
