@@ -654,12 +654,12 @@ impl Executor {
             .in_flight
             .store(segments_version, Ordering::SeqCst);
         self.publish_arc(Arc::clone(&next), started);
-        self.deps.refresh.spawn(next);
-
+        // Pruned before the refresh starts, so its snapshot holds what retention keeps and no more.
         self.row_projection_cache.prune_generations_below(
             segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS),
-            &self.generation.load().prefix,
+            &next.prefix,
         );
+        self.deps.refresh.spawn(next);
         self.prune_region_cache(segments_version);
         self.health.merges.fetch_add(1, Ordering::Relaxed);
     }
@@ -2326,15 +2326,15 @@ impl Executor {
             .in_flight
             .store(segments_version, Ordering::SeqCst);
         self.publish_arc(Arc::clone(&next), started);
-        self.deps.refresh.spawn(next);
-
         // A flush supersedes geometry, so it prunes exactly as any other geometry publication
-        // does: one swap, one `segments_version` bump, one retention pass. The superseded
+        // does: one swap, one `segments_version` bump, one retention pass, before the refresh
+        // starts so its snapshot holds what retention keeps and no more. The superseded
         // generation itself is held by nothing but the requests already in flight against it.
         self.row_projection_cache.prune_generations_below(
             segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS),
-            &self.generation.load().prefix,
+            &next.prefix,
         );
+        self.deps.refresh.spawn(next);
         self.prune_region_cache(segments_version);
         self.health.flushes.fetch_add(1, Ordering::Relaxed);
         self.health
