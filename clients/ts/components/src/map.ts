@@ -7,7 +7,9 @@ import {
   assertCompositionMatchesServed,
   dataToWorldXY,
   worldBbox,
+  type ArtifactsProjection,
   type FiltersProjection,
+  type MarksProjection,
   type RegionProjection,
   type Store,
   type SelectionShape,
@@ -59,7 +61,10 @@ const FINALIZE_SETTLE_MS = 250;
  */
 const HOVER_DESCRIBE_MS = 140;
 
-/** What the map publishes for an instrument or a smoke script — mutated in place, one object. */
+/**
+ * What the map publishes for an instrument or a smoke script, mutated in place, one object.
+ * `timings.frame` and `cluster` are filled only while the map's `measure` is on.
+ */
 export type MapProbe = {
   paints: number;
   at: number;
@@ -321,6 +326,12 @@ export class TesseraMap extends TesseraElement {
    * on and the layer still builds it from the exact tiles' counts (decision 0097).
    */
   @property({type: Boolean}) accessor wash = false;
+  /**
+   * Whether the map measures itself for the probe: the frame-gap loop behind `probe.timings.frame`,
+   * the colour-by-cluster sample behind `probe.cluster`, and the check that each composition
+   * matches what was served. Off, none of the three runs.
+   */
+  @property({type: Boolean}) accessor measure = false;
   /** A fixed mark radius in pixels; unset, the marks are sized by their count and the zoom (`markStyle`). */
   @property({type: Number}) accessor radius: number | null = null;
   /** The mode and fit control cluster — the map's own, not a slot. */
@@ -390,7 +401,7 @@ export class TesseraMap extends TesseraElement {
     this.setAttribute('role', 'application');
     if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', 'map — arrow keys pan, + and - zoom');
     this.addEventListener('keydown', this.onKey);
-    this.startFrameLoop();
+    if (this.measure) this.startFrameLoop();
   }
 
   override disconnectedCallback(): void {
@@ -410,6 +421,11 @@ export class TesseraMap extends TesseraElement {
 
   protected override updated(changed: PropertyValues<this>): void {
     this.ensureDeck();
+    if (changed.has('measure')) {
+      if (this.measure && this.isConnected) this.startFrameLoop();
+      else this.stopFrameLoop();
+      if (this.measure && this.resolvedStore) this.measureStore(this.resolvedStore);
+    }
     const s = this.resolvedStore;
     if (s) {
       if (changed.has('colourBy') && this.colourBy !== '') s.setColourBy(this.colourBy === 'none' ? null : this.colourBy);
@@ -501,16 +517,7 @@ export class TesseraMap extends TesseraElement {
     const legend = s.get('legend');
     const clusterLayer = clusterLayerOf(legend.colourBy);
     p.encoding = clusterLayer ? `cluster|${clusterLayer}` : encodingSignature(encodingOf(s.get('meta'), legend));
-    if (view.composition && !checkedCompositions.has(view.composition)) {
-      checkedCompositions.add(view.composition);
-      assertCompositionMatchesServed(view.composition);
-    }
-    const artifacts = s.get('artifacts');
-    if (artifacts !== this.probedArtifacts || view.composition !== this.probedComposition) {
-      this.probedArtifacts = artifacts;
-      this.probedComposition = view.composition;
-      p.cluster = this.clusterProbe(clusterLayer, artifacts, s.get('marks').bands);
-    }
+    if (this.measure) this.measureStore(s);
 
     // Events for what arrived: the picked record, the opened artifact, the region's counts.
     const sel = s.get('selection');
@@ -607,9 +614,22 @@ export class TesseraMap extends TesseraElement {
   private paintedWashChannel: ReturnType<typeof washChannel> | null = null;
   private regionShape: SelectionShape | null = null;
 
+  /** What `measure` adds on a store change: the composition check and the cluster sample. */
+  private measureStore(s: Store): void {
+    const view = s.get('view');
+    if (view.composition && !checkedCompositions.has(view.composition)) {
+      checkedCompositions.add(view.composition);
+      assertCompositionMatchesServed(view.composition);
+    }
+    const artifacts = s.get('artifacts');
+    if (artifacts === this.probedArtifacts && view.composition === this.probedComposition) return;
+    this.probedArtifacts = artifacts;
+    this.probedComposition = view.composition;
+    this.probe.cluster = this.clusterProbe(clusterLayerOf(s.get('legend').colourBy), artifacts, s.get('marks').bands);
+  }
+
   /** See {@link MapProbe.cluster}: a sample of carried ordinals, each resolved through the table. */
-  private clusterProbe(clusterLayer: string | null, artifacts: ReturnType<Store['get']> & {layers: string[]}, bands: readonly {membership: Record<string, {distinct: Uint32Array}>}[]): MapProbe['cluster'] {
-    const a = artifacts as unknown as import('@tesseradb/client').ArtifactsProjection;
+  private clusterProbe(clusterLayer: string | null, a: ArtifactsProjection, bands: MarksProjection['bands']): MapProbe['cluster'] {
     const layer = clusterLayer ?? a.layers[0] ?? null;
     const rows = clusterLayer ? a.colourServed : a.served;
     const rowOrdinals = clusterLayer ? new Set(rows.map((x) => a.table.ordinalOf(x.layer, x.tesseraId))) : a.servedOrdinals;
@@ -1138,7 +1158,7 @@ export class TesseraMap extends TesseraElement {
     e.preventDefault();
   };
 
-  // ---- the frame loop, for the probe ---------------------------------------------------------
+  // ---- the frame loop, for the probe while measuring -------------------------------------------
 
   private startFrameLoop(): void {
     if (this.frameLoop !== null || typeof requestAnimationFrame === 'undefined') return;

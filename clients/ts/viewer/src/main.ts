@@ -259,6 +259,8 @@ async function publishProbe(): Promise<void> {
   await explorer.updateComplete;
   const map = explorer.map;
   if (!map) return;
+  // The frame gaps and the cluster sample the harness reads are filled only while measuring.
+  map.measure = true;
   const probe = map.probe as MapProbe & {lanes: Lanes};
   probe.lanes ??= {decode: [], absorb: {split: [], store: [], remap: [], remapPoints: [], sliceMaxMs: 0}, region: null, coverage: null, longTasks: []};
   window.__tesseraProbe = probe;
