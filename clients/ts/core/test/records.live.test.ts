@@ -127,6 +127,17 @@ function frameStarts(body: Uint8Array): {at: number; kind: number; length: numbe
 /** Every value of column `name` across `tables`, in order. */
 const column = (tables: Table[], name: string): unknown[] => tables.flatMap((t) => [...t.getChild(name)!]);
 
+/** Each column's name and Arrow type. */
+const typesOf = (table: Table) => table.schema.fields.map((f) => `${f.name}: ${String(f.type)}`);
+
+/** The first page of a read, and the read stopped after it. */
+async function firstPage<Head>(opening: Promise<RecordsRead<Head>>): Promise<Table> {
+  const read = await opening;
+  const {value} = await read.next();
+  await read.return();
+  return value as Table;
+}
+
 /** Each table's rows as one comparable string, a 64-bit value as its decimal digits. */
 const dump = (tables: Table[]) => tables.map((t) => JSON.stringify(t.toArray(), (_, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)));
 
@@ -199,6 +210,39 @@ describe('bulk reads against a live server', () => {
     await lanesFree();
     const rest = await items({...request, cursor: read.cursor!});
     expect([...column([first.value as Table], 'tessera_id'), ...column(rest.tables, 'tessera_id')]).toEqual(whole);
+  });
+
+  it('gives a read that finds nothing one page of no rows, with the columns and types of a page with rows', async (ctx) => {
+    live(ctx);
+    const request: ItemsRequest = {view: 's0', fields: ['archive', 'title', 'submitted_at'], systemFields: ['position', 'external_id', 'labels'], pageRows: 100};
+    const some = await firstPage(client.items(session.token, request));
+    expect(some.numRows).toBe(100);
+    const none = await items({...request, filters: {arxiv_id: {eq: 'no such paper'}}, count: true});
+    expect(none.tables.map((t) => t.numRows)).toEqual([0]);
+    expect(typesOf(none.tables[0]!)).toEqual(typesOf(some));
+    expect(none.read.head).toMatchObject({matched: 0});
+    expect(none.read.pageEnd).toEqual({next: null, endedBy: 'end'});
+    expect(none.read.trailer).toMatchObject({pages: 1, rows: 0, next: null});
+
+    // The children of an artifact that has none.
+    const layer: ArtifactsRequest = {view: 's0', layer: 'taxonomy/arxiv', fields: ['key', 'level', 'masked_count', 'parents'], level: 1, pageRows: 5};
+    const leaves = await firstPage(client.artifacts(session.token, layer));
+    const leaf = leaves.getChild('tessera_id')!.get(0) as bigint;
+    const children = await artifacts({...layer, level: undefined, parent: leaf});
+    expect(children.tables.map((t) => t.numRows)).toEqual([0]);
+    expect(typesOf(children.tables[0]!)).toEqual(typesOf(leaves));
+  });
+
+  it('carries a page of no rows from a response part-way through a read that finds nothing', async (ctx) => {
+    live(ctx);
+    const filters = {archive: {in: ['cs']}};
+    const {matched} = await viewportCounts({filters});
+    // One page that holds every match, so the response after it scans the rest and finds none.
+    const {tables, responses, read} = await items({view: 's0', fields: ['archive'], filters, pageRows: matched, pages: 1});
+    expect(tables.map((t) => t.numRows)).toEqual([matched, 0]);
+    expect(responses).toBe(2);
+    expect(typesOf(tables[1]!)).toEqual(typesOf(tables[0]!));
+    expect(read.pageEnd).toEqual({next: null, endedBy: 'end'});
   });
 
   it('reads the items a filter matches, as many as the viewport matches, and marks them under keepUnmatched', async (ctx) => {

@@ -104,13 +104,16 @@ function byCursor(answers: Record<string, () => Response>) {
   };
 }
 
-/** One response's body: `pages`, each with the cursor of its page end, then a trailer naming `next`. */
+/**
+ * One response's body: `pages`, each with the cursor of its page end, then a trailer naming
+ * `next`. A page of no rows ends by time where a cursor follows it, as the server sends one.
+ */
 function responseOf(pages: [Table, string | null][], next: string | null, head: Record<string, unknown> = {order: 'map', page_rows: 3}): Uint8Array {
   return framed([
     json(HEAD, head),
     ...pages.flatMap(([table, end]): Frame[] => [
       {kind: RECORDS, payload: tableToIPC(table, 'stream')},
-      json(PAGE_END, {next: end, ended_by: end === null ? 'end' : 'rows'})
+      json(PAGE_END, {next: end, ended_by: end === null ? 'end' : table.numRows === 0 ? 'time' : 'rows'})
     ]),
     trailer(pages.length, pages.reduce((n, [t]) => n + t.numRows, 0), next)
   ]);
@@ -168,7 +171,7 @@ afterEach(() => compressionRegistry.set(CompressionType.ZSTD, {}));
 
 describe('TesseraClient.items and artifacts', () => {
   it('sends the request as given, each field that is set under its wire name', async () => {
-    const empty = framed([json(HEAD, {order: 'stored', page_rows: 10}), trailer(0, 0)]);
+    const empty = responseOf([[page([]), null]], null, {order: 'stored', page_rows: 10});
     const {client, sent} = clientFor(() => chunked(empty));
     const items: ItemsRequest = {
       view: 's0',
@@ -298,15 +301,26 @@ describe('TesseraClient.items and artifacts', () => {
     expect(rest.map((p) => p.rows)).toEqual(PAGES.slice(1).map(rowsOf));
   });
 
-  it('takes a response of one page of no rows, which carries the read’s columns', async () => {
-    const empty = page([]);
-    const read = await clientFor(chunked(responseOf([[empty, null]], null))).client.items('tok', REQUEST);
+  it('takes a response of one page of no rows, first or part-way through a read, typed as the others', async () => {
+    const types = (table: Table) => table.schema.fields.map((f) => `${f.name}: ${String(f.type)}`);
+    const alone = await clientFor(chunked(responseOf([[page([]), null]], null))).client.items('tok', REQUEST);
     const tables: Table[] = [];
-    for await (const table of read) tables.push(table);
+    for await (const table of alone) tables.push(table);
     expect(tables.map((t) => t.numRows)).toEqual([0]);
-    expect(tables[0]!.schema.fields.map((f) => f.name)).toEqual(['tessera_id', 'archive', 'title', 'score']);
-    expect(read.trailer).toMatchObject({pages: 1, rows: 0, next: null});
-    expect(read.cursor).toBeNull();
+    expect(types(tables[0]!)).toEqual(types(PAGES[0]!));
+    expect(alone.trailer).toMatchObject({pages: 1, rows: 0, next: null});
+    expect(alone.cursor).toBeNull();
+
+    const {client} = clientFor(
+      byCursor({
+        '': () => chunked(responseOf([[PAGES[0]!, 'c1']], 't1')),
+        t1: () => chunked(responseOf([[page([]), 't2']], 't2')),
+        t2: () => chunked(responseOf([[PAGES[1]!, 'c2'], [PAGES[2]!, null]], null))
+      })
+    );
+    const pages = await drain(await client.items('tok', REQUEST));
+    expect(pages.map((p) => p.rows.length)).toEqual([3, 0, 3, 2]);
+    expect(pages[1]).toEqual({rows: [], next: 't2', endedBy: 'time'});
   });
 
   it('decodes pages whose buffers are zstd-compressed to the tables sent uncompressed', async () => {
@@ -342,22 +356,26 @@ describe('TesseraClient.items and artifacts', () => {
   });
 
   it('reads the artifacts head, whose counts are of artifacts served', async () => {
+    const none = new Table({tessera_id: u64([]), key: vectorFromArray([], new Utf8())});
     const {client, sent} = clientFor(
       byCursor({
         // A response that found no row can still move the cursor on.
-        '': () => chunked(framed([json(HEAD, {page_rows: 5, served: 3, matched: 1}), trailer(0, 0, 'c4')])),
-        c4: () => chunked(framed([json(HEAD, {page_rows: 5}), trailer(0, 0)]))
+        '': () => chunked(responseOf([[none, 'c4']], 'c4', {page_rows: 5, served: 3, matched: 1})),
+        c4: () => chunked(responseOf([[none, null]], null, {page_rows: 5}))
       })
     );
     const read = await client.artifacts('tok', {view: 's0', layer: 'l', fields: ['key'], count: true, parent: 7n});
     expect(read.head).toEqual<ArtifactsHead>({pageRows: 5, served: 3, matched: 1});
-    expect(await drain(read)).toEqual([]);
+    expect(await drain(read)).toEqual([
+      {rows: [], next: 'c4', endedBy: 'time'},
+      {rows: [], next: null, endedBy: 'end'}
+    ]);
     expect(sent.map((s) => s.body)).toEqual([
       {view: 's0', layer: 'l', fields: ['key'], count: true, parent: '7'},
       {view: 's0', layer: 'l', fields: ['key'], parent: '7', cursor: 'c4'}
     ]);
     expect(read.cursor).toBeNull();
-    const uncounted = await clientFor(chunked(framed([json(HEAD, {page_rows: 5}), trailer(0, 0)]))).client.artifacts('tok', {view: 's0', layer: 'l', fields: []});
+    const uncounted = await clientFor(chunked(responseOf([[none, null]], null, {page_rows: 5}))).client.artifacts('tok', {view: 's0', layer: 'l', fields: []});
     expect(uncounted.head).toEqual<ArtifactsHead>({pageRows: 5, served: null, matched: null});
   });
 
