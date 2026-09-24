@@ -425,8 +425,8 @@ class Database:
           which is read where it lies.
         - `roster`, `artifacts`, `members`: tables of a view group's views, a layer's annotations,
           and a layer's memberships. Each is its own insert, since their columns share names.
-        - `columns`: on the anchor view's insert, `{attribute: column}` for an attribute filled
-          from a column with another name.
+        - `columns`: `{attribute: column}` for an attribute filled from a column with another
+          name, on the anchor view's insert, and after the first commit on any view's.
         - the other keywords: which column of the table holds each thing the target needs, such as
           `id=`, `x=`, `y=` and `access=` for a view.
 
@@ -661,29 +661,29 @@ class Database:
     ) -> dict:
         """The declared attributes a table's rows carry, as `{attribute: column}`.
 
-        A column carries the declared attribute of the same name, or the one `columns=` maps it to
-        on the anchor view's insert. The first commit's build reads an attribute from the anchor
-        view's table alone, so there attribute-named columns in any other view's table are
-        ignored. After it, every view's points carry the declared columns their table holds,
-        those declared since and the scoped columns of the view's group included.
+        A column carries the declared attribute of the same name, or the one `columns=` maps it
+        to. The first commit's build reads an attribute from the anchor view's table alone, so
+        there attribute-named columns in any other view's table are ignored. After it, every
+        view's points carry the declared columns their table holds, those declared since and the
+        scoped columns of the view's group included.
         """
-        if columns and not (kind == "view" and role == "rows"):
-            raise Refusal(
-                f"insert into {kind} {target!r}: columns= names an attribute's value column on "
-                f"the allocation view's own insert, which this is not"
-            )
         if kind not in ("view", "view_group") or role != "rows":
-            return {}
-        anchor = kind == "view" and target == self.blocks.allocation_view()
-        if not anchor:
             if columns:
                 raise Refusal(
-                    f"insert into view {target!r}: an attribute is filled from the allocation "
-                    f"view's frame, which is {self.blocks.allocation_view()!r}. Insert the values "
-                    f"into the attribute itself: insert(<attribute>, table, id=…, value=…)"
+                    f"insert into {kind} {target!r}: columns= maps an attribute to a column of a "
+                    f"view's rows, which this insert is not; drop it"
                 )
-            if not self.built:
-                return {}
+            return {}
+        anchor = kind == "view" and target == self.blocks.allocation_view()
+        if not anchor and not self.built:
+            if columns:
+                raise Refusal(
+                    f"insert into {kind} {target!r}: the first commit reads an attribute from "
+                    f"the allocation view's frame, which is {self.blocks.allocation_view()!r}; "
+                    f"map the column there, or insert the values into the attribute itself: "
+                    f"insert(<attribute>, table, id=…, value=…)"
+                )
+            return {}
         # The groups whose scoped columns this table's views take: its own, and the one it shares.
         groups = set()
         if kind == "view_group":

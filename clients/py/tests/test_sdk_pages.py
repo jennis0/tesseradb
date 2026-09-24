@@ -520,6 +520,26 @@ def test_a_second_views_rows_carry_the_declared_columns_their_frame_holds(served
     assert answer["counts"]["matched"] == 2
 
 
+def test_columns_maps_an_attribute_on_a_second_views_rows(served, corpus):
+    """After the first commit `columns=` maps a declared attribute to a column of any view's rows,
+    so a new item placed in the second view holds the value its renamed column carried."""
+    db = served(two_views)
+    db.insert(
+        "atlas",
+        rows(["m0"], points=pa.array([9.5])),
+        id="id",
+        x="x",
+        y="y",
+        access="labels",
+        columns={"score": "points"},
+    )
+    report = db.commit()
+    assert report.ok, report
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    answer = viewport(db, "atlas", frame, filters={"score": {"range": {"gte": 9.0}}})
+    assert answer["counts"]["matched"] == 1
+
+
 def test_an_insert_into_an_attribute_fills_it_and_a_filter_finds_it(served, corpus):
     db = served(small)
     frame = [-5.0, -5.0, 40.0, 40.0]
