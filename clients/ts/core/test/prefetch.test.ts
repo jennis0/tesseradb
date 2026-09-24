@@ -3,13 +3,11 @@ import {
   MARGIN,
   RING_MARGIN,
   RING_MARGIN_MAX,
-  deeperFetch,
   plan,
   ringMargin,
   worldBbox,
   type PlannerInputs
 } from '../src/prefetch.js';
-import type {DepthChoice} from '../src/budget.js';
 import {tileOfCode} from '../src/coords.js';
 import {rectArea, rectContains} from '../src/rects.js';
 
@@ -138,40 +136,6 @@ describe('plan', () => {
 
   it('is deterministic', () => {
     expect(plan(BASE)).toEqual(plan(BASE));
-  });
-});
-
-describe('deeperFetch', () => {
-  it('asks one depth down over the centre, at the tile cost of the foreground', () => {
-    const p = plan(BASE);
-    const deeper = deeperFetch(BASE, p.choice)!;
-    expect(deeper.depth).toBe(p.choice.depth + 1);
-    // Four times the tile density over a quarter of the area: the same count, give or take rounding
-    // a box onto the grid.
-    expect(rectArea(deeper.rect)).toBeLessThanOrEqual(rectArea(p.foreground.rect) * 2);
-  });
-
-  it('folds back inside the foreground one level up', () => {
-    const p = plan(BASE);
-    const deeper = deeperFetch(BASE, p.choice)!;
-    const folded = {
-      x0: deeper.rect.x0 >> 1,
-      y0: deeper.rect.y0 >> 1,
-      x1: deeper.rect.x1 >> 1,
-      y1: deeper.rect.y1 >> 1
-    };
-    expect(rectContains(p.foreground.rect, folded)).toBe(true);
-  });
-
-  it('stops at the grid floor', () => {
-    const atFloor = {...BASE, viewport: {...BASE.viewport, zoom: 16}};
-    const choice: DepthChoice = {depth: 16, tiles: 1, predictedMarks: 0, source: 'bound', averageMarks: 0, limitedBy: 'maxDepth'};
-    expect(deeperFetch(atFloor, choice)).toBeNull();
-  });
-
-  it('declines rather than breaching the tile ceiling', () => {
-    const p = plan(BASE);
-    expect(deeperFetch({...BASE, maxTiles: 4}, p.choice)).toBeNull();
   });
 });
 

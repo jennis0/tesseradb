@@ -208,19 +208,6 @@ export function plan(inputs: PlannerInputs): Plan {
   };
 }
 
-/**
- * A fetch of the next depth over the centre quadrant of the view: four times the tile density over
- * a quarter of the area, so the same tile count as the foreground. Little of depth `d+1` is usually
- * held, so each idle pause that asks pays for a server scan. {@link plan} does not call this.
- */
-export function deeperFetch(inputs: PlannerInputs, choice: DepthChoice): PlannedFetch | null {
-  if (choice.depth >= 16) return null;
-  const depth = choice.depth + 1;
-  const rect = tileRectOfBbox(worldBbox(inputs.viewport, 0.5), depth);
-  if (rectArea(rect) > inputs.maxTiles) return null;
-  return {kind: 'deeper', depth, rect};
-}
-
 function ringShift(viewport: Viewport, velocity: [number, number]): [number, number] {
   const scale = 2 ** viewport.zoom;
   const worldWidth = viewport.width / scale;
