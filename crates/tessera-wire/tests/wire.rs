@@ -8,7 +8,7 @@ use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use tessera_wire::{
     artifacts_frame, artifacts_identity_frame, records_head_frame, page_end_frame, points_frame,
-    points_highlight_frame, records_frame, split_frames, sub_cells_frame, tiles_frame,
+    points_highlight_frame, read_frame, records_frame, split_frames, sub_cells_frame, tiles_frame,
     trailer_frame, ArtifactRow, FrameError, RecordsCompression, ScalarColumn, FRAME_ARTIFACTS,
     FRAME_HEADER_BYTES, FRAME_RECORDS_HEAD, FRAME_PAGE_END, FRAME_POINTS, FRAME_RECORDS,
     FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
@@ -190,6 +190,68 @@ fn a_strict_prefix_of_a_body_never_ends_in_a_trailer() {
             );
         }
     }
+}
+
+/// A reader that hands over one byte a call, as a slow connection does.
+struct Trickle<'a>(&'a [u8]);
+
+impl std::io::Read for Trickle<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some((first, rest)) = self.0.split_first() else {
+            return Ok(0);
+        };
+        match buf.first_mut() {
+            Some(slot) => *slot = *first,
+            None => return Ok(0),
+        }
+        self.0 = rest;
+        Ok(1)
+    }
+}
+
+/// Every frame `read_frame` returns, until it ends or fails.
+fn read_all(body: &[u8]) -> (Vec<(u8, Vec<u8>)>, std::io::Result<()>) {
+    let mut reader = Trickle(body);
+    let mut frames = Vec::new();
+    loop {
+        match read_frame(&mut reader) {
+            Ok(Some(frame)) => frames.push(frame),
+            Ok(None) => return (frames, Ok(())),
+            Err(e) => return (frames, Err(e)),
+        }
+    }
+}
+
+/// Read as it arrives, a body gives the frames `split_frames` gives. A cut on a frame boundary
+/// ends cleanly, one inside a frame is an unexpected end, and neither yields the trailer.
+#[test]
+fn a_body_read_as_it_arrives_is_the_body_split_whole() {
+    let body = build_body();
+    let (frames, ended) = read_all(&body);
+    assert!(ended.is_ok());
+    let split: Vec<(u8, Vec<u8>)> = split_frames(&body)
+        .unwrap()
+        .into_iter()
+        .map(|(kind, payload)| (kind, payload.to_vec()))
+        .collect();
+    assert_eq!(frames, split);
+
+    for cut in 1..body.len() {
+        let (frames, ended) = read_all(&body[..cut]);
+        assert_ne!(frames.last().map(|(kind, _)| *kind), Some(FRAME_TRAILER));
+        match (ended, split_frames(&body[..cut])) {
+            (Ok(()), Ok(whole)) => assert_eq!(frames.len(), whole.len(), "cut at {cut}"),
+            (Err(e), Err(_)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof, "cut at {cut}")
+            }
+            (ended, split) => panic!("cut at {cut}: read {ended:?}, split {split:?}"),
+        }
+    }
+
+    let mut unknown = body.clone();
+    unknown[0] = 9;
+    let (_, ended) = read_all(&unknown);
+    assert_eq!(ended.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 }
 
 #[test]
