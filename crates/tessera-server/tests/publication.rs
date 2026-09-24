@@ -764,10 +764,7 @@ async fn wait_visible_holds_a_row_page_until_its_rows_are_served() {
     // **The waited row itself is served**, read back by the identifier its acknowledgement
     // returned. The whole-frame count would prove nothing: the fixture's own thousand rows fill
     // the k budget whatever this page did.
-    let waited_id = body["tessera_ids"][0]
-        .as_u64()
-        .or_else(|| body["tessera_ids"][0].as_str().and_then(|s| s.parse().ok()))
-        .unwrap_or_else(|| panic!("the acknowledgement names the row it took: {body}"));
+    let waited_id = ingested_ids(&body)[0];
     assert!(
         points_near(&server, 10.0, 10.0).await.contains(&waited_id),
         "the row the waited page took is in the viewport with no wait of the reader's own"
@@ -959,12 +956,7 @@ async fn wait_visible_holds_a_flush_until_the_unwaited_pages_are_served() {
             &external_id_of(N_ITEMS + i),
         )
         .await;
-        waiting.push(
-            body["tessera_ids"][0]
-                .as_u64()
-                .or_else(|| body["tessera_ids"][0].as_str().and_then(|s| s.parse().ok()))
-                .unwrap_or_else(|| panic!("the acknowledgement names the row it took: {body}")),
-        );
+        waiting.push(ingested_ids(&body)[0]);
     }
     assert!(
         server.state.engine.buffered_items() > 0,

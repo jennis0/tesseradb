@@ -1000,12 +1000,7 @@ async fn ingest_right_of_the_shape(server: &TestServer, view: &str, batch_id: &s
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    body["tessera_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_u64().unwrap())
-        .collect()
+    ingested_ids(&body).into_iter().collect()
 }
 
 /// Request a fold and wait until it has either published or been discarded, returning whether

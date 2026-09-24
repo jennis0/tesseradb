@@ -460,16 +460,7 @@ async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    let ids: Vec<u64> = body["tessera_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| {
-            v.as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                .unwrap()
-        })
-        .collect();
+    let ids = ingested_ids(&body);
     drain(&served.server).await;
 
     let high = filtered(

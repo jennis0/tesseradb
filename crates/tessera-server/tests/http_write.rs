@@ -674,25 +674,15 @@ fn concurrent_ingest_and_change_both_survive() {
     );
 }
 
-/// Contracts §3.4: an item ingested with no external id at all is still accepted, and the
-/// `tessera_id` the 200 response returns for it is a genuine, correctly-shard-scoped identity for
-/// the entity that was actually allocated — the only way the item is addressable at all, since it
-/// has no external id.
-///
-/// This does not assert a `200` from `/v1/items`. ⊘ There is no flush, so *any* freshly ingested
-/// item — with or without an external id — has no row geometry until the next `tessera build`, and
-/// `Engine::item`'s own doc records that a visible-but-geometryless entity is a `404`, identical to
-/// an unknown one. That limitation is the absent flush, not this path. What this test checks instead
-/// is what the path does promise:
-/// inverting the returned `tessera_id` with the deployment's own identity key yields the right
-/// shard and a freshly-allocated entity id (at or past the bundle's `N_ITEMS` high-water mark),
-/// so the caller genuinely learned a working identity for its item, not a decoy.
+/// An item ingested with no external id is accepted, and the `tessera_id` the answer gives it is
+/// its only address. Inverting that id with the deployment's key yields the fixture's shard and a
+/// freshly allocated entity, and once the row is published the viewer serves it under that id.
 #[tokio::test]
 async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_id() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
-    let body = build_ingest_batch_optional(&[(None, 20.0, 20.0, "0")]);
+    let body = build_ingest_batch_optional(&[(None, 20.5, 20.5, "0")]);
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
@@ -706,32 +696,33 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 1);
-    let tessera_ids = json["tessera_ids"].as_array().unwrap();
+    let tessera_ids = ingested_ids(&json);
     assert_eq!(tessera_ids.len(), 1);
-    let tessera_id = tessera_ids[0].as_u64().unwrap();
+    let tessera_id = tessera_ids[0];
 
-    // The fixture's own identity key (matches `TEST_KEY_HEX`, shard 0) — inverting independently
-    // of the server proves the response carries a real, working identity, not an opaque number.
     let (shard, entity) = test_key().invert(tessera_types::TesseraId::new(tessera_id));
     assert_eq!(shard, 0, "the fixture bundle is shard 0");
     assert!(
         entity.raw() >= N_ITEMS,
-        "a freshly-ingested item must get an entity id past the bundle's own N_ITEMS range, not \
-         collide with a built-in item"
+        "an ingested item gets an entity id past the bundle's own"
     );
 
-    // ⊘ The absent flush, not a defect in this path: with no flush there is no row geometry for a
-    // freshly-ingested item, so `/v1/items` 404s identically to an unknown id (`Engine::item`'s
-    // doc).
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-    let resp = post_item(&server, token, tessera_id).await;
-    assert_eq!(
-        resp.status(),
-        404,
-        "a buffered (unflushed) item 404s on /v1/items regardless of external id — there is no \
-         flush, so it has no row geometry"
-    );
+    drain(&server).await;
+    let token = token_for(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 12, "bbox": [20.3, 20.3, 20.7, 20.7], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let served: Vec<u64> = points.into_iter().map(|(id, _)| id).collect();
+    assert_eq!(served, [tessera_id]);
 }
 
 /// Contracts §3.4 (r6): a batch mixing items with and without an external id is accepted whole,
@@ -765,8 +756,7 @@ async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
     );
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 4);
-    let tessera_ids = json["tessera_ids"].as_array().unwrap();
-    assert_eq!(tessera_ids.len(), 4);
+    assert_eq!(ingested_ids(&json).len(), 4);
 
     // A follow-up batch re-using one of the *supplied* external ids must still be caught.
     let dup_body = build_ingest_batch_optional(&[(Some(b"mixed-a".as_slice()), 9.0, 9.0, "0")]);
@@ -804,13 +794,58 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 2);
-    let tessera_ids = json["tessera_ids"].as_array().unwrap();
+    let tessera_ids = ingested_ids(&json);
     assert_eq!(tessera_ids.len(), 2);
     assert_ne!(
-        tessera_ids[0].as_u64().unwrap(),
-        tessera_ids[1].as_u64().unwrap(),
+        tessera_ids[0], tessera_ids[1],
         "two null-external-id items must still get distinct entities/tessera_ids"
     );
+}
+
+/// A `tessera_id` fills 64 bits, and a JSON number past 2^53 is rounded by JavaScript, so the
+/// ingest answer sends each as a decimal string: the same id the viewer serves for that row.
+#[tokio::test]
+async fn ingest_answers_each_rows_tessera_id_as_the_string_the_viewer_serves() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    // The fixture's points sit on whole coordinates, so this box holds only these rows.
+    let body = build_ingest_batch_optional(&[
+        (Some(b"string-a".as_slice()), 10.4, 10.4, "0"),
+        (None, 10.5, 10.5, "0"),
+        (Some(b"string-b".as_slice()), 10.6, 10.6, "0"),
+    ]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "string-ids")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let answer: serde_json::Value = resp.json().await.unwrap();
+    let answered = ingested_ids(&answer);
+    assert_eq!(answered.len(), 3);
+    drain(&server).await;
+
+    let token = token_for(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 12, "bbox": [10.3, 10.3, 10.7, 10.7], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let served: std::collections::BTreeSet<u64> = points.into_iter().map(|(id, _)| id).collect();
+    assert_eq!(served, answered.into_iter().collect());
 }
 
 /// `/healthz` must stay prompt while a viewport request runs, even on this test's single-threaded

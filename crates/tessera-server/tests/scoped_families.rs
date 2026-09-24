@@ -1164,12 +1164,7 @@ async fn ingest_scoped(
     let status = resp.status().as_u16();
     let body: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "{view} accepts the batch: {body}");
-    body["tessera_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_u64().unwrap())
-        .collect()
+    ingested_ids(&body)
 }
 
 /// Request a compaction fold and block until it has published (`POST /control/compact`).
