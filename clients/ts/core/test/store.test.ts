@@ -1218,6 +1218,66 @@ describe('the token', () => {
     expect(await store.describe(7n)).toEqual({asked: 't2'});
   });
 
+  it('answers every verb called before the first token lands, from one supplier call', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const shape: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const detail = {fields: {archive: 'cs'}, externalId: null, views: [], scoped: {}, labels: []};
+    Object.assign(client, {
+      item: vi.fn(async () => detail),
+      artifact: vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape})),
+      suggest: vi.fn(async (_t: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}))
+    });
+    let land: (() => void) | null = null;
+    const authorise = vi.fn(async () => {
+      await new Promise<void>((resolve) => (land = resolve));
+      return {token: 't1', expiresAt: (Date.now() + 3_600_000) / 1000};
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    // Opening an artifact clears the picked item, so the item is read as it lands.
+    const items: unknown[] = [];
+    store.subscribe('selection', (selection) => items.push(selection.item));
+
+    const picked = store.pick(7n);
+    const described = store.describe(8n);
+    const opened = store.openArtifact(9n);
+    store.needShape(10n);
+    store.suggest('archive', 'c');
+    await clock.advance(1_000);
+    land!();
+    await Promise.all([picked, opened]);
+    await clock.advance(1_000);
+
+    expect(authorise).toHaveBeenCalledTimes(1);
+    expect(items).toContainEqual({id: 7n, detail});
+    expect(await described).toEqual(detail.fields);
+    expect(store.get('selection').artifact?.id).toBe(9n);
+    expect(new Set(store.get('artifacts').shapes.keys())).toEqual(new Set([9n, 10n]));
+    expect(store.get('filters').suggestions.archive?.q).toBe('c');
+  });
+
+  it('refuses every verb called before a first token that is refused', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const authorise = vi.fn(async () => {
+      throw new TesseraError(401, 'bad-credential', 'refused');
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+
+    await store.pick(7n);
+    expect(await store.describe(8n)).toBeNull();
+    store.suggest('archive', 'c');
+    await clock.advance(1_000);
+
+    expect(store.get('selection').itemRefusal?.code).toBe('bad-credential');
+    expect(store.get('filters').suggestErrors.archive?.code).toBe('bad-credential');
+    // The artifact route names the view, which the store knows once it has read its meta.
+    await store.openArtifact(9n);
+    expect(store.get('selection').artifactRefusal?.code).toBe('bad-credential');
+  });
+
   it('reports the session expired when the server refuses the token it holds as expired', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();

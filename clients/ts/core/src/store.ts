@@ -629,6 +629,10 @@ export function createStore(options: StoreOptions): Store {
 
   // ---- the token supplier -------------------------------------------------------------------
 
+  /**
+   * The token to ask with: the one held while it is fresh, else the supplier's next. Every verb
+   * asks through this, so a verb called before the first token lands waits for it.
+   */
   async function ensureToken(): Promise<string> {
     if (token && Date.now() < expiresAtMs - 5_000) return token;
     if (!options.authorise) {
@@ -638,13 +642,24 @@ export function createStore(options: StoreOptions): Store {
     return renew(options.authorise);
   }
 
-  async function renew(authorise: TokenSupplier): Promise<string> {
+  /** The renewal in flight, which every caller shares, so one supplier call answers them all. */
+  let renewing: Promise<string> | null = null;
+
+  function renew(authorise: TokenSupplier): Promise<string> {
+    renewing ??= renewOnce(authorise).finally(() => {
+      renewing = null;
+    });
+    return renewing;
+  }
+
+  async function renewOnce(authorise: TokenSupplier): Promise<string> {
     const got = await authorise();
     if (disposed) return got.token;
     // A derived shape is a function of the principal's own visible members, so one held across a
     // change of token would draw the previous principal's shape against the new one's identifiers.
-    // A hover's record is an answer to the principal too.
-    if (token !== got.token) {
+    // A hover's record is an answer to the principal too. Before the first token nothing is held
+    // under another principal, and what was asked for is being answered under this one.
+    if (token !== null && token !== got.token) {
       forgetShapes('derived');
       forgetDescribed();
     }
@@ -666,6 +681,12 @@ export function createStore(options: StoreOptions): Store {
     renewTimer = clock.after(wait, () => {
       void renew(authorise).catch(() => {});
     });
+  }
+
+  /** The token and the view a verb naming a view asks under, once the store has read its meta. */
+  async function viewed(): Promise<{token: string; view: string}> {
+    await warming;
+    return {token: await ensureToken(), view: viewId};
   }
 
   /** Whether a refusal means the session ended (design §5.4's expired row). */
@@ -1268,13 +1289,13 @@ export function createStore(options: StoreOptions): Store {
   }
 
   async function resolveCategoryCodes(column: string, counts: Map<number, number>): Promise<void> {
-    if (!token || !meta) return;
+    if (!meta) return;
     if (projections.legend.categoryErrors[column]) return;
     const held = new Set((projections.legend.categories[column] ?? []).map((v) => v.code));
     const wanted = [...counts.keys()].filter((code) => !held.has(code));
     if (wanted.length === 0) return;
     try {
-      const resolved = await client.categories(token, column, {codes: wanted, view: viewId});
+      const resolved = await client.categories(await ensureToken(), column, {codes: wanted, view: viewId});
       const byCode = new Map((projections.legend.categories[column] ?? []).map((v) => [v.code, v]));
       for (const v of resolved) byCode.set(v.code, v);
       replaceProjection('legend', {
@@ -1633,7 +1654,7 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function suggest(column: string, q: string): void {
-    if (!token || disposed) return;
+    if (disposed) return;
     // Idempotent per (column, q): a caller re-asking for the identical q it already asked for —
     // the shape a store tick that has nothing to do with this control takes, if the caller does
     // not itself dedupe — must not re-arm the debounce, or churn frequent enough holds the timer
@@ -1662,13 +1683,14 @@ export function createStore(options: StoreOptions): Store {
   }
 
   async function runSuggest(column: string, q: string): Promise<void> {
-    if (!token || disposed) return;
+    if (disposed) return;
     // Captured once, at entry: every landing below — success, the catch, and the superseded
     // re-arm — requires this unchanged against the live `suggestEpoch`, which is what `resetSuggestions`'s
     // doc above explains is not the same question the `q` echo answers.
     const epoch = suggestEpoch;
     try {
-      const result = await client.suggest(token, column, q, {view: viewId});
+      const asked = await viewed();
+      const result = await client.suggest(asked.token, column, q, {view: asked.view});
       if (disposed || suggestWant.get(column) !== q || suggestEpoch !== epoch) return; // a later keystroke, or a reset, already wants something else
       if (result.status === 'superseded') {
         // The session already has one suggest in flight (§5.1's one-in-flight rule): retry once
@@ -1768,9 +1790,8 @@ export function createStore(options: StoreOptions): Store {
   }
 
   async function pick(id: bigint): Promise<void> {
-    if (!token) return;
     try {
-      const detail = await client.item(token, id);
+      const detail = await client.item(await ensureToken(), id);
       replaceProjection('selection', {...projections.selection, item: {id, detail}, itemRefusal: null});
     } catch (error) {
       replaceProjection('selection', {
@@ -1805,10 +1826,9 @@ export function createStore(options: StoreOptions): Store {
     if (held !== undefined) return held;
     const inFlight = describing.get(key);
     if (inFlight) return inFlight;
-    if (!token) return null;
     const epoch = describedEpoch;
-    const request = client
-      .item(token, id)
+    const request = ensureToken()
+      .then((t) => client.item(t, id))
       .then((detail) => detail.fields)
       .catch(() => null)
       .then((fields) => {
@@ -1876,12 +1896,11 @@ export function createStore(options: StoreOptions): Store {
     if (askedShapes.has(id)) return;
     askedShapes.add(id);
     void (async () => {
-      const t = token;
-      if (!t) return;
       try {
+        const asked = await viewed();
         // The view's own zoom, so the shape is generalised to this screen's pixel.
         const zoom = presenter?.view?.view.zoom;
-        const detail = await client.artifact(t, id, {view: viewId, ...(zoom === undefined ? {} : {zoom})});
+        const detail = await client.artifact(asked.token, id, {view: asked.view, ...(zoom === undefined ? {} : {zoom})});
         // The principal may have changed under the request — a renewal, a cleared store — in which
         // case this answer describes a mask that is no longer the one being drawn.
         if (!askedShapes.has(id)) return;
@@ -1921,13 +1940,12 @@ export function createStore(options: StoreOptions): Store {
   }
 
   async function openArtifact(id: bigint): Promise<void> {
-    if (!token) return;
-    const asked = token;
     try {
-      const detail = await client.artifact(token, id, {view: viewId});
+      const asked = await viewed();
+      const detail = await client.artifact(asked.token, id, {view: asked.view});
       // The principal may have changed under the request, in which case this shape describes a
-      // mask that is no longer the one being drawn — the same guard `needShape` takes.
-      if (token === asked) holdShape(id, detail.shape);
+      // mask that is no longer the one being drawn.
+      if (token === asked.token) holdShape(id, detail.shape);
       replaceProjection('selection', {...projections.selection, artifact: {id, detail}, artifactRefusal: null, item: null, itemRefusal: null});
     } catch (error) {
       replaceProjection('selection', {
@@ -2222,7 +2240,8 @@ export function createStore(options: StoreOptions): Store {
     dispose
   };
 
-  void warm().catch((error) => {
+  const warming = warm();
+  void warming.catch((error) => {
     const refusal = refusalOf(error);
     replaceProjection('status', {...projections.status, status: 'refused', refusal, expired: isExpiry(refusal)});
   });
