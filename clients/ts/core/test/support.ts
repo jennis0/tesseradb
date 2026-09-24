@@ -8,16 +8,18 @@ import type {Artifact, Layer, Meta, TileCounts, ViewInfo, ViewportResponse, View
 /** The fixtures the core tests share, the fake clocks, and `settle`. */
 
 // Held at import, so a test that fakes the global timers still settles on the real event loop.
-const realSetImmediate = globalThis.setImmediate;
+const realSetTimeout = globalThis.setTimeout;
 
 /**
- * Resolves once every promise chain already started has run as far as it can without a timer.
+ * Resolves once every promise chain already started has run as far as it can.
  *
  * A macrotask turn runs only after the microtask queue is empty, however long the chains in it,
- * so this does not depend on how many `await`s the code under test takes.
+ * so this does not depend on how many `await`s the code under test takes. The turn is a zero-delay
+ * timer, so one the code under test has already set, as the replica does between absorb slices,
+ * fires first.
  */
 export function settle(): Promise<void> {
-  return new Promise((resolve) => realSetImmediate(resolve));
+  return new Promise((resolve) => realSetTimeout(resolve, 0));
 }
 
 /** A clock whose timers fire only inside `advance`, each followed by a `settle`. */
