@@ -402,6 +402,29 @@ fn an_accepted_write_rotates_the_content_key() {
     );
 }
 
+/// **A restart rotates the content key**, so no band a client holds from before it is declared
+/// held and served back unchanged: a new process may encode the same rows differently.
+#[test]
+fn a_restart_rotates_the_content_key() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let before = {
+        let engine = engine_at(tmp.path(), &root, "wal", 3600);
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        engine.viewport(&session, whole_extent()).unwrap()
+    };
+    let engine = engine_at(tmp.path(), &root, "wal", 3600);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let after = wait_for_viewport(&engine, &session);
+    assert_eq!(before.points, after.points, "the same rows are served");
+    assert_ne!(before.coordinates.content_key, after.coordinates.content_key);
+}
+
 /// A viewport, retried past the bounded `ProjectionBuilding` a refresh window can answer with.
 /// Decision 0044 permits exactly this residual, and a test that did not retry would be asserting
 /// that the residual does not exist.
