@@ -430,13 +430,14 @@ describe('BandCache.bandsForRegion at scale', () => {
     expect(fallback).toHaveLength(0);
   });
 
+  // 160,000 bands: under a second alone, and past the default timeout on a loaded machine.
   it('collects a large stand-in set without exceeding the call stack', () => {
     const cache = new BandCache(1e9);
     // `push(...bucket)` passes one argument per entry and throws a RangeError somewhere near 10^5.
     for (let x = 0; x < 400; x++) for (let y = 0; y < 400; y++) cache.put(tile(11, x, y));
     const {fallback} = cache.bandsForRegion({x0: 0, y0: 0, x1: 63, y1: 63}, 8, 'ck', 500);
     expect(fallback.length).toBeGreaterThan(100_000);
-  });
+  }, 30_000);
 });
 
 describe('bandSplitter', () => {
