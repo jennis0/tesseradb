@@ -25,11 +25,12 @@ harness, built to answer one question: **does a running Tessera actually work?**
   StrictMode's double mount leaks no driver. `@tesseradb/react/components` wraps every element
   through `@lit/react` with typed props and events, behind optional peers on
   `@tesseradb/components` and `@lit/react`, so a hooks-only install pulls neither Lit nor deck.gl.
-- `examples/` — the three pages design §9 step 4 asks for, each a workspace the gate typechecks:
-  `plain-html` (no build step; the bundle with its integrity hash, and the app server that holds
-  the session credential), `react-explorer` (React 19 through the wrappers, one slot replaced by
-  a host component) and `canvas-store` (the store under a hand-rolled camera on a 2D canvas, with
-  none of our rendering — the check that C2 works).
+- `examples/` — four pages, each a workspace the client check typechecks: `plain-html` (no build
+  step; the bundle with its integrity hash, and the app server that holds the session
+  credential), `react-explorer` (React 19 through the wrappers, one slot replaced by a host
+  component), `canvas-store` (the store under a hand-rolled camera on a 2D canvas, with none of
+  our rendering) and `deck-host` (`TesseraLayer` in a `Deck` the page builds, beside a layer of
+  its own).
 - `viewer/` — the demo, `@tesseradb/viewer`: `<tessera-explorer layout="overlay">` plus the
   instruments — dataset and principal pickers (where the session credential stays), the layer and
   colour controls, the depth and request readouts, the trace bar.
@@ -545,6 +546,9 @@ lives here instead.
 - **A legend lists the values on screen**, not the whole vocabulary, and a numeric ramp spans the
   marks served, not the corpus. A refused column draws every mark unmapped; every served mark is
   still on the map.
+- **A mark with no value draws unmapped**, grey, and takes no part in a numeric ramp, whether the
+  column is a category (code 0) or a number, bool, timestamp or string the server sent as null.
+  The decoder keeps a null in the column's `present` bytes and never reads it as zero.
 - **A typed category value is submitted, never validated**: values a principal cannot list may
   still be filtered by, and an unresolvable one is an empty answer — the control never says *no
   such value*.

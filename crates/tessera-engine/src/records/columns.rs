@@ -29,7 +29,8 @@ use super::plan::{FieldPlan, Home, Named, SystemField};
 use super::walk::{PageCx, Taken};
 use crate::error::{EngineError, Result};
 use crate::viewport::{
-    category_code, category_key, slice_value, stored_field_out, OpenView, ScalarOut,
+    category_code, category_key, slice_value, stored_field_out, OpenView, RowPresence,
+    ScalarOut,
 };
 use crate::Generation;
 
@@ -240,7 +241,8 @@ fn value_bytes(value: &RV) -> usize {
 }
 
 /// A rendered field's values: the slot in the row tail, where the segment holds the column and
-/// the row carries a value. Absence is a number's presence bitmap and a category's code 0.
+/// the row carries a value, read as [`RowPresence`] says. A category's absence is its code 0,
+/// which `slice_value` answers.
 fn rendered_values(
     segments: &[(&tessera_store::read::SegmentData, u32)],
     field: &Named,
@@ -252,15 +254,16 @@ fn rendered_values(
         .collect();
     let presences: Vec<_> = segments
         .iter()
-        .map(|(segment, _)| segment.columns.presence(&field.name))
+        .map(|(segment, _)| {
+            RowPresence::of(segment, &field.name, field.vocabulary.is_some())
+        })
         .collect();
     rows.iter()
         .map(|row| {
-            let slice = slices[row.seg].as_ref()?;
-            if field.vocabulary.is_none() && !presences[row.seg].contains(row.local) {
+            if !presences[row.seg].contains(row.local) {
                 return None;
             }
-            slice_value(slice, row.local as usize)
+            slice_value(slices[row.seg].as_ref()?, row.local as usize)
         })
         .collect()
 }

@@ -964,8 +964,16 @@ export type MembershipColumn = {
  * to re-derive it would be joining two documents on every frame, and the one that matters —
  * whether a `u16` is a category or an integer — is a mistake that renders silently wrong.
  * `arrowType` here is the *storage* type; whether it is a category is `Meta`'s answer.
+ *
+ * **`present` says which points have a value.** The server sends an absent number, bool,
+ * timestamp or string as null; `present[i]` is `0` there, and `values[i]` is a zero that means
+ * nothing. Where `present` is missing or `null`, every point has a value; {@link hasValue} reads
+ * it. A category has no nulls; code 0 in `values` is its absence.
  */
-export type ScalarColumn =
+export type ScalarColumn = ScalarValues & {present?: Uint8Array | null};
+
+/** A column's declared type and its values, without {@link ScalarColumn.present}. */
+export type ScalarValues =
   | {arrowType: 'bool'; values: boolean[]}
   | {arrowType: 'utf8'; values: string[]}
   | {arrowType: 'u8'; values: Uint8Array}

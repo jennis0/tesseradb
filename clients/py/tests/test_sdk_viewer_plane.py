@@ -15,7 +15,9 @@ from tesseradb import Refusal, authorise, connect
 
 pytest.importorskip("pyarrow")
 
-from test_sdk_identity import string_ids  # noqa: E402
+import pyarrow as pa  # noqa: E402
+
+from test_sdk_identity import papers, string_ids  # noqa: E402
 
 
 @pytest.fixture
@@ -98,6 +100,31 @@ def test_a_sample_reads_as_its_points_table(db):
     assert "tessera_id" in served.column_names
     assert served.num_rows == len(served) == served.points.num_rows
     assert counts(served)["visible"] == 20
+
+
+def test_a_sample_serves_a_null_where_an_item_has_no_rendered_value(served, corpus):
+    """An item with no value in a rendered number column is a null in the points table, and a
+    NaN in pandas; a genuine zero stays a zero. `n` names each item and every item has one."""
+    heat = [None if i % 3 == 0 else float(i % 2) for i in range(20)]
+
+    def declare(db):
+        db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+        db.declare_attribute("heat", type="f64", render=True)
+        db.declare_attribute("n", type="u32", render=True)
+        table = papers([f"p{i}" for i in range(20)])
+        table = table.append_column("heat", pa.array(heat, pa.float64()))
+        table = table.append_column("n", pa.array(range(20), pa.uint32()))
+        db.insert("map", table, id="paper", x="x", y="y", access="labels")
+
+    points = served(declare).view("map").sample(k=100)
+    served_heat = points.column("heat").to_pylist()
+    names = points.column("n").to_pylist()
+    assert points.column("n").null_count == 0
+    assert {n: h for n, h in zip(names, served_heat)} == {n: heat[n] for n in names}
+    assert None in served_heat and 0.0 in served_heat
+    frame = points.to_pandas()
+    assert frame["heat"].isna().sum() == served_heat.count(None)
+    assert (frame["heat"] == 0.0).sum() == served_heat.count(0.0)
 
 
 def test_a_highlight_lights_the_served_set_without_moving_it(db):

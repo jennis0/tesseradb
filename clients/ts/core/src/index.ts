@@ -68,6 +68,7 @@ export {
   countCodesCached,
   countCodesInPiece,
   extendRanks,
+  hasValue,
   numericValues,
   rankedValues,
   widenDomain,

@@ -170,13 +170,13 @@ function scalarBytes(column: ScalarColumn): number {
   // `bool` and `utf8` decode to boxed arrays rather than typed ones. Their true cost is a heap
   // object per value; the estimates here are deliberately generous rather than accurate, because
   // undercounting them is what would let the ledger drift above the bound it exists to hold.
-  if (column.arrowType === 'bool') return column.values.length * 4;
+  if (column.arrowType === 'bool') return column.values.length * 4 + (column.present?.byteLength ?? 0);
   if (column.arrowType === 'utf8') {
     let bytes = 0;
     for (const value of column.values) bytes += 40 + value.length * 2;
-    return bytes;
+    return bytes + (column.present?.byteLength ?? 0);
   }
-  return column.values.byteLength;
+  return column.values.byteLength + (column.present?.byteLength ?? 0);
 }
 
 function sliceScalars(
@@ -186,7 +186,9 @@ function sliceScalars(
 ): Record<string, ScalarColumn> {
   const out: Record<string, ScalarColumn> = {};
   for (const [name, column] of Object.entries(scalars)) {
-    out[name] = {arrowType: column.arrowType, values: column.values.slice(from, to)} as ScalarColumn;
+    const sliced = {arrowType: column.arrowType, values: column.values.slice(from, to)} as ScalarColumn;
+    if (column.present) sliced.present = column.present.slice(from, to);
+    out[name] = sliced;
   }
   return out;
 }

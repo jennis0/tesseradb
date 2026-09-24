@@ -447,7 +447,7 @@ await page.waitForTimeout(800);
   check(
     'a coloured point’s ordinal resolves to a served artifact',
     clusterOption !== null && probe?.encoding === `cluster|${probe.cluster.layer}` && sample.length > 0 && foreign.length === 0,
-    `colour-by ${probe?.encoding}; ${sample.length} ordinals sampled from the marks on screen, ${sample.length - unresolved.length} resolve to one of ${served.size} served artifacts, ${foreign.length} to an artifact not served, ${probe?.cluster.coloured ?? 0} drawn in a colour; ${probe?.lutWrites} lookup-texture writes so far`
+    `colour-by ${probe?.encoding}; ${sample.length} ordinals sampled from the marks on screen, ${sample.length - unresolved.length} resolve to one of ${served.size} served artifacts, ${foreign.length} to an artifact not served, ${probe?.cluster.coloured ?? 0} drawn in a colour; ${probe?.lutWrites} writes to the lookup texture since the layer made it`
   );
 }
 const clusterShot = shot.replace(/\.png$/, '-cluster.png');
@@ -529,7 +529,7 @@ if (probe) {
     console.log('  per response — the decode, absorb and region lanes are the demo\'s instruments; this page keeps none (the store\'s `instruments` option), so they are not measured here');
   }
   console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, wash bin ${probe.timings.washMs.toFixed(2)} ms, lookup texture ${probe.timings.lutMs.toFixed(2)} ms, outlines ${probe.timings.outlinesMs.toFixed(2)} ms (${probe.timings.outlines}), labels ${probe.timings.labelsMs.toFixed(2)} ms (${probe.timings.labels} placed), layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle); coverage check ${lanes?.coverage ? `${lanes.coverage.ms.toFixed(2)} ms over ${lanes.coverage.bands} bands, ${lanes.coverage.stale} stale` : 'not recorded'}`);
-  console.log(`  per frame — mean ${probe.timings.frame.mean.toFixed(1)} ms, p95 ${probe.timings.frame.p95.toFixed(1)} ms over the last ${probe.timings.frame.n} frames (${headed ? 'headed chromium on the display' : 'software GL under headless chromium'}), colouring by ${probe.cluster.layer ? 'cluster' : 'column'} through the lookup texture, ${probe.timings.lutWrites} texture writes in the session`);
+  console.log(`  per frame — mean ${probe.timings.frame.mean.toFixed(1)} ms, p95 ${probe.timings.frame.p95.toFixed(1)} ms over the last ${probe.timings.frame.n} frames (${headed ? 'headed chromium on the display' : 'software GL under headless chromium'}), colouring by ${probe.cluster.layer ? 'cluster' : 'column'} through the lookup texture, ${probe.timings.lutWrites} writes to the lookup texture since the layer made it`);
   const region = await page.evaluate(() => window.__tesseraProbeOf()?.region ?? null);
   console.log(`  box selection — ${region?.ms?.toFixed(0) ?? '?'} ms select-to-counted (200 ms settle, the request, the sum); ${regionMs} ms mouse-up to panel under ${headed ? 'headed' : 'headless'} input; lanes: ${lanes?.region ? `settle ${lanes.region.settleMs.toFixed(0)} ms, wire ${lanes.region.wireMs.toFixed(0)} ms (server ${lanes.region.serverMs.toFixed(1)} ms, ${lanes.region.tiles} tiles), projection ${lanes.region.projectMs.toFixed(1)} ms` : 'not recorded'}`);
   if (lanes) console.log(`  main thread — longest tasks: ${lanes.longTasks.slice(0, 5).map((t) => `${t.ms.toFixed(0)} ms at ${(t.at / 1000).toFixed(1)} s`).join(', ') || 'none over 50 ms'}; decode replies that waited through a long task: ${lanes.decode.filter((x) => lanes.longTasks.some((t) => x.at - x.ms <= t.at + t.ms && x.at >= t.at)).length} of ${lanes.decode.length}`);
