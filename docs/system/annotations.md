@@ -218,7 +218,7 @@ changes nothing, and a different one is refused. It takes effect when the level 
 as every fill does. Changing a label means deleting the artifact and publishing it again, under a
 new identifier.
 
-A label is compared with the descriptors the viewer's credential resolved to, so a label no item
+A label is compared with the terms the viewer's credential resolved to, so a label no item
 carries is still one a credential can hold. A layer's own label is compared the same way.
 
 Separately, a layer declares a membership requirement: how much of an artifact's declared
@@ -347,8 +347,8 @@ rather than evaluated per request.
 An ingested point's membership column carries the layer's edges as well as its memberships, exactly
 as a member file's does at a build: consecutive keys in one point's list name a parent and a child.
 Where the child does not exist, it is created holding that parent. Where it exists and holds no
-parent — a roster published with names before any point named the tree — the edge is recorded on it,
-durably, with the batch. Where it holds the same parent, the column restates what is already there.
+parent, the edge is recorded on it, durably, with the batch. This is the case of a roster published
+with names before any point named the tree. Where it holds the same parent, the column restates what is already there.
 Where it holds a different one the batch is refused, because there is no correct output and choosing
 would publish a hierarchy nobody declared. A `dag` layer's list is memberships alone; its several
 parents are declared on the artifact itself. A recorded edge reaches a response when the level's

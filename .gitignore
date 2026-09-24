@@ -41,3 +41,7 @@ notebooks/
 
 #Ignore codacy configuration files
 .codacy/
+
+# The documentation site: its virtualenv and its build output.
+.venv-docs/
+/site/

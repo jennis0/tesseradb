@@ -239,9 +239,9 @@ put every one of them back on the map.
 
 ### When live state reaches a manifest
 
-Everything a manifest carries that no segment does — the deny records, the layers, views,
+A manifest carries some state that no segment does: the deny records, the layers, views,
 attributes and vocabularies declared while the service runs, and the artifact memberships and
-supplied content published since the last one — is written by one routine, and whatever is
+supplied content published since the last manifest. One routine writes all of it, and whatever is
 outstanding goes into whichever manifest it writes next. What differs is when that is.
 
 A deny, a declaration and an operator's own publication or growth of artifacts reach a manifest at

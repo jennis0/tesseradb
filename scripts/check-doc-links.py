@@ -10,6 +10,7 @@ mechanical half of the fix.
     python3 scripts/check-doc-links.py             # errors fail, warnings report
     python3 scripts/check-doc-links.py --strict    # warnings fail too
     python3 scripts/check-doc-links.py --check-sections
+    python3 scripts/check-doc-links.py --strict README.md docs/reference   # only these paths
 
 ## What is checked, and how hard
 
@@ -84,7 +85,16 @@ def excluded(p: Path) -> bool:
     return any(part in EXCLUDE_PARTS for part in p.parts)
 
 
-def gather():
+def gather(paths=()):
+    if paths:
+        files = []
+        for name in paths:
+            p = ROOT / name
+            if p.is_file():
+                files.append((p, "md" if p.suffix == ".md" else "code"))
+            elif p.is_dir():
+                files += [(f, "md") for f in p.rglob("*.md") if not excluded(f.relative_to(ROOT))]
+        return sorted(set(files))
     files = []
     for name in SCAN_ROOT_FILES:
         p = ROOT / name
@@ -182,7 +192,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--strict", action="store_true", help="fail on warnings too")
     ap.add_argument("--check-sections", action="store_true", help="also warn on §N anchors with no matching heading")
+    ap.add_argument("paths", nargs="*", help="check only these files and directories, relative to the repository root")
     args = ap.parse_args()
+    missing = [p for p in args.paths if not (ROOT / p).exists()]
+    if missing:
+        print(f"check-doc-links: no such path: {', '.join(missing)}; give paths relative to the repository root", file=sys.stderr)
+        return 1
 
     idx = basename_index()
     tracked = [x for v in idx.values() for x in v]
@@ -194,7 +209,7 @@ def main():
     def warn(p, n, msg):
         warnings.append(f"{p.relative_to(ROOT)}:{n}: {msg}")
 
-    for path, kind in gather():
+    for path, kind in gather(args.paths):
         if path.resolve() == Path(__file__).resolve():
             continue  # this file names the forbidden strings on purpose
         if kind == "md":
@@ -260,7 +275,7 @@ def main():
     for e in errors:
         print(f"ERROR: {e}", file=sys.stderr)
 
-    n_files = len(gather())
+    n_files = len(gather(args.paths))
     print(f"\nchecked {n_files} files: {len(errors)} error(s), {len(warnings)} warning(s)")
     if errors or (args.strict and warnings):
         return 1

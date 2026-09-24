@@ -21,8 +21,9 @@
 //!
 //! ```text
 //! kind 6  head       JSON; exactly one, first
-//! kind 7  records    Arrow stream of one batch, its buffers optionally zstd-compressed; zero or
-//!                    more, each followed by a page end
+//! kind 7  records    Arrow stream of one batch, its buffers optionally zstd-compressed; one or
+//!                    more, each followed by a page end, a page of no rows where a response finds
+//!                    none, and none only where a response is cancelled before its first page
 //! kind 8  page end   JSON; one after each records frame, carrying the cursor to resume after it
 //! kind 4  trailer    JSON; exactly one, last
 //! ```
@@ -564,17 +565,7 @@ pub fn split_frames(body: &[u8]) -> Result<Vec<(u8, &[u8])>, FrameError> {
             return Err(FrameError::TruncatedHeader { at });
         };
         let kind = header[0];
-        if !matches!(
-            kind,
-            FRAME_TILES
-                | FRAME_SUB_CELLS
-                | FRAME_POINTS
-                | FRAME_TRAILER
-                | FRAME_ARTIFACTS
-                | FRAME_RECORDS_HEAD
-                | FRAME_RECORDS
-                | FRAME_PAGE_END
-        ) {
+        if !known(kind) {
             return Err(FrameError::UnknownKind { kind, at });
         }
         let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
@@ -587,6 +578,50 @@ pub fn split_frames(body: &[u8]) -> Result<Vec<(u8, &[u8])>, FrameError> {
         at = start + len;
     }
     Ok(frames)
+}
+
+fn known(kind: u8) -> bool {
+    matches!(
+        kind,
+        FRAME_TILES
+            | FRAME_SUB_CELLS
+            | FRAME_POINTS
+            | FRAME_TRAILER
+            | FRAME_ARTIFACTS
+            | FRAME_RECORDS_HEAD
+            | FRAME_RECORDS
+            | FRAME_PAGE_END
+    )
+}
+
+/// The next frame of a body read from `body` as it arrives: `(kind, payload)`, or `None` where
+/// the body ends before another frame begins. A body that ends inside a frame is an
+/// `UnexpectedEof` error, and an unknown kind is `InvalidData`, so a cut body never reads as a
+/// shorter one.
+pub fn read_frame(body: &mut impl std::io::Read) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+    use std::io::ErrorKind;
+    let mut header = [0u8; FRAME_HEADER_BYTES];
+    let mut filled = 0;
+    while filled < header.len() {
+        match body.read(&mut header[filled..]) {
+            Ok(0) if filled == 0 => return Ok(None),
+            Ok(0) => return Err(ErrorKind::UnexpectedEof.into()),
+            Ok(read) => filled += read,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let kind = header[0];
+    if !known(kind) {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("unknown frame kind {kind}"),
+        ));
+    }
+    let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+    let mut payload = vec![0u8; len];
+    body.read_exact(&mut payload)?;
+    Ok(Some((kind, payload)))
 }
 
 /// Why [`split_frames`] refused a body. `at` is the byte offset of the frame.
