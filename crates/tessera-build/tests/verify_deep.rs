@@ -811,8 +811,10 @@ fn read_base_postings(path: &Path) -> Vec<Vec<u32>> {
     (0..reader.term_count())
         .map(|t| match reader.posting_at(t).unwrap().unwrap() {
             tessera_authz::PostingRef::Array(bytes) => bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
                 .collect(),
             tessera_authz::PostingRef::Roaring(view) => view.iter().collect(),
         })

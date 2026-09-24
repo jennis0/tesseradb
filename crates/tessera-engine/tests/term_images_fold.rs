@@ -299,8 +299,8 @@ fn posting_bitmap(postings: &PostingsReader, term: u32) -> Option<Bitmap> {
         None => None,
         Some(PostingRef::Array(bytes)) => {
             let mut bitmap = Bitmap::new();
-            for chunk in bytes.chunks_exact(4) {
-                bitmap.add(u32::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in bytes.as_chunks::<4>().0 {
+                bitmap.add(u32::from_le_bytes(*chunk));
             }
             Some(bitmap)
         }

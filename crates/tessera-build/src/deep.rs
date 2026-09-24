@@ -517,8 +517,8 @@ fn walk_posting(
     match posting {
         PostingRef::Array(bytes) => {
             // A payload length that is not a multiple of 4 was refused at the reader's open.
-            for chunk in bytes.chunks_exact(4) {
-                visit(u32::from_le_bytes(chunk.try_into().expect("chunks_exact(4)")))?;
+            for chunk in bytes.as_chunks::<4>().0 {
+                visit(u32::from_le_bytes(*chunk))?;
             }
         }
         PostingRef::Roaring(view) => {

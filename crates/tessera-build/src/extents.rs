@@ -164,7 +164,7 @@ impl ExtentColumn {
         while self.extents.len() > max_open {
             let groups = self.extents.len().div_ceil(max_open);
             let per_group = self.extents.len().div_ceil(groups);
-            let taken: Vec<ExtentPaths> = self.extents.drain(..).collect();
+            let taken = std::mem::take(&mut self.extents);
             let mut folded: Vec<ExtentPaths> = Vec::with_capacity(groups);
             for (group, extents) in taken.chunks(per_group).enumerate() {
                 let stem = format!("extent-{}-fold{}-{group:05}", self.column, self.folds);

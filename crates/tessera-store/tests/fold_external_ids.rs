@@ -111,8 +111,10 @@ fn pairs_of(path: &Path) -> Vec<(Vec<u8>, u32)> {
 fn locator_of(dir: &Path) -> Vec<u32> {
     std::fs::read(dir.join("ext-locator.u32"))
         .expect("the locator is written")
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 

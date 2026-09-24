@@ -649,8 +649,10 @@ fn term_names(root: &Path, term: TermId, entity: EntityId) -> bool {
         None => false,
         Some(PostingRef::Roaring(view)) => view.contains(entity),
         Some(PostingRef::Array(bytes)) => bytes
-            .chunks_exact(4)
-            .any(|c| u32::from_le_bytes(c.try_into().unwrap()) == entity),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|c| u32::from_le_bytes(*c) == entity),
     };
     named
 }

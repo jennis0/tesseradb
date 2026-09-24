@@ -87,6 +87,7 @@ that completed with a wrong answer.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import json
 import re
@@ -233,6 +234,30 @@ _SCOPE_SEQ = itertools.count()
 #: discrimination rests on reading that file after the kill. Finite rather than `infinity` so a
 #: harness that crashed without reaping cannot leak it past a couple of hours.
 _SCOPE_KEEPER_WRAP = 'sleep 7200 >/dev/null 2>&1 & exec "$0" "$@"'
+
+
+@functools.cache
+def _scope_oom_policy() -> list[str]:
+    """``OOMPolicy=continue`` where the user manager applies an OOM policy to scopes (253 on).
+
+    Its default there is ``stop``: the kernel's kill of the server makes systemd stop the scope,
+    which kills the keeper and removes ``memory.events`` before the harness reads it. Before 253
+    a scope has no OOM policy and is not stopped. The version is the running manager's, which
+    is the one that takes or refuses the property.
+    """
+    try:
+        shown = subprocess.run(
+            ["systemctl", "--user", "show", "-p", "Version", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    version = re.match(r"(\d+)", shown.strip())
+    if version is None or int(version[1]) < 253:
+        return []
+    return ["-p", "OOMPolicy=continue"]
 
 
 def _advise_out_of_page_cache(*roots: Path) -> None:
@@ -641,6 +666,7 @@ class SuiteHarness:
                 f"MemoryMax={self.profile.memory_max}",
                 "-p",
                 "MemorySwapMax=0",
+                *_scope_oom_policy(),
                 "--",
                 "sh",
                 "-c",

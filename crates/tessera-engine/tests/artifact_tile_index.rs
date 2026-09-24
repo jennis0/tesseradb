@@ -21,6 +21,9 @@
 //! are real, the overlay is live, a growth lands mid-sequence, and holes and empty projections sit
 //! among the artifacts rather than at the end.
 
+// A viewport is a list of row ranges, and several here hold one.
+#![allow(clippy::single_range_in_vec_init)]
+
 use std::sync::Arc;
 
 use croaring::Bitmap;

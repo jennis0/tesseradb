@@ -175,8 +175,8 @@ impl ColumnPostings {
                 PostingRef::Array(bytes) => {
                     // Bounded by `small_term_threshold`, so the membership test is over a handful
                     // of entities and needs no bitmap of its own.
-                    for chunk in bytes.chunks_exact(4) {
-                        let entity = u32::from_le_bytes(chunk.try_into().unwrap());
+                    for chunk in bytes.as_chunks::<4>().0 {
+                        let entity = u32::from_le_bytes(*chunk);
                         if candidate.contains(entity) {
                             out.add(entity);
                         }
@@ -265,9 +265,11 @@ impl ColumnPostings {
             1 => Ok(match &sources[0] {
                 PostingRef::Roaring(view) => candidate.and_cardinality(view),
                 PostingRef::Array(bytes) => bytes
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .filter(|chunk| {
-                        candidate.contains(u32::from_le_bytes((*chunk).try_into().unwrap()))
+                        candidate.contains(u32::from_le_bytes(**chunk))
                     })
                     .count() as u64,
             }),
@@ -305,8 +307,8 @@ impl ColumnPostings {
                 PostingRef::Roaring(view) => live.and_inplace(view),
                 PostingRef::Array(bytes) => {
                     let mut small = Bitmap::new();
-                    for chunk in bytes.chunks_exact(4) {
-                        small.add(u32::from_le_bytes(chunk.try_into().unwrap()));
+                    for chunk in bytes.as_chunks::<4>().0 {
+                        small.add(u32::from_le_bytes(*chunk));
                     }
                     live.and_inplace(&small);
                 }
@@ -317,8 +319,8 @@ impl ColumnPostings {
                     match posting {
                         PostingRef::Roaring(view) => out |= live.and(view),
                         PostingRef::Array(bytes) => {
-                            for chunk in bytes.chunks_exact(4) {
-                                let entity = u32::from_le_bytes(chunk.try_into().unwrap());
+                            for chunk in bytes.as_chunks::<4>().0 {
+                                let entity = u32::from_le_bytes(*chunk);
                                 if live.contains(entity) {
                                     out.add(entity);
                                 }
@@ -388,8 +390,10 @@ fn hits(posting: &PostingRef<'_>, candidate: &Bitmap) -> bool {
     match posting {
         PostingRef::Roaring(view) => candidate.intersect(view),
         PostingRef::Array(bytes) => bytes
-            .chunks_exact(4)
-            .any(|chunk| candidate.contains(u32::from_le_bytes(chunk.try_into().unwrap()))),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|chunk| candidate.contains(u32::from_le_bytes(*chunk))),
     }
 }
 
@@ -431,8 +435,8 @@ pub fn resolve_union(column: &ColumnPostings, values: &[AttrLocalId]) -> io::Res
                         "tag-0 posting payload length must be a multiple of 4 (validated at \
                          PostingsReader::open)"
                     );
-                    for chunk in bytes.chunks_exact(4) {
-                        small.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+                    for chunk in bytes.as_chunks::<4>().0 {
+                        small.push(u32::from_le_bytes(*chunk));
                     }
                 }
             }

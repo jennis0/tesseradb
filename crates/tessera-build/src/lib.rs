@@ -2610,7 +2610,7 @@ fn check_view_identity(
         }
         window.clear();
         window.resize((hi - lo) as usize, NO_ENTITY);
-        for record in store.load(k)?.chunks_exact(ROW_ENTITY_RECORD) {
+        for record in store.load(k)?.as_chunks::<ROW_ENTITY_RECORD>().0 {
             let row = u32::from_le_bytes(record[..4].try_into().expect("four bytes")) as u64;
             let entity = u64::from_le_bytes(record[4..].try_into().expect("eight bytes"));
             window[(row - lo) as usize] = entity;
