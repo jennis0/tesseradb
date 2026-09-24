@@ -76,7 +76,7 @@ async fn ingest_anonymous(server: &TestServer, batch_id: &str) -> u64 {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    json["tessera_ids"].as_array().unwrap()[0].as_u64().unwrap()
+    ingested_ids(&json)[0]
 }
 
 /// **The hole this closes**: an item ingested with no external id is addressable — and therefore

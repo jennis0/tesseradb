@@ -1248,13 +1248,6 @@ async fn fields_of(server: &TestServer, tessera_id: u64) -> Value {
     body["fields"].clone()
 }
 
-fn tessera_id_at(answer: &Value, row: usize) -> u64 {
-    let id = &answer["tessera_ids"][row];
-    id.as_u64()
-        .or_else(|| id.as_str().and_then(|s| s.parse().ok()))
-        .expect("the ingest answers each row's tessera_id")
-}
-
 /// **An Arrow column is read by the rule a build reads a points file by**: any integer type
 /// carries an integer declaration whose range holds its values, either float width carries
 /// either float declaration, and a string at either offset width carries a string one. Each
@@ -1271,7 +1264,7 @@ async fn an_arrow_column_at_another_width_is_read_as_a_build_reads_it() {
 
     let (matched, _) = viewport(&server, &["0"], Some(json!({ "level": { "eq": 255 } }))).await;
     assert_eq!(matched.len(), 1, "the u8 is filterable at its value");
-    let fields = fields_of(&server, tessera_id_at(&answer, 0)).await;
+    let fields = fields_of(&server, ingested_ids(&answer)[0]).await;
     assert_eq!(fields["level"], json!(7));
     assert_eq!(fields["weight"], json!(0.5));
     assert_eq!(fields["precise"], json!(2.5));
@@ -1345,7 +1338,7 @@ async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
     declare_widths(&server).await;
     let (status, answer) = ingest(&server, "rows", Some(ARROW), widths_body(&[800], &[None])).await;
     assert_eq!(status, 200, "{answer}");
-    let tessera_id = tessera_id_at(&answer, 0);
+    let tessera_id = ingested_ids(&answer)[0];
     drain(&server).await;
 
     let (status, answer) = post_values(&server, "too-wide", level_values_body(800, 300)).await;
@@ -1448,8 +1441,9 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
     )
     .await;
     assert_eq!(status, 200, "{answer}");
-    let first = tessera_id_at(&answer, 0);
-    let second = tessera_id_at(&answer, 1);
+    let [first, second] = ingested_ids(&answer)[..] else {
+        panic!("two rows, two ids: {answer}")
+    };
     drain(&server).await;
     let (matched, _) = viewport(&server, &["0"], arxiv()).await;
     assert_eq!(matched, [first], "the ingested key is served");

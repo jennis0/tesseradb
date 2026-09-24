@@ -147,17 +147,7 @@ async fn ingest_with_receipt(served: &Served, batch_id: &str, body: Vec<u8>) -> 
     let status = resp.status().as_u16();
     let body: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "batch {batch_id} is accepted: {body}");
-    let ids = body["tessera_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| {
-            v.as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                .unwrap()
-        })
-        .collect();
-    (ids, body["padded_columns"].as_u64().unwrap())
+    (ingested_ids(&body), body["padded_columns"].as_u64().unwrap())
 }
 
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
@@ -522,12 +512,7 @@ async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
         ]),
     )
     .await;
-    let ids: Vec<u64> = ingested["tessera_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()).unwrap())
-        .collect();
+    let ids = ingested_ids(&ingested);
     drain(&served.server).await;
     write_json(
         &served,

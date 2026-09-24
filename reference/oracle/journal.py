@@ -96,7 +96,7 @@ class IngestOp:
     sequence: int
     batch_id: str
     accepted: int
-    tessera_ids: tuple[int, ...] = ()
+    tessera_ids: tuple[str, ...] = ()
     # The `entity_id_high_water` the barrier waits for: what it was before the call, plus the
     # rows the service said it accepted. Captured per batch because that is the only quantity
     # `/control/status` exposes that moves with an ingest at all (see `barrier`).
