@@ -1743,11 +1743,15 @@ impl ListColumnPack {
         match self.width {
             1 => values.iter().for_each(|byte| visit(u32::from(*byte))),
             2 => values
-                .chunks_exact(2)
-                .for_each(|v| visit(u32::from(u16::from_le_bytes([v[0], v[1]])))),
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .for_each(|v| visit(u32::from(u16::from_le_bytes(*v)))),
             _ => values
-                .chunks_exact(4)
-                .for_each(|v| visit(u32::from_le_bytes([v[0], v[1], v[2], v[3]]))),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .for_each(|v| visit(u32::from_le_bytes(*v))),
         }
     }
 
@@ -1770,10 +1774,12 @@ impl ListColumnPack {
                     .iter()
                     .for_each(|byte| visit(row as u32, u32::from(*byte))),
                 2 => values
-                    .chunks_exact(2)
-                    .for_each(|v| visit(row as u32, u32::from(u16::from_le_bytes([v[0], v[1]])))),
-                _ => values.chunks_exact(4).for_each(|v| {
-                    visit(row as u32, u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .for_each(|v| visit(row as u32, u32::from(u16::from_le_bytes(*v)))),
+                _ => values.as_chunks::<4>().0.iter().for_each(|v| {
+                    visit(row as u32, u32::from_le_bytes(*v))
                 }),
             }
             at = end;
