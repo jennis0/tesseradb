@@ -2443,8 +2443,8 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
     let first = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
 
-    // The holder is deleted, so the binding is dead bookkeeping: decision 0047 makes the
-    // re-ingest below allocate rather than 409, and it is no longer a join.
+    // The holder is deleted, so the binding is dead bookkeeping: the re-ingest below allocates
+    // rather than answering 409, and it is no longer a join.
     let body = json!([{ "tessera_id": first.to_string(), "idset": FIXTURE_IDSET, "op": "delete" }]);
     let resp = served
         .server
