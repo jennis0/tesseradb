@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The TypeScript half of the gate: typecheck every package and the operator scripts, build the four
 # library packages and import each from `dist/` in Node, run the unit suites, run core's live test
-# against a real `tessera serve`, then the components' browser suite in headless Chromium.
+# against a real `tessera serve`, then the components' browser suite in headless Chromium, which
+# also decodes through the built worker and renders the built elements.
 #
 # The operator scripts are plain `.mjs` and are checked with `checkJs`, so a block-scoped variable
 # used before its declaration (TS2448) fails here rather than at run time.
