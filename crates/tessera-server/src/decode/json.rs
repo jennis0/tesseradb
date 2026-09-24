@@ -45,7 +45,7 @@ pub(crate) fn record_batch(
 ) -> Result<RecordBatch, DecodeError> {
     let rows = records(body_name, body)?;
     for (row, record) in rows.iter().enumerate() {
-        check_declared_present(columns.required.iter().copied(), |name| {
+        check_declared_present(columns.required.iter().map(|name| (*name, *name)), |name| {
             record.contains_key(name)
         })
         .map_err(|detail| DecodeError(format!("{body_name}: row {row}: {detail}")))?;

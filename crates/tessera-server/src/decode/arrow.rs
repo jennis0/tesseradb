@@ -310,7 +310,7 @@ pub(crate) fn parse_ingest_batch(
     let (mut clipped, mut clamped) = (0u64, 0u64);
     for batch in batches {
         let batch = batch?;
-        check_declared_present(required.iter().copied(), |name| {
+        check_declared_present(required.iter().map(|name| (*name, *name)), |name| {
             batch.column_by_name(name).is_some()
         })
         .map_err(|detail| DecodeError(format!("{body_name}: {detail}")))?;

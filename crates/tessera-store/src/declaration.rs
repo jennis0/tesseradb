@@ -152,15 +152,19 @@ pub fn check_column_name(name: &str) -> Result<(), String> {
 
 /// Every declared column must be in an input that writes rows, a build's attribute source and an
 /// ingest batch alike; a column of nulls says no row has a value. A `/control/values` batch fills
-/// only the columns it names, so it is not held to this.
+/// only the columns it names, so it is not held to this. `declared` is `(attribute, column)`,
+/// the column being the attribute's own name except where a build's `field` moves it.
 pub fn check_declared_present<'a>(
-    declared: impl IntoIterator<Item = &'a str>,
+    declared: impl IntoIterator<Item = (&'a str, &'a str)>,
     carries: impl Fn(&str) -> bool,
 ) -> Result<(), String> {
     let missing: Vec<String> = declared
         .into_iter()
-        .filter(|column| !carries(column))
-        .map(|column| format!("'{column}'"))
+        .filter(|(_, column)| !carries(column))
+        .map(|(attribute, column)| match attribute == column {
+            true => format!("'{column}'"),
+            false => format!("'{column}' (attribute '{attribute}')"),
+        })
         .collect();
     if missing.is_empty() {
         return Ok(());
@@ -375,9 +379,10 @@ mod tests {
     fn every_declared_column_must_be_carried() {
         let carried = ["a", "b"];
         let carries = |column: &str| carried.contains(&column);
-        assert!(check_declared_present(["a", "b"], carries).is_ok());
+        assert!(check_declared_present([("a", "a"), ("moved", "b")], carries).is_ok());
         assert!(check_declared_present([], carries).is_ok());
-        assert!(check_declared_present(["a", "c"], carries).is_err());
+        assert!(check_declared_present([("a", "a"), ("c", "c")], carries).is_err());
+        assert!(check_declared_present([("b", "c")], carries).is_err());
     }
 
     #[test]

@@ -2091,7 +2091,9 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
 
     let id_root = src.id_index(&file_schema)?;
     tessera_store::declaration::check_declared_present(
-        columns.iter().map(|attribute| attribute.column()),
+        columns
+            .iter()
+            .map(|attribute| (attribute.name.as_str(), attribute.column())),
         |column| file_schema.column_with_name(column).is_some(),
     )
     .map_err(|detail| BuildError::Schema {
