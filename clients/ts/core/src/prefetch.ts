@@ -3,41 +3,19 @@ import {MIN_DEPTH, chooseDepth, tileRectOfBbox, type CountField, type DepthChoic
 import {rectArea, type TileRect} from './rects.js';
 
 /**
- * Layer 2: deciding *which* tiles to want.
+ * Which tiles to want. Pure: no timers, no fetch, no clock; the caller schedules. A consumer with its
+ * own tile scheduler (deck.gl's `TileLayer`, a MapLibre source) can drop this and keep the replica.
  *
- * Split from the replica because the two answer different questions and a consumer may want only
- * one of them. The replica answers asks; this decides what to ask for, and a consumer with its own
- * tile scheduler — deck.gl's `TileLayer`, a MapLibre source — drops this layer entirely and keeps
- * the cache. Everything here is pure: no timers, no fetch, no clock. The scheduling that drives it
- * lives with the caller, which is what makes the policy testable at all.
+ * Plans are rectangles, never tile lists: enumerating a quarter-million-tile ring costs a noticeable
+ * fraction of a second to describe what four integers carry.
  *
- * **Regions, not tile lists.** A viewport is a rectangle and a plan is a rectangle; enumerating the
- * tiles inside one costs O(tiles) — measured at 181 ms for a 262 144-tile ring — to produce a shape
- * four integers already describe. The replica subtracts what it holds as rectangles too, so no
- * layer of this ever materialises a tile set.
+ * Asking for tiles deeper than the view needs is sound because served prefixes nest: a deeper
+ * answer is a superset of the shallower one, so nothing disappears when the user arrives.
  *
- * **Presentation, never selection.** Which tiles a client asks for is its own business; which marks
- * it is *served* for a tile is the engine's (I7). Requesting a deeper tile than the viewport
- * strictly needs is sound because §7.2's prefixes nest — a deeper answer is a superset of the
- * shallower one, so nothing pops when the user arrives there — and it is why look-ahead can be a
- * client-side choice at all.
- *
- * **Three dials, deliberately separate.** Anticipation has three independent quantities that are
- * easy to conflate into one knob, and each has its own owner:
- *
- * - **Where** to anticipate — this file: geometry, velocity bias, depth grading. A prediction, and
- *   only prediction quality should shape it.
- * - **How fast** to fetch it — the caller's pacing (bites and bytes per pause, `?ring=`). A
- *   transport and decode throttle; it must never redefine the region, only the rate, which is why
- *   the region resumes across pauses via `novelIn` rather than being recomputed truncated.
- * - **How much** to keep — the replica's byte budget. Retention, enforced by eviction, whatever
- *   was fetched.
- *
- * One coupling is retained knowingly: {@link ringMargin} widens the ring as the replica fills, so
- * reach grows with how much of the retention budget is unspent. That is retention pressure
- * steering prediction, and it is kept because an empty cache wants its first ring close-in whatever
- * the prediction says — but it is the seam to revisit if reach ever needs to answer to prediction
- * alone.
+ * Anticipation has three separate quantities. Where to fetch ahead is decided here, from geometry,
+ * velocity and depth. How fast is the caller's pacing, which changes the rate and never the region.
+ * How much to keep is the replica's byte budget. One coupling is kept: {@link ringMargin} widens the
+ * ring while the replica has room, because an empty cache wants its first ring close in.
  */
 
 export type Viewport = {
@@ -53,14 +31,11 @@ export type PlannerInputs = {
   viewport: Viewport;
   /** Target marks on screen. */
   budget: number;
-  /** Calibrated marks-per-tile — the fallback model, used where no counts cover the view. */
+  /** Calibrated marks per tile, for the average model used where no counts cover the view. */
   mTarget: number;
-  /**
-   * Per-cell masked counts the caller knows cover the view, from responses already absorbed. The
-   * depth choice is arithmetic over these where they answer; see `budget.ts`.
-   */
+  /** Per-cell masked counts known to cover the view; see `budget.ts`. */
   counts?: CountField;
-  /** The cap in force, `min(k, k_max_marks)` — the `k` of `Σ min(k, count)`. */
+  /** The cap in force, `min(k, k_max_marks)`: the `k` of `Σ min(k, count)`. */
   k?: number;
   maxTiles: number;
   /** The previous response's visible count, the saturation term for depth choice. */
@@ -69,13 +44,12 @@ export type PlannerInputs = {
   velocity?: [number, number];
   /** The depth currently drawn; a one-step budget disagreement defers to it. See {@link plan}. */
   holdDepth?: number;
-  /** What the replica holds and what it may hold — sizes the ring. See {@link ringMargin}. */
+  /** What the replica holds and what it may hold, which size the ring. See {@link ringMargin}. */
   heldBytes?: number;
   budgetBytes?: number;
   /**
-   * Zoom layers to keep resident-but-undrawn beneath the current depth (`?layers=`, default 1;
-   * 0 for a resource-starved client, 2+ where GPU and wire afford it). See the shadow band in
-   * {@link plan}.
+   * Depths below the current one to fetch over the visible box and hold undrawn: default 1, 0 for a
+   * constrained client, 2 or more where GPU and network allow.
    */
   depthLayers?: number;
 };
@@ -100,77 +74,41 @@ export type Plan = {
 };
 
 /**
- * How much beyond the visible box the foreground request covers.
- *
- * Costs `MARGIN²` in tiles (1.3 → 1.69×) and buys the common interaction for free: measured, most
- * drags move the view by well under 30% of its width. The alternative — requesting exactly the
- * visible box — guarantees a round trip for every pixel of movement.
+ * How far beyond the visible box the foreground request reaches. Costs `MARGIN²` in tiles, and most
+ * drags move the view by well under 30% of its width.
  */
 export const MARGIN = 1.3;
 
 /**
- * How far beyond the visible box the *drawn* buffer reaches.
+ * How far beyond the visible box the drawn buffer reaches.
  *
- * **Wider than {@link MARGIN}, because drawing and fetching are bounded by different things.** What
- * to fetch is limited by what the budget will pay for; what to draw is limited only by what is
- * already held, and re-assembling costs milliseconds where a round trip costs hundreds. Drawing
- * only the fetched box puts the edge of the marks 30% beyond the screen, so a pan of more than 15%
- * of the viewport runs off it and waits for a re-assembly — measured at 65–197 ms with **zero**
- * requests, which is pop-in with a fully warm cache and nothing to fetch.
- *
- * Costs `RENDER_MARGIN²` in marks drawn, and deck.gl takes binary attributes so the marks are a
- * buffer upload rather than per-mark work.
- *
- * **Sized against the gesture, not against the screen.** Escaping the buffer costs a full rebuild
- * and a fresh upload of every mark; staying inside it costs nothing at all, because deck re-projects
- * what is already there. So the question is how far a gesture travels: an aggressive pan moves a
- * third to a half of a viewport, and at 1.8 the buffer reached only 0.4 widths beyond the screen —
- * exactly short of it, which put a rebuild on the interaction users make most deliberately. At 2.6
- * it reaches 0.8.
- *
- * The trade is marks drawn against rebuilds avoided: `RENDER_MARGIN²` more marks in the buffer, and
- * the rebuild happens less often. The redraw itself is ~1 ms at 6 × 10^4 marks, so the cost that
- * matters is the GPU upload, which is paid per rebuild rather than per frame.
+ * Wider than {@link MARGIN}: fetching is bounded by the budget, drawing only by what is held.
+ * Leaving the buffer costs a rebuild and an upload of every mark; staying inside costs nothing,
+ * since deck.gl re-projects what is there. An aggressive pan moves a third to a half of a viewport,
+ * and at 2.6 the buffer reaches 0.8 viewport widths beyond the screen. The cost is `RENDER_MARGIN²`
+ * more marks per upload.
  */
 export const RENDER_MARGIN = 2.6;
-/**
- * How far the anticipatory ring reaches when the replica is nearly full.
- *
- * The floor, not the figure: see {@link ringMargin}.
- */
+/** How far the anticipatory ring reaches when the replica is nearly full; see {@link ringMargin}. */
 export const RING_MARGIN = 2.2;
 
 /** How far it reaches when the replica is empty. */
 export const RING_MARGIN_MAX = 6;
 
 /**
- * Fill the replica to this fraction of its budget before the ring stops growing.
- *
- * Below it the cache is not the scarce resource and a wider ring is close to free — the marks are
- * held either way, and the only extra cost is fetching ground the user may not reach. Above it a
- * wider ring would evict what it just bought.
+ * The fraction of its budget the replica fills before the ring stops growing. Below it a wider ring
+ * costs only the fetch; above it a wider ring would evict what it bought.
  */
 export const RING_FILL_TARGET = 0.6;
 
 /**
- * How far the ring should reach, given how full the replica already is.
+ * How far the ring reaches, from `RING_MARGIN_MAX` when the replica is empty down to `RING_MARGIN`
+ * as it fills. A fixed small ring leaves most of the cache budget unused; a wide one is affordable
+ * because the reach is spent on coarser depths (see {@link plan}).
  *
- * **Sized against the cache budget rather than fixed**, because a fixed multiple is wrong at both
- * ends. Measured on the demo corpus at the broad principal: points cost ~48 B each, so a 512 MB
- * budget holds ~10.7 × 10^6 of them — and a 2.2× ring left the replica at 41 MB and 8 × 10^5 points
- * after a dozen pans, 8% of what it was given. The cache was never the constraint; the ring was,
- * and it was fetching a thin margin and then waiting to be asked again.
- *
- * Grows as `RING_MARGIN_MAX` down to `RING_MARGIN` as the replica fills, so an empty cache is
- * aggressive and a full one stops buying what it would have to evict. The reach is spent on
- * *coarser* bands rather than more fine ones — see {@link plan} — so a wide ring is affordable.
- *
- * **It is bought with server work, and the exchange rate is steep.** Measured over six pans on the
- * demo corpus, against the fixed 2.2× ring: four of six pans needing no request instead of three,
- * and 2.5 × 10^6 points held instead of 8 × 10^5 — for **6× the server CPU** (33 ms → 207 ms) and
- * **4× the bytes** (9.1 MB → 35.7 MB). Worth it for one principal on a dedicated box; against
- * `caching.md` §4's ceiling of a handful of concurrently active broad principals it is not
- * obviously worth it at all, and `RING_MARGIN_MAX` is the dial.
+ * The reach costs server work: on the demo corpus the wide ring held three times the points and
+ * answered more pans without a request, for six times the server CPU and four times the bytes.
+ * With many active principals `RING_MARGIN_MAX` is the setting to lower.
  */
 export function ringMargin(heldBytes: number, budgetBytes: number): number {
   if (budgetBytes <= 0) return RING_MARGIN;
@@ -199,11 +137,9 @@ export function worldBbox(
 }
 
 /**
- * What to ask for, given a viewport.
- *
- * **Depth is chosen for what is visible, and the margin is then fetched at that depth.** Choosing
- * it for the margined box instead would spend the budget on off-screen marks and quietly lower the
- * resolution of what the user is actually looking at.
+ * What to ask for, given a viewport. The depth is chosen for the visible box and the margin fetched
+ * at that depth; chosen for the margined box, it would spend the budget off screen and lower the
+ * resolution of what is in view.
  */
 export function plan(inputs: PlannerInputs): Plan {
   const {viewport, budget, mTarget, maxTiles, counts, k, visibleInView, velocity, holdDepth} = inputs;
@@ -211,14 +147,9 @@ export function plan(inputs: PlannerInputs): Plan {
   const visible = worldBbox(viewport, 1);
   const ask = {budget, mTarget, worldBbox: visible, maxTiles, counts, k, visibleInView};
   let choice = chooseDepth(ask);
-  // **A one-step disagreement defers to the depth already drawn.** `visibleInView` varies with the
-  // ground under the view, so panning across a density boundary flip-flops the budget's choice
-  // between neighbours — measured as `8 9 8 8 9 8` across consecutive derivations, each flip
-  // redrawing the view from a different partition's coverage, which reads as the map changing its
-  // mind about how many points a zoom level has. One step is a calibration wobble; two is a real
-  // zoom, and a real zoom also changes the viewport enough that the budget's answer moves by more
-  // than one. The caller clears `holdDepth` on gesture pauses, so the hold never outlives the
-  // interaction that needed it.
+  // A one-step disagreement defers to the depth drawn. The visible count changes with the ground
+  // under the view, so panning across a density boundary would flip the choice between neighbouring
+  // depths. A real zoom moves the choice by more than one step.
   if (holdDepth !== undefined && Math.abs(choice.depth - holdDepth) === 1) {
     choice = chooseDepth({...ask, force: holdDepth});
   }
@@ -230,13 +161,8 @@ export function plan(inputs: PlannerInputs): Plan {
   };
 
   /**
-   * The visible box alone, fetched before the margin.
-   *
-   * **The screen fills in the time its own contents take, not the time the margin takes.** One
-   * request for the margined box means the user waits for `MARGIN²` — 1.69× — of the marks they can
-   * actually see, and on cold ground at a high budget that difference is seconds. Splitting costs
-   * one extra round trip, against a per-request floor of ~170 µs; the margin is then a rectangle
-   * subtraction away and is fetched second, off the critical path.
+   * The visible box alone, fetched before the margin, so the screen fills in the time its own
+   * contents take. The margin is fetched second, less what the first request covered.
    */
   const visible_: PlannedFetch = {
     kind: 'visible',
@@ -246,38 +172,17 @@ export function plan(inputs: PlannerInputs): Plan {
 
   const background: PlannedFetch[] = [];
 
-  // **The ring, biased downwind.** A pan continues in the direction it started far more often than
-  // it reverses, so shifting the ring along recent movement buys the next second of panning at the
-  // same tile cost as a centred one.
+  // The ring is shifted along recent movement, since a pan more often continues than reverses. Most
+  // of a ring is already held; the rest is speculative server work.
   //
-  // **It is not free, and measurement says so.** Most of the ring is already held — 46,070 of
-  // 46,410 tiles on the demo corpus — but the remainder is speculative work for tiles the user may
-  // never look at. Measured (`probes/2026-08-08-lookahead-contention/`): the fraction of pans
-  // needing no request at all roughly doubles, for roughly half again the server CPU per pan.
-  //
-  // The bias is the part whose value is unmeasured. A symmetric ring fetches ahead in every
-  // direction at once and so costs the same whether the guess was right or not; shifting it is
-  // what would make the cost depend on predicting correctly.
-  // **The periphery is fetched coarser, not just further.** Each level shallower is a quarter of
-  // the points per unit area, and §7.2's prefixes nest, so a coarse band is a legitimate superset
-  // of the fine one it will be replaced by — it draws immediately when the user arrives and refines
-  // when the foreground fetch lands. Doubling the reach while dropping a depth therefore costs
-  // about the same as the band before it, instead of four times as much: a ring reaching 8x the
-  // viewport costs three foregrounds rather than sixty-four.
-  //
-  // Without this a wide ring is unaffordable at any useful reach. Measured at a fixed depth, a 6x
-  // ring asked for 2.3 x 10^6 points in one response.
+  // The periphery is fetched coarser as well as further. Each level shallower is a quarter of the
+  // points per unit area, and a coarse band is a superset of the fine one that later replaces it,
+  // so doubling the reach while dropping a depth costs about the same as the band before it.
   const reach = ringMargin(inputs.heldBytes ?? 0, inputs.budgetBytes ?? 0);
   const shift = velocity ? ringShift(viewport, velocity) : ([0, 0] as [number, number]);
-  // **The zoom shadow comes first.** Depth+L over the visible box is the one region anticipation
-  // can be certain about — a zoom-in lands under the cursor, and its ground is already on screen
-  // — and it is the interaction the pan ring cannot help: ancestors stay sparse by design, so an
-  // unanticipated zoom notch reads as loading. Resident-but-undrawn is free to arrange: bands
-  // land in the replica by depth, the slab retains a partition per depth, and the flip on arrival
-  // is the swap that is already instant. Each layer costs up to ~4x the viewport's bytes over
-  // novel ground and nothing over held ground (owner-ruled: ship at design budgets, measure —
-  // D5); the count is a knob because that cost is a machine's to afford: 0 for a starved client,
-  // 2+ where GPU and wire allow.
+  // The depths below the current one over the visible box come first: a zoom-in lands under the
+  // cursor, and the pan ring does not help with it. Each costs up to about four times the view's
+  // bytes over new ground and nothing over held ground.
   for (let layer = 1; layer <= (inputs.depthLayers ?? 1); layer++) {
     const depth = choice.depth + layer;
     if (depth > MAX_DEPTH) break;
@@ -304,23 +209,13 @@ export function plan(inputs: PlannerInputs): Plan {
 }
 
 /**
- * The anticipatory next-depth fetch, for a client that has measured its cost and wants it.
- *
- * **Separate from {@link plan}, and off by default.** The ring is nearly free once bands are held —
- * most of it is already in the replica — but this is not: the client by construction never holds
- * depth `d+1`, so nothing elides and the request costs a genuine slice of a viewport's selection
- * scan on every idle pause. It is tile-count-neutral (four times the tiles over a quarter of the
- * area) and emphatically not CPU-neutral, and at N users it multiplies. Measure before enabling.
- *
- * What it buys is zoom-*in* feeling instant, which the ring cannot help with: a zoom lands on tiles
- * at a depth the replica has never seen, and nothing but having fetched them ahead of time avoids
- * the round trip.
+ * A fetch of the next depth over the centre quadrant of the view: four times the tile density over
+ * a quarter of the area, so the same tile count as the foreground. Little of depth `d+1` is usually
+ * held, so each idle pause that asks pays for a server scan. {@link plan} does not call this.
  */
 export function deeperFetch(inputs: PlannerInputs, choice: DepthChoice): PlannedFetch | null {
   if (choice.depth >= 16) return null;
   const depth = choice.depth + 1;
-  // The centre quadrant: half the linear extent, so four times the tile density over a quarter of
-  // the area is the same tile count the foreground already pays for.
   const rect = tileRectOfBbox(worldBbox(inputs.viewport, 0.5), depth);
   if (rectArea(rect) > inputs.maxTiles) return null;
   return {kind: 'deeper', depth, rect};
