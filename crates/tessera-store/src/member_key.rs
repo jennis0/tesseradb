@@ -144,6 +144,13 @@ pub fn read_levels(array: &dyn Array) -> Option<&UInt32Array> {
     array.as_any().downcast_ref()
 }
 
+/// Row `row`'s level in a [`LEVEL`] column: 0 where the row is null or there is no column.
+pub fn level_in(levels: Option<&UInt32Array>, row: usize) -> u32 {
+    levels
+        .filter(|levels| !levels.is_null(row))
+        .map_or(0, |levels| levels.value(row))
+}
+
 /// A member key column's cells: one key per row, or a list of keys per row at any of Arrow's list
 /// types.
 #[derive(Clone, Copy)]
@@ -293,9 +300,7 @@ impl<'a> MemberColumn<'a> {
     /// hierarchy, and for a scalar key the row's [`LEVEL`] where `levels` is given.
     pub fn level_at(&self, levels: Option<&UInt32Array>, row: usize, position: usize) -> u32 {
         match self.cells {
-            KeyCells::Scalar => levels
-                .filter(|levels| !levels.is_null(row))
-                .map_or(0, |levels| levels.value(row)),
+            KeyCells::Scalar => level_in(levels, row),
             _ => self.meaning.level_of(position),
         }
     }

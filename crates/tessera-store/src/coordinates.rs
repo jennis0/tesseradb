@@ -4,9 +4,11 @@
 
 use std::fmt;
 
-use arrow::array::{Array, Float32Array, Float64Array};
+use arrow::array::Array;
 use arrow::datatypes::DataType;
 use tessera_spatial::{Bounds, Projection};
+
+use crate::scalar_column::f64_values;
 
 /// The columns a view's coordinates are read from: `x` and `y` where it projects nothing, and
 /// `lon` and `lat` where it projects the Earth. A build renames them through a declaration's
@@ -60,17 +62,11 @@ impl fmt::Display for ColumnError {
     }
 }
 
-/// A coordinate column as `f64`. `float32` is widened and `float64` kept as it is, since at a deep
-/// frame narrowing would move a point into another cell.
+/// A coordinate column as `f64`, by [`f64_values`]: `float32` is widened and `float64` kept as it
+/// is, since at a deep frame narrowing would move a point into another cell.
 pub fn read_coordinates(column: &dyn Array) -> Result<Vec<f64>, ColumnError> {
-    let any = column.as_any();
-    let values = if let Some(values) = any.downcast_ref::<Float64Array>() {
-        values.values().to_vec()
-    } else if let Some(values) = any.downcast_ref::<Float32Array>() {
-        values.values().iter().map(|v| f64::from(*v)).collect()
-    } else {
-        return Err(ColumnError::Type(column.data_type().clone()));
-    };
+    let values =
+        f64_values(column).ok_or_else(|| ColumnError::Type(column.data_type().clone()))?;
     // A null slot's value buffer holds an arbitrary number, so a null is found before any is used.
     if column.null_count() > 0 {
         let row = (0..column.len()).find(|&row| column.is_null(row));
@@ -188,7 +184,7 @@ pub fn place(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::Int32Array;
+    use arrow::array::{Float32Array, Float64Array, Int32Array};
 
     #[test]
     fn a_float32_column_is_widened_and_a_float64_one_kept() {

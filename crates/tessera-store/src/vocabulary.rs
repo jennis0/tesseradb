@@ -553,7 +553,7 @@ impl VocabularyMinter {
     /// Two branches, both uniform over exactly the free set. The mask makes the raw draw uniform
     /// over `0..=max` without modulo bias; `0` and the assigned set are rejected.
     fn draw(&self) -> Result<u32, MintError> {
-        let max = usable_max(self.width);
+        let max = crate::declaration::max_code(self.width);
         let free = u64::from(max) - self.assigned.len() as u64;
         if free == 0 {
             return Err(MintError::Exhausted {
@@ -860,16 +860,6 @@ pub fn fold_extensions_into(
                 None => vocabulary.values.push(value.clone()),
             }
         }
-    }
-}
-
-/// The highest usable code at `width` — also the mask that makes a raw `u32` draw uniform over the
-/// width's domain. Code 0 is reserved, so the count of usable codes equals this value.
-fn usable_max(width: ScalarType) -> u32 {
-    match width {
-        ScalarType::U8 => u32::from(u8::MAX),
-        ScalarType::U16 => u32::from(u16::MAX),
-        _ => u32::MAX,
     }
 }
 

@@ -120,12 +120,7 @@ impl ScalarColumn {
                 Some(a) => Values::F32(a.values().to_vec()),
                 None => Values::F64AsF32(any.downcast_ref::<Float64Array>()?.values().to_vec()),
             },
-            ScalarType::F64 => Values::F64(if let Some(a) = any.downcast_ref::<Float64Array>() {
-                a.values().to_vec()
-            } else {
-                let a = any.downcast_ref::<Float32Array>()?;
-                a.values().iter().map(|v| f64::from(*v)).collect()
-            }),
+            ScalarType::F64 => Values::F64(f64_values(column.as_ref())?),
             ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
                 Values::Text(Utf8Values::new(column)?)
             }
@@ -191,6 +186,17 @@ impl ScalarColumn {
             _ => ScalarValue::TimestampUs(value as i64),
         })
     }
+}
+
+/// A float column at either width as `f64`, the narrower widened; `None` for any other type. The
+/// slots of null rows hold arbitrary numbers.
+pub fn f64_values(column: &dyn Array) -> Option<Vec<f64>> {
+    let any = column.as_any();
+    if let Some(a) = any.downcast_ref::<Float64Array>() {
+        return Some(a.values().to_vec());
+    }
+    let a = any.downcast_ref::<Float32Array>()?;
+    Some(a.values().iter().map(|v| f64::from(*v)).collect())
 }
 
 /// Any integer column but a `u64` one, or a microsecond timestamp, as `i64`: one conversion per

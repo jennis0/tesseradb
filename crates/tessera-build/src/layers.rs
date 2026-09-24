@@ -938,12 +938,12 @@ fn read_artifacts(
         // Read whether or not the layer declares a membership shape: the same column is the space
         // of the row's authored shape content, which the second pass below reads (§6.1).
         let spaces = space_column(path, &batch, fields)?;
-        let level = optional_u32(path, &batch, LEVEL)?;
+        let level = optional_levels(path, &batch, LEVEL)?;
         let contents = optional_ranked_values(path, &batch, fields, "contents")?;
         let members = optional_u64_list(path, &batch, fields, "members", ids)?;
         let excluding = optional_u64_list(path, &batch, fields, "excluding", ids)?;
         let target_layer = optional_utf8(path, &batch, fields, "attached_layer")?;
-        let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
+        let target_level = optional_levels(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
         let parent = parent_column(path, &batch, fields)?;
         // A source without the declared column states no labels, and the publication refuses
@@ -1018,7 +1018,7 @@ fn read_artifacts(
             ) {
                 (Some(layer), Some(key)) => Some(IncomingAttachment {
                     layer,
-                    level: target_level.as_ref().map_or(0, |c| number_at(c, row)),
+                    level: level_in(target_level, row),
                     key,
                 }),
                 (None, None) => None,
@@ -1247,16 +1247,7 @@ fn read_members(
                 })?)
             }
         };
-        let level = match batch.column_by_name(LEVEL) {
-            None => None,
-            Some(array) => Some(read_levels(array.as_ref()).ok_or_else(|| {
-                BuildError::Invalid(format!(
-                    "{}: column {LEVEL} is {:?}; write it as uint32",
-                    path.display(),
-                    array.data_type()
-                ))
-            })?),
-        };
+        let level = optional_levels(path, &batch, LEVEL)?;
         let rank = optional_u32_field(path, &batch, fields, "rank")?;
         let entity = member_entities(path, &batch, fields, ids)?;
         read += batch.num_rows() as u64;
@@ -3584,16 +3575,23 @@ fn member_entities(
     )?))
 }
 
-/// A `u32` column read under its own name — the two the field map may not move.
-fn optional_u32<'a>(
+/// A level column read under its own name, one of the two the field map may not move, by
+/// [`read_levels`].
+fn optional_levels<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
 ) -> Result<Option<&'a UInt32Array>> {
-    match batch.column_by_name(name) {
-        None => Ok(None),
-        Some(array) => typed(path, array, name).map(Some),
-    }
+    let Some(array) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    read_levels(array.as_ref()).map(Some).ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "{}: column {name} is {:?}; write it as uint32",
+            path.display(),
+            array.data_type()
+        ))
+    })
 }
 
 fn optional_u32_field<'a>(
@@ -3661,14 +3659,6 @@ fn optional_ranked_values<'a>(
 
 fn value_at(column: crate::utf8::Utf8Column<'_>, row: usize) -> Option<String> {
     column.at(row).map(str::to_string)
-}
-
-fn number_at(column: &UInt32Array, row: usize) -> u32 {
-    if column.is_null(row) {
-        0
-    } else {
-        column.value(row)
-    }
 }
 
 fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
@@ -3843,7 +3833,7 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 /// the only decimal string an open layer writes is the one it mints an artifact under, once per
 /// cluster.
 pub(crate) use tessera_store::member_key::{
-    read_levels, KeyCells, KeyColumn, KeyRead, MemberColumn, LEVEL,
+    level_in, read_levels, KeyCells, KeyColumn, KeyRead, MemberColumn, LEVEL,
 };
 
 pub(crate) fn key_column<'a>(
@@ -4199,7 +4189,7 @@ fn address(
     };
     Ok((
         layer.to_string(),
-        level.map_or(0, |c| number_at(c, row)),
+        level_in(*level, row),
         key,
         view.map(str::to_string),
     ))
