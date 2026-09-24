@@ -2869,6 +2869,7 @@ dependencies = [
  "tempfile",
  "tessera-analyse",
  "tessera-authz",
+ "tessera-docgen",
  "tessera-engine",
  "tessera-filter",
  "tessera-filter-write",

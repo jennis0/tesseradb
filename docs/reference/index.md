@@ -7,7 +7,7 @@ These pages state what each interface accepts and returns.
 - [Capabilities](capabilities.md): which route, function, method or command performs each core capability on each of the four surfaces.
 - [CLI](cli.md): the `tessera` command and its subcommands.
 - [tessera.toml](tessera-toml.md): the deployment file, which says where the bundle is and how the server listens and bounds its work.
-- [Configuration schema](schema.md): the corpus declaration and `tessera.toml`.
+- [corpus.toml](corpus-toml.md): the corpus declaration, which says what a build reads and what each view, vocabulary, attribute and layer is.
 - [Python client](python.md): the `tesseradb` package.
 - [TypeScript client](typescript.md): the `@tesseradb/client` package.
 - [Components](components.md): the web components, their attributes, events and styling.

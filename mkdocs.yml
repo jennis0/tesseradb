@@ -95,7 +95,7 @@ nav:
       - Capabilities: reference/capabilities.md
       - CLI: reference/cli.md
       - tessera.toml: reference/tessera-toml.md
-      - Configuration schema: reference/schema.md
+      - corpus.toml: reference/corpus-toml.md
       - Python client: reference/python.md
       - TypeScript client: reference/typescript.md
       - Components: reference/components.md
