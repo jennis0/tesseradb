@@ -1,104 +1,79 @@
-import {ArtifactChannel, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
-import {SessionArtifactTable} from './artifactTable.js';
-import type {Composition} from './compose.js';
-import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
-import {dataToWorldXY, gridToWorld, MAX_DEPTH, WORLD_SIZE} from './coords.js';
-import {tileRectOfBbox} from './budget.js';
-import {rectContainsTile} from './rects.js';
-import {worldBbox} from './prefetch.js';
-import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.js';
-import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks} from './encoding.js';
-import {composeFilters, emptyDraft, type ClauseVerb, type FilterDraft} from './filters.js';
-import {withMember, withMembers, withoutMember, type MemberClause} from './members.js';
-import {Presenter, defaultFrameScheduler, refusalOf, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
-import {insideBox, insidePolygon, regionOperand, withRegion, type WorldPolygon} from './region.js';
-import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
-import {requestLevels} from './artifactChannel.js';
+import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
-import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
-import type {Band, BandKey} from './bands.js';
-import {BandBudget, bandKey} from './bands.js';
+import {SessionArtifactTable} from './artifactTable.js';
+import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
+import {tileRectOfBbox, type DepthChoice} from './budget.js';
+import {TesseraClient, type TesseraClientOptions} from './client.js';
+import {ArtifactColours} from './colours.js';
+import type {Composition} from './compose.js';
+import {dataToWorldXY, gridToWorld, MAX_DEPTH, WORLD_SIZE} from './coords.js';
+import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
+import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.js';
+import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
+import {HeldRecords, HeldShapes} from './held.js';
+import {HeldViews, type ViewMachinery} from './heldViews.js';
+import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
+import {CLUSTER_PREFIX, Legend, type LegendProjection} from './legend.js';
+import {withMembers, type MemberClause} from './members.js';
+import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
+import {worldBbox} from './prefetch.js';
+import {rectContainsTile} from './rects.js';
+import {Presenter, defaultFrameScheduler, refusalOf, type FrameScheduler, type Presented, type PresentedStatus, type Refusal} from './presented.js';
+import {regionOperand, withRegion} from './region.js';
 import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
-import {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
-import type {DepthChoice} from './budget.js';
-import type {Presented} from './presented.js';
+import {SelectedRegion, type RegionProjection, type SelectionShape} from './selectedRegion.js';
+import {Suggestions, type SuggestState} from './suggestions.js';
+import {TokenSupply, type TokenSupplier} from './token.js';
 import type {
   Artifact,
   ArtifactDetail,
   BrowsePage,
   BrowseRequest,
-  CategoryValue,
   FilterExpr,
   ItemDetail,
   Meta,
   Quantisation,
-  RegionVerdict,
   Shape,
   ShapeKind,
-  SuggestValue,
+  Timings,
   ViewportResult
 } from './types.js';
 
 /**
- * The headless store (design client-components §4): *tell it where I am looking, and it hands you
- * what to draw, from its cache, with its scheduling.* It is `@tesseradb/client`'s main export.
+ * The headless store: told where the viewer is looking, it hands back what to draw, from its
+ * cache, on its own schedule. It holds no camera; the host calls `setView`. It hands the vis side
+ * a `Composition` by reference and typed counts, never pixels.
  *
- * Behind it: the session client, the replica, the driver and the presented frame (all in this
- * package), the artifact channel, the encoding accumulators, item and artifact detail, filter
- * composition, and the session artifact table. What it does **not** own is a camera — C2's engine
- * does, and `setView` is how it is told (§4). Rendering is the vis side's: the store hands over a
- * `Composition` by reference and the numbers typed by what they are, never pixels.
+ * The frame scheduler and the clock are injected, defaulting to `requestAnimationFrame` and
+ * `setTimeout`, so the store runs in node against a fake client.
  *
- * **Headless by construction.** The frame scheduler and the driver clock are injected, defaulting
- * to `requestAnimationFrame`/`setTimeout`, so the whole store is testable in node against a fake
- * `fetch` (or a fake `TesseraClient`) with a fake scheduler.
- *
- * **The membership column** (D12, §5.10): the point path names the layers drawn with their
- * closure, and the layer the points are coloured by, so each band arrives with its ordinals named
- * through the session table; the `artifacts` projection carries the table, the served set's
- * ordinals and each one's colour, and the colour coverage over the bands in view — a band whose
- * ordinals no longer resolve to anything served, or that lacks a column for a layer now asked
- * for, is colour-stale and is refetched after novel ground by the replica's own path.
+ * The store composes parts that each own their state: the token ({@link TokenSupply}), each view's
+ * replica, presenter and artifact channel ({@link HeldViews}), the typeahead ({@link Suggestions}),
+ * shapes and hovered records ({@link HeldShapes}, {@link HeldRecords}), the selected region
+ * ({@link SelectedRegion}), artifact colours ({@link ArtifactColours}) and
+ * the legend ({@link Legend}). What remains here is what they share: `meta`, the current view id,
+ * the camera, the layers, the filters and the projections.
  */
 
 export type {Count, Masked} from './counts.js';
 export {formatCount, formatMasked} from './counts.js';
+export type {TokenSupplier} from './token.js';
+export {CLUSTER_PREFIX, type LegendProjection} from './legend.js';
+export {REGION_HELD_LIMIT, type RegionProjection, type SelectionShape} from './selectedRegion.js';
 
-/** A data-coordinates bbox and the pixel size it is drawn at — what `setView` takes (§4). */
+/** A data-coordinates bbox and the pixel size it is drawn at. */
 export type ViewInput = {bbox: [number, number, number, number]; width: number; height: number};
-
-/**
- * A selection, in **data coordinates** — the space `setView` takes and `dataXY` returns — or a
- * published shape named by its `tessera_id` (*filter to this* on an artifact card).
- *
- * **A selection is a filter** (`selection-operand.md`; §5.11): it rides every viewport request as
- * the `region` leaf composed with the other filters, so the marks, the counts and the artifacts'
- * `matched` bits narrow to it, and the region's own count is read off the same frame as
- * everything else — no counting request of its own. `outside` negates it: `none_of` over the
- * leaf, the complement within what this principal can see (`polygon-membership.md` §8).
- */
-export type SelectionShape = (
-  | {kind: 'box'; bbox: [number, number, number, number]}
-  | {kind: 'lasso'; points: [number, number][]}
-  | {kind: 'artifact'; id: bigint}
-) & {outside?: boolean};
-
-/**
- * How the store gets a viewer token it renews before expiry. `expiresAt` is seconds since the Unix
- * epoch, as `/session/authorise` reports `expires_at`; `Infinity` is a token that does not expire.
- */
-export type TokenSupplier = () => Promise<{token: string; expiresAt: number}>;
 
 export type StoreOptions = {
   viewerUrl: string;
-  /** A fixed token, or {@link authorise} for one the store renews. Exactly one is required. */
+  /** A fixed token, or {@link authorise} for one the store renews. One of the two, or a `client`, is required. */
   token?: string;
   authorise?: TokenSupplier;
   /** Which view to answer for; defaults to `meta.views[0]`. */
   view?: string;
-  /** Marks-on-screen budget — the input's default, not a ceiling (design, owner 2026-08-25). */
+  /** The marks-on-screen budget the driver starts from. */
   budget?: number;
-  /** How served artifacts are coloured (§5.10): positional by default, or spread over the served set. */
+  /** How served artifacts are coloured: `positional` by default, or `spread` over the served set. */
   palette?: PaletteKind;
   prefetch?: boolean;
   /** Injected for tests; browser defaults otherwise. */
@@ -107,34 +82,22 @@ export type StoreOptions = {
   driver?: DriverOptions;
   replica?: Pick<ReplicaOptions, 'cacheBytes' | 'cache' | 'revalidateAfterMs' | 'onPhase'>;
   /**
-   * A `/v1/meta` already in hand, fetched under the token {@link authorise} will return.
-   *
-   * The host that has to read meta *before* opening a store — to choose the layer and the colour
-   * the store opens pointed at, which is what the demo does — otherwise pays for the document
-   * twice, and pays for the session twice with it. Handing the one it read is the whole saving:
-   * the store's bring-up is unchanged in every other respect.
-   *
-   * **The caller's obligation is that it is this principal's meta.** The roster a principal
-   * reaches is theirs, so a document fetched under another token would open the store on layers
-   * and views this one may not have been served. Absent, the store fetches its own.
+   * A `/v1/meta` the host has already read, so the store does not fetch it again. It must have been
+   * fetched under this principal's token: another principal's meta lists layers and views this one
+   * may not be served.
    */
   meta?: Meta;
-  /** A client already built (a test's fake, or a host that owns `authorise`); else one is made. */
+  /** A client already built, such as a test's fake; else one is made. */
   client?: TesseraClient;
   clientOptions?: Omit<TesseraClientOptions, 'viewerUrl'>;
-  /**
-   * A demo-only side channel for measurement instruments — **not part of §4**. A conformant
-   * client reads projections; the demo's depth/stage/calibration panels read numbers the §4
-   * surface deliberately omits (predicted marks, stage timings, the plan's held-vs-fetched split,
-   * m_target), so they are forwarded here rather than widening the projection table for them.
-   */
+  /** Measurements the projections do not carry, for a demo's instrument panels. */
   instruments?: {
-    onFrame?(info: {plan: {choice: DepthChoice}; timings: import('./types.js').Timings | null; bytes: number; held: number; fetched: number; calibration: {mTarget: number; visibleInView: number | undefined}; replica: {bytes: number; points: number; bands: number}}): void;
+    onFrame?(info: {plan: {choice: DepthChoice}; timings: Timings | null; bytes: number; held: number; fetched: number; calibration: {mTarget: number; visibleInView: number | undefined}; replica: {bytes: number; points: number; bands: number}}): void;
     onTrace?(kind: string, fields: Record<string, number | string>): void;
   };
 };
 
-/** The projections table of §4 — each an immutable object, replaced on change. */
+/** The store's projections. Each is immutable and replaced whole when it changes. */
 export type Projections = {
   meta: Meta | null;
   status: StatusProjection;
@@ -157,42 +120,37 @@ export type StatusProjection = {
   refusal: Refusal | null;
   /** True when the content key the latest response observed differs from the presented frame's. */
   stale: boolean;
-  /** Set with a refusal that means the session ended (design §5.4's expired row). */
+  /** Set with a refusal that means the session ended. */
   expired: boolean;
   retrying: boolean;
 };
 
 export type ViewProjection = {
   /**
-   * The view the store is answering from — `''` before `meta`, then a view id `meta.views` lists
-   * (`view-switching.md` §3). A component that draws or lists compares this, not `frame()`, to
-   * learn that a switch happened; the frame is what it draws under once it has.
+   * The view the store answers from: `''` before `meta`, then an id `meta.views` lists. A component
+   * compares this to learn that a switch happened.
    */
   id: string;
-  /** The composition on screen and the depth it is drawn at, by reference — the deck side's input. */
+  /** The composition on screen, by reference. */
   composition: Composition | null;
   depth: number;
   visible: Masked;
   matched: Masked;
   /**
-   * The sum of the frame's per-tile `highlighted` — *the highlight matched N points*
-   * (`highlight-and-hierarchy.md` §2, §5.2).
-   *
-   * **Equal to `matched` where no highlight is set**, because the wire's column is: a client
-   * reading it never has to ask whether the question was put. Which is why the strip's third line
-   * is drawn from {@link ViewProjection.highlighting} and not from this being different — the two
-   * are legitimately equal when a highlight matches everything the filter did.
+   * The sum of the frame's per-tile `highlighted`. Equal to `matched` where no highlight is set,
+   * and also where a highlight matches everything the filter does, so {@link highlighting} says
+   * whether one was asked.
    */
   highlighted: Masked;
-  /** Whether the request behind this frame carried a `highlight` at all. */
+  /** Whether the request behind this frame carried a `highlight`. */
   highlighting: boolean;
   served: Count;
-  /** Provisional marks — a screen fact, a plain mark count, never a masked quantity. */
+  /** Provisional marks on screen: a plain mark count, not a masked quantity. */
   provisional: number;
 };
 
 export type MarksProjection = {
-  /** The exact bands, by reference — the slab writes them once; nothing here copies them. */
+  /** The exact bands, by reference. */
   bands: Composition['exact'];
   standIn: Composition['standIn'];
   count: Count;
@@ -203,54 +161,35 @@ export type TilesProjection = {tiles: Composition['tiles']};
 export type ArtifactsProjection = {
   /** The first layer drawn. */
   layer: string | null;
-  /** Every layer drawn, with its closure (decision 0096). The colour layer is here only when it is drawn too. */
+  /** Every layer drawn, with its closure. The colour layer is here only when it is drawn too. */
   layers: string[];
-  /** The served artifacts of the drawn layers — what the map, the lists and the labels draw. */
+  /** The served artifacts of the drawn layers. */
   served: Artifact[];
-  /**
-   * The served artifacts of the layer the points are coloured by (`colourBy = "cluster:<layer>"`),
-   * drawn or not; empty under a column colouring. The legend's swatches and levels read these.
-   */
+  /** The served artifacts of the layer named by `colourBy = "cluster:<layer>"`, drawn or not; else empty. */
   colourServed: Artifact[];
   lineage: ServedLineage;
   status: ArtifactChannelState['status'];
   refusal: {code: string; detail: string} | null;
   version: number;
-  /**
-   * How many artifact payloads the session holds — the served set plus everything served earlier
-   * under the same identity and content keys, which the channel keeps rather than refetching
-   * (`artifact-cache-handover.md`). Instrumentation: what is drawn is `served`.
-   */
+  /** How many artifact payloads the session holds, the served set and those kept from earlier answers. */
   held: number;
-  /** The session artifact table, for a consumer resolving ordinals (§5.10). */
+  /** The session artifact table, which resolves ordinals. */
   table: SessionArtifactTable;
-  /** The drawn served set's ordinals — what an opened or hovered artifact resolves through. */
+  /** The drawn served set's ordinals. */
   servedOrdinals: ReadonlySet<number>;
   /**
-   * The shapes fetched by identifier, by `tesseraId` — what the map draws.
-   *
-   * **Not part of the viewport's answer.** The channel asks for centroids and boxes; a consumer
-   * that wants a shape calls {@link TesseraStore.needShape} and reads it here when it lands. An
-   * artifact with no entry has not been asked for or has not answered yet, and a consumer draws
-   * its `box` meanwhile. A **derived** shape here was fetched by this principal and is dropped
-   * with the principal; a **predicate** or an **authored** one is the same for every principal
-   * and survives a switch (`polygon-membership.md` §7.1, the layer's `shape` kind in the meta).
+   * Shapes fetched by {@link Store.needShape}, by `tesseraId`. An artifact with no entry has not
+   * been asked for or has not answered, and is drawn as its `box`.
    */
   shapes: ReadonlyMap<bigint, Shape>;
   /**
-   * A colour for **every ordinal the session table holds**, not only the served set's (§5.10).
-   * A band held under a coarser cut, or one fetched a moment before the channel caught up with
-   * a finer one, names artifacts that are not in `servedOrdinals`; its points still wear the
-   * colour of an artifact the wire said they belong to, which is exact. An ordinal not here —
-   * one whose whole parent chain was never seen — resolves to neutral.
+   * A colour for every ordinal the session table holds. A band fetched under a coarser cut names
+   * artifacts outside `servedOrdinals`, and its points take those artifacts' colours. An ordinal
+   * not here resolves to neutral.
    */
   colours: ReadonlyMap<number, Rgba>;
   palette: PaletteKind;
-  /**
-   * Colour coverage over the bands in view (§5.10): `current` resolve wholly to the served set;
-   * `stale` do not, or lack a column for a layer on, and are being refetched. The status strip's
-   * hover reads *colours exact* when `stale` is zero.
-   */
+  /** How many bands in view resolve to a colour for every layer asked for, and how many are being refetched. */
   coverage: {current: number; stale: number};
 };
 
@@ -261,80 +200,21 @@ export type SelectionProjection = {
   artifactRefusal: Refusal | null;
 };
 
-/**
- * The selected region and what it holds (§5.11), read off the presented frame: the region is a
- * leaf of the request, so `matched` is the sum of the frame's `matched` counts — the items inside
- * the shape that the other filters admit — exact for the shape when the server said so
- * (`verdict`) and the frame's exact tiles cover the shape, and a cover otherwise. `visible` is
- * the region alone: the same number where no other filter is on, and `null` where one is — the
- * frame answered a narrower question, and a figure for the wider one would be a second request.
- * `served` is the held marks inside against `matched` — a sample, so both figures always.
- * `status` is the frame's own: `loading` until a derive lands after the selection, and a refusal
- * of the request carrying the leaf is the region's refusal, never a zero.
- */
-export type RegionProjection = {
-  shape: SelectionShape;
-  status: 'loading' | 'shown' | 'refused';
-  refusal: Refusal | null;
-  visible: Masked | null;
-  matched: Masked;
-  served: Count;
-  /** `x-tessera-region`: exact for the shape, or a cover at a depth; `null` until it has answered. */
-  verdict: RegionVerdict | null;
-  /** The held marks inside the shape — ids and world positions, the first {@link REGION_HELD_LIMIT}. */
-  held: {ids: BigUint64Array; positions: Float32Array; count: number};
-};
-
 export type FiltersProjection = {
   draft: FilterDraft;
-  /**
-   * The controls in the `filter` position, composed — what rides the request's `filters` beside
-   * the drawn region's leaf. Null for the unfiltered request.
-   */
+  /** The controls in the `filter` position, composed. Null for none. */
   expr: FilterExpr | null;
   /**
-   * The controls and `member_of` clauses in the `highlight` position, composed — what rides the
-   * request's `highlight` (`highlight-and-hierarchy.md` §5.2). Null where nothing is highlighted.
-   *
-   * **A filter never moves the mask and a highlight never moves the draw**: these are two fields
-   * of one request and the store keeps them apart from composition onwards, so a clause's
-   * position is the only thing that decides which of the two it reaches.
+   * The controls and `member_of` clauses in the `highlight` position, composed. A highlight moves
+   * no mask and a filter moves no highlight: a clause's position decides which field it reaches.
    */
   highlight: FilterExpr | null;
-  /** The `member_of` clauses held, in either position (§3, §5.5). */
+  /** The `member_of` clauses, in either position. */
   members: MemberClause[];
-  /**
-   * The typeahead's last landed page per column (`value-suggestion.md` §5.1) — `q` is the query
-   * it answers, so a control can tell a page that answers what is in the box from one that
-   * answers what used to be. `suggest`'s only source: the enumeration's page-the-whole-set path
-   * (`loadFilterValues`) is gone — the legend resolves codes it drew through `resolveCategoryCodes`
-   * instead, and a category's picker is this typeahead everywhere else.
-   */
-  suggestions: Record<string, {q: string; values: SuggestValue[]; more: boolean}>;
-  suggestErrors: Record<string, Refusal>;
-  /**
-   * Bumped every time {@link resetSuggestions} invalidates every column's held page (a view
-   * switch, a re-authorise) — a control's own bookkeeping (`filter.ts`'s `lastEpoch`) compares
-   * against this to notice an invalidation even where it never receives one through `suggestions`
-   * or `suggestErrors` directly (a column stuck on a refusal, or still in flight when the reset
-   * lands). Not meaningful on its own; only the fact that it moved matters.
-   */
-  suggestEpoch: number;
-};
-
-export type LegendProjection = {
-  /** Palette rank per code, per column — assigned by observed frequency, never reordered. */
-  ranks: Record<string, Ranks>;
-  /** Sticky numeric domains per column — widened as marks arrive, never narrowed. */
-  domains: Record<string, Domain>;
-  /** Resolved category values per column — the codes drawn, named. */
-  categories: Record<string, CategoryValue[]>;
-  categoryErrors: Record<string, Refusal>;
-  colourBy: string | null;
-};
+} & SuggestState;
 
 export type ReplicaProjection = {
-  /** Bytes held across **every** view's bands — the figure the one budget bounds (`view-switching.md` §3). */
+  /** Bytes held across every view's bands, the figure the one byte budget bounds. */
   bytes: number;
   points: number;
   bands: number;
@@ -354,160 +234,83 @@ export interface Store {
   setView(input: ViewInput): void;
   setFilters(draft: FilterDraft): void;
   /**
-   * Replace the `member_of` clauses (`highlight-and-hierarchy.md` §3, §5.5): the card's *filter to
-   * this* and *outside this*, and a hierarchy panel's nodes.
-   *
-   * Like `setFilters`, this is the whole set rather than an edit, so a caller composes with
-   * `withMember`/`withoutMember` and the store never has to reconcile two half-states. It requeries
-   * for the same reason `setFilters` does — the question changed — and a clause in the `highlight`
-   * position moves no mask, which is asserted where it is composed.
+   * Replace the `member_of` clauses: a card's "filter to this" and "outside this", and a hierarchy
+   * panel's nodes. Like `setFilters` it takes the whole set; compose it with `withMember` and
+   * `withoutMember`.
    */
   setMembers(clauses: readonly MemberClause[]): void;
   /**
-   * One page of a layer's hierarchy by lineage (`highlight-and-hierarchy.md` §4) — roots, an
-   * artifact's children and parents, or a name search.
-   *
-   * **Not a projection.** The panel walks a tree, opening and paging nodes at its own pace, and
-   * what is expanded is the panel's state rather than the store's; a projection would have to hold
-   * the walk and would be rebuilt on every store tick. What the store owns is the token and the
-   * question: `filters` is supplied from the store's own composition where the caller does not
-   * name one, so a filtered map and a filtered tree read the same numbers.
+   * One page of a layer's hierarchy: roots, an artifact's children and parents, or a name search.
+   * `filters` defaults to {@link requestFilters}, so the tree counts what the map counts, and
+   * `view` to the store's current view.
    */
   browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage>;
   /**
-   * The expression every request carries as `filters`, composed: the draft's filter-position
-   * leaves, the `member_of` clauses in that position, and the drawn region's leaf. Null for the
-   * unfiltered request.
-   *
-   * **Read it rather than recomposing it.** A caller that needs to know *what question is being
-   * asked* — a panel deciding whether its counts are stale, a host labelling a number — has three
-   * projections to look in and no way to be told about a fourth. `filters.expr` is one of the
-   * three, and a reader that took it for the whole would miss a drawn region entirely.
-   *
-   * It is JSON-safe: a `member_of` leaf carries its artifact as a decimal string and a region
-   * leaf carries numbers, so this composes, hashes and logs without a replacer.
+   * The `filters` every request carries: the filter-position controls, the `member_of` clauses in
+   * that position and the selected region's leaf. Null for the unfiltered request. `filters.expr`
+   * holds the controls alone. The expression is JSON-safe: a `member_of` leaf carries its artifact
+   * as a decimal string.
    */
   requestFilters(): FilterExpr | null;
   /**
-   * Ask a category's typeahead for `q`, debounced per column (`value-suggestion.md` §5.1) — lands
-   * in `filters.suggestions[column]`, or `filters.suggestErrors[column]` on a refusal. Fire and
-   * forget: a control calls it on every keystroke it actually changes and reads the projection.
+   * Ask a category's typeahead for `q`, debounced per column. The page lands in
+   * `filters.suggestions[column]`, a refusal in `filters.suggestErrors[column]`.
    */
   suggest(column: string, q: string): void;
-  /** Draw layers — each with its closure (decision 0096); `[]` draws none. */
+  /** Draw layers, each with its closure; `[]` draws none. */
   setLayers(names: string[]): void;
   /**
-   * Colour by a declared column, by `cluster:<layer>` for any layer {@link colourLayers} lists
-   * (a lookup-texture switch on the vis side, never a per-point pass), or `null` for uniform.
-   * Colouring by a layer does not draw it. A layer `meta` does not list as one that can colour
-   * is named in no request and traced as `colour-by`; the points then draw uniform.
+   * Colour by a declared column, by `cluster:<layer>` for a layer {@link colourLayers} lists, or
+   * `null` for uniform. Colouring by a layer does not draw it. A layer `meta` does not list as one
+   * that can colour is named in no request and traced as `colour-by`, and the points draw uniform.
    */
   setColourBy(column: string | null): void;
   setPalette(kind: PaletteKind): void;
   setBudget(budget: number): void;
   /**
-   * Make `id` the view the store answers from (`view-switching.md` §3): a pointer change, never a
-   * rebuild. Queued before `meta` arrives; an id `meta.views` does not list is ignored and traced.
+   * Make `id` the view the store answers from. Called before `meta` arrives, it names the view to
+   * open with; an id `meta.views` does not list is ignored and traced.
    */
   setCurrentView(id: string): void;
-  /**
-   * The extent this store's view is quantised against, or `null` before `meta` has arrived.
-   *
-   * **A view's, not the bundle's** (decision 0040) — a host converting between data coordinates
-   * and the world space the camera works in needs the frame of the view it is looking at, and a
-   * second view of the same bundle may declare another.
-   */
+  /** The extent the current view is quantised against, or `null` before `meta` has arrived. */
   frame(): Quantisation | null;
   pick(id: bigint): Promise<void>;
   /**
-   * One item's record for a *hint*, held once asked — what a hover wants, where {@link pick} is
-   * what a click wants.
-   *
-   * **It writes no projection.** `pick` puts the record in `selection`, which opens a card; a
-   * pointer crossing a map must not open anything, so this answers the caller and nothing else.
-   *
-   * **The reason it exists at all is that a name cannot be drawn from the marks.** A text column
-   * lives in the record blob and is refused `render` (records-and-search §3), so no viewport
-   * response can carry one — the id is genuinely all a mark has, and the alternative to a request
-   * here is a tooltip that names an opaque number.
-   *
-   * At most one request per id: the answer is held, and so is a refusal, so a hover that cannot
-   * be answered is not asked again on every pointer move. Held per principal — {@link clear}
-   * drops it, since an item this session cannot see is not a fact about the item.
+   * One item's record for a hover, asked for once per id and held, a refusal as `null`. It writes
+   * no projection: {@link pick} opens a card, and a pointer crossing the map opens nothing.
+   * {@link clear} and a change of token drop what is held.
    */
   describe(id: bigint): Promise<Record<string, unknown> | null>;
   openArtifact(id: bigint): Promise<void>;
   /**
-   * Ask for one artifact's shape, if it is not already held.
-   *
-   * **The shape is fetched where it is drawn.** The viewport asks for centroids and boxes
-   * (`artifactChannel.ts`), because a derived shape costs a per-request derivation over every
-   * member this principal can see and a settled view carries a couple of hundred artifacts while
-   * the map draws one. This is the one that draws: call it for the hovered and the opened
-   * artifact, and the shape arrives in `artifacts.shapes` a moment later, served at the depth the
-   * view is at.
-   *
-   * Idempotent and cheap to call on every pointer move: a shape already held, or already in
-   * flight, is not asked for twice. A derived shape is dropped whenever the mask could have moved,
-   * because holding one across that would draw another viewer's shape; a predicate or an authored
-   * shape is the same for every principal and is kept.
+   * Ask for one artifact's shape, which lands in `artifacts.shapes`, generalised to the view's
+   * zoom. The viewport serves centroids and boxes only, because deriving a shape costs a pass over
+   * the principal's visible members. A shape held or in flight is not asked for again, so this may
+   * be called on every pointer move.
    */
   needShape(id: bigint): void;
-  /** Drop the picked point and the opened artifact — a card's close. */
+  /** Drop the picked item and the opened artifact. */
   clearSelection(): void;
-  /** The colour scheme the map draws on, so the positional palette reads on its ground (§5.10). */
+  /** The colour scheme the map draws on, which the positional palette is chosen against. */
   setScheme(scheme: PaletteScheme): void;
   select(shape: SelectionShape | null): void;
-  /** A data-coordinates bbox for an artifact — what a map's `fitTo` uses. */
+  /** A data-coordinates bbox for a served artifact. */
   extentOf(artifactId: bigint): [number, number, number, number] | null;
-  /** Data coordinates from marks or artifact geometry, derived from world positions. */
+  /** Data coordinates of a world position. */
   dataXY(worldX: number, worldY: number): [number, number];
   /**
-   * Forget everything answered under the current principal, for a re-authorise: the held views,
-   * marks, shapes, legend, suggestions, region and the selected item and artifact.
+   * Forget everything answered under the current principal, for a re-authorise: every view's
+   * marks, the shapes, records, legend, suggestions and region, and the selected item and artifact.
    */
   clear(): void;
   refresh(): void;
   dispose(): void;
 }
 
-/** The `colourBy` prefix that names a layer's cluster colour rather than a column. */
-export const CLUSTER_PREFIX = 'cluster:';
-
-/** How many held marks a region lists — the panel's list, not the count, which is always whole. */
-export const REGION_HELD_LIMIT = 500;
-
-/**
- * How long a view waits, after becoming current, before it asks for the camera it inherited.
- *
- * The driver's own debounce, applied a level up: a slider held down steps through a group's views
- * faster than this, and each step's request is cancelled by the next, so a passed-over view costs
- * nothing and the one the hand stops on issues the single request (`view-switching.md` §4). It is
- * here rather than in the driver because the driver's leading edge fires for a view arriving from
- * stillness, which every stepped-to view is.
- */
-const VIEW_SETTLE_MS = 140;
-
-/**
- * How long a category typeahead waits, after a keystroke, before it asks (`value-suggestion.md`
- * §5.1: keystroke cadence, 10–100 ms of server work). Short enough that the control still reads
- * as live, long enough that a held key or a fast typist spends one request rather than one per
- * character — and short of the debounce mattering less than it looks: the session's own
- * single-flight admission (one suggest in flight at a time) is what actually bounds the request
- * rate under a control that fires faster than this.
- */
-const SUGGEST_DEBOUNCE_MS = 120;
-
-/**
- * The floor on a `superseded` retry's delay. `retry_after_s` may be `0`, and a filter panel mounts
- * a control per category column in the same tick — every one's first ask can be shed by the same
- * in-flight suggest and, with no floor, would retry in the same tick again, colliding in lockstep
- * indefinitely rather than spreading out.
- */
-const SUGGEST_MIN_RETRY_S = 0.25;
-
-/** How many `superseded` retries one `q` gets before the session gives up and surfaces it as a refusal. */
-const SUGGEST_MAX_RETRIES = 5;
+/** The `view` projection before a frame has been drawn in view `id`. */
+function noFrame(id: string): ViewProjection {
+  return {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0};
+}
 
 const NO_STATUS: StatusProjection = {
   status: 'idle',
@@ -538,66 +341,91 @@ export function createStore(options: StoreOptions): Store {
 
   const table = new SessionArtifactTable();
 
-  // The token the store holds, renewed before the first refusal, and whether this store has ever
-  // used one — a 401 on a token it *did* use is a swept session (design §5.4), not a bad option.
-  let token: string | null = options.token ?? null;
-  let expiresAtMs = Infinity;
-  let renewTimer: unknown = null;
-  let tokenEverUsed = false;
-
   let meta: Meta | null = null;
-  let viewId = options.view ?? '';
   let budget = options.budget ?? 500_000;
-  let colourBy: string | null = null;
-  let palette: PaletteKind = options.palette ?? 'positional';
-  let scheme: PaletteScheme = 'dark';
   let contentKeyAtFrame = '';
-  let selection: SelectionShape | null = null;
 
-  /**
-   * One view's geometry machinery (`view-switching.md` §3). A replica's bands are quantised under
-   * one frame, a presenter's composition is one view's drawn frame and its counts, and a channel's
-   * served set is per row space, so all three are per view by construction. Everything else in the
-   * store — the token, the mask, `meta`, the filters, the colour, the layer choice, the budget,
-   * the item details and the session artifact table — is shared and untouched by a switch.
-   */
-  type ViewMachinery = {id: string; replica: Replica; presenter: Presenter; channel: ArtifactChannel};
-
-  /** Built on first visit, kept on leaving: a switch is a pointer change, never a rebuild (§3). */
-  const perView = new Map<string, ViewMachinery>();
-
-  /** One byte budget across every view's bands, evicted least-recently-drawn across them (§3). */
+  /** One byte budget across every view's bands, evicted least recently drawn across them. */
   const bandBudget = new BandBudget(options.replica?.cacheBytes ?? DEFAULT_CACHE_BYTES);
+  const views = new HeldViews(clock, buildView, options.view ?? '');
 
-  // The current view's machinery, rebound at a switch so every reader below — and every consumer
-  // reading through an accessor — follows the current view without knowing a switch happened.
-  // Built after `meta`, which carries the views and their frames.
-  let replica: Replica | null = null;
-  let presenter: Presenter | null = null;
-  let channel: ArtifactChannel | null = null;
-  /** The layers drawn, as `setLayers` last named them — held here so a call before meta survives to the channel. */
+  /** The layers drawn, with their closure, as `setLayers` last named them. */
   let layersOn: string[] = [];
   let lastView: {input: ViewInput} | null = null;
-  let queuedView: ViewInput | null = null; // a setView before meta arrives
-  /** A `setCurrentView` before meta arrives — applied at warm-up in place of `options.view` (§3). */
+  /** A `setView` before meta. */
+  let queuedView: ViewInput | null = null;
+  /** A `setCurrentView` before meta, applied at warm-up in place of `options.view`. */
   let queuedCurrentView: string | null = null;
-  /** The pending {@link VIEW_SETTLE_MS} wait, cancelled by the next switch. */
-  let switchTimer: unknown = null;
   /**
-   * A switch published an empty frame and `loading`, and the incoming view's own bands are what
-   * answer it: the driver transitions on requests, and a frame derived from the cache is not one.
-   * Cleared by {@link setView}, so only a frame presented before anything was asked for may end
-   * the wait — a cold switch stays at `loading` until the request it triggered says otherwise.
+   * A switch published `loading`, and a frame drawn from the incoming view's held bands ends it,
+   * since no request's status will. Cleared by {@link setView}, after which a cold switch stays at
+   * `loading` until its request answers.
    */
   let awaitingSwitchFrame = false;
+
+  const tokens = new TokenSupply(options.authorise, options.token, clock, (changed) => {
+    // A derived shape and a hovered record answer one principal; a new token may be another.
+    if (changed) {
+      shapes.forget('derived');
+      records.forget();
+    }
+    // A warm-up that failed for want of a token runs again now there is one.
+    if (meta === null) void ready().catch(() => {});
+  });
+
+  const colours = new ArtifactColours(table, options.palette ?? 'positional', (map, palette) =>
+    replaceProjection('artifacts', {...projections.artifacts, colours: map, palette})
+  );
+  /** The served-set version each colour-stale band was last fetched again under. */
+  const colourAsked = new Map<BandKey, number>();
+
+  const legend = new Legend(
+    async (column, codes) => client.categories(await tokens.get(), column, {codes, view: views.id}),
+    (value) => replaceProjection('legend', value)
+  );
+
+  const suggestions = new Suggestions(
+    clock,
+    async (column, q) => {
+      const asked = await viewed();
+      return client.suggest(asked.token, column, q, {view: asked.view});
+    },
+    (state) => replaceProjection('filters', {...projections.filters, ...state})
+  );
+
+  const shapes = new HeldShapes(
+    async (id) => {
+      const asked = await viewed();
+      // Generalised to the pixel of the view's own zoom.
+      const zoom = views.current?.presenter.view?.view.zoom;
+      const detail = await client.artifact(asked.token, id, {view: asked.view, ...(zoom === undefined ? {} : {zoom})});
+      return detail.shape;
+    },
+    shapeKindOf,
+    (held) => replaceProjection('artifacts', {...projections.artifacts, shapes: held})
+  );
+
+  const region = new SelectedRegion({
+    clock,
+    frame: frameOrNull,
+    extentOf,
+    covered: (box, depth) => {
+      const replica = views.current?.replica;
+      return replica !== undefined && meta !== null && replica.novelIn(tileRectOfBbox(box, depth), depth, meta.selection.kMaxMarks) === 0;
+    },
+    publish: (value) => replaceProjection('region', value),
+    trace: (kind, fields) => options.instruments?.onTrace?.(kind, fields)
+  });
+
+  const records = new HeldRecords((id) => tokens.get().then((t) => client.item(t, id)).then((detail) => detail.fields));
 
   const projections: Projections = {
     meta: null,
     status: NO_STATUS,
-    view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0},
+    view: noFrame(''),
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: colours.palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
@@ -609,12 +437,8 @@ export function createStore(options: StoreOptions): Store {
   const perName = new Map<ProjectionName, Set<() => void>>();
 
   /**
-   * Publish one projection to every subscriber — **each one, whatever the others do.** A
-   * subscriber that throws is reported — to the console with its stack, and to `onTrace` — and
-   * the fan-out continues past it: a `forEach` that let the throw escape stopped at the first bad
-   * listener, and every element subscribed after it drew the previous publish for as long as the
-   * fault lasted — a status strip at zero beside a million marks, or a blank map beside a live
-   * one, depending on nothing but connection order.
+   * Publish one projection to every subscriber. A subscriber that throws is reported to the console
+   * and to `onTrace`, and the subscribers after it are still told.
    */
   function replaceProjection<K extends ProjectionName>(name: K, value: Projections[K]): void {
     projections[name] = value;
@@ -631,75 +455,13 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  // ---- the token supplier -------------------------------------------------------------------
-
-  /**
-   * The token to ask with: the one held while it is fresh, else the supplier's next. Every verb
-   * asks through this, so a verb called before the first token lands waits for it.
-   */
-  async function ensureToken(): Promise<string> {
-    if (disposed) throw disposedError();
-    if (token && Date.now() < expiresAtMs - 5_000) return token;
-    if (!options.authorise) {
-      if (!token) throw new TesseraError(401, 'bad-credential', 'no token');
-      return token;
-    }
-    return renew(options.authorise);
-  }
-
-  /** The renewal in flight, which every caller shares, so one supplier call answers them all. */
-  let renewing: Promise<string> | null = null;
-
-  function renew(authorise: TokenSupplier): Promise<string> {
-    renewing ??= renewOnce(authorise).finally(() => {
-      renewing = null;
-    });
-    return renewing;
-  }
-
-  async function renewOnce(authorise: TokenSupplier): Promise<string> {
-    const got = await authorise();
-    if (disposed) throw disposedError();
-    // A derived shape is a function of the principal's own visible members, so one held across a
-    // change of token would draw the previous principal's shape against the new one's identifiers.
-    // A hover's record is an answer to the principal too. Before the first token nothing is held
-    // under another principal, and what was asked for is being answered under this one.
-    if (token !== null && token !== got.token) {
-      forgetShapes('derived');
-      forgetDescribed();
-    }
-    token = got.token;
-    expiresAtMs = got.expiresAt * 1000;
-    armRenewal();
-    // A warm-up that failed for want of a token runs again now there is one.
-    if (meta === null) void ready().catch(() => {});
-    return token;
-  }
-
-  function armRenewal(): void {
-    if (renewTimer) clock.cancel(renewTimer);
-    const authorise = options.authorise;
-    if (!authorise || !Number.isFinite(expiresAtMs)) return;
-    // Renew 30 s before expiry, so a warm client never presents a token the server will refuse, or
-    // halfway through a lifetime shorter than a minute. The token is still fresh by `ensureToken`'s
-    // margin when this fires, so it renews directly.
-    const left = expiresAtMs - Date.now();
-    const wait = Math.max(0, left / 2, left - 30_000);
-    renewTimer = clock.after(wait, () => {
-      void renew(authorise).catch(() => {});
-    });
-  }
-
   /** The token and the view a verb naming a view asks under, once the store has read its meta. */
   async function viewed(): Promise<{token: string; view: string}> {
     await ready();
-    return {token: await ensureToken(), view: viewId};
+    return {token: await tokens.get(), view: views.id};
   }
 
-  /**
-   * The store's first `/v1/meta`, read once and shared. A warm-up that failed is forgotten, so the
-   * next call runs it again.
-   */
+  /** The store's first `/v1/meta`, read once and shared. A failed warm-up is forgotten, so the next call runs it again. */
   let warming: Promise<void> | null = null;
 
   function ready(): Promise<void> {
@@ -707,35 +469,16 @@ export function createStore(options: StoreOptions): Store {
       warming = null;
       if (!disposed) {
         const refusal = refusalOf(error);
-        replaceProjection('status', {...projections.status, status: 'refused', refusal, expired: isExpiry(refusal)});
+        replaceProjection('status', {...projections.status, status: 'refused', refusal, expired: tokens.isExpiry(refusal)});
       }
       throw error;
     });
     return warming;
   }
 
-  function disposedError(): Error {
-    return new Error('the store is disposed; create another store to ask again');
-  }
-
-  /** Whether a refusal means the session ended (design §5.4's expired row). */
-  function isExpiry(refusal: Refusal | null): boolean {
-    if (!refusal) return false;
-    if (refusal.code === 'expired-token') return true;
-    // A 401 `bad-credential` on a token this store has used is a swept session, indistinguishable
-    // from one that never existed — expired either way. Before the store has used a token, it is a
-    // bad option, not an expiry.
-    return refusal.code === 'bad-credential' && tokenEverUsed;
-  }
-
-  /**
-   * The frame the store's current view is quantised against, or `null` before `meta` has arrived
-   * — **the view's, not the bundle's** (decision 0040): every conversion between wire grid units
-   * and data coordinates is a fraction of *this* view's extent, and a second view of the same
-   * bundle may declare another.
-   */
+  /** The current view's frame, or `null` before `meta`. Each view of a bundle may declare its own. */
   function frameOrNull(): Quantisation | null {
-    return quantisationOf(viewId);
+    return quantisationOf(views.id);
   }
 
   /** One named view's frame, or `null` where the bundle declares no such view. */
@@ -743,63 +486,40 @@ export function createStore(options: StoreOptions): Store {
     return meta?.views.find((v) => v.id === id)?.quantisation ?? null;
   }
 
-  /**
-   * Whether two views share a frame — the question §4 turns on. Every view of a group quantises
-   * against one extent (`views.md` §3.1), so the Morton addresses, the depth and the camera mean
-   * the same thing in both and a switch keeps them; two frames that differ share nothing, and a
-   * camera carried across would put the marks somewhere the user did not point at.
-   *
-   * By value, not by identity: `meta` hands out a fresh object per view.
-   */
+  /** Whether two views quantise against one extent, compared by value. The camera carries between them. */
   function sameFrame(a: Quantisation | null, b: Quantisation | null): boolean {
     return (
       a !== null && b !== null && a.xMin === b.xMin && a.xMax === b.xMax && a.yMin === b.yMin && a.yMax === b.yMax
     );
   }
 
-  /**
-   * {@link frameOrNull} where the caller has already established that `meta` is in hand.
-   *
-   * It throws rather than returning a default because there is no default to return: a guessed
-   * extent draws every point in the wrong place, and nothing downstream would notice.
-   */
+  /** {@link frameOrNull} for a caller that holds `meta`. There is no default extent to fall back to. */
   function frame(): Quantisation {
     const q = frameOrNull();
-    if (!q) throw new Error(`the bundle declares no view '${viewId}'`);
+    if (!q) throw new Error(`the bundle declares no view '${views.id}'`);
     return q;
   }
 
-  // ---- session bring-up ---------------------------------------------------------------------
-
   /**
-   * Build one view's machinery (`view-switching.md` §3), on its first visit and never again.
-   *
-   * Each part is bound to **this** view's id and frame, not to whichever view is current: the
-   * replica names it on every request, the channel asks under it, and the events they emit are
-   * dropped where the view is no longer the one being drawn — a held view emits nothing anybody
-   * reads, and cannot write the current view's projections. The session artifact table is the one
-   * thing handed in from outside: an ordinal indexes a colour rather than a position, so an
-   * artifact identity served in two views takes one ordinal and one colour (§3).
+   * Build one view's machinery, bound to that view's id and frame. Its events reach the projections
+   * only while it is the current view. The session artifact table is shared, so an artifact served
+   * in two views has one ordinal and one colour.
    */
   function buildView(id: string): ViewMachinery {
     const m = meta;
     if (!m) throw new Error('a view is built after meta');
     const q = quantisationOf(id);
     if (!q) throw new Error(`the bundle declares no view '${id}'`);
-    /** This view's own presenter, read by the fetch closure below; assigned a few lines on. */
+    /** Assigned below; the fetch reads it. */
     let ownPresenter: Presenter | null = null;
-    const current = () => id === viewId;
+    const current = () => id === views.id;
 
     const built = new Replica(
       async (req, signal, background, onPart) => {
-        const tok = await ensureToken();
-        tokenEverUsed = true;
-        // The point path names the layers asked for and pays their pass (§5.10): that is what puts
-        // the membership column on each band. `[]` until a layer is drawn or coloured by — and
-        // `[]` on the replica's counts-only revalidation, which absorbs no points and would pay the
-        // artifact pass for a frame nobody reads.
-        // The point path carries the same budget as the channel, so a point's membership column
-        // names the deepest artifact of the *same* cut the panels show.
+        const tok = await tokens.use();
+        // The layers named put a membership column on each band. A counts-only revalidation
+        // (`k = 0`) absorbs no points, so it names none. The artifact budget and levels are the
+        // channel's, so a point's membership names an artifact of the cut the panels show.
         const zoom = ownPresenter?.view?.view.zoom ?? 0;
         const layers = req.k === 0 ? [] : layersAsked();
         return client.viewport(
@@ -808,14 +528,9 @@ export function createStore(options: StoreOptions): Store {
             ...req,
             view: id,
             filters: requestFilters(),
-            // Beside it and never instead of it: the draw is unchanged by a highlight, so this
-            // costs the response three columns and nothing else (`highlight-and-hierarchy.md` §2).
             highlight: requestHighlight(),
             layers,
             ...(layers.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
-            // The levels from the camera zoom, so the membership column names the same cut the
-            // channel asks for — and not the deepest level alone, which is what the server's
-            // depth-keyed default answers a budget-deepened request with (`requestLevels`).
             ...(layers.length === 0 || requestLevels(m.layers, layers, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layers, zoom)})
           },
           signal,
@@ -832,8 +547,7 @@ export function createStore(options: StoreOptions): Store {
         revalidateAfterMs: options.replica?.revalidateAfterMs,
         onPhase: (kind, ms, n) => {
           options.replica?.onPhase?.(kind, ms, n);
-          // A stored slice is drawable now: the driver derives at most once per its gap while
-          // the response streams in, so the first marks arrive with the first slice.
+          // A stored slice is drawable, so the first marks arrive with the first slice.
           if (kind === 'piece' || kind === 'store') ownPresenter?.absorbed();
         },
         now: () => clock.now()
@@ -868,68 +582,42 @@ export function createStore(options: StoreOptions): Store {
       clock,
       view: id,
       quantisation: q,
-      token: ensureToken,
-      // The drawn depth, from the projection the frame handler has just replaced — the presenter's
-      // own handle is assigned after it hands the frame over, so it is one frame behind here. A
-      // view that is not current has no drawn depth in the projection and reads its own.
+      token: () => tokens.get(),
+      // The projection's depth, which is set before the presenter's own `frame`; a view that is
+      // not current reads its presenter's.
       depth: () => (current() ? projections.view.depth : undefined) ?? ownPresenter?.frame?.depth,
       maxTiles: m.maxTilesPerRequest,
       table,
-      // The same composition the point path sends — the region leaf included, so an artifact's
-      // `matched` bit is *has a member inside the selection the filters admit*: a filtered view
-      // asks the server (the bit is per request, decision 0104), an unfiltered one over scopes
-      // held whole is served locally.
+      // The point path's filters, region included, so an artifact's `matched` bit counts members
+      // inside the selection.
       filters: () => requestFilters(),
-      // What classifies each layer for the fetch model — levelled and flat scopes may be held
-      // whole; treed ones ask per view always.
       declarations: m.layers,
       onChange: (state) => {
         if (current()) onArtifacts(state);
       }
     });
-    // A `setLayers` that arrived before meta is honoured now: the channel is what asks, and it
-    // did not exist to be told. (Found by the artifacts smoke: the demo chooses its layer before
-    // opening the session's store, and the choice was lost on every principal switch.)
+    // Layers set before this view existed, including before meta.
     viewChannel.setLayers(layersAsked());
 
-    const machinery: ViewMachinery = {id, replica: built, presenter: ownPresenter, channel: viewChannel};
-    perView.set(id, machinery);
-    return machinery;
-  }
-
-  /** This view's machinery, built on first visit (§3). */
-  function machineryFor(id: string): ViewMachinery {
-    return perView.get(id) ?? buildView(id);
-  }
-
-  /** Point the store's own handles at one view's machinery — the whole of what a switch changes. */
-  function bind(machinery: ViewMachinery): void {
-    replica = machinery.replica;
-    presenter = machinery.presenter;
-    channel = machinery.channel;
+    return {replica: built, presenter: ownPresenter, channel: viewChannel};
   }
 
   async function warm(): Promise<void> {
-    const t = await ensureToken();
-    tokenEverUsed = true;
-    // The host may have read this document already (see {@link StoreOptions.meta}); a second
-    // fetch of it is a round trip for something in hand.
+    const t = await tokens.use();
     const read = options.meta ?? (await client.meta(t));
     if (disposed) return;
     meta = read;
-    // A `setCurrentView` before meta names the view to open with, in place of `options.view` (§3);
-    // an id the bundle does not declare is refused here exactly as it is afterwards.
+    // A `setCurrentView` before meta names the view to open with, in place of `options.view`.
     if (queuedCurrentView !== null) {
       const wanted = queuedCurrentView;
       queuedCurrentView = null;
-      if (meta.views.some((v) => v.id === wanted)) viewId = wanted;
+      if (meta.views.some((v) => v.id === wanted)) views.name(wanted);
       else onTrace('view-switch', {refused: 1, id: wanted});
     }
-    if (!viewId) viewId = meta.views[0]?.id ?? '';
+    if (!views.id) views.name(meta.views[0]?.id ?? '');
     replaceProjection('meta', meta);
-    replaceProjection('view', {...projections.view, id: viewId});
-    // Seed the filter draft from what this bundle publishes as filterable — one control per
-    // operand set, all empty. A bundle without an `abstract` simply has no abstract control.
+    replaceProjection('view', {...projections.view, id: views.id});
+    // One empty control per operand set the bundle publishes.
     if (Object.keys(projections.filters.draft).length === 0) {
       const draft = emptyDraft(meta.filterOperands);
       replaceProjection('filters', {...projections.filters, draft, expr: composeFilters(draft, 'filter'), highlight: composeFilters(draft, 'highlight')});
@@ -937,7 +625,7 @@ export function createStore(options: StoreOptions): Store {
 
     layersOn = drawnOnly(layerClosure(meta.layers, layersOn));
     traceUnknownColourLayer();
-    bind(machineryFor(viewId));
+    views.enter(views.id);
 
     if (queuedView) {
       const q = queuedView;
@@ -948,10 +636,8 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  // ---- projection updates from the machinery ------------------------------------------------
-
   function onStatus(status: PresentedStatus, refusal: Refusal | null): void {
-    const expired = isExpiry(refusal);
+    const expired = tokens.isExpiry(refusal);
     replaceProjection('status', {
       status,
       sessionWarm: projections.status.sessionWarm || status === 'shown',
@@ -960,28 +646,17 @@ export function createStore(options: StoreOptions): Store {
       expired,
       retrying: status === 'retrying'
     });
-    // The request carrying the region leaf was refused — a polygon over `max_region_vertices`,
-    // a coordinate that is not one — so the region's numbers are a refusal and never a zero.
-    const region = projections.region;
-    if (status === 'refused' && refusal && region && region.status !== 'refused') {
-      replaceProjection('region', {...region, status: 'refused', refusal, visible: null, matched: NO_MASKED, served: {shown: region.held.count, total: 0, exact: false}});
-    }
+    if (status === 'refused' && refusal) region.refuse(refusal);
   }
 
   /**
-   * Recompute staleness against the content key. `status.stale` is true when the content key the
-   * latest response observed differs from the one the presented marks were derived under — the
-   * built replica's own `currentContentKey`, deliberately not `x-tessera-stale` (design §4). A
-   * revalidation or an artifact response can observe a bump without a redraw, which is exactly the
-   * case a client wired to the geometry stamp would miss; `onTrace('revalidate')` is the signal.
-   *
-   * ⊘ Eager number refresh is not built here: the design has the numbers refresh from the
-   * revalidation response's counts while the marks stay stale-marked until `refresh()`; the
-   * replica's counts-only response is not surfaced to the store, so the numbers hold until the
-   * next derive. Marking stale — the load-bearing half — is built; the eager refresh is not.
+   * `status.stale`: the content key the replica last observed differs from the one the presented
+   * marks were derived under. A revalidation or an artifact response can observe a new key without
+   * a redraw. Not built yet: the counts from a revalidation are not published, so the numbers stay
+   * as drawn until the next derive.
    */
   function recomputeStale(): void {
-    const observed = replica?.currentContentKey ?? '';
+    const observed = views.current?.replica.currentContentKey ?? '';
     const stale = contentKeyAtFrame !== '' && observed !== '' && observed !== contentKeyAtFrame;
     if (stale !== projections.status.stale) {
       replaceProjection('status', {...projections.status, stale, sessionWarm: true});
@@ -989,7 +664,7 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function onTrace(kind: string, fields: Record<string, number | string>): void {
-    // A revalidation observed a (possibly new) content key without redrawing the marks.
+    // A revalidation observed a content key without redrawing the marks.
     if (kind === 'revalidate') {
       recomputeStale();
       observeArtifactRotation();
@@ -998,20 +673,20 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /**
-   * Hand the point path's content-key observation to the artifact channel. While its held scopes
-   * answer views locally the channel issues no request of its own, so this is the only route by
-   * which a rotation can reach its rule-7 drop (`artifact-cache-handover.md` §4a.3: the point path
-   * carries the key on every response, so the client learns without asking).
+   * Tell the artifact channel the content key the point path observed. A channel answering from
+   * scopes it holds whole makes no request, so this is how it learns that the key moved.
    */
   function observeArtifactRotation(): void {
-    const observed = replica?.currentContentKey;
-    if (observed) channel?.observeContentKey(observed);
+    const current = views.current;
+    const observed = current?.replica.currentContentKey;
+    if (observed) current?.channel.observeContentKey(observed);
   }
 
   function onPresented(p: Presented): void {
+    const current = views.current;
+    const replica = current?.replica;
     const frame = p.frame;
-    // A derive redrew the marks under the current content key; a fold did not, so it may reveal a
-    // bump observed since. `p.fetched` is non-null exactly for a derive.
+    // A derive (`p.fetched` set) redrew the marks under the current content key; a fold did not.
     const observed = replica?.currentContentKey ?? '';
     if (p.fetched) contentKeyAtFrame = observed;
     const stale = contentKeyAtFrame !== '' && observed !== '' && observed !== contentKeyAtFrame;
@@ -1024,31 +699,25 @@ export function createStore(options: StoreOptions): Store {
       if (!tile.counts) continue;
       visible += tile.counts.visible;
       matched += tile.counts.matched;
-      // Exact, and the whole point of the third line: it counts the members the cap clause did
-      // not draw as well as the ones it did.
       highlighted += tile.counts.highlighted;
       served += tile.counts.served;
     }
 
-    // A frame on screen ends *Starting session…*: the session answered, whatever the driver's
-    // status says about the request still streaming.
+    // A frame with marks means the session answered, while the request may still be streaming.
     if (!projections.status.sessionWarm && frame.exactDrawn + frame.provisional > 0) replaceProjection('status', {...projections.status, sessionWarm: true});
-    // A switch published `loading` over an empty frame; this one came from the view's own bands
-    // and no request will arrive to transition the status (`view-switching.md` §3).
+    // A switch published `loading`; a frame drawn from the view's own bands, with no request
+    // behind it, ends that.
     if (awaitingSwitchFrame) {
       awaitingSwitchFrame = false;
       if (projections.status.status === 'loading') replaceProjection('status', {...projections.status, status: 'shown'});
     }
     replaceProjection('view', {
-      id: viewId,
+      id: views.id,
       composition: frame,
       depth: frame.depth,
       visible: {value: Number(visible), exact: true},
       matched: {value: Number(matched), exact: true},
       highlighted: {value: Number(highlighted), exact: true},
-      // Read off the composition rather than off the counts: `highlighted` equals `matched`
-      // legitimately, and *there is no highlight* is a different state from *the highlight
-      // matched everything the filter did*.
       highlighting: requestHighlight() !== null,
       served: {shown: served, total: Number(visible), exact: true},
       provisional: frame.provisional
@@ -1058,17 +727,22 @@ export function createStore(options: StoreOptions): Store {
       standIn: frame.standIn,
       count: {shown: frame.exactDrawn, total: Number(visible), exact: true}
     });
-    // The channel asks at a depth the drawn frame supplies, so a view noted before the first frame
-    // was refused (no depth) and nothing else re-asks until the camera moves. The first derive is
-    // that moment: ask now, or the session's opening view shows its points and no artifacts.
-    if (channel && !channel.hasView && lastView && presenter?.view) {
-      const v = presenter.view;
-      channel.schedule({target: v.view.target, zoom: v.view.zoom}, v.width, v.height);
+    // The channel needs a drawn depth to ask at, so the first frame is when it can first ask.
+    if (current && !current.channel.hasView && lastView && current.presenter.view) {
+      const v = current.presenter.view;
+      current.channel.schedule({target: v.view.target, zoom: v.view.zoom}, v.width, v.height);
     }
     replaceProjection('tiles', {tiles: frame.tiles});
-    projectRegion(frame, replica?.lastRegionVerdict ?? null, p.fetched !== null, Number(matched));
-    accumulateEncoding(frame);
-    refreshColours();
+    region.answer({
+      marks: {bands: frame.exact, standIn: frame.standIn},
+      depth: frame.depth,
+      verdict: replica?.lastRegionVerdict ?? null,
+      fetched: p.fetched !== null,
+      matched: Number(matched),
+      narrowed: filtersBesideRegion() !== null
+    });
+    legend.accumulate(frame, meta?.declaredScalars ?? []);
+    colours.refresh();
     checkColourCoverage();
 
     if (replica) {
@@ -1082,8 +756,6 @@ export function createStore(options: StoreOptions): Store {
     if (stale !== projections.status.stale) {
       replaceProjection('status', {...projections.status, stale, sessionWarm: true});
     }
-    // After the frame's projections are settled: a rotation the points observed reaches the
-    // artifact channel's rule-7 drop, which matters exactly when held scopes answer views locally.
     if (p.fetched) observeArtifactRotation();
     if (options.instruments?.onFrame && replica && p.fetched) {
       options.instruments.onFrame({
@@ -1098,13 +770,9 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  /**
-   * The `replica` projection (`view-switching.md` §3): **`bytes` is the whole cache** — every
-   * view's bands, the figure the one budget bounds — and `views` how many views hold any band,
-   * which is what a default budget is measured against. `points` and `bands` are the current
-   * view's: they describe what is drawable now.
-   */
+  /** `bytes` and `views` count every view's bands; `points` and `bands` the current view's. */
   function publishReplica(lastPlan: ReplicaProjection['lastPlan']): void {
+    const replica = views.current?.replica;
     replaceProjection('replica', {
       bytes: replica?.bytes ?? 0,
       points: replica?.points ?? 0,
@@ -1116,12 +784,8 @@ export function createStore(options: StoreOptions): Store {
 
   function onArtifacts(state: ArtifactChannelState): void {
     recomputeStale();
-    // The served set's ordinals: the channel took its reference before it emitted, so every
-    // served artifact is named. They are what an opened artifact resolves through; the colours
-    // are built over the whole table, which is a superset of them.
-    // The channel is asked for the colour layer as well as the drawn ones. Its rows are in the
-    // table, so the colours cover them, and they reach `colourServed`; only the drawn layers'
-    // rows reach `served`, which is what every drawn surface reads.
+    // The channel is asked for the colour layer as well as the drawn ones. Only the drawn layers'
+    // rows reach `served`; the colour layer's reach `colourServed`.
     const drawn = new Set(layersOn);
     const served = state.artifacts.every((a) => drawn.has(a.layer)) ? state.artifacts : state.artifacts.filter((a) => drawn.has(a.layer));
     const coloured = colourLayer();
@@ -1143,207 +807,64 @@ export function createStore(options: StoreOptions): Store {
       held: state.held,
       table,
       servedOrdinals,
-      shapes: heldShapes,
-      // **Rebuilt only when the table moved.** A response that names artifacts already held names
-      // no new ordinal, so the colours and the lookup texture built from them are the same ones —
-      // which is what the channel's payload store buys, and it buys nothing if this rebuilds a map
-      // of the same size every settle (`artifact-cache-handover.md` §6 step 2).
-      colours: table.version === colouredAt ? projections.artifacts.colours : colourTable(),
-      palette
+      shapes: shapes.shapes,
+      colours: colours.current(),
+      palette: colours.palette
     });
     checkColourCoverage();
   }
 
-  /** The table's version the held `colours` map was built at — a rebuild only when it moved. */
-  let colouredAt = -1;
-  /** The palette and ground the held map was built under; either moving is a whole rebuild. */
-  let colouredUnder: {palette: PaletteKind; scheme: PaletteScheme} | null = null;
   /**
-   * The map the `artifacts` projection publishes. It is a `ReadonlyMap` to every reader and this
-   * is the one writer: an extension for newly named ordinals is applied here, in place, so the
-   * map's identity is what tells a reader an extension from a recolour.
-   */
-  let colourMap = new Map<number, Rgba>();
-
-  /**
-   * A colour per live ordinal (§5.10), **extended for what the table gained rather than rebuilt
-   * over what it holds**, and only when the table has moved at all — a response naming artifacts
-   * already known computes nothing.
-   *
-   * The distinction the incremental route rests on is the palette's, not an optimisation's.
-   * `positional` is a pure function of one artifact's centroid, so an ordinal's colour is
-   * unaffected by every other ordinal and the table's change list is exactly the work to do; the
-   * map is then **mutated in place and keeps its identity**, which is what lets the lookup
-   * texture tell an extension from a recolour (`lut.ts`). `spread` assigns hues by rank around
-   * the whole set's angle circle, so one arrival moves every colour: it rebuilds whole, at the
-   * table's live count, on any settle that names an artifact.
-   */
-  function colourTable(): Map<number, Rgba> {
-    const changes = palette === 'positional' && colouredUnder?.palette === 'positional' && colouredUnder.scheme === scheme ? table.changesSince(colouredAt) : null;
-    colouredAt = table.version;
-    colouredUnder = {palette, scheme};
-    if (changes) {
-      for (const {ordinal, kind} of changes) {
-        if (kind === 'freed') colourMap.delete(ordinal);
-        else colourMap.set(ordinal, positionalEntry(table.entry(ordinal)?.centroid ?? null, scheme));
-      }
-      return colourMap;
-    }
-    colourMap = artifactColours(
-      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
-      palette,
-      scheme
-    );
-    return colourMap;
-  }
-
-  /**
-   * Rebuild the colours if a response has named artifacts the table had not seen — the point
-   * path's own artifacts frames, which arrive ahead of the debounced channel's.
-   */
-  function refreshColours(): void {
-    if (table.version === colouredAt) return;
-    replaceProjection('artifacts', {...projections.artifacts, colours: colourTable(), palette});
-  }
-
-  /** Bands already asked for again under this served-set version — a refetch is asked once. */
-  const colourAsked = new Map<BandKey, number>();
-
-  /**
-   * Colour coverage (§5.10): per band in view, over its distinct list — never its points — does
-   * every ordinal resolve to something colourable, for every layer asked for? A band that has one
-   * that does not, or that lacks the column for a layer asked for (fetched before it was), is
-   * colour-stale: it keeps drawing what resolves, and its tile is asked for again after novel
-   * ground, once per served set, through the replica's coverage retraction and the driver's
-   * ordinary plan.
-   *
-   * **Against the colours, not against the channel's latest served set** — a deviation from
-   * §5.10's wording, reported with the change. Resolving against the served set alone made every
-   * band in view stale the moment a zoom moved the cut finer, because a walk cannot go down: on
-   * the 2.4M corpus one notch retracted 2,267 of 15,006 bands, refetching tiles that had just
-   * arrived, and drew them neutral meanwhile. A band whose ordinals resolve to an artifact the
-   * table holds is coloured, exactly, by an artifact the wire said its points belong to; it needs
-   * no refetch to be correct. What remains stale is what colour-staleness is for: a band with no
-   * column for a layer just switched on, and one whose parent chain was never seen.
+   * Publish the colour coverage of the bands in view, and fetch the colour-stale ones again, once
+   * per served-set version. A band is colour-stale when it has no membership column for a layer
+   * asked for, or names an ordinal that resolves to no colour. It resolves against the colours,
+   * which cover every artifact the table holds, so a band fetched under a coarser cut is still
+   * coloured. In view is the visible box: the point path also fetches a margin, whose bands name
+   * artifacts the channel did not serve for this view.
    */
   function checkColourCoverage(): void {
     const a = projections.artifacts;
-    const asked = layersAsked();
-    if (!replica || !presenter || a.status !== 'shown' || asked.length === 0) {
+    const layers = layersAsked();
+    const machinery = views.current;
+    if (!machinery || a.status !== 'shown' || layers.length === 0) {
       if (a.coverage.stale !== 0 || a.coverage.current !== 0) replaceProjection('artifacts', {...a, coverage: {current: 0, stale: 0}});
       return;
     }
     const started = clock.now();
-    const stale: Band[] = [];
-    let current = 0;
-    // **In view means the visible box, not the render rect.** The channel answers for what the
-    // viewer is looking at; the point path fetches a wider ring, and a band in the margin names
-    // artifacts the channel never served for this view. Those resolve to neutral, correctly, and
-    // are not a reason to refetch — they colour when a pan brings their artifacts into the box.
-    const v = presenter.view;
+    const v = machinery.presenter.view;
     const depth = projections.view.depth;
     const visible = v ? tileRectOfBbox(worldBbox({target: [v.view.target[0], v.view.target[1]], zoom: v.view.zoom, width: v.width, height: v.height}, 1), depth) : null;
-    for (const band of projections.marks.bands) {
+    const bands = projections.marks.bands;
+    const staleBands: Band[] = [];
+    let current = 0;
+    for (const band of bands) {
       if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
-      let ok = true;
-      for (const layer of asked) {
-        const m = band.membership[layer];
-        if (!m) {
-          ok = false;
-          break;
-        }
-        for (let i = 0; i < m.distinct.length; i++) {
-          if (table.resolve(m.distinct[i]!, a.colours) === 0) {
-            ok = false;
-            break;
-          }
-        }
-        if (!ok) break;
-      }
-      if (ok) current++;
-      else stale.push(band);
+      if (layers.every((layer) => resolves(band, layer, a.colours))) current++;
+      else staleBands.push(band);
     }
-    // **Nothing is asked for while a switch is settling.** `reschedule` re-enters the driver,
-    // which fires its leading edge for a view arriving from stillness — so a view the slider is
-    // passing through would ask here, outside the settle that exists to stop exactly that
-    // (`view-switching.md` §4). Not merely deferred but *not decided*: recording these bands as
-    // asked and then not asking would leave them stale until the served set moved. The frame the
-    // settled request draws runs this check again, with nothing pending.
-    const toAsk = switchTimer === null ? stale.filter((b) => colourAsked.get(bandKey(b.depth, b.prefix)) !== a.version) : [];
+    const stale = staleBands.length;
+    // While a switch settles nothing is asked for or recorded: asking reschedules the driver, which
+    // would request a view the slider is passing through.
+    const toAsk = views.settling ? [] : staleBands.filter((b) => colourAsked.get(bandKey(b.depth, b.prefix)) !== a.version);
     for (const b of toAsk) colourAsked.set(bandKey(b.depth, b.prefix), a.version);
     if (toAsk.length > 0) {
-      replica.retract(toAsk);
-      presenter.reschedule();
+      machinery.replica.retract(toAsk);
+      machinery.presenter.reschedule();
     }
-    options.instruments?.onTrace?.('coverage', {ms: clock.now() - started, bands: projections.marks.bands.length, stale: stale.length, asked: toAsk.length});
-    if (a.coverage.current !== current || a.coverage.stale !== stale.length) {
-      replaceProjection('artifacts', {...projections.artifacts, coverage: {current, stale: stale.length}});
-    }
-  }
-
-  // ---- the encoding accumulators (in the store, §4) -----------------------------------------
-
-  function accumulateEncoding(frame: Composition): void {
-    // Cluster colour is the lookup texture's, resolved on the vis side from the table; nothing
-    // accumulates for it here.
-    if (!colourBy || !meta || colourBy.startsWith(CLUSTER_PREFIX)) return;
-    const column = meta.declaredScalars.find((c) => c.name === colourBy);
-    if (!column) return;
-    if (column.category) {
-      const counts = new Map<number, number>();
-      for (const band of frame.exact) {
-        const values = band.scalars[colourBy];
-        if (values) for (const [code, n] of countCodesCached(values)) counts.set(code, (counts.get(code) ?? 0) + n);
-      }
-      // The stand-in pieces bootstrap the palette while this depth's own bands stream in.
-      if (counts.size === 0) for (const piece of frame.standIn) countCodesInPiece(counts, piece, colourBy);
-      if (counts.size === 0) return;
-      const ranks = extendRanks(projections.legend.ranks[colourBy] ?? {}, counts);
-      if (ranks !== projections.legend.ranks[colourBy]) {
-        replaceProjection('legend', {...projections.legend, ranks: {...projections.legend.ranks, [colourBy]: ranks}});
-        void resolveCategoryCodes(colourBy, counts);
-      }
-    } else {
-      let domain: Domain | null = projections.legend.domains[colourBy] ?? null;
-      for (const band of frame.exact) {
-        const values = band.scalars[colourBy];
-        if (values) domain = widenDomain(domain, values);
-      }
-      for (const piece of frame.standIn) {
-        const values = piece.band.scalars[colourBy];
-        if (values) domain = widenDomainOver(domain, values, piece.indices, piece.limit);
-      }
-      if (domain && domain !== projections.legend.domains[colourBy]) {
-        replaceProjection('legend', {...projections.legend, domains: {...projections.legend.domains, [colourBy]: domain}});
-      }
+    options.instruments?.onTrace?.('coverage', {ms: clock.now() - started, bands: bands.length, stale, asked: toAsk.length});
+    if (a.coverage.current !== current || a.coverage.stale !== stale) {
+      replaceProjection('artifacts', {...projections.artifacts, coverage: {current, stale}});
     }
   }
 
-  async function resolveCategoryCodes(column: string, counts: Map<number, number>): Promise<void> {
-    if (!meta) return;
-    if (projections.legend.categoryErrors[column]) return;
-    const held = new Set((projections.legend.categories[column] ?? []).map((v) => v.code));
-    const wanted = [...counts.keys()].filter((code) => !held.has(code));
-    if (wanted.length === 0) return;
-    try {
-      const resolved = await client.categories(await ensureToken(), column, {codes: wanted, view: viewId});
-      if (disposed) return;
-      const byCode = new Map((projections.legend.categories[column] ?? []).map((v) => [v.code, v]));
-      for (const v of resolved) byCode.set(v.code, v);
-      replaceProjection('legend', {
-        ...projections.legend,
-        categories: {...projections.legend.categories, [column]: [...byCode.values()]}
-      });
-    } catch (error) {
-      if (disposed) return;
-      replaceProjection('legend', {
-        ...projections.legend,
-        categoryErrors: {...projections.legend.categoryErrors, [column]: refusalOf(error)}
-      });
+  function resolves(band: Band, layer: string, colourMap: ReadonlyMap<number, Rgba>): boolean {
+    const m = band.membership[layer];
+    if (!m) return false;
+    for (let i = 0; i < m.distinct.length; i++) {
+      if (table.resolve(m.distinct[i]!, colourMap) === 0) return false;
     }
+    return true;
   }
-
-  // ---- setView's conversion (§4) ------------------------------------------------------------
 
   function toDriverView(input: ViewInput): DriverViewState & {width: number; height: number} {
     const q = frame();
@@ -1352,8 +873,7 @@ export function createStore(options: StoreOptions): Store {
     const [wx1, wy1] = dataToWorldXY(dx1, dy1, q);
     const bw = Math.abs(wx1 - wx0) || 1;
     const bh = Math.abs(wy1 - wy0) || 1;
-    // Zoom from the tighter axis, so a camera whose aspect differs over-covers the other axis,
-    // which is safe (§4).
+    // Zoom from the tighter axis, so a camera of another aspect over-covers the other axis.
     const zoom = Math.min(MAX_DEPTH, Math.log2(Math.min(input.width / bw, input.height / bh)));
     return {
       target: [(wx0 + wx1) / 2, (wy0 + wy1) / 2, 0],
@@ -1363,122 +883,59 @@ export function createStore(options: StoreOptions): Store {
     };
   }
 
-  // ---- verbs --------------------------------------------------------------------------------
-
   /**
-   * Make `id` the view the store answers from (`view-switching.md` §3–§4).
-   *
-   * **A pointer change, never a rebuild.** The machinery of the view being left is cancelled — a
-   * view that is not current has nothing in flight and no timer that could put something there
-   * (§8) — the machinery of the view being entered is built on its first visit, brought up to date
-   * from the shared fields, and bound; nothing re-subscribes and no component is told to.
-   *
-   * **The camera follows the frame, not the view.** Within a group every view quantises against
-   * one extent, so the camera, the depth rule and the selection carry over and the same tiles are
-   * asked for in the view arrived at. Across frames there is no camera to carry: the incoming view
-   * is published with none and the selection goes, because a selection is a shape in one frame's
-   * data coordinates. The map owns the camera, sees the frame change under `view.id`, refits and
-   * issues the `setView` that asks for what the refitted camera covers.
-   *
-   * An id `meta.views` does not list is **ignored and reported**, never a throw and never a guess
-   * at a neighbour: the pickers are built from `meta.views` and cannot produce one, a host's URL
-   * state can, and a wrong view id discloses nothing.
+   * Make `id` the view the store answers from. Between views that share a frame the camera and the
+   * selection carry over: the incoming view draws what it holds, and asks after the settle. Across
+   * frames both are dropped, and the map's refit supplies the next `setView`. An id `meta.views`
+   * does not list is ignored and traced.
    */
   function setCurrentView(id: string): void {
     if (!meta) {
-      // Queued as `setView` is, and applied at warm-up in place of `options.view`.
       queuedCurrentView = id;
       return;
     }
-    if (id === viewId) return;
+    if (id === views.id) return;
     if (!meta.views.some((v) => v.id === id)) {
       onTrace('view-switch', {refused: 1, id});
       return;
     }
 
-    const from = viewId;
+    const from = views.id;
     const kept = sameFrame(quantisationOf(from), quantisationOf(id));
-    // A category's suggestion page is per `(column, view)` — the vocabulary a `derived` column
-    // walks is view-addressed (`value-suggestion.md` §5.1) — so the page held for the view being
-    // left answers nothing about the one being entered, whether or not the two share a frame.
-    resetSuggestions();
+    // A suggestion page answers one view.
+    suggestions.reset();
 
-    // Nothing of a view that is not current may be in flight, and nothing of it may be scheduled:
-    // a debounce left armed would put a request on the wire for a view nobody is looking at.
-    const outgoing = perView.get(from);
-    outgoing?.presenter.cancel();
-    outgoing?.channel.cancel();
-    if (switchTimer !== null) {
-      clock.cancel(switchTimer);
-      switchTimer = null;
-    }
-
-    // **The incoming machinery is built before `viewId` moves, and bound in the same breath.**
-    // Everything below this line publishes, and every publish reaches the map synchronously — and
-    // the map decides its refit from `frame()`, which follows `viewId`. With `viewId` moved and
-    // `presenter` still the outgoing view's, that refit's `setView` schedules the view being
-    // *left*: the request goes out for a view nobody is looking at, the incoming view is never
-    // asked for at all, and the switch sits at `loading` for ever. Found by the V2 smoke against
-    // the multiview fixture, on the first switch across frames.
-    //
-    // Building first is safe because a view's machinery reports through `current()`, which is
-    // `id === viewId` read at the time of the event: while it is being built it is not current and
-    // publishes nothing.
-    const incoming = machineryFor(id);
-    viewId = id;
-    bind(incoming);
-    // Set here rather than below for the same reason: a `setView` arriving from a subscriber
-    // during this call clears it, and from then on the request on the wire answers for the status.
+    // Current before anything below publishes, so a subscriber's `setView` reaches the incoming view.
+    const incoming = views.enter(id);
+    // A `setView` from a subscriber clears this, and its request then answers for the status.
     awaitingSwitchFrame = true;
-    // Shared state reaches a view when it becomes current, rather than at every change: a change
-    // pushed to a held view would have it *ask* (§3).
+    // The shared settings reach a view as it becomes current. Set on a held view, they would make it ask.
     incoming.channel.setLayers(layersAsked());
     incoming.presenter.setBudget(budget);
-    // The content key was the frame of another view's replica, and the colour refetch's record is
-    // per band key with no view axis — both are about what was drawn, and what was drawn is gone.
+    // The content key, the bands asked for again and the shapes were the outgoing view's.
     contentKeyAtFrame = '';
     colourAsked.clear();
-    // A shape is generalised against the frame it was fetched under and names an artifact of one
-    // view's row space (§8: the client does not match artifact identity across views).
-    forgetShapes('all');
+    shapes.forget('all');
 
     if (!kept) {
-      // No camera to carry, so no question to re-ask: `lastView` is the outgoing frame's bbox and
-      // means nothing here. The map's refit is what supplies the next one.
+      // The camera and the selection are in the outgoing frame's data coordinates.
       lastView = null;
-      selection = null;
-      regionVerdict = null;
-      replaceProjection('region', null);
+      region.drop();
     }
 
-    // The `view` projection, immediately, with the new id and no marks: view A's marks must never
-    // be drawn under view B's frame, and the presenter of the view being entered was cancelled
-    // when it was left, so it holds nothing to publish yet.
-    replaceProjection('view', {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0});
+    // No marks until the incoming view presents, and the incoming channel's artifacts.
+    replaceProjection('view', noFrame(id));
     replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
     replaceProjection('tiles', {tiles: []});
-    // The artifacts of the view being entered — its own channel's state, which is empty for a
-    // cold view and its held served set for a warm one. Left alone, the projection would show the
-    // outgoing view's artifacts under the incoming view's id until that channel next answered,
-    // which on a cross-frame switch is not until the map has refitted: the list, the coverage
-    // score and every `tesseraId` lookup would be against another view's row space (§8).
     onArtifacts(incoming.channel.current);
     replaceProjection('status', {...projections.status, status: 'loading', refusal: null, stale: false});
     publishReplica(projections.replica.lastPlan);
 
     if (kept && lastView) {
       const v = toDriverView(lastView.input);
-      // What this view already holds for the camera, drawn without asking for anything — the
-      // return to a warm view is the cache's whole point. It reaches the projections on the next
-      // scheduler tick rather than inside this call, because deriving a frame is the presenter's
-      // work and the presenter coalesces to one paint per tick; nothing waits on the network. A
-      // cold view draws nothing, and the empty frame published above stands until the request
-      // below answers.
+      // Draws what the view holds on the next scheduler tick, without a request.
       incoming.presenter.redraw({target: v.target, zoom: v.zoom}, v.width, v.height);
-      // And the request, after the settle: a slider stepping through five views issues one
-      // request, for the fifth (§4).
-      switchTimer = clock.after(VIEW_SETTLE_MS, () => {
-        switchTimer = null;
+      views.settle(() => {
         if (lastView) setView(lastView.input);
       });
     }
@@ -1488,34 +945,22 @@ export function createStore(options: StoreOptions): Store {
 
   function setView(input: ViewInput): void {
     lastView = {input};
-    // A request answers for the status from here on: the driver transitions on its own, and the
-    // partial frames it presents on the way are not the switch's cache-derived frame.
+    // From here the request's own status transitions answer for the status.
     awaitingSwitchFrame = false;
-    if (!meta || !presenter) {
-      // A setView before meta has arrived is queued (§4).
+    const current = views.current;
+    if (!meta || !current) {
       queuedView = input;
       return;
     }
     const v = toDriverView(input);
-    presenter.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
-    channel?.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
+    current.presenter.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
+    current.channel.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
   }
 
   /**
-   * The filter every request carries: the draft's expression composed with the selection's
-   * `region` leaf (`selection-operand.md` §5). One composition site, so the point path, the
-   * artifact channel and the region's own count are answers to one question.
-   */
-  /**
-   * The layers a viewport request may name: every one that is not a **filter layer**
-   * (`highlight-and-hierarchy.md` §5.4, owner ruling 2026-09-02).
-   *
-   * A layer declaring `computed = []` is listed in the client's roster and never presented for
-   * viewing, so naming it here would pay an artifact pass for rows nothing draws — and would put
-   * its artifacts in the *In view* list and its names on the map, which is the whole of what the
-   * ruling forbids. It is reached through the hierarchy panel and applied as a `member_of` clause.
-   * Filtered here rather than in the picker, so a host driving `setLayers` directly cannot get it
-   * wrong either.
+   * The layers a viewport request may name: all but the filter layers, which declare
+   * `computed = []` and are applied only as `member_of` clauses. Filtered here so that a host
+   * calling `setLayers` directly cannot draw one.
    */
   function drawnOnly(names: readonly string[]): string[] {
     if (!meta) return [...names];
@@ -1525,12 +970,14 @@ export function createStore(options: StoreOptions): Store {
 
   /** The layer `colourBy` colours by, where `meta` lists it as one that can colour; else null. */
   function colourLayer(): string | null {
+    const colourBy = legend.colourBy;
     if (!meta || !colourBy?.startsWith(CLUSTER_PREFIX)) return null;
     const name = colourBy.slice(CLUSTER_PREFIX.length);
     return colourLayers(meta.layers).some((l) => l.name === name) ? name : null;
   }
 
   function traceUnknownColourLayer(): void {
+    const colourBy = legend.colourBy;
     if (meta && colourBy?.startsWith(CLUSTER_PREFIX) && colourLayer() === null) onTrace('colour-by', {refused: 1, layer: colourBy.slice(CLUSTER_PREFIX.length)});
   }
 
@@ -1544,63 +991,54 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /**
-   * Point the channel at the layers asked for, and publish the artifacts under the drawn layers and
-   * the colour layer as they now stand. A layer newly asked for is fetched at once: the channel
-   * asks for its artifacts, and every band in view that lacks its membership column is
-   * colour-stale and refetched centre-first as the coverage check finds it (§5.10). A layer no
-   * longer asked for costs nothing: held bands keep its column and the rows are filtered out here.
+   * Point the channel at the layers asked for and publish the artifacts as they now stand. A layer
+   * newly asked for is fetched at once, and the bands in view lacking its membership column are
+   * refetched by the coverage check. A layer dropped costs nothing: its rows are filtered out.
    */
   function askLayers(): void {
-    if (!channel) {
-      // Before meta: record the intent where a reader sees it; the channel adopts it at meta.
+    const current = views.current;
+    if (!current) {
+      // Before meta: published now, and asked for when the view is built.
       replaceProjection('artifacts', {...projections.artifacts, layer: layersOn[0] ?? null, layers: layersOn});
       return;
     }
+    const {channel, presenter} = current;
     const before = channel.current.layers;
     const asked = layersAsked();
     // The channel publishes when its layers move; when they do not, the drawn set may still have.
     if (asked.length === before.length && asked.every((l, i) => l === before[i])) onArtifacts(channel.current);
     else channel.setLayers(asked);
-    if (asked.some((l) => !before.includes(l)) && presenter?.view) {
+    if (asked.some((l) => !before.includes(l)) && presenter.view) {
       const v = presenter.view;
       channel.refresh(v.view, v.width, v.height);
     }
   }
 
+  /** The filter-position controls and `member_of` clauses, without the region leaf. */
+  function filtersBesideRegion(): FilterExpr | null {
+    return withMembers(composeFilters(projections.filters.draft, 'filter'), projections.filters.members, 'filter');
+  }
+
+  /** One composition for the point path, the artifact channel and the region's count. */
   function requestFilters(): FilterExpr | null {
-    const expr = withMembers(composeFilters(projections.filters.draft, 'filter'), projections.filters.members, 'filter');
-    return withRegion(expr, selection ? regionOperand(selection) : null, selection?.outside ?? false);
+    const selected = region.selected;
+    return withRegion(filtersBesideRegion(), selected ? regionOperand(selected) : null, selected?.outside ?? false);
   }
 
   /**
-   * The highlight every request carries: the controls and the `member_of` clauses in the
-   * `highlight` position (`highlight-and-hierarchy.md` §5.2), composed the same way and at the
-   * same one site.
-   *
-   * **The drawn region is never here.** A drawn region is a shape the viewer put on the map and
-   * the region panel's own numbers are read off the filtered frame's `matched`; moving it would
-   * make those numbers answer a different question with nothing on screen saying so. Every other
-   * clause carries both verbs.
+   * The `highlight` every request carries: the controls and `member_of` clauses in that position.
+   * The region is never here, because its numbers are read off the frame's `matched`.
    */
   function requestHighlight(): FilterExpr | null {
     return withMembers(composeFilters(projections.filters.draft, 'highlight'), projections.filters.members, 'highlight');
   }
 
   /**
-   * The question changed — a filter or the selection — so what is held answers a different one.
-   * A filter narrows what is served without changing the identity key, so bands held under one
-   * filter are renderable under another; the client that changed the question is the only party
-   * that knows the held answers are to a different one (§4).
+   * The filters or the selection changed, so every view's held bands answer another question. A
+   * held view is reset without asking, and refills when it is next current.
    */
   function requery(): void {
-    presenter?.cancel();
-    replica?.reset();
-    // A filter and a selection are shared, so a held view's bands answer the question that has
-    // just changed as surely as this view's do (`view-switching.md` §3). They are dropped now
-    // rather than at the switch, so no view is ever drawn under a filter it was not fetched
-    // under; a held view asks for nothing here, and refills when it is next current.
-    for (const held of perView.values()) {
-      if (held.id === viewId) continue;
+    for (const held of views.all()) {
       held.presenter.cancel();
       held.replica.reset();
     }
@@ -1610,192 +1048,29 @@ export function createStore(options: StoreOptions): Store {
 
   async function browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage> {
     const asked = await viewed();
-    // The map's own filter unless the caller named one — including `null`, which asks for the
-    // unfiltered counts explicitly. The view is the store's own current one: a masked count is an
-    // intersection in row space and row space is per view, so a panel that named none would be
-    // asking about whichever view the server chose.
+    // A caller's `filters: null` asks for the unfiltered counts.
     const filters = 'filters' in req ? (req.filters ?? null) : requestFilters();
-    // `req.view ?? viewId`, never a spread: an explicit `view: undefined` in the caller's object
-    // would clobber the store's own with a spread and the request would go out without one.
+    // Not a spread alone: a caller's `view: undefined` would replace the store's view.
     return client.browse(asked.token, {...req, view: req.view ?? asked.view, filters});
   }
 
   function setMembers(clauses: readonly MemberClause[]): void {
     const members = [...clauses];
     replaceProjection('filters', {...projections.filters, members});
-    if (selection) projectRegionLoading(selection);
+    region.loading(projections.marks);
     requery();
   }
 
   function setFilters(draft: FilterDraft): void {
     const expr = composeFilters(draft, 'filter');
     replaceProjection('filters', {...projections.filters, draft, expr, highlight: composeFilters(draft, 'highlight')});
-    // A region's `matched` is under the filters, so its numbers are to a question just changed.
-    if (selection) projectRegionLoading(selection);
+    region.loading(projections.marks);
     requery();
   }
 
-  /** Per column: the debounce or retry timer armed by the most recent {@link suggest} call. */
-  const suggestTimers = new Map<string, unknown>();
-  /**
-   * Per column: the `q` the *last* {@link suggest} call named — not what was last sent, what was
-   * last *asked for*. A landed response is applied only when its echoed `q` still matches this,
-   * which is what makes a response stale by keystroke rather than by request order: a debounce
-   * collapses same-column bursts to one request, but a slow response to request *N* can still
-   * land after a fast response to request *N+1* has, and the echo is what tells the two apart
-   * without a sequence number either side has to invent.
-   */
-  const suggestWant = new Map<string, string>();
-  /** Per column: how many `superseded` retries the current `q` has spent (§ the retry cap below). */
-  const suggestRetries = new Map<string, number>();
-
-  /**
-   * Bumped by every {@link resetSuggestions}, and checked by {@link runSuggest} against the value
-   * it captured at its own start — an in-flight request that straddles a reset must not land, even
-   * where its `(column, q)` pair coincidentally matches a fresh ask under the new epoch.
-   *
-   * **Why the existing `q` echo is not enough on its own.** `resetSuggestions` publishes the
-   * cleared `filters` projection synchronously, and a mounted `<tessera-filter>` reacts inside that
-   * same publish (`onStoreChange` runs from `subscribe`'s callback) — so by the time this function
-   * returns, a control has often already re-asked the identical `q` (most commonly `''`, the
-   * empty-q page every category control asks on mount and after an invalidation alike). That
-   * repopulates `suggestWant` with the same value the stale in-flight request is still carrying, so
-   * the `suggestWant.get(column) !== q` guard alone cannot tell the two apart — only the epoch can.
-   */
-  let suggestEpoch = 0;
-
-  /**
-   * Drop every column's held suggestion page and refusal, and the debounce/retry bookkeeping
-   * behind them — a view switch or a re-authorise invalidates them (`value-suggestion.md` §5.1):
-   * a category's visible values, and so its empty-`q` page, are per `(column, view)`, and a mask
-   * change can only narrow or widen who a value is served to. Clearing `suggestWant` alongside the
-   * projection is what lets the next `ask('')` actually reach the server — otherwise the debounce
-   * dedupe (`suggestWant.get(column) === q`) would read the old `q` as already asked and answer
-   * from a page that no longer applies. A control re-derives its shape (checklist or lookahead)
-   * from whatever page lands next, the same as on first mount.
-   */
-  function resetSuggestions(): void {
-    // Bumped unconditionally — even where nothing is held in `suggestions`/`suggestErrors` there
-    // may be a request in flight (a fetch already sent, its result not yet landed), and the epoch
-    // is exactly what tells that stale landing apart from a fresh ask sharing its `(column, q)`.
-    suggestEpoch++;
-    for (const timer of suggestTimers.values()) clock.cancel(timer);
-    suggestTimers.clear();
-    suggestWant.clear();
-    suggestRetries.clear();
-    replaceProjection('filters', {...projections.filters, suggestions: {}, suggestErrors: {}, suggestEpoch});
-  }
-
-  function suggest(column: string, q: string): void {
-    if (disposed) return;
-    // Idempotent per (column, q): a caller re-asking for the identical q it already asked for —
-    // the shape a store tick that has nothing to do with this control takes, if the caller does
-    // not itself dedupe — must not re-arm the debounce, or churn frequent enough holds the timer
-    // just out of reach of firing, ever. Asking for the identical q a second time is a no-op
-    // whether the first ask is still debouncing, in flight, retrying or already landed.
-    if (suggestWant.get(column) === q) return;
-    const pending = suggestTimers.get(column);
-    if (pending !== undefined) clock.cancel(pending);
-    suggestWant.set(column, q);
-    suggestRetries.delete(column);
-    suggestTimers.set(
-      column,
-      clock.after(SUGGEST_DEBOUNCE_MS, () => {
-        suggestTimers.delete(column);
-        void runSuggest(column, q);
-      })
-    );
-  }
-
-  /** A record with `key` removed — used to drop the *other* half of the suggestion pair on a landing. */
-  function without<T>(record: Record<string, T>, key: string): Record<string, T> {
-    if (!(key in record)) return record;
-    const next = {...record};
-    delete next[key];
-    return next;
-  }
-
-  async function runSuggest(column: string, q: string): Promise<void> {
-    if (disposed) return;
-    // Captured once, at entry: every landing below — success, the catch, and the superseded
-    // re-arm — requires this unchanged against the live `suggestEpoch`, which is what `resetSuggestions`'s
-    // doc above explains is not the same question the `q` echo answers.
-    const epoch = suggestEpoch;
-    try {
-      const asked = await viewed();
-      const result = await client.suggest(asked.token, column, q, {view: asked.view});
-      if (disposed || suggestWant.get(column) !== q || suggestEpoch !== epoch) return; // a later keystroke, or a reset, already wants something else
-      if (result.status === 'superseded') {
-        // The session already has one suggest in flight (§5.1's one-in-flight rule): retry once
-        // it should have returned, still guarded by the same `q` check, rather than surface the
-        // 429 as a refusal a picker would have to render. `retry_after_s` may be `0`, and every
-        // category control in a panel mounts in the same tick and asks together, so a floor keeps
-        // a lockstep collision from spinning; a cap stops a session stuck superseded from retrying
-        // forever, surfacing the last refusal instead.
-        const attempt = (suggestRetries.get(column) ?? 0) + 1;
-        if (attempt > SUGGEST_MAX_RETRIES) {
-          suggestRetries.delete(column);
-          replaceProjection('filters', {
-            ...projections.filters,
-            suggestions: without(projections.filters.suggestions, column),
-            suggestErrors: {
-              ...projections.filters.suggestErrors,
-              [column]: {code: 'backpressure', detail: `still superseded after ${SUGGEST_MAX_RETRIES} retries`}
-            }
-          });
-          return;
-        }
-        suggestRetries.set(column, attempt);
-        suggestTimers.set(
-          column,
-          clock.after(Math.max(result.retryAfterS, SUGGEST_MIN_RETRY_S) * 1000, () => {
-            suggestTimers.delete(column);
-            void runSuggest(column, q);
-          })
-        );
-        return;
-      }
-      suggestRetries.delete(column);
-      replaceProjection('filters', {
-        ...projections.filters,
-        suggestions: {...projections.filters.suggestions, [column]: {q: result.q, values: result.values, more: result.more}},
-        // A landed page answers the question a prior refusal was about; carrying that refusal
-        // forward would leave "values not listable" showing beside a page that just listed some.
-        suggestErrors: without(projections.filters.suggestErrors, column)
-      });
-    } catch (error) {
-      if (disposed || suggestWant.get(column) !== q || suggestEpoch !== epoch) return;
-      replaceProjection('filters', {
-        ...projections.filters,
-        // A refusal answers the question a prior page was about too — a stale page must not
-        // render as though it still does.
-        suggestions: without(projections.filters.suggestions, column),
-        suggestErrors: {...projections.filters.suggestErrors, [column]: refusalOf(error)}
-      });
-    }
-  }
-
   function setLayers(names: string[]): void {
-    // Usually one, with its closure (decision 0096) — the request names every layer in it.
     layersOn = meta ? drawnOnly(layerClosure(meta.layers, names)) : names;
     askLayers();
-  }
-
-  function recolour(): void {
-    // O(live): the colours move, the ordinals do not, and the vis side rewrites its texture.
-    replaceProjection('artifacts', {...projections.artifacts, colours: colourTable(), palette});
-  }
-
-  function setPalette(kind: PaletteKind): void {
-    if (kind === palette) return;
-    palette = kind;
-    recolour();
-  }
-
-  function setScheme(next: PaletteScheme): void {
-    if (next === scheme) return;
-    scheme = next;
-    recolour();
   }
 
   function clearSelection(): void {
@@ -1804,28 +1079,24 @@ export function createStore(options: StoreOptions): Store {
 
   function setColourBy(column: string | null): void {
     const before = colourLayer();
-    colourBy = column;
-    replaceProjection('legend', {...projections.legend, colourBy: column});
+    legend.setColourBy(column);
     traceUnknownColourLayer();
-    // `cluster:<layer>` is a uniform switch on the vis side and accumulates nothing. Its layer is
-    // fetched only where it is not already asked for (`askLayers`).
     if (colourLayer() !== before) askLayers();
-    // No refetch for a column: every declared column is already in the held response, so this is
-    // an accumulator pass over what is drawn (§4). The mark count cannot move.
-    if (column && projections.view.composition) accumulateEncoding(projections.view.composition);
+    // Every declared column is in the held bands, so a column needs no refetch.
+    if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
   }
 
   function setBudget(next: number): void {
     if (!Number.isFinite(next) || next <= 0) return;
     budget = next;
-    presenter?.setBudget(next);
-    presenter?.reschedule();
+    views.current?.presenter.setBudget(next);
+    views.current?.presenter.reschedule();
   }
 
   async function pick(id: bigint): Promise<void> {
     const epoch = clears;
     try {
-      const detail = await client.item(await ensureToken(), id);
+      const detail = await client.item(await tokens.get(), id);
       if (disposed || epoch !== clears) return;
       replaceProjection('selection', {...projections.selection, item: {id, detail}, itemRefusal: null});
     } catch (error) {
@@ -1838,141 +1109,11 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  /**
-   * {@link Store.describe} — the hover's record, asked for once per id and held.
-   *
-   * A refusal is held as `null` for the same reason the shape cache holds one: the pointer will
-   * cross this mark again within the second, and an id that answered 404 once will answer 404
-   * every time until the principal changes.
-   */
-  const described = new Map<string, Record<string, unknown> | null>();
-  const describing = new Map<string, Promise<Record<string, unknown> | null>>();
-  /** Moved when the principal changes, so an answer asked for under the previous one is not held. */
-  let describedEpoch = 0;
-
-  function forgetDescribed(): void {
-    described.clear();
-    describing.clear();
-    describedEpoch += 1;
-  }
-
-  async function describe(id: bigint): Promise<Record<string, unknown> | null> {
-    const key = id.toString();
-    const held = described.get(key);
-    if (held !== undefined) return held;
-    const inFlight = describing.get(key);
-    if (inFlight) return inFlight;
-    const epoch = describedEpoch;
-    const request = ensureToken()
-      .then((t) => client.item(t, id))
-      .then((detail) => detail.fields)
-      .catch(() => null)
-      .then((fields) => {
-        if (disposed || epoch !== describedEpoch) return fields;
-        describing.delete(key);
-        described.set(key, fields);
-        return fields;
-      });
-    describing.set(key, request);
-    return request;
-  }
-
-  // ---- the drawn shape, fetched by identifier (`artifact-shapes.md` §9) -----------------------
-
-  /**
-   * The shapes held, with the kind each was served as, and the identifiers already asked for.
-   *
-   * **Two maps, because an absence has two meanings.** A shape not in `heldShapes` is either not
-   * asked for or asked for and not answered, and the second must not be asked again on every
-   * pointer move; `askedShapes` is what separates them. A refusal stays in `askedShapes` and out
-   * of `heldShapes`, so a `404` is asked once and drawn as a box — which is what the map does for
-   * an artifact whose layer draws no shape, and the two are indistinguishable on purpose.
-   *
-   * **The kind decides what survives a change of principal** (`polygon-membership.md` §7.1): a
-   * `derived` shape is this principal's and goes with them; a `predicate` or an `authored` one is
-   * identical for every principal served the artifact and is kept. An artifact the new
-   * principal is not served is simply never looked up.
-   */
-  let heldShapes = new Map<bigint, Shape>();
-  let heldKinds = new Map<bigint, ShapeKind>();
-  let askedShapes = new Set<bigint>();
-
-  /** Drop what the principal's change invalidates — every derived shape, or everything. */
-  function forgetShapes(which: 'derived' | 'all'): void {
-    if (heldShapes.size === 0 && askedShapes.size === 0) return;
-    if (which === 'all') {
-      heldShapes = new Map();
-      heldKinds = new Map();
-      askedShapes = new Set();
-    } else {
-      const keep = new Map<bigint, Shape>();
-      const kinds = new Map<bigint, ShapeKind>();
-      for (const [id, shape] of heldShapes) {
-        const kind = heldKinds.get(id);
-        if (kind !== undefined && kind !== 'derived') {
-          keep.set(id, shape);
-          kinds.set(id, kind);
-        }
-      }
-      heldShapes = keep;
-      heldKinds = kinds;
-      askedShapes = new Set(keep.keys());
-    }
-    replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
-  }
-
   /** The kind a served artifact's layer draws, from the meta; null where it draws none. */
   function shapeKindOf(id: bigint): ShapeKind | null {
     const layer = projections.artifacts.served.find((a) => a.tesseraId === id)?.layer;
     if (layer === undefined) return null;
     return projections.meta?.layers.find((l) => l.name === layer)?.shape ?? null;
-  }
-
-  function needShape(id: bigint): void {
-    if (askedShapes.has(id)) return;
-    askedShapes.add(id);
-    void (async () => {
-      try {
-        const asked = await viewed();
-        // The view's own zoom, so the shape is generalised to this screen's pixel.
-        const zoom = presenter?.view?.view.zoom;
-        const detail = await client.artifact(asked.token, id, {view: asked.view, ...(zoom === undefined ? {} : {zoom})});
-        // The principal may have changed under the request, by a renewal or a clear, and then
-        // this answer describes a mask no longer drawn.
-        if (disposed || !askedShapes.has(id)) return;
-        if (!detail.shape) return;
-        heldShapes = new Map(heldShapes).set(id, detail.shape);
-        heldKinds = new Map(heldKinds).set(id, shapeKindOf(id) ?? 'derived');
-        replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
-      } catch {
-        // A refused shape is a shape not drawn, and the `box` already in hand answers instead.
-        // There is nothing here to report: `404` covers an unknown identifier, one this principal
-        // may not reach and one below its layer's criterion identically, so a message would be
-        // inventing a distinction the wire does not carry.
-      }
-    })();
-  }
-
-  /**
-   * Take the shape an answer already carried into the held shapes, so the map draws it.
-   *
-   * The drill-down route answers `centroid`, `box` **and** the shape in one body, and
-   * {@link openArtifact} was reading the first two and discarding the third: the shape landed in
-   * `selection.artifact.detail` — where the card reads it and draws nothing with it — and never
-   * in `artifacts.shapes`, which is what `focusOutlines` looks in. So an artifact opened from
-   * `<tessera-artifact-list>` drew no outline at all on a layer that declares a hull, because the
-   * box the served row carries is refused for a layer whose declared shape is a hull; a layer
-   * declaring none drew its box and hid the fault. The map's own click and hover call
-   * {@link needShape} beside this, which is why a pick drew and a list row did not.
-   *
-   * Recorded as asked, so `needShape` never issues a second request for a shape already in hand.
-   */
-  function holdShape(id: bigint, shape: Shape | null): void {
-    if (!shape) return;
-    askedShapes.add(id);
-    heldShapes = new Map(heldShapes).set(id, shape);
-    heldKinds = new Map(heldKinds).set(id, shapeKindOf(id) ?? 'derived');
-    replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
   }
 
   async function openArtifact(id: bigint): Promise<void> {
@@ -1982,7 +1123,7 @@ export function createStore(options: StoreOptions): Store {
       const detail = await client.artifact(asked.token, id, {view: asked.view});
       if (disposed || epoch !== clears) return;
       // A renewal may have changed the principal under the request, and a shape can be theirs.
-      if (token === asked.token) holdShape(id, detail.shape);
+      if (tokens.current === asked.token) shapes.hold(id, detail.shape);
       replaceProjection('selection', {...projections.selection, artifact: {id, detail}, artifactRefusal: null, item: null, itemRefusal: null});
     } catch (error) {
       if (disposed || epoch !== clears) return;
@@ -1994,177 +1135,11 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  // ---- the selected region (§5.11) ------------------------------------------------------------
-
-  /** A shape in world space: the box, the lasso's polygon, or nothing to highlight by (an artifact). */
-  type WorldShape = {kind: 'box'; box: [number, number, number, number]} | {kind: 'lasso'; polygon: WorldPolygon} | {kind: 'artifact'};
-
-  /** When the selection was made, so the answer can be timed (the instruments' `region` trace). */
-  let selectedAt = 0;
-  /** The last verdict the wire gave for this selection — read off the replica, which observes every response. */
-  let regionVerdict: RegionVerdict | null = null;
-
-  /**
-   * The held marks whose world positions fall inside the shape — the region's sample (P1), by
-   * the server's own predicate over the quantised grid (`region.ts`). An artifact selection has
-   * no client-side predicate: the wire's `membership:<layer>` column is the membership, and the
-   * sample is every held mark, which the request already narrowed to the artifact's members.
-   */
-  function heldInside(world: WorldShape, outside: boolean): RegionProjection['held'] {
-    const ids: bigint[] = [];
-    const xy: number[] = [];
-    let count = 0;
-    const inside =
-      world.kind === 'box' ? (x: number, y: number) => insideBox(x, y, world.box) : world.kind === 'lasso' ? (x: number, y: number) => insidePolygon(x, y, world.polygon) : () => true;
-    const take = (band: {ids: BigUint64Array; positions: Float32Array}, i: number) => {
-      const x = band.positions[i * 2]!;
-      const y = band.positions[i * 2 + 1]!;
-      if (world.kind !== 'artifact' && inside(x, y) === outside) return;
-      count++;
-      if (ids.length < REGION_HELD_LIMIT) {
-        ids.push(band.ids[i]!);
-        xy.push(x, y);
-      }
-    };
-    for (const band of projections.marks.bands) {
-      for (let i = 0; i < band.ids.length; i++) take(band, i);
-    }
-    for (const piece of projections.marks.standIn) {
-      if (piece.indices) for (const i of piece.indices.slice(0, piece.limit)) take(piece.band, i);
-      else for (let i = 0; i < Math.min(piece.limit, piece.band.ids.length); i++) take(piece.band, i);
-    }
-    return {ids: BigUint64Array.from(ids), positions: Float32Array.from(xy), count};
-  }
-
-  function worldOfShape(shape: SelectionShape): WorldShape | null {
-    if (!meta) return null;
-    const q = frame();
-    if (shape.kind === 'artifact') return {kind: 'artifact'};
-    if (shape.kind === 'box') {
-      const [x0, y0] = dataToWorldXY(shape.bbox[0], shape.bbox[1], q);
-      const [x1, y1] = dataToWorldXY(shape.bbox[2], shape.bbox[3], q);
-      return {kind: 'box', box: [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)]};
-    }
-    if (shape.points.length < 3) return null;
-    return {kind: 'lasso', polygon: shape.points.map(([x, y]) => dataToWorldXY(x, y, q))};
-  }
-
-  /**
-   * The world box the selection's count is over, or `null` where the client cannot know it — an
-   * artifact whose extent the store does not hold. A frame whose exact tiles cover it has counted
-   * the whole shape; one that does not has counted the part in view.
-   */
-  function worldExtentOf(shape: SelectionShape): [number, number, number, number] | null {
-    const world = worldOfShape(shape);
-    if (!world) return null;
-    if (world.kind === 'box') return world.box;
-    if (world.kind === 'lasso') {
-      let x0 = Infinity;
-      let y0 = Infinity;
-      let x1 = -Infinity;
-      let y1 = -Infinity;
-      for (const [x, y] of world.polygon) {
-        if (x < x0) x0 = x;
-        if (y < y0) y0 = y;
-        if (x > x1) x1 = x;
-        if (y > y1) y1 = y;
-      }
-      return [x0, y0, x1, y1];
-    }
-    const extent = shape.kind === 'artifact' ? extentOf(shape.id) : null;
-    if (!extent || !meta) return null;
-    const q = frame();
-    const [x0, y0] = dataToWorldXY(extent[0], extent[1], q);
-    const [x1, y1] = dataToWorldXY(extent[2], extent[3], q);
-    return [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
-  }
-
-  /** The region as it stands before a frame has answered for it: its held sample, no numbers. */
-  function projectRegionLoading(shape: SelectionShape): void {
-    const world = worldOfShape(shape);
-    if (!world) {
-      replaceProjection('region', null);
-      return;
-    }
-    const held = heldInside(world, shape.outside ?? false);
-    replaceProjection('region', {
-      shape,
-      status: 'loading',
-      refusal: null,
-      visible: null,
-      matched: NO_MASKED,
-      served: {shown: held.count, total: 0, exact: false},
-      verdict: regionVerdict,
-      held
-    });
-  }
-
-  /**
-   * The region's numbers, read off a presented frame. `matched` is the frame's own sum — the
-   * request carried the leaf, so a tile's `matched` is the items inside the shape the filters
-   * admit. Exact for the shape when the wire said so *and* the frame's exact tiles cover the
-   * shape's extent; an outside selection is never covered by one frame, since its complement is
-   * the whole map.
-   */
-  function projectRegion(frame: Composition, verdict: RegionVerdict | null, derived: boolean, matched: number): void {
-    const shape = selection;
-    const current = projections.region;
-    if (!shape || !current || current.shape !== shape) return;
-    if (verdict) regionVerdict = verdict;
-    // A frame folded from the replica, before any derive answered for this selection, is to the
-    // previous question; the numbers wait for the derive.
-    if (current.status === 'loading' && !derived) return;
-    const world = worldOfShape(shape);
-    if (!world) return;
-    const outside = shape.outside ?? false;
-    const extent = outside ? null : worldExtentOf(shape);
-    // Covered means the replica holds every tile of the shape's extent at the frame's depth —
-    // asked of the replica rather than read off the frame's tile list, which names only the
-    // tiles that drew a point; a tile the region emptied is held, counted and listed nowhere.
-    const covered = extent !== null && replica !== null && meta !== null && replica.novelIn(tileRectOfBbox(extent, frame.depth), frame.depth, meta.selection.kMaxMarks) === 0;
-    const exact = (regionVerdict?.exact ?? false) && covered;
-    const held = heldInside(world, outside);
-    const draftEmpty = composeFilters(projections.filters.draft) === null;
-    const wasLoading = current.status === 'loading';
-    replaceProjection('region', {
-      ...current,
-      status: 'shown',
-      refusal: null,
-      matched: {value: matched, exact},
-      // The region alone is the same question only while no other filter narrows the frame.
-      visible: draftEmpty ? {value: matched, exact} : null,
-      served: {shown: held.count, total: matched, exact: true},
-      verdict: regionVerdict,
-      held
-    });
-    if (wasLoading) options.instruments?.onTrace?.('region', {answerMs: clock.now() - selectedAt, exact: exact ? 1 : 0, depth: regionVerdict?.depth ?? -1});
-  }
-
-  /**
-   * Select a shape — and, with it, filter to it: the leaf joins every request from here on, and
-   * the region's numbers are read off the next frame. `null` clears both.
-   */
-  function select(shape: SelectionShape | null): void {
-    const changed = shape !== selection;
-    selection = shape;
-    regionVerdict = null;
-    selectedAt = clock.now();
-    if (!shape || (shape.kind === 'lasso' && shape.points.length < 3)) {
-      selection = null;
-      replaceProjection('region', null);
-      if (changed) requery();
-      return;
-    }
-    projectRegionLoading(shape);
-    requery();
-  }
-
   function extentOf(artifactId: bigint): [number, number, number, number] | null {
     const artifact = projections.artifacts.served.find((a) => a.tesseraId === artifactId);
     const box = artifact?.box;
     if (!box || !meta) return null;
-    // The box is in the wire's 32-bit grid units (contracts §3.2), the same units the outlines
-    // draw from: through world space, by the one conversion every reader of wire geometry uses.
+    // The box is in the wire's 32-bit grid units.
     const [x0, y0] = dataXY(gridToWorld(box[0]), gridToWorld(box[1]));
     const [x1, y1] = dataXY(gridToWorld(box[2]), gridToWorld(box[3]));
     return [x0, y0, x1, y1];
@@ -2183,58 +1158,50 @@ export function createStore(options: StoreOptions): Store {
 
   function clear(): void {
     clears += 1;
-    // A re-authorise moves the mask, and a category's suggestion page answers `visible(code)`
-    // under the mask it was fetched against (`value-suggestion.md` §5.1) — held across a mask
-    // change it would show values the new mask does not, or hide ones it now does.
-    resetSuggestions();
-    // **Every held view, not the current one alone**: a mask change invalidates all of them
-    // (`view-switching.md` §4), and a view left warm across it would draw the previous
-    // principal's marks the moment it was returned to.
-    for (const held of perView.values()) {
+    suggestions.reset();
+    // Every held view, so none draws the previous principal's marks when it is returned to.
+    for (const held of views.all()) {
       held.presenter.cancel();
       held.channel.reset();
       held.replica.reset();
     }
-    if (switchTimer !== null) {
-      clock.cancel(switchTimer);
-      switchTimer = null;
-    }
+    views.cancelSettle();
     table.clear();
-    forgetShapes('all');
-    forgetDescribed();
+    shapes.forget('all');
+    records.forget();
     clearSelection();
     contentKeyAtFrame = '';
-    replaceProjection('view', {id: viewId, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0});
-    replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});
-    replaceProjection('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy});
+    replaceProjection('view', noFrame(views.id));
+    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
+    replaceProjection('tiles', {tiles: []});
+    legend.clear();
     replaceProjection('status', {...NO_STATUS});
-    selection = null;
-    regionVerdict = null;
-    replaceProjection('region', null);
+    region.drop();
     publishReplica(null);
   }
 
   function refresh(): void {
-    // Redraw the marks against the refreshed content key — a held layer set goes with it (§4).
-    channel?.reset();
-    if (selection) projectRegionLoading(selection);
+    // Redraw against the current content key, refetching the artifacts with it.
+    views.current?.channel.reset();
+    region.loading(projections.marks);
     if (lastView) setView(lastView.input);
   }
 
-  /** Set by `dispose`: a fetch that lands afterwards writes nothing into a store nobody reads. */
+  /** Set by `dispose`: an answer that lands afterwards writes nothing. */
   let disposed = false;
 
   function dispose(): void {
     disposed = true;
-    for (const held of perView.values()) {
+    tokens.dispose();
+    suggestions.dispose();
+    shapes.dispose();
+    records.dispose();
+    legend.dispose();
+    for (const held of views.all()) {
       held.presenter.cancel();
       held.channel.cancel();
     }
-    if (switchTimer !== null) clock.cancel(switchTimer);
-    switchTimer = null;
-    if (renewTimer) clock.cancel(renewTimer);
-    for (const timer of suggestTimers.values()) clock.cancel(timer);
-    suggestTimers.clear();
+    views.cancelSettle();
     client.close();
   }
 
@@ -2262,20 +1229,22 @@ export function createStore(options: StoreOptions): Store {
     requestFilters,
     setFilters,
     setMembers,
-    suggest,
+    suggest: (column, q) => suggestions.suggest(column, q),
     setLayers,
     setColourBy,
-    setPalette,
+    setPalette: (kind) => colours.setPalette(kind),
     setBudget,
     setCurrentView,
     frame: frameOrNull,
     pick,
-    describe,
+    describe: (id) => records.describe(id),
     openArtifact,
-    needShape,
+    needShape: (id) => shapes.need(id),
     clearSelection,
-    setScheme,
-    select,
+    setScheme: (scheme) => colours.setScheme(scheme),
+    select(shape) {
+      if (region.select(shape, projections.marks)) requery();
+    },
     extentOf,
     dataXY,
     clear,

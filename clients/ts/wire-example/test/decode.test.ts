@@ -1,6 +1,6 @@
 // The worked decode against the golden fixtures, read by path from the core package's test
-// directory — deliberately not imported from `@tesseradb/client`, whose decoder is the thing
-// this example must not share code with. `expected.json` is the same file the Python example's
+// directory. Nothing is imported from `@tesseradb/client`, whose decoder this example must not
+// share code with. `expected.json` is the same file the Python example's
 // test reads, so the two decodes are held to one answer.
 
 import {readFileSync} from 'node:fs';

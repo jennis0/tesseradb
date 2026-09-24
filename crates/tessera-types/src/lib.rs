@@ -11,6 +11,7 @@ pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION,
 /// asks about its own memory never names it.
 pub mod label;
 pub mod process;
+pub mod scalar;
 
 /// The annotation layer declaration, shared by the WAL record that makes a registration durable,
 /// the manifest section that carries it, and the gate-filtered `/v1/meta` view.

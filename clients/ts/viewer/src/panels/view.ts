@@ -4,14 +4,13 @@ import type {AppState} from '../state.js';
 const fmt = (n: number | bigint) => n.toLocaleString('en-GB');
 
 /**
- * What the budget chose, and how close the prediction came. Prediction against reality is the row
- * that matters, and *from* says which model made it: `counts` is arithmetic over the masked counts
- * the responses carried and should read near zero drift, `average` the `m_target` fallback for a
- * view no counts cover, `bound` the counts moved to another depth.
+ * The depth the budget chose, and the drift between predicted and drawn marks. `from` names the
+ * model: `counts` works from the masked counts the responses carried, `average` is the `m_target`
+ * fallback for a view no counts cover, `bound` is counts moved to another depth.
  */
 export function renderDepth(state: AppState): string {
   const chosen = state.depthChoice;
-  // Against the prediction, only exact tiles are comparable — they are what the budget asked for.
+  // Only exact tiles are what the budget asked for, so only they are compared.
   const actual = state.frame?.exactDrawn ?? 0;
   const drift =
     chosen && chosen.predictedMarks > 0

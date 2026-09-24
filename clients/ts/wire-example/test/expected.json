@@ -1,16 +1,16 @@
 {
-  "_comment": "What both worked decodes — clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow) — must agree on over the golden fixtures in clients/ts/core/test/fixtures. Frame kinds in order, row counts per batch, and the first tessera_id of the points and artifacts batches as decimal strings. Re-derive when the fixtures are re-captured (clients/ts/scripts/capture-golden.mjs).",
+  "_comment": "What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts per batch, and the first tessera_id of the points and artifacts batches as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.",
   "viewport-plain.bin": {
     "frames": [
       1,
       3,
       4
     ],
-    "tiles": 5,
+    "tiles": 16,
     "sub_cells": null,
     "artifacts": null,
-    "points": 48,
-    "first_point_tessera_id": "8549480826753018745",
+    "points": 260,
+    "first_point_tessera_id": "141076408467200112",
     "first_artifact_tessera_id": null
   },
   "viewport-underlay.bin": {
@@ -20,11 +20,11 @@
       3,
       4
     ],
-    "tiles": 5,
-    "sub_cells": 12,
+    "tiles": 16,
+    "sub_cells": 256,
     "artifacts": null,
-    "points": 48,
-    "first_point_tessera_id": "8549480826753018745",
+    "points": 260,
+    "first_point_tessera_id": "141076408467200112",
     "first_artifact_tessera_id": null
   },
   "viewport-artifacts.bin": {
@@ -35,10 +35,10 @@
     ],
     "tiles": 15,
     "sub_cells": null,
-    "artifacts": 263,
+    "artifacts": 64,
     "points": 0,
     "first_point_tessera_id": null,
-    "first_artifact_tessera_id": "15635839221253775265"
+    "first_artifact_tessera_id": "3223333276503754438"
   },
   "viewport-membership.bin": {
     "frames": [
@@ -49,9 +49,9 @@
     ],
     "tiles": 15,
     "sub_cells": null,
-    "artifacts": 263,
-    "points": 248,
-    "first_point_tessera_id": "1559474477015133409",
-    "first_artifact_tessera_id": "15635839221253775265"
+    "artifacts": 64,
+    "points": 235,
+    "first_point_tessera_id": "527482152805734822",
+    "first_artifact_tessera_id": "3223333276503754438"
   }
 }

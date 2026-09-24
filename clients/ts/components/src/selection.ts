@@ -1,4 +1,4 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {REGION_HELD_LIMIT, type RegionProjection} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail} from './base.js';
@@ -8,16 +8,14 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-selection>`: the selected region. *Shown inside · Matched inside · Visible inside* through
- * `<tessera-count>` — `matched` as `Masked`, exact for the shape unless the server answered a
- * cover (`x-tessera-region`) or the frame did not cover the shape; `visible` only while no other
- * filter narrows the frame; `served` as the held marks inside against `matched`, both figures
- * always — the shown items as a list (click picks), and the actions.
+ * `<tessera-selection>`: the selected region's counts, the held marks inside it as a list (a click
+ * picks one), and the actions. Shown inside is the held marks against `matched`. Matched inside is
+ * exact for the shape unless the server answered with a cover (`x-tessera-region`). Visible inside
+ * shows only while no other filter narrows the view.
  *
- * **The selection is the filter** (`selection-operand.md`): the map and every count narrowed to
- * it the moment it settled, so *filter to this* is not a button here. *Outside* flips it to the
- * complement. *Export* and *Save as artifact* are greyed with the reason on hover rather than
- * omitted: each is a server-side verb asked for in D11 and ⊘ neither is built.
+ * The selection is itself a filter: the map and every count narrow to it once it settles.
+ * Outside flips it to the complement. Not built yet: export and save as artifact, which need
+ * server verbs; their buttons are disabled with the reason on hover.
  */
 export class TesseraSelection extends TesseraElement {
   static override styles = [
@@ -66,7 +64,7 @@ export class TesseraSelection extends TesseraElement {
     return this.region ?? this.resolvedStore?.get('region') ?? null;
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const r = this.shown;
     const heading = (shape: string = '') => html`<h2 part="title">Selection<span class="summary">${shape}</span></h2>`;
     if (!r) return html`<div class="panel">${heading()}<span part="state" data-state="detached"></span></div>`;
@@ -88,7 +86,6 @@ export class TesseraSelection extends TesseraElement {
           ? html`<span part="state" data-state="refused">${icon('warn', 14)}Refused<span part="refusal" class="mono">${r.refusal?.code}</span></span>`
           : html`<span part="state" data-state=${state} title=${r.verdict === null ? 'not yet answered' : r.verdict.exact ? 'exact for the shape' : `a cover of the shape at depth ${r.verdict.depth}`}>${stale ? html`${icon('clock', 14)}Corpus updated` : nothing}</span>`;
     const ids = Array.from(r.held.ids, idString);
-    // Greyed with the reason on hover, never omitted: each waits on a server verb (D11).
     const waiting = (label: unknown, reason: string) => html`<button part="action" class="btn off" type="button" disabled title=${reason}>${label}</button>`;
     return html`<div class="panel">${heading(r.shape.outside ? `outside ${r.shape.kind}` : r.shape.kind)}${stateRegion}${counts}
       ${ids.length > 0

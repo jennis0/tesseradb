@@ -1,12 +1,10 @@
 import {describe, expect, it} from 'vitest';
 import {NO_COUNT, NO_MASKED, type FiltersProjection, type RegionProjection, type ViewProjection} from '@tesseradb/client';
-import {washChannel} from '../src/map.js';
+import {washChannel} from '../src/wash.js';
 
 /**
- * §5.3's wash reads the count the question actually put, and the interface labels it as that
- * count. What is checked is the **choice**, not the image: the three columns legitimately agree —
- * `highlighted` equals `matched` with no highlight and `matched` equals `visible` with no filter —
- * so nothing about the numbers could tell the three states apart.
+ * The wash reads the count the request asked for. The tests check the choice, not the image: the
+ * three counts are equal when nothing narrows them, so the numbers cannot tell the states apart.
  */
 
 const view = (highlighting = false): ViewProjection => ({

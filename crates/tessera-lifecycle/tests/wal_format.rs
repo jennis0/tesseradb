@@ -4,7 +4,7 @@
 //! it must be re-derivable from the log byte-for-byte. The field this file pins is the one §2.1's
 //! contiguity arithmetic assumes and the format did not carry.
 
-use tessera_lifecycle::wal::{Wal, WalError, WalRecord, WalRow};
+use tessera_lifecycle::wal::{Wal, WalError, WalRecord, WalRow, WalScalar};
 use tessera_types::EntityId;
 
 /// The view a row belongs to is durable, because a flush segment's entity range is
@@ -217,4 +217,57 @@ fn view_create_and_drop_round_trip() {
         }
         other => panic!("expected a create then a drop, got {other:?}"),
     }
+}
+
+/// A row carrying one value of every scalar kind is written to the log as these bytes. A change to
+/// the scalar's encoding changes them, and is a `WAL_VERSION` bump.
+#[test]
+fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("wal.log");
+    let row = WalRow {
+        external_id: Some(b"e".to_vec()),
+        entity_id: EntityId::new(3),
+        view: "v".to_string(),
+        join: false,
+        descriptors: Vec::new(),
+        x: 0.5,
+        y: 0.25,
+        scalars: vec![
+            WalScalar::Bool(true),
+            WalScalar::U8(0xab),
+            WalScalar::U16(0xabcd),
+            WalScalar::U32(0x0102_0304),
+            WalScalar::U64(u64::MAX),
+            WalScalar::I8(-2),
+            WalScalar::I16(-300),
+            WalScalar::I32(-70_000),
+            WalScalar::I64(i64::MIN),
+            WalScalar::F32(1.5),
+            WalScalar::F64(-2.25),
+            WalScalar::TimestampUs(1_700_000_000_000_000),
+            WalScalar::Utf8("k".to_string()),
+            WalScalar::Null,
+        ],
+        scoped: vec![WalScalar::U8(1)],
+    };
+    {
+        let (mut wal, _) = Wal::open(&path).unwrap();
+        wal.append(&WalRecord::IngestBatch {
+            batch_id: "b".into(),
+            body_hash: [0u8; 32],
+            rows: vec![row],
+        })
+        .unwrap();
+        wal.fsync().unwrap();
+    }
+    let bytes = std::fs::read(dir.path().join("wal-000001.log")).unwrap();
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        hex,
+        "5457414c190001000000000000000000000000000000870000000101620000000000000000000000000000\
+         000000000000000000000000000000000000010101650301760000000000000000e03f000000000000d03f\
+         0e000101ab02cdd702038486880804ffffffffffffffffff0105fe06d70407dfc50808ffffffffffffffffff\
+         01090000c03f0a00000000000002c00b8080f281838985060c016b0d010101b47f9998"
+    );
 }

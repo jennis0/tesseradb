@@ -2,14 +2,10 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient} from '../src/client.js';
 
 /**
- * `authorise` puts the candidate term list on the wire as base64, and the session plane decodes it
- * to a `Vec<u8>` it reads as UTF-8 JSON (`crates/tessera-server/src/session.rs`). The encoding
- * therefore has to be base64 of the UTF-8 bytes, which `btoa` alone does not give: it maps each
- * UTF-16 code unit to one byte, throwing above U+00FF and silently emitting Latin-1 below it.
- *
- * Both halves were live against rung 5 of the ladder, whose 474 publisher terms are institution
- * names: three carry an en-dash or a curly apostrophe and refused the whole authorise, and forty
- * more carry an accent and would have authorised against bytes no dictionary holds.
+ * `authorise` sends the candidate term list as base64, which the session route decodes and reads as
+ * UTF-8 JSON. So the encoding must be base64 of the UTF-8 bytes. `btoa` alone maps each UTF-16 code
+ * unit to one byte: it throws above U+00FF and emits Latin-1 below it, so a term with an en dash or
+ * an accent would be refused or authorised against the wrong bytes.
  */
 const captureAuthData = () => {
   const seen: string[] = [];
@@ -36,7 +32,7 @@ describe('the authorise term encoding', () => {
 
   it('carries a term above U+00FF rather than refusing the request', async () => {
     const seen = captureAuthData();
-    // An en-dash, a curly apostrophe and a caron: `btoa` throws `InvalidCharacterError` on each.
+    // An en dash, a curly apostrophe and a caron: `btoa` throws `InvalidCharacterError` on each.
     const terms = [
       'University of Wisconsin–La Crosse',
       'Estonian Naturalists’ Society',

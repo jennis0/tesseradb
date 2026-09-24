@@ -1,17 +1,19 @@
-import {defineConfig} from 'vite';
+import {defaultClientConditions, defineConfig} from 'vite';
 import {tesseraDecorators} from './vite-plugin-decorators.js';
 
 /**
- * The self-contained bundle: one ESM file, lit and deck.gl inside it, the decode worker inlined
- * (`src/bundle.ts`). The unbundled distribution is the source itself, with those as peers; a
- * host with a bundler resolves `@tesseradb/components` to `src/index.ts`.
+ * The self-contained bundle: one minified ESM file with lit and deck.gl inside it and the decode
+ * worker inlined (`src/bundle.ts`). The npm distribution is the `tsc` build in `dist/` beside it,
+ * with those as dependencies and peers.
  */
 export default defineConfig({
   plugins: [tesseraDecorators()],
+  // The workspace packages resolve to their sources, so the bundle needs no prior library build.
+  resolve: {conditions: ['tessera-source', ...defaultClientConditions]},
   // deck.gl reads `process.env.NODE_ENV` unguarded, and library mode does not substitute it. A
-  // page bundled by a host is fine (its bundler substitutes); this file is evaluated as-is — from
-  // a `<script type="module">` and, as the widget's `_esm`, from a Blob URL inside JupyterLab,
-  // where the first `process` is a ReferenceError before any element defines.
+  // host's bundler substitutes it, but this bundle is also loaded as-is from a
+  // `<script type="module">` and, as the widget's `_esm`, from a Blob URL in JupyterLab, where
+  // `process` is undefined.
   define: {'process.env.NODE_ENV': JSON.stringify('production')},
   build: {
     lib: {
@@ -19,15 +21,21 @@ export default defineConfig({
       formats: ['es'],
       fileName: () => 'tessera-components.js'
     },
-    rollupOptions: {
+    // The library build sits in the same directory.
+    emptyOutDir: false,
+    rolldownOptions: {
       output: {
         // One file: no chunks, no separate worker asset.
-        inlineDynamicImports: true,
-        manualChunks: undefined
+        codeSplitting: false,
+        // Library mode keeps whitespace in an ES build so that a consumer's bundler can still
+        // tree-shake it. Nothing bundles this file again, so it is minified whole. Licence
+        // comments stay.
+        minify: true,
+        comments: {legal: true, annotation: false, jsdoc: false}
       }
     },
     sourcemap: false,
-    minify: 'esbuild',
+    minify: 'oxc',
     target: 'es2022'
   },
   worker: {format: 'es'}

@@ -1,34 +1,26 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import type {DeclaredScalar, ItemDetail, ItemViewPosition, Meta, Quantisation, Refusal} from '@tesseradb/client';
 import {GRID32} from '@tesseradb/client';
-import {TesseraElement, emit, idString} from './base.js';
+import {TesseraElement, emit, idString, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-item-card>`: the selected point. A headline, then the fields **by name, in
- * declaration order** as a label/value grid, then Open and Copy id. `/v1/items` omits a field the item carries no value for, so position lies and a card
- * reading positionally would misattribute every field after the first gap. A text column lives in
- * the record blob and never appears in a viewport response, so this is the only place its prose
- * is ever seen. A category arrives already resolved to its key.
+ * `<tessera-item-card>`: the selected point. A headline, the fields as a label and value grid by
+ * name in declaration order, then Open and Copy id. Fields are matched by name because
+ * `/v1/items` omits a field with no value. A text column is served only here, never in a viewport
+ * response. A category arrives resolved to its key.
  *
- * The headline is the field the host names in `title-field`, else the item's id, and every other
- * field is in the grid, the id among them when it is not the headline. A slot per field
- * (`field-<name>`) lets a host render one as a link into their application without replacing the
- * card, and `tessera-open` (the id as a decimal string) does the same for Open.
+ * The headline is the field named in `title-field`, else the item's id; every other field is in
+ * the grid. A slot per field (`field-<name>`) lets a host render one as a link, and
+ * `tessera-open` carries the id as a decimal string for Open.
  *
- * **A miss and a broken pick are different.** Nothing under the cursor is the ordinary case; a
- * hit whose layer carried no identity is a fault in the map and says so, rather than reading as
- * "click a mark" for a whole session. The map passes what its pick resolved to as `pick`.
+ * `pick` is what the map's pick resolved to. A miss is ordinary; a broken pick is a fault in the
+ * map and the card says so.
  */
-export type PickOutcome =
-  | {kind: 'miss'}
-  | {kind: 'broken'; index: number; layer: string | null; hasIds: boolean; idCount: number}
-  | null;
-
 export class TesseraItemCard extends TesseraElement {
   static override styles = [
     tokens,
@@ -80,7 +72,7 @@ export class TesseraItemCard extends TesseraElement {
     `
   ];
 
-  /** Data by property, for a host feeding the card from its own fetch (§5.6 rung 6). */
+  /** Data by property, for a host feeding the card from its own fetch. */
   @property({attribute: false}) accessor item: {id: bigint; detail: ItemDetail} | null = null;
   @property({attribute: false}) accessor refusal: Refusal | null = null;
   @property({attribute: false}) accessor pick: PickOutcome = null;
@@ -89,8 +81,8 @@ export class TesseraItemCard extends TesseraElement {
   @property({attribute: 'title-field'}) accessor titleField = '';
 
   private get shown(): {item: {id: bigint; detail: ItemDetail} | null; refusal: Refusal | null; meta: Meta | null} {
-    // A host feeding the card by property still gets the store's schema where one is adopted: the
-    // declaration order, a view's own name and its frame are the bundle's, not the item's.
+    // A card fed by property still takes the schema from an adopted store: declaration order and
+    // view names and frames belong to the bundle.
     if (this.item || this.refusal) return {item: this.item, refusal: this.refusal, meta: this.meta ?? this.resolvedStore?.get('meta') ?? null};
     const s = this.resolvedStore;
     if (!s) return {item: null, refusal: null, meta: this.meta};
@@ -98,11 +90,10 @@ export class TesseraItemCard extends TesseraElement {
     return {item: sel.item, refusal: sel.itemRefusal, meta: this.meta ?? s.get('meta')};
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const {item, refusal, meta} = this.shown;
     const heading = html`<h2 part="title">Item<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'item'})}>${icon('close', 14)}</button></h2>`;
     if (refusal) {
-      // A refusal from `/v1/items` is a refusal, never an empty item.
       return html`<div class="panel">${heading}<span part="state" data-state="refused"><span part="refusal">${refusal.code}: ${refusal.detail}</span></span></div>`;
     }
     if (!item) {
@@ -146,13 +137,10 @@ export class TesseraItemCard extends TesseraElement {
   }
 
   /**
-   * **The views this item is in that this session may reach** (`view-switching.md` §6.4), as chips
-   * under the title, the current one marked. Clicking another follows the item into it: the detail
-   * already holds its position there, so the switch and the camera cost no request.
-   *
-   * An empty array draws nothing. It means *none of this item's views is one you can reach*, which
-   * the server serves in the same shape as *this item is in no view* — a card must not present the
-   * second (`ItemDetail.views`).
+   * The views this item is in that this session may reach, as chips under the title with the
+   * current one marked. Clicking another follows the item there; the detail already holds its
+   * position, so no request is made. An empty array draws nothing: the server does not distinguish
+   * "in no view" from "in no view you can reach".
    */
   private views(positions: ItemViewPosition[], meta: Meta | null) {
     if (positions.length === 0) return nothing;
@@ -170,9 +158,8 @@ export class TesseraItemCard extends TesseraElement {
   }
 
   /**
-   * Follow the item into another view: `tessera-viewfollow` with the position **dequantised under
-   * that view's frame** (decision 0040), so the host centres a camera on data coordinates rather
-   * than on grid units of the wrong extent.
+   * Follow the item into another view: emit `tessera-viewfollow` with the position dequantised
+   * under that view's frame, in data coordinates.
    */
   private follow(position: ItemViewPosition, frame: Quantisation | null): void {
     if (!frame) return;
@@ -184,9 +171,8 @@ export class TesseraItemCard extends TesseraElement {
   }
 
   /**
-   * **The labels this session satisfies, and only those** (contracts §3.2, decision 0114) — never
-   * the item's full label set, which is why the heading says which of my grants admit me rather
-   * than what this item is labelled. Empty is a real answer and draws nothing.
+   * The item's labels this session satisfies, which is what the server serves, so the heading names
+   * the grants that admit the viewer. Empty draws nothing.
    */
   private labels(labels: string[]) {
     if (labels.length === 0) return nothing;
@@ -195,9 +181,8 @@ export class TesseraItemCard extends TesseraElement {
   }
 
   /**
-   * The group-scoped attribute values (`views.md` §5), as rows **headed by the key** in the order
-   * served — the key is a view's only address, so two views sharing one through a `members` group
-   * share one heading.
+   * The group-scoped attribute values, headed by key in the order served. Two views that share a
+   * key through a `members` group share a heading.
    */
   private scoped(scoped: Record<string, Record<string, unknown>>) {
     const keys: string[] = [];
@@ -227,13 +212,8 @@ export class TesseraItemCard extends TesseraElement {
   }
 }
 
-/** A `timestamp_us` value in full, as an ISO date-time. */
-export function timestampText(value: number | bigint): string {
-  return new Date(Number(value) / 1000).toISOString();
-}
-
 /** A value as text, by the column's declared type; a category is already its key. */
-export function present(value: unknown, column: DeclaredScalar | undefined): string {
+function present(value: unknown, column: DeclaredScalar | undefined): string {
   if (value === null || value === undefined) return '—';
   if (column?.arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return timestampText(value);
   if (typeof value === 'number') return Number.isInteger(value) ? value.toLocaleString('en-GB') : String(value);

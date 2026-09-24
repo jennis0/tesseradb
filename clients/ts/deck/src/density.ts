@@ -1,55 +1,40 @@
 import {WORLD_SIZE, tileXY, type ComposedTile} from '@tesseradb/client';
 
 /**
- * The density wash: the number channel as one texture (design client-components §5.10).
+ * The density wash: the tile counts drawn as one texture under the marks.
  *
- * **It reads counts, never marks.** A tile's `visible`/`matched` are exact masked aggregates from
- * the server; the marks are a per-tile-capped sample whose on-screen density says nothing about
- * the corpus. So the wash is binned from the `tiles` projection — one bin per exact tile at the
- * drawn depth — and a tile that is not exact (drawn from an ancestor or from held descendants)
- * contributes **nothing**: a superset read as density overstates (`delta-serving.md` §7), and the
- * honest wash has a hole there rather than a guess.
+ * The wash reads counts, not marks. A tile's counts are exact masked aggregates from the server;
+ * the marks are a per-tile-capped sample and their density on screen says nothing about the
+ * corpus. The wash has one bin per exact tile at the drawn depth. A tile that is not exact (drawn
+ * from an ancestor or from held descendants) contributes nothing, because its counts cover a
+ * superset and would overstate.
  *
- * **Single hue.** Colouring a bin by its majority cluster would be a colour chosen from a sample,
- * which is the guess exact-only refuses (decision 0099). Intensity is histogram-equalised over the
- * bins on screen — datashader's `eq_hist`, the field's answer to counts spanning several decades —
- * which is a mapping computed from counts this principal was served, not a masked quantity.
+ * One hue: a bin coloured by its majority cluster would take its colour from the sample.
+ * Intensity is histogram-equalised over the bins on screen (datashader's `eq_hist`), since the
+ * counts span several orders of magnitude.
  *
- * Rebuilt at the settle, O(tiles); a full viewport at 10⁹ scale is ~10⁵ tiles, a millisecond or
- * two, and it is drawn as one `BitmapLayer` under the points.
- *
- * **The tile grid is never shown** (decision 0097). A bin per tile drawn nearest-neighbour is the
- * storage grid drawn — at a coarse depth under a sparse principal it read as hard-edged squares.
- * So the binned image is {@link filterDensity}'d: supersampled with the intensity interpolated
- * between tile centres, softened at the scale of one drawn cell, its alpha fading with density
- * so an isolated cell reads as a halo and never as a block, and sampled linearly on the GPU. No
- * texel column steps from nothing to full across one texel.
+ * Rebuilt at the settle in O(tiles). {@link filterDensity} smooths the binned image so the tile
+ * grid does not show as hard-edged squares.
  */
 
 export type DensityImage = {
   width: number;
   height: number;
-  /** RGBA, row-major from the lowest tile row — `bounds` says where it sits. */
+  /** RGBA, row-major from the lowest tile row. */
   data: Uint8ClampedArray<ArrayBuffer>;
   /** World-space `[x0, y0, x1, y1]` the image covers, half-open on the far edges. */
   bounds: [number, number, number, number];
-  /** How many bins carry a count — zero means nothing exact is on screen and nothing is drawn. */
+  /** How many bins carry a count; zero means nothing exact is on screen. */
   filled: number;
 };
 
-/** The wash's one hue, RGB — a cool neutral that sits under every palette colour. */
+/** The wash's hue, RGB: a cool neutral that sits under every palette colour. */
 export const WASH_HUE: [number, number, number] = [96, 132, 190];
 
 /**
  * Bin the exact tiles at `depth` into one texel each, over the rectangle those tiles span.
- *
- * `channel` chooses which count is washed; `matched` is the default because it is the filtered
- * answer — the wash narrows with a filter as the counts do, while `visible` would hold.
- *
- * **`highlighted` is the channel a highlight washes** (`highlight-and-hierarchy.md` §5.3), and it
- * is the only picture a spread artifact has: a highlight over 27 million articles draws 66,000 of
- * them, so the marks say almost nothing about where the rest are and the count says it exactly.
- * The caller labels the wash as the count it is; this function only bins what it is handed.
+ * `channel` chooses the count: `matched` narrows with a filter, `visible` does not, and
+ * `highlighted` shows where a highlight's members are when the marks are too sparse a sample to.
  */
 export function binDensity(
   tiles: readonly ComposedTile[],
@@ -90,8 +75,7 @@ export function binDensity(
     data[i] = hue[0];
     data[i + 1] = hue[1];
     data[i + 2] = hue[2];
-    // Faint at the low end so a sparse principal's ground still reads as ground, never opaque so
-    // the points stay legible over the densest bin.
+    // Faint at the low end and never opaque, so the points stay legible over the densest bin.
     data[i + 3] = Math.round(28 + t * 150);
     filled++;
   }
@@ -106,7 +90,7 @@ export function binDensity(
   };
 }
 
-/** Texels per tile in the filtered image — four gives a ramp of four steps across a cell edge. */
+/** Texels per tile in the filtered image. */
 export const DENSITY_SUPERSAMPLE = 4;
 
 /**

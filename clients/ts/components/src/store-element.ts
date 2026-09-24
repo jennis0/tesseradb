@@ -1,17 +1,15 @@
 import {ContextProvider} from '@lit/context';
-import {css, html} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import type {Store} from '@tesseradb/client';
 import {TesseraElement} from './base.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';
 
 /**
- * `<tessera-store>` — the provider, for panels and maps that share one view (design §5.3 tier
- * 3). A store owns one view — one driver, one presented frame — so this shares a *single* view
- * among its descendants; an overview beside a detail is two of these. Nothing else needs it and
- * the documentation does not lead with it: the explorer is its own provider.
+ * `<tessera-store>`: provides one store, and so one view, to the panels and maps inside it. An
+ * overview beside a detail is two of these. The explorer is its own provider.
  *
- * Takes a `.store`, or builds one from `viewer-url` and `token` or `authorise`, on the same
+ * Takes a `.store`, or builds one from `viewer-url` and `token` or `authorise`, with the same
  * precedence as the map.
  */
 export class TesseraStore extends TesseraElement {
@@ -28,7 +26,7 @@ export class TesseraStore extends TesseraElement {
     this.provider.setValue(store);
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     return html`<slot></slot>`;
   }
 }

@@ -36,8 +36,7 @@ describe('coords', () => {
   it('sends data-space corners to world-space corners', () => {
     expect(dataToWorldXY(square.xMin, square.yMin, square)).toEqual([0, 0]);
     expect(dataToWorldXY(square.xMax, square.yMax, square)).toEqual([WORLD_SIZE, WORLD_SIZE]);
-    // The skewed extent lands on the same square world, which is what makes a tile square on
-    // screen despite a rectangular data extent.
+    // The skewed extent lands on the same square world, so a tile is square on screen.
     expect(dataToWorldXY(skewed.xMax, skewed.yMax, skewed)).toEqual([WORLD_SIZE, WORLD_SIZE]);
   });
 
@@ -49,9 +48,8 @@ describe('coords', () => {
   });
 
   it('requests a bbox naming exactly one tile, at every depth', () => {
-    // `tessera-spatial`'s tile_corners quantises both corners to cells and iterates lo..=hi
-    // INCLUSIVELY, so a bbox closed on the tile boundary selects the neighbours too. This
-    // reproduces that arithmetic and asserts the request bbox does not trip it.
+    // The server quantises both corners to cells and includes both, so a bbox closed on the tile
+    // boundary selects the neighbours too. This reproduces that arithmetic.
     const cellOf = (v: number, lo: number, hi: number) =>
       Math.min(CELL_GRID - 1, Math.max(0, Math.floor(((v - lo) / (hi - lo)) * CELL_GRID)));
 

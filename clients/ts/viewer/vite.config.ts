@@ -1,6 +1,6 @@
 import {fileURLToPath} from 'node:url';
-import {defineConfig, searchForWorkspaceRoot} from 'vite';
-import {tesseraDecorators} from '@tesseradb/components/vite-plugin-decorators';
+import {defaultClientConditions, defineConfig, searchForWorkspaceRoot} from 'vite';
+import {tesseraDecorators} from '../components/vite-plugin-decorators.js';
 
 // Where `run_demo.sh` puts everything it produces — bundles, presets, and the `datasets.json` the
 // picker reads. It is outside this package on purpose (the demo writes nothing into the source
@@ -11,6 +11,8 @@ const demoDir =
 
 export default defineConfig({
   plugins: [tesseraDecorators()],
+  // The workspace packages resolve to their sources, so the page runs without a library build.
+  resolve: {conditions: ['tessera-source', ...defaultClientConditions]},
   // strictPort, because the origin is enumerated in the server's `serve.dev_cors_origins`: a
   // silent fallback to another port would produce a CORS failure that reads as a broken server.
   // `VITE_PORT` runs a second viewer beside one already holding 5173; `run_demo.sh` writes

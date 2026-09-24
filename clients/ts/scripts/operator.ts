@@ -1,7 +1,7 @@
 /**
  * What the operator scripts share: reading a control answer, and the two layer declarations they
  * send. Core's live test sends the same declarations to a real server, so a declaration the server
- * no longer takes fails there. This file imports nothing, so Node loads it by stripping its types.
+ * refuses fails there. This file imports nothing, so Node loads it by stripping its types.
  */
 
 /** A control answer, as `Control` returns it. */

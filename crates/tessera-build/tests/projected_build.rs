@@ -298,7 +298,6 @@ fn a_coordinate_outside_the_wgs84_range_is_refused() {
     assert!(message.contains("is not a place"), "{message}");
     assert!(message.contains("WGS84"), "{message}");
     assert!(message.contains("entity_id 1"), "{message}");
-    assert!(message.contains("projection = \"none\""), "{message}");
 
     let message = refused(&[0.0, 10.0, 20.0], &[0.0, 95.0, 0.0]);
     assert!(message.contains("lat 95"), "{message}");

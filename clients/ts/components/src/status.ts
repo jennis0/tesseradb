@@ -1,4 +1,4 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {NO_COUNT, NO_MASKED, type StatusProjection, type ViewProjection} from '@tesseradb/client';
 import {TesseraElement, emit} from './base.js';
@@ -9,19 +9,14 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-status>` — the state and the three counts, as one line (design §5.3, decision 0098),
- * drawn as the boards draw it (`StatusStates.png`): a dot and a word, then three cells —
- * *4,812 shown · 12,465 matched · 181,900 visible* — in that order because their relationship is
- * the content, with a fourth cell — *the highlight matched N* — where the request carried a
- * `highlight` (`highlight-and-hierarchy.md` §5.2, the owner's words); it is absent where none is
- * set, because `highlighted` equals `matched` then and a cell repeating a number says there is
- * a second answer where there is not; skeleton bars in the cells while loading or retrying; *Starting session…* on the
- * first request; *Corpus updated* with the counts dimmed and *Refresh* when stale; *Session
- * expired · Sign in again*. The detail behind the numbers is a hover; `expanded` renders it as
- * a card.
+ * `<tessera-status>`: the state and the counts on one line. A dot and a word, then
+ * `4,812 shown · 12,465 matched · 181,900 visible`, plus `the highlight matched N` when a
+ * highlight is set (without one it would repeat `matched`). Skeleton bars fill the cells while
+ * loading or retrying, and the stale and expired states offer Refresh and Sign in again.
+ * `expanded` renders the detail behind the numbers as a card; otherwise it is a hover.
  *
- * An `aria-live` region, so a refusal, an expiry or a stale signal is announced (§5.8). Fires
- * `tessera-statechange` on every transition of §5.4 and `tessera-expired` once per expiry.
+ * The element is an `aria-live` region, so a refusal, expiry or stale signal is announced. It
+ * fires `tessera-statechange` on every state change and `tessera-expired` once per expiry.
  */
 export class TesseraStatus extends TesseraElement {
   static override styles = [
@@ -172,13 +167,12 @@ export class TesseraStatus extends TesseraElement {
     return parts.join(' · ');
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const status = this.status;
     const state = stateOf(status);
     const stale = status?.stale ?? false;
     const v = this.view;
-    // Stale keeps the strip's shape — three dimmed cells — and no number: the numbers on screen
-    // were drawn against a corpus that has since moved (the formatter renders nothing).
+    // Stale shows dimmed skeleton cells and no numbers, since they predate the corpus change.
     const content = state === 'shown' && v;
     const skeleton = (state === 'loading' && status?.sessionWarm !== false) || state === 'retrying' || state === 'stale';
     const cell = (label: string, inner: unknown, dim = false) => html`<div class=${`cell${dim ? ' dim' : ''}`}>${inner}<span class="l">${label}</span></div>`;
@@ -193,7 +187,6 @@ export class TesseraStatus extends TesseraElement {
         ? html`${cell('shown', html`<span class="skel" aria-hidden="true"></span>`, stale)}${cell('matched', html`<span class="skel" aria-hidden="true"></span>`, stale)}${cell('visible', html`<span class="skel" aria-hidden="true"></span>`, stale)}`
         : nothing;
     const empty = state === 'empty' ? html`<div class="cell"><span class="l">nothing in this region</span></div>` : nothing;
-    // Stale keeps its numbers beside the word, so the strip reads Corpus updated · … · Refresh.
     const strip =
       state === 'stale'
         ? html`<span part="state" data-state="stale">${icon('clock', 14)}${stateWord(state, status)}</span>${cells}

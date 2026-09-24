@@ -30,7 +30,7 @@ use std::sync::Arc;
 use rand::rngs::OsRng;
 use rand::RngCore;
 
-use tessera_spatial::tiler::ScalarType;
+use tessera_spatial::tiler::{ScalarType, ScalarValue};
 
 use crate::manifest::{
     DeclaredScalar, ManifestVocabulary, ManifestVocabularyValue, Visibility, VocabularyExtension,
@@ -94,6 +94,52 @@ impl std::fmt::Display for MintError {
 }
 
 impl std::error::Error for MintError {}
+
+/// One category cell resolved against its vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved<'a> {
+    /// The key's bound code, or [`ABSENT_CODE`] for a null cell.
+    Code(u32),
+    /// A key a discovered vocabulary binds no code to yet, for the caller to mint.
+    Novel(&'a str),
+}
+
+/// Why a category cell has no code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unresolved {
+    EmptyKey,
+    /// A key a declared vocabulary does not list.
+    Unlisted { key: String, vocabulary: String },
+}
+
+impl std::fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unresolved::EmptyKey => write!(
+                f,
+                "carries the empty string, which is not a value key; use null for an item with no \
+                 value"
+            ),
+            Unresolved::Unlisted { key, vocabulary } => write!(
+                f,
+                "carries value '{key}', which declared vocabulary '{vocabulary}' does not list; \
+                 use a key it lists"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Unresolved {}
+
+/// A code at the width its category column is declared at: `u8`, `u16` or `u32`, into which the
+/// vocabulary's codes fit.
+pub fn code_value(width: ScalarType, code: u32) -> ScalarValue {
+    match width {
+        ScalarType::U8 => ScalarValue::U8(code as u8),
+        ScalarType::U16 => ScalarValue::U16(code as u16),
+        _ => ScalarValue::U32(code),
+    }
+}
 
 /// A binding that contradicts one already held — the same key at a different code, or the same
 /// code under a different key.
@@ -392,6 +438,28 @@ impl VocabularyMinter {
         self.codes.get(key).copied()
     }
 
+    /// One category cell, `None` where it is null. A declared vocabulary refuses a key it does
+    /// not list, and a discovered one returns it as [`Resolved::Novel`]; the empty string is
+    /// refused by either.
+    pub fn resolve<'a>(&self, key: Option<&'a str>) -> Result<Resolved<'a>, Unresolved> {
+        let Some(key) = key else {
+            return Ok(Resolved::Code(ABSENT_CODE));
+        };
+        if key.is_empty() {
+            return Err(Unresolved::EmptyKey);
+        }
+        if let Some(code) = self.code_of(key) {
+            return Ok(Resolved::Code(code));
+        }
+        match self.kind {
+            VocabularyKind::Declared => Err(Unresolved::Unlisted {
+                key: key.to_string(),
+                vocabulary: self.name.clone(),
+            }),
+            VocabularyKind::Discovered => Ok(Resolved::Novel(key)),
+        }
+    }
+
     /// The key `code` is bound to, or `None` where nothing is — an unbound code, a `reserved`
     /// retirement, or the absent sentinel.
     ///
@@ -485,7 +553,7 @@ impl VocabularyMinter {
     /// Two branches, both uniform over exactly the free set. The mask makes the raw draw uniform
     /// over `0..=max` without modulo bias; `0` and the assigned set are rejected.
     fn draw(&self) -> Result<u32, MintError> {
-        let max = usable_max(self.width);
+        let max = crate::declaration::max_code(self.width);
         let free = u64::from(max) - self.assigned.len() as u64;
         if free == 0 {
             return Err(MintError::Exhausted {
@@ -792,16 +860,6 @@ pub fn fold_extensions_into(
                 None => vocabulary.values.push(value.clone()),
             }
         }
-    }
-}
-
-/// The highest usable code at `width` — also the mask that makes a raw `u32` draw uniform over the
-/// width's domain. Code 0 is reserved, so the count of usable codes equals this value.
-fn usable_max(width: ScalarType) -> u32 {
-    match width {
-        ScalarType::U8 => u32::from(u8::MAX),
-        ScalarType::U16 => u32::from(u16::MAX),
-        _ => u32::MAX,
     }
 }
 
@@ -1352,5 +1410,44 @@ mod tests {
         ));
         // Code 0 stays absent's, which is why a u8 holds 255 values and not 256.
         assert!(m.bindings().all(|(_, code)| code != ABSENT_CODE));
+    }
+
+    #[test]
+    fn a_cell_resolves_to_its_code_absence_or_a_novel_key_by_the_vocabulary_kind() {
+        let declared = VocabularyMinter::declared(
+            "v",
+            VocabularyKind::Declared,
+            Visibility::Public,
+            ScalarType::U16,
+            &[],
+            [("ops", 7)],
+            [],
+        )
+        .unwrap();
+        assert_eq!(declared.resolve(Some("ops")), Ok(Resolved::Code(7)));
+        assert_eq!(declared.resolve(None), Ok(Resolved::Code(ABSENT_CODE)));
+        assert!(matches!(
+            declared.resolve(Some("k9")),
+            Err(Unresolved::Unlisted { .. })
+        ));
+        assert_eq!(declared.resolve(Some("")), Err(Unresolved::EmptyKey));
+
+        let mut discovered = VocabularyMinter::new(
+            "v",
+            VocabularyKind::Discovered,
+            Visibility::Public,
+            ScalarType::U8,
+        );
+        assert_eq!(discovered.resolve(Some("k9")), Ok(Resolved::Novel("k9")));
+        assert_eq!(discovered.resolve(Some("")), Err(Unresolved::EmptyKey));
+        let code = discovered.mint("k9").unwrap().code();
+        assert_eq!(discovered.resolve(Some("k9")), Ok(Resolved::Code(code)));
+    }
+
+    #[test]
+    fn a_code_takes_its_columns_width() {
+        assert_eq!(code_value(ScalarType::U8, 200), ScalarValue::U8(200));
+        assert_eq!(code_value(ScalarType::U16, 60_000), ScalarValue::U16(60_000));
+        assert_eq!(code_value(ScalarType::U32, 70_000), ScalarValue::U32(70_000));
     }
 }

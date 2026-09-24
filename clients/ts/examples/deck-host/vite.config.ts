@@ -1,7 +1,9 @@
-import {defineConfig} from 'vite';
+import {defaultClientConditions, defineConfig} from 'vite';
 
 /** Same origin as the React example: `/v1/*` to the viewer plane, `/token` and `/users` to the app server. */
 export default defineConfig({
+  // The workspace packages resolve to their sources, so the page runs without a library build.
+  resolve: {conditions: ['tessera-source', ...defaultClientConditions]},
   server: {
     port: 5183,
     strictPort: true,

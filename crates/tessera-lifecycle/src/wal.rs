@@ -96,51 +96,9 @@ use serde::{Deserialize, Serialize};
 use tessera_types::layer::{EntityRun, LayerDeclaration, ReservedRuns};
 use tessera_types::EntityId;
 
-/// One declared-scalar value carried by a WAL row.
-///
-/// Mirrors `tessera_spatial::tiler::ScalarValue`'s three kinds. **Duplicated deliberately** — a
-/// reader would otherwise "fix" it: this crate's dependencies are `tessera-types`, `postcard` and
-/// `crc32fast` alone (no `tessera-spatial`), so the WAL carries its own copy of the tiny, stable
-/// shape. Keep the two enums in lockstep if either changes.
-///
-/// On-disk format: postcard encodes enum variants by declaration index, so reordering this enum
-/// changes what every stored record means. That is a `WAL_VERSION` bump and a recreated log, not
-/// a reason to keep a bad order: no deployment holds a WAL (decision 0048), so the order is chosen
-/// for the reader and the version check turns a stale local log into a refusal.
-///
-/// **In width order, matching `tessera_spatial::ScalarValue` variant for variant.** An earlier
-/// revision appended the four narrow widths after `Utf8` to preserve the existing discriminants —
-/// a compatibility cost paid to nobody, which left the two mirrored enums agreeing on the set and
-/// disagreeing on the order, and a `to_scalar_value` whose correctness depended on a reader
-/// noticing that.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum WalScalar {
-    Bool(bool),
-    U8(u8),
-    U16(u16),
-    U32(u32),
-    U64(u64),
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    F32(f32),
-    F64(f64),
-    /// Microseconds since the Unix epoch — an `i64` whose unit the declaration fixes.
-    TimestampUs(i64),
-    Utf8(String),
-    /// **No value at all** — `tessera_spatial::ScalarValue::Null`'s mirror, and the reason this
-    /// enum has one is that the ingest plane needs to say what the build's source file can already
-    /// say.
-    ///
-    /// A category never travels as this: its absence is the reserved code 0, in band, because a
-    /// vocabulary keeps 0 out of its value space. Every other family has no spare value to spend —
-    /// every bit pattern of a number is a legal number, and the empty string is one a corpus may
-    /// hold — so absence has to travel beside the value rather than inside it. Without this variant
-    /// an item ingested with no score is stored as `0` and marked present, and then matches a range
-    /// containing zero ([decision 0064](../../../docs/decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md)).
-    Null,
-}
+/// One declared-scalar value carried by a WAL row: the value type a build writes, under the name the
+/// log's records use.
+pub use tessera_types::scalar::ScalarValue as WalScalar;
 
 /// One item within an `IngestBatch` record.
 ///
@@ -744,10 +702,9 @@ pub struct ValuesRow {
 pub struct AttributeDeclaration {
     pub name: String,
     pub title: Option<String>,
-    /// The declared type by its contracts §2.2 name (`u32`, `f64`, `keyword`, `text`, …). Carried
-    /// as the name because the engine's type lives in `tessera-spatial`, which this crate does
-    /// not see; the door parses it and refuses a name outside the set before a record is
-    /// prepared, so a record never carries one.
+    /// The declared type by its contracts §2.2 name (`u32`, `f64`, `keyword`, `text`, …). The door
+    /// parses it and refuses a name outside the set before a record is prepared, so a record never
+    /// carries one.
     pub ty: String,
     /// The vocabulary a category column draws its codes from; `None` for a plain column.
     pub vocabulary: Option<String>,

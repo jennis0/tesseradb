@@ -2,21 +2,13 @@ import type {Meta, Quantisation, Store} from '@tesseradb/client';
 import {emit} from './base.js';
 
 /**
- * What the two pickers share beyond the rules themselves (`view-switching.md` §6.3).
- *
- * **The rules live in `@tesseradb/client`** — `viewLabel`, `viewPickerEntries`, `enterGroup`,
- * `hasOneLayout`, `viewsOfGroup` and `stepView` — so a host that draws its own picker gets the
- * same answers as these elements without importing an element. What is left here is the frame
- * comparison the camera decides by and the one site a switch is announced from.
+ * What the view and key pickers share: the frame comparison and the switch. The picker rules are
+ * in `@tesseradb/client`, so a host drawing its own picker gets the same answers.
  */
 
 /**
- * Whether two views are quantised against one frame — the field that decides whether a switch
- * keeps the camera or refits it (§4).
- *
- * Compared **by value**, never by reference: `/v1/meta` publishes each view's extent separately,
- * so the views of one group carry equal-but-distinct objects and a reference test would report
- * every step of a roster as a frame change.
+ * Whether two views are quantised against one frame, which decides whether a switch keeps the
+ * camera or refits it. Compared by value: `/v1/meta` gives each view its own extent object.
  */
 export function sameFrame(a: Quantisation | null, b: Quantisation | null): boolean {
   if (!a || !b) return a === b;
@@ -24,12 +16,9 @@ export function sameFrame(a: Quantisation | null, b: Quantisation | null): boole
 }
 
 /**
- * Make `id` the current view and announce it (`view-switching.md` §6.3).
- *
- * One site, so both pickers report the same event: `tessera-viewswitch` `{from, to, sameFrame}`,
- * bubbling and composed, for a host that owns the URL or a basemap. The map does not listen for
- * it — it reacts to the `view` projection, so a host calling `setCurrentView` itself gets the
- * same refit.
+ * Make `id` the current view and emit `tessera-viewswitch` `{from, to, sameFrame}`, for a host that
+ * owns the URL or a basemap. The map follows the `view` projection, so a host calling
+ * `setCurrentView` itself gets the same refit.
  */
 export function switchView(from: HTMLElement, store: Store, meta: Meta, id: string): void {
   const current = store.get('view').id;
