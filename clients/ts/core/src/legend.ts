@@ -24,6 +24,8 @@ export type LegendProjection = {
  */
 export class Legend {
   private state: LegendProjection = {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null};
+  /** Moved by {@link clear}, so names asked for before it are not taken. */
+  private epoch = 0;
   private disposed = false;
 
   constructor(
@@ -78,6 +80,7 @@ export class Legend {
 
   /** Forget everything accumulated, keeping the colour column. */
   clear(): void {
+    this.epoch += 1;
     this.set({ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: this.state.colourBy});
   }
 
@@ -96,14 +99,15 @@ export class Legend {
     const held = new Set((this.state.categories[column] ?? []).map((v) => v.code));
     const wanted = [...counts.keys()].filter((code) => !held.has(code));
     if (wanted.length === 0) return;
+    const epoch = this.epoch;
     try {
       const resolved = await this.resolve(column, wanted);
-      if (this.disposed) return;
+      if (this.disposed || epoch !== this.epoch) return;
       const byCode = new Map((this.state.categories[column] ?? []).map((v) => [v.code, v]));
       for (const v of resolved) byCode.set(v.code, v);
       this.set({...this.state, categories: {...this.state.categories, [column]: [...byCode.values()]}});
     } catch (error) {
-      if (this.disposed) return;
+      if (this.disposed || epoch !== this.epoch) return;
       this.set({...this.state, categoryErrors: {...this.state.categoryErrors, [column]: refusalOf(error)}});
     }
   }
