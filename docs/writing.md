@@ -89,28 +89,36 @@ Quote an error message exactly, and say what to change.
 
 ### What makes prose read as generated
 
-The tell is emptiness, not structure. An introduction, an outline and a closing summary are all right in a tutorial. What gives them away is being generic: a promise of "a powerful, interactive visualisation", an outline that repeats the headings, a summary that says nothing the reader could not have guessed before starting. Fill each one with specifics that only this tutorial could contain.
+The tell is emptiness, not structure. An introduction, an outline and a closing summary are all right in a tutorial. What gives them away is being generic: a promise of "a powerful, interactive visualisation", an outline that repeats the headings, a summary the reader could have guessed before starting. Fill each one with specifics that only this tutorial could contain.
 
-Review looks for:
+Most of the other tells are in the sentences.
 
-- Claims no run could contradict ("Tessera handles large data efficiently"). Give the figure and its conditions, or cut the claim.
-- Enthusiasm, hype and reassurance in place of information ("That's it!", "don't worry", "seamlessly").
-- Every paragraph the same length and shape, or every sentence the same rhythm.
-- Explanations that restate the command instead of saying what it does and why.
-- Three examples where one would do, or options set side by side for balance.
+- **Compound sentences, one after another.** Two clauses joined by ", and", ", so", ", but", a semicolon or a colon. People writing tutorials mostly write simple sentences: one subject, one verb, one thing said. Join two clauses only when the second makes no sense alone. If every other sentence is compound, split most of them.
+- **A colon followed by a list of three.** "One program does all the work: it checks, builds and serves." Say one thing, or show the three as they happen.
+- **Sentences about the text instead of the subject.** "There are six stages, and each one leaves something you can look at." "This is the step that decides what a viewer sees." Cut them, or replace them with the fact they gesture at.
+- **Framing that nobody would say aloud.** "The pieces every deployment is made of." "The whole path from a text file to a viewer's map." Name the actual things.
+- **Metaphor for a technical part.** Doors, lanes, gates. Use the real name and explain it in plain words.
+- **Claims no run could contradict.** "Tessera handles large data efficiently." Give the figure and its conditions, or cut the claim.
+- **Enthusiasm, hype and reassurance in place of information.** "That's it!", "don't worry", "seamlessly".
+- **Explanations that restate the command** instead of saying what it does and why.
+- **Three examples where one would do,** or options set side by side for balance.
 
-`scripts/check-register.sh` rejects the stock phrases of generated documentation on user pages; the script holds the list.
+`scripts/check-register.sh` rejects the stock phrases of generated documentation on user pages; the script holds the list. It cannot see sentence shape, so review has to.
 
 ### Before and after
 
 > ✗ In this tutorial, we'll walk through building your first Tessera map. By the end, you'll have a powerful, interactive visualisation of your data, ready to explore!
 >
-> ✓ This tutorial is for someone who has never used Tessera. We'll take the 29,935 places GeoNames lists for Ireland, from 12,159 towns and villages to 3,970 hills and mountains, and turn them into a map you can search and filter in a browser. Along the way you'll meet the four things every Tessera deployment is made of: a declaration, a bundle, a server and a token. The commands take about four minutes to run, half of that building the binary.
+> ✓ This tutorial is for someone who has never used Tessera. We'll take the 29,935 places GeoNames lists for Ireland and put them on a map in your browser. You'll be able to search them by name and filter them by population. The commands take about four minutes to run. Half of that is compiling Tessera.
 
 > ✗ `point_visibility` names no field to read an access label from, so every place gets the default label, `public`.
 >
-> ✓ Tessera decides who may see each place by tagging it with an access label, and each viewer is allowed a set of labels. A label can come from a column in your data, so that different rows are visible to different people. We have no such column, so the `default` in `point_visibility` gives every place the same label, `public`. In a later tutorial you'll give places different labels and watch two viewers see two different maps.
+> ✓ Tessera decides who may see each place by giving it an access label. Each viewer holds a set of labels and sees only the places that carry one of them. A label usually comes from a column in your data. We have no such column, so every place gets the default label, `public`. Every viewer holds `public`. Everyone will see every place.
 
 > ✗ Run `tessera build`.
 >
-> ✓ Now build the bundle. The build reads every row of `points.parquet`, projects each place onto the map, sorts the places so that nearby ones sit together on disc, and writes the result into the `bundle` directory. The bundle is what the server opens; it never reads your Parquet files.
+> ✓ Now build the bundle. The build reads every row of `points.parquet` and works out where each place sits on the map. It stores neighbouring places next to each other on disc. The result goes into the `bundle` directory. From now on the server reads only the bundle, never your Parquet file.
+
+> ✗ One program, `tessera`, does all the server-side work: it checks a declaration, builds a bundle and serves it. There are six stages, and each one leaves something you can look at.
+>
+> ✓ *(Cut both. The outline that follows shows what each stage does.)*
