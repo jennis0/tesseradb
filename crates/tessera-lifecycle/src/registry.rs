@@ -919,7 +919,7 @@ impl LayerRegistry {
     /// On any error nothing has moved: the checks all run before the first allocation.
     pub fn prepare_create(
         &mut self,
-        declaration: LayerDeclaration,
+        mut declaration: LayerDeclaration,
         alloc: &mut Allocator,
     ) -> Result<WalRecord, RegistryError> {
         declaration.validate()?;
@@ -2847,10 +2847,8 @@ impl LayerRegistry {
 
     /// Resolves which layers this principal may know exist, once per session.
     ///
-    /// `resolve_label` maps a gate label to its term, returning `None` for a label the dictionary
-    /// does not hold — which makes the layer reachable by nobody. **Fail-closed, and the right
-    /// answer**: a gate naming a term no document carries grants nothing, and treating an
-    /// unresolvable label as "no gate" would publish every such layer to everyone.
+    /// `admits` answers whether the principal holds a layer's gate label. A label it cannot
+    /// resolve admits nobody: treating one as no gate would publish every such layer to everyone.
     ///
     /// Satisfaction is **intersection** with the principal's satisfied set, never a conservative
     /// label join: a join yields an empty required set for a disjunctive gate and would admit every

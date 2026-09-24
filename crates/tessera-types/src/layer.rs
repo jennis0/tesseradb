@@ -1216,7 +1216,9 @@ impl LayerDeclaration {
         }
     }
 
-    pub fn validate(&self) -> Result<(), DeclarationError> {
+    /// Check the declaration, and store its labels as the label rule reads them: trimmed, with a
+    /// `visibility` of `public` stored as no gate. The build and a running service both call it.
+    pub fn validate(&mut self) -> Result<(), DeclarationError> {
         if self.name.trim().is_empty() {
             return Err(DeclarationError::EmptyName);
         }
@@ -1387,13 +1389,17 @@ impl LayerDeclaration {
             return refuse("`artifact_visibility.field`");
         }
         let label = |key: &str, word: &str| {
-            crate::label::check_label(key, word).map_err(DeclarationError::Label)
+            crate::label::declared_label(key, word)
+                .map(str::to_string)
+                .map_err(DeclarationError::Label)
         };
         if let Some(visibility) = &self.visibility {
-            label("visibility", visibility)?;
+            let visibility = label("visibility", visibility)?;
+            self.visibility = (!crate::label::is_public(&visibility)).then_some(visibility);
         }
         if let MemberDefault::Label(default) = &self.artifact_visibility.default {
-            label("artifact_visibility.default", default)?;
+            self.artifact_visibility.default =
+                MemberDefault::Label(label("artifact_visibility.default", default)?);
         }
         if let Some(field) = &self.artifact_visibility.field {
             if field.trim().is_empty() {
@@ -1967,12 +1973,33 @@ mod tests {
         assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
 
         let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.artifact_visibility.default = MemberDefault::Label(" inherited ".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
         d.visibility = Some("team".into());
         d.artifact_visibility = ArtifactVisibility {
             field: Some("team".into()),
             default: MemberDefault::Label("public".into()),
         };
         assert!(d.validate().is_ok());
+    }
+
+    /// A layer's labels are stored trimmed, and a `visibility` of `public` is stored as no gate,
+    /// however either was padded.
+    #[test]
+    fn a_layers_labels_are_stored_trimmed() {
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some(" team ".into());
+        d.artifact_visibility.default = MemberDefault::Label(" red ".into());
+        d.validate().unwrap();
+        assert_eq!(d.visibility.as_deref(), Some("team"));
+        assert_eq!(d.artifact_visibility.default, MemberDefault::Label("red".into()));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some(" public ".into());
+        d.validate().unwrap();
+        assert_eq!(d.visibility, None);
     }
 
     /// **What an attribute layer may not declare.** Each of these would register a layer that is

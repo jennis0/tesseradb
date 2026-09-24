@@ -230,7 +230,7 @@ fn compile_common(
 /// The gate as the manifest stores it: a public view has none. The labels were checked against
 /// the plugin before the declaration reached the executor.
 fn gate_of(visibility: Option<Vec<String>>) -> Option<Vec<String>> {
-    visibility.filter(|labels| labels.as_slice() != ["public"])
+    visibility.filter(|labels| !tessera_types::label::is_public_gate(labels))
 }
 
 fn check_metadata(name: &str, metadata: &[GroupMetadataField]) -> Result<(), String> {

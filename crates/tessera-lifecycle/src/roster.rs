@@ -247,7 +247,7 @@ impl ViewRoster {
         // the engine can ask, and `Engine::create_view` asks it before this record is prepared, on
         // the same route an item's `access` labels take at ingest. The gate is a list of labels,
         // each one term (decision 0132); `public` is recognised only as the whole of the list.
-        let visibility = visibility.filter(|labels| labels.as_slice() != ["public"]);
+        let visibility = visibility.filter(|labels| !tessera_types::label::is_public_gate(labels));
         // **A `timestamp_us` arrives as an integer, and the declaration is what says so.** JSON
         // carries no date type, so a record's `starts` is microseconds since the epoch as a
         // number; typing it from the wire alone would make every timestamp an `int` and refuse
@@ -672,6 +672,7 @@ mod tests {
             "a comma inside a label is part of the label"
         );
         assert_eq!(gate_of(Some(&["public"])), None);
+        assert_eq!(gate_of(Some(&[" public "])), None);
         assert_eq!(gate_of(None), None);
     }
 }

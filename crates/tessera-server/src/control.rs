@@ -1806,18 +1806,13 @@ async fn drop_view(
     acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 
-/// An artifact record's `access` labels as the plugin's descriptors: the call `/control/ingest`
-/// makes of its `access` column. Absent and empty are no label.
+/// An artifact record's `access` labels as the plugin's descriptors, by the rule the build reads
+/// an artifact's labels with. Absent and empty are no label.
 fn access_descriptors(
     state: &AppState,
     labels: Option<Vec<String>>,
 ) -> Result<Vec<Vec<u8>>, ApiError> {
-    let labels: Vec<Vec<u8>> = labels
-        .unwrap_or_default()
-        .into_iter()
-        .map(String::into_bytes)
-        .collect();
-    tessera_plugin::artifact_access(state.engine.plugin().as_ref(), &labels)
+    tessera_plugin::artifact_access(state.engine.plugin().as_ref(), &labels.unwrap_or_default())
         .map_err(ApiError::Contract)
 }
 
