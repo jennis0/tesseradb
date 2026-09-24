@@ -235,6 +235,25 @@ _SCOPE_SEQ = itertools.count()
 _SCOPE_KEEPER_WRAP = 'sleep 7200 >/dev/null 2>&1 & exec "$0" "$@"'
 
 
+def _scope_oom_policy() -> list[str]:
+    """``OOMPolicy=continue`` where systemd applies an OOM policy to scopes (253 and later).
+
+    Its default there is ``stop``: the kernel's kill of the server makes systemd stop the scope,
+    which kills the keeper and removes ``memory.events`` before the harness reads it. Before 253
+    a scope has no OOM policy and is not stopped.
+    """
+    try:
+        shown = subprocess.run(
+            ["systemctl", "--version"], capture_output=True, text=True, timeout=30
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    version = re.match(r"systemd (\d+)", shown)
+    if version is None or int(version[1]) < 253:
+        return []
+    return ["-p", "OOMPolicy=continue"]
+
+
 def _advise_out_of_page_cache(*roots: Path) -> None:
     """Advise every file under `roots` out of the page cache — the cold boundary's eviction.
 
@@ -641,6 +660,7 @@ class SuiteHarness:
                 f"MemoryMax={self.profile.memory_max}",
                 "-p",
                 "MemorySwapMax=0",
+                *_scope_oom_policy(),
                 "--",
                 "sh",
                 "-c",

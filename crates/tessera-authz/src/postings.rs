@@ -316,8 +316,8 @@ impl PostingRef<'_> {
                     bytes.len() % 4 == 0,
                     "tag-0 posting payload length must be a multiple of 4 (validated at open)"
                 );
-                for chunk in bytes.chunks_exact(4) {
-                    out.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+                for chunk in bytes.as_chunks::<4>().0 {
+                    out.push(u32::from_le_bytes(*chunk));
                 }
             }
             PostingRef::Roaring(view) => out.extend(view.iter()),
@@ -646,8 +646,10 @@ mod tests {
             for (t, expected) in per_term.iter().enumerate() {
                 let got: Vec<u32> = match reader.posting(TermId::new(t as u32)).unwrap().expect("every term is present") {
                     PostingRef::Array(bytes) => bytes
-                        .chunks_exact(4)
-                        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| u32::from_le_bytes(*c))
                         .collect(),
                     PostingRef::Roaring(bm) => bm.iter().collect(),
                 };

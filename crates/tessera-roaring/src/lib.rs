@@ -237,16 +237,16 @@ impl Sink {
             let base = u32::from(key) << 16;
             members.clear();
             if self.cards[i] > ARRAY_MAX {
-                for (wi, w) in self.payload[start..end].chunks_exact(8).enumerate() {
-                    let mut w = u64::from_le_bytes(w.try_into().expect("eight bytes"));
+                for (wi, w) in self.payload[start..end].as_chunks::<8>().0.iter().enumerate() {
+                    let mut w = u64::from_le_bytes(*w);
                     while w != 0 {
                         members.push(base + (wi as u32) * 64 + w.trailing_zeros());
                         w &= w - 1;
                     }
                 }
             } else {
-                for pair in self.payload[start..end].chunks_exact(2) {
-                    let low = u16::from_le_bytes(pair.try_into().expect("two bytes"));
+                for pair in self.payload[start..end].as_chunks::<2>().0 {
+                    let low = u16::from_le_bytes(*pair);
                     members.push(base + u32::from(low));
                 }
             }

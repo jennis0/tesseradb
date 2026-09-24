@@ -164,8 +164,10 @@ fn posting_entities(path: &Path, term: TermId) -> BTreeSet<u64> {
         .expect("the term is present in this file")
     {
         PostingRef::Array(bytes) => bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c) as u64)
             .collect(),
         PostingRef::Roaring(view) => view.iter().map(|v| v as u64).collect(),
     };
@@ -697,8 +699,10 @@ fn morton_input_requires_the_identity_extent() {
     let mut got: Vec<u64> =
         std::fs::read(out.join("v00000/partitions/default/views/s0/segments/seg-0/morton.u32"))
             .unwrap()
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c) as u64)
             .collect();
     got.sort_unstable();
     let mut want: Vec<u64> = (0..N_ITEMS).map(source_morton).collect();

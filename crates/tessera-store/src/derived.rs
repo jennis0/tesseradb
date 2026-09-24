@@ -534,7 +534,7 @@ pub fn project_row_column_pairs(
                 for k in 0..buckets.len() {
                     let (lo, hi) = range(k);
                     let mut counts = vec![0u32; (hi - lo) as usize];
-                    for record in store.load(k)?.chunks_exact(ROW_ORDINAL_RECORD) {
+                    for record in store.load(k)?.as_chunks::<ROW_ORDINAL_RECORD>().0 {
                         let row = u32::from_le_bytes(record[..4].try_into().expect("four bytes"));
                         counts[(row - lo) as usize] += 1;
                     }
@@ -589,7 +589,9 @@ fn list_form_entries(entries: u64) -> Option<u32> {
 fn sorted_pairs(store: &crate::partition::PartitionStore, k: usize) -> crate::Result<Vec<u64>> {
     let bytes = store.load(k)?;
     let mut pairs: Vec<u64> = bytes
-        .chunks_exact(ROW_ORDINAL_RECORD)
+        .as_chunks::<ROW_ORDINAL_RECORD>()
+        .0
+        .iter()
         .map(|record| {
             let row = u32::from_le_bytes(record[..4].try_into().expect("four bytes"));
             let ordinal = u32::from_le_bytes(record[4..].try_into().expect("four bytes"));
@@ -696,7 +698,7 @@ impl SignatureIndex {
                 // `wanted` one at a time because the array form is the *small* terms, and
                 // materialising a bitmap to intersect would cost more than the probe.
                 PostingSlice::Array(bytes) => {
-                    for chunk in bytes.chunks_exact(4) {
+                    for chunk in bytes.as_chunks::<4>().0 {
                         let entity = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         if wanted.contains(entity) {
                             by_entity.entry(entity).or_default().push(term);

@@ -4532,7 +4532,7 @@ fn write_keyword_column(
     for k in 0..partition.ranges.len() {
         let (lo, hi) = partition.ranges[k];
         let mut window = vec![0u32; (hi - lo) as usize];
-        for record in store.load(k)?.chunks_exact(KEYWORD_ORDINAL_RECORD) {
+        for record in store.load(k)?.as_chunks::<KEYWORD_ORDINAL_RECORD>().0 {
             let row = u32::from_le_bytes(record[..4].try_into().expect("a record is 8 bytes"));
             let ordinal = u32::from_le_bytes(record[4..].try_into().expect("a record is 8 bytes"));
             // The bucket-range check the row-bound check became: a record outside the range its
@@ -7243,8 +7243,10 @@ mod tests {
                 .expect("every term in the dictionary has a posting");
             let got: Vec<u32> = match posting {
                 tessera_authz::postings::PostingRef::Array(bytes) => bytes
-                    .chunks_exact(4)
-                    .map(|c| u32::from_le_bytes(c.try_into().expect("four bytes")))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| u32::from_le_bytes(*c))
                     .collect(),
                 tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
             };
@@ -7678,8 +7680,10 @@ mod tests {
             let got = match posting.expect("carried") {
                 tessera_authz::PostingRef::Roaring(view) => view.iter().collect::<Vec<_>>(),
                 tessera_authz::PostingRef::Array(bytes) => bytes
-                    .chunks_exact(4)
-                    .map(|c| u32::from_le_bytes(c.try_into().expect("four bytes")))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| u32::from_le_bytes(*c))
                     .collect(),
             };
             assert_eq!(got, expected, "code {code}");

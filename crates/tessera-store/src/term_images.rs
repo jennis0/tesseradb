@@ -570,8 +570,10 @@ fn read_posting(posting: PostingWalk<'_>, term: u32) -> io::Result<Posting> {
         let next = match slice {
             PostingSlice::Array(bytes) => {
                 let values: Vec<u32> = bytes
-                    .chunks_exact(4)
-                    .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four bytes")))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|chunk| u32::from_le_bytes(*chunk))
                     .collect();
                 let mut bitmap = Bitmap::new();
                 bitmap.add_many(&values);

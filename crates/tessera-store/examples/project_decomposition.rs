@@ -601,13 +601,13 @@ fn fused_packed_shared(slots: &[u32], mask: &Bitmap, row_bound: u32) -> Bitmap {
             let offset = row - base;
             stamp[(offset >> 6) as usize] |= 1u64 << (offset & 63);
         }
-        for (blk, words) in stamp.chunks_exact(WORDS).enumerate() {
+        for (blk, words) in stamp.as_chunks::<WORDS>().0.iter().enumerate() {
             let card: u32 = words.iter().map(|w| w.count_ones()).sum();
             if card == 0 {
                 continue;
             }
             let key = u16::try_from((base >> 16) + blk as u32).expect("container key fits u16");
-            sink.push_block(key, card, words.try_into().expect("whole container"));
+            sink.push_block(key, card, words);
         }
     }
     sink.finish()
@@ -631,7 +631,7 @@ fn fused_packed(slots: &[u32], mask: &Bitmap, row_bound: u32) -> Bitmap {
             let offset = row - base;
             stamp[(offset >> 6) as usize] |= 1u64 << (offset & 63);
         }
-        for (blk, words) in stamp.chunks_exact(WORDS).enumerate() {
+        for (blk, words) in stamp.as_chunks::<WORDS>().0.iter().enumerate() {
             let card: u32 = words.iter().map(|w| w.count_ones()).sum();
             if card == 0 {
                 continue;
