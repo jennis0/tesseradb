@@ -4,7 +4,8 @@
  * property is set as that property, so an object such as `store` reaches the element under React
  * 18, which sets a custom element's props as attributes. Each element's events are handler props,
  * such as `onPick` for `tessera-pick`. The element classes are exported as types with an `Element`
- * suffix, such as `MapElement`, for typing a ref.
+ * suffix, such as `MapElement`, for typing a ref. Each element's attributes, properties, events,
+ * slots and parts are on its page in the Components reference, which each wrapper's type links to.
  *
  * This entry imports `@tesseradb/components`, and with it Lit and deck.gl. The hooks are in the
  * package root, `@tesseradb/react`, which imports neither.

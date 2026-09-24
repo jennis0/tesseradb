@@ -363,7 +363,8 @@ export class Control {
    * `POST /control/values`: fills attribute values on rows the database holds, one page given as an
    * Arrow IPC stream. It creates no point. A cell that holds no value takes the one given, a cell
    * already holding the same value is left as it is, and a cell holding a different value refuses
-   * the whole page. The answer's body counts the cells `filled` and `held`.
+   * the whole page. A page naming a column declared `render` is refused with `422`, since a filled
+   * value is not drawn. The answer's body counts the cells `filled` and `held`.
    */
   values(body: Uint8Array, options: RowOptions = {}): Promise<RowAnswer> {
     return this.rows('/control/values', body, options);
@@ -390,7 +391,8 @@ export class Control {
   /**
    * `PUT /control/attributes`: declares one attribute column, named in the body. A batch sent after
    * the answer may carry it. `201` when new, `200` when the name already has this declaration,
-   * `409` when it has another.
+   * `409` when it has another. A column declared with `render: true` is refused with `422`: a
+   * rendered column is declared at a build.
    */
   declareAttribute(body: object, options: WriteOptions = {}): Promise<Answer> {
     return this.sendJson('PUT', withQuery('/control/attributes', waiting(options)), body, options);

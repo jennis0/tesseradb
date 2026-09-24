@@ -26,8 +26,8 @@ const TYPING_DEBOUNCE_MS = 350;
 
 /**
  * One filter control for the column `column`, drawn by the family `/v1/meta` gives the column. A
- * text column is a search box with an all words and a phrase (or any word) toggle. A category is a
- * checklist when every value the viewer can see fits on the first page of suggestions, else a
+ * text column is a search box and two buttons: all words, and phrase (any word where the column
+ * takes no phrase). A category is a checklist when every value the viewer can see fits on the first page of suggestions, else a
  * typeahead over `/v1/categories/{column}/suggest`. A number is two inputs, and a date two date
  * inputs. A keyword column is a text box with its operator (`contains`, `prefix` or `eq`).
  *

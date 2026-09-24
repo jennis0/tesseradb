@@ -36,8 +36,8 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * buttons put a `member_of` clause on its artifact as a highlight or a filter, and Fit fits the map
  * to it on a layer that draws. Pressing the name highlights it.
  *
- * The panel asks for nothing while it is hidden. What is expanded and paged is the element's own
- * state, not the store's.
+ * The panel asks for nothing while it is hidden. The element keeps which rows are expanded and
+ * paged.
  *
  * @summary A layer's hierarchy, browsed apart from the viewport.
  * @tagname tessera-hierarchy

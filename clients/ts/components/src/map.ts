@@ -105,8 +105,8 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  *
  * The map owns the camera and tells the store where it is looking on every move. Keys, with the
  * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn or
- * clears the selection. The map sets `tabindex="0"`, `role="application"` and an `aria-label` on
- * itself unless the host set them.
+ * clears the selection. On connecting, the map sets `role="application"` on itself, replacing
+ * any role the host set, and sets `tabindex="0"` and an `aria-label` unless the host set them.
  *
  * The host element is `display: block`; its height comes from `--tessera-map-height`. A map that
  * is disconnected and not reconnected releases its GPU resources a quarter of a second later.

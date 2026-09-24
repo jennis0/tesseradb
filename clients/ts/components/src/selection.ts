@@ -8,14 +8,14 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * The selected region: its counts, the held marks inside it as a list, and its actions. Shown
- * inside counts the held marks against the served set; matched inside is exact for the shape
- * unless the server answered for a cover of it; visible inside appears only while no other filter
- * narrows the view. Clicking a listed mark picks it. Outside flips the selection to its
- * complement, and Clear drops it.
+ * The selected region: its counts, the held marks inside it as a list, and its actions. *Shown
+ * inside* counts the held marks against the served set. *Matched inside* is exact for the shape
+ * unless the server answered for a cover of it. *Visible inside* appears only while no other
+ * filter narrows the view. Clicking a listed mark picks it. *Outside* flips the selection to its
+ * complement, and *Clear* drops it.
  *
  * A selection is a filter: the map and every count narrow to it once it settles. Not built yet:
- * Export and Save as artifact, which need server routes; their buttons are disabled with the
+ * *Export* and *Save as artifact*, which need server routes; their buttons are disabled with the
  * reason on hover.
  *
  * @summary The selected region's counts, marks and actions.

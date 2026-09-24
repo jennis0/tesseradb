@@ -87,7 +87,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-hover']>} tessera-hover - The pointer moved over a point.
  * @fires {CustomEvent<TesseraEventDetails['tessera-artifactopen']>} tessera-artifactopen - An artifact was opened and its drill-down arrived.
  * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - A selection was drawn, changed or cleared, or its counts arrived.
- * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The layers drawn changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The layers chosen changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - The Colour by select changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level select changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
@@ -367,7 +367,7 @@ export class TesseraExplorer extends TesseraElement {
   @property() accessor layers = '';
   /** Passed to the map's `tooltip-fields`. */
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
-  /** The field that titles a point, in the map's tooltip and the item card's headline. Unset, its `tessera_id`. */
+  /** The field that titles a point, in the map's tooltip and the item card's headline. Unset, the title is the `tessera_id`. */
   @property({attribute: 'title-field'}) accessor titleField = '';
   /** Passed to the map's `budget`. */
   @property({type: Number}) accessor budget = 0;

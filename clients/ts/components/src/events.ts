@@ -51,7 +51,7 @@ export type TesseraEventDetails = {
     served?: Count;
     verdict?: RegionProjection['verdict'];
   };
-  /** The layers drawn are now `layers`, each named with the layers it depends on. */
+  /** The layers chosen are now `layers`; the store also draws the layers each depends on, which the list leaves out. */
   'tessera-layerchange': {layers: string[]};
   /** The points are now coloured by `colourBy`: a column, `cluster:<layer>`, or null for one colour. */
   'tessera-colourchange': {colourBy: string | null};

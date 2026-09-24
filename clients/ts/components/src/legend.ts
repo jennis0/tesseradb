@@ -12,9 +12,9 @@ import {chrome, tokens} from './tokens.js';
  * colours; for a numeric column, a ramp over the range of the marks served, with its minimum and
  * maximum; under colour by cluster, the served artifacts in their colours.
  *
- * `selectable` adds a Colour by select (the rendered columns, and every layer that can colour,
- * drawn or not) and a Layers select that draws one layer or none, and, under colour by a levelled
- * layer with several levels served, a Level select. Colouring by a layer does not draw it.
+ * `selectable` adds up to three selects. *Colour by* offers the rendered columns and every layer
+ * that can colour, drawn or not; colouring by a layer does not draw it. *Layers* draws one layer or
+ * none. *Level* appears under colour by a levelled layer with several levels served.
  *
  * @summary What the map's colours mean, and the colour controls.
  * @tagname tessera-legend
