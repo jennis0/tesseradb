@@ -27,14 +27,37 @@ from .split import (
 # ---------------------------------------------------------------------------------------------
 
 
-def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list[str], list[dict]]:
-    """`(access column, attribute columns, joined files)` for one view's batches, the anchor's by
-    default, read off the rung's own declaration: the view's `point_visibility.field`, and every
-    `[[attribute]]` that travels with a point there. One read from a file of its own is joined
-    on entity id, as the build reads it beside the points: each joined file is `(file, columns,
-    select, fields)`. A group-scoped attribute travels only on a view of its group or of one
-    sharing its keys, its rows picked by its file's discriminator, `view` unless `fields.view`
-    renames it."""
+#: A declared type's wire type, for a column of nulls.
+WIRE_TYPES = {
+    "bool": pa.bool_(),
+    "u8": pa.uint8(),
+    "u16": pa.uint16(),
+    "u32": pa.uint32(),
+    "u64": pa.uint64(),
+    "i8": pa.int8(),
+    "i16": pa.int16(),
+    "i32": pa.int32(),
+    "i64": pa.int64(),
+    "f32": pa.float32(),
+    "f64": pa.float64(),
+    "timestamp_us": pa.timestamp("us"),
+    "keyword": pa.string(),
+    "text": pa.string(),
+    "category": pa.string(),
+}
+
+
+def wire_columns(
+    rung: Path, view: dict | None = None
+) -> tuple[str | None, list[str], list[dict], list[tuple[str, pa.DataType]]]:
+    """`(access column, attribute columns, joined files, null columns)` for one view's batches,
+    the anchor's by default, read off the rung's own declaration: the view's
+    `point_visibility.field`, and every `[[attribute]]` that travels with a point there. One read
+    from a file of its own is joined on entity id, as the build reads it beside the points: each
+    joined file is `(file, columns, select, fields)`. A group-scoped attribute travels only on a
+    view of its group or of one sharing its keys, its rows picked by its file's discriminator,
+    `view` unless `fields.view` renames it. A batch names every declared column, so one the view's
+    points file does not hold travels as nulls at its declared type."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
     entity = declared.get("defaults", {}).get("entity_id_field", "entity_id")
@@ -42,6 +65,7 @@ def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list
     access = view["point_visibility"].get("field")
     held = set(pq.ParquetFile(view["points"]).schema_arrow.names)
     attributes: list[str] = []
+    nulls: list[tuple[str, pa.DataType]] = []
     joined: dict = {}
     for attribute in declared.get("attribute", []):
         group = scope_group(attribute)
@@ -51,6 +75,8 @@ def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list
         if own in (None, view["points"]):
             if attribute["name"] in held:
                 attributes.append(attribute["name"])
+            else:
+                nulls.append((attribute["name"], WIRE_TYPES[attribute["type"]]))
             continue
         column = (attribute.get("fields") or {}).get("view", "view")
         select = (column, view["key"]) if group is not None else None
@@ -65,7 +91,7 @@ def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list
         )
         entry["columns"].append(attribute["name"])
         attributes.append(attribute["name"])
-    return access, attributes, list(joined.values())
+    return access, attributes, list(joined.values()), nulls
 
 
 def scope_group(attribute: dict) -> str | None:
@@ -218,7 +244,7 @@ class HoldOut:
         }
         self.batch_rows = batch_rows
         self.held = np.sort(held)
-        self.access, self.attributes, joined = wire_columns(rung, view)
+        self.access, self.attributes, joined, self.nulls = wire_columns(rung, view)
         #: Each joined file's rows for the hold-out, read once: small beside the points.
         self.joined = [
             read_view_rows(
@@ -341,6 +367,10 @@ class HoldOut:
             self.head = pa.concat_tables(head)
 
     def encode(self, table: pa.Table) -> bytes:
-        """[`encode_batch`] over a slice of this hold-out, member columns included."""
-        return encode_batch(table, self.coordinates, self.access, self.attributes, self.columns)
+        """[`encode_batch`] over a slice of this hold-out, member columns and the declared
+        columns this view's file does not hold included, the latter as nulls."""
+        for name, dtype in self.nulls:
+            table = table.append_column(name, pa.nulls(table.num_rows, dtype))
+        names = [*self.attributes, *(name for name, _ in self.nulls)]
+        return encode_batch(table, self.coordinates, self.access, names, self.columns)
 

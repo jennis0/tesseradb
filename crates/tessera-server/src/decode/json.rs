@@ -26,8 +26,9 @@ use super::{DecodeError, Fixed};
 pub(crate) struct JsonColumns<'a> {
     /// The route's own columns, in the order the batch carries them.
     pub fixed: &'a [Fixed<'a>],
-    /// Whether a declared column one row names must be on every row of the batch.
-    pub declared_on_every_row: bool,
+    /// The declared and scoped columns a row may be required to carry: which of them each record
+    /// leaves out is answered beside the batch, for the caller to hold its rows to.
+    pub required: &'a [&'a str],
     pub declared: &'a [DeclaredScalar],
     pub scoped: &'a [ScopedScalar],
     pub layer_of: &'a dyn Fn(&str) -> Option<LayerDeclaration>,
@@ -35,13 +36,22 @@ pub(crate) struct JsonColumns<'a> {
 
 /// One JSON body as one record batch: the route's fixed columns in its order (a coordinate and
 /// `access` always, the others where any row carries them), then declared scalars, the scoped
-/// families any row names, and layer columns in first-appearance order.
+/// families any row names, and layer columns in first-appearance order. Beside it, for each record,
+/// the positions in `columns.required` of the keys it leaves out.
 pub(crate) fn record_batch(
     body_name: &str,
     body: &[u8],
     columns: &JsonColumns<'_>,
-) -> Result<RecordBatch, DecodeError> {
+) -> Result<(RecordBatch, Vec<Vec<usize>>), DecodeError> {
     let rows = records(body_name, body)?;
+    let omitted = rows
+        .iter()
+        .map(|record| {
+            (0..columns.required.len())
+                .filter(|&at| !record.contains_key(columns.required[at]))
+                .collect()
+        })
+        .collect();
     let mut fields: Vec<Field> = Vec::new();
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
@@ -58,20 +68,13 @@ pub(crate) fn record_batch(
         arrays.push(column);
     }
 
-    // A declared column no row names is left out, which the Arrow decode reads as absent on
-    // every row. One some rows name is carried on every row, null where a row has no value; with
-    // `declared_on_every_row`, a row omitting it is refused.
+    // A column some row names is carried on every row, null where a row leaves it out; one no row
+    // names is left out.
     for declared in columns.declared {
         if !has(&declared.name) {
             continue;
         }
-        let column = scalar_column(
-            body_name,
-            &rows,
-            &declared.name,
-            declared.wire_type(),
-            columns.declared_on_every_row,
-        )?;
+        let column = scalar_column(body_name, &rows, &declared.name, declared.wire_type())?;
         fields.push(Field::new(&declared.name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -80,12 +83,12 @@ pub(crate) fn record_batch(
             continue;
         }
         let wire = super::scoped_wire_type(family);
-        let column = scalar_column(body_name, &rows, &family.name, wire, false)?;
+        let column = scalar_column(body_name, &rows, &family.name, wire)?;
         fields.push(Field::new(&family.name, column.data_type().clone(), true));
         arrays.push(column);
     }
 
-    // Every other name is a layer's or is refused, on the Arrow decode's rule.
+    // Every other name is `level`, a layer's or refused, on the Arrow decode's rule.
     let known = |name: &str| {
         columns.fixed.iter().any(|f| f.name() == name)
             || columns.declared.iter().any(|d| d.name == name)
@@ -98,12 +101,11 @@ pub(crate) fn record_batch(
             if known(name) || layers.iter().any(|l| l == name) {
                 continue;
             }
+            if name == member_key::LEVEL {
+                levels = true;
+                continue;
+            }
             if (columns.layer_of)(name).is_none() {
-                // Read as a member table's `level` column where the batch carries a layer column.
-                if name == member_key::LEVEL {
-                    levels = true;
-                    continue;
-                }
                 return Err(DecodeError(format!(
                     "{body_name}: row {row}, column '{name}' is not a declared scalar, a \
                      registered layer or a group-scoped attribute of this batch's view; declare \
@@ -124,8 +126,9 @@ pub(crate) fn record_batch(
         arrays.push(column);
     }
 
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-        .map_err(|e| DecodeError(format!("{body_name}: {e}")))
+    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+        .map_err(|e| DecodeError(format!("{body_name}: {e}")))?;
+    Ok((batch, omitted))
 }
 
 /// One of a route's fixed columns, over every row.
@@ -333,26 +336,14 @@ fn refusal(body_name: &str, row: usize, column: &str, what: &str) -> DecodeError
     DecodeError(format!("{body_name}: row {row}, column '{column}' {what}"))
 }
 
-/// One scalar column at its wire type. Where `required`, a row omitting the name is refused.
+/// One scalar column at its wire type, null where a row omits the name.
 fn scalar_column(
     body_name: &str,
     rows: &[Map<String, Value>],
     name: &str,
     wire: ScalarType,
-    required: bool,
 ) -> Result<ArrayRef, DecodeError> {
-    let cell = |row: usize| -> Result<&Value, DecodeError> {
-        match rows[row].get(name) {
-            Some(value) => Ok(value),
-            None if required => Err(refusal(
-                body_name,
-                row,
-                name,
-                "is missing; send it on every row, null where the row has no value",
-            )),
-            None => Ok(&Value::Null),
-        }
-    };
+    let cell = |row: usize| rows[row].get(name).unwrap_or(&Value::Null);
     // An integer outside the declared type's range is refused; inside it, the cast is exact.
     let in_range = |row: usize, value: i128| {
         let (min, max) = wire
@@ -375,7 +366,7 @@ fn scalar_column(
         ($builder:ty, $ty:ty) => {{
             let mut builder = <$builder>::new();
             for row in 0..rows.len() {
-                match integer(body_name, cell(row)?, row, name)? {
+                match integer(body_name, cell(row), row, name)? {
                     None => builder.append_null(),
                     Some(value) => builder.append_value(in_range(row, value)? as $ty),
                 }
@@ -387,7 +378,7 @@ fn scalar_column(
         ScalarType::Bool => {
             let mut builder = BooleanBuilder::new();
             for row in 0..rows.len() {
-                match cell(row)? {
+                match cell(row) {
                     Value::Null => builder.append_null(),
                     Value::Bool(value) => builder.append_value(*value),
                     _ => return Err(refusal(body_name, row, name, "is not a boolean")),
@@ -407,7 +398,7 @@ fn scalar_column(
         ScalarType::F32 => {
             let mut builder = Float32Builder::new();
             for row in 0..rows.len() {
-                match float(body_name, cell(row)?, row, name)? {
+                match float(body_name, cell(row), row, name)? {
                     None => builder.append_null(),
                     Some(value) => builder.append_value(
                         scalar_column::narrow_to_f32(value).ok_or_else(|| {
@@ -429,7 +420,7 @@ fn scalar_column(
         ScalarType::F64 => {
             let mut builder = Float64Builder::new();
             for row in 0..rows.len() {
-                match float(body_name, cell(row)?, row, name)? {
+                match float(body_name, cell(row), row, name)? {
                     None => builder.append_null(),
                     Some(value) => builder.append_value(value),
                 }
@@ -439,7 +430,7 @@ fn scalar_column(
         ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
             let mut builder = StringBuilder::new();
             for row in 0..rows.len() {
-                match cell(row)? {
+                match cell(row) {
                     Value::Null => builder.append_null(),
                     Value::String(text) => builder.append_value(text),
                     _ => return Err(refusal(body_name, row, name, "is not a string")),

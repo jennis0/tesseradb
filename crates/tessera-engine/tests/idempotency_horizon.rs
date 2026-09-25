@@ -69,6 +69,7 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
     let anonymous = {
         let engine = engine_at(tmp.path(), &root, 1);
         let row = UnallocatedRow {
+            join_only: false,
             external_id: None,
             view: "s0".to_string(),
             join: None,

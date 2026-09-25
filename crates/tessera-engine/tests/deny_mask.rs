@@ -68,6 +68,7 @@ fn fixture(tmp: &Path) -> PathBuf {
 /// Ingest one item at (5, 5) carrying the fixture's `ALL_TERM`.
 fn ingest(engine: &Engine, external_id: &str) -> EntityId {
     let row = UnallocatedRow {
+        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -386,6 +387,7 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
     // "anchor" sorts below "joiner" — so `s1`'s plan is the one the dispatch sends first.
     let ingest_into = |batch: &str, view: &str, external_id: &str, descriptors: Vec<Vec<u8>>| {
         let row = UnallocatedRow {
+            join_only: false,
             external_id: Some(external_id.as_bytes().to_vec()),
             view: view.to_string(),
             join: None,
@@ -568,6 +570,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
 
         let ingest_into = |batch: &str, view: &str, external_id: &str, descriptors: Vec<Vec<u8>>| {
             let row = UnallocatedRow {
+                join_only: false,
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: view.to_string(),
                 join: None,
@@ -635,6 +638,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
         let mut unrelated = Vec::new();
         for n in 0..3u32 {
             let row = UnallocatedRow {
+                join_only: false,
                 external_id: Some(format!("unrelated-{n}").into_bytes()),
                 view: JOINED_VIEW.to_string(),
                 join: None,

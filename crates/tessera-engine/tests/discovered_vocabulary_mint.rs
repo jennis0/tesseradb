@@ -192,6 +192,7 @@ fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId
     engine
         .accept_ingest(
             vec![UnallocatedRow {
+                join_only: false,
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -327,6 +328,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     let engine = engine_over(tmp.path(), &root, config());
 
     let row = |external_id: &str| UnallocatedRow {
+        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -498,6 +500,7 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
     let err = engine
         .accept_ingest(
             vec![UnallocatedRow {
+                join_only: false,
                 external_id: Some(b"one-too-many".to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -611,6 +614,7 @@ fn a_refused_window_publishes_none_of_the_keys_it_drew() {
     let engine = engine_over(tmp.path(), &root, config());
 
     let row = |external_id: &str, key: &str| UnallocatedRow {
+        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,

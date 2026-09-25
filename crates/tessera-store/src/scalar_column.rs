@@ -12,13 +12,17 @@
 //! declaration would store incomparable numbers.
 //!
 //! A category's column carries value keys as strings at either offset width, whatever width its
-//! codes are declared at. Only its vocabulary can resolve a key, so a category is not read here.
+//! codes are declared at. Only its vocabulary can resolve a key, so a category is read here only as
+//! far as its keys ([`category_keys`]).
+//!
+//! A column of Arrow's `null` type carries every declaration, with no value on any row.
 
 use std::fmt;
 
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    Int8Array, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Int8Array, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array,
+    UInt8Array,
 };
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, TimeUnit};
@@ -30,6 +34,9 @@ use crate::utf8::{is_utf8, Utf8Values};
 /// where `category` is set. An integer's fit is checked per row by [`ScalarColumn::value`], so
 /// for an integer declaration this answers only whether the column holds integers.
 pub fn carries(ty: ScalarType, category: bool, found: &DataType) -> bool {
+    if matches!(found, DataType::Null) {
+        return true;
+    }
     if category {
         return is_utf8(found);
     }
@@ -62,6 +69,14 @@ pub fn carries(ty: ScalarType, category: bool, found: &DataType) -> bool {
     }
 }
 
+/// A category column's value keys, or `None` where [`carries`] says it cannot hold them.
+pub fn category_keys(column: &ArrayRef) -> Option<Utf8Values> {
+    match column.data_type() {
+        DataType::Null => Some(Utf8Values::Small(StringArray::new_null(column.len()))),
+        _ => Utf8Values::new(column),
+    }
+}
+
 /// One batch's worth of a column read as a declared type, decoded once so each row is an index.
 pub struct ScalarColumn {
     ty: ScalarType,
@@ -81,6 +96,8 @@ enum Values {
     F64AsF32(Vec<f64>),
     F64(Vec<f64>),
     Text(Utf8Values),
+    /// A column of Arrow's `null` type.
+    Nulls,
 }
 
 /// A row whose value does not fit its declared type, holding the value as the column holds it.
@@ -115,6 +132,7 @@ impl ScalarColumn {
     pub fn new(column: &ArrayRef, ty: ScalarType) -> Option<Self> {
         let any = column.as_any();
         let values = match ty {
+            _ if matches!(column.data_type(), DataType::Null) => Values::Nulls,
             ScalarType::Bool => Values::Bool(any.downcast_ref::<BooleanArray>()?.clone()),
             ScalarType::F32 => match any.downcast_ref::<Float32Array>() {
                 Some(a) => Values::F32(a.values().to_vec()),
@@ -161,6 +179,7 @@ impl ScalarColumn {
             Values::Text(values) => ScalarValue::Utf8(values.value(row).to_string()),
             Values::Ints(values) => self.integer(values[row].into())?,
             Values::U64(values) => self.integer(values[row].into())?,
+            Values::Nulls => ScalarValue::Null,
         })
     }
 
@@ -272,6 +291,7 @@ mod tests {
             Arc::new(LargeStringArray::from(vec!["k"])),
             Arc::new(TimestampMicrosecondArray::from(vec![1i64])),
             Arc::new(TimestampMillisecondArray::from(vec![1i64])),
+            Arc::new(arrow::array::NullArray::new(1)),
         ];
         for ty in DECLARED {
             for column in &columns {
@@ -286,6 +306,19 @@ mod tests {
     }
 
     #[test]
+    fn a_column_of_the_null_type_carries_every_declaration_as_nulls() {
+        let column: ArrayRef = Arc::new(arrow::array::NullArray::new(2));
+        for ty in DECLARED {
+            assert!(carries(ty, false, column.data_type()), "{ty:?}");
+            let read = ScalarColumn::new(&column, ty).unwrap();
+            assert_eq!(read.value(1), Ok(ScalarValue::Null), "{ty:?}");
+        }
+        assert!(carries(ScalarType::U8, true, column.data_type()));
+        let keys = category_keys(&column).unwrap();
+        assert_eq!((keys.len(), keys.column().at(1)), (2, None));
+    }
+
+    #[test]
     fn a_category_carries_strings_at_either_offset_width_and_nothing_else() {
         let strings = [DataType::Utf8, DataType::LargeUtf8];
         let others = [DataType::UInt8, DataType::UInt32, DataType::Int64, DataType::Boolean];
@@ -297,6 +330,11 @@ mod tests {
                 assert!(!carries(ty, true, found), "{ty:?} category against {found:?}");
             }
         }
+        let keys: ArrayRef = Arc::new(LargeStringArray::from(vec![Some("k"), None]));
+        let read = category_keys(&keys).unwrap();
+        assert_eq!((read.column().at(0), read.column().at(1)), (Some("k"), None));
+        let codes: ArrayRef = Arc::new(UInt8Array::from(vec![1u8]));
+        assert!(category_keys(&codes).is_none());
     }
 
     #[test]

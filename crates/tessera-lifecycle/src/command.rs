@@ -63,6 +63,9 @@ pub struct UnallocatedRow {
     /// backstop re-reads the live map beside the same generation it will clone from, so a batch
     /// that raced a delete cannot be admitted against a stale answer.
     pub join: Option<tessera_types::EntityId>,
+    /// The row left out a column a new item must carry, so it is admitted only as the join the
+    /// handler resolved; the writer refuses it rather than let it become a new item.
+    pub join_only: bool,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f64,
     pub y: f64,
@@ -626,6 +629,7 @@ mod tests {
 
     fn row() -> UnallocatedRow {
         UnallocatedRow {
+            join_only: false,
             external_id: Some(b"ext-1".to_vec()),
             view: "default".to_string(),
             join: None,

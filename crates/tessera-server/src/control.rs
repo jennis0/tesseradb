@@ -520,8 +520,6 @@ struct IngestResp {
     clipped: u64,
     /// Rows whose coordinates fell outside the view's extent and were stored on its edge.
     clamped: u64,
-    /// Declared columns this batch omitted, each taken as absent in every row.
-    padded_columns: u64,
     /// One `tessera_id` per row, in request order, whether or not the row carried an external id.
     /// Decimal strings, since a JSON number loses `u64` precision past 2^53 in JavaScript.
     tessera_ids: Vec<String>,
@@ -562,6 +560,7 @@ fn run_ingest(
     let extent = crate::filter_dto::view_extent(view);
     // A row with no label takes the view's `point_visibility.default`, as a built row does.
     let point_default = view.point_default.clone();
+    let own_group = view.roster.as_ref().map(|roster| roster.group.clone());
     let view = view.id.clone();
 
     // The group-scoped families this batch may carry: those whose group owns this view's key,
@@ -574,9 +573,9 @@ fn run_ingest(
         .cloned()
         .collect();
     let ParsedBatch {
+        columns,
         items,
         artifacts,
-        padded_columns,
         clipped,
         clamped,
     } = parse_ingest_batch(
@@ -666,7 +665,6 @@ fn run_ingest(
                 // original counts.
                 clipped,
                 clamped,
-                padded_columns,
                 tessera_ids,
                 minted: 0,
                 // Filled by the handler, which is where the wait can be awaited.
@@ -736,6 +734,31 @@ fn run_ingest(
             duplicate_ids.join(", ")
         )));
     }
+    // A row that creates an item carries every declared column. A join's entity-scoped values are
+    // the item's already, so it carries only the families of its view's own group, whose values
+    // are the view's; a sharing group's view is held to none, as a build reads it for none.
+    let join_of: FxHashMap<usize, EntityId> = joins.into_iter().collect();
+    let declared_count = meta.declared_scalars.len();
+    // A join that left out an entity-scoped column is admitted only as a join.
+    let mut join_only = vec![false; items.len()];
+    for (index, item) in items.iter().enumerate() {
+        if item.omitted.is_empty() {
+            continue;
+        }
+        let creates = !join_of.contains_key(&index);
+        let required = columns.iter().enumerate().filter(|(at, _)| {
+            match at.checked_sub(declared_count) {
+                None => creates,
+                Some(family) => Some(&scoped[family].group) == own_group.as_ref(),
+            }
+        });
+        tessera_engine::check_declared_present(
+            required.map(|(_, name)| (*name, *name)),
+            |name| !item.omitted.iter().any(|&at| columns[at] == name),
+        )
+        .map_err(|detail| ApiError::Contract(format!("ingest body: row {index}: {detail}")))?;
+        join_only[index] = item.omitted.iter().any(|&at| at < declared_count);
+    }
     // The buffer bound: the command queue drains in milliseconds, so between flushes the buffer
     // is what grows. Checked before submission, so a 429 costs no entity id or WAL append; the
     // figure may lag by one apply. `Retry-After` is the next tick plus the observed flush cost.
@@ -753,7 +776,6 @@ fn run_ingest(
     // Rows go to the executor unallocated: entity ids are assigned on the writer, per commit
     // window. The decoded vectors are moved, not cloned, so one copy is live while the handler
     // waits. Every row keeps its descriptors, since the writer decides finally which rows join.
-    let join_of: FxHashMap<usize, EntityId> = joins.into_iter().collect();
     let rows: Vec<UnallocatedRow> = items
         .into_iter()
         .zip(terms_per_item)
@@ -763,6 +785,7 @@ fn run_ingest(
             external_id: item.external_id,
             view: view.clone(),
             join: join_of.get(&index).copied(),
+            join_only: join_only[index],
             descriptors,
             x: item.x,
             y: item.y,
@@ -794,7 +817,6 @@ fn run_ingest(
         over_bound_ids,
         clipped,
         clamped,
-        padded_columns,
         tessera_ids,
         minted,
         publication: 0,

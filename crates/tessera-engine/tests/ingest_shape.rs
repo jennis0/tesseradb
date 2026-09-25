@@ -145,6 +145,7 @@ fn build_rows_with_signatures(
         .map(|i| {
             let descriptors = vec![format!("{}", i % signatures.max(1)).into_bytes()];
             UnallocatedRow {
+                join_only: false,
                 external_id: Some(format!("{tag}-{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,

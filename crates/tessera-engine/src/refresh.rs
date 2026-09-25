@@ -103,7 +103,8 @@ fn carry_for(key: &RowProjectionKey, generation: &Generation) -> Carry {
     }
 }
 
-/// Refresh every resident entry to `generation`, returning how many were produced.
+/// Refresh each session's newest resident entry per view to `generation`, returning how many
+/// were produced.
 ///
 /// **Most-recently-used first** (`SingleFlightCache::ready_entries`). This is a serial loop over a
 /// rebuild that costs a *measured* 1 277 ms at 10⁹, so across a compaction it runs for minutes and

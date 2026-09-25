@@ -1090,14 +1090,15 @@ const FILLER: Written = Written {
     score: 0.1,
 };
 
-/// An ingest body carrying the reserved columns and all four scoped families **under their plain
+/// An ingest body carrying the reserved columns and the scoped families **under their plain
 /// names** (`views.md` §5): the view comes from `x-tessera-view`, so the column is not qualified
 /// and the view decides which of each family's columns the value lands in. A category arrives as
-/// its **key**, never a code.
-fn scoped_batch(rows: &[(u64, f64, f64, Written)]) -> Vec<u8> {
+/// its **key**, never a code. `tone`, and each string column `nulls` names, is null on every row.
+fn scoped_batch(rows: &[(u64, f64, f64, Written)], nulls: &[&str]) -> Vec<u8> {
     use arrow::array::BinaryArray;
     let access = access_column(rows.iter().map(|_| "0"));
-    let schema = Arc::new(ArrowSchema::new(vec![
+    let nulls: Vec<&str> = std::iter::once("tone").chain(nulls.iter().copied()).collect();
+    let mut fields = vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
@@ -1106,14 +1107,19 @@ fn scoped_batch(rows: &[(u64, f64, f64, Written)]) -> Vec<u8> {
         Field::new("sector", DataType::Utf8, true),
         Field::new("note", DataType::Utf8, true),
         Field::new("score", DataType::Float32, true),
-    ]));
+    ];
+    fields.extend(nulls.iter().map(|name| Field::new(*name, DataType::Utf8, true)));
+    let schema = Arc::new(ArrowSchema::new(fields));
     let ids: Vec<Vec<u8>> = rows.iter().map(|(e, ..)| external_id_of(*e)).collect();
+    let null_column = || -> arrow::array::ArrayRef {
+        Arc::new(StringArray::from(vec![None::<&str>; rows.len()]))
+    };
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![
+        [
             Arc::new(BinaryArray::from_iter(
                 ids.iter().map(|id| Some(id.as_slice())),
-            )),
+            )) as arrow::array::ArrayRef,
             Arc::new(Float64Array::from_iter_values(
                 rows.iter().map(|(_, x, ..)| *x),
             )),
@@ -1133,7 +1139,10 @@ fn scoped_batch(rows: &[(u64, f64, f64, Written)]) -> Vec<u8> {
             Arc::new(Float32Array::from_iter_values(
                 rows.iter().map(|(.., w)| w.score),
             )),
-        ],
+        ]
+        .into_iter()
+        .chain(nulls.iter().map(|_| null_column()))
+        .collect(),
     )
     .unwrap();
     let mut w = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
@@ -1149,6 +1158,17 @@ async fn ingest_scoped(
     view: &str,
     rows: &[(u64, f64, f64, Written)],
 ) -> Vec<u64> {
+    ingest_scoped_with_nulls(served, batch_id, view, rows, &[]).await
+}
+
+/// [`ingest_scoped`], carrying each column of `nulls`, declared while the service runs, as nulls.
+async fn ingest_scoped_with_nulls(
+    served: &Served,
+    batch_id: &str,
+    view: &str,
+    rows: &[(u64, f64, f64, Written)],
+    nulls: &[&str],
+) -> Vec<u64> {
     let resp = served
         .server
         .client
@@ -1157,7 +1177,7 @@ async fn ingest_scoped(
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", view)
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(scoped_batch(rows))
+        .body(scoped_batch(rows, nulls))
         .send()
         .await
         .unwrap();
@@ -1719,11 +1739,12 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
             .unwrap();
         assert!(resp.status().is_success(), "{name} is declared");
     }
-    let id = ingest_scoped(
+    let id = ingest_scoped_with_nulls(
         &served,
         "q3-only",
         "quarter:2026-Q3",
         &[(FILLED, 250.0, 250.0, IN_Q3)],
+        &["grade", "tier"],
     )
     .await[0];
     drain(&served.server).await;
@@ -1798,11 +1819,12 @@ async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
             .unwrap();
         assert_eq!(resp.status().as_u16(), 201, "{path}");
     }
-    let id = ingest_scoped(
+    let id = ingest_scoped_with_nulls(
         &served,
         "q3-only",
         "quarter:2026-Q3",
         &[(FILLED, 250.0, 250.0, IN_Q3)],
+        &["grade"],
     )
     .await[0];
     drain(&served.server).await;
