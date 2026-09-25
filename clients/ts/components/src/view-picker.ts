@@ -1,5 +1,6 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
-import {enterGroup, hasOneLayout, viewPickerEntries, type Meta} from '@tesseradb/client';
+import {type Meta} from '@tesseradb/client';
+import {enterGroup, hasOneLayout, viewPickerEntries} from '@tesseradb/client/internal';
 import {TesseraElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {switchView} from './view-switch.js';
@@ -7,8 +8,9 @@ import {chrome, tokens} from './tokens.js';
 
 /**
  * A select over the views the viewer may reach, one entry per plain view and one per view group,
- * in `/v1/meta`'s order. Choosing a group enters it at the key this element last left it on, else
- * at the view the client's `enterGroup` picks. Renders nothing where the bundle offers one entry.
+ * in `/v1/meta`'s order. Choosing a group enters it under the current view's key where the two
+ * groups share keys, else at the key this element last left it on, else at its first view. Renders
+ * nothing where the bundle offers one entry.
  *
  * @summary Chooses the view.
  * @tagname tessera-view-picker

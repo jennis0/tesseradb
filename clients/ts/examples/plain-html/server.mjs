@@ -68,9 +68,18 @@ export async function proxy(viewerUrl, req, res) {
  * @param {{sessionUrl: string, viewerUrl: string, credential: string, users: Record<string, {label: string, terms: string[]}>, bundleDir: string}} cfg
  */
 export function createHandler(cfg) {
-  const page = readFile(join(here, 'index.html'), 'utf8');
-  const bundle = readFile(join(cfg.bundleDir, 'tessera-components.js'));
-  const sri = readFile(join(cfg.bundleDir, 'tessera-components.js.sri'), 'utf8').then((s) => s.trim());
+  /** The bundle's file, read on each request, or `null` where it has not been built. @param {string} name */
+  const built = async (name) => {
+    try {
+      return await readFile(join(cfg.bundleDir, name));
+    } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code === 'ENOENT') return null;
+      throw e;
+    }
+  };
+  /** @param {import('node:http').ServerResponse} res */
+  const unbuilt = (res) =>
+    json(res, 503, {error: `${join(cfg.bundleDir, 'tessera-components.js')} is not built; run: npm run bundle -w @tesseradb/components`});
   /** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
   return async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -87,14 +96,19 @@ export function createHandler(cfg) {
         return json(res, 200, await authorise(cfg, user.terms));
       }
       if (url.pathname === '/tessera-components.js') {
+        const bundle = await built('tessera-components.js');
+        if (!bundle) return unbuilt(res);
         res.writeHead(200, {'content-type': 'text/javascript', 'cache-control': 'no-store'});
-        return res.end(await bundle);
+        return res.end(bundle);
       }
       if (url.pathname === '/') {
         // The integrity hash of the bundle beside this server. A static page pastes it in, and the
         // browser refuses the bundle if the file changes.
+        const sri = await built('tessera-components.js.sri');
+        if (!sri) return unbuilt(res);
+        const page = await readFile(join(here, 'index.html'), 'utf8');
         res.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
-        return res.end((await page).replace('__SRI__', await sri));
+        return res.end(page.replace('__SRI__', sri.toString('utf8').trim()));
       }
       json(res, 404, {error: 'not found'});
     } catch (e) {

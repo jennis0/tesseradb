@@ -166,7 +166,7 @@ impl Timing {
 }
 
 /// Per-stage nanoseconds, mirroring `tessera_engine::StageTimings` plus the server-owned
-/// serialise step. Shares its field order with the `x-tessera-stage-ns` header.
+/// serialise step. Shares its field order with the viewport trailer's `stage_ns`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stages {
     pub generation_resolve_ns: u64,

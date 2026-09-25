@@ -624,6 +624,12 @@ export function parseTrailer(payload: Uint8Array): Record<string, unknown> {
   return trailer;
 }
 
+/** The trailer's `stage_ns` CSV as numbers in its field order, or `null` where it has none. */
+export function stageNsOf(trailer: Record<string, unknown>): number[] | null {
+  const csv = trailer['stage_ns'];
+  return typeof csv === 'string' ? csv.split(',').map(Number) : null;
+}
+
 /**
  * Checks the trailer's point-frame and point counts against the body. A mismatch means the body
  * was mis-framed or edited in transit, so the points in hand are not the answer.

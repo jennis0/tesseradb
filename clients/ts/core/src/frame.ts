@@ -16,8 +16,6 @@
  *   projection gets `tessera_id` and `highlighted` alone. Zero or more, each holding whole tiles;
  *   their rows, in order, are the response's points.
  * - Kind 4, trailer: JSON, exactly one, last. A body without it is incomplete.
- *
- * @category HTTP client
  */
 export type FramedStreams = {
   /** The kind-1 tiles payload. */
@@ -175,9 +173,8 @@ export class FrameReader {
         this.sawArtifacts = true;
         break;
       case FRAME_POINTS:
-        // Checked here rather than only at the end, because a streaming reader decodes this frame
-        // now: without the tiles batch there is nothing to attribute its points to, and a reader
-        // that discovered the absence at the trailer would already have drawn them.
+        // Checked here and not only at the end, since a streaming reader decodes this frame now
+        // and needs the tiles frame to attribute its points.
         if (!this.sawTiles) throw new Error('a points frame before the tiles frame');
         this.sawPoints = true;
         break;
@@ -186,8 +183,7 @@ export class FrameReader {
         this.sawTrailer = true;
         break;
       default:
-        // Refused, never skipped: skipping would let a future frame kind carry data an old
-        // reader silently drops.
+        // Refused, so a reader never drops the data of a kind it does not know.
         throw new Error(`unknown frame kind ${kind} at byte ${this.consumed}`);
     }
   }
@@ -238,8 +234,7 @@ export class FrameReader {
 
   /** Consume the next `n` bytes. A view onto one chunk where it can be, a fresh buffer where not. */
   private take(n: number): Uint8Array {
-    // A zero-length payload is legal — a schema-only Arrow stream is not zero bytes, but a
-    // trailing kind whose length is 0 is well-framed and must reach {@link check} to be refused.
+    // A frame of length 0 is well formed, and its kind still goes to `check`.
     if (n === 0) return new Uint8Array(0);
     this.queued -= n;
     const first = this.queue[0]!;
@@ -269,8 +264,6 @@ export class FrameReader {
  *
  * @throws `Error` for a body that is truncated, lacks its tiles frame or its trailer, or has a
  *   frame of unknown kind, out of order or repeated.
- *
- * @category HTTP client
  */
 export function splitFramedStreams(buf: Uint8Array): FramedStreams {
   const reader = new FrameReader();

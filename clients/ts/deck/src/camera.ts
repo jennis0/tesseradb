@@ -1,4 +1,5 @@
-import {worldBbox, type Store, type ViewInput} from '@tesseradb/client';
+import {type Store, type ViewInput} from '@tesseradb/client';
+import {worldBbox} from '@tesseradb/client/internal';
 
 /** The part of a deck.gl `OrthographicView` view state that {@link viewInputOf} reads. */
 export type OrthographicCamera = {

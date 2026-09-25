@@ -12,6 +12,11 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./internal": {
+      "tessera-source": "./src/internal.ts",
+      "types": "./dist/internal.d.ts",
+      "default": "./dist/internal.js"
+    },
     "./decode.worker": {
       "tessera-source": "./src/decode.worker.ts",
       "types": "./dist/decode.worker.d.ts",

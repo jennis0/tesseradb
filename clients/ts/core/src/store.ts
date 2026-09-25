@@ -1,6 +1,6 @@
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
-import {SessionArtifactTable} from './artifactTable.js';
+import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
 import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
 import {tileRectOfBbox, type DepthChoice} from './budget.js';
 import {TesseraClient, type TesseraClientOptions} from './client.js';
@@ -336,7 +336,7 @@ export type ArtifactsProjection = {
    * The session artifact table, shared by every view, which resolves the ordinals in a band's
    * membership columns to artifacts.
    */
-  table: SessionArtifactTable;
+  table: ArtifactTable;
   /** The ordinals of `served` in `table`. */
   servedOrdinals: ReadonlySet<number>;
   /**
@@ -349,7 +349,7 @@ export type ArtifactsProjection = {
   /**
    * A colour for every ordinal `table` holds. A band fetched under a coarser cut names artifacts
    * outside `servedOrdinals`, and its points take those artifacts' colours. An ordinal not here
-   * takes {@link NEUTRAL}.
+   * has no colour of its own.
    */
   colours: ReadonlyMap<number, Rgba>;
   /** The palette `colours` was built under. */

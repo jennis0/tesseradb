@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tesseradb/client';
+import {type Band} from '@tesseradb/client';
+import {bandsOfResult, mortonOfTile, type ReplicaFrame} from '@tesseradb/client/internal';
 import type {ScalarColumn, ViewportResult} from '@tesseradb/client';
 import {band as heldBand, refused} from '../../core/test/support.js';
 import {

@@ -30,7 +30,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@tesseradb/client": "^0.1.0"
+    "@tesseradb/client": "0.1.0"
   },
   "peerDependencies": {
     "@deck.gl/core": "^9.3.7",

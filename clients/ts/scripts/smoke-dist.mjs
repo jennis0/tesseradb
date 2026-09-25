@@ -5,7 +5,8 @@ import {existsSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 
 const entries = {
-  '@tesseradb/client': ['createStore', 'setWorkerFactory', 'TesseraClient', 'RecordsRead'],
+  '@tesseradb/client': ['createStore', 'setWorkerFactory', 'TesseraClient', 'RecordsRead', 'Control'],
+  '@tesseradb/client/internal': ['compose', 'workerDecoder'],
   '@tesseradb/deck': ['TesseraLayer', 'viewInputOf', 'resolvePick'],
   '@tesseradb/deck/internal': ['MarkSlab'],
   '@tesseradb/components': ['TesseraExplorer', 'TesseraMap', 'TesseraStore', 'storeContext', 'tokens', 'PARTS'],

@@ -1,6 +1,7 @@
 import '@tesseradb/components';
 import type {TesseraExplorer, MapProbe} from '@tesseradb/components';
-import {TesseraClient, createStore, dataToWorldXY, refusalOf, type Store as DataStore} from '@tesseradb/client';
+import {TesseraClient, createStore, dataToWorldXY, type Store as DataStore} from '@tesseradb/client';
+import {refusalOf} from '@tesseradb/client/internal';
 import type {ViewInfo} from '@tesseradb/client';
 import {basemapLayer, coverFor, type BasemapCover, type Camera} from './basemap.js';
 import {loadDatasets, readConfig, type Dataset} from './config.js';

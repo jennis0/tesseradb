@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {chromium, type Browser} from 'playwright';
 import {build} from 'vite';
 import {afterAll, beforeAll, describe, expect, it} from 'vitest';
-import {decodeViewport} from '@tesseradb/client';
+import {decodeViewport} from '@tesseradb/client/internal';
 
 /**
  * The packages as `npm run build` wrote them to `dist/`, in Chromium: the decode worker loaded
@@ -26,7 +26,7 @@ const TYPES: Record<string, string> = {'.js': 'text/javascript', '.mjs': 'text/j
 /** An import map for the client and its dependencies, which the page loads unbundled. */
 const PLAIN = `<!doctype html><html><head><script type="importmap">${JSON.stringify({
   imports: {
-    '@tesseradb/client': '/core/dist/index.js',
+    '@tesseradb/client/internal': '/core/dist/internal.js',
     'apache-arrow': '/node_modules/apache-arrow/Arrow.dom.mjs',
     fzstd: '/node_modules/fzstd/esm/index.mjs',
     flatbuffers: '/node_modules/flatbuffers/mjs/flatbuffers.js',
@@ -34,7 +34,7 @@ const PLAIN = `<!doctype html><html><head><script type="importmap">${JSON.string
     'json-with-bigint': '/node_modules/json-with-bigint/json-with-bigint.js'
   }
 })}</script></head><body><script type="module">
-import {workerDecoder} from '@tesseradb/client';
+import {workerDecoder} from '@tesseradb/client/internal';
 const bytes = new Uint8Array(await (await fetch('/core/test/fixtures/viewport-plain.bin')).arrayBuffer());
 const decoder = workerDecoder();
 const decoded = await decoder.decode(bytes);

@@ -2,6 +2,7 @@ import {
   checkTrailerCounts,
   decodeViewport,
   parseTrailer,
+  stageNsOf,
   type PointsPart,
   type ViewportHead
 } from './decode.js';
@@ -10,7 +11,7 @@ import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
 import {openRecords, type RecordsRead} from './records.js';
-import type {ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /**
  * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
@@ -31,6 +32,8 @@ type Decoded = {
   points: number;
   ms: number;
   workerMs: number | null;
+  /** The trailer's `stage_ns`. */
+  stageNs: number[] | null;
 };
 
 /**
@@ -45,11 +48,26 @@ function emptyPoints() {
     world: new Float32Array(0),
     scalars: {} as Record<string, never>,
     membership: {} as Record<string, never>,
-    // No points, so no bits — and `null` is the honest value, being *no highlight column here*
-    // rather than *nothing highlighted*.
+    // No points, so no highlight column. `null` says that; an empty array would say nothing is
+    // highlighted.
     highlighted: null,
     pointsProjection: 'full' as const
   };
+}
+
+/**
+ * The trailer's `stage_ns` in a whole body, found by walking the frame headers to the trailer, or
+ * `null` where the walk finds none. The decoder checks the body's grammar.
+ */
+function stageNsOfBody(bytes: Uint8Array): number[] | null {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let at = 0; at + 5 <= bytes.byteLength; ) {
+    const end = at + 5 + view.getUint32(at + 1, true);
+    if (end > bytes.byteLength) return null;
+    if (bytes[at] === FRAME_TRAILER) return stageNsOf(parseTrailer(bytes.subarray(at + 5, end)));
+    at = end;
+  }
+  return null;
 }
 
 /** The same result with its points removed, since they went to the part sink. */
@@ -109,7 +127,7 @@ async function fail(response: Response): Promise<never> {
     code = body.error ?? code;
     detail = body.detail ?? detail;
   } catch {
-    // A non-JSON body (a proxy's, say) still deserves a typed error rather than a parse crash.
+    // A body that is not JSON, such as a proxy's, still gives a TesseraError.
   }
   throw new TesseraError(response.status, code, detail);
 }
@@ -139,8 +157,8 @@ export type TesseraClientOptions = {
    */
   onDecode?: (ms: number, bytes: number, points: number, workerMs: number | null) => void;
   /**
-   * Where responses are decoded. Defaults to {@link createDecoder}'s choice: a worker where one can
-   * be made, this thread otherwise. Made at the first `viewport` call.
+   * Where responses are decoded. Defaults to a worker where one can be made, and this thread
+   * otherwise, made at the first `viewport` call.
    */
   decoder?: Decoder;
   /** Used for every request in place of the global `fetch`. */
@@ -414,7 +432,6 @@ export class TesseraClient {
       signal
     });
     if (!response.ok) await fail(response);
-    const stage = response.headers.get('x-tessera-stage-ns');
     const coordinates = {
       identityKey: response.headers.get('x-tessera-identity-key') ?? '',
       // The quotes are the entity-tag syntax and not part of the key.
@@ -445,7 +462,7 @@ export class TesseraClient {
         // The server's time to its first flush, not to the end of the stream.
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),
-        stageNs: stage ? stage.split(',').map(Number) : null
+        stageNs: decoded.stageNs
       },
       ...coordinates,
       bytes: decoded.bytes
@@ -460,36 +477,32 @@ export class TesseraClient {
   ): Promise<Decoded> {
     const started = performance.now();
     const bytes = new Uint8Array(await response.arrayBuffer());
-    // Read BEFORE decode: the worker path transfers the buffer zero-copy, which detaches it —
-    // `byteLength` afterwards is 0, and every byte ledger downstream (the anticipation budget,
-    // the traces, the ring-spend measurement) silently read that zero.
+    // Read before decoding: the worker path transfers the buffer, which detaches it and leaves
+    // `byteLength` at 0.
     const size = bytes.byteLength;
+    const stageNs = stageNsOfBody(bytes);
     const result = counts ? decodeViewport(bytes) : await this.decoder!.decode(bytes, background);
     return {
       result,
       bytes: size,
       points: result.ids.length,
       ms: performance.now() - started,
-      workerMs: counts ? null : this.decoder!.lastWorkerMs
+      workerMs: counts ? null : this.decoder!.lastWorkerMs,
+      stageNs
     };
   }
 
   /**
-   * Reads the body as it arrives and hands each points frame to the sink once it is whole.
+   * Reads the body as it arrives and hands each points frame to the sink once it is whole, so a
+   * wide view draws before its last byte arrives. The server sends whole tiles per frame, in tile
+   * order, and each frame is an Arrow stream that decodes alone.
    *
-   * A wide view is around a hundred points frames and a hundred megabytes. Reading the body to its
-   * end before decoding would draw nothing until the last byte arrived. The server sends whole
-   * tiles per frame, in tile order, each frame an Arrow stream decodable alone, so each frame is
-   * decoded and drawn as it completes.
+   * The tiles frame comes first, so each part carries the counts of the tiles its points belong
+   * to. A part is a set of whole bands, and the replica stores it as it stores a whole response.
    *
-   * The tiles frame comes first, so each part carries the run of tile counts its own points
-   * satisfy, found from the counts the server already sent. A part is a set of whole bands, and
-   * the replica stores it as it stores a whole response.
-   *
-   * The trailer ends the response. A body that stops without one is incomplete and throws here.
-   * What the caller has already received stays correct, since every part came from one generation
-   * and each tile's points are an id-order prefix of its served set, but the request does not
-   * resolve, so nothing marks the region covered.
+   * A body that stops without its trailer throws here. The parts already delivered stay correct:
+   * they come from one generation, and each tile's points are an id-order prefix of its served
+   * set. The request does not resolve, so nothing marks the region covered.
    */
   private async streamed(
     response: Response,
@@ -499,8 +512,8 @@ export class TesseraClient {
   ): Promise<Decoded> {
     const started = performance.now();
     if (!response.body) {
-      // A runtime whose `fetch` gives no stream — a polyfill, a mocked transport. The sink is
-      // still handed everything, in one piece; the difference is when, never what.
+      // A `fetch` that gives no stream, such as a polyfill or a mock. The sink gets the whole
+      // result as one part.
       const whole = await this.whole(response, false, background);
       await onPart({result: whole.result, ...coordinates});
       return {...whole, result: headOnly(whole.result)};
@@ -513,23 +526,20 @@ export class TesseraClient {
     let bytes = 0;
     let flushes = 0;
     let points = 0;
-    // Accumulated across the frames, and left null where the decoder measures nothing (the inline
-    // one, whose calls *are* the work) so a zero is never reported as a measurement.
+    // Summed over the frames, and null where the decoder measures nothing, as the inline one does.
     let workerMs: number | null = null;
     // The tiles frame's rows, consumed in step with the point frames that satisfy them.
     let tileAt = 0;
-    // Parts are delivered in wire order however the decode lanes deal the frames, by awaiting
-    // each frame's decode in turn. The chain also carries the sink's own backpressure: reading
-    // continues while a part is absorbed, so the socket is never held for the absorb lane, but a
-    // second part is never handed over before the first has been taken.
+    // Parts are delivered in wire order by awaiting each frame's decode in turn, whichever worker
+    // decodes it. Reading continues while the sink takes a part, but the next part waits until the
+    // sink's promise settles.
     let delivering: Promise<void> = Promise.resolve();
-    // Nobody awaits this chain until the body has been read, and a rejection with no handler in
-    // between is an unhandled rejection rather than this call's failure.
+    // The chain is awaited only after the body has been read. Until then a rejection needs a
+    // handler, or it is reported as unhandled.
     delivering.catch(() => {});
 
-    // Set the moment the read fails — an abort, a transport fault, a frame the grammar refuses.
-    // Nothing lands after it: a request the caller has abandoned must not keep filling a store
-    // behind the view that superseded it, which is the discard a whole-body abort got for free.
+    // Set when the read fails: an abort, a transport fault, or a frame the grammar refuses. No part
+    // is delivered after it, so an abandoned request does not keep filling the store.
     let abandoned = false;
 
     const startHead = () => {
@@ -538,8 +548,8 @@ export class TesseraClient {
     const deliver = (decoding: Promise<PointsPart>) => {
       delivering = delivering.then(async () => {
         const part = await decoding;
-        // Read here, next to the reply it belongs to: the decoder reports the *last* reply's
-        // time, and the head's own reply lands on the same counter.
+        // Read here: the decoder reports the last reply's time, and the head's reply sets the same
+        // counter.
         const frameMs = this.decoder!.lastWorkerMs;
         if (abandoned) return;
         const decodedHead = await decodingHead!;
@@ -551,13 +561,12 @@ export class TesseraClient {
         await onPart({
           result: {
             tiles: run.tiles,
-            // `part` carries `projection`; the result names it `pointsProjection`, the frames'
-            // own answer either way.
+            // The part's `projection` is the result's `pointsProjection`.
             ...part,
             pointsProjection: part.projection,
             subCells: null,
-            // Every part carries the response's artifacts, because that is what a point's
-            // membership column is named through (`bands.ts`) and the frame precedes them all.
+            // Every part carries the response's artifacts, since a point's membership column
+            // names its artifacts through them.
             artifacts: decodedHead.artifacts,
             artifactsIdentity: decodedHead.artifactsIdentity
           },
@@ -584,9 +593,8 @@ export class TesseraClient {
               head.artifacts = frame.payload;
               break;
             case FRAME_POINTS:
-              // The head is complete at the first points frame — the grammar puts every other
-              // frame before it — so this is the earliest the counts and the artifacts can be
-              // decoded, and they are decoded before the points they name.
+              // The grammar puts every head frame before the first points frame, so the head is
+              // complete here and is decoded before the points.
               startHead();
               flushes += 1;
               deliver(this.decoder!.decodePoints(frame.payload, background));
@@ -606,19 +614,16 @@ export class TesseraClient {
       void reader.cancel().catch(() => {});
       throw error;
     }
-    // **Every whole frame is handed over before the response is judged.** A body that stopped
-    // without its trailer is refused below, and what it did deliver is sound — whole tiles from
-    // the one generation snapshot — so the refusal denies the caller a *complete* response, not
-    // the points it already has.
+    // Every whole frame is delivered before the body is checked. A body that stopped without its
+    // trailer is refused below, but the whole tiles it delivered are correct and the caller keeps
+    // them.
     await delivering;
-    // Throws on a body that stopped mid-frame or without its trailer, which is what makes a
-    // truncated response loud rather than short.
+    // Throws on a body that stopped inside a frame or without its trailer.
     frames.end();
     const decodedHead = await decodingHead!;
-    checkTrailerCounts(parseTrailer(trailerBytes!), flushes, points);
-    // Every tile the server said it served points for has had them. The batch decoder gets this
-    // for free by walking one array; here the walk is spread over the parts, so its end is
-    // checked rather than assumed.
+    const trailer = parseTrailer(trailerBytes!);
+    checkTrailerCounts(trailer, flushes, points);
+    // Every tile the server served points for has had them.
     for (let i = tileAt; i < decodedHead.tiles.length; i++) {
       if (decodedHead.tiles[i]!.served !== 0n) {
         throw new Error(
@@ -637,7 +642,8 @@ export class TesseraClient {
       bytes,
       points,
       ms: performance.now() - started,
-      workerMs
+      workerMs,
+      stageNs: stageNsOf(trailer)
     };
   }
 
@@ -845,14 +851,12 @@ export class TesseraClient {
       layer: served.layer,
       // Absent rather than null when the publisher supplied none.
       key: served.key ?? null,
-      // Absent where the layer declares the property, or rather does not: geometry is never
-      // withheld from an artifact that is served at all, so an absence is a fact about the layer.
+      // Absent where the layer declares no such property. A served artifact always has the
+      // geometry its layer declares.
       centroid: served.centroid ?? null,
       box: served.box ?? null,
       shape: served.shape ?? null,
-      // JSON carries it as a number, and a count is not an identifier: it is bounded by the
-      // corpus, so nothing here can reach 2^53. Widened to `bigint` anyway, because it is the same
-      // quantity the wire delivers as `u64` and a panel must be able to print the two the same way.
+      // A `bigint`, as the same count is on the Arrow wire, so a panel prints both one way.
       maskedCount: BigInt(served.masked_count)
     };
   }
@@ -979,14 +983,14 @@ type RawBrowsePage = {artifacts?: RawBrowseRow[]; parents?: RawBrowseRow[]; next
 function browseRow(r: RawBrowseRow): BrowseRow {
   return {
     tesseraId: BigInt(r.tessera_id),
-    // Absent rather than null where the publisher supplied none, and where this principal may not
-    // read the text — the two are one state, as they are on the artifacts frame.
+    // Absent where the publisher supplied none and where this principal may not read the text.
+    // The two look the same, as they do on the artifacts frame.
     key: r.key ?? null,
     name: r.name ?? null,
     maskedCount: BigInt(r.masked_count),
     matchedCount: r.matched_count === undefined || r.matched_count === null ? null : BigInt(r.matched_count),
     rung: r.rung,
-    // A null cell is the empty list, which is the fail-closed direction: no parent is invented.
+    // A null cell is the empty list.
     parentIds: (r.parent_ids ?? []).map((v) => BigInt(v))
   };
 }
@@ -1038,7 +1042,7 @@ type RawMeta = {
     id: string;
     display_name: string;
     quantisation: {x_min: number; x_max: number; y_min: number; y_max: number};
-    projection: ProjectionName;
+    projection: MapProjection;
     world_aspect: number | null;
     tile_scheme: TileScheme | null;
     tile: {z: number; x: number; y: number} | null;

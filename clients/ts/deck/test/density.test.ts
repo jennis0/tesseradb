@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {mortonOfTile, type ComposedTile} from '@tesseradb/client';
+import {type ComposedTile} from '@tesseradb/client';
+import {mortonOfTile} from '@tesseradb/client/internal';
 import {binDensity} from '../src/density.js';
 import {resolvePick} from '../src/pick.js';
 

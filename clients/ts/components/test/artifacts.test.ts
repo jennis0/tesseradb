@@ -1,5 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection, type Layer, type Meta} from '@tesseradb/client';
+import {type Artifact, type ArtifactsProjection, type Layer, type Meta} from '@tesseradb/client';
+import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import '../src/layer-picker.js';
 import '../src/artifact-card.js';
 import '../src/legend.js';

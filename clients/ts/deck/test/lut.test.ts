@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {NEUTRAL, SessionArtifactTable, artifactColours, positionalEntry, type Artifact, type Band, type ScalarColumn} from '@tesseradb/client';
+import {type Artifact, type Band, type ScalarColumn} from '@tesseradb/client';
+import {NEUTRAL, SessionArtifactTable, artifactColours, positionalEntry} from '@tesseradb/client/internal';
 import {LookupTexture, LUT_WIDTH, buildLut, dimmed} from '../src/lut.js';
 import {MarkSlab} from '../src/slab.js';
 import {fakeDevice} from './fake-device.js';

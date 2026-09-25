@@ -135,23 +135,6 @@ export function distinctOrdinals(ordinals: Uint32Array): Uint32Array {
   return Uint32Array.from(seen).sort();
 }
 
-/**
- * Whether the band holds all of `served(T)` and would still at `k`.
- *
- * The server's sampling threshold depends on the mask, the generation and the view, not on the
- * bounding box or the zoom, so at a fixed content key and depth the reported `served` stays current. The band is
- * complete when it holds every served point and either `served` was below the cap in force or
- * that cap was already at least `k`; then a larger `k` cannot serve more. A complete tile is left
- * out of the request.
- *
- * @internal
- */
-export function isComplete(band: Band, contentKey: string, k: number): boolean {
-  if (band.contentKey !== contentKey) return false;
-  if (band.ids.length !== band.served) return false;
-  return band.served < band.capUsed || band.capUsed >= k;
-}
-
 /** How many bytes a band's buffers occupy, the figure eviction counts. */
 function bandBytes(
   ids: BigUint64Array,

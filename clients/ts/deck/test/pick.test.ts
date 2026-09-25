@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection, type Band} from '@tesseradb/client';
+import {type Artifact, type ArtifactsProjection, type Band} from '@tesseradb/client';
+import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import {artifactOfMark} from '../src/pick.js';
 
 /** A hovered mark names the artifact it is a member of, through its ordinal and the table. */

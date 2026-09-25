@@ -1,4 +1,5 @@
-import type {Composition, DepthChoice, Meta, Session, Timings} from '@tesseradb/client';
+import type {Composition, Meta, Session, Timings} from '@tesseradb/client';
+import type {DepthChoice} from '@tesseradb/client/internal';
 
 /**
  * The state the viewer's instrument panels read: a mirror of the store's projections for the

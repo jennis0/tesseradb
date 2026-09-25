@@ -3,9 +3,7 @@ import {
   CELL_GRID,
   WORLD_SIZE,
   dataToWorldXY,
-  positionsToWorld,
   tileToCellBox,
-  tileToDataBbox,
   tileToRequestBbox
 } from '../src/coords.js';
 
@@ -13,38 +11,11 @@ const square = {xMin: 0, xMax: 65536, yMin: 0, yMax: 65536};
 const skewed = {xMin: -10, xMax: 10, yMin: 0, yMax: 1000};
 
 describe('coords', () => {
-  it('maps the z=0 tile onto the whole data extent', () => {
-    expect(tileToDataBbox({x: 0, y: 0, z: 0}, skewed)).toEqual([-10, 0, 10, 1000]);
-  });
-
-  it('partitions the extent across a depth’s tiles with no gap or overlap', () => {
-    const z = 3;
-    const n = 2 ** z;
-    for (let x = 0; x < n - 1; x++) {
-      const left = tileToDataBbox({x, y: 0, z}, skewed);
-      const right = tileToDataBbox({x: x + 1, y: 0, z}, skewed);
-      expect(left[2]).toBeCloseTo(right[0], 9);
-    }
-  });
-
-  it('handles a non-square extent per axis', () => {
-    const box = tileToDataBbox({x: 0, y: 0, z: 1}, skewed);
-    expect(box[2] - box[0]).toBeCloseTo(10, 9); // half of 20
-    expect(box[3] - box[1]).toBeCloseTo(500, 9); // half of 1000
-  });
-
   it('sends data-space corners to world-space corners', () => {
     expect(dataToWorldXY(square.xMin, square.yMin, square)).toEqual([0, 0]);
     expect(dataToWorldXY(square.xMax, square.yMax, square)).toEqual([WORLD_SIZE, WORLD_SIZE]);
     // The skewed extent lands on the same square world, so a tile is square on screen.
     expect(dataToWorldXY(skewed.xMax, skewed.yMax, skewed)).toEqual([WORLD_SIZE, WORLD_SIZE]);
-  });
-
-  it('keeps the cell box and the data bbox describing the same block', () => {
-    const cells = tileToCellBox({x: 5, y: 2, z: 4});
-    const data = tileToDataBbox({x: 5, y: 2, z: 4}, square);
-    expect(data[0]).toBeCloseTo((cells.cx0 / CELL_GRID) * 65536, 6);
-    expect(data[1]).toBeCloseTo((cells.cy0 / CELL_GRID) * 65536, 6);
   });
 
   it('requests a bbox naming exactly one tile, at every depth', () => {
@@ -71,20 +42,13 @@ describe('coords', () => {
   });
 
   it('keeps the request bbox strictly inside the tile’s exact bbox', () => {
-    const exact = tileToDataBbox({x: 2, y: 3, z: 4}, square);
+    // Over `square`, data coordinates are cell coordinates.
+    const cells = tileToCellBox({x: 2, y: 3, z: 4});
+    const exact = [cells.cx0, cells.cy0, cells.cx1, cells.cy1] as const;
     const request = tileToRequestBbox({x: 2, y: 3, z: 4}, square);
     expect(request[0]).toBeGreaterThan(exact[0]);
     expect(request[1]).toBeGreaterThan(exact[1]);
     expect(request[2]).toBeLessThan(exact[2]);
     expect(request[3]).toBeLessThan(exact[3]);
-  });
-
-  it('scales an interleaved cell-space buffer to world space, pair by pair', () => {
-    // Cell space in, world space out: the whole grid maps onto the whole world, and the scale
-    // needs no quantisation extent because both spaces are the grid.
-    const positions = new Float64Array([0, 0, 65536, 65536, 32768, 16384]);
-    const out = positionsToWorld(positions);
-    expect(out).toBeInstanceOf(Float32Array);
-    expect([...out]).toEqual([0, 0, WORLD_SIZE, WORLD_SIZE, WORLD_SIZE / 2, WORLD_SIZE / 4]);
   });
 });

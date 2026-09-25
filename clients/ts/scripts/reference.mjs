@@ -32,8 +32,6 @@ const UNDOCUMENTED_TYPES = new Set([
   '@tesseradb/client:ArtifactChannelState',
   // `StoreOptions.replica`, whose four fields its comment describes.
   '@tesseradb/client:ReplicaOptions',
-  // `ViewInfo.projection`: the root exports the store's `ProjectionName` under this name.
-  '@tesseradb/client:ProjectionName',
   // `Store.subscribe`'s callback, `() => void`.
   '@tesseradb/client:Listener',
   // The props type `TesseraLayer` is declared over, which adds `slab` for `<tessera-map>`, and so

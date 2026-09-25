@@ -21,7 +21,7 @@ import {chunked, framed, manual, rejectsAsRefused, settle, u64} from './support.
 const SERVED = [2n, 2n, 0n, 2n, 2n, 2n, 2n];
 const PER_FRAME = [2, 2, 3]; // tiles per points frame; frames flush at whole tiles
 
-function bodyBytes(): Uint8Array {
+function bodyBytes(stageNs?: string): Uint8Array {
   const tiles = tableToIPC(
     new Table({
       tile: u64(SERVED.map((_, i) => BigInt(i))),
@@ -46,7 +46,13 @@ function bodyBytes(): Uint8Array {
   }
   const total = Number(SERVED.reduce((a, b) => a + b, 0n));
   const trailer = new TextEncoder().encode(
-    JSON.stringify({arrow_serialise_ns: 0, flushes: points.length, points: total, stream_us: 0})
+    JSON.stringify({
+      arrow_serialise_ns: 0,
+      flushes: points.length,
+      points: total,
+      stream_us: 0,
+      ...(stageNs === undefined ? {} : {stage_ns: stageNs})
+    })
   );
   return framed([
     {kind: 1, payload: tiles},
@@ -204,5 +210,16 @@ describe('a streamed viewport response', () => {
     const response = await client().viewport('tok', {view: 's0', zoom: 4, k: 100});
     expect([...response.result.ids]).toEqual([...whole.ids]);
     expect(response.bytes).toBe(body.byteLength);
+  });
+
+  it('reports the trailer\'s stage timings on the streamed and the whole-body paths, and none where it has none', async () => {
+    for (const onPart of [(): void => {}, undefined]) {
+      vi.stubGlobal('fetch', async () => chunked(bodyBytes('10,20,30'), 64, {headers: HEADERS}));
+      const staged = await client().viewport('tok', {view: 's0', zoom: 4, k: 100}, undefined, false, onPart);
+      expect(staged.timings.stageNs).toEqual([10, 20, 30]);
+      vi.stubGlobal('fetch', async () => chunked(bodyBytes(), 64, {headers: HEADERS}));
+      const plain = await client().viewport('tok', {view: 's0', zoom: 4, k: 100}, undefined, false, onPart);
+      expect(plain.timings.stageNs).toBeNull();
+    }
   });
 });

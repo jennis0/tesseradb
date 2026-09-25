@@ -1,14 +1,12 @@
 # The React explorer
 
-Vite + React 19. `<TesseraExplorer>` from `@tesseradb/react/components` over a store the host
-owns (`useTesseraStore`), with the `detail` slot replaced by a host component reading
-`useProjection(store, 'selection')` — `src/ItemCard.tsx`.
+Vite and React 19. `<TesseraExplorer>` from `@tesseradb/react/components` draws a store the host owns (`useTesseraStore`). Its `detail` slot holds a host component, `src/ItemCard.tsx`, which reads `useProjection(store, 'selection')`.
+
+It expects the demo's `2m4` scale (`./run_demo.sh --scale 2m4` at the repository root), whose users `../plain-html/users.json` lists.
 
 ```bash
-node ../plain-html/server.mjs &      # the app server: tokens, and the users it knows
+node ../plain-html/server.mjs &      # the app server, which mints the tokens
 npm run dev                          # http://localhost:5181
 ```
 
-The store is keyed by the signed-in user (`<Session key={user}>`): a different user unmounts the
-component, which disposes its store in the effect's cleanup, and mounts a fresh one. `StrictMode`
-is on, because its double mount is what the hook is built for.
+The store is keyed by the signed-in user (`<Session key={user}>`). Choosing another user unmounts the component, which disposes its store in the effect's cleanup, and mounts a new one. `StrictMode` is on, so every run exercises the double mount the hook has to survive.
