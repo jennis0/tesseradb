@@ -359,6 +359,11 @@ impl Executor {
 
         let next = Arc::new(next);
         self.publish_arc(Arc::clone(&next), started);
+        // Pruned before the refresh starts, so its snapshot holds what retention keeps and no more.
+        self.row_projection_cache.prune_generations_below(
+            segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS),
+            &next.prefix,
+        );
 
         // After the swap, so a missing projection after a fold is an ordinary cache miss.
         if rotation.is_some() {
@@ -375,8 +380,6 @@ impl Executor {
             );
         }
 
-        self.row_projection_cache
-            .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
         self.prune_region_cache(segments_version);
         Ok(())
     }

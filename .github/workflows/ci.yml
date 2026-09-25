@@ -7,9 +7,9 @@
 # specified-but-unbuilt and are left that way rather than half-built, because a nightly that runs
 # one seed batch is this gate with a worse schedule.
 #
-# What runs is exactly the gate CLAUDE.md defines, plus the conformance suite. Nothing here builds
-# from the Phase 0 corpus: every fixture the suite uses is synthesised from a seed, which is what
-# makes a hosted runner possible at all.
+# What runs is the gate CLAUDE.md defines, with the Rust tests under nextest, plus the conformance
+# suite. Nothing here builds from the Phase 0 corpus: every fixture the suite uses is synthesised
+# from a seed, which is what makes a hosted runner possible at all.
 #
 # `reference/tests` used to be excluded **wholesale** on that ground, and the ground held for one
 # of its six modules and three cases of a second. Measured 2026-08-30 at `2bde89a6`: 62 of its 71
@@ -37,9 +37,9 @@
 # out. I1 keeps CI coverage through the overlay-journal differential and its two defective engines.
 # Recorded so the omission reads as a decision rather than an oversight.
 #
-# What the Rust job does not execute, on the same principle. `cargo test --workspace` skips every
-# `#[ignore]`d test — 22 of the 2,283 distinct tests the workspace harnesses list — and each of
-# those 22 either builds a real corpus, runs for minutes to hours, or measures rather than asserts.
+# What the Rust job does not execute, on the same principle. The test run skips every
+# `#[ignore]`d test, and each of those either builds a real corpus, runs for minutes to hours, or
+# measures rather than asserts.
 # Nothing here runs them and no other tier does either: §6's nightly, which would, is specified and
 # unbuilt. So a property held only by an ignored test is a property nothing gates on.
 #
@@ -106,14 +106,19 @@ jobs:
         with:
           components: clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
       # The tests run once, instrumented, so the gate and Codacy's coverage come from one build.
       # `show-env` instruments only the workspace's crates, so the cached dependencies still serve.
       #
-      # `--no-fail-fast` is load-bearing. Without it cargo stops at the first test
-      # binary that fails and never runs the rest, so the summary reports the failures it reached
-      # alongside a passing total that is quietly smaller than the run before it — which reads as
-      # success at a glance. That has already been mistaken for a green gate here.
+      # nextest runs every test binary's tests at once, where `cargo test` runs the binaries one
+      # after another; each test is its own process, so a fixture a test binary shares between
+      # its tests is built once per test here. It does not run doc-tests, so `--doc` does.
+      #
+      # `--no-fail-fast` makes a run report every failure rather than stop starting tests at the
+      # first. Each command runs whatever the one before it returned, and the step fails if any
+      # of them did.
       #
       # The reachability check shares the step for the instrumented environment: `--quick` asks the
       # compiled harnesses what they would run, and would otherwise compile the workspace a second
@@ -122,8 +127,11 @@ jobs:
         run: |
           source <(cargo llvm-cov show-env --sh)
           cargo llvm-cov clean --workspace
-          cargo test --workspace --no-fail-fast
-          bash scripts/check-test-reachability.sh --quick
+          status=0
+          cargo nextest run --workspace --no-fail-fast || status=1
+          cargo test --workspace --doc --no-fail-fast || status=1
+          bash scripts/check-test-reachability.sh --quick || status=1
+          exit $status
       # Paths relative to the repository root, as Codacy matches them.
       - name: coverage report
         if: ${{ !cancelled() }}
