@@ -26,6 +26,7 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 ## Structure
 
+- An item inserted with no external id answers `500 fail-closed` on `/v1/items` from its flush until the next fold. A flush does not install a new external-id lookup table (only a key rotation, `write/executor/mod.rs`, and a coalesce, `publications.rs`, do), so `external_id_of_checked` (`tessera-store/src/sidecar.rs`) reads an entity below the high-water mark that is in neither the lookup nor the in-memory map as a corrupt bundle. An item with an external id is found in the map and is unaffected.
 - The three rules about an artifact row's carried geometry are written twice. The build's inline path and `tessera check` share one copy (`tessera_build::shapes::inline_shape`); the publication route has its own in `canonical_row_shape` (`crates/tessera-server/src/control.rs`), which walks the same fields and refuses the same three, plus a fourth the build does not need — a shape layer's published row must carry a shape, where an inline row may carry none and become an empty one. Rule 3 exists three times over: `inline_shape`, `tessera_store::derived::shape_input`, and the server's call into it, and `inline_shape`'s kind check is redundant with `shape_input`, which `ShapeReader::row` calls on the same value a moment later. A `carried_shape` in `tessera_store::derived` beside `shape_input`, taking the four fields and an optional kind, would serve all three callers and take the server's extra rule as a flag. About 60 lines across two crates. Behaviour is equal on both paths today; only the authorship is doubled.
 - `/control/status` (`crates/tessera-server/src/control.rs`) copies each figure out of the engine's stats types by hand. Making those types serialise themselves was tried on 2026-09-24 and does not pay while the published blocks do not match them: four cache blocks publish four different subsets of `CacheStats`, and `ExecutorStats` is spread over four other blocks. It would need `ExecutorStats` restructured into the groups it is published in first.
 - `tessera-build` keeps a second whole implementation of the build (`build_in_memory`) as a test oracle for the streaming one. Every change to the build is made twice.
@@ -66,8 +67,21 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 - The conformance suite has no corpus with a per-view annotation layer, so nothing there checks that a view serves only its own artifacts. The Rust server tests do.
 - `distinct_key_first_viewports_overlap_instead_of_serialising` (`crates/tessera-engine/tests/viewport.rs`) asserts a timing ratio and fails when the box is loaded. It failed in four runs on 2026-09-18 and passed alone each time.
 - The coalesce unit tests (`crates/tessera-engine/src/coalesce.rs`) test the planner and the rebase separately, each on a hand-built manifest, and repeat one "replaces its window in both halves" test per axis. A plan, execute, rebase round trip per axis over one shared fixture would test the join between the halves and roughly halve the module.
+- `viewLabel` (`clients/ts/core/src/views.ts`) names a view in the picker by reading roster metadata called `label`, `title`, `starts` and `ends`. The contract reserves none of these names, so this is a guessed column name.
+- The Python client offers `wait` on flush and the two drops only, though the server takes it on every write route; its `grow` always sends JSON, though the route takes Arrow; and it retries a `429` with no lower bound on the wait. The TypeScript `Control` client has all three.
+- `POST /control/ingest` and `POST /control/values` accept JSON and NDJSON bodies as well as Arrow. No client sends either.
 - `Wal::retained_from` and `batch_identity` (`crates/tessera-lifecycle/src/wal.rs`) are tested only through the engine, and that test checks that a batch id is forgotten at rotation and not that a retained one is kept.
 - If `Wal::rotate` fails after deleting some members, the engine skips trimming its batch-id memory until the next rotation that succeeds, so a few ids are remembered longer than the log holds them.
+
+## Features not built
+
+- Export of a selection. The selection panel greys *Export* (`clients/ts/components/src/selection.ts`). The TypeScript client now reads `POST /v1/items`, so an export can be built on it. To decide: the format (Arrow, Parquet or CSV), and whether the element downloads a file or hands the rows to the host.
+- *Save as artifact* from a drawn selection. The selection panel greys it; no route publishes a runtime artifact from a region.
+- A host cannot read or set the map's camera, selection mode or chosen cluster level: they are fields of `<tessera-map>` and `<tessera-explorer>`, not store state. Saving and restoring a view, linking two maps and keeping the view in a URL all need them.
+- A host cannot set how data is drawn or worded: the 12-colour categorical palette and two-colour numeric ramp (`clients/ts/deck/src/colour.ts`), value formatting, the interface's English strings, and the `en-GB` number format are fixed in code.
+- `TesseraLayer` draws in a 512-unit orthographic world. A geographic host (a deck.gl `MapView`, MapLibre or Mapbox) needs a coordinate adapter that does not exist, and the OpenStreetMap basemap exists only in the demo viewer (`clients/ts/viewer/src/basemap.ts`).
+- The four TypeScript packages build and pack at version 0.1.0 and stay `private`. Publishing them to npm waits for a ruling.
+- Vue, Svelte and Angular hosts have notes in the clients README and no example or test.
 
 ## Documentation
 
