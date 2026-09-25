@@ -1,0 +1,36 @@
+{# Copied from essentials-openapi 1.4.0's partial of the same name. Changed: `markdown`
+   attributes, so descriptions render as Markdown, and the schema's own description above its
+   properties. #}
+{% if definition.description %}
+{{definition.description}}
+
+{% endif %}
+{%- if get_primary_type(definition.type) == "object" %}
+{%- with props = handler.get_properties(definition) -%}
+{% if props %}
+<table markdown="1">
+<thead>
+<tr>
+<th>{{texts.name}}</th>
+<th>{{texts.type}}</th>
+<th>{{texts.description}}</th>
+</tr>
+</thead>
+<tbody markdown="1">
+{%- for name, schema in props %}
+<tr markdown="1">
+<td><code>{{name}}</code></td>
+<td>{% include "partial/schema-repr.html" %}</td>
+<td markdown="block">{{schema.description or ""}}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+{%- endwith -%}
+{%- else -%}
+{%- with schema = definition -%}
+<span>{{texts.type}}: </span>
+{%- include "partial/schema-repr.html" -%}
+{%- endwith -%}
+{%- endif %}

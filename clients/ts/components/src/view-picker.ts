@@ -7,13 +7,18 @@ import {switchView} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-view-picker>`: chooses the layout, with one entry per plain view and one per group, in
- * `/v1/meta`'s serving order. The rules are the client's `viewPickerEntries`, `enterGroup` and
- * `hasOneLayout`; this element adds the control, the key it last left each group on, and the
- * switch. It renders nothing where the bundle offers one entry.
+ * A select over the views the viewer may reach, one entry per plain view and one per view group,
+ * in `/v1/meta`'s order. Choosing a group enters it at the key this element last left it on, else
+ * at the view the client's `enterGroup` picks. Renders nothing where the bundle offers one entry.
  *
- * `part="select"` is the control, `part="label"` its caption and `part="field"` the pair, as in
- * the legend.
+ * @summary Chooses the view.
+ * @tagname tessera-view-picker
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-viewswitch']>} tessera-viewswitch - The view
+ *   changed.
+ * @csspart field - The caption and the select.
+ * @csspart label - The caption.
+ * @csspart select - The select.
  */
 export class TesseraViewPicker extends TesseraElement {
   static override styles = [

@@ -1,14 +1,24 @@
 import {type Store, type ViewInput} from '@tesseradb/client';
 import {worldBbox} from '@tesseradb/client/internal';
 
-/** The part of a deck.gl `OrthographicView` view state the conversion reads. */
-export type OrthographicCamera = {target: readonly number[]; zoom: number};
+/** The part of a deck.gl `OrthographicView` view state that {@link viewInputOf} reads. */
+export type OrthographicCamera = {
+  /** The world point at the centre of the canvas, `[x, y]` in world units. A missing coordinate reads as 0. */
+  target: readonly number[];
+  /** deck's zoom: the canvas shows `2 ** zoom` pixels per world unit, so at 0 the 512-unit world is 512 pixels wide. */
+  zoom: number;
+};
 
 /**
- * What `store.setView` takes for a deck.gl `OrthographicView` camera over the 512-unit world:
- * the canvas's world bbox, clamped to the world and converted to data coordinates through the
- * store's frame, and the canvas size in CSS pixels. Null before `meta` has arrived, when the
- * store has no frame to convert against.
+ * Converts a deck.gl `OrthographicView` camera over the 512-unit world into the input
+ * `store.setView` takes: the box the canvas covers, clamped to the world and converted to data
+ * coordinates through the store's frame, and the canvas size.
+ *
+ * @param store - The store whose frame converts world units to data coordinates.
+ * @param camera - The view state's `target` and `zoom`.
+ * @param width - The canvas width in CSS pixels.
+ * @param height - The canvas height in CSS pixels.
+ * @returns The view input, or `null` before `meta` has arrived, when the store has no frame.
  */
 export function viewInputOf(store: Pick<Store, 'frame' | 'dataXY'>, camera: OrthographicCamera, width: number, height: number): ViewInput | null {
   if (!store.frame()) return null;

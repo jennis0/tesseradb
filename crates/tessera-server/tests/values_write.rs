@@ -75,7 +75,8 @@ async fn declare(served: &Served, body: Value) {
     );
 }
 
-/// Ingest one point and answer its `tessera_id`.
+/// Ingest one point and answer its `tessera_id`. The runtime columns [`serve`] declares are
+/// null, since a values batch fills them.
 async fn ingest_point(served: &Served, batch_id: &str, external_id: &str) -> u64 {
     ingest_point_with(served, batch_id, external_id, json!({})).await
 }
@@ -93,6 +94,8 @@ async fn ingest_point_with(
         "y": 500.0,
         "access": ["0"],
         "score": 1.0,
+        "tag": null,
+        "dept": null,
     });
     for (name, value) in columns.as_object().unwrap() {
         row[name] = value.clone();
@@ -307,7 +310,7 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
         json!({"name": "grade", "type": "category", "vocabulary": "grade", "index": true}),
     )
     .await;
-    let id = ingest_point(&served, "points-1", "subject").await;
+    let id = ingest_point_with(&served, "points-1", "subject", json!({"grade": null})).await;
     tick(&served.server).await;
 
     let (status, answer) = values(
@@ -338,7 +341,7 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
     let served = served.restart().await;
     assert_eq!(item_fields(&served, id).await["grade"], json!("g0"));
     assert_minted_key_is_listed(&served, "g0").await;
-    let second = ingest_point(&served, "points-2", "second").await;
+    let second = ingest_point_with(&served, "points-2", "second", json!({"grade": null})).await;
     tick(&served.server).await;
     assert!(
         item_fields(&served, second).await["grade"].is_null(),
@@ -399,7 +402,7 @@ async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() 
     register(&served.server, grades).await;
 
     ingest_point_with(&served, "points-1", "by-ingest", json!({"grade": "g1"})).await;
-    ingest_point(&served, "points-2", "by-values").await;
+    ingest_point_with(&served, "points-2", "by-values", json!({"grade": null})).await;
     tick(&served.server).await;
     let (status, answer) = values(
         &served,

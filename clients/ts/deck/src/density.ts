@@ -1,4 +1,5 @@
-import {WORLD_SIZE, tileXY, type ComposedTile} from '@tesseradb/client';
+import {WORLD_SIZE, type ComposedTile} from '@tesseradb/client';
+import {tileXY} from '@tesseradb/client/internal';
 
 /**
  * The density wash: the tile counts drawn as one texture under the marks.

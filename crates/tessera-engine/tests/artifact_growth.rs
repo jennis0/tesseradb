@@ -694,6 +694,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
+        join_only: false,
         external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -813,6 +814,7 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
     let before = engine.allocator_high_water();
     let descriptors = vec![b"0".to_vec()];
     let row = tessera_lifecycle::command::UnallocatedRow {
+        join_only: false,
         external_id: Some(b"p1".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -868,6 +870,7 @@ fn ingest_into_view(engine: &Engine, batch: &str, view: &str, external_id: &str,
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
+        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: view.to_string(),
         join: None,

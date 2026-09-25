@@ -474,6 +474,16 @@ impl Executor {
                 }) || generation.buffer.contains_in_view(entity, view)
             },
         );
+        if let Some(index) = rows.iter().position(|row| row.join_only && row.join.is_none()) {
+            drop(generation);
+            reply.fail(ExecError::JoinRefused {
+                detail: format!(
+                    "row {index} joins an item deleted since the batch was checked; send the \
+                     batch again"
+                ),
+            });
+            return None;
+        }
         if collisions == 0 {
             if let Err(detail) = settle_joins(&generation, &mut rows) {
                 drop(generation);

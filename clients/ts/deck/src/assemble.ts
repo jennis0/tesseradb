@@ -4,10 +4,9 @@ import {
   type Composition,
   type ScalarColumn,
   type ScalarValues,
-  type StandInPiece,
-  type TileRect
+  type StandInPiece
 } from '@tesseradb/client';
-import {assertCompositionMatchesServed, compose, fold, type ReplicaFrame} from '@tesseradb/client/internal';
+import {assertCompositionMatchesServed, compose, fold, type ReplicaFrame, type TileRect} from '@tesseradb/client/internal';
 
 /**
  * Materialising a core composition into the buffers one `ScatterplotLayer` draws. Core's

@@ -8,16 +8,20 @@ import {switchView} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-key-picker>`: which view of the current group, as a select over the group's roster with
- * previous and next buttons. Renders nothing when the current view is in no group.
+ * Which view of the current view's group: a select over the group's views in creation order, with
+ * previous and next buttons that stop at the ends. Each entry shows the view's label and its key.
+ * Renders nothing when the current view is in no group.
  *
- * The roster is in creation order (`viewsOfGroup`), since a key is the caller's own string and its
- * sort order means nothing. The buttons are `stepView(meta, current, ∓1)`, disabled at the ends
- * without wrapping. Each entry shows `viewLabel`'s label and the key, which is the address a link
- * or request carries.
- *
- * `part="select"` is the control, `part="label"` its caption, `part="entry"` the row and
- * `part="step"` each button, with `data-direction="prev"` or `"next"`.
+ * @summary Chooses the view within the current group.
+ * @tagname tessera-key-picker
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-viewswitch']>} tessera-viewswitch - The view
+ *   changed.
+ * @csspart field - The caption and the row.
+ * @csspart label - The caption, which is the group's name.
+ * @csspart entry - The row of buttons and select.
+ * @csspart select - The select.
+ * @csspart step - A previous or next button, with `data-direction` set to `prev` or `next`.
  */
 export class TesseraKeyPicker extends TesseraElement {
   static override styles = [

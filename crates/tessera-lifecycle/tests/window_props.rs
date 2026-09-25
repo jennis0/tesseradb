@@ -18,6 +18,7 @@ use tessera_types::TermId;
 
 fn row(key: &str, terms: &[u32]) -> UnallocatedRow {
     UnallocatedRow {
+        join_only: false,
         external_id: Some(key.as_bytes().to_vec()),
         view: "default".to_string(),
         join: None,

@@ -515,6 +515,7 @@ fn ingest_sources(engine: &Engine, batch: &str, sources: &[u64]) -> Vec<EntityId
                 .map(|t| t.to_string().into_bytes())
                 .collect();
             UnallocatedRow {
+                join_only: false,
                 external_id: Some(s.to_le_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -1428,6 +1429,7 @@ fn a_viewport_point_is_null_where_its_item_has_no_rendered_value() {
     const ZERO: u64 = N + 100;
     let (x, y) = position(ZERO);
     let zero = UnallocatedRow {
+        join_only: false,
         external_id: Some(ZERO.to_le_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1696,6 +1698,7 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
     let ingest_into = |batch: &str, view: &str, external_id: &str, x: f64, y: f64, scalars| {
         let descriptors = vec![b"0".to_vec(), b"1".to_vec()];
         let row = UnallocatedRow {
+            join_only: false,
             external_id: Some(external_id.as_bytes().to_vec()),
             view: view.to_string(),
             join: None,
@@ -2325,6 +2328,7 @@ fn thirty_thousand(batches: u64) -> (tempfile::TempDir, Engine) {
             .map(|i| {
                 let s = n + batch * 700 + i;
                 UnallocatedRow {
+                    join_only: false,
                     external_id: Some(s.to_le_bytes().to_vec()),
                     view: "s0".to_string(),
                     join: None,
@@ -2663,6 +2667,7 @@ fn a_columns_first_null_is_counted_against_the_ceiling() {
             scalars[7] = WalScalar::TimestampUs(base + s as i64);
             let (x, y) = position(s);
             UnallocatedRow {
+                join_only: false,
                 external_id: Some(s.to_le_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -2807,6 +2812,7 @@ fn a_cell_larger_than_a_stretch_is_read_whole() {
     engine.set_background_refresh_for_test(false);
     let rows: Vec<UnallocatedRow> = (0..10_000u64)
         .map(|i| UnallocatedRow {
+            join_only: false,
             external_id: Some(format!("crowd-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,

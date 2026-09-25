@@ -1,7 +1,10 @@
 /**
- * `@tesseradb/components`: the root entry defines every element on import. A host that wants one
- * element imports its subpath, such as `@tesseradb/components/count`; only the map's pulls in
- * deck.gl.
+ * The `tessera-*` custom elements. Importing the root entry defines every element. A host that
+ * wants one element imports its subpath, such as `@tesseradb/components/count`. The map, the
+ * explorer, the legend, the artifact list and the artifact card import `@tesseradb/deck`, which
+ * depends on deck.gl; the other elements do not.
+ *
+ * @module @tesseradb/components
  */
 import './store-element.js';
 import './count.js';

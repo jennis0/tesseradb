@@ -553,6 +553,7 @@ pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
 /// id are the caller's string.
 pub fn ingest(engine: &Engine, external_id: &str) -> EntityId {
     let row = UnallocatedRow {
+        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,

@@ -306,6 +306,7 @@ fn ingest_with_descriptors(
     descriptors: &[Vec<u8>],
 ) -> Result<EntityId, tessera_engine::AcceptError> {
     let row = UnallocatedRow {
+        join_only: false,
         external_id: Some(external_id),
         view: "s0".to_string(),
         join: None,
@@ -2221,6 +2222,7 @@ fn term_ordinals_are_stable_across_a_fold() {
     // `dict_extents` entry across it — the shape a single-extent dictionary cannot distinguish
     // from "coincidentally unchanged".
     let novel_row = UnallocatedRow {
+        join_only: false,
         external_id: Some(b"novel-holder".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -2922,6 +2924,7 @@ fn a_fold_lands_while_the_feed_runs(key: fn(u64, &str, u64) -> String) {
                 for view in ["s0", "s1", "s2"] {
                     let rows: Vec<UnallocatedRow> = (0..8u64)
                         .map(|i| UnallocatedRow {
+                            join_only: false,
                             external_id: Some(key(round, view, i).into_bytes()),
                             view: view.to_string(),
                             join: None,
@@ -3036,6 +3039,7 @@ fn a_flush_of_joins_binds_nothing_and_the_joined_key_resolves_both_ways() {
     let before = bindings(&engine);
 
     let join = UnallocatedRow {
+        join_only: false,
         external_id: Some(key.clone()),
         view: "s1".to_string(),
         join: None,
@@ -3114,6 +3118,7 @@ fn interleaved_new_items_in_two_views_resolve_both_ways_from_the_sidecar() {
         .iter()
         .enumerate()
         .map(|(i, key)| UnallocatedRow {
+            join_only: false,
             external_id: Some(key.clone()),
             view: if i % 2 == 0 { "s0" } else { "s1" }.to_string(),
             join: None,
@@ -3174,6 +3179,7 @@ fn a_join_keeps_its_key_when_the_binding_view_is_dropped_before_it_flushes() {
 
     let key = b"dropped-binding".to_vec();
     let row = |view: &str| UnallocatedRow {
+        join_only: false,
         external_id: Some(key.clone()),
         view: view.to_string(),
         join: None,
@@ -3250,6 +3256,7 @@ fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
     create_quarter_q2(&engine);
     let key = b"dropped-view-item".to_vec();
     let row = UnallocatedRow {
+        join_only: false,
         external_id: Some(key.clone()),
         view: "quarter:q2".to_string(),
         join: None,

@@ -9,25 +9,6 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
-/**
- * `<tessera-hierarchy>`: a layer's hierarchy over `POST /v1/artifacts/browse`, independent of the
- * viewport. The viewport serves a budget cut, and where an artifact's members are spread over the
- * whole layout its leaves arrive only at deep zoom; this panel opens on the roots at any zoom and
- * does not move with the map.
- *
- * A layer select over the bundle's hierarchical layers, then a tree. Each row is a name, a masked
- * count and an expander; expanding fetches the children, paged under "N more". On a `dag` layer a
- * node appears under each served parent and lists its other parents. A parent the principal may
- * not see is absent, so the node reads as a root. A search box shows matches with their lineage.
- *
- * The panel sends the map's filters and shows each row's matched count beside its masked count.
- * Whether a row exists and its masked count do not change with the filter.
- *
- * A row's first action is highlight, which shows where an artifact's members are without changing
- * the map; filter is beside it, and fit on a layer that draws something.
- *
- * What is expanded and paged is this element's state, not the store's.
- */
 
 /** One node of the walk: a row, its children once fetched, and where its paging got to. */
 type Node = {
@@ -42,6 +23,51 @@ type Node = {
 
 const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
 
+/**
+ * A layer's hierarchy, browsed through `POST /v1/artifacts/browse` independently of the viewport:
+ * it opens on the roots at any zoom and does not move with the map. A select chooses among the
+ * bundle's hierarchical layers where there are several. Each row is a name, a masked count and an
+ * expander; expanding fetches the children, a page at a time under More. On a layer where a child
+ * may have several parents, a row appears under each parent it is served under and names the
+ * others. A parent the viewer may not see is absent, so its child reads as a root. The search box
+ * lists matching names.
+ *
+ * The panel sends the map's filters and, while any is set, shows each row's matched count beside
+ * its masked count. A row's presence and its masked count do not change with the filters. A row's
+ * buttons put a `member_of` clause on its artifact as a highlight or a filter, and Fit fits the map
+ * to it on a layer that draws. Pressing the name highlights it.
+ *
+ * The panel asks for nothing while it is hidden. The element keeps which rows are expanded and
+ * paged.
+ *
+ * @summary A layer's hierarchy, browsed apart from the viewport.
+ * @tagname tessera-hierarchy
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A row's
+ *   name, highlight or filter button put a `member_of` clause on or took it off.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - A row's Fit
+ *   button was pressed.
+ * @csspart title - The heading.
+ * @csspart state - The state line, with `data-state`.
+ * @csspart refusal - A refusal's code and detail.
+ * @csspart layer - The layer select, shown where there are several layers.
+ * @csspart search - The search box.
+ * @csspart tree - The tree of rows.
+ * @csspart row - One row, with `data-id`, and `data-clause` (`filter` or `highlight`) while a
+ *   clause is on its artifact.
+ * @csspart expander - A row's expand button.
+ * @csspart name - A row's name, which highlights the artifact when pressed.
+ * @csspart counts - A row's counts.
+ * @csspart count-matched - A row's matched `<tessera-count>`, while a filter is set.
+ * @csspart count-masked - A row's masked `<tessera-count>`.
+ * @csspart actions - A row's buttons.
+ * @csspart highlight - A row's highlight button, with `aria-pressed`.
+ * @csspart filter - A row's filter button, with `aria-pressed`.
+ * @csspart fit - A row's Fit button, on a layer that draws.
+ * @csspart also - The other parents a row is served under, or a refusal of its children.
+ * @csspart children - An expanded row's children.
+ * @csspart more - The More button that fetches the next page.
+ */
 export class TesseraHierarchy extends TesseraElement {
   static override styles = [
     tokens,
@@ -144,9 +170,9 @@ export class TesseraHierarchy extends TesseraElement {
     `
   ];
 
-  /** Which layer's hierarchy is shown; unset, the first the bundle offers. */
+  /** The layer whose hierarchy is shown. Unset or unknown, the first the bundle offers. */
   @property() accessor layer = '';
-  /** Rows per page, and what "N more" fetches, clamped to the server's ceiling. */
+  /** Rows per page, at least 1 and at most the server's `maxBrowseRows`. */
   @property({type: Number}) accessor limit = 50;
 
   @state() private accessor roots: Node[] | null = null;

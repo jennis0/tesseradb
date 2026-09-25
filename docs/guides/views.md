@@ -241,11 +241,12 @@ guard the entity from being silently changed by a second view's row:
 
 A **group-scoped** attribute may not appear on a plain view's batch at all — it is an undeclared
 column there. On a batch into any view whose key the attribute's group holds — the owner's own
-views, and every view of a group declaring `members` of it — it may and should: a join carries
-geometry **and this key's scoped values**, and nothing else. It allocates no id, writes no
-descriptor and contributes no postings, which is what keeps a label supplied on a joining row inert
-rather than a quiet widening — but a scoped value belongs to the `(entity, attribute, key)` cell
-the row addresses, not to the entity, so it is the one thing such a row legitimately brings.
+views, and every view of a group declaring `members` of it — it may, and on the owner's own views it
+must: a join carries geometry **and this key's scoped values**, and nothing else. It allocates no
+id, writes no descriptor and contributes no postings, which is what keeps a label supplied on a
+joining row inert rather than a quiet widening — but a scoped value belongs to the
+`(entity, attribute, key)` cell the row addresses, not to the entity, so it is the one thing such
+a row legitimately brings.
 
 All three refusals are decided on the write executor, not in the handler, so a row that becomes a
 join between your request arriving and the write landing meets them too (decision 0116). You still
@@ -357,12 +358,13 @@ x-tessera-view: quarter:2026-Q3
 external_id | x | y | access | kind | sentiment
 ```
 
-Nulls are absences, a category arrives as its **key** (never a code), and a column the batch
-omits entirely means every row of it is absent — a family has no slot in the positional scalar
-tail, so leaving it out misaligns nothing. A view created while the service runs acquires its
-columns at the **first flush** that covers it, with no rebuild: from then on it filters, pins,
-renders and answers `/v1/categories` like any other, and `/v1/meta`'s `scoped_scalars[..].views`
-names it.
+Nulls are absences and a category arrives as its **key** (never a code). Every row into a view of
+the family's own group carries the family, a join included, since the value is the view's: one it
+leaves out is refused, and a null says the row has no value. A batch into a view of a group sharing
+the keys may leave it out, as a build reads it from no such view. A view created while the service
+runs acquires its columns at the **first flush** that covers it, with no rebuild: from then on it
+filters, pins, renders and answers `/v1/categories` like any other, and `/v1/meta`'s
+`scoped_scalars[..].views` names it.
 
 **Either door writes the cell.** A group that declares `members` of another shares its keys, and a
 scoped value is addressed by `(attribute → its group, key)` — never by the view — so a batch into
@@ -521,5 +523,5 @@ quarter — before that a request under it simply has no `sentiment`.
   used the wrong door.
 - **A `text` scoped column cannot be rewritten once it has flushed.** Its stored prose is a
   dictionary and postings with no value to compare against, so a second batch naming that cell is
-  refused whether the string agrees or not. Change it with a delete and a re-ingest; omit the column
-  to leave it alone.
+  refused whether the string agrees or not. Change it with a delete and a re-ingest; a null leaves
+  it alone.

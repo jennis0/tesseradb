@@ -108,9 +108,9 @@ pub struct ItemsRequest<'a> {
     /// Cancellation ends the response with a trailer whose `ended_by` is `deadline`, after a
     /// page holding whatever rows the page under way had reached. The walk honours it only once
     /// stopping moves the cursor on, so it may run on for one stretch's filter evaluation and one
-    /// chunk of the scan after it. A token cancelled before the response walks its first page
-    /// ends the response with no rows, no counts and the cursor it was given, since the client
-    /// has gone.
+    /// chunk of the scan after it. A token cancelled before the response walks its first page,
+    /// by the stream deadline or because the client has gone, ends the response with no rows, no
+    /// counts and the cursor it was given.
     pub cancel: Option<CancelToken>,
 }
 
@@ -137,7 +137,7 @@ pub struct RecordsHead {
     pub region: Option<RegionVerdict>,
     /// The viewport's identity coordinate for this session and view, from the first page's
     /// geometry, for the response's header. `None` only where the response was cancelled before
-    /// its first page, which happens only when the client has gone.
+    /// its first page.
     pub identity_key: Option<[u8; 16]>,
 }
 
@@ -485,8 +485,7 @@ impl Engine {
     /// The head, then pages until the response ends, then the trailer. The head follows the first
     /// page, so a failure there is a plain refusal and the head carries the first page's region
     /// verdict. A response whose pages found no row carries one page of no rows, so that every
-    /// response gives the read's columns; one cancelled before it walks a page carries none, since
-    /// the client has gone.
+    /// response gives the read's columns; one cancelled before it walks a page carries none.
     fn serve_pages(
         &self,
         response: &Response<'_>,

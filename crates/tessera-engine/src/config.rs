@@ -101,17 +101,22 @@ impl EngineConfig {
     }
 }
 
+/// The largest segment a merge produces when `EngineConfig::max_merged_segment_bytes` is unset.
+pub const DEFAULT_MAX_MERGED_SEGMENT_BYTES: u64 = 256 << 20;
+
 /// The row-space merge's policy, with every configured knob applied.
 ///
-/// Defaults: `tier_width` 4, floor 16 MiB, cap 256 MiB. The floor is where per-segment overheads
-/// stop dominating, so flushes a few bytes apart still merge; the cap bounds one merge's pool
-/// time and write amplification. The base segment has no extent, so `plan_merge`'s selection over
-/// the extent list can never choose it regardless of these knobs.
+/// Defaults: `tier_width` 4, floor 16 MiB, cap [`DEFAULT_MAX_MERGED_SEGMENT_BYTES`]. The floor is
+/// where per-segment overheads stop dominating, so flushes a few bytes apart still merge; the cap
+/// bounds one merge's pool time and write amplification. The base segment has no extent, so
+/// `plan_merge`'s selection over the extent list can never choose it regardless of these knobs.
 pub(crate) fn merge_policy(config: &EngineConfig) -> tessera_store::merge::MergePolicy {
     tessera_store::merge::MergePolicy {
         tier_width: config.tier_width.unwrap_or(4),
         segment_floor_bytes: config.segment_floor_bytes.unwrap_or(16 << 20),
-        max_merged_segment_bytes: config.max_merged_segment_bytes.unwrap_or(256 << 20),
+        max_merged_segment_bytes: config
+            .max_merged_segment_bytes
+            .unwrap_or(DEFAULT_MAX_MERGED_SEGMENT_BYTES),
     }
 }
 

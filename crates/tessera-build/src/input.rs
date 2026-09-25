@@ -2090,25 +2090,22 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     let file_schema = builder.schema().clone();
 
     let id_root = src.id_index(&file_schema)?;
+    tessera_store::declaration::check_declared_present(
+        columns
+            .iter()
+            .map(|attribute| (attribute.name.as_str(), attribute.column())),
+        |column| file_schema.column_with_name(column).is_some(),
+    )
+    .map_err(|detail| BuildError::Schema {
+        path: path.to_path_buf(),
+        detail: format!("{detail} (its columns are {})", column_names(&file_schema)),
+    })?;
     let mut roots: Vec<usize> = id_root.into_iter().collect();
     for attribute in columns {
-        roots.push(
-            file_schema
-                .column_with_name(attribute.column())
-                .map(|(i, _)| i)
-                .ok_or_else(|| BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "the schema declares attribute '{}', read from a column named '{}', which \
-                         this attribute source has no column for. Its columns are: {}. A declared \
-                         column the data lacks would otherwise be written as the absent sentinel \
-                         for every row — a column that cost its width to say nothing",
-                        attribute.name,
-                        attribute.column(),
-                        column_names(&file_schema)
-                    ),
-                })?,
-        );
+        let (index, _) = file_schema
+            .column_with_name(attribute.column())
+            .expect("every declared column was found above");
+        roots.push(index);
     }
     // A group-scoped column is read from a points file that may hold several views' rows, so the
     // selection rides the same projection here as it does on the geometry (`views.md` §5, §3.1).
@@ -2185,6 +2182,28 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     Ok(())
 }
 
+/// The refusal for an item this build creates that has no row in the attribute source at `path`,
+/// which carries `columns`: every such item has one, as a new item at a running service carries
+/// every declared column, and a row of nulls is how a source says it has no value.
+pub(crate) fn item_without_a_row(
+    path: &Path,
+    columns: &[&crate::config::Attribute],
+    id_space: &crate::ids::IdSpace,
+    source_id: u64,
+) -> BuildError {
+    let detail = tessera_store::declaration::check_declared_present(
+        columns
+            .iter()
+            .map(|attribute| (attribute.name.as_str(), attribute.column())),
+        |_| false,
+    )
+    .expect_err("an attribute source carries at least one column");
+    BuildError::Schema {
+        path: path.to_path_buf(),
+        detail: format!("item {} has no row: {detail}", id_space.display(source_id)),
+    }
+}
+
 /// How many rows one decoded batch of an attribute source carries — the Parquet reader's batch
 /// size, and the bound a caller's staging buffer must leave room for above its own budget.
 pub const ATTRIBUTE_BATCH_ROWS: usize = 65_536;
@@ -2245,15 +2264,16 @@ impl BatchColumn {
             // A category arrives as its *key*, never as a code: §3.1 — the key in the row is not
             // the display name, and the code is drawn once and pinned, so a data file
             // supplying codes directly would be a second place codes are decided.
-            let keys = crate::utf8::Utf8Values::new(column).ok_or_else(|| BuildError::Schema {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "attribute '{}' is a category, so its column must hold value keys (utf8); \
-                     this file holds {:?}. A category's code is drawn once from the \
-                     vocabulary and never re-derived from the data (per-point-attributes §3.4)",
-                    attribute.name,
-                    column.data_type()
-                ),
+            let keys = tessera_store::scalar_column::category_keys(column).ok_or_else(|| {
+                BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "attribute '{}' is a category and this file holds {:?}; write its value \
+                         keys as utf8",
+                        attribute.name,
+                        column.data_type()
+                    ),
+                }
             })?;
             return match attribute.value_set {
                 Some(crate::config::ValueSet::Open) => {

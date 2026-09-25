@@ -19,10 +19,10 @@ import {rectContains, type TileRect} from './rects.js';
  * nothing disappears.
  */
 
-/** The shallowest depth requested; see {@link chooseDepth}. */
+/** The shallowest depth requested; see {@link chooseDepth}. @internal */
 export const MIN_DEPTH = 3;
 
-/** One cell's masked count, as the tile list reported it. */
+/** One cell's masked count, as the tile list reported it. @internal */
 export type CountCell = {x: number; y: number; count: number};
 
 /**
@@ -33,6 +33,8 @@ export type CountCell = {x: number; y: number; count: number};
  * chooses a depth too deep. So whoever builds a field reads `cells` over the whole of `covers` and
  * has fetched every tile of `covers` at `depth`; `Driver.adopt` does both. A consumer checks only
  * that the view lies inside `covers`.
+ *
+ * @internal
  */
 export type CountField = {
   depth: number;
@@ -40,6 +42,7 @@ export type CountField = {
   covers: TileRect;
 };
 
+/** @internal */
 export type BudgetInputs = {
   budget: number;
   mTarget: number;
@@ -59,6 +62,7 @@ export type BudgetInputs = {
   force?: number;
 };
 
+/** @internal */
 export type DepthChoice = {
   depth: number;
   tiles: number;
@@ -92,13 +96,13 @@ function tileRange(bbox: [number, number, number, number], depth: number) {
   return {x0: index(x0), y0: index(y0), x1: index(x1), y1: index(y1)};
 }
 
-/** How many tiles of `depth` a world-space bbox intersects. */
+/** How many tiles of `depth` a world-space bbox intersects. @internal */
 export function tilesInBbox(bbox: [number, number, number, number], depth: number): number {
   const r = tileRange(bbox, depth);
   return (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1);
 }
 
-/** The tile-index rectangle a world-space bbox covers. */
+/** The tile-index rectangle a world-space bbox covers. @internal */
 export function tileRectOfBbox(
   bbox: [number, number, number, number],
   depth: number
@@ -121,6 +125,8 @@ export function tileRectOfBbox(
  * so a deeper request returns the same marks over four times the tiles.
  *
  * `null` where the view is not inside `field.covers`.
+ *
+ * @internal
  */
 export function countedMarks(
   field: CountField,
@@ -183,6 +189,8 @@ function sumCells(cells: readonly CountCell[], delta: number, k: number) {
  *
  * The floor of 3 is set by marks: at depth 0 a view holds one tile and about 16 marks whatever the
  * budget. The first depth is taken whatever it predicts, since there is no shallower answer.
+ *
+ * @internal
  */
 export function chooseDepth(inputs: BudgetInputs): DepthChoice {
   const {budget, mTarget, worldBbox, maxTiles, counts, k, visibleInView, force} = inputs;
@@ -266,6 +274,7 @@ export function chooseDepth(inputs: BudgetInputs): DepthChoice {
   return answer(depth, limitedBy);
 }
 
+/** @internal */
 export type Observation = {
   /** The average model's figure at the chosen depth, {@link DepthChoice.averageMarks}. */
   predictedMarks: number;
@@ -300,6 +309,8 @@ const DAMPING = 0.5;
  *
  * Saturation stops the loop: once every visible item in view is served, a deeper request adds no
  * marks, and an uncorrected loop would push a sparse principal's depth to the `maxTiles` cap.
+ *
+ * @internal
  */
 export function calibrate(observation: Observation, mTarget: number, base: number): number {
   const {predictedMarks, actualMarks, visibleInView} = observation;

@@ -223,6 +223,7 @@ fn synth_rows(
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
+                join_only: false,
                 external_id: Some(format!("write-cost-{n}").into_bytes()),
                 view: fx.view.clone(),
                 join: None,

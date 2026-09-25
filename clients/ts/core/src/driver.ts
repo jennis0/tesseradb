@@ -20,22 +20,24 @@ import {TesseraError} from './client.js';
  * through callbacks. What to draw arrives as a {@link ReplicaFrame} for the consumer to render.
  */
 
-/** The injected clock, in `setTimeout`'s shape. */
+/** The injected clock, in `setTimeout`'s shape. @internal */
 export type Clock = {
   now(): number;
   after(ms: number, fire: () => void): unknown;
   cancel(handle: unknown): void;
 };
 
+/** @internal */
 export type ViewState = {target: [number, number, number]; zoom: number};
 
-/** What the driver needs to know from `/v1/meta`, injected once at session start. */
+/** What the driver needs to know from `/v1/meta`, injected once at session start. @internal */
 export type DriverMeta = {
   kMaxMarks: number;
   maxTilesPerRequest: number;
   thetaTargetMarks: number;
 };
 
+/** @internal */
 export type DriverEvents = {
   /**
    * What this paint may cost.
@@ -53,6 +55,7 @@ export type DriverEvents = {
   onTrace?(kind: string, fields: Record<string, number | string>): void;
 };
 
+/** @internal */
 export type DriverOptions = {
   /** Trailing debounce while the store can answer the view. */
   debounceMs?: number;
@@ -97,6 +100,7 @@ const DEFAULTS = {
   budget: 50_000
 };
 
+/** @internal */
 export class Driver {
   private readonly o: Required<DriverOptions>;
 

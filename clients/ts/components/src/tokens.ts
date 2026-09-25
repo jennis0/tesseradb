@@ -1,14 +1,53 @@
 import {css} from 'lit';
 
 /**
- * The theme: every colour, font, spacing and radius is a public `--tessera-*` custom property. The
- * elements never declare the public names. Each element's host declares a private
- * `--_tessera-*` twin as `var(--tessera-x, <default>)` and its styles read only the twin, so a
- * value set on the element or on any ancestor, including an enclosing `<tessera-explorer>`, wins,
- * and the default applies only where nothing is set. Each colour default is a `light-dark()` pair
- * resolved against the `color-scheme` the element inherits from the page.
+ * The theme every element shares, as a Lit `CSSResult` a host element can add to its own `styles`.
+ * Every colour and font, the corner radius and the shadow are `--tessera-*` custom properties, as
+ * are the map's height and the spacing of the map's corners; other spacing is fixed. The elements
+ * do not declare those names: each reads a private twin that falls back to the default, so a value
+ * set on the element or on any ancestor, including an enclosing `<tessera-explorer>`, wins, and the
+ * default applies where nothing is set. Each colour's default is a light and a dark value, chosen
+ * by the `color-scheme` the element inherits from the page.
  *
  * The map's data palette is not a token: it encodes data, and it is the map's `palette` property.
+ *
+ * @cssprop --tessera-surface - The background of panels, cards, inputs and buttons.
+ * @cssprop --tessera-surface-2 - The background of a hovered row and of the map toolbar's divider.
+ * @cssprop --tessera-surface-3 - The background of a pressed toggle, a hovered row button and a
+ *   loading skeleton.
+ * @cssprop --tessera-ink - The colour of body text and values.
+ * @cssprop --tessera-ink-2 - The colour of labels, headings and secondary text.
+ * @cssprop --tessera-ink-3 - The colour of faint text: placeholders, hints and disabled controls.
+ * @cssprop --tessera-line - The colour of borders around inputs, buttons, cards and the map
+ *   toolbar.
+ * @cssprop --tessera-line-2 - The colour of the rules between panels and between the status
+ *   strip's cells.
+ * @cssprop --tessera-accent - The colour of focus rings, primary buttons, filter chips and checked
+ *   boxes.
+ * @cssprop --tessera-accent-ink - The text colour on an accent background.
+ * @cssprop --tessera-accent-soft - The background of a filter chip, a chosen row and a matched
+ *   span in a suggestion.
+ * @cssprop --tessera-highlight - The colour of a highlight chip and a pressed highlight button.
+ * @cssprop --tessera-highlight-ink - For text on a highlight background. Not built yet: no element
+ *   reads it, so setting it changes nothing.
+ * @cssprop --tessera-highlight-soft - The background of a highlight chip and a highlighted row.
+ * @cssprop --tessera-warn - The colour of the stale and retrying states.
+ * @cssprop --tessera-warn-soft - The background of the stale state in the status strip.
+ * @cssprop --tessera-refuse - The colour of the refused and expired states and of refusal text.
+ * @cssprop --tessera-refuse-soft - The background of the refused and expired states in the status
+ *   strip and on the map.
+ * @cssprop --tessera-ok - The colour of the status dot in the shown state.
+ * @cssprop --tessera-map-bg - The map canvas's background.
+ * @cssprop --tessera-radius - The corner radius of inputs, buttons, cards and the map toolbar.
+ * @cssprop --tessera-font - The font family of all text but figures and identifiers.
+ * @cssprop --tessera-font-mono - The font family of figures and identifiers.
+ * @cssprop --tessera-shadow - The shadow under the status strip, the map toolbar, the map tooltip
+ *   and floating panels. The default does not render: it is written as a `light-dark()` pair, which
+ *   takes colours only, so no shadow is drawn until a value is set here.
+ * @cssprop --tessera-space - The gap between the map's corner content and the map's edges, and
+ *   between items in one corner. Nothing else reads it.
+ * @cssprop --tessera-density - A multiplier on `--tessera-space`'s default.
+ * @cssprop --tessera-map-height - The map's height.
  */
 export const tokens = css`
   :host {

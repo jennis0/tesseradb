@@ -100,12 +100,12 @@ Four identifiers name an item or a view, one for each party that needs to addres
 | external id | the operator, before ingest | the operator, and any record of a write naming it | nothing, for the item's life |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
 
-The entity id is the server's own internal key: a dense integer, assigned as items are
-committed, in an order that groups together the items sharing the same access terms. A build
-starting from an empty corpus commits everything at once, producing one such dense, fully sorted
-range. A later ingest commits its own new items above what already exists, in a range sorted the
-same way within itself but appended after the corpus already on disc rather than interleaved with
-it.
+The entity id is the server's own internal key: a dense integer, assigned as items are committed,
+in an order that groups together the items sharing the same access terms. A build numbers its items
+in batches sized to its memory budget, each a dense range sorted that way, and a build that fits in
+one batch sorts the whole corpus as one range. A later ingest commits its own new items above what
+already exists, in a range sorted the same way within itself but appended after the corpus already
+on disc rather than interleaved with it.
 
 The `tessera_id` is what a client receives and holds instead of the entity id. It is stable for
 the item's life unless the operator rotates the deployment's key, and a rotation ends every
@@ -148,19 +148,16 @@ exact at every zoom level.
 Two distinct things can move a stored position onto the frame's edge, and each is reported on its
 own:
 
-| | Cause | Refused? |
-|---|---|---|
-| Clamping | The coordinate is outside the view's declared frame | Past half the corpus |
-| Clipping | The coordinate is outside the projection's own domain, beyond `web_mercator`'s polar cut, for instance | Never |
+| | Cause |
+|---|---|
+| Clamping | The coordinate is outside the view's declared frame |
+| Clipping | The coordinate is outside the projection's own domain, beyond `web_mercator`'s polar cut, for instance |
 
-A build refuses past half the corpus clamping, because a frame that misplaces most of a corpus
-describes some other dataset. No frame can bring a clipped point back inside a projection that
-does not reach it, so clipping is never a reason to refuse.
-
-A live ingest stores an out-of-frame coordinate on the frame's edge in the same way, and its
-receipt counts the rows it clamped as `clamped` and the rows it clipped as `clipped`. The
-half-corpus refusal applies to a build only, because a batch is a part of a corpus. Both refuse a
-coordinate that is not a finite number, and under a projection one outside WGS84's range.
+Neither is a reason to refuse. A build stores the point on the frame's edge and its report counts
+how many points clamped and how many clipped, whatever the proportion. A live ingest does the
+same, and its receipt counts the rows it clamped as `clamped` and the rows it clipped as
+`clipped`. Both refuse a coordinate that is not a finite number, and under a projection one
+outside WGS84's range.
 
 ## Fields: five families, one declaration
 
@@ -185,25 +182,32 @@ index  = true    # can be searched (default false)
 render = false   # draws on the map (default false)
 ```
 
-A field's value lives in exactly one of three homes: drawn on the map when `render` is set,
-searchable when `index` is set, or, always, stored compactly per item and read only when that
-item is opened. The last is the cheapest of the three, and the one a field takes by default.
+A field's value is kept in one or more of three homes, which `/v1/meta` lists for each field as its
+`homes`. A field with `render` set is stored beside every item's position in each view (`rendered`)
+and read for every point drawn. A field other than text with `index` set, and a category whose
+vocabulary is derived, has a column of one value per item (`value_column`), read by filters, counts
+and category listings. A field with neither, and every text field, is kept in the compact record
+store (`record`): the cheapest home, and the one a field takes by default. A text field's search
+index answers a search but cannot give its prose back, so its value stays in the record store. The
+record store is read when an item is opened, when a bulk read names the field, and to confirm a
+text phrase.
 
 ```mermaid
 flowchart LR
   decl["field declaration<br/>type, render, index"]
-  decl -- "render = true" --> hot["drawn on the map<br/>read for every point"]
-  decl -- "index = true" --> idx["searchable<br/>read for a filter or a<br/>category listing"]
-  decl -- "always" --> blob["stored per item<br/>read when it is opened"]
+  decl -- "render = true" --> hot["rendered<br/>beside every point"]
+  decl -- "index = true, or a<br/>derived vocabulary" --> idx["value column<br/>one value per item"]
+  decl -- "neither, or text" --> blob["record store<br/>compact, per item"]
   hot --> mark["a mark on the map"]
-  idx --> filter["a filter, a count, a typeahead"]
-  blob --> card["an item card"]
+  idx --> filter["a filter, a count, a listing"]
+  blob --> card["an item card, a bulk read"]
 ```
-*A field with neither flag still has a home: the compact record, read at drill-down.*
+*A field with neither flag still has a home: the record store, read by the item card and by a bulk
+read.*
 
-A category's record of which items carry which value exists whatever else the field's declaration
-says, because that record is what makes the category's own value list servable. Every other
-family builds a search structure only when `index` is set.
+A category over a derived vocabulary keeps its value column, and the record of which items carry
+each value, whatever its declaration says, because that record decides which of the vocabulary's
+values a viewer is shown. Every other field builds a search structure only when `index` is set.
 
 A field can be both drawable and searchable at once, since the two choices are independent.
 
@@ -214,6 +218,13 @@ position, whether or not that item carries one.
 A field that draws but carries no value for some item is stored as absent rather than as a
 numeric zero, so a range query that happens to include zero does not wrongly match items that
 have no value at all.
+
+Every declared field is required wherever an item arrives with its fields. A build refuses a
+source file that lacks the column, or that has no row for an item the build creates, and an
+ingest refuses a row that creates an item without it; a null is how either says an item has no
+value. A row that adds an item already held to another view carries its fields already, so it may
+leave them out, and a values batch fills only the columns it names. A field may not take the name
+of a column the system reads itself, `level` among them.
 
 ## Vocabularies
 

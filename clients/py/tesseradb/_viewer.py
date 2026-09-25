@@ -16,10 +16,13 @@ import struct
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 from ._auth import Token, TokenSource, minted
 from ._refusal import Refusal
+
+if TYPE_CHECKING:
+    from .widget import Map
 
 #: How near expiry a held token may come before the next read gets another, in seconds.
 TOKEN_MARGIN = 60.0
@@ -107,6 +110,7 @@ class PartialRead(Refusal):
     - `cursor`: the cursor to pass as `cursor` to read the rows after them, or `None` to read
       from the start.
     - `done`: `True` where every row had arrived before the stop, so none is left to read.
+    - `why`: what stopped the read, which the message begins with.
     """
 
     def __init__(self, why: str, cursor: Optional[str], done: bool) -> None:
@@ -149,14 +153,13 @@ class Batches:
       page it is the read's own `cursor`, `None` for a read from the start.
     - `done`: `True` once the server has said that no row remains.
 
-    Every response carries at least one page, so a response that found no row gives a page of no
-    rows, with the read's columns. It is given like any other page, so that a read of nothing
-    still says what its columns are. A response cut short, or a later request refused, raises a
-    `PartialRead` after the pages before it. A category column's dictionary holds the keys of its
-    own page only. `read_all()`
-    joins the pages left into one table with one dictionary per column, and `to_pandas()` does the
-    same and returns a DataFrame. `close()` ends the response being read, which frees its place
-    on the server; dropping the last reference does the same.
+    A response that found no row gives a page of no rows with the read's columns, like any other
+    page, so a read of nothing still says what its columns are. A response cut short, or a later request refused, raises a `PartialRead` after
+    the pages before it. A category column's dictionary holds the keys of its own page only.
+
+    `read_all()` joins the pages not yet taken into one table, with one dictionary per column,
+    and `to_pandas()` returns the same as a DataFrame. `close()` ends the response being read,
+    which frees its place on the server; dropping the last reference does the same.
 
         for batch in db.items("papers", ["title"], page_rows=10_000, batches=True):
             frame = batch.to_pandas()
@@ -498,8 +501,8 @@ class Selection:
         reader may see in the view.
 
         A box whose outline is longer than the server's `max_region_cells` setting allows is
-        counted over the grid cells covering it, so the number can include items just outside
-        the box.
+        counted over the grid cells covering it, so the number can include items outside the box
+        that lie in those cells.
 
             db.view("papers").count()
             db.viewer(["cs.LG"]).view("papers").filter({"year": {"eq": 2023}}).count()
@@ -637,17 +640,19 @@ class Selection:
         colour_by: Optional[str] = None,
         layers: Optional[Sequence[str]] = None,
         height: int = 480,
-    ):
+    ) -> Map:
         """The interactive map of this selection, as a notebook widget.
 
         It opens on this view with this selection's filters applied, framed on its box if it
-        has one. Items outside the box are still drawn when they are in frame.
+        has one.
 
         - `colour_by`: the column to colour points by, or `"cluster:<layer>"` to colour them by
           the clusters of that layer.
         - `layers`: the annotation layers to draw. `None` lets the map choose and `[]` draws
           none.
         - `height`: the widget's height in pixels.
+
+        Items outside the box are still drawn when they are in frame.
 
             db.view("papers").filter({"year": {"range": {"gte": 2020}}}).map(colour_by="venue")
         """
@@ -685,7 +690,7 @@ class Viewer:
     Get one with `connect(url, token)` for a database someone else runs, or with
     `db.viewer(terms)` for one of your own.
 
-    - `url`: the address of the database's reading endpoint.
+    - `url`: the address of the database's viewer plane, where readers read.
     - `token`: a token as a string, a `Token`, or a function that returns either. A function is
       called again when the token it gave is close to expiry.
     - `terms`: the access terms the token was made for, if known. It is kept for display.
@@ -743,7 +748,7 @@ class Viewer:
         filters: Optional[dict] = None,
         height: int = 480,
         **kwargs: Any,
-    ):
+    ) -> Map:
         """The interactive map, as a notebook widget, showing what this reader may see.
 
         - `view`: the view to open on. `None` opens the first one.
@@ -860,8 +865,9 @@ class Viewer:
         `page_rows`, the page size used, `order`, the order used, and the counts under `count`.
         A read that returns no row is a table of no rows with these columns.
 
-        A response cut short, or a later request refused, raises a `PartialRead` whose `rows` are
-        the rows read before it and whose `cursor` reads the rest.
+        A refusal of the first request raises `Refusal`. A response cut short, or a later request
+        refused, raises a `PartialRead` whose `rows` are the rows read before it and whose
+        `cursor` reads the rest.
 
             papers = db.items("papers", ["title", "year"], system_fields=["external_id"])
             papers.to_pandas()
@@ -1158,7 +1164,7 @@ class Viewer:
 def connect(url: str, token: TokenSource) -> Viewer:
     """A reader of a Tessera database someone else runs.
 
-    - `url`: the address of its reading endpoint.
+    - `url`: the address of its viewer plane, where readers read.
     - `token`: the token its operator issued you, as a string, a `Token`, or a function that
       returns either. A function is called again when its token is close to expiry.
 
