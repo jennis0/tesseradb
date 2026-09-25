@@ -2,7 +2,7 @@
  * The headless client. `createStore` returns the store a host draws from and steers.
  * `TesseraClient` calls the viewer and session routes, `Control` the operator's control plane, and
  * `RecordsRead` is a bulk read of items or artifacts. The helpers build the filter drafts and
- * member clauses the store takes, and format its counts.
+ * member clauses the store takes, say which layers it draws and colours by, and format its counts.
  *
  * @module @tesseradb/client
  */

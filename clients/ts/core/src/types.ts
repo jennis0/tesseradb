@@ -983,8 +983,7 @@ export type MembershipColumn = {
  *
  * `present`, where set, says which points have a value: `present[i]` is `0` where the server sent
  * null, and `values[i]` is then a zero that means nothing. Where `present` is missing or `null`,
- * every point has a value. A category has no nulls; code `0` is its
- * absent value.
+ * every point has a value. A category has no nulls; code `0` is its absent value.
  *
  * @category Requests and responses
  */
@@ -1028,9 +1027,9 @@ export type Timings = {
   /** Microseconds the request waited for admission (`x-tessera-admission-us`); `0` when the header is absent. */
   admissionUs: number;
   /**
-   * Per-stage timings from an `x-tessera-stage-ns` header, as numbers in the header's order.
-   * `null` when the header is absent, which is every response from the current server: it sends
-   * stage timings in the body's trailer, which this client does not read.
+   * Per-stage timings from an `x-tessera-stage-ns` header, as numbers in the header's order, or
+   * `null` when the header is absent. The server sends no such header: its stage timings are in the
+   * body's trailer, which this client does not read.
    */
   stageNs: number[] | null;
 };
@@ -1182,7 +1181,6 @@ export type ArtifactDetail = {
    */
   shape: Shape | null;
 };
-
 
 /**
  * The body of `POST /v1/artifacts/browse`, as {@link TesseraClient.browse} takes it: a layer's

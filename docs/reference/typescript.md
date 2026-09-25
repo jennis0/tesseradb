@@ -6,7 +6,7 @@ The TypeScript client is four packages in `clients/ts`. Each page below lists wh
 
 | Package | What it holds |
 |---|---|
-| [`@tesseradb/client`](typescript/client.md) | The headless store that `createStore` returns, the viewer and session client `TesseraClient`, the operator's control-plane client `Control`, the bulk read `RecordsRead`, the helpers that build the filter drafts and member clauses the store takes, and the count formatters. |
+| [`@tesseradb/client`](typescript/client.md) | The headless store that `createStore` returns, the viewer and session client `TesseraClient`, the operator's control-plane client `Control`, the bulk read `RecordsRead`, the helpers that build the filter drafts and member clauses the store takes and say which layers it draws and colours by, and the count formatters. |
 | [`@tesseradb/deck`](typescript/deck.md) | `TesseraLayer`, a deck.gl layer that draws the store, for a host that builds its own `Deck`. deck.gl and luma.gl are peer dependencies. |
 | [`@tesseradb/components`](typescript/components.md) | The types of the `tessera-*` elements' events, parts, context and theme. The elements are on the [Components](components.md) pages. |
 | [`@tesseradb/react`](typescript/react.md) | `useTesseraStore` and `useProjection`, the store as React hooks. |
