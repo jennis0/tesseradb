@@ -5,17 +5,17 @@ import type {ViewportResult} from './types.js';
 export type HeadFrames = {tiles: Uint8Array; subCells: Uint8Array | null; artifacts: Uint8Array | null};
 
 /**
- * Turns a `/v1/viewport` body into typed arrays. {@link workerDecoder} decodes in web workers, off
- * the thread that draws; {@link inlineDecoder} decodes on the calling thread, for a test, a script
- * or a runtime without `Worker`. Pass one as a {@link TesseraClient}'s `decoder` option.
+ * Turns a `/v1/viewport` body into typed arrays. The default decodes in web workers, off the thread
+ * that draws; {@link inlineDecoder} decodes on the calling thread, for a test, a script or a
+ * runtime without `Worker`. Pass one as a {@link TesseraClient}'s `decoder` option.
  *
  * @category HTTP client
  */
 export type Decoder = {
   /**
-   * Decodes a whole body, as {@link decodeViewport} does. `background` sends the work to a separate
-   * worker where the decoder has one, so a response the user is waiting for does not queue behind
-   * speculative work. Rejects with `Error` for a malformed body.
+   * Decodes a whole body. `background` sends the work to a separate worker where the decoder has
+   * one, so a response the user is waiting for does not queue behind speculative work. Rejects with
+   * `Error` for a malformed body.
    */
   decode(bytes: Uint8Array, background?: boolean): Promise<ViewportResult>;
   /** The counts, the underlay and the artifacts: everything before the first points frame. @internal */
@@ -53,7 +53,7 @@ export function inlineDecoder(): Decoder {
 let workerFactory: (() => Worker) | null = null;
 
 /**
- * Sets how {@link workerDecoder} makes a worker, for a host whose bundler cannot load the default.
+ * Sets how the default decoder makes a worker, for a host whose bundler cannot load the default.
  * The default loads `decode.worker.js` from beside this module, which Vite and webpack follow and
  * bundle. That file has Arrow bundled into it, since a page's import map does not apply inside a
  * worker, so it also loads unbundled. esbuild does not follow the URL: a host copies the file

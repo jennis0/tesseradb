@@ -1,5 +1,6 @@
 import {
   CLUSTER_PREFIX,
+  colourLayers,
   createStore,
   emptyDraft,
   type ColumnDraft,
@@ -9,7 +10,6 @@ import {
   type Store,
   type TokenSupplier
 } from '@tesseradb/client';
-import {colourLayers} from '@tesseradb/client/internal';
 import {idString} from './base.js';
 import type {TesseraExplorer} from './explorer.js';
 import './explorer.js';

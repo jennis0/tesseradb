@@ -13,7 +13,7 @@ export {GRID32_PER_WORLD_UNIT, mortonOfTile, tileXY} from './coords.js';
 export {decodeViewport} from './decode.js';
 export {workerDecoder} from './decoder.js';
 export {countCodes, countCodesCached, extendRanks, hasValue, numericValues, rankedValues, widenDomain} from './encoding.js';
-export {browsableLayers, colourLayers, isFilterLayer, layerEntries, type LayerEntry} from './layers.js';
+export {browsableLayers, layerEntries, type LayerEntry} from './layers.js';
 export {artifactColours, positionalEntry, NEUTRAL} from './palette.js';
 export {worldBbox} from './prefetch.js';
 export {assertCompositionMatchesServed, refusalOf} from './presented.js';

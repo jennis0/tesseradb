@@ -1,7 +1,7 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
-import {browsableLayers, isFilterLayer, refusalOf} from '@tesseradb/client/internal';
+import {isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
+import {browsableLayers, refusalOf} from '@tesseradb/client/internal';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';

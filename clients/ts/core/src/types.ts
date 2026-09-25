@@ -358,8 +358,8 @@ export type TileScheme = 'xyz';
 /**
  * One view this principal may reach, as `/v1/meta` publishes it. The frame and projection fields
  * are the same for every principal, and a host decides from them whether to draw a basemap
- * ({@link basemapScheme}) and how to turn a position into longitude and latitude
- * ({@link lonLatOfCell}).
+ * ({@link ViewInfo.tileScheme}) and how to turn a position into longitude and latitude
+ * ({@link ViewInfo.projection}).
  *
  * @category Meta
  */
@@ -983,7 +983,7 @@ export type MembershipColumn = {
  *
  * `present`, where set, says which points have a value: `present[i]` is `0` where the server sent
  * null, and `values[i]` is then a zero that means nothing. Where `present` is missing or `null`,
- * every point has a value. {@link hasValue} reads it. A category has no nulls; code `0` is its
+ * every point has a value. A category has no nulls; code `0` is its
  * absent value.
  *
  * @category Requests and responses

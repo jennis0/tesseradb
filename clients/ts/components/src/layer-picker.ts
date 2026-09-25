@@ -1,5 +1,6 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
-import {isFilterLayer, layerEntries, type LayerEntry} from '@tesseradb/client/internal';
+import {isFilterLayer} from '@tesseradb/client';
+import {layerEntries, type LayerEntry} from '@tesseradb/client/internal';
 import {TesseraElement, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf} from './states.js';

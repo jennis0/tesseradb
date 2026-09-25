@@ -51,7 +51,7 @@ export function defaultFrameScheduler(): FrameScheduler {
 export type PresentedStatus = 'idle' | 'loading' | 'retrying' | 'shown' | 'empty' | 'refused';
 
 /**
- * Why a request failed, as the store's projections report it. Made by {@link refusalOf}.
+ * Why a request failed, as the store's projections report it.
  *
  * @category Projections
  */

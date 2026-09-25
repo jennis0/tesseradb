@@ -349,7 +349,7 @@ export type ArtifactsProjection = {
   /**
    * A colour for every ordinal `table` holds. A band fetched under a coarser cut names artifacts
    * outside `servedOrdinals`, and its points take those artifacts' colours. An ordinal not here
-   * takes {@link NEUTRAL}.
+   * has no colour of its own.
    */
   colours: ReadonlyMap<number, Rgba>;
   /** The palette `colours` was built under. */
