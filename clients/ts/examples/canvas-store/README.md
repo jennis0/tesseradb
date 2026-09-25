@@ -1,11 +1,8 @@
 # The store on a canvas
 
-C2 with none of Tessera's rendering: `createStore`, `setView` from a hand-rolled camera
-(`src/camera.ts`) on a 2D canvas, `subscribe('marks')` drawing dots, and the counts formatted by
-the host with `formatCount` and `formatMasked` — the type says which. The package's dependencies
-are `@tesseradb/client` alone: no Lit, no deck.gl, no element.
+The store with none of Tessera's rendering. `src/main.ts` calls `createStore`, calls `setView` from a hand-written camera (`src/camera.ts`) whenever it moves, and draws the `marks` projection as dots on a 2D canvas. The host formats the counts itself with `formatCount` and `formatMasked`. The only Tessera dependency is `@tesseradb/client`: no Lit, no deck.gl and no elements.
 
 ```bash
-node ../plain-html/server.mjs &      # the app server: tokens, and the users it knows
+node ../plain-html/server.mjs &      # the app server, which mints the tokens
 npm run dev                          # http://localhost:5182
 ```
