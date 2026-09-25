@@ -67,4 +67,6 @@ base64 = { workspace = true }
 # The check verb's payload test round-trips stdout through the type `PUT /control/layers` takes:
 # a body that will not deserialise there is not a payload, whatever it looks like.
 serde_json = { workspace = true }
+# docs/reference/cli.md is rendered with its table helpers (`src/reference.rs`).
+tessera-docgen = { path = "../tessera-docgen" }
 

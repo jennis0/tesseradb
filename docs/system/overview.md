@@ -119,9 +119,8 @@ with.
 
 TesseraDB, the server, is one binary that checks a declaration, builds a bundle, serves it and
 verifies it. It exposes three HTTP planes: viewer, session and control. An OpenAPI description
-covers the viewer and session planes, so any language can drive read access to a deployment
-without the clients below; the control plane, which ingest and administration use, is not yet in
-that description.
+covers all three, so any language can read from and write to a deployment without the clients
+below.
 
 A corpus is declared in one TOML file: the files it reads, one or more coordinate systems over it,
 and how a viewer's access is decided. A GeoNames declaration, shortened:

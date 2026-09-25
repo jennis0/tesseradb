@@ -1,3 +1,10 @@
+/**
+ * The headless client. `createStore` returns the store a host draws from and steers.
+ * `TesseraClient` calls the viewer and session routes, and `Control` the operator's control
+ * plane. The remaining exports build filters, pickers and counts by the rules the elements use.
+ *
+ * @module @tesseradb/client
+ */
 export * from './types.js';
 export * from './coords.js';
 export {splitFramedStreams, type FramedStreams} from './frame.js';
@@ -126,6 +133,7 @@ export {
   type Masked
 } from './counts.js';
 export {createStore, CLUSTER_PREFIX, REGION_HELD_LIMIT, type Store} from './store.js';
+export type {SuggestState} from './suggestions.js';
 export {insideBox, insidePolygon, parseRegionVerdict, quantise, regionOperand, withRegion, type WorldPolygon} from './region.js';
 export {browsableLayers, colourLayers, drawableLayers, isFilterLayer, layerClosure, layerEntries, type LayerEntry} from './layers.js';
 export {enterGroup, hasOneLayout, stepView, viewLabel, viewPickerEntries, viewsOfGroup, type ViewPickerEntry} from './views.js';

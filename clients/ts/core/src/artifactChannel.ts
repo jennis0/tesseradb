@@ -46,7 +46,7 @@ import {refusalOf} from './presented.js';
  * them apart. The debounce clock is injected so the channel runs in node with a fake.
  */
 
-/** The session's held artifacts and the channel's state, from which a projection is built. */
+/** The session's held artifacts and the channel's state, from which a projection is built. @internal */
 export type ArtifactChannelState = {
   /** The first layer asked for, for a reader of one layer. */
   layer: string | null;
@@ -82,6 +82,8 @@ const SETTLE_MS = 200;
 /**
  * How long the view must be quiet before a whole-scope fetch goes out. Longer than the settle
  * debounce, so a pause between drags does not start one.
+ *
+ * @internal
  */
 export const PROMOTE_IDLE_MS = 1500;
 
@@ -90,6 +92,8 @@ export const PROMOTE_IDLE_MS = 1500;
  * can be held whole, since the budget does not act on either. A treed layer (parent-linked, no
  * levels) cannot: `prune_children` and the budget reshape its cut per request. Anything else is
  * treated as treed, which only ever asks.
+ *
+ * @internal
  */
 export function scopeKindOf(layer: Pick<Layer, 'hierarchy' | 'levels'>): 'levelled' | 'flat' | 'treed' {
   if (layer.levels.length > 0) return 'levelled';
@@ -102,6 +106,8 @@ export function scopeKindOf(layer: Pick<Layer, 'hierarchy' | 'levels'>): 'levell
  * mirroring the server's default. Where no level declares a zoom range every level answers;
  * otherwise a level answers where its range covers the zoom, inclusive, and a level with no range
  * answers at every zoom.
+ *
+ * @internal
  */
 export function declaredLevelsAt(layer: Pick<Layer, 'levels'>, zoom: number): number[] {
   zoom = Math.floor(zoom);
@@ -119,6 +125,8 @@ export function declaredLevelsAt(layer: Pick<Layer, 'levels'>, zoom: number): nu
  * and can be several levels deeper than the camera. On a sparse corpus that selects only the
  * deepest level, and most points then carry no membership. The server applies one list to every
  * named layer and ignores a level a layer does not declare, so the union is safe.
+ *
+ * @internal
  */
 export function requestLevels(declarations: ReadonlyMap<string, Pick<Layer, 'hierarchy' | 'levels'>> | readonly Pick<Layer, 'name' | 'hierarchy' | 'levels'>[], layers: readonly string[], zoom: number): number[] | undefined {
   const lookup = (name: string) => (declarations instanceof Map ? declarations.get(name) : (declarations as readonly Pick<Layer, 'name' | 'hierarchy' | 'levels'>[]).find((l) => l.name === name));
@@ -138,6 +146,8 @@ export function requestLevels(declarations: ReadonlyMap<string, Pick<Layer, 'hie
  * box, its centroid is inside it. One with no geometry is in view, since nothing excludes it.
  * `box` is `[minX, minY, maxX, maxY]` in wire grid units, closed; the viewport is in the same
  * units.
+ *
+ * @internal
  */
 export function artifactInView(
   a: Pick<Artifact, 'box' | 'centroid'>,
@@ -194,6 +204,7 @@ export type ArtifactChannelOptions = {
   promoteIdleMs?: number;
 };
 
+/** @internal */
 export class ArtifactChannel {
   private inFlight: AbortController | null = null;
   private timer: unknown = null;
@@ -705,27 +716,29 @@ export class ArtifactChannel {
 }
 
 /**
- * The forest a response carried, assembled from `parentIds`.
+ * The hierarchy among the artifacts a response served, built from their `parentIds`, as the
+ * store's `artifacts` projection holds it in `lineage`. A parent is named only where the same
+ * response served it, so an artifact whose parent was withheld has no parent here and is a root.
+ * On a `dag` layer a child is listed under every served parent. The lineage changes as the map
+ * moves and as the artifact budget cuts the hierarchy.
  *
- * A parent is named only where it is in the same response, and an artifact whose parent was
- * withheld arrives as one with no parent. So an unresolved link counts as none, and an artifact
- * without one is a root of what this viewer was given. On a `dag` layer a child is listed under
- * every served parent. The forest belongs to the response and changes as the map moves and as the
- * budget cuts.
+ * @category Projections
  */
 export type ServedLineage = {
+  /** Every served artifact, by `tesseraId`. */
   byId: Map<bigint, Artifact>;
   /**
-   * A parent's served children, by the parent's id; on a `dag` layer one child may be under
-   * several. Absent means none were served.
+   * A parent's served children, by the parent's `tesseraId`; on a `dag` layer one child may be
+   * under several. Absent where none was served.
    */
   childrenOf: Map<bigint, Artifact[]>;
-  /** Those with no served parent, where a walk of the forest starts. */
+  /** The served artifacts with no served parent, where a walk of the hierarchy starts. */
   roots: Artifact[];
-  /** Whether any link resolved. A flat layer and a tree cut to one level look the same. */
+  /** Whether any parent link resolved. `false` both for a flat layer and for a tree cut to one level. */
   linked: boolean;
 };
 
+/** @internal */
 export function servedLineage(artifacts: readonly Artifact[]): ServedLineage {
   const byId = new Map(artifacts.map((a) => [a.tesseraId, a]));
   const childrenOf = new Map<bigint, Artifact[]>();
@@ -748,6 +761,8 @@ export function servedLineage(artifacts: readonly Artifact[]): ServedLineage {
 /**
  * One artifact and everything served beneath it. The visited set ends the walk on a response
  * that contains a cycle.
+ *
+ * @internal
  */
 export function subtreeOf(lineage: ServedLineage, root: bigint): Set<bigint> {
   const seen = new Set<bigint>();

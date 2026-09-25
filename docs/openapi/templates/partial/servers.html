@@ -1,0 +1,20 @@
+{# Copied from essentials-openapi 1.4.0's partial of the same name. Changed: `markdown`
+   attributes, so descriptions render as Markdown. #}
+## {{texts.servers}}
+
+<table markdown="1">
+<thead>
+<tr>
+<th>{{texts.description}}</th>
+<th>{{texts.url}}</th>
+</tr>
+</thead>
+<tbody markdown="1">
+{%- for server in servers %}
+<tr markdown="1">
+<td markdown="block">{{server.description or server.url}}</td>
+<td><code>{{server.url}}</code></td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>

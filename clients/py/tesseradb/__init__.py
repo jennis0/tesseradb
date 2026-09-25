@@ -1,12 +1,12 @@
 """Tessera's Python package: read a Tessera database, map it in a notebook, and make one.
 
-`connect` reads a database someone else runs; `create` and `open` make one in a directory from
-data frames and files. Every table the package returns is a pyarrow table, whose `.to_pandas()`
-gives a pandas DataFrame where pandas is installed. `pip install tesseradb[widget]` adds the
-notebook map, `Map`.
+`connect` reads a database someone else runs. `create` makes one in a directory from data frames
+and files, and `open` reopens one. Every table the package returns is a pyarrow table, whose
+`.to_pandas()` gives a pandas DataFrame where pandas is installed. `pip install tesseradb[widget]`
+adds the notebook map, `Map`.
 
 `Map`, `create`, `open` and `Database` are loaded when first used, so `import tesseradb` works
-without anywidget.
+without anywidget or pyarrow.
 """
 
 from __future__ import annotations

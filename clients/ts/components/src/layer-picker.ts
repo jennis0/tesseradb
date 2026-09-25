@@ -6,12 +6,22 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-layer-picker>`: which annotation layers the map draws, from `meta.layers`. One entry
- * per layer with its closure: a clustering's labels are a layer that `depends_on` it, so one entry
- * covers both. No artifact count is shown; the server serves none per layer.
+ * A checkbox per annotation layer in `meta.layers`, choosing which layers the map draws. A layer
+ * that others depend on (a clustering and its labels) is one entry that turns on the whole group;
+ * the entry's tooltip names the layers in it. A filter layer, which has nothing to draw, is listed
+ * in its own group without a checkbox; it is applied as a clause through `<tessera-hierarchy>`.
  *
- * A filter layer (one declaring `computed = []`) is listed in its own group without a checkbox,
- * since it has nothing to draw. It is applied as a clause through `<tessera-hierarchy>`.
+ * @summary Which annotation layers the map draws.
+ * @tagname tessera-layer-picker
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - A checkbox
+ *   changed, with the layers now drawn.
+ * @csspart title - The heading.
+ * @csspart state - The state line, with `data-state`.
+ * @csspart refusal - A refusal's code and detail, in the refused state.
+ * @csspart entry - One layer, with `data-layer`, and `data-filter-layer` on a filter layer.
+ * @csspart name - A layer's name.
+ * @csspart group - The heading of the filter layers.
  */
 export class TesseraLayerPicker extends TesseraElement {
   static override styles = [

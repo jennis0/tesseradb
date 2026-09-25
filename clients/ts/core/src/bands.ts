@@ -26,72 +26,106 @@ import {
  * every band.
  */
 
-/** A tile's address: its Morton prefix at a depth. Depth is not recoverable from the prefix. */
+/** A tile's address: its Morton prefix at a depth. Depth is not recoverable from the prefix. @internal */
 export type TileAddress = {depth: number; prefix: bigint};
 
-/** `${depth}:${prefix}`, the map key. */
+/** `${depth}:${prefix}`, the map key. @internal */
 export type BandKey = string;
 
+/** @internal */
 export function bandKey(depth: number, prefix: bigint): BandKey {
   return `${depth}:${prefix}`;
 }
 
 /**
- * One tile's held points, ascending by `tessera_id` as the wire sends them.
+ * One tile's held points, ascending by `tessera_id` as the server sent them. A {@link Composition}
+ * and the store's `marks` projection hold bands by reference. Every array is the band's own copy.
  *
- * Every array is a copy. A view onto the response buffer would keep the whole response alive, so
- * evicting the band would free nothing and `bytes` would be wrong.
+ * @category Projections
  */
 export type Band = {
+  // Every array is a copy. A view onto the response buffer would keep the whole response alive,
+  // so evicting the band would free nothing and `bytes` would be wrong.
+  /** The tile's depth, 0 to 16. */
   depth: number;
+  /** The tile's Morton prefix at `depth`. */
   prefix: bigint;
-  /**
-   * The tile's `(x, y)` index, computed once when the band is built. Recovering it from the prefix
-   * is a `BigInt` loop per bit, and region queries run over every held band on every redraw.
-   */
+  // `x` and `y` are kept because recovering them from `prefix` is a `BigInt` loop per bit, and
+  // region queries run over every held band on every redraw.
+  /** The tile's column index at `depth`. */
   x: number;
+  /** The tile's row index at `depth`. */
   y: number;
+  /** Each point's `tessera_id`, ascending. */
   ids: BigUint64Array;
   /**
-   * Interleaved x, y in deck.gl world space, two `f32` entries a point, converted once from the
-   * wire's `f64` cell space.
+   * Each point's position in deck.gl world space: `x` and `y` interleaved, two `f32` entries a
+   * point.
    */
   positions: Float32Array;
+  /** The rendered columns the response carried, by name, one value per point. */
   scalars: Record<string, ScalarColumn>;
   /**
-   * Per layer the response named, each point's session ordinal, `0` for a point under no served
-   * artifact of that layer. A layer missing here was not named when the band was fetched, so the
-   * band is colour-stale for it. A layer turned off keeps its column until eviction.
-   *
-   * `distinct` holds the band's references on the table, one per ordinal it carries, released when
-   * the band is evicted or truncated.
+   * For each layer the request named, each point's artifact ordinal on the session's
+   * {@link SessionArtifactTable}, `0` for a point under no served artifact of that layer. A layer
+   * missing here was not named when the band was fetched, so the band has no colour for it yet. A
+   * layer turned off keeps its column until the band is evicted.
    */
   membership: Record<string, BandMembership>;
   /**
    * One byte a point: `1` where the point satisfies the request's `highlight`, `0` where it does
    * not. `null` where the request carried no highlight, and then nothing is dulled. A change of
-   * highlight refetches the band, so the bits answer the highlight being drawn.
+   * highlight fetches the band again, so the bits answer the highlight being drawn.
    */
   highlightBits: Uint8Array | null;
-  /** `m(T)` as the server reported it: how many points the definition serves for this tile. */
+  /**
+   * The tile's `served` count: how many points the server serves for this tile at this depth.
+   * Equal to `ids.length` unless eviction has cut the band short.
+   */
   served: number;
-  /** `min(k, k_max_marks)` when this band was fetched; see {@link isComplete}. */
+  /** The `k` the band was fetched with, which decides whether a request at a larger `k` could serve more. */
   capUsed: number;
+  /** How many items this principal may see in the tile. */
   visible: bigint;
+  /** How many of `visible` match the request's filter. */
   matched: bigint;
-  /** The tile's exact `highlighted` count; equal to `matched` where no highlight is set. */
+  /** How many of `matched` also match the request's highlight; equal to `matched` where none is set. */
   highlighted: bigint;
-  /** The declaration: every held identity is strictly below this. `0n` for an empty band. */
+  /** One past the highest `tessera_id` held, so every id in `ids` is below it. `0n` for an empty band. */
   heldBelow: bigint;
+  /** The identity key of the response the band came from. */
   identityKey: string;
+  /** The content key of the response the band came from. */
   contentKey: string;
+  /**
+   * Bytes the band's arrays occupy, the figure the replica's byte budget counts. Text and boolean
+   * columns are estimated high.
+   */
   bytes: number;
+  /**
+   * When the request that fetched the band started, in milliseconds on the store's clock
+   * (`performance.now()` unless the store was given a `clock`). Eviction takes the least recently
+   * touched first within a depth.
+   */
   touchedAt: number;
 };
 
-export type BandMembership = {ordinals: Uint32Array; distinct: Uint32Array};
+/**
+ * One layer's membership column on a {@link Band}.
+ *
+ * @category Projections
+ */
+export type BandMembership = {
+  /** Each point's artifact ordinal on the session's {@link SessionArtifactTable}, `0` for none. */
+  ordinals: Uint32Array;
+  /**
+   * The distinct non-zero ordinals in `ordinals`, ascending. The band holds one reference on the
+   * table for each, released when the band is evicted or cut short.
+   */
+  distinct: Uint32Array;
+};
 
-/** The distinct non-zero ordinals of a slice, ascending: a band's references on the table. */
+/** The distinct non-zero ordinals of a slice, ascending: a band's references on the table. @internal */
 export function distinctOrdinals(ordinals: Uint32Array): Uint32Array {
   const seen = new Set<number>();
   for (let i = 0; i < ordinals.length; i++) {
@@ -109,6 +143,8 @@ export function distinctOrdinals(ordinals: Uint32Array): Uint32Array {
  * complete when it holds every served point and either `served` was below the cap in force or
  * that cap was already at least `k`; then a larger `k` cannot serve more. A complete tile is left
  * out of the request.
+ *
+ * @internal
  */
 export function isComplete(band: Band, contentKey: string, k: number): boolean {
   if (band.contentKey !== contentKey) return false;
@@ -324,7 +360,7 @@ export function bandSplitter(
   };
 }
 
-/** {@link bandSplitter}, drained in one call. */
+/** {@link bandSplitter}, drained in one call. @internal */
 export function bandsOfResult(
   result: ViewportResult,
   depth: number,
@@ -333,9 +369,10 @@ export function bandsOfResult(
   return bandSplitter(result, depth, meta).step(Infinity);
 }
 
-/** What a band contributes to a render, and on what authority. */
+/** What a band contributes to a render, and on what authority. @internal */
 export type Provenance = 'exact' | 'ancestor' | 'descendants';
 
+/** @internal */
 export type Resolved = {
   provenance: Provenance;
   bands: Band[];
@@ -346,6 +383,7 @@ export type Resolved = {
   exact: boolean;
 };
 
+/** @internal */
 export type PlannedRequest = {
   /** The regions to fetch, in tile-index space at the planned depth. Empty means nothing to fetch. */
   fetch: TileRect[];
@@ -354,6 +392,7 @@ export type PlannedRequest = {
   novel: number;
 };
 
+/** @internal */
 export type EvictionFocus = {
   depth: number;
   prefix: bigint;
@@ -447,6 +486,8 @@ function evictionOrder(a: Band, b: Band, focus: EvictionFocus): number {
  *
  * `budget` is a {@link BandBudget} shared with other views' caches, or a number, which gives this
  * cache a budget of its own.
+ *
+ * @internal
  */
 export class BandCache {
   private bands = new Map<BandKey, Band>();

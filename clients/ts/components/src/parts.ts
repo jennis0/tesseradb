@@ -8,6 +8,12 @@
 /** What `renderState` draws, in every element that shows a state. */
 const STATE = ['state', 'refusal', 'refresh', 'reauthorise'];
 
+/**
+ * The parts each element may render, by element name without `tessera-`, as the lists an element
+ * forwards with `exportparts`. A host that renders an element inside its own shadow root forwards
+ * `PARTS[name]` to style them from outside. Each element's reference page says when each part is
+ * rendered.
+ */
 export const PARTS = {
   map: ['canvas', 'controls', 'overlay', 'tooltip', ...STATE],
   status: ['card', 'strip', 'count-shown', 'count-matched', 'count-highlighted', 'count-visible', ...STATE],
@@ -24,6 +30,7 @@ export const PARTS = {
   'artifact-card': ['child', 'children', 'close', 'content', 'count', 'filter', 'fit', 'headline', 'highlight', 'label', 'name', 'outside', 'parent', 'parents', 'shape', 'title', 'value', 'verbs', ...STATE]
 } as const satisfies Record<string, readonly string[]>;
 
+/** An element name `PARTS` lists: `map`, `status`, `item-card`, and so on. */
 export type PartsOf = keyof typeof PARTS;
 
 /**

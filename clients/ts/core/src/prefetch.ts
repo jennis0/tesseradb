@@ -18,6 +18,7 @@ import {rectArea, type TileRect} from './rects.js';
  * ring while the replica has room, because an empty cache wants its first ring close in.
  */
 
+/** @internal */
 export type Viewport = {
   /** deck.gl world-space centre. */
   target: [number, number];
@@ -27,6 +28,7 @@ export type Viewport = {
   height: number;
 };
 
+/** @internal */
 export type PlannerInputs = {
   viewport: Viewport;
   /** Target marks on screen. */
@@ -57,13 +59,14 @@ export type PlannerInputs = {
   depthLayers?: number;
 };
 
-/** One region to ask about, in tile-index space at `depth`. */
+/** One region to ask about, in tile-index space at `depth`. @internal */
 export type PlannedFetch = {
   kind: 'visible' | 'foreground' | 'ring' | 'deeper';
   depth: number;
   rect: TileRect;
 };
 
+/** @internal */
 export type Plan = {
   choice: DepthChoice;
   /** Exactly what is on screen. Issued first, so the screen fills before the margin is bought. */
@@ -79,6 +82,8 @@ export type Plan = {
 /**
  * How far beyond the visible box the foreground request reaches. Costs `MARGIN²` in tiles, and most
  * drags move the view by well under 30% of its width.
+ *
+ * @internal
  */
 export const MARGIN = 1.3;
 
@@ -90,12 +95,14 @@ export const MARGIN = 1.3;
  * since deck.gl re-projects what is there. An aggressive pan moves a third to a half of a viewport,
  * and at 2.6 the buffer reaches 0.8 viewport widths beyond the screen. The cost is `RENDER_MARGIN²`
  * more marks per upload.
+ *
+ * @internal
  */
 export const RENDER_MARGIN = 2.6;
-/** How far the anticipatory ring reaches when the replica is nearly full; see {@link ringMargin}. */
+/** How far the anticipatory ring reaches when the replica is nearly full; see {@link ringMargin}. @internal */
 export const RING_MARGIN = 2.2;
 
-/** How far it reaches when the replica is empty. */
+/** How far it reaches when the replica is empty. @internal */
 export const RING_MARGIN_MAX = 6;
 
 /**
@@ -112,6 +119,8 @@ export const RING_FILL_TARGET = 0.6;
  * The reach costs server work: on the demo corpus the wide ring held three times the points and
  * answered more pans without a request, for six times the server CPU and four times the bytes.
  * With many active principals `RING_MARGIN_MAX` is the setting to lower.
+ *
+ * @internal
  */
 export function ringMargin(heldBytes: number, budgetBytes: number): number {
   if (budgetBytes <= 0) return RING_MARGIN;
@@ -121,10 +130,12 @@ export function ringMargin(heldBytes: number, budgetBytes: number): number {
 /**
  * How far a velocity of one viewport-width per second shifts the ring, as a fraction of the
  * viewport. Bounded well under 1 so a fast flick biases rather than abandons the current view.
+ *
+ * @internal
  */
 export const VELOCITY_BIAS = 0.5;
 
-/** The world-space box a viewport covers, expanded by `margin` and clamped to the world. */
+/** The world-space box a viewport covers, expanded by `margin` and clamped to the world. @internal */
 export function worldBbox(
   viewport: Viewport,
   margin = 1,
@@ -143,6 +154,8 @@ export function worldBbox(
  * What to ask for, given a viewport. The depth is chosen for the visible box and the margin fetched
  * at that depth; chosen for the margined box, it would spend the budget off screen and lower the
  * resolution of what is in view.
+ *
+ * @internal
  */
 export function plan(inputs: PlannerInputs): Plan {
   const {viewport, budget, mTarget, maxTiles, counts, k, visibleInView, velocity, holdDepth} = inputs;

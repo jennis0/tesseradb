@@ -50,8 +50,9 @@ class Token:
         return f"Token(expires_at={self.expires_at}{left}{granting})"
 
 
-#: What a token may be given as: the token itself, a `Token`, or a function returning either.
 TokenSource = Union[str, Token, Callable[[], Union[str, "Token"]]]
+"""What a token may be given as: the token itself as a string, a `Token`, or a function that
+returns either, which is called again when the token it gave is close to expiry."""
 
 
 def minted(source: TokenSource) -> Token:
@@ -75,7 +76,7 @@ def authorise(
 ) -> Token:
     """Make a token that reads as someone holding the access terms given. For operators.
 
-    - `session_url`: the address of the database's session endpoint.
+    - `session_url`: the address of the database's session plane, where tokens are made.
     - `credential`: the session credential. It can make a token for any terms, so whoever holds
       it can read everything. Give other people a token, never the credential.
     - `terms`: the access terms the token grants.
@@ -83,6 +84,9 @@ def authorise(
 
     The token's `renew()` makes a fresh one with the same credential, which stays in this
     process. A `Database` does this for you: `db.token(terms)` and `db.viewer(terms)`.
+
+    An empty `session_url` or `credential` raises `ValueError`, and a request the server refuses
+    raises `PermissionError` with its status and answer.
 
         token = tesseradb.authorise(session_url, credential, ["cs.LG"])
         tesseradb.connect(viewer_url, token).view("papers").count()
@@ -131,7 +135,8 @@ def revoke(
     - `timeout`: how long to wait for the server, in seconds.
 
     An id that names no live token is accepted without comment, so the answer says nothing
-    about which tokens exist.
+    about which tokens exist. An empty `session_url` or `credential`, or a `Token` with no
+    `token_id`, raises `ValueError`, and a request the server refuses raises `PermissionError`.
 
         tesseradb.revoke(session_url, credential, token)
     """

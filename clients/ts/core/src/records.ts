@@ -11,18 +11,28 @@ import type {PageEnd, RecordsTrailer, RegionVerdict, Timings} from './types.js';
 export type RecordsRequest = (cursor?: string) => Promise<Response>;
 
 /**
- * A whole bulk read of `POST /v1/items` or `POST /v1/artifacts`: each page as an Arrow table as it
- * arrives, response after response, each response requested from the cursor the one before it
- * ended with, until that cursor is null.
+ * A whole bulk read of `POST /v1/items` or `POST /v1/artifacts`, as {@link TesseraClient.items}
+ * and {@link TesseraClient.artifacts} return it: each page as an Arrow table as it arrives,
+ * response after response, each response requested from the cursor the one before it ended with,
+ * until that cursor is null.
  *
  * A page is yielded once its page end has arrived, so a records frame cut off before its page end
- * is never yielded. A body that ends or is cut without its trailer throws after its last whole
- * page, and so does a follow-up request the server refuses. {@link cursor} is then where the read
+ * is never yielded. A response that found no row yields one table of no rows, which carries the
+ * read's columns. A body that ends or is cut without its trailer throws after its last whole page,
+ * and so does a follow-up request the server refuses. {@link cursor} is then where the read
  * resumes without repeating a row.
  *
  * The bodies are read only as the caller iterates. Iterating to the end, breaking out of the loop,
  * calling `return()` or aborting the request's signal each release the connection and send no
  * further request. A `return()` while a page is awaited ends that wait as the end of the read.
+ *
+ * ```ts
+ * const read = await client.items(token, {view: 'papers', fields: ['title', 'year']});
+ * for await (const page of read) console.log(page.numRows);
+ * ```
+ *
+ * @typeParam Head - {@link ItemsHead} or {@link ArtifactsHead}.
+ * @category HTTP client
  */
 export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
   private at: string | null | undefined;
@@ -31,6 +41,7 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
   private stopped = false;
   private readonly pages: AsyncGenerator<Table, undefined, undefined>;
 
+  /** @internal */
   constructor(
     /** The first response's head. */
     readonly head: Head,
@@ -84,10 +95,18 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
     return this.at;
   }
 
+  /**
+   * The next page, or `done` once the read has ended.
+   *
+   * @throws `Error` for a response cut or ended without its trailer, or whose trailer counts other
+   *   pages or rows than it carried, after the pages before it; {@link TesseraError} for a
+   *   follow-up request the server refuses; and the signal's reason once it aborts.
+   */
   next(): Promise<IteratorResult<Table, undefined>> {
     return this.pages.next();
   }
 
+  /** Stop the read: the response being read is released and no other is requested. */
   return(): Promise<IteratorResult<Table, undefined>> {
     // A generator that never started skips its `finally`, so the body is released here too.
     this.stopped = true;
@@ -95,6 +114,7 @@ export class RecordsRead<Head> implements AsyncIterableIterator<Table> {
     return this.pages.return(undefined);
   }
 
+  /** This read, so that `for await` iterates it. */
   [Symbol.asyncIterator](): this {
     return this;
   }

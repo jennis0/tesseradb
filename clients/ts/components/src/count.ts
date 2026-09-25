@@ -5,15 +5,20 @@ import {attachContextRoot, defineOnce} from './define.js';
 import {tokens} from './tokens.js';
 
 /**
- * `<tessera-count>`: renders a `Count` or a `Masked` through the client's formatter. A sample shows
- * both figures or neither; a scalar one figure or none, marked approximate when inexact; nothing
- * against a stale view.
+ * Renders a `Count` or a `Masked` through the client's `formatCount` and `formatMasked`. A sample
+ * (`count`) shows both figures, as `4,812 of 12,465`, or neither when the count is inexact; a
+ * scalar (`masked`) shows one figure, marked `≈` when inexact. Nothing is rendered while `stale` is
+ * set. With both properties set, `count` is rendered.
  *
- * `figure="shown"` renders a sample's shown figure alone, for a strip whose next cell is the
- * total, and carries the total on `data-total`. The cell is empty exactly when the pair would be.
+ * This element takes no store; the host or another element sets its properties.
  *
- * `part="count"` carries `data-kind` (`sample` or `scalar`), `data-exact`, and `data-empty` when
- * nothing was rendered.
+ * @summary A sample count or a masked count, formatted.
+ * @tagname tessera-count
+ * @category Elements
+ * @csspart count - The figure. Carries `data-kind` (`sample`, `scalar` or `none`), `data-exact`
+ *   (`true` or `false`), `data-empty` (`true` when nothing was rendered) and, under
+ *   `figure="shown"`, `data-total` with the total.
+ * @csspart label - The `label` text after the figure, rendered only when the figure is.
  */
 export class TesseraCount extends LitElement {
   static override styles = [
@@ -35,10 +40,18 @@ export class TesseraCount extends LitElement {
     `
   ];
 
+  /** A sample count: how many marks are shown of how many are served. */
   @property({attribute: false}) accessor count: Count | null = null;
+  /** A masked count over the viewer's visible set, rendered where `count` is not set. */
   @property({attribute: false}) accessor masked: Masked | null = null;
+  /** Renders nothing, since the figures predate a change to the corpus. */
   @property({type: Boolean}) accessor stale = false;
+  /** Text rendered after the figure, such as `matched`. */
   @property() accessor label = '';
+  /**
+   * `both` renders a sample as `shown of total`; `shown` renders the shown figure alone and puts
+   * the total on the part's `data-total`. The figure is empty exactly when the pair would be.
+   */
   @property() accessor figure: 'both' | 'shown' = 'both';
 
   override render(): TemplateResult | typeof nothing {

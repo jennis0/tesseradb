@@ -9,17 +9,40 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-item-card>`: the selected point. A headline, the fields as a label and value grid by
- * name in declaration order, then Open and Copy id. Fields are matched by name because
- * `/v1/items` omits a field with no value. A text column is served only here, never in a viewport
- * response. A category arrives resolved to its key.
+ * The selected item's record: a headline, the views and labels it is in, its fields as a label and
+ * value grid, its group-scoped values, then Open and Copy id. Fields are listed by name in
+ * declaration order, then any the schema does not declare; a field the record has no value for is
+ * left out. A category field shows its key. A timestamp shows as an ISO date-time.
  *
- * The headline is the field named in `title-field`, else the item's id; every other field is in
- * the grid. A slot per field (`field-<name>`) lets a host render one as a link, and
- * `tessera-open` carries the id as a decimal string for Open.
+ * The headline is the field `title-field` names, else the item's `tessera_id`. Each field has a
+ * slot, `field-<name>`, so a host can render one as a link. The item is the store's selection
+ * (`Store.pick`), or the `item` property.
  *
- * `pick` is what the map's pick resolved to. A miss is ordinary; a broken pick is a fault in the
- * map and the card says so.
+ * @summary The selected item's fields, with Open and Copy id.
+ * @tagname tessera-item-card
+ * @category Elements
+ * @slot field-<name> - Replaces the value of the field `<name>`, in the grid or the headline.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-open']>} tessera-open - Open was pressed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - The close button was
+ *   pressed, with `what` set to `item`.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-viewfollow']>} tessera-viewfollow - A view chip
+ *   was pressed: follow the item into that view, at its position there.
+ * @csspart title - The heading, holding the close button.
+ * @csspart close - The close button.
+ * @csspart state - The state line, with `data-state`: `shown`, `empty` (no item, or nothing under
+ *   the cursor), `refused` or `detached`.
+ * @csspart refusal - A refusal's code and detail, or the fault a broken pick reports.
+ * @csspart headline - The headline, with `data-name` set to the field it shows.
+ * @csspart view-chip - One view the item is in, with `data-view` and `aria-current` on the current
+ *   view.
+ * @csspart label-chip - One access label of the item that the viewer holds.
+ * @csspart field - One field, with `data-name`, and `data-prose` on a value over 60 characters.
+ * @csspart label - A field's name, and the headings above the view and label chips.
+ * @csspart value - A field's value.
+ * @csspart scoped - The group-scoped values, grouped by key.
+ * @csspart key - One key's heading among the group-scoped values, with `data-key`.
+ * @csspart open - The Open button.
+ * @csspart copy - The Copy id button, which copies the `tessera_id` to the clipboard.
  */
 export class TesseraItemCard extends TesseraElement {
   static override styles = [
@@ -72,12 +95,21 @@ export class TesseraItemCard extends TesseraElement {
     `
   ];
 
-  /** Data by property, for a host feeding the card from its own fetch. */
+  /**
+   * The item to show, for a host that fetches the record itself. Set with `refusal` or alone, it
+   * replaces the store's selection.
+   */
   @property({attribute: false}) accessor item: {id: bigint; detail: ItemDetail} | null = null;
+  /** A refusal to show in place of an item, for a host that fetches the record itself. */
   @property({attribute: false}) accessor refusal: Refusal | null = null;
+  /**
+   * What the map's last click resolved to (`<tessera-map>`'s `lastPick`), shown while no item is
+   * selected: `{kind: 'miss'}` shows "Nothing under the cursor", and a broken pick shows the fault.
+   */
   @property({attribute: false}) accessor pick: PickOutcome = null;
+  /** The schema for field order and view names, where the card has no store to read it from. */
   @property({attribute: false}) accessor meta: Meta | null = null;
-  /** The field the headline shows; unset, the headline is the item's id. */
+  /** The field the headline shows. Unset, or where the item has no value for it, the headline is the `tessera_id`. */
   @property({attribute: 'title-field'}) accessor titleField = '';
 
   private get shown(): {item: {id: bigint; detail: ItemDetail} | null; refusal: Refusal | null; meta: Meta | null} {

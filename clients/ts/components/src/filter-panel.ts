@@ -13,14 +13,32 @@ import './filter.js';
 const FILTER_PARTS = exportparts('filter');
 
 /**
- * `<tessera-filter-panel>`: a `<tessera-filter>` for every operand in `meta.filterOperands`, with
- * the applied clauses as chips and a Clear all control.
+ * A `<tessera-filter>` for every column `meta.filterOperands` lists, under the clauses applied, as
+ * chips, and a Clear all button. Each chip shows its position: `filter` narrows the map and every
+ * count to the matches, and `highlight` keeps the map and lights the matches. Pressing the word on
+ * a chip moves the clause to the other position. A `member_of` clause (an artifact chosen on the
+ * artifact card or in the hierarchy) is a chip too.
  *
- * Each chip shows its verb: `filter` narrows the map to the matches, `highlight` keeps the map and
- * lights the matches. Clicking the verb moves the clause to the other expression. A `member_of`
- * clause (an artifact chosen from the card or the hierarchy panel) is a chip too.
+ * Removing a chip empties its control and keeps its position. Clear all empties every control and
+ * drops every `member_of` clause.
  *
- * Rendering is keyed, so a store update does not rebuild a control under the cursor.
+ * @summary Every filter control, with the applied clauses as chips.
+ * @tagname tessera-filter-panel
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A
+ *   column's chip moved between filter and highlight (with `verb`), a column's chip was removed
+ *   (with `expr` null), or Clear all was pressed (with `column` and `expr` null). Moving or removing
+ *   a `member_of` chip fires nothing. Each inner control fires its own as well.
+ * @csspart title - The heading, holding Clear all.
+ * @csspart clear - The Clear all button, shown while any clause is applied.
+ * @csspart state - The state line, with `data-state`.
+ * @csspart refusal - A refusal's code and detail, in the refused state.
+ * @csspart chips - The applied clauses.
+ * @csspart chip - One applied clause, with `data-verb` (`filter` or `highlight`) and `data-column`
+ *   or `data-artifact`.
+ * @csspart verb - The position word on a chip, which moves the clause when pressed.
+ * @csspart filter-<part> - A part of an inner `<tessera-filter>`, forwarded under a `filter-`
+ *   prefix: `filter-entry`, `filter-value-chip`, and so on.
  */
 export class TesseraFilterPanel extends TesseraElement {
   static override styles = [

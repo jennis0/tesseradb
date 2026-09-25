@@ -45,3 +45,9 @@ notebooks/
 # The documentation site: its virtualenv and its build output.
 .venv-docs/
 /site/
+
+# The TypeScript and components reference, generated from the client sources by
+# clients/ts/scripts/reference.mjs, and the custom-elements manifest it reads.
+/docs/reference/typescript/
+/docs/reference/components/
+clients/ts/components/custom-elements.json

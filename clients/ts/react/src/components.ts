@@ -1,3 +1,17 @@
+/**
+ * Every `tessera-*` element as a React component with typed props and event handlers, made with
+ * `@lit/react`. `TesseraMap` wraps `<tessera-map>`, and so on. A prop that names an element
+ * property is set as that property, so an object such as `store` reaches the element under React
+ * 18, which sets a custom element's props as attributes. Each element's events are handler props,
+ * such as `onPick` for `tessera-pick`. The element classes are exported as types with an `Element`
+ * suffix, such as `MapElement`, for typing a ref. Each element's attributes, properties, events,
+ * slots and parts are on its page in the Components reference, which each wrapper's type links to.
+ *
+ * This entry imports `@tesseradb/components`, and with it Lit and deck.gl. The hooks are in the
+ * package root, `@tesseradb/react`, which imports neither.
+ *
+ * @module @tesseradb/react/components
+ */
 import {createComponent, type EventName} from '@lit/react';
 import * as React from 'react';
 import {
@@ -20,19 +34,11 @@ import {
   type TesseraEventMap
 } from '@tesseradb/components';
 
-/**
- * `@tesseradb/react/components`: every `tessera-*` element as a React component with typed props
- * and events. This entry imports `@tesseradb/components`, and with it Lit and deck.gl; a host that
- * wants only the hooks imports the package root.
- *
- * `@lit/react` sets a prop that names an element property as that property, not an attribute,
- * which object values such as `store` need and React 18 does not do for custom elements. Under
- * React 19 the wrappers still type the props and event handlers. `TesseraMap` wraps
- * `<tessera-map>`, and so on; the element classes are exported as types with an `Element` suffix,
- * for a ref.
- */
 
-/** The events the elements emit, as `@tesseradb/components` declares them. */
+/**
+ * The events the elements emit, by name, each a `CustomEvent` with its detail: `TesseraEventMap`
+ * from `@tesseradb/components`.
+ */
 export type TesseraEvents = TesseraEventMap;
 
 const ev = <K extends keyof TesseraEvents>(name: K) => name as EventName<TesseraEvents[K]>;
@@ -50,8 +56,16 @@ const mapEvents = {
   onLayerChange: ev('tessera-layerchange')
 };
 
+/** `<tessera-store>` as a React component. It has no event props. */
 export const TesseraStore = wrap('tessera-store', StoreElement, {});
-/** The explorer carries every event: its pieces emit inside it, and each event is composed. */
+/**
+ * `<tessera-explorer>` as a React component. It has a handler prop for every event, since the
+ * elements inside it emit them and each event bubbles out of it: `onPick`, `onHover`,
+ * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactSelect`,
+ * `onArtifactFit`, `onColourChange`, `onLevelChange`, `onFilterChange`, `onStateChange`,
+ * `onExpired`, `onOpen`, `onClose`, `onClauseChange`, `onViewSwitch` and `onViewFollow`, each for
+ * the `tessera-` event of the same name in lower case.
+ */
 export const TesseraExplorer = wrap('tessera-explorer', ExplorerElement, {
   ...mapEvents,
   onArtifactSelect: ev('tessera-artifactselect'),
@@ -67,27 +81,62 @@ export const TesseraExplorer = wrap('tessera-explorer', ExplorerElement, {
   onViewSwitch: ev('tessera-viewswitch'),
   onViewFollow: ev('tessera-viewfollow')
 });
+/**
+ * `<tessera-map>` as a React component. Event props: `onPick` (`tessera-pick`), `onHover`
+ * (`tessera-hover`), `onViewChange` (`tessera-viewchange`), `onSelectChange`
+ * (`tessera-selectchange`), `onArtifactOpen` (`tessera-artifactopen`) and `onLayerChange`
+ * (`tessera-layerchange`).
+ */
 export const TesseraMap = wrap('tessera-map', MapElement, mapEvents);
+/** `<tessera-status>` as a React component. Event props: `onStateChange` (`tessera-statechange`) and `onExpired` (`tessera-expired`). */
 export const TesseraStatus = wrap('tessera-status', StatusElement, {onStateChange: ev('tessera-statechange'), onExpired: ev('tessera-expired')});
+/** `<tessera-count>` as a React component. It has no event props. */
 export const TesseraCount = wrap('tessera-count', CountElement, {});
+/**
+ * `<tessera-item-card>` as a React component. Event props: `onOpen` (`tessera-open`), `onClose`
+ * (`tessera-close`) and `onViewFollow` (`tessera-viewfollow`).
+ */
 export const TesseraItemCard = wrap('tessera-item-card', ItemCardElement, {onOpen: ev('tessera-open'), onClose: ev('tessera-close'), onViewFollow: ev('tessera-viewfollow')});
+/** `<tessera-filter>` as a React component. Event prop: `onFilterChange` (`tessera-filterchange`). */
 export const TesseraFilter = wrap('tessera-filter', FilterElement, {onFilterChange: ev('tessera-filterchange')});
+/** `<tessera-filter-panel>` as a React component. Event prop: `onFilterChange` (`tessera-filterchange`). */
 export const TesseraFilterPanel = wrap('tessera-filter-panel', FilterPanelElement, {onFilterChange: ev('tessera-filterchange')});
+/** `<tessera-selection>` as a React component. Event prop: `onSelectChange` (`tessera-selectchange`). */
 export const TesseraSelection = wrap('tessera-selection', SelectionElement, {onSelectChange: ev('tessera-selectchange')});
+/** `<tessera-layer-picker>` as a React component. Event prop: `onLayerChange` (`tessera-layerchange`). */
 export const TesseraLayerPicker = wrap('tessera-layer-picker', LayerPickerElement, {onLayerChange: ev('tessera-layerchange')});
+/** `<tessera-view-picker>` as a React component. Event prop: `onViewSwitch` (`tessera-viewswitch`). */
 export const TesseraViewPicker = wrap('tessera-view-picker', ViewPickerElement, {onViewSwitch: ev('tessera-viewswitch')});
+/** `<tessera-key-picker>` as a React component. Event prop: `onViewSwitch` (`tessera-viewswitch`). */
 export const TesseraKeyPicker = wrap('tessera-key-picker', KeyPickerElement, {onViewSwitch: ev('tessera-viewswitch')});
+/**
+ * `<tessera-artifact-list>` as a React component. Event prop: `onArtifactSelect`
+ * (`tessera-artifactselect`).
+ */
 export const TesseraArtifactList = wrap('tessera-artifact-list', ArtifactListElement, {onArtifactSelect: ev('tessera-artifactselect')});
+/**
+ * `<tessera-artifact-card>` as a React component. Event props: `onArtifactFit`
+ * (`tessera-artifactfit`), `onClauseChange` (`tessera-clausechange`) and `onClose`
+ * (`tessera-close`).
+ */
 export const TesseraArtifactCard = wrap('tessera-artifact-card', ArtifactCardElement, {
   onArtifactFit: ev('tessera-artifactfit'),
   onClauseChange: ev('tessera-clausechange'),
   onClose: ev('tessera-close')
 });
+/**
+ * `<tessera-legend>` as a React component. Event props: `onColourChange` (`tessera-colourchange`),
+ * `onLevelChange` (`tessera-levelchange`) and `onLayerChange` (`tessera-layerchange`).
+ */
 export const TesseraLegend = wrap('tessera-legend', LegendElement, {
   onColourChange: ev('tessera-colourchange'),
   onLevelChange: ev('tessera-levelchange'),
   onLayerChange: ev('tessera-layerchange')
 });
+/**
+ * `<tessera-hierarchy>` as a React component. Event props: `onClauseChange` (`tessera-clausechange`)
+ * and `onArtifactFit` (`tessera-artifactfit`).
+ */
 export const TesseraHierarchy = wrap('tessera-hierarchy', HierarchyElement, {onClauseChange: ev('tessera-clausechange'), onArtifactFit: ev('tessera-artifactfit')});
 
 export type {

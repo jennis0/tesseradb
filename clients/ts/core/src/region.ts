@@ -12,13 +12,15 @@ import type {FilterExpr, RegionOperand, RegionVerdict} from './types.js';
  * `x-tessera-region`, and holds the client's copy of the server's point-in-polygon predicate.
  */
 
-/** A polygon in world space, as the lasso draws it: at least three vertices, implicitly closed. */
+/** A polygon in world space, as the lasso draws it: at least three vertices, implicitly closed. @internal */
 export type WorldPolygon = readonly (readonly [number, number])[];
 
 /**
  * A world coordinate on the server's 32-bit-per-axis grid, as the tiler quantises a point:
  * `floor(v / WORLD_SIZE · 2³²)`, clamped. The predicate tests quantised positions against
  * quantised vertices, as the count does, so the two agree along the edge.
+ *
+ * @internal
  */
 export function quantise(v: number): number {
   const scaled = Math.floor((v / WORLD_SIZE) * 4294967296);
@@ -33,6 +35,8 @@ export function quantise(v: number): number {
  *
  * This is for a drawn selection. Which artifact a point belongs to is the `membership:<layer>`
  * column; a served `shape` is generalised for drawing.
+ *
+ * @internal
  */
 export function insidePolygon(x: number, y: number, polygon: WorldPolygon): boolean {
   const px = BigInt(quantise(x));
@@ -62,7 +66,7 @@ export function insidePolygon(x: number, y: number, polygon: WorldPolygon): bool
   return inside;
 }
 
-/** Whether a world-space point falls inside a world-space box, closed on every side, on the grid. */
+/** Whether a world-space point falls inside a world-space box, closed on every side, on the grid. @internal */
 export function insideBox(x: number, y: number, box: [number, number, number, number]): boolean {
   const px = quantise(x);
   const py = quantise(y);
@@ -70,9 +74,11 @@ export function insideBox(x: number, y: number, box: [number, number, number, nu
 }
 
 /**
- * A selection as the wire's `region` leaf, in the view's data coordinates. A box is normalised so
- * either corner may come first. A lasso is sent as drawn, so the server's canonical form and cache
- * key depend on the drawing alone. An artifact is named by its `tessera_id`.
+ * A selection as the operand of a `region` filter leaf, in the view's data coordinates. A box is
+ * normalised so either corner may come first. A lasso's points are sent as drawn. An artifact is
+ * named by its `tessera_id` as a decimal string.
+ *
+ * @category Filters
  */
 export function regionOperand(
   shape: {kind: 'box'; bbox: [number, number, number, number]} | {kind: 'lasso'; points: [number, number][]} | {kind: 'artifact'; id: bigint}
@@ -90,8 +96,13 @@ export function regionOperand(
 }
 
 /**
- * The region composed with the other filters. Outside is `none_of` over the leaf; every item with a
- * row has a position, so the complement is defined.
+ * Joins a `region` leaf for `operand` to `expr` with `all_of`, or returns the leaf alone where
+ * `expr` is `null`. Returns `expr` unchanged where `operand` is `null`.
+ *
+ * @param outside - Whether to select everything outside the region, by wrapping the leaf in
+ *   `none_of`. Defaults to `false`.
+ *
+ * @category Filters
  */
 export function withRegion(expr: FilterExpr | null, operand: RegionOperand | null, outside = false): FilterExpr | null {
   if (!operand) return expr;
@@ -103,6 +114,8 @@ export function withRegion(expr: FilterExpr | null, operand: RegionOperand | nul
  * Parses `x-tessera-region`: `exact`, or `cover; depth=<d>`, an answer exact for a cover of the shape
  * at that depth, which is a superset. `null` where the request carried no region leaf or the header
  * is not understood.
+ *
+ * @internal
  */
 export function parseRegionVerdict(header: string | null): RegionVerdict | null {
   if (!header) return null;

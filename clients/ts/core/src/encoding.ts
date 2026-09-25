@@ -13,13 +13,37 @@
 import type {StandInPiece} from './compose.js';
 import type {CategoryValue, ScalarColumn} from './types.js';
 
-/** The sticky domain for one numeric column. */
-export type Domain = {min: number; max: number};
+/**
+ * The range of one numeric column's values among the marks drawn, for a colour ramp. The store's
+ * `legend` projection holds one per column in `domains`. It widens as marks arrive and does not
+ * narrow until the store is cleared, so a pan does not recolour the map. It is taken from the marks
+ * alone, since a range over the whole corpus would be an aggregate over items the viewer may not
+ * see.
+ *
+ * @category Projections
+ */
+export type Domain = {
+  /** The smallest finite value drawn. */
+  min: number;
+  /** The largest finite value drawn. */
+  max: number;
+};
 
-/** Palette rank per code, as a plain object so it lives comfortably in a projection. */
+/**
+ * A palette rank per category code. The store's `legend` projection holds one per column in
+ * `ranks`. Codes are ranked by how often they appear among the marks drawn when first seen, and a
+ * code keeps its rank until the store is cleared, so a pan does not recolour the map.
+ *
+ * @category Projections
+ */
 export type Ranks = Record<number, number>;
 
-/** Whether point `i` of `column` has a value: false where the server sent a null. */
+/**
+ * Whether point `i` of `column` has a value: `false` where the server sent a null. A category
+ * column has no nulls, so this is `true` for all its points; there code `0` means no value.
+ *
+ * @category Projections
+ */
 export function hasValue(column: ScalarColumn, i: number): boolean {
   return !column.present || column.present[i] === 1;
 }
@@ -30,6 +54,8 @@ export function hasValue(column: ScalarColumn, i: number): boolean {
  *
  * `u64`, `i64` and `timestamp_us` lose precision past 2^53 as doubles. A colour ramp has about 256
  * steps, so the loss does not show here; the decoder keeps the 64-bit arrays for display.
+ *
+ * @internal
  */
 export function numericValues(column: ScalarColumn): ArrayLike<number> | null {
   if (column.arrowType === 'bool' || column.arrowType === 'utf8') return null;
@@ -45,12 +71,14 @@ export function numericValues(column: ScalarColumn): ArrayLike<number> | null {
  * Widens `held` to cover `column`, or establishes it. It does not narrow, so a pan onto a narrow
  * part of the data does not recolour what is on screen. `null` for a column with no numeric reading
  * or no marks.
+ *
+ * @internal
  */
 export function widenDomain(held: Domain | null, column: ScalarColumn): Domain | null {
   return widenDomainOver(held, column, null, Infinity);
 }
 
-/** {@link widenDomain} over a stand-in piece's drawn subset: a prefix or an index list. */
+/** {@link widenDomain} over a stand-in piece's drawn subset: a prefix or an index list. @internal */
 export function widenDomainOver(
   held: Domain | null,
   column: ScalarColumn,
@@ -81,6 +109,8 @@ export function widenDomainOver(
 /**
  * Counts each code among the marks on screen. The served marks are a sample of the visible set,
  * which is enough to choose which values get a colour; the result is never shown as a count.
+ *
+ * @internal
  */
 export function countCodes(column: ScalarColumn): Map<number, number> {
   const counts = new Map<number, number>();
@@ -99,6 +129,7 @@ export function countCodes(column: ScalarColumn): Map<number, number> {
  */
 const heldCounts = new WeakMap<object, Map<number, number>>();
 
+/** @internal */
 export function countCodesCached(column: ScalarColumn): Map<number, number> {
   let held = heldCounts.get(column);
   if (!held) {
@@ -108,7 +139,7 @@ export function countCodesCached(column: ScalarColumn): Map<number, number> {
   return held;
 }
 
-/** {@link countCodes} over a stand-in piece's drawn subset, into `into`. Not memoised: pieces are rebuilt per derive. */
+/** {@link countCodes} over a stand-in piece's drawn subset, into `into`. Not memoised: pieces are rebuilt per derive. @internal */
 export function countCodesInPiece(into: Map<number, number>, piece: StandInPiece, column: string): void {
   const values = piece.band.scalars[column]?.values as ArrayLike<number | bigint> | undefined;
   if (!values) return;
@@ -131,6 +162,8 @@ export function countCodesInPiece(into: Map<number, number>, piece: StandInPiece
  * colours, key order would give the colours to arbitrary values; frequency gives them to what is on
  * screen. Assigned ranks are not reordered, so a pan does not recolour the map. Cleared when the
  * identity key changes.
+ *
+ * @internal
  */
 export function extendRanks(held: Ranks, counts: Map<number, number>): Ranks {
   const unranked = [...counts.entries()].filter(([code]) => held[code] === undefined);
@@ -142,7 +175,7 @@ export function extendRanks(held: Ranks, counts: Map<number, number>): Ranks {
   return next;
 }
 
-/** The resolved values that hold one of `paletteSize` colours, in rank order: the legend's list. */
+/** The resolved values that hold one of `paletteSize` colours, in rank order: the legend's list. @internal */
 export function rankedValues(
   values: readonly CategoryValue[],
   ranks: Ranks,

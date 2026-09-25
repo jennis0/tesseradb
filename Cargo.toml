@@ -21,6 +21,7 @@ members = [
     "crates/tessera-cli",
     "crates/tessera-bench",
     "crates/tessera-python",
+    "crates/tessera-docgen",
 ]
 
 [workspace.package]

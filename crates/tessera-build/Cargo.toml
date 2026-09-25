@@ -48,4 +48,6 @@ tessera-engine = { path = "../tessera-engine" }
 croaring = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+# docs/reference/corpus-toml.md is rendered from this crate's source (`src/config/reference.rs`).
+tessera-docgen = { path = "../tessera-docgen" }
 

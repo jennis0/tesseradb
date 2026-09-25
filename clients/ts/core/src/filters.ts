@@ -9,7 +9,13 @@ import type {FilterExpr, FilterOperandSet, FilterOperator} from './types.js';
  * The controls and their units are the renderer's.
  */
 
-/** What a `text` control asks for. */
+/**
+ * How a `text` control matches its query. `all` sends `match`: every analysed token must appear, in
+ * any order and position. `any` sends `match` with `minimum_should_match: 1`: one token is enough.
+ * `phrase` sends `phrase`: the tokens adjacent and in order.
+ *
+ * @category Filters
+ */
 export type TextMode =
   /** `match`: every analysed token must appear, in any order and any position. */
   | 'all'
@@ -19,28 +25,60 @@ export type TextMode =
   | 'phrase';
 
 /**
- * Where a clause is sent. Moving a clause changes only this field, so it is not re-entered.
+ * Which of a request's two expressions a clause joins. Moving a clause between them changes only
+ * this field.
  *
- * - `filter`: the clause joins `filters`; the map narrows to the matches.
- * - `highlight`: the clause joins `highlight`; the matches are lit and the rest dulled.
+ * - `filter`: the clause joins `filters`, and the map and its counts narrow to the matches.
+ * - `highlight`: the clause joins `highlight`, and the matches are lit and the rest dulled.
+ *
+ * @category Filters
  */
 export type ClauseVerb = 'filter' | 'highlight';
 
-/** What a control asks: the predicate alone. */
+/**
+ * What one filter control asks, without its position: one variant per column family. A control
+ * whose predicate is empty asks nothing (see {@link isPopulated}).
+ *
+ * @category Filters
+ */
 export type ColumnPredicate =
+  /** A search of `query` by analysed words, matched as `mode` says. The query is trimmed. */
   | {family: 'text'; query: string; mode: TextMode}
+  /** `needle` compared with the whole value (`eq`), its start (`prefix`) or any part (`contains`). */
   | {family: 'keyword'; needle: string; op: 'eq' | 'prefix' | 'contains'}
-  /** Selected category keys; the server resolves them to codes. */
+  /**
+   * The selected category keys, sent as `in`. The server resolves keys to codes. A key this viewer
+   * cannot see matches nothing, as a key that does not exist does, and neither is refused.
+   */
   | {family: 'category'; keys: string[]}
-  /** Inclusive bounds in the column's own units; `null` for an open side. */
+  /** Inclusive bounds in the column's own units, sent as `range`; `null` for an open side. */
   | {family: 'numeric'; gte: number | null; lte: number | null};
 
-/** One control: what it asks, and which of the request's two expressions it joins. */
-export type ColumnDraft = ColumnPredicate & {verb: ClauseVerb};
+/**
+ * One filter control: its predicate, and which of the request's two expressions it joins.
+ *
+ * @category Filters
+ */
+export type ColumnDraft = ColumnPredicate & {
+  /** The expression the control joins. */
+  verb: ClauseVerb;
+};
 
+/**
+ * A filter panel's controls, keyed by the column name the leaf is sent under. It may hold empty
+ * controls, which constrain nothing. {@link emptyDraft} seeds one; {@link composeFilters} turns it
+ * into the expressions a request carries.
+ *
+ * @category Filters
+ */
 export type FilterDraft = Record<string, ColumnDraft>;
 
-/** Whether a control carries a predicate. */
+/**
+ * Whether a control carries a predicate: a text query that is not blank, a keyword needle that is
+ * not empty, at least one category key, or at least one numeric bound.
+ *
+ * @category Filters
+ */
 export function isPopulated(draft: ColumnPredicate): boolean {
   switch (draft.family) {
     case 'text':
@@ -84,9 +122,13 @@ function operatorOf(draft: ColumnPredicate): FilterOperator {
 }
 
 /**
- * Composes the draft's clauses for one position into an expression, or `null` for none, so an
- * unfiltered request and one whose filter constrains nothing are the same request. A single clause
- * is sent as a bare leaf.
+ * Composes the populated controls in one position into a filter expression: `null` for none, the
+ * bare leaf for one, and `all_of` over the leaves for several, in the draft's key order. A draft
+ * that constrains nothing therefore sends the same request as no filter.
+ *
+ * @param verb - The position to compose. Defaults to `filter`.
+ *
+ * @category Filters
  */
 export function composeFilters(draft: FilterDraft, verb: ClauseVerb = 'filter'): FilterExpr | null {
   const leaves: FilterExpr[] = [];
@@ -103,14 +145,21 @@ export function composeFilters(draft: FilterDraft, verb: ClauseVerb = 'filter'):
 }
 
 /**
- * How many controls carry a predicate, for a panel heading. With a `verb`, how many in that
- * position.
+ * How many controls carry a predicate, for a panel heading. With `verb`, only those in that
+ * position are counted.
+ *
+ * @category Filters
  */
 export function activeCount(draft: FilterDraft, verb?: ClauseVerb): number {
   return Object.values(draft).filter((d) => isPopulated(d) && (verb === undefined || d.verb === verb)).length;
 }
 
-/** Moves one column's clause to the other position, keeping its predicate. */
+/**
+ * Returns a draft with `column`'s control moved to `verb`, its predicate kept. Returns `draft`
+ * itself where the column has no control or the control is already in that position.
+ *
+ * @category Filters
+ */
 export function withVerb(draft: FilterDraft, column: string, verb: ClauseVerb): FilterDraft {
   const control = draft[column];
   if (!control || control.verb === verb) return draft;
@@ -118,13 +167,17 @@ export function withVerb(draft: FilterDraft, column: string, verb: ClauseVerb): 
 }
 
 /**
- * A draft with one empty control per filterable column, from `/v1/meta`'s `filter_operands`. A
- * column that publishes no operator a control here can send gets no control. A keyword control
- * starts on whichever of `eq`, `prefix` and `contains` the column publishes first.
+ * A draft with one empty control per filterable column in `operands` (`Meta.filterOperands`), each
+ * in the `filter` position. A column gets a control only where it publishes the operator the
+ * control sends: `match` for text (the control starts in mode `all`), `in` for category and `range`
+ * for numeric. A keyword control starts on whichever of `eq`, `prefix` and `contains` the column
+ * publishes first.
  *
- * A key is the leaf's name as sent. A group-scoped column is seeded under its bare name, which the
- * server answers only under a view of its group; a caller drawing it under another view re-keys it
- * as `column@key`.
+ * A group-scoped column is keyed by its bare name, which the server answers only under a view of
+ * its group or a group sharing its views. To filter it under another view, re-key the control as
+ * `column@key`, naming one view of the group by its key; the bare name there is refused with `422`.
+ *
+ * @category Filters
  */
 export function emptyDraft(operands: FilterOperandSet[]): FilterDraft {
   const draft: FilterDraft = {};

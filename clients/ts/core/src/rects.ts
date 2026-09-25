@@ -9,35 +9,41 @@
  * Everything is inclusive integer tile indices at one depth, so containment is exact.
  */
 
-/** An inclusive rectangle in tile-index space at one depth. `x1 >= x0`, `y1 >= y0`. */
+/** An inclusive rectangle in tile-index space at one depth. `x1 >= x0`, `y1 >= y0`. @internal */
 export type TileRect = {x0: number; y0: number; x1: number; y1: number};
 
 /**
  * A rectangle the client has asked for and absorbed the answer to. `capUsed` is `min(k, k_max_marks)`
  * when it was fetched; the coverage holds only for a `k` no larger, since a larger `k` can serve
  * more points from the same tiles.
+ *
+ * @internal
  */
 export type Coverage = {rect: TileRect; depth: number; contentKey: string; capUsed: number};
 
+/** @internal */
 export function rectArea(r: TileRect): number {
   return (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1);
 }
 
+/** @internal */
 export function rectContains(outer: TileRect, inner: TileRect): boolean {
   return (
     inner.x0 >= outer.x0 && inner.y0 >= outer.y0 && inner.x1 <= outer.x1 && inner.y1 <= outer.y1
   );
 }
 
+/** @internal */
 export function rectContainsTile(r: TileRect, x: number, y: number): boolean {
   return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
 }
 
+/** @internal */
 export function rectsIntersect(a: TileRect, b: TileRect): boolean {
   return a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0;
 }
 
-/** The overlap, or null when they do not touch. */
+/** The overlap, or null when they do not touch. @internal */
 export function rectIntersection(a: TileRect, b: TileRect): TileRect | null {
   if (!rectsIntersect(a, b)) return null;
   return {
@@ -51,6 +57,8 @@ export function rectIntersection(a: TileRect, b: TileRect): TileRect | null {
 /**
  * `want` minus `hole`, as up to four disjoint rectangles: above, below, then left and right of what
  * remains. Overlapping pieces would be requested and absorbed twice.
+ *
+ * @internal
  */
 export function rectSubtract(want: TileRect, hole: TileRect): TileRect[] {
   const overlap = rectIntersection(want, hole);
@@ -69,6 +77,8 @@ export function rectSubtract(want: TileRect, hole: TileRect): TileRect[] {
  * `want` minus every hole, as disjoint rectangles. Past `maxPieces` it stops subtracting and returns
  * what it has, a superset of the new ground: one slightly large request is cheaper than many small
  * ones, and asking again for a held tile costs the server almost nothing.
+ *
+ * @internal
  */
 export function rectSubtractAll(want: TileRect, holes: TileRect[], maxPieces = 8): TileRect[] {
   let pieces = [want];
@@ -103,6 +113,8 @@ export function rectFuse(a: TileRect, b: TileRect): TileRect | null {
  * Adds a rectangle to a coverage list, fusing where the union is exactly a rectangle, repeated until
  * nothing more fuses. Fusion keeps a sequence of pans to one rectangle, so each pan subtracts to one
  * request.
+ *
+ * @internal
  */
 export function coverageAdd(list: Coverage[], added: Coverage): Coverage[] {
   const others: Coverage[] = [];
@@ -133,7 +145,7 @@ export function coverageAdd(list: Coverage[], added: Coverage): Coverage[] {
   return [...others, ...candidates, merged];
 }
 
-/** Coverage entries usable at this depth and content key. */
+/** Coverage entries usable at this depth and content key. @internal */
 export function coverageAt(
   list: Coverage[],
   depth: number,

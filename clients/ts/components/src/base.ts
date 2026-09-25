@@ -6,6 +6,16 @@ import type {SelectionShapeDetail, TesseraEventDetails} from './events.js';
 import {storeContext} from './context.js';
 
 /**
+ * Where an element's store came from: its `store` property, a `<tessera-store>` or
+ * `<tessera-explorer>` above it (`context`), one it built itself from `viewer-url` and `token` or
+ * `authorise` (`own`), or none (`detached`), in which case it renders its detached state.
+ */
+export type StoreSource = 'property' | 'context' | 'own' | 'detached';
+
+/** What an own store was built from; a change in any of these rebuilds it. */
+type OwnConfig = {viewerUrl: string; token: string; supplied: boolean};
+
+/**
  * What every element shares: how it finds its store, and how it follows it.
  *
  * Store precedence: a `.store` property; else a context answer (a provider that connects after an
@@ -19,22 +29,28 @@ import {storeContext} from './context.js';
  * reorder them, and JupyterLab scrolls notebook cells out of the DOM; a new store each time would
  * refetch the view. An own store lives until `dispose()` or until its attributes change.
  */
-export type StoreSource = 'property' | 'context' | 'own' | 'detached';
-
-/** What an own store was built from; a change in any of these rebuilds it. */
-type OwnConfig = {viewerUrl: string; token: string; supplied: boolean};
-
 export abstract class TesseraElement extends LitElement {
-  /** A store handed in directly, which outranks every other source. */
+  /**
+   * The store to read, which outranks a store from context and the element's own. The element does
+   * not dispose a store it was given.
+   */
   @property({attribute: false}) accessor store: Store | null = null;
-  /** For an element that may build its own store (the map, the explorer, `<tessera-store>`). */
+  /**
+   * The viewer plane's base URL. Only `<tessera-map>`, `<tessera-explorer>` and `<tessera-store>`
+   * read it, to build their own store where no `store` property or context supplies one. Changing
+   * it builds a new store.
+   */
   @property({attribute: 'viewer-url'}) accessor viewerUrl = '';
+  /**
+   * A viewer token for the store the element builds from `viewer-url`. Only the map, the explorer
+   * and `<tessera-store>` read it. Changing it builds a new store.
+   */
   @property() accessor token = '';
   /**
-   * A token supplier, used in place of `token`. The store this element builds always calls the
-   * supplier set now, so replacing the function (an inline arrow in a framework's render) does not
-   * rebuild the store. Setting or clearing it does. A different principal needs a new `token`, a
-   * new `viewer-url` or a new element.
+   * A token supplier, used in place of `token`, which the store calls to renew the token before it
+   * expires. The store calls whichever function is set at the time, so replacing the function (an
+   * inline arrow in a framework's render) does not rebuild the store; setting or clearing it does.
+   * A different principal needs a new `token`, a new `viewer-url` or a new element.
    */
   @property({attribute: false}) accessor authorise: TokenSupplier | null = null;
 
@@ -49,10 +65,11 @@ export abstract class TesseraElement extends LitElement {
   private consumer: ContextConsumer<typeof storeContext, this> | null = null;
   private unsubscribe: (() => void) | null = null;
 
-  /** The store this element reads. */
+  /** The store this element reads, from whichever source won; `null` while detached. */
   get activeStore(): Store | null {
     return this.resolvedStore;
   }
+  /** Where `activeStore` came from. */
   get source(): StoreSource {
     return this.storeSource;
   }
@@ -157,7 +174,11 @@ export abstract class TesseraElement extends LitElement {
     this.requestUpdate();
   }
 
-  /** Release the store this element built. A host that handed one in disposes it itself. */
+  /**
+   * Dispose of the store this element built and detach from it. Disconnecting does not do this, so
+   * a host that removes an element for good calls it. A store handed in by property or context is
+   * left for its owner to dispose.
+   */
   dispose(): void {
     const own = this.ownStore;
     this.ownStore = null;
