@@ -13,7 +13,7 @@
  */
 
 /**
- * What a {@link SessionArtifactTable} holds for one ordinal.
+ * What an {@link ArtifactTable} holds for one ordinal.
  *
  * @category Projections
  */
@@ -26,7 +26,7 @@ export type ArtifactEntry = {
    * The ordinals of the artifact's parents that the table holds, ascending by `tessera_id` as the
    * server orders them, and empty where none is held. A parent is known only where it arrived in
    * the same response as the child, so a walk that meets an empty list stops there. A tree has at
-   * most one parent; a `dag` layer may have several, and {@link SessionArtifactTable.resolve} takes
+   * most one parent; a `dag` layer may have several, and {@link ArtifactTable.resolve} takes
    * the first.
    */
   parentOrdinals: readonly number[];
@@ -43,11 +43,7 @@ export type ArtifactEntry = {
   centroid: readonly [number, number] | null;
 };
 
-/**
- * An artifact as a holder hands it to {@link SessionArtifactTable.take}.
- *
- * @category Projections
- */
+/** An artifact as a holder hands it to {@link SessionArtifactTable.take}. */
 export type ArtifactRef = {
   /** The artifact's `tessera_id`. */
   tesseraId: bigint;
@@ -69,7 +65,7 @@ export type ArtifactRef = {
 export const NO_ORDINAL = 0;
 
 /**
- * What changed for one ordinal, as {@link SessionArtifactTable.changesSince} reports it. Each kind
+ * What changed for one ordinal, as {@link ArtifactTable.changesSince} reports it. Each kind
  * asks a reader to recompute something different:
  *
  * - `named`: the ordinal was assigned. It is on no other ordinal's parent chain yet, so only its
@@ -105,16 +101,60 @@ function keyOf(layer: string, tesseraId: bigint): string {
  * The session's table of annotation artifacts, one ordinal per artifact, as the store's
  * `artifacts` projection holds it. A point's membership column carries ordinals from this table
  * (see {@link BandMembership}), and a renderer resolves an ordinal to an artifact and a colour
- * through it.
+ * through it. The store alone writes to it.
  *
- * An ordinal is a `u32`, with {@link NO_ORDINAL} for none. Ordinals are reference-counted: each
- * holder takes one reference per distinct ordinal it carries and releases it when dropped, and an
- * ordinal left with none is freed and may be given to another artifact. The store's bands and its
- * held artifacts are the holders.
+ * An ordinal is a `u32`, with {@link NO_ORDINAL} for none. Ordinals are reference-counted by the
+ * store's bands and held artifacts, and an ordinal none of them holds is freed and may be given to
+ * another artifact.
  *
  * @category Projections
  */
-export class SessionArtifactTable {
+export interface ArtifactTable {
+  /**
+   * How many times the table has changed: when an ordinal is named or freed, a centroid arrives, a
+   * parent link changes, or the table is cleared. A value derived from the table is current while
+   * this has not moved. Compare for equality only.
+   */
+  readonly version: number;
+  /**
+   * Every change since `version`, oldest first, so a colour map or lookup texture derived from the
+   * table can be patched instead of rebuilt. `[]` where `version` is current.
+   *
+   * @returns The changes, or `null` where the table cannot answer: `version` is from before the
+   *   last `clear`, is ahead of the table, or is further behind than the latest 32,768 to 65,536
+   *   changes the table keeps. A reader given `null` rebuilds from `liveEntries()`.
+   */
+  changesSince(version: number): ArtifactTableChange[] | null;
+  /** How many ordinals are in use. */
+  readonly live: number;
+  /** One past the highest ordinal assigned since the last `clear`: the size a lookup texture indexed by ordinal needs. */
+  readonly range: number;
+  /** The ordinal of an artifact, or {@link NO_ORDINAL} where the table does not hold it. */
+  ordinalOf(layer: string, tesseraId: bigint): number;
+  /** The entry an ordinal names, or `null` for `0`, a freed ordinal or one never assigned. */
+  entry(ordinal: number): ArtifactEntry | null;
+  /** Every ordinal in use, with its entry, for building a colour per ordinal. */
+  liveEntries(): {ordinal: number; entry: ArtifactEntry}[];
+  /**
+   * The ordinal itself or its nearest ancestor that `served` holds, found by walking parent links.
+   * On a `dag` layer the walk takes the first parent at each step, and parents are ordered by
+   * `tessera_id`, so it gives the same answer on every rebuild.
+   *
+   * @param served - Anything with `has`, such as a set of ordinals or a colour map.
+   * @param maxLevel - The level to colour at. The walk passes a served ancestor whose `rung` is
+   *   deeper and stops at the first at or above it, so moving to a coarser level needs no new
+   *   request. Left out, the walk stops at the first served ordinal.
+   * @returns The ordinal found, or {@link NO_ORDINAL} where the walk ends without one: at a link
+   *   never seen, or below a cut finer than anything held.
+   */
+  resolve(ordinal: number, served: {has(ordinal: number): boolean}, maxLevel?: number): number;
+}
+
+/**
+ * The store's {@link ArtifactTable}, with the writes: each holder takes one reference per distinct
+ * ordinal it carries and releases it when dropped.
+ */
+export class SessionArtifactTable implements ArtifactTable {
   /** Indexed by ordinal; slot 0 is reserved. A freed slot holds null until reused. */
   private entries: (ArtifactEntry | null)[] = [null];
   private refs: number[] = [0];
@@ -134,11 +174,6 @@ export class SessionArtifactTable {
   /** The version `journal[0]` follows: the oldest version {@link changesSince} can answer from. */
   private journalFrom = 0;
 
-  /**
-   * How many times the table has changed: when an ordinal is named or freed, a centroid arrives, a
-   * parent link changes, or the table is cleared. A value derived from the table is current while
-   * this has not moved. Compare for equality only.
-   */
   get version(): number {
     return this.stamp;
   }
@@ -154,14 +189,6 @@ export class SessionArtifactTable {
     }
   }
 
-  /**
-   * Every change since `version`, oldest first, so a colour map or lookup texture derived from the
-   * table can be patched instead of rebuilt. `[]` where `version` is current.
-   *
-   * @returns The changes, or `null` where the table cannot answer: `version` is from before the
-   *   last `clear`, is ahead of the table, or is further behind than the latest 32,768 to 65,536
-   *   changes the table keeps. A reader given `null` rebuilds from `liveEntries()`.
-   */
   changesSince(version: number): ArtifactTableChange[] | null {
     if (version === this.stamp) return [];
     if (version < this.journalFrom || version > this.stamp) return null;
@@ -173,27 +200,22 @@ export class SessionArtifactTable {
     return out;
   }
 
-  /** How many ordinals are in use. */
   get live(): number {
     return this.ordinals.size;
   }
 
-  /** One past the highest ordinal assigned since the last `clear`: the size a lookup texture indexed by ordinal needs. */
   get range(): number {
     return this.entries.length;
   }
 
-  /** The ordinal of an artifact, or {@link NO_ORDINAL} where the table does not hold it. */
   ordinalOf(layer: string, tesseraId: bigint): number {
     return this.ordinals.get(keyOf(layer, tesseraId)) ?? NO_ORDINAL;
   }
 
-  /** The entry an ordinal names, or `null` for `0`, a freed ordinal or one never assigned. */
   entry(ordinal: number): ArtifactEntry | null {
     return this.entries[ordinal] ?? null;
   }
 
-  /** Every ordinal in use, with its entry, for building a colour per ordinal. */
   liveEntries(): {ordinal: number; entry: ArtifactEntry}[] {
     const out: {ordinal: number; entry: ArtifactEntry}[] = [];
     for (const ordinal of this.ordinals.values()) {
@@ -292,18 +314,6 @@ export class SessionArtifactTable {
     }
   }
 
-  /**
-   * The ordinal itself or its nearest ancestor that `served` holds, found by walking parent links.
-   * On a `dag` layer the walk takes the first parent at each step, and parents are ordered by
-   * `tessera_id`, so it gives the same answer on every rebuild.
-   *
-   * @param served - Anything with `has`, such as a set of ordinals or a colour map.
-   * @param maxLevel - The level to colour at. The walk passes a served ancestor whose `rung` is
-   *   deeper and stops at the first at or above it, so moving to a coarser level needs no new
-   *   request. Left out, the walk stops at the first served ordinal.
-   * @returns The ordinal found, or {@link NO_ORDINAL} where the walk ends without one: at a link
-   *   never seen, or below a cut finer than anything held.
-   */
   resolve(ordinal: number, served: {has(ordinal: number): boolean}, maxLevel?: number): number {
     let at = ordinal;
     // Bounded by the table's size, so a link cycle cannot hang the caller.

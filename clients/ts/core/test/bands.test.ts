@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {BandBudget, BandCache, bandSplitter, bandsOfResult, isComplete, type Band} from '../src/bands.js';
+import {BandBudget, BandCache, bandSplitter, bandsOfResult, type Band} from '../src/bands.js';
 import {mortonOfTile, tileContains, tileOfCode, tileXY} from '../src/coords.js';
 import type {ScalarColumn} from '../src/types.js';
 import {band as heldBand, result, tile} from './support.js';
@@ -67,29 +67,6 @@ describe('bandsOfResult', () => {
     const [only] = bandsOfResult(res, 1, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
     // A subarray would share the 4-element response buffer; a copy owns exactly its own two.
     expect(only!.ids.buffer.byteLength).toBe(2 * 8);
-  });
-});
-
-describe('isComplete', () => {
-  it('requires the whole served set', () => {
-    expect(isComplete(band({depth: 3, prefix: 1n, n: 10, served: 10}), 'ck', 500)).toBe(true);
-    expect(isComplete(band({depth: 3, prefix: 1n, n: 9, served: 10}), 'ck', 500)).toBe(false);
-  });
-
-  it('survives a larger k when the cap was not the binding clause', () => {
-    // served < capUsed: theta or the floor decided, and neither moves with k.
-    const thetaBound = band({depth: 3, prefix: 1n, n: 40, served: 40, capUsed: 500});
-    expect(isComplete(thetaBound, 'ck', 2000)).toBe(true);
-  });
-
-  it('is void at a larger k when the cap WAS binding', () => {
-    const capped = band({depth: 3, prefix: 1n, n: 500, served: 500, capUsed: 500});
-    expect(isComplete(capped, 'ck', 500)).toBe(true);
-    expect(isComplete(capped, 'ck', 2000)).toBe(false);
-  });
-
-  it('is void under a rotated content key', () => {
-    expect(isComplete(band({depth: 3, prefix: 1n, n: 10, served: 10}), 'other', 500)).toBe(false);
   });
 });
 

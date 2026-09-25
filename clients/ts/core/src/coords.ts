@@ -116,27 +116,6 @@ export function tileToCellBox({x, y, z}: TileIndex): CellBox {
 }
 
 /**
- * The data-space bbox `[x0, y0, x1, y1]` a tile covers, half-open like {@link tileToCellBox}. Not
- * what to send to `/v1/viewport`; see {@link tileToRequestBbox}.
- *
- * @internal
- */
-export function tileToDataBbox(
-  index: TileIndex,
-  q: Quantisation
-): [number, number, number, number] {
-  const cells = tileToCellBox(index);
-  const spanX = q.xMax - q.xMin;
-  const spanY = q.yMax - q.yMin;
-  return [
-    q.xMin + (cells.cx0 / CELL_GRID) * spanX,
-    q.yMin + (cells.cy0 / CELL_GRID) * spanY,
-    q.xMin + (cells.cx1 / CELL_GRID) * spanX,
-    q.yMin + (cells.cy1 / CELL_GRID) * spanY
-  ];
-}
-
-/**
  * The bbox to request for a tile: its cell block, inset to the centres of its first and last cells.
  *
  * The server's bbox is closed: it quantises both corners to cells and includes both. A bbox whose
@@ -192,23 +171,4 @@ export function dataToWorldXY(x: number, y: number, q: Quantisation): [number, n
     ((x - q.xMin) / (q.xMax - q.xMin)) * WORLD_SIZE,
     ((y - q.yMin) / (q.yMax - q.yMin)) * WORLD_SIZE
   ];
-}
-
-/**
- * Converts an interleaved x, y buffer from cell space to world space, narrowing to the
- * `Float32Array` a deck.gl binary attribute takes. Needs no quantisation extent: cell space is the
- * grid's own units, and world space is a uniform scaling of it.
- *
- * Precision is lost here: below about a 2^-8 fraction of a world unit `f32` runs out. Recovering it
- * would take deck.gl's `fp64` emulation, a `position64Low` attribute, which is a change to the layer
- * and not to the wire.
- *
- * @internal
- */
-export function positionsToWorld(positions: Float64Array): Float32Array {
-  const out = new Float32Array(positions.length);
-  for (let i = 0; i < positions.length; i++) {
-    out[i] = positions[i]! / CELLS_PER_WORLD_UNIT;
-  }
-  return out;
 }

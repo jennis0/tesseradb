@@ -2,6 +2,8 @@
 
 Vite and React 19. `<TesseraExplorer>` from `@tesseradb/react/components` draws a store the host owns (`useTesseraStore`). Its `detail` slot holds a host component, `src/ItemCard.tsx`, which reads `useProjection(store, 'selection')`.
 
+It expects the demo's `2m4` scale (`./run_demo.sh --scale 2m4` at the repository root), whose users `../plain-html/users.json` lists.
+
 ```bash
 node ../plain-html/server.mjs &      # the app server, which mints the tokens
 npm run dev                          # http://localhost:5181

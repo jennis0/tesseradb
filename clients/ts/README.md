@@ -30,7 +30,7 @@ You need Node 20.19 or later (22.12 or later on the 22 line), which Vite 8 requi
 npm ci
 ```
 
-Inside the workspace the packages resolve to their TypeScript sources, through the `tessera-source` export condition that `tsconfig.base.json` and each Vite and Vitest config name. The tests, the viewer and the examples therefore run without a build.
+Inside the workspace the packages resolve to their TypeScript sources, through the `tessera-source` export condition. `tsconfig.base.json` names it, and so does every Vite and Vitest config that loads a workspace package, so the unit tests, the viewer and the examples run without a build. The components' browser config leaves it out, because that suite tests the built `dist/`; the plain-HTML, spike and wire-example configs load no workspace package.
 
 ```bash
 npm run build
@@ -61,7 +61,7 @@ The check runs these steps, each of which can be run alone from this directory:
 | Live tests of core against a real server | `npm --prefix core run test:live` | a `tessera` binary and the notebook corpus |
 | Browser tests of the elements | `npm --prefix components run test:browser` | Chromium for Playwright, and a build |
 
-The live tests build the notebook corpus into a temporary deployment, serve it, and call it through `TesseraClient`, `Control` and the bulk reads. They look for the binary in `TESSERA_BIN`, then this checkout's `target/release` or `target/debug`, then `PATH`, and for the corpus in `TESSERA_NOTEBOOK_DATA`, then `data/notebook/` at the root of the main checkout, which worktrees share. That directory is not in git. Where either is missing, each test is skipped and prints why. Build the binary with `cargo build --release -p tessera-cli`.
+The live tests build the notebook corpus into a temporary deployment, serve it, and call it through `TesseraClient`, `Control` and the bulk reads. They look for the binary in `TESSERA_BIN`, then this checkout's `target/release` or `target/debug`, then `PATH`, then a `target/release` or `target/debug` in any directory above this one, and for the corpus in `TESSERA_NOTEBOOK_DATA`, then `data/notebook/` at the root of the main checkout, which worktrees share. That directory is not in git. Where either is missing, each test is skipped and prints why. Build the binary with `cargo build --release -p tessera-cli`.
 
 The browser tests run the elements in headless Chromium, and also load the built packages from `dist/`: the decode worker from its file with no bundler, and the elements built by Vite from their `dist/` modules. Install the browser once with `npx playwright install chromium`.
 
@@ -75,20 +75,23 @@ The reference on the documentation site is generated from the doc comments. `com
 
 ```bash
 ./run_demo.sh --scale notebook     # the arXiv notebook corpus, with its annotation layers
+./run_demo.sh --scale 2m4          # 2,422,486 arXiv papers; the examples expect this one
 ./run_demo.sh --bundle PATH        # a bundle you already have
 ```
 
 It prints the viewer's address, which carries the dataset document in `?datasets=`. Everything it writes goes under `tessera-demo/` at the repository root, which git ignores. The script's header lists its other options.
 
-Two settings make the demo work, and both are for development only. `serve.dev_cors_origins` in the generated `tessera.toml` lets the viewer's origin call the session listener from the browser, and the server logs a warning when it is set. `VITE_TESSERA_SESSION_CREDENTIAL` puts the session credential into the viewer's page, so the viewer can mint a token for each principal in its picker. A page embedding Tessera gets its tokens from its own server, as the plain-HTML example shows.
+Two settings make the demo work, and both are for development only. `serve.dev_cors_origins` in the generated `tessera.toml` lets the viewer's origin call both the viewer and the session listeners from the browser, and the server logs a warning when it is set. `VITE_TESSERA_SESSION_CREDENTIAL` puts the session credential into the viewer's page, so the viewer can mint a token for each principal in its picker. A page embedding Tessera gets its tokens from its own server, as the plain-HTML example shows.
 
-The viewer's Vite port is fixed at 5173, because the origin is listed in `dev_cors_origins`. `VITE_PORT` moves it, and `run_demo.sh` writes the port it is given into the deployments it generates.
+The viewer's Vite server listens on 5173, or on `VITE_PORT` where that is set, and fails to start where the port is taken instead of moving to another: the origin has to match the one in `dev_cors_origins`. `run_demo.sh` writes the viewer's port into the deployments it generates.
 
 `viewer/smoke*.mjs` and `harness/harness.mjs` drive a running viewer in headless Chromium and report or check what it did. Each script's header says what it measures and which flags it takes. They are not part of `check-clients.sh`. The harness also runs against the plain-HTML example with `--url http://localhost:5180`.
 
 ## The examples
 
-Each example is a workspace that `npm run typecheck` checks. The plain-HTML example's app server mints the tokens for all four, so start it first. It listens on port 5180 and calls a viewer listener at `http://127.0.0.1:37585` and a session listener at `http://127.0.0.1:49303` with the session credential `dev-session-credential`; `TESSERA_VIEWER_URL`, `TESSERA_SESSION_URL` and `TESSERA_SESSION_CRED` change them. The other three are Vite dev servers that proxy `/token` and `/users` to it and `/v1/*` to the viewer listener.
+Each example is a workspace that `npm run typecheck` checks. They expect the demo's `2m4` scale, started with `./run_demo.sh --scale 2m4`: its viewer listener on `127.0.0.1:37585`, its session listener on `127.0.0.1:49303`, and the session credential `dev-session-credential`. The users in `examples/plain-html/users.json` hold access labels from that bundle's term dictionary. `TESSERA_VIEWER_URL`, `TESSERA_SESSION_URL` and `TESSERA_SESSION_CRED` point the examples at another deployment, whose users `users.json` then has to name.
+
+The plain-HTML example's app server mints the tokens for all four, so start it after the demo and before the others. It listens on port 5180. The other three are Vite dev servers that proxy `/token` and `/users` to it and `/v1/*` to the viewer listener.
 
 | Example | Port | What it shows |
 |---|---|---|

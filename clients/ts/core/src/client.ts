@@ -2,6 +2,7 @@ import {
   checkTrailerCounts,
   decodeViewport,
   parseTrailer,
+  stageNsOf,
   type PointsPart,
   type ViewportHead
 } from './decode.js';
@@ -10,7 +11,7 @@ import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
 import {openRecords, type RecordsRead} from './records.js';
-import type {ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /**
  * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
@@ -31,6 +32,8 @@ type Decoded = {
   points: number;
   ms: number;
   workerMs: number | null;
+  /** The trailer's `stage_ns`. */
+  stageNs: number[] | null;
 };
 
 /**
@@ -50,6 +53,21 @@ function emptyPoints() {
     highlighted: null,
     pointsProjection: 'full' as const
   };
+}
+
+/**
+ * The trailer's `stage_ns` in a whole body, found by walking the frame headers to the trailer, or
+ * `null` where the walk finds none. The decoder checks the body's grammar.
+ */
+function stageNsOfBody(bytes: Uint8Array): number[] | null {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let at = 0; at + 5 <= bytes.byteLength; ) {
+    const end = at + 5 + view.getUint32(at + 1, true);
+    if (end > bytes.byteLength) return null;
+    if (bytes[at] === FRAME_TRAILER) return stageNsOf(parseTrailer(bytes.subarray(at + 5, end)));
+    at = end;
+  }
+  return null;
 }
 
 /** The same result with its points removed, since they went to the part sink. */
@@ -414,7 +432,6 @@ export class TesseraClient {
       signal
     });
     if (!response.ok) await fail(response);
-    const stage = response.headers.get('x-tessera-stage-ns');
     const coordinates = {
       identityKey: response.headers.get('x-tessera-identity-key') ?? '',
       // The quotes are the entity-tag syntax and not part of the key.
@@ -445,7 +462,7 @@ export class TesseraClient {
         // The server's time to its first flush, not to the end of the stream.
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),
-        stageNs: stage ? stage.split(',').map(Number) : null
+        stageNs: decoded.stageNs
       },
       ...coordinates,
       bytes: decoded.bytes
@@ -463,13 +480,15 @@ export class TesseraClient {
     // Read before decoding: the worker path transfers the buffer, which detaches it and leaves
     // `byteLength` at 0.
     const size = bytes.byteLength;
+    const stageNs = stageNsOfBody(bytes);
     const result = counts ? decodeViewport(bytes) : await this.decoder!.decode(bytes, background);
     return {
       result,
       bytes: size,
       points: result.ids.length,
       ms: performance.now() - started,
-      workerMs: counts ? null : this.decoder!.lastWorkerMs
+      workerMs: counts ? null : this.decoder!.lastWorkerMs,
+      stageNs
     };
   }
 
@@ -602,7 +621,8 @@ export class TesseraClient {
     // Throws on a body that stopped inside a frame or without its trailer.
     frames.end();
     const decodedHead = await decodingHead!;
-    checkTrailerCounts(parseTrailer(trailerBytes!), flushes, points);
+    const trailer = parseTrailer(trailerBytes!);
+    checkTrailerCounts(trailer, flushes, points);
     // Every tile the server served points for has had them.
     for (let i = tileAt; i < decodedHead.tiles.length; i++) {
       if (decodedHead.tiles[i]!.served !== 0n) {
@@ -622,7 +642,8 @@ export class TesseraClient {
       bytes,
       points,
       ms: performance.now() - started,
-      workerMs
+      workerMs,
+      stageNs: stageNsOf(trailer)
     };
   }
 
@@ -1021,7 +1042,7 @@ type RawMeta = {
     id: string;
     display_name: string;
     quantisation: {x_min: number; x_max: number; y_min: number; y_max: number};
-    projection: ProjectionName;
+    projection: MapProjection;
     world_aspect: number | null;
     tile_scheme: TileScheme | null;
     tile: {z: number; x: number; y: number} | null;

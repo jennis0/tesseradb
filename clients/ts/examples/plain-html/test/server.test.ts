@@ -91,4 +91,23 @@ describe('server.mjs', () => {
     expect(page).toContain("createElement('tessera-explorer')");
     expect(await (await fetch(`${base}/tessera-components.js`)).text()).toBe('export {};');
   });
+
+  it('starts without a built bundle, answering 503 for the page and the bundle and serving tokens', async () => {
+    const handler = createHandler({
+      sessionUrl: 'http://127.0.0.1:1',
+      viewerUrl: 'http://127.0.0.1:1',
+      credential: 'the-secret',
+      users: {},
+      bundleDir: join(tmpdir(), 'tessera-plain-absent')
+    });
+    const bare = createServer((req, res) => void handler(req, res));
+    const at = `http://127.0.0.1:${await listen(bare)}`;
+    try {
+      expect((await fetch(`${at}/`)).status).toBe(503);
+      expect((await fetch(`${at}/tessera-components.js`)).status).toBe(503);
+      expect((await fetch(`${at}/users`)).status).toBe(200);
+    } finally {
+      bare.close();
+    }
+  });
 });

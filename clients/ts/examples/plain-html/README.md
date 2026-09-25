@@ -7,7 +7,7 @@ npm run bundle -w @tesseradb/components    # writes components/dist/tessera-comp
 node server.mjs                            # http://localhost:5180
 ```
 
-`users.json` lists the signed-in users the page offers and the access labels each holds. The ones shipped match the demo's presets for the `2m4` bundle. `TESSERA_VIEWER_URL`, `TESSERA_SESSION_URL` and `TESSERA_SESSION_CRED` point the server at another deployment, and `PORT` moves it off 5180.
+The server expects the demo's `2m4` scale (`./run_demo.sh --scale 2m4` at the repository root): a viewer listener on `127.0.0.1:37585`, a session listener on `127.0.0.1:49303` and the session credential `dev-session-credential`. `users.json` lists the signed-in users the page offers and the access labels each holds, taken from that bundle's term dictionary. `TESSERA_VIEWER_URL`, `TESSERA_SESSION_URL` and `TESSERA_SESSION_CRED` point the server at another deployment, and `PORT` moves it off 5180. Until the bundle is built the server answers the page with a 503 naming the command above.
 
 ## Where the token comes from
 

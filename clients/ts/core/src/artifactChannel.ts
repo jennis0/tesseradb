@@ -759,10 +759,11 @@ export function servedLineage(artifacts: readonly Artifact[]): ServedLineage {
 }
 
 /**
- * One artifact and everything served beneath it. The visited set ends the walk on a response
- * that contains a cycle.
+ * The `tesseraId`s of `root` and of every artifact served beneath it, following the parent links
+ * in `lineage`. `root` is included even where `lineage` does not hold it. A `dag` layer's cycles
+ * end the walk.
  *
- * @internal
+ * @category Layers and views
  */
 export function subtreeOf(lineage: ServedLineage, root: bigint): Set<bigint> {
   const seen = new Set<bigint>();

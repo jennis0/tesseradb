@@ -9,24 +9,18 @@ const JSON_TYPE = 'application/json';
 /**
  * The shortest wait between attempts after a `429`, in seconds. A `429` that names no wait, or
  * one shorter than this, waits this long.
- *
- * @category Control plane
  */
 export const MIN_BACKOFF = 1;
 
 /**
  * The longest wait between attempts after a `429`, in seconds. A longer `Retry-After` is cut to
  * this.
- *
- * @category Control plane
  */
 export const MAX_BACKOFF = 30;
 
 /**
  * How many times one call sends its request while the server answers `429`. The last `429` is
  * returned as the answer.
- *
- * @category Control plane
  */
 export const MAX_ATTEMPTS = 600;
 
@@ -254,9 +248,8 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
  * declarations, publications and changes, and either on `grow`. A JSON body is serialised once per
  * call, so every attempt of one call sends the same bytes.
  *
- * A `429` is backpressure. The call waits the `Retry-After` it carries, between
- * {@link MIN_BACKOFF} and {@link MAX_BACKOFF} seconds, and sends the request again, at most
- * {@link MAX_ATTEMPTS} times in all. Every other status is returned as an {@link Answer}, neither
+ * A `429` is backpressure. The call waits the `Retry-After` it carries, between 1
+ * and 30 seconds, and sends the request again, at most 600 times in all. Every other status is returned as an {@link Answer}, neither
  * thrown nor retried. A request that reaches no server is returned with status
  * {@link UNANSWERED}. A call whose `signal` aborts rejects with the signal's reason.
  *

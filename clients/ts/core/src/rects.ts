@@ -158,8 +158,3 @@ export function coverageAt(
   }
   return out;
 }
-
-/** `rect`'s tiles, as `(x, y)` pairs. */
-export function* rectTiles(r: TileRect): Generator<{x: number; y: number}> {
-  for (let y = r.y0; y <= r.y1; y++) for (let x = r.x0; x <= r.x1; x++) yield {x, y};
-}

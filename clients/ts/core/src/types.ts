@@ -344,8 +344,12 @@ export type Layer = {
   version: number;
 };
 
-/** The names a view's `projection` may take. */
-export type ProjectionName = 'web_mercator' | 'equirectangular' | 'gall_isographic' | 'none';
+/**
+ * The map projection that placed a view's positions. See {@link ViewInfo.projection}.
+ *
+ * @category Meta
+ */
+export type MapProjection = 'web_mercator' | 'equirectangular' | 'gall_isographic' | 'none';
 
 /**
  * The tile schemes a view's frame may be addressed in. There is one: `xyz`, the slippy-map
@@ -359,7 +363,7 @@ export type TileScheme = 'xyz';
  * One view this principal may reach, as `/v1/meta` publishes it. The frame and projection fields
  * are the same for every principal, and a host decides from them whether to draw a basemap
  * ({@link ViewInfo.tileScheme}) and how to turn a position into longitude and latitude
- * ({@link ViewInfo.projection}).
+ * ({@link lonLatOfCell}).
  *
  * @category Meta
  */
@@ -375,11 +379,9 @@ export type ViewInfo = {
   quantisation: Quantisation;
   /**
    * What placed this view's positions: `web_mercator`, `equirectangular`, `gall_isographic`, or
-   * `none` for a view that projects nothing. The package root exports a different
-   * `ProjectionName` (the names of the store's projections), so this field's type cannot be
-   * imported by that name; write `ViewInfo['projection']`.
+   * `none` for a view that projects nothing.
    */
-  projection: ProjectionName;
+  projection: MapProjection;
   /**
    * The width-to-height ratio to draw the world at: `1` for `web_mercator`, `2cos φ₁` for
    * `equirectangular` and `gall_isographic` (φ₁ being the standard parallel), and `null` for
@@ -1014,7 +1016,7 @@ export type ScalarValues =
   | {arrowType: 'timestamp_us'; values: BigInt64Array};
 
 /**
- * The server's timings for one viewport response, read from its headers.
+ * The server's timings for one viewport response, read from its headers and its trailer.
  *
  * @category Requests and responses
  */
@@ -1027,9 +1029,9 @@ export type Timings = {
   /** Microseconds the request waited for admission (`x-tessera-admission-us`); `0` when the header is absent. */
   admissionUs: number;
   /**
-   * Per-stage timings from an `x-tessera-stage-ns` header, as numbers in the header's order, or
-   * `null` when the header is absent. The server sends no such header: its stage timings are in the
-   * body's trailer, which this client does not read.
+   * Per-stage timings from the trailer's `stage_ns`, as numbers in its field order, or `null`
+   * where the trailer has none. The server sends them only when it was built with the
+   * `bench-timing` feature and `serve.stage_timing` is on.
    */
   stageNs: number[] | null;
 };

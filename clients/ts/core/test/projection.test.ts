@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {CELL_GRID} from '../src/coords.js';
-import {XYZ, basemapScheme, lonLatOfCell} from '../src/projection.js';
+import {basemapScheme, lonLatOfCell} from '../src/projection.js';
 import type {Quantisation, ViewInfo} from '../src/types.js';
 import {view as plain} from './support.js';
 
@@ -71,7 +71,7 @@ describe('what a client decides from the published projection fields', () => {
     // The z3 tile (5, 2): x [0.625, 0.75], y [0.25, 0.375], east of the meridian and north of the
     // equator. Ignoring the extent would put these points off the west coast of Africa.
     const frame: Quantisation = {xMin: 0.625, xMax: 0.75, yMin: 0.25, yMax: 0.375};
-    const inside = view('web_mercator', XYZ, {z: 3, x: 5, y: 2});
+    const inside = view('web_mercator', 'xyz', {z: 3, x: 5, y: 2});
     for (const [lon, lat] of [
       [45, 45],
       [50.5, 60],
@@ -96,7 +96,7 @@ describe('what a client decides from the published projection fields', () => {
   it('draws a basemap only where a scheme addresses the frame', () => {
     // The equirectangular frame is the same aligned square as the Web Mercator one, and addresses
     // no published scheme: the longitude and latitude schemes are 2:1 at their top level.
-    expect(basemapScheme(view('web_mercator', XYZ, {z: 3, x: 5, y: 2}))).toBe('xyz');
+    expect(basemapScheme(view('web_mercator', 'xyz', {z: 3, x: 5, y: 2}))).toBe('xyz');
     expect(basemapScheme(view('equirectangular'))).toBeNull();
     expect(basemapScheme(view('gall_isographic'))).toBeNull();
     expect(basemapScheme(view('none'))).toBeNull();
