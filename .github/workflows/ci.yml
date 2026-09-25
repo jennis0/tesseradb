@@ -75,29 +75,13 @@ jobs:
   rust:
     runs-on: ubuntu-24.04
     env:
-      # The runner fills its disk building the workspace's 261 test binaries, and reports it two
-      # ways in the same run: `rustc-LLVM ERROR: IO failure on output stream: No space left on
-      # device`, and `ld terminated with signal 7 [Bus error]`. The second is the first seen
-      # through an `mmap` — rustc links with `lld`, which writes its output through one, and a
-      # mapped page that cannot be written back because the filesystem is full raises SIGBUS
-      # instead of returning ENOSPC. Freeing 18 GB was not enough on its own.
-      #
-      # Debug info is what the space goes on, so CI builds without it, which is what CLAUDE.md
-      # already tells a developer to do in a worktree for the same reason. The cost is that a CI
+      # Debug info is most of what the workspace's test binaries occupy on disk, so CI builds
+      # without it, as CLAUDE.md tells a developer to in a worktree. The cost is that a CI
       # backtrace names a function but not a line.
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v7
-      # Half of the fix: the runner ships ~25 GB of toolchains this build never touches. Measured
-      # on this runner, the step takes / from 14 GB free to 32 GB. The build needed more than that
-      # with debug info on, which is why the profile above turns it off.
-      - name: make room for the test binaries
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL
-          df -h /
       # `stable`, matching rust-toolchain.toml's channel. Note this is a rolling channel, not a
       # pin: the `.stderr` fixtures under crates/tessera-types/tests/ui are compiler output, so a
       # rustc release can turn this job red on wording alone. See that test's own doc for why
