@@ -10,6 +10,9 @@ use memmap2::{Advice, Mmap};
 use super::{entries_per_page, file_len, Header, Key, RunPart, HEADER_LEN, PAGE_BODY, PAGE_SIZE};
 use crate::error::{Result, StoreError};
 
+/// The most pages between two ranges a batched lookup needs that it prefetches with them.
+const PREFETCH_GAP: u64 = 4;
+
 fn corrupt(path: &Path, part: RunPart, detail: impl Into<String>) -> StoreError {
     StoreError::InvalidKeyIndex {
         path: path.to_path_buf(),
@@ -319,6 +322,10 @@ impl<K: Key> KeyRun<K> {
     /// Ask the kernel to read, in the background, every page a lookup of `keys` will read. The
     /// entry pages are mapped for random access, so without this a batch reads its pages one at
     /// a time, each waiting on the disk.
+    ///
+    /// Pages are advised in ranges, and a gap of up to [`PREFETCH_GAP`] pages between two ranges
+    /// is advised with them: reading a few unneeded pages costs less than a system call per range
+    /// when the pages are already resident.
     fn prefetch(&self, keys: &[K]) {
         let advise = |(first, end): (u64, u64)| {
             let _ = self.map.advise_range(
@@ -334,19 +341,14 @@ impl<K: Key> KeyRun<K> {
                 continue;
             }
             from = self.start_page(key, from);
-            // The pages after the start page whose first key is at or below `key`.
-            let (mut lo, mut hi) = (from + 1, self.header.pages);
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                if self.index_key(mid) <= key {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
+            let mut end = from + 1;
+            while end < self.header.pages && self.index_key(end) <= key {
+                end += 1;
             }
-            let end = lo;
             pending = match pending {
-                Some((first, last_end)) if from <= last_end => Some((first, last_end.max(end))),
+                Some((first, last_end)) if from <= last_end + PREFETCH_GAP => {
+                    Some((first, last_end.max(end)))
+                }
                 other => {
                     if let Some(range) = other {
                         advise(range);

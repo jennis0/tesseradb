@@ -238,9 +238,15 @@ fn main() {
         let t = Instant::now();
         let hits = run.lookup_sorted(&keys).expect("lookup");
         let cold = t.elapsed();
-        let t = Instant::now();
-        run.lookup_sorted(&keys).expect("lookup");
-        let warm = t.elapsed();
+        // The fastest of five, since a warm batch is short enough for other load to move it.
+        let warm = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                run.lookup_sorted(&keys).expect("lookup");
+                t.elapsed()
+            })
+            .min()
+            .expect("five runs");
         assert_eq!(hits.len(), batch);
         println!("  cold {cold:.2?}, warm {warm:.2?}");
     }
