@@ -24,13 +24,22 @@ pub(super) struct HeldMembers<'a> {
     pub(super) restating: Option<&'a croaring::Bitmap>,
 }
 
-/// The entities of a window's join rows: the only rows that can restate a membership.
-pub(super) fn joining_entities<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> croaring::Bitmap {
+/// The entities of a window's join rows and of the items it places in artifacts in place: the
+/// only rows that can restate a membership.
+pub(super) fn joining_entities<W>(
+    closed: &[tessera_lifecycle::ClosedEntry<W>],
+) -> croaring::Bitmap {
     let mut restating = croaring::Bitmap::new();
     for entry in closed {
-        for row in entry.rows().iter().filter(|row| row.join) {
+        let joined = &entry.entity_ids[entry.rows().len() + entry.edits().len()..];
+        let entities = entry
+            .rows()
+            .iter()
+            .filter(|row| row.join)
+            .map(|row| row.entity_id);
+        for entity in entities.chain(joined.iter().copied()) {
             // Entity space is `u32`-wide, so the narrowing is total.
-            restating.add(row.entity_id.raw() as u32);
+            restating.add(entity.raw() as u32);
         }
     }
     restating
@@ -153,8 +162,10 @@ pub(super) fn mint_plan<W>(
         closed.iter().map(|entry| entry.memberships.as_slice()),
         &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
     )?;
-    let edges: Vec<tessera_lifecycle::BatchEdge> =
-        closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
+    let edges: Vec<tessera_lifecycle::BatchEdge> = closed
+        .iter()
+        .flat_map(|e| e.edges.iter().cloned())
+        .collect();
     if wanted.is_empty() && edges.is_empty() {
         return Ok(None);
     }
@@ -301,8 +312,7 @@ impl Executor {
                     // Carried to the close: on the publication that creates the child, or as a
                     // fill on a child that exists without a parent.
                     Ok(
-                        tessera_lifecycle::EdgeCheck::Mints
-                        | tessera_lifecycle::EdgeCheck::Records,
+                        tessera_lifecycle::EdgeCheck::Mints | tessera_lifecycle::EdgeCheck::Records,
                     ) => settling.push(edge.clone()),
                     Err(e) => return Err(e.to_string()),
                 }
@@ -472,15 +482,7 @@ impl Executor {
                     })
                 };
                 let record = registry
-                    .prepare_publish(
-                        layer,
-                        *level,
-                        &incoming,
-                        store,
-                        alloc,
-                        &pending,
-                        &views,
-                    )
+                    .prepare_publish(layer, *level, &incoming, store, alloc, &pending, &views)
                     .map_err(|e| e.to_string())?;
                 let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
                     unreachable!("prepare_publish returns an ArtifactPublish");
@@ -524,8 +526,12 @@ impl Executor {
             let mut fills = Vec::new();
             for edge in edges {
                 let view = edge.view.as_deref();
-                if assigned.contains_key(&(edge.layer.as_str(), edge.level, view, edge.child.as_str()))
-                {
+                if assigned.contains_key(&(
+                    edge.layer.as_str(),
+                    edge.level,
+                    view,
+                    edge.child.as_str(),
+                )) {
                     continue;
                 }
                 let pending = |key: &str| {
@@ -534,10 +540,12 @@ impl Executor {
                         .find(|((layer, _, in_view, held), _)| {
                             *layer == edge.layer && *in_view == view && *held == key
                         })
-                        .map(|((_, level, _, _), ordinal)| tessera_lifecycle::wal::ParentRef {
-                            level: *level,
-                            ordinal: *ordinal,
-                        })
+                        .map(
+                            |((_, level, _, _), ordinal)| tessera_lifecycle::wal::ParentRef {
+                                level: *level,
+                                ordinal: *ordinal,
+                            },
+                        )
                 };
                 if let Some(record) = registry
                     .prepare_parent_fill(

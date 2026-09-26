@@ -215,8 +215,7 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
     The SDK keeps no record of what it sent, so the same frame inserted again is sent again, as a
     new request under a fresh batch id. Every row names by its id an item the database holds and
     carries what that item stores, so the page changes nothing and every row is already present.
-    The same rows moved a little would change the items' positions, and editing an item is not
-    available yet, so that page is a `409` on the whole of it.
+    The same rows moved a little change the items' positions, and edit them.
     """
     db = notebook(served, corpus)
     delta = new_papers(db)
@@ -236,10 +235,9 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
     insert_the_new_papers(db, x_offset=0.5)
-    with pytest.raises(Refusal) as raised:
-        db.commit()
-    assert [r["status"] for r in raised.value.report.refusals] == [409]
-    assert raised.value.report.rows_accepted == {}
+    moved = db.commit()
+    assert moved.ok, moved
+    assert moved.items_edited == len(NEW_IDS), moved
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
 
@@ -805,8 +803,8 @@ def test_a_row_with_no_id_where_the_insert_names_one_is_listed(served, corpus):
     assert any("rows with no id" in str(f) for f in plan.findings), plan
 
 
-def test_a_rendered_column_filled_after_the_first_commit_refuses_the_commit(served, corpus):
-    """§6.3: the route refuses a rendered column, and the SDK does not send the page without it."""
+def test_a_rendered_column_set_after_the_first_commit_edits_the_item(served, corpus):
+    """A rendered value set on an item the database holds edits the item, which is drawn with it."""
 
     def with_a_rendered_score(db) -> None:
         db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
@@ -835,10 +833,11 @@ def test_a_rendered_column_filled_after_the_first_commit_refuses_the_commit(serv
         id="id",
         value="note",
     )
-    plan = db.check()
-    assert not plan.ok
-    assert any("rendered column" in str(f) for f in plan.findings), plan
-    assert plan.plan == []
+    report = db.commit()
+    assert report.ok, report
+    assert report.items_edited == 1, report
+    answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0], filters={"note": {"range": {"gte": 0.9}}})
+    assert answer["counts"]["matched"] == 1
 
 
 def test_a_column_no_target_reads_is_ignored_and_reported_as_ignored(served, corpus):

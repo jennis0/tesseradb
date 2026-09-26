@@ -155,6 +155,9 @@ pub enum Slot {
     Written { row: u32, tessera_id: Option<u64> },
     /// The row named this item and changed nothing, so it writes nothing.
     Unchanged { entity: EntityId, tessera_id: u64 },
+    /// The row places this item in artifacts that do not hold it and changes nothing else, so it
+    /// writes no row and the item keeps its entity.
+    Joined { entity: EntityId, tessera_id: u64 },
     /// The row moves its item to a new entity as the entry's edit at this position. `added` is a
     /// row whose one change was adding the item to a view, which the receipt counts as added.
     Edited {
@@ -165,8 +168,8 @@ pub enum Slot {
 }
 
 /// What an entry's rows touch that a later entry's rows must not touch in the same window: the
-/// existing items its rows add to a view or edit, and the unique values and external ids its rows
-/// give items. Each is decided against state the close writes, so a later row touching one is admitted
+/// existing items its rows add to a view, edit or place in artifacts, and the unique values and
+/// external ids its rows give items. Each is decided against state the close writes, so a later row touching one is admitted
 /// only after the window holding it has closed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowClaims {
@@ -178,19 +181,26 @@ pub struct WindowClaims {
 }
 
 impl WindowClaims {
-    /// The claims of `rows` and `edits`, with `keys` the unique values the rows set.
-    pub fn of(rows: &[UnallocatedRow], edits: &[UnallocatedEdit], keys: Vec<(u16, u128)>) -> Self {
+    /// The claims of `rows`, of the existing items `named` that an entry's edits and joins in
+    /// place touch, and of the external ids `edited` its edits give, with `keys` the unique values
+    /// the rows set.
+    pub fn of<'a>(
+        rows: &'a [UnallocatedRow],
+        named: impl IntoIterator<Item = EntityId>,
+        edited: impl IntoIterator<Item = &'a [u8]>,
+        keys: Vec<(u16, u128)>,
+    ) -> Self {
         WindowClaims {
             entities: rows
                 .iter()
                 .filter_map(|row| row.join)
-                .chain(edits.iter().map(|edit| edit.old))
+                .chain(named)
                 .collect(),
             keys,
             external_ids: rows
                 .iter()
-                .chain(edits.iter().filter_map(|edit| edit.rows.first()))
                 .filter_map(|row| row.external_id.as_deref())
+                .chain(edited)
                 .map(digest)
                 .collect(),
         }
@@ -226,7 +236,8 @@ pub struct ResolvedMembership {
     /// the same one. So the key travels and the resolution is made once, on the executor, where
     /// nothing can interleave with it.
     pub ordinal: Option<u32>,
-    /// Indices into this entry's `rows`, then into its `edits` counted on from the rows' end.
+    /// Indices into this entry's `rows`, then into its `edits` counted on from the rows' end,
+    /// then into its [`Slot::Joined`] items in slot order, counted on from the edits' end.
     pub rows: Vec<u32>,
 }
 
@@ -241,8 +252,8 @@ pub struct ClosedEntry<W> {
     pub terms: Vec<Vec<TermId>>,
     /// The resolved term set of each edit's first row, in the record's edit order.
     pub edit_terms: Vec<Vec<TermId>>,
-    /// The assigned ids, in the entry's row order, then each edit's new entity in edit order: a
-    /// membership names an edit by the position after the rows.
+    /// The assigned ids, in the entry's row order, then each edit's new entity in edit order, then
+    /// each [`Slot::Joined`] item's entity in slot order: a membership names them by position.
     pub entity_ids: Vec<EntityId>,
     /// This entry's memberships, carried through the allocation unchanged: the ids the joins name
     /// are `entity_ids[row]`, which is why the two travel together.
@@ -602,7 +613,10 @@ impl<W> CommitWindow<W> {
     pub fn conflicts(&self, claims: &WindowClaims) -> bool {
         claims.entities.iter().any(|e| self.entities.contains(e))
             || claims.keys.iter().any(|k| self.keys.contains(k))
-            || claims.external_ids.iter().any(|d| self.external_ids.contains(d))
+            || claims
+                .external_ids
+                .iter()
+                .any(|d| self.external_ids.contains(d))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -780,6 +794,10 @@ impl<W> CommitWindow<W> {
                     rows,
                 });
             }
+            entity_ids.extend(entry.slots.iter().filter_map(|slot| match slot {
+                Slot::Joined { entity, .. } => Some(*entity),
+                _ => None,
+            }));
             let receipt = entry
                 .slots
                 .iter()
@@ -799,6 +817,11 @@ impl<W> CommitWindow<W> {
                     }
                     Slot::Unchanged { tessera_id, .. } => RowReceipt {
                         outcome: RowOutcome::Unchanged,
+                        tessera_id,
+                        over_bound: false,
+                    },
+                    Slot::Joined { tessera_id, .. } => RowReceipt {
+                        outcome: RowOutcome::Edited,
                         tessera_id,
                         over_bound: false,
                     },
@@ -850,12 +873,20 @@ mod tests {
 
     /// Admit `entry` claiming what its rows claim, with no unique values.
     fn push<W>(w: &mut CommitWindow<W>, entry: WindowEntry<W>) {
-        let claims = WindowClaims::of(&entry.rows, &entry.edits, Vec::new());
+        let claims = WindowClaims::of(
+            &entry.rows,
+            entry.edits.iter().map(|edit| edit.old),
+            entry
+                .edits
+                .iter()
+                .filter_map(|edit| edit.rows.first()?.external_id.as_deref()),
+            Vec::new(),
+        );
         w.push(entry, claims);
     }
 
     fn claims(rows: &[UnallocatedRow]) -> WindowClaims {
-        WindowClaims::of(rows, &[], Vec::new())
+        WindowClaims::of(rows, [], [], Vec::new())
     }
 
     fn row(external_id: Option<&str>, terms: &[u32]) -> UnallocatedRow {
@@ -898,13 +929,16 @@ mod tests {
     fn the_sort_scope_is_the_window_not_the_entry() {
         let mut split = CommitWindow::new(0);
         for b in 0..4u32 {
-            push(&mut split, entry(
-                &format!("b{b}"),
-                vec![
-                    row(Some(&format!("x{b}")), &[9]),
-                    row(Some(&format!("y{b}")), &[1]),
-                ],
-            ));
+            push(
+                &mut split,
+                entry(
+                    &format!("b{b}"),
+                    vec![
+                        row(Some(&format!("x{b}")), &[9]),
+                        row(Some(&format!("y{b}")), &[1]),
+                    ],
+                ),
+            );
         }
         let mut alloc_split = Allocator::new(100);
         let (closed, _) = split.allocate(&mut alloc_split, |e| e.raw()).unwrap();
@@ -943,10 +977,10 @@ mod tests {
     #[test]
     fn every_entry_gets_its_own_ids_in_its_own_row_order_and_every_id_is_framed() {
         let mut w = CommitWindow::new(3);
-        push(&mut w, entry(
-            "a",
-            vec![row(Some("a0"), &[5]), row(Some("a1"), &[0])],
-        ));
+        push(
+            &mut w,
+            entry("a", vec![row(Some("a0"), &[5]), row(Some("a1"), &[0])]),
+        );
         push(&mut w, entry("b", vec![row(Some("b0"), &[3])]));
         let (closed, _) = w.allocate(&mut Allocator::new(0), |e| e.raw()).unwrap();
 
@@ -984,7 +1018,10 @@ mod tests {
     #[test]
     fn a_held_external_id_conflicts_and_none_never_does() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
-        push(&mut w, entry("b1", vec![row(Some("k"), &[1]), row(None, &[1])]));
+        push(
+            &mut w,
+            entry("b1", vec![row(Some("k"), &[1]), row(None, &[1])]),
+        );
 
         assert!(
             w.conflicts(&claims(&[row(Some("zzz"), &[1]), row(Some("k"), &[1])])),
@@ -1008,12 +1045,17 @@ mod tests {
         };
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
         let first = entry("b1", vec![joining.clone(), row(None, &[1])]);
-        let claims = WindowClaims::of(&first.rows, &[], vec![(2, 99)]);
+        let claims = WindowClaims::of(&first.rows, [], [], vec![(2, 99)]);
         w.push(first, claims);
 
-        assert!(w.conflicts(&WindowClaims::of(&[joining], &[], Vec::new())));
-        assert!(w.conflicts(&WindowClaims::of(&[row(None, &[1])], &[], vec![(2, 99)])));
-        assert!(!w.conflicts(&WindowClaims::of(&[row(None, &[1])], &[], vec![(2, 98), (3, 99)])));
+        assert!(w.conflicts(&WindowClaims::of(&[joining], [], [], Vec::new())));
+        assert!(w.conflicts(&WindowClaims::of(&[row(None, &[1])], [], [], vec![(2, 99)])));
+        assert!(!w.conflicts(&WindowClaims::of(
+            &[row(None, &[1])],
+            [],
+            [],
+            vec![(2, 98), (3, 99)]
+        )));
     }
 
     /// The `Held` lookup: the batch id, the window's own sequence number, and **the hash the
@@ -1021,20 +1063,23 @@ mod tests {
     #[test]
     fn a_held_batch_id_is_found_with_the_hash_it_was_admitted_under() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(7);
-        push(&mut w, WindowEntry {
-            slots: vec![Slot::Written {
-                row: 0,
-                tessera_id: None,
-            }],
-            over_bound: Vec::new(),
-            rows: vec![row(Some("k"), &[1])],
-            edits: Vec::new(),
-            batch_id: "b1".to_string(),
-            body_hash: [3u8; 32],
-            memberships: Vec::new(),
-            edges: Vec::new(),
-            waiters: vec!["w"],
-        });
+        push(
+            &mut w,
+            WindowEntry {
+                slots: vec![Slot::Written {
+                    row: 0,
+                    tessera_id: None,
+                }],
+                over_bound: Vec::new(),
+                rows: vec![row(Some("k"), &[1])],
+                edits: Vec::new(),
+                batch_id: "b1".to_string(),
+                body_hash: [3u8; 32],
+                memberships: Vec::new(),
+                edges: Vec::new(),
+                waiters: vec!["w"],
+            },
+        );
 
         assert_eq!(w.held("b1"), Some((7, [3u8; 32])));
         assert_eq!(w.held("b2"), None, "an unheld batch id is not held");
@@ -1100,17 +1145,20 @@ mod tests {
     #[test]
     fn the_tally_matches_the_arithmetic_worked_out_by_hand() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
-        push(&mut w, entry(
-            "b1",
-            vec![
-                row(Some("e"), &[2]),
-                row(Some("c"), &[1, 2]),
-                row(Some("a"), &[1]),
-                row(Some("f"), &[2]),
-                row(Some("d"), &[1, 2]),
-                row(Some("b"), &[1]),
-            ],
-        ));
+        push(
+            &mut w,
+            entry(
+                "b1",
+                vec![
+                    row(Some("e"), &[2]),
+                    row(Some("c"), &[1, 2]),
+                    row(Some("a"), &[1]),
+                    row(Some("f"), &[2]),
+                    row(Some("d"), &[1, 2]),
+                    row(Some("b"), &[1]),
+                ],
+            ),
+        );
         let (_, t) = w.allocate(&mut Allocator::new(0), |e| e.raw()).unwrap();
 
         assert_eq!(t.rows, 6);
@@ -1131,22 +1179,34 @@ mod tests {
             ..row(Some(external), terms)
         };
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
-        push(&mut w, entry(
-            "b1",
-            vec![
-                joining("far", 70_000, &[1]),
-                joining("near", 3, &[1]),
-                row(Some("new"), &[1]),
-            ],
-        ));
-        let (closed, t) = w.allocate(&mut Allocator::new(100_000), |e| e.raw()).unwrap();
+        push(
+            &mut w,
+            entry(
+                "b1",
+                vec![
+                    joining("far", 70_000, &[1]),
+                    joining("near", 3, &[1]),
+                    row(Some("new"), &[1]),
+                ],
+            ),
+        );
+        let (closed, t) = w
+            .allocate(&mut Allocator::new(100_000), |e| e.raw())
+            .unwrap();
 
         let ids: Vec<u64> = closed[0].entity_ids.iter().map(|e| e.raw()).collect();
-        assert_eq!(ids, [70_000, 3, 100_000], "a join keeps its entity; the new row is allocated");
+        assert_eq!(
+            ids,
+            [70_000, 3, 100_000],
+            "a join keeps its entity; the new row is allocated"
+        );
         assert_eq!(t.rows, 3);
         assert_eq!(t.postings, 3);
         assert_eq!(t.runs, 3, "3, 70 000 and 100 000 are three runs");
-        assert_eq!(t.containers, 2, "3 is in block 0; 70 000 and 100 000 share block 1");
+        assert_eq!(
+            t.containers, 2,
+            "3 is in block 0; 70 000 and 100 000 share block 1"
+        );
     }
 
     /// A term repeated within one row is **one** posting, and it is found however far apart the
@@ -1160,10 +1220,13 @@ mod tests {
     #[test]
     fn a_term_repeated_within_one_row_is_one_posting() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
-        push(&mut w, entry(
-            "b1",
-            vec![row(Some("a"), &[7, 9, 7]), row(Some("b"), &[7, 9, 7])],
-        ));
+        push(
+            &mut w,
+            entry(
+                "b1",
+                vec![row(Some("a"), &[7, 9, 7]), row(Some("b"), &[7, 9, 7])],
+            ),
+        );
         let (_, t) = w.allocate(&mut Allocator::new(0), |e| e.raw()).unwrap();
 
         assert_eq!(t.rows, 2);
@@ -1182,15 +1245,18 @@ mod tests {
     fn a_run_across_a_container_boundary_opens_a_container() {
         const LO: u64 = 65_534;
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
-        push(&mut w, entry(
-            "b1",
-            vec![
-                row(Some("a"), &[1]),
-                row(Some("b"), &[1]),
-                row(Some("c"), &[1]),
-                row(Some("d"), &[1]),
-            ],
-        ));
+        push(
+            &mut w,
+            entry(
+                "b1",
+                vec![
+                    row(Some("a"), &[1]),
+                    row(Some("b"), &[1]),
+                    row(Some("c"), &[1]),
+                    row(Some("d"), &[1]),
+                ],
+            ),
+        );
         let (closed, t) = w.allocate(&mut Allocator::new(LO), |e| e.raw()).unwrap();
 
         assert_eq!(
@@ -1211,7 +1277,10 @@ mod tests {
     #[test]
     fn a_window_that_exhausts_the_id_space_has_no_effect() {
         let mut w = CommitWindow::new(0);
-        push(&mut w, entry("a", vec![row(Some("x"), &[1]), row(Some("y"), &[1])]));
+        push(
+            &mut w,
+            entry("a", vec![row(Some("x"), &[1]), row(Some("y"), &[1])]),
+        );
         let mut alloc = Allocator::new(u32::MAX as u64 - 1);
         let err = w.allocate(&mut alloc, |e| e.raw());
         let Err((AllocError::Exhausted { .. }, waiters)) = err else {

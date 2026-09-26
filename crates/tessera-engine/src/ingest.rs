@@ -248,6 +248,7 @@ impl Engine {
         // The request row each written row came from, and each edit, for the membership columns.
         let mut written_from: Vec<usize> = Vec::new();
         let mut edited_from: Vec<usize> = Vec::new();
+        let mut joined_from: Vec<usize> = Vec::new();
 
         // Named items in ascending entity order, so the stored reads walk each layer forwards.
         let mut order: Vec<(EntityId, usize)> = named
@@ -339,6 +340,13 @@ impl Engine {
                         entity: *entity,
                         tessera_id: tid_of(entity)?,
                     }),
+                    Decided::Joined => {
+                        slots.push(Slot::Joined {
+                            entity: *entity,
+                            tessera_id: tid_of(entity)?,
+                        });
+                        joined_from.push(at);
+                    }
                     Decided::Added(join) => {
                         slots.push(Slot::Written {
                             row: rows.len() as u32,
@@ -393,7 +401,8 @@ impl Engine {
                 over_bound.push(*at as u32);
             }
         }
-        let artifacts = Self::written_memberships(request, &written_from, &edited_from);
+        let artifacts =
+            Self::written_memberships(request, &written_from, &edited_from, &joined_from);
         Ok(Planned {
             rows,
             edits,
@@ -666,7 +675,7 @@ impl Engine {
             None => BlobRow::default(),
         };
         let membership = || match stored.not_members.contains_key(&at) {
-            true => Decided::Edited { added: false },
+            true => Decided::Joined,
             false => Decided::Unchanged,
         };
         let carried = |position: usize| !row.omitted.contains(&position);
@@ -930,17 +939,20 @@ impl Engine {
         Ok(None)
     }
 
-    /// The batch's membership columns, over the rows it writes: a row writing nothing has been
-    /// found to be a member of every artifact it names already. `written_from` is the request row
-    /// each written row came from and `edited_from` each edit's, numbered on from the rows.
+    /// The batch's membership columns, over the rows it writes, edits and joins in place: an
+    /// unchanged row has been found to be a member of every artifact it names already.
+    /// `written_from` is the request row each written row came from, `edited_from` each edit's
+    /// and `joined_from` each join's in place, numbered on in that order.
     fn written_memberships(
         request: &IngestRequest,
         written_from: &[usize],
         edited_from: &[usize],
+        joined_from: &[usize],
     ) -> BatchArtifacts {
         let position: BTreeMap<u32, u32> = written_from
             .iter()
             .chain(edited_from)
+            .chain(joined_from)
             .enumerate()
             .map(|(written, at)| (*at as u32, written as u32))
             .collect();
@@ -1048,6 +1060,8 @@ struct Stored {
 /// What one row naming an item does to it.
 enum Decided {
     Unchanged,
+    /// The row places the item in artifacts that do not hold it, and changes nothing else.
+    Joined,
     /// The row adds the item to the batch's view in place, as this row.
     Added(Box<UnallocatedRow>),
     /// The row changes the item, which moves to a new entity. `added` where adding it to the

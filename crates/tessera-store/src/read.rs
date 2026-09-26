@@ -111,10 +111,14 @@ impl ViewData {
         let segments = self
             .segments_by_row_base()
             .map_err(|seg_id| format!("segment '{seg_id}' has no row base in its view"))?;
-        let slices: Vec<Option<ScalarSlice<'_>>> =
-            segments.iter().map(|(segment, _)| segment.columns.scalar(column)).collect();
+        let slices: Vec<Option<ScalarSlice<'_>>> = segments
+            .iter()
+            .map(|(segment, _)| segment.columns.scalar(column))
+            .collect();
         for entity in entities.iter() {
-            let Some(row) = self.row_space.row_of(tessera_types::EntityId::new(u64::from(entity)))
+            let Some(row) = self
+                .row_space
+                .row_of(tessera_types::EntityId::new(u64::from(entity)))
             else {
                 continue;
             };
@@ -948,7 +952,7 @@ fn open_prefix(
 
             // Every segment after the first is one a flush appended or a merge collapsed, and it
             // owns row space above the base. Its entity→row mapping is rebuilt here from its own
-            // `tessera_id` column — nothing on disk carries it, deliberately; see
+            // `tessera_id` column and the rows an edit moved; see
             // [`SegmentExtent::rebuild`]. `with_extent` then re-checks contiguity and
             // well-formedness, so a manifest listing segments out of entity order, or one whose
             // `row_count` disagrees with what the extent actually owns, fails closed here rather
@@ -966,12 +970,10 @@ fn open_prefix(
                     }
                 })?;
                 let extent = SegmentExtent::rebuild(
-                    &seg_desc.seg_id,
+                    &segment,
                     seg_desc.entity_lo,
                     seg_desc.entity_hi,
                     row_base,
-                    columns.tessera_id(),
-                    &segment.edited,
                     &identity_key,
                     manifest.identity.shard_id,
                 )?;

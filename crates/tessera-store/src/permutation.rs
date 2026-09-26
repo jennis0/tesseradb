@@ -1350,10 +1350,10 @@ impl SegmentExtent {
     ///
     /// The alternative was to write `rows` beside `morton.u32` (4 bytes × entities in the segment,
     /// one more file, one more manifest field, a contracts §2.1 change). This construction stores
-    /// **nothing**: `columns.arrow` already carries `tessera_id` at the row, the identity is a
-    /// bijection over 2⁶⁴ ([`tessera_types::IdentityKey`]), and `MANIFEST.json` already carries the
-    /// key — so the mapping is derivable from artefacts that must exist anyway. Ruled on
-    /// 2026-08-02 in favour of adding no artefact.
+    /// only the rows an edit moved: `columns.arrow` already carries `tessera_id` at the row, the
+    /// identity is a bijection over 2⁶⁴ ([`tessera_types::IdentityKey`]) from an item's number,
+    /// and `MANIFEST.json` already carries the key, so a row's entity is its number's unless the
+    /// segment's edited rows list another ([`crate::edited`]).
     ///
     /// **The invariant it spends, stated so it is not spent again silently.** Row space above the
     /// build bound is now recoverable *only* while the identity permutation is invertible at open.
@@ -1366,15 +1366,18 @@ impl SegmentExtent {
     /// what merge leaves unmerged rather than by the corpus. Deliberately not parallelised: it runs
     /// once at open, inside a loop that is already mapping and digest-verifying files.
     pub fn rebuild(
-        seg_id: &str,
+        segment: &crate::read::SegmentData,
         entity_lo: u64,
         entity_hi: u64,
         row_base: u32,
-        tessera_ids: &[u64],
-        edited: &[(u32, u32)],
         key: &tessera_types::IdentityKey,
         shard_id: u32,
     ) -> Result<Self> {
+        let (seg_id, tessera_ids, edited) = (
+            segment.seg_id.as_str(),
+            segment.columns.tessera_id(),
+            &segment.edited,
+        );
         let malformed = |detail: String| StoreError::MalformedBundle { detail };
         let span = entity_hi
             .checked_sub(entity_lo)

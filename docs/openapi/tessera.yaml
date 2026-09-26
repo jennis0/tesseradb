@@ -1043,7 +1043,8 @@ paths:
         is counted in `edited`: it changes a value, the label, the external id or a position, or
         adds the item to a view it is older than the newest item of. An edited item keeps its
         `tessera_id`, its views, its layer memberships and a suppression; a label the edit narrows
-        applies from the answer on.
+        applies from the answer on. A row whose one change is placing the item in artifacts that
+        do not hold it is counted in `edited` and joins them without moving the item.
 
         **Columns.** Every column may be left out, and in JSON every key. A value left out keeps
         what the item stores; a new item has no value there. A null clears it: on an item that

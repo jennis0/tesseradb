@@ -150,6 +150,7 @@ against a newer one.
 | One item, and every value the row carries is the one stored | The row changes nothing. It is counted `unchanged` and writes nothing |
 | One item with no row in the batch's view, newer than the view's newest flushed item, the row carrying a position there and changing nothing else | The row adds the item to the view, counted `added` |
 | One item with no row in the batch's view, older than the view's newest flushed item | The row edits the item, counted `edited`: a flush places rows only above a view's newest, so the item moves to join it |
+| One item, and the row's one change is placing it in artifacts that do not hold it | The item joins them and keeps its entity, counted `edited` |
 | One item, and the row changes a value, the label, the external id or a position | The row edits the item, counted `edited` |
 | Two items | Refused with `409`, naming the values and the items' `tessera_id`s |
 

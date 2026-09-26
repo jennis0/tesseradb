@@ -241,7 +241,9 @@ item's `tessera_id`, which an edit never changes.
 An edited item moves to a new entity, carrying every view it is in, every value, its layer
 memberships, the contents generated from it, its group-scoped values under every key and any
 suppression. It is in no view from the acknowledgement until the flush that places its new rows,
-and is then served as the edit left it. A row with no coordinates edits only what it carries.
+and is then served as the edit left it. A row with no coordinates edits only what it carries. A
+row whose one change is placing the item in a layer's artifacts is counted as an edit and does not
+move the item: it joins the artifacts where it is.
 
 A **group-scoped** attribute may not appear on a plain view's batch at all: it is an undeclared
 column there. On a batch into any view whose key the attribute's group holds (the owner's own

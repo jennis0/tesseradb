@@ -439,6 +439,7 @@ async fn a_page_without_positions_mints_the_keys_nothing_holds_and_joins_every_r
         "the build's own column minted one artifact per key it carried: {held:?}"
     );
 
+    let high_water = control_status(&server).await["entity_id_high_water"].clone();
     let rows: Vec<u64> = (0..N).collect();
     let (status, body) = post_rows(
         &server,
@@ -447,6 +448,11 @@ async fn a_page_without_positions_mints_the_keys_nothing_holds_and_joins_every_r
     )
     .await;
     assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water,
+        "an item placed in an artifact keeps its entity"
+    );
     assert_eq!(
         body["minted"].as_u64(),
         Some(8 - BUILT),

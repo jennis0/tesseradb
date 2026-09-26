@@ -81,7 +81,11 @@ impl ClosingWindow {
         for (i, entry) in self.closed.into_iter().enumerate() {
             for (k, waiter) in entry.waiters.into_iter().enumerate() {
                 // A joined retry was never appended separately, so it has nothing else to be told.
-                let e = if k == 0 { blame.at(i) } else { WalError::Poisoned };
+                let e = if k == 0 {
+                    blame.at(i)
+                } else {
+                    WalError::Poisoned
+                };
                 waiter.fail(ExecError::Wal(e));
             }
         }
@@ -295,8 +299,7 @@ impl Executor {
                     continue;
                 }
             };
-            let Command::Ingest { submission, reply } = command
-            else {
+            let Command::Ingest { submission, reply } = command else {
                 // A declaration reads the unique values the window holds and has not yet applied,
                 // so the window closes first. Every other command is tolerable while a window is
                 // open: none of them touch the buffer or the swap.
@@ -327,7 +330,10 @@ impl Executor {
 
     /// Close `window` and return its replacement, stamped after the close: stamped first, the
     /// replacement would charge its predecessor's whole service to itself.
-    pub(super) fn close_and_reopen(&mut self, window: CommitWindow<Reply<Ingested>>) -> CommitWindow<Reply<Ingested>> {
+    pub(super) fn close_and_reopen(
+        &mut self,
+        window: CommitWindow<Reply<Ingested>>,
+    ) -> CommitWindow<Reply<Ingested>> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
     }
@@ -389,11 +395,17 @@ impl Executor {
                 let mut admission = Admission::Admitted;
                 // What the open window touches is written at its close, and the re-check below
                 // reads what was written.
-                let edits: Vec<tessera_lifecycle::UnallocatedEdit> =
-                    submission.edits.iter().map(|e| e.edit.clone()).collect();
+                let joined = submission.slots.iter().filter_map(|slot| match slot {
+                    tessera_lifecycle::Slot::Joined { entity, .. } => Some(*entity),
+                    _ => None,
+                });
                 let claims = tessera_lifecycle::WindowClaims::of(
                     &submission.rows,
-                    &edits,
+                    submission.edits.iter().map(|e| e.edit.old).chain(joined),
+                    submission
+                        .edits
+                        .iter()
+                        .filter_map(|e| e.edit.rows.first()?.external_id.as_deref()),
                     submission.keys.clone(),
                 );
                 if window.conflicts(&claims) {
@@ -433,9 +445,9 @@ impl Executor {
         let generation = self.generation.load();
         let creates = rows.iter().any(|row| row.join.is_none()) || !edits.is_empty();
         let bound_elsewhere = |id: &[u8], item: Option<EntityId>| {
-            self.live
-                .established_entity(id)
-                .is_some_and(|holder| Some(holder) != item && !generation.overlay.is_deleted(holder))
+            self.live.established_entity(id).is_some_and(|holder| {
+                Some(holder) != item && !generation.overlay.is_deleted(holder)
+            })
         };
         let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
             || edits.iter().any(|submitted| {
@@ -447,18 +459,21 @@ impl Executor {
                         .as_deref()
                         .is_some_and(|id| bound_elsewhere(id, Some(old)))
             })
-            || slots.iter().any(|slot| {
-                matches!(slot, tessera_lifecycle::Slot::Unchanged { entity, .. } if generation.overlay.is_deleted(*entity))
+            || slots.iter().any(|slot| match slot {
+                tessera_lifecycle::Slot::Unchanged { entity, .. }
+                | tessera_lifecycle::Slot::Joined { entity, .. } => {
+                    generation.overlay.is_deleted(*entity)
+                }
+                _ => false,
             })
             || rows.iter().any(|row| match row.join {
                 Some(entity) => {
                     generation.overlay.is_deleted(entity)
                         || !crate::write::joined::joins_in_place(&generation, entity, &row.view)
                         || self.flush.outstanding()
-                            && self
-                                .flush_flight
-                                .as_ref()
-                                .is_some_and(|(view, floor)| *view == row.view && entity.raw() < *floor)
+                            && self.flush_flight.as_ref().is_some_and(|(view, floor)| {
+                                *view == row.view && entity.raw() < *floor
+                            })
                         || generation.bundle.partitions.values().any(|partition| {
                             partition
                                 .views
@@ -513,7 +528,10 @@ impl Executor {
         let mut fresh: Vec<(String, String, u32)> = Vec::new();
         for entry in closing.entries_mut() {
             let (rows, edits) = entry.rows_and_edits_mut();
-            for row in rows.iter_mut().chain(edits.iter_mut().flat_map(|e| e.rows.iter_mut())) {
+            for row in rows
+                .iter_mut()
+                .chain(edits.iter_mut().flat_map(|e| e.rows.iter_mut()))
+            {
                 // A column declared since admission is appended at the tail of `declared_scalars`.
                 crate::attributes::pad_to_schema(&mut row.scalars, declared_scalars);
                 mint_cells(
@@ -666,9 +684,7 @@ impl Executor {
             }
         }
         drop(generation);
-        let carried = self
-            .live
-            .with_artifacts(|store| store.carried_over(&moved));
+        let carried = self.live.with_artifacts(|store| store.carried_over(&moved));
 
         mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
@@ -718,7 +734,11 @@ impl Executor {
             .chain(growth.iter().map(|(record, _)| record))
             .chain(carried.iter())
             .collect();
-        self.apply_artifact_records(&artifact_records, &positions[artifacts_at..], Publish::AtTick);
+        self.apply_artifact_records(
+            &artifact_records,
+            &positions[artifacts_at..],
+            Publish::AtTick,
+        );
 
         for (old, new) in moved {
             self.superseded.insert(old, new);
@@ -788,13 +808,17 @@ impl Executor {
         for (entry, wal_pos) in closed.iter_mut().zip(positions) {
             let terms = std::mem::take(&mut entry.terms);
             let edit_terms = std::mem::take(&mut entry.edit_terms);
-            let rows = entry.rows().iter().zip(terms).map(|(row, terms)| (row, terms));
-            let edit_rows = entry.edits().iter().zip(edit_terms).flat_map(|(edit, terms)| {
-                let mut terms = Some(terms);
-                edit.rows
-                    .iter()
-                    .map(move |row| (row, terms.take().unwrap_or_default()))
-            });
+            let rows = entry.rows().iter().zip(terms);
+            let edit_rows = entry
+                .edits()
+                .iter()
+                .zip(edit_terms)
+                .flat_map(|(edit, terms)| {
+                    let mut terms = Some(terms);
+                    edit.rows
+                        .iter()
+                        .map(move |row| (row, terms.take().unwrap_or_default()))
+                });
             for (row, row_terms) in rows.chain(edit_rows) {
                 // No external id means nothing to establish.
                 let mut m = StageMark::now();
@@ -812,8 +836,7 @@ impl Executor {
             }
             for edit in entry.edits() {
                 let new = edit.rows[0].entity_id;
-                let overlay =
-                    overlay.get_or_insert_with(|| (*generation.overlay).clone());
+                let overlay = overlay.get_or_insert_with(|| (*generation.overlay).clone());
                 overlay.apply(edit.old, tessera_lifecycle::ChangeOp::Delete);
                 deleted.push(edit.old);
                 newly_denied.push(edit.old);
@@ -832,9 +855,7 @@ impl Executor {
         let unique_live = unique.then(|| {
             let mut unique_live = (*generation.unique_live).clone();
             if !deleted.is_empty() {
-                unique_live.remove_entities(
-                    &deleted.iter().map(|e| e.raw() as u32).collect(),
-                );
+                unique_live.remove_entities(&deleted.iter().map(|e| e.raw() as u32).collect());
             }
             unique_live.add(
                 declared,
