@@ -722,10 +722,12 @@ impl WritePath {
     /// what the batch did.
     pub(crate) fn fill_values(
         &self,
-        request: tessera_lifecycle::ValuesRequest,
+        request: Box<tessera_lifecycle::ValuesRequest>,
+        unique_seq: u64,
     ) -> Result<ValuesReceipt, AcceptError> {
         self.submit(|reply| Command::Values {
-            request: Box::new(request),
+            request,
+            unique_seq,
             reply,
         })
     }

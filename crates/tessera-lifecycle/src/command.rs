@@ -584,9 +584,20 @@ pub enum ExecError {
     /// id.
     UniqueTaken { detail: String },
     /// The executor could not re-check a batch's unique values from memory, because what the
-    /// handler checked them against has changed since → the handler checks the batch again and
-    /// resubmits it. Nothing took effect.
-    UniqueStale,
+    /// handler checked them against has changed since. The batch comes back, and the handler
+    /// checks it again and resubmits it. Nothing took effect.
+    UniqueStale(Box<StaleSubmission>),
+}
+
+/// A batch the executor handed back to be checked again: see [`ExecError::UniqueStale`].
+#[derive(Debug)]
+pub enum StaleSubmission {
+    Ingest {
+        rows: Vec<UnallocatedRow>,
+        batch_id: String,
+        artifacts: BatchArtifacts,
+    },
+    Values(Box<ValuesRequest>),
 }
 
 impl std::fmt::Display for ExecError {
@@ -617,7 +628,7 @@ impl std::fmt::Display for ExecError {
             | ExecError::ValuesRefused { detail }
             | ExecError::UniqueTaken { detail }
             | ExecError::JoinRefused { detail } => write!(f, "{detail}"),
-            ExecError::UniqueStale => write!(
+            ExecError::UniqueStale(_) => write!(
                 f,
                 "the items this batch names changed while it was checked; send it again"
             ),

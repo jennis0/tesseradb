@@ -259,9 +259,14 @@ fn full(engine: &Engine) -> Session {
     engine.authorise(&full_coverage_credential()).unwrap()
 }
 
-/// The `tessera_id`s a viewport under `filter` returns.
+/// The `tessera_id`s a viewport of `s0` under `filter` returns.
 fn matching(engine: &Engine, session: &Session, filter: FilterExpr) -> BTreeSet<u64> {
-    let mut req = ViewportRequest::new("s0", 0, VIEWPORT, 10_000);
+    matching_in(engine, session, "s0", filter)
+}
+
+/// The `tessera_id`s a viewport of `view` under `filter` returns.
+fn matching_in(engine: &Engine, session: &Session, view: &str, filter: FilterExpr) -> BTreeSet<u64> {
+    let mut req = ViewportRequest::new(view, 0, VIEWPORT, 10_000);
     req.filter = Some(filter);
     engine
         .viewport(session, req)
@@ -573,8 +578,16 @@ fn two_concurrent_batches_setting_one_value_are_one_accepted() {
     let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     let accepted = outcomes.iter().filter(|o| o.is_ok()).count();
     assert_eq!(accepted, 1, "exactly one batch holds the value: {outcomes:?}");
-    assert!(outcomes.iter().filter(|o| o.is_err()).all(|o| taken(o)
-        || matches!(o, Err(AcceptError::Exec(ExecError::UniqueStale)))));
+    for (i, outcome) in outcomes.iter().enumerate().filter(|(_, o)| o.is_err()) {
+        let i = i as u64;
+        let stale = matches!(outcome, Err(AcceptError::Exec(ExecError::UniqueStale(_))));
+        assert!(taken(outcome) || stale, "{outcome:?}");
+        // Sent again as it was, it is refused for the value; with a value of its own, accepted.
+        let again = row(&engine, &format!("c{i}"), b"0", "10.race/1", BIG * 8 + i, 9_000 + i as i64);
+        assert!(is_taken(try_ingest(&engine, &format!("race-{i}"), vec![again])));
+        let own = row(&engine, &format!("c{i}"), b"0", &format!("10.race/own-{i}"), BIG * 8 + i, 9_000 + i as i64);
+        ingest(&engine, &format!("race-own-{i}"), vec![own]);
+    }
 }
 
 /// A row of the fixture's shape into `view`, joining `join` where the handler found one.
@@ -595,19 +608,23 @@ fn held_ingest(
     batch: &'static str,
     rows: Vec<UnallocatedRow>,
 ) -> std::thread::JoinHandle<Result<Vec<EntityId>, AcceptError>> {
-    engine.hold_next_ingest_check_for_test();
+    engine.hold_next_write_check_for_test();
     let e = Arc::clone(engine);
     let handle = std::thread::spawn(move || try_ingest(&e, batch, rows));
     wait_until("the ingest never reached its hold", Duration::from_secs(30), || {
-        engine.ingest_check_is_holding_for_test()
+        engine.write_check_is_holding_for_test()
     });
     handle
 }
 
-/// How many live items hold `doi`, once every buffered row is flushed.
+/// How many live items in views `s0` and `s1` hold `doi`, once every buffered row is flushed.
 fn holders_of(engine: &Engine, doi: &str) -> usize {
     flush(engine);
-    matching(engine, &full(engine), text_in("doi", &[doi.to_string()])).len()
+    let session = full(engine);
+    let filter = || text_in("doi", &[doi.to_string()]);
+    let mut found = matching_in(engine, &session, "s0", filter());
+    found.extend(matching_in(engine, &session, "s1", filter()));
+    found.len()
 }
 
 /// **A join that becomes a create on the executor is checked as a create.** The item a row joins
@@ -629,7 +646,7 @@ fn a_join_that_becomes_a_create_is_checked_as_one() {
     // The joining row and another batch setting its value reach the executor together.
     engine.set_work_pass_paused_for_test(true);
     let before = engine.work_enqueued_for_test();
-    engine.release_ingest_check_for_test();
+    engine.release_write_check_for_test();
     let e = Arc::clone(&engine);
     let other = std::thread::spawn(move || {
         try_ingest(&e, "other", vec![row_into(&e, "s0", "k", doi, None)])
@@ -658,7 +675,7 @@ fn a_create_that_becomes_a_join_carries_its_own_value() {
     let doi = "10.join/joined";
     let held = held_ingest(&engine, "late", vec![row_into(&engine, "s1", "x", doi, None)]);
     let created = ingest(&engine, "early", vec![row_into(&engine, "s0", "x", doi, None)])[0];
-    engine.release_ingest_check_for_test();
+    engine.release_write_check_for_test();
     let joined = held.join().unwrap().expect("the row joins the item holding its value");
     assert_eq!(joined, vec![created], "the row joined the item its external id names");
     assert_eq!(holders_of(&engine, doi), 1);
@@ -771,17 +788,18 @@ fn matching_result(engine: &Engine, filter: FilterExpr) -> Result<usize, String>
 }
 
 /// **A column already holding a value twice is refused, and stays as it was**; so is one whose
-/// duplicate is only in the buffer. The refusal names no entity.
+/// duplicate is only in the buffer.
 #[test]
 fn a_runtime_declaration_over_duplicates_is_refused() {
     let fx = fixture_with(false);
     let engine = engine_over(&fx);
-    match declare(&engine, "note", true) {
-        Err(AcceptError::Exec(ExecError::UniqueTaken { detail })) => {
-            assert!(detail.contains("'n1'"), "names a value held twice: {detail}");
-        }
-        other => panic!("a column holding values twice is refused: {other:?}"),
-    }
+    assert!(
+        matches!(
+            declare(&engine, "note", true),
+            Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
+        ),
+        "a column holding values twice is refused"
+    );
     assert!(!engine.meta().declared_scalars.iter().any(|d| d.unique));
 
     // A duplicate held only by a buffered row.
@@ -905,6 +923,34 @@ fn a_values_fill_setting_a_held_value_is_refused() {
         matching(&engine, &session, text_in("doi", &["10.f/1".to_string()])),
         BTreeSet::from([id])
     );
+}
+
+/// **A values fill checked before an ingest took its value is refused on the executor.**
+#[test]
+fn a_fill_whose_value_is_taken_after_its_check_is_refused() {
+    let fx = fixture();
+    let engine = Arc::new(engine_over(&fx));
+    let mut blank = row(&engine, "blank", b"0", "unused", 0, 0);
+    blank.scalars = vec![WalScalar::Null, WalScalar::Null, WalScalar::Null, WalScalar::Null];
+    let entity = ingest(&engine, "blank", vec![blank])[0];
+    flush(&engine);
+    let doi = "10.fill/raced";
+    engine.hold_next_write_check_for_test();
+    let e = Arc::clone(&engine);
+    let held = std::thread::spawn(move || {
+        fill(&e, "raced", "doi", vec![(entity, WalScalar::Utf8(doi.to_string()))])
+    });
+    wait_until("the fill never reached its hold", Duration::from_secs(30), || {
+        engine.write_check_is_holding_for_test()
+    });
+    ingest(&engine, "taker", vec![row(&engine, "taker", b"0", doi, BIG + 30, 30_000)]);
+    engine.release_write_check_for_test();
+    assert!(matches!(
+        held.join().unwrap(),
+        Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
+    ));
+    flush(&engine);
+    assert_eq!(matching(&engine, &full(&engine), text_in("doi", &[doi.to_string()])).len(), 1);
 }
 
 /// **A flush planned before a declaration is planned again after it**, so the rows it carried

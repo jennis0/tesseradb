@@ -360,7 +360,11 @@ impl Executor {
             Command::DeclareAttribute { request, reply } => {
                 self.commit_attribute_declare(*request, reply)
             }
-            Command::Values { request, reply } => self.commit_values(*request, reply),
+            Command::Values {
+                request,
+                unique_seq,
+                reply,
+            } => self.commit_values(request, unique_seq, reply),
             Command::DeclareVocabulary { request, reply } => {
                 self.commit_vocabulary_declare(*request, reply)
             }
@@ -797,7 +801,8 @@ impl Executor {
     /// so there is no state in which a cell is filled and its code or membership is not.
     pub(super) fn commit_values(
         &mut self,
-        mut request: tessera_lifecycle::ValuesRequest,
+        mut request: Box<tessera_lifecycle::ValuesRequest>,
+        unique_seq: u64,
         reply: Reply<ValuesReceipt>,
     ) {
         let started = std::time::Instant::now();
@@ -816,6 +821,20 @@ impl Executor {
             }
         }
 
+        // The unique values against what was added since the handler checked them, from memory.
+        match crate::unique::recheck_fills(&generation, &request, unique_seq, &self.deps.identity_key) {
+            Ok(()) => {}
+            Err(crate::unique::Recheck::Refused(e)) => {
+                reply.fail(e);
+                return;
+            }
+            Err(crate::unique::Recheck::Stale) => {
+                reply.fail(ExecError::UniqueStale(Box::new(
+                    tessera_lifecycle::StaleSubmission::Values(request),
+                )));
+                return;
+            }
+        }
         let columns = match values_columns(&generation.bundle.manifest, &request) {
             Ok(columns) => columns,
             Err(e) => {
@@ -843,12 +862,6 @@ impl Executor {
                 return;
             }
         };
-        if let Err(e) =
-            crate::unique::refuse_taken_fills(&generation, &planned.fills, &self.deps.identity_key)
-        {
-            reply.fail(e);
-            return;
-        }
         // A layer column on a values row is a membership join, and mints what it names. A held
         // key joins the entity to the artifact; a key no artifact holds mints it here, on an
         // `open` layer, with the batch's rows as its first members and its lineage from a list

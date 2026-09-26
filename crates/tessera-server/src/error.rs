@@ -366,7 +366,7 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // The detail names the values and the holders' `tessera_id`s, never an entity id.
         AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
         // Reached only where the handler's one re-check was stale too.
-        AcceptError::Exec(e @ ExecError::UniqueStale) => ApiError::Conflict(e.to_string()),
+        AcceptError::Exec(e @ ExecError::UniqueStale(_)) => ApiError::Conflict(e.to_string()),
         // 404, as an unknown view is on every plane.
         AcceptError::UnknownView { view, .. } => {
             ApiError::Unknown(format!("unknown view '{view}'"))
@@ -519,7 +519,7 @@ fn exec_failure_may_be_in_force(
         ExecError::AttributeRefused { .. }
         | ExecError::AttributeConflict { .. }
         | ExecError::VocabularyConflict { .. } => false,
-        ExecError::UniqueTaken { .. } | ExecError::UniqueStale => false,
+        ExecError::UniqueTaken { .. } | ExecError::UniqueStale(_) => false,
         ExecError::Alloc(_) => false,
     }
 }

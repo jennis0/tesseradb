@@ -39,7 +39,7 @@ pub use alloc::{
 pub use buffer::{BufferedItem, DescriptorResolver, Fill, IngestBuffer, ScopedFill};
 pub use command::{
     AttributeRequest, BatchArtifacts, BatchEdge, BatchMembership, DeclaredValue, ExecError,
-    IncomingValues, MembershipGrown, SubmitError, UnallocatedRow, ValuesRequest,
+    IncomingValues, MembershipGrown, StaleSubmission, SubmitError, UnallocatedRow, ValuesRequest,
     VocabularyRequest,
 };
 pub use faults::WalMeter;

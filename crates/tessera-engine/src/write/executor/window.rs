@@ -552,14 +552,26 @@ impl Executor {
         reply: Reply<Ingested>,
     ) -> Option<WindowEntry<Reply<Ingested>>> {
         let generation = self.generation.load();
-        if let Err(e) =
-            crate::unique::recheck_rows(&generation, &rows, unique_seq, &self.deps.identity_key)
-        {
-            drop(generation);
-            reply.fail(e);
-            return None;
-        }
+        let rechecked =
+            crate::unique::recheck_rows(&generation, &rows, unique_seq, &self.deps.identity_key);
         drop(generation);
+        match rechecked {
+            Ok(()) => {}
+            Err(crate::unique::Recheck::Refused(e)) => {
+                reply.fail(e);
+                return None;
+            }
+            Err(crate::unique::Recheck::Stale) => {
+                reply.fail(ExecError::UniqueStale(Box::new(
+                    tessera_lifecycle::StaleSubmission::Ingest {
+                        rows,
+                        batch_id,
+                        artifacts,
+                    },
+                )));
+                return None;
+            }
+        }
         let (memberships, edges) = match self.resolve_memberships(&artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {

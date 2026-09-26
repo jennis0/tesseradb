@@ -271,6 +271,8 @@ pub(crate) enum Command {
     /// per cell. The answer says how many cells were filled, already held, joined and minted.
     Values {
         request: Box<ValuesRequest>,
+        /// The unique values' sequence number the handler checked them at.
+        unique_seq: u64,
         reply: Reply<ValuesReceipt>,
     },
 }

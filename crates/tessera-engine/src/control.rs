@@ -250,37 +250,35 @@ impl Engine {
                 });
             }
         }
-        // Unique values are checked here, against the generation this thread holds, and re-checked
-        // on the executor against what was added since. Where the executor cannot re-check from
-        // memory, the batch is checked again here once.
-        // The copy a second attempt is sent from, held only where a unique column may make one
-        // owed; a declaration committing between the check and the executor makes one owed too,
-        // and that batch is answered stale.
-        let mut attempt = meta
-            .declared_scalars
-            .iter()
-            .any(|d| d.unique)
-            .then(|| (rows.clone(), batch_id.clone(), artifacts.clone()));
+        // Unique values are checked here, and re-checked on the executor against what was added
+        // since. Where the executor cannot re-check from memory it hands the batch back, and it is
+        // checked here once more.
         let mut submission = (rows, batch_id, artifacts);
+        let mut checks = 0;
         loop {
             let seq = crate::unique::check_rows(&self.generation(), &submission.0, &self.identity_key)?;
             #[cfg(feature = "fault-injection")]
-            self.switches.hold_ingest_check_if_wanted();
+            self.switches.hold_write_check_if_wanted();
+            checks += 1;
             let (rows, batch_id, artifacts) = submission;
             match self
                 .write
                 .accept_ingest(rows, batch_id, body_hash, artifacts, seq)
             {
-                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::UniqueStale)) => {
-                    match attempt.take() {
-                        Some(again) => submission = again,
-                        None => {
-                            return Err(crate::write::AcceptError::Exec(
-                                tessera_lifecycle::ExecError::UniqueStale,
-                            ))
-                        }
+                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::UniqueStale(
+                    stale,
+                ))) if checks < 2 => match *stale {
+                    tessera_lifecycle::StaleSubmission::Ingest {
+                        rows,
+                        batch_id,
+                        artifacts,
+                    } => submission = (rows, batch_id, artifacts),
+                    other => {
+                        return Err(crate::write::AcceptError::Exec(
+                            tessera_lifecycle::ExecError::UniqueStale(Box::new(other)),
+                        ))
                     }
-                }
+                },
                 answered => return answered,
             }
         }
@@ -388,7 +386,28 @@ impl Engine {
         &self,
         request: tessera_lifecycle::ValuesRequest,
     ) -> std::result::Result<crate::write::ValuesReceipt, crate::write::AcceptError> {
-        self.write.fill_values(request)
+        // Checked and re-checked as an ingest's unique values are.
+        let mut request = Box::new(request);
+        let mut checks = 0;
+        loop {
+            let seq = crate::unique::check_fills(&self.generation(), &request, &self.identity_key)?;
+            #[cfg(feature = "fault-injection")]
+            self.switches.hold_write_check_if_wanted();
+            checks += 1;
+            match self.write.fill_values(request, seq) {
+                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::UniqueStale(
+                    stale,
+                ))) if checks < 2 => match *stale {
+                    tessera_lifecycle::StaleSubmission::Values(again) => request = again,
+                    other => {
+                        return Err(crate::write::AcceptError::Exec(
+                            tessera_lifecycle::ExecError::UniqueStale(Box::new(other)),
+                        ))
+                    }
+                },
+                answered => return answered,
+            }
+        }
     }
 
     /// Declare a vocabulary while the service runs. Answers `(existing, added, titles)`.
