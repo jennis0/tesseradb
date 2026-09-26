@@ -74,9 +74,9 @@ use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
 use tessera_spatial::{split32, Bounds};
 use tessera_store::manifest::{
-    CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
-    IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
-    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    CurrentPointer, DeclaredScalar, DictExtent, FileDigest, IdentityDescriptor, Manifest,
+    ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor, SegmentDescriptor,
+    SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
@@ -1470,7 +1470,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &args.schema,
             |column| crate::unique_index::UniqueSource::Items(&tiler_items, column),
             scratch.path(),
-            args.memory_budget.unwrap_or_else(pipeline::detect_memory_budget),
+            args.memory_budget
+                .unwrap_or_else(pipeline::detect_memory_budget),
         )?;
         scratch.close()?;
         written
@@ -1954,7 +1955,12 @@ fn write_manifests(
         .iter()
         .chain(&files.external_ids_paths)
         .chain(&files.other_paths)
-        .chain(files.unique.iter().flat_map(|(_, runs)| runs.iter().map(|run| &run.path)))
+        .chain(
+            files
+                .unique
+                .iter()
+                .flat_map(|(_, runs)| runs.iter().map(|run| &run.path)),
+        )
         .collect();
     let unique_indexes = files
         .unique
@@ -2683,11 +2689,33 @@ fn walk_window(
                     segment.seg_id
                 )));
             }
+            let id = ids[local];
+            // A row an edit moved lists its entity, and its `tessera_id` is its number's, which
+            // the deep pass checks against the edited items.
+            if let Ok(at) = segment
+                .edited
+                .binary_search_by_key(&(local as u32), |&(row, _)| row)
+            {
+                let listed = u64::from(segment.edited[at].1);
+                if listed != entity {
+                    return Err(BuildError::Invalid(format!(
+                        "view '{view_id}' segment '{}' row {local}: the row space claims entity                          {entity} and the segment lists entity {listed}",
+                        segment.seg_id
+                    )));
+                }
+                let (shard, _) = identity_key.invert(tessera_types::TesseraId::new(id));
+                if shard != shard_id {
+                    return Err(BuildError::Invalid(format!(
+                        "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} names                          shard {shard}, not {shard_id}",
+                        segment.seg_id
+                    )));
+                }
+                continue;
+            }
             let expected = identity_key
                 .forward(shard_id, EntityId::new(entity))
                 .map_err(BuildError::Identity)?
                 .raw();
-            let id = ids[local];
             if id != expected {
                 return Err(BuildError::Invalid(format!(
                     "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} does not \

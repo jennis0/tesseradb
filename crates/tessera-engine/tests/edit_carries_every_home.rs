@@ -852,9 +852,17 @@ fn an_edit_carries_every_home() {
     engine = open(tmp.path(), &root);
     flush(&engine);
     check(&engine, &expected, "a restart before the edit's flush");
+    // Two edits, each giving the item an entity with a row in its three views; the first entity
+    // is deleted and still on disc until the fold.
+    let verified = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+        .expect("the edited items agree with the rows");
+    assert_eq!((verified.edited_pairs, verified.edited_rows), (2, 6));
 
     fold(&engine);
     check(&engine, &expected, "a fold");
+    let verified = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+        .expect("the folded edited items agree with the rows");
+    assert_eq!((verified.edited_pairs, verified.edited_rows), (1, 3));
     drop(engine);
     let engine = open(tmp.path(), &root);
     check(&engine, &expected, "a restart after the fold");

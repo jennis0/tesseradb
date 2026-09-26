@@ -54,7 +54,10 @@ impl Direction {
 
 /// Where a partition's edited-item runs of one direction live, prefix-relative.
 pub fn runs_dir_rel(partition: &str, direction: Direction) -> String {
-    format!("partitions/{partition}/entities/edited/{}", direction.name())
+    format!(
+        "partitions/{partition}/entities/edited/{}",
+        direction.name()
+    )
 }
 
 /// The runs one writer finished for both directions.
@@ -325,6 +328,17 @@ impl EditedIndex {
     }
 }
 
+/// Every `(key, value)` entry of one direction's runs, base and live, in no particular order.
+pub fn entries(runs: &KeyRuns, prefix_dir: &Path) -> Result<Vec<(u32, u32)>> {
+    let mut out = Vec::new();
+    for rel in runs.base.iter().map(|run| &run.path).chain(&runs.live) {
+        for entry in KeyRun::<u32>::open(&prefix_dir.join(rel))?.iter() {
+            out.push(entry?);
+        }
+    }
+    Ok(out)
+}
+
 impl Default for EditedIndex {
     fn default() -> Self {
         EditedIndex::empty()
@@ -338,7 +352,10 @@ pub fn write_edited_rows(seg_dir: &Path, rows: &[(u32, u32)]) -> Result<bool> {
         return Ok(false);
     }
     debug_assert!(rows.windows(2).all(|w| w[0].0 < w[1].0));
-    let flat: Vec<u32> = rows.iter().flat_map(|&(row, entity)| [row, entity]).collect();
+    let flat: Vec<u32> = rows
+        .iter()
+        .flat_map(|&(row, entity)| [row, entity])
+        .collect();
     crate::flush::write_u32_array(&seg_dir.join(EDITED_ROWS_FILE), &flat)?;
     Ok(true)
 }
@@ -433,7 +450,8 @@ mod tests {
         assert_eq!(index.numbers_of(&[41, 5]).unwrap(), vec![(0, 3)]);
 
         let retired = croaring::Bitmap::of(&[40]);
-        let paths = |runs: &[WrittenRun<u32>]| runs.iter().map(|r| r.path.clone()).collect::<Vec<_>>();
+        let paths =
+            |runs: &[WrittenRun<u32>]| runs.iter().map(|r| r.path.clone()).collect::<Vec<_>>();
         let dir = |direction| prefix.join(runs_dir_rel("p", direction));
         let by_number = merge_edited_runs(
             Direction::ByNumber,
@@ -477,7 +495,11 @@ mod tests {
         let rows = read_edited_rows(tmp.path()).unwrap();
         assert_eq!(rows, vec![(1, 90), (4, 91)]);
         let key = tessera_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
-        let tid = |n: u64| key.forward(0, tessera_types::EntityId::new(n)).unwrap().raw();
+        let tid = |n: u64| {
+            key.forward(0, tessera_types::EntityId::new(n))
+                .unwrap()
+                .raw()
+        };
         assert_eq!(
             entity_of_row(&rows, 4, tid(5), &key, 0, "s").unwrap(),
             tessera_types::EntityId::new(91)
