@@ -347,7 +347,8 @@ impl Executor {
                 note(arrived[i].1, &arrived[i].2);
             }
         }
-        Ok((!keys_found.is_empty()).then(|| (keys_found.len() as u64, examples)))
+        let count = keys_found.len() as u64;
+        Ok((count > 0).then_some((count, examples)))
     }
 
     fn refuse_unique_declare(&mut self, count: u64, examples: &[String]) {

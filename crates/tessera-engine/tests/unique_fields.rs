@@ -602,10 +602,7 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
     let fx = fixture_with(false);
     let engine = engine_over(&fx);
     assert!(
-        matches!(
-            matching_result(&engine, text_in("doi", &[doi_of(1)])),
-            Err(_)
-        ),
+        matching_result(&engine, text_in("doi", &[doi_of(1)])).is_err(),
         "before the declaration, a column with no index takes no filter"
     );
     // Rows buffered before the declaration are covered by it too.

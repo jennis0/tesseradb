@@ -26,6 +26,10 @@ const UNIQUE_BUDGET_MAX: u64 = 4 << 30;
 /// How many values a refusal names.
 const EXAMPLES: usize = 10;
 
+/// What a walk over a unique column's values hands each present value to: the entity, the key,
+/// and the text of a keyword.
+type Visit<'v> = dyn FnMut(u32, UniqueKey, Option<&str>) -> Result<()> + 'v;
+
 /// Where one unique column's values are read from, entity by entity, in ascending order.
 pub(crate) enum UniqueSource<'a> {
     /// The column held in entity order.
@@ -42,7 +46,7 @@ impl UniqueSource<'_> {
     fn walk(
         &self,
         attribute: &Attribute,
-        visit: &mut dyn FnMut(u32, UniqueKey, Option<&str>) -> Result<()>,
+        visit: &mut Visit<'_>,
     ) -> Result<()> {
         let keyed = |value: &ScalarValue| key_of(attribute.ty, value);
         match self {
