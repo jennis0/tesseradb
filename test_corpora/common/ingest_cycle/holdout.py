@@ -205,6 +205,8 @@ class HoldOut:
         view: dict | None = None,
         members: Sequence[str] = (),
         record_order: bool = False,
+        nudge: float = 0.0,
+        nudge_every: int = 1,
     ):
         #: The view's own points file: its positions, its access column, and whichever declared
         #: attributes it holds; and the `(column, key)` picking the view's rows out of a file
@@ -247,11 +249,23 @@ class HoldOut:
         #: Each row's entity id in the order the batches send them, where asked for: what the row
         #: index a body starts at is an index into.
         self.order: list[int] | None = [] if record_order else None
+        #: Added to the first coordinate of every `nudge_every`th entity's row, by entity id, which
+        #: moves each item it names.
+        self.nudge = nudge
+        self.nudge_every = nudge_every
 
     def emit(self, table: pa.Table, start: int):
         """[`bodies`] over one slice, its entity ids recorded first where `order` is kept."""
         if self.order is not None:
             self.order += table.column("entity_id").to_pylist()
+        if self.nudge:
+            at = table.column_names.index(self.coordinates[0])
+            column = table.column(at)
+            moved = pc.add(column, pa.scalar(self.nudge, table.schema.field(at).type))
+            if self.nudge_every > 1:
+                chosen = table.column("entity_id").to_numpy() % self.nudge_every == 0
+                moved = pc.if_else(pa.array(chosen), moved, column)
+            table = table.set_column(at, table.schema.field(at), moved)
         yield from self.bodies(table, start)
 
     @staticmethod
