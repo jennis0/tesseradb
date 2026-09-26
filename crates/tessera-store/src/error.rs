@@ -139,6 +139,15 @@ pub enum StoreError {
     /// on purpose (see `crate::sidecar`'s module doc) — a `None` here would read as "no such
     /// external id" and could turn a WAL-resident suppression into a silent no-op.
     InvalidSidecar { path: PathBuf, detail: String },
+    /// A key index run ([`crate::key_index`]) failed a check. `part` names the header, the page
+    /// index or the one page whose bytes are wrong, so a damaged page is told apart from a damaged
+    /// file. Never folded into "key absent": a lookup that cannot read a page cannot say the key is
+    /// not on it.
+    InvalidKeyIndex {
+        path: PathBuf,
+        part: crate::key_index::RunPart,
+        detail: String,
+    },
     /// The entity→term transpose (`entities/terms/`, contracts §2.4) failed closed: a has-row
     /// bitmap that is not portable Roaring, an offsets array of the wrong length or not
     /// ascending, or a terms file that does not end where the last offset says. Fail-closed
@@ -297,6 +306,9 @@ impl fmt::Display for StoreError {
                     "invalid entity-terms transpose at {}: {detail}",
                     path.display()
                 )
+            }
+            StoreError::InvalidKeyIndex { path, part, detail } => {
+                write!(f, "key index run {} ({part}): {detail}", path.display())
             }
             StoreError::InvalidSidecar { path, detail } => {
                 write!(

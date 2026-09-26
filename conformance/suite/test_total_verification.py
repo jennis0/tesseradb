@@ -28,13 +28,13 @@ census`, minus the denies this harness had accepted.
 ## The negative controls
 
 Total verification that has never rejected anything is indistinguishable from a stub, so each
-half's ability to fail is asserted against real recordings: a deliberately corrupted expectation
-— one item's declared value, another item's position — must be rejected by the row half, naming
-the rows; and a census computed for the wrong principal must be rejected by the census half. A
-third control corrupts nothing and pins the wire defect the first run of this mechanism found:
-the points tail's column names must be the render declaration's, never the full declaration's
-first *k* — this corpus's `seen_at` sits between two render columns, so a positional slip
-misnames every column after it.
+half's ability to fail is asserted against real recordings. The row half must reject a corrupted
+expectation (one item's declared value moved by one, another item's position moved by one unit)
+and a zero expected where an item holds no value, on the points tail and at drill-down, naming
+each row. The census half must reject a census computed for the wrong principal. A last test
+checks that the points tail's columns are named by the render declaration, in its order: this
+corpus's `seen_at` is declared between two render columns, so a tail named from the full
+declaration would misname every column after it.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ from .verification import (
     Declaration,
     TotalVerificationFailure,
     build_bundle,
+    check_item,
     check_points,
     expected_census,
     expected_items,
@@ -112,7 +113,14 @@ def run(tmp_path_factory) -> SimpleNamespace:
                 points.column("fx_key").to_pylist(),
             )
         )
-        item_ids = tuple(sorted(fx_of_tessera)[:3])
+        # Three items for the denies, and one the corpus gives no weight, so the drill-down is
+        # checked against an absent rendered value.
+        served_ids = sorted(fx_of_tessera)
+        corpus = expected_items(SEED, fx_of_tessera.values())
+        absent_id = next(
+            t for t in served_ids[3:] if corpus[fx_of_tessera[t]].fields["weight"] is None
+        )
+        item_ids = (*served_ids[:3], absent_id)
         battery = build_battery(
             meta,
             view_id=VIEW_ID,
@@ -265,10 +273,11 @@ def test_the_deny_lane_is_where_the_recording_says_it_is(run):
         for q, canon in run.recorded.items()
         if isinstance(q, Item)
     }
-    suppressed, deleted, unsuppressed = run.battery_fx
+    suppressed, deleted, unsuppressed, absent = run.battery_fx
     assert statuses[suppressed] == 404
     assert statuses[deleted] == 404
     assert statuses[unsuppressed] == 200
+    assert statuses[absent] == 200
     assert unsuppressed not in run.denied_fx, (
         "an unsuppressed item held in the denied set would be subtracted from the census — "
         "conflating the two removal rules"
@@ -319,6 +328,54 @@ def test_negative_control_a_corrupted_expectation_is_rejected(run):
         f"the corrupted position was not rejected: {reasons[:3]}"
     )
     assert len(reasons) == 2, f"unexpected extra disagreements: {reasons}"
+
+
+def test_negative_control_a_zero_for_an_absent_value_is_rejected(run):
+    """An item with no weight expected to hold 0 must be rejected on the points tail and at
+    drill-down: a comparator that equated null with zero would pass a server that served either
+    for the other."""
+    absent_fx = run.battery_fx[3]
+    query = next(
+        q
+        for q in run.recorded
+        if isinstance(q, Viewport) and q.zoom == 3 and q.filters is None
+    )
+    canon = run.recorded[query]
+    served_fx = streams_table(canon.points).column("fx_key").to_pylist()
+    assert absent_fx in served_fx
+    expected = expected_items(SEED, set(served_fx))
+    victim = expected[absent_fx]
+    assert victim.fields["weight"] is None
+    zeroed = dataclasses.replace(victim, fields={**victim.fields, "weight": 0})
+
+    reasons: list[str] = []
+    check_points(
+        "control",
+        canon,
+        {**expected, absent_fx: zeroed},
+        declaration=run.declaration,
+        denied_fx=run.denied_fx,
+        reasons=reasons,
+    )
+    assert len(reasons) == 1, reasons
+    assert "weight" in reasons[0] and format(absent_fx, "#x") in reasons[0], reasons
+
+    item = next(
+        q
+        for q in run.recorded
+        if isinstance(q, Item) and run.fx_of_tessera[q.tessera_id] == absent_fx
+    )
+    reasons = []
+    check_item(
+        "control",
+        run.recorded[item],
+        zeroed,
+        declaration=run.declaration,
+        denied=False,
+        reasons=reasons,
+    )
+    assert len(reasons) == 1, reasons
+    assert "weight" in reasons[0], reasons
 
 
 def test_negative_control_a_census_for_the_wrong_principal_is_rejected(run):
