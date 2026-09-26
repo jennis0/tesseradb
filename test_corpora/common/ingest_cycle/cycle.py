@@ -304,7 +304,8 @@ class Cycle:
             totals["offered"] += rows
             if r.status_code == 200:
                 body = r.json()
-                totals["accepted"] += body["accepted"]
+                # A row is taken where it created an item or added one to the view.
+                totals["accepted"] += body["created"] + body["added"]
                 totals["minted"] += body.get("minted", 0)
                 if tessera_ids is not None:
                     tessera_ids.update(enumerate(body.get("tessera_ids") or [], start))
