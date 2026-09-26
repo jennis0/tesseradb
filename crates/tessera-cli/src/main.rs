@@ -536,20 +536,6 @@ fn parse_extent(raw: &str) -> Result<Bounds, String> {
     Ok(extent)
 }
 
-/// A new key for the bundle a build creates, drawn from the operating system's random source.
-/// A draw that [`IdentityKey::from_hex`] refuses as degenerate (`k1 == 0`) is drawn again.
-fn generate_identity_key() -> IdentityKey {
-    use rand::RngCore;
-    loop {
-        let mut bytes = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
-        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        if let Ok(key) = IdentityKey::from_hex(&hex) {
-            return key;
-        }
-    }
-}
-
 /// `24g` / `512m` / `1073741824` — the human forms a budget is actually typed in.
 fn parse_byte_size(value: &str) -> Result<u64, String> {
     let value = value.trim();
@@ -1322,7 +1308,7 @@ fn main() -> ExitCode {
                 attribute_sources: acquired.attribute_sources,
                 out: out.clone(),
                 limit,
-                identity_key: generate_identity_key(),
+                identity_key: IdentityKey::generate(),
                 shard_id: 0,
                 mint_external_ids,
                 emit_oracle_pairs: !no_oracle_pairs,

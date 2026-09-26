@@ -154,6 +154,20 @@ impl IdentityKey {
         Self::from_parts(k0, k1)
     }
 
+    /// A new key from the operating system's random source, for a bundle being created. A draw
+    /// that [`IdentityKey::from_hex`] would refuse as degenerate (`k1 == 0`) is drawn again.
+    pub fn generate() -> Self {
+        loop {
+            let mut bytes = [0u8; 16];
+            getrandom::getrandom(&mut bytes).expect("the operating system's random source");
+            let k0 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+            let k1 = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+            if let Ok(key) = Self::from_parts(k0, k1) {
+                return key;
+            }
+        }
+    }
+
     /// The canonical form [`IdentityKey::from_hex`] reads: 32 lowercase hexadecimal characters,
     /// byte 0 first.
     pub fn to_hex(&self) -> String {
@@ -524,6 +538,13 @@ mod tests {
             .sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.raw().cmp(&b.raw())));
 
         assert_eq!(by_priority_then_raw, by_raw);
+    }
+
+    #[test]
+    fn a_generated_key_is_valid_and_differs_from_the_next() {
+        let key = IdentityKey::generate();
+        assert_eq!(IdentityKey::from_hex(&key.to_hex()), Ok(key));
+        assert_ne!(key, IdentityKey::generate());
     }
 
     #[test]
