@@ -242,6 +242,35 @@ impl<'a, K: Key> PageCursor<'a, K> {
         self.page.entity(self.at)
     }
 
+    /// Move forward to the first entry whose key is at or past `key`, or to the page's last entry
+    /// when none is.
+    #[inline]
+    pub(super) fn seek(&mut self, key: K) {
+        if self.key >= key {
+            return;
+        }
+        let (target, bits, last) = (key.widen(), self.page.bits, self.page.len - 1);
+        let gaps = &self.page.bytes[head_len(K::WIDTH)..];
+        let (mut at, mut k) = (self.at, self.key.widen());
+        if bits <= 56 {
+            let mask = (1u64 << bits) - 1;
+            while at < last && k < target {
+                let bit = at * bits as usize;
+                let word =
+                    u64::from_le_bytes(gaps[bit / 8..bit / 8 + 8].try_into().expect("eight bytes"));
+                k = k.wrapping_add(((word >> (bit % 8)) & mask) as u128);
+                at += 1;
+            }
+        } else {
+            while at < last && k < target {
+                k = k.wrapping_add(get_bits(gaps, at * bits as usize, bits));
+                at += 1;
+            }
+        }
+        self.at = at;
+        self.key = K::narrow(k);
+    }
+
     /// Move to the next entry; false, not moving, at the page's last.
     #[inline]
     pub(super) fn step(&mut self) -> bool {

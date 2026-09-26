@@ -399,6 +399,7 @@ impl<K: Key> KeyRun<K> {
         }
         let (p, cursor) = at.as_mut().expect("set above");
         loop {
+            cursor.seek(key);
             loop {
                 if cursor.key > key {
                     return Ok(());
