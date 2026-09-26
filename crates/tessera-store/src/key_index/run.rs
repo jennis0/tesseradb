@@ -175,11 +175,10 @@ impl<K: Key> KeyRun<K> {
     }
 
     /// A page's checksum, its count and gap width, that the bits and bytes it leaves unused are
-    /// zero, the order of its entries, its first and last
-    /// keys against the page index and the header, and the order of its first and last entries
-    /// against those of a neighbouring page already checked. Whichever of two neighbours is
-    /// checked second compares the two, so every pair of neighbouring pages a lookup has read is
-    /// in order.
+    /// zero, the order of its entries, its first and last keys against the page index and the
+    /// header, and the order of its first and last entries against those of a neighbouring page
+    /// already checked. Whichever of two neighbours is checked second compares the two, so every
+    /// pair of neighbouring pages a lookup has read is in order.
     fn check_page<'a>(&'a self, p: u64, bytes: &'a [u8]) -> Result<Page<'a, K>> {
         let fail = |detail: &str| corrupt(&self.path, RunPart::Page(p), detail);
         let stored = u32::from_le_bytes(bytes[PAGE_BODY..].try_into().expect("four bytes"));
@@ -291,7 +290,8 @@ impl<K: Key> KeyRun<K> {
         self.prefetch(keys);
         let mut out: Vec<(usize, u32)> = Vec::new();
         let mut at = None;
-        // Where the previous key's entities start in `out`, for a repeated key.
+        // Where the previous key's entities start in `out`. A repeated key copies them, since the
+        // cursor has moved past that key's entries.
         let mut previous: Option<(K, usize)> = None;
         for (i, &key) in keys.iter().enumerate() {
             if !self.may_hold(key) {

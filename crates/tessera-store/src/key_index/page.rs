@@ -249,26 +249,49 @@ impl<'a, K: Key> PageCursor<'a, K> {
         if self.key >= key {
             return;
         }
-        let (target, bits, last) = (key.widen(), self.page.bits, self.page.len - 1);
-        let gaps = &self.page.bytes[head_len(K::WIDTH)..];
-        let (mut at, mut k) = (self.at, self.key.widen());
-        if bits <= 56 {
-            let mask = (1u64 << bits) - 1;
+        let (bits, last) = (self.page.bits, self.page.len - 1);
+        if bits == 0 {
+            // Every key is the first, which is below `key`.
+            self.at = last;
+            return;
+        }
+        if bits > 56 {
+            let gaps = &self.page.bytes[head_len(K::WIDTH)..];
+            let (target, mut k) = (key.widen(), self.key.widen());
+            while self.at < last && k < target {
+                k = k.wrapping_add(get_bits(gaps, self.at * bits as usize, bits));
+                self.at += 1;
+            }
+            self.key = K::narrow(k);
+            return;
+        }
+        // Every read below starts at or before byte PAGE_BODY - 8 of a page that parsed, so the
+        // clamp never moves it; it lets the compiler drop the bounds check.
+        let page: &[u8; PAGE_SIZE] = self.page.bytes.try_into().expect("a whole page");
+        let (base, mask) = (8 * head_len(K::WIDTH), (1u64 << bits) - 1);
+        let gap = |at: usize| {
+            let bit = base + at * bits as usize;
+            let byte = (bit / 8).min(PAGE_SIZE - 8);
+            let word = u64::from_le_bytes(page[byte..byte + 8].try_into().expect("eight bytes"));
+            (word >> (bit % 8)) & mask
+        };
+        let mut at = self.at;
+        if K::WIDTH <= 8 {
+            let (target, mut k) = (key.widen() as u64, self.key.widen() as u64);
             while at < last && k < target {
-                let bit = at * bits as usize;
-                let word =
-                    u64::from_le_bytes(gaps[bit / 8..bit / 8 + 8].try_into().expect("eight bytes"));
-                k = k.wrapping_add(((word >> (bit % 8)) & mask) as u128);
+                k = k.wrapping_add(gap(at));
                 at += 1;
             }
+            self.key = K::narrow(k as u128);
         } else {
+            let (target, mut k) = (key.widen(), self.key.widen());
             while at < last && k < target {
-                k = k.wrapping_add(get_bits(gaps, at * bits as usize, bits));
+                k = k.wrapping_add(gap(at) as u128);
                 at += 1;
             }
+            self.key = K::narrow(k);
         }
         self.at = at;
-        self.key = K::narrow(k);
     }
 
     /// Move to the next entry; false, not moving, at the page's last.

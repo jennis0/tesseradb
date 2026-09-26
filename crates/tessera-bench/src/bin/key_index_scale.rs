@@ -14,35 +14,24 @@
 //! or a VM the host may still hold the bytes, so a cold read there is a read from the host's
 //! cache, not necessarily from the disk.
 //!
-//! `--rewrite <dir>` instead reads every format 1 run (the fixed-width format, twelve bytes an
-//! entry) of `u64` keys in `<dir>` once, front to back with `O_DIRECT` so that the read neither
-//! fills nor empties the page cache, and writes each into a run of the current format under
-//! `--dir`. It prints the old and new sizes, the size a width per block of 64 gaps would give
-//! instead of one width per page, and cold and warm single and batched lookups over the new runs
-//! as the base runs of one index; then it removes them.
-//!
 //! Each spill arm runs in a child process of its own, so its peak resident set (`VmHWM`) and its
 //! anonymous memory (`RssAnon`) are the spill's and not the lookups' mappings.
 //!
 //! ```text
 //! cargo run --release -p tessera-bench --bin key_index_scale -- --dir <scratch> [--entries N] [--keys dense|random] [--spill]
-//! cargo run --release -p tessera-bench --bin key_index_scale -- --dir <scratch> --rewrite <dir of format 1 runs>
 //! ```
 
 use std::fs::File;
-use std::io::Read;
 use std::num::NonZeroU64;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use tessera_store::key_index::{verify_run, KeyIndexView, KeyRun, KeyRunWriter, KeySpill};
+use tessera_store::key_index::{verify_run, KeyRun, KeyRunWriter, KeySpill};
 
 #[derive(Parser)]
 #[command(about = "key index run write, open, lookup and spill costs at scale")]
@@ -52,9 +41,9 @@ struct Args {
     dir: PathBuf,
     #[arg(long, default_value_t = 100_000_000)]
     entries: u64,
-    /// The keys: `dense` or `random` (see the module doc).
-    #[arg(long, default_value = "dense")]
-    keys: String,
+    /// The keys (see the module doc).
+    #[arg(long, value_enum, default_value_t = KeyPattern::Dense)]
+    keys: KeyPattern,
     /// Single lookups timed in each of the cold and warm passes.
     #[arg(long, default_value_t = 2_000)]
     lookups: usize,
@@ -64,13 +53,15 @@ struct Args {
     /// The spill's memory budget in MiB.
     #[arg(long, default_value_t = 1024)]
     budget_mib: usize,
-    /// Rewrite the format 1 `u64` runs in this directory into the current format and time
-    /// lookups over them, instead of the synthetic run.
-    #[arg(long)]
-    rewrite: Option<PathBuf>,
     /// Run one spill arm, `random` or `sequential`, and nothing else.
     #[arg(long, hide = true)]
     spill_arm: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum KeyPattern {
+    Dense,
+    Random,
 }
 
 /// The keys of a run of `n` entries: the `i`th key, and a key between it and the next that is
@@ -82,13 +73,12 @@ enum Keys {
 }
 
 impl Keys {
-    fn new(name: &str, n: u64) -> Self {
-        match name {
-            "dense" => Keys::Dense,
-            "random" => Keys::Random {
+    fn new(pattern: KeyPattern, n: u64) -> Self {
+        match pattern {
+            KeyPattern::Dense => Keys::Dense,
+            KeyPattern::Random => Keys::Random {
                 stride: u64::MAX / n.max(1),
             },
-            other => panic!("--keys is dense or random, not {other}"),
         }
     }
 
@@ -226,17 +216,13 @@ fn main() {
         spill_arm(&args, &args.dir, arm);
         return;
     }
-    if let Some(from) = &args.rewrite {
-        rewrite(&args, from);
-        return;
-    }
     let dir = args
         .dir
         .join(format!("key-index-scale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create dir");
     let n = args.entries;
-    let keys = Keys::new(&args.keys, n);
-    println!("entries: {n}, {} keys", args.keys);
+    let keys = Keys::new(args.keys, n);
+    println!("entries: {n}, {:?} keys", args.keys);
 
     let started = Instant::now();
     let mut writer =
@@ -333,252 +319,5 @@ fn main() {
         }
     }
 
-    std::fs::remove_dir_all(&dir).expect("remove dir");
-}
-
-/// Every `(key, entity)` of a format 1 run of `u64` keys to `visit`, reading the file once with
-/// `O_DIRECT`. Returns the file's length.
-fn read_format_1(path: &Path, mut visit: impl FnMut(u64, u32)) -> u64 {
-    const CHUNK: usize = 8 << 20;
-    const PAGE: usize = 4096;
-    const PER_PAGE: u64 = 341;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECT)
-        .open(path)
-        .expect("open a format 1 run");
-    let len = file.metadata().expect("metadata").len();
-    let mut backing = vec![0u8; CHUNK + PAGE];
-    let skip = backing.as_ptr().align_offset(PAGE);
-    let buf = &mut backing[skip..skip + CHUNK];
-    let (mut entries, mut pages) = (0u64, 0u64);
-    let mut page_no = 0u64;
-    let mut seen = 0u64;
-    loop {
-        let mut filled = 0;
-        while filled < CHUNK {
-            let n = file.read(&mut buf[filled..]).expect("read");
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        for page in buf[..filled].chunks_exact(PAGE) {
-            if page_no == 0 {
-                assert_eq!(
-                    &page[0..8],
-                    b"TSKEYRUN",
-                    "{}: not a key run",
-                    path.display()
-                );
-                let version = u32::from_le_bytes(page[8..12].try_into().unwrap());
-                let width = u32::from_le_bytes(page[12..16].try_into().unwrap());
-                assert_eq!((version, width), (1, 8), "{}", path.display());
-                entries = u64::from_le_bytes(page[16..24].try_into().unwrap());
-                pages = u64::from_le_bytes(page[24..32].try_into().unwrap());
-            } else if page_no <= pages {
-                let in_page = (entries - (page_no - 1) * PER_PAGE).min(PER_PAGE) as usize;
-                for e in page[..in_page * 12].chunks_exact(12) {
-                    visit(
-                        u64::from_le_bytes(e[..8].try_into().unwrap()),
-                        u32::from_le_bytes(e[8..].try_into().unwrap()),
-                    );
-                }
-                seen += in_page as u64;
-            }
-            page_no += 1;
-        }
-        if filled < CHUNK {
-            break;
-        }
-    }
-    assert_eq!(seen, entries, "{}: entries read", path.display());
-    len
-}
-
-/// The size of a run packed with one gap width per block of `block` gaps, each block's width in a
-/// byte before it, and otherwise as the current format packs: a page fills until the next entry
-/// does not fit.
-struct BlockSim {
-    block: usize,
-    pages: u64,
-    entries: u64,
-    in_page: usize,
-    last: u64,
-    closed: usize,
-    open: usize,
-    open_bits: u32,
-}
-
-impl BlockSim {
-    fn new(block: usize) -> Self {
-        BlockSim {
-            block,
-            pages: 0,
-            entries: 0,
-            in_page: 0,
-            last: 0,
-            closed: 0,
-            open: 0,
-            open_bits: 0,
-        }
-    }
-
-    fn cost(&self, n: usize, closed: usize, open: usize, bits: u32) -> usize {
-        let open_bytes = if open > 0 {
-            1 + (open * bits as usize).div_ceil(8)
-        } else {
-            0
-        };
-        3 + 8 + closed + open_bytes + 4 * n
-    }
-
-    fn push(&mut self, key: u64) {
-        self.entries += 1;
-        if self.in_page > 0 {
-            let bits = 64 - (key - self.last).leading_zeros();
-            let (mut closed, mut open, mut open_bits) = (self.closed, self.open, self.open_bits);
-            if open == self.block {
-                closed += 1 + (open * open_bits as usize).div_ceil(8);
-                open = 0;
-                open_bits = 0;
-            }
-            open_bits = open_bits.max(bits);
-            open += 1;
-            if self.cost(self.in_page + 1, closed, open, open_bits) <= 4092 {
-                (self.closed, self.open, self.open_bits) = (closed, open, open_bits);
-                self.in_page += 1;
-                self.last = key;
-                return;
-            }
-        }
-        self.pages += u64::from(self.in_page > 0);
-        (self.in_page, self.closed, self.open, self.open_bits) = (1, 0, 0, 0);
-        self.last = key;
-    }
-
-    fn file_bytes(&self) -> u64 {
-        let pages = self.pages + u64::from(self.in_page > 0);
-        (1 + pages) * 4096 + pages * 8 + 4
-    }
-}
-
-fn rewrite(args: &Args, from: &Path) {
-    let mut inputs: Vec<PathBuf> = std::fs::read_dir(from)
-        .expect("read the runs' directory")
-        .map(|e| e.expect("entry").path())
-        .filter(|p| p.extension().is_some_and(|x| x == "keys"))
-        .collect();
-    inputs.sort();
-    let dir = args
-        .dir
-        .join(format!("key-index-rewrite-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create dir");
-    let (mut old_bytes, mut new_bytes, mut entries) = (0u64, 0u64, 0u64);
-    let mut sim = BlockSim::new(64);
-    let mut sim_bytes = 0u64;
-    let mut present = Vec::new();
-    let mut absent = Vec::new();
-    let mut outputs = Vec::new();
-    let started = Instant::now();
-    for (i, input) in inputs.iter().enumerate() {
-        let mut writer = KeyRunWriter::<u64>::create(
-            &dir,
-            &format!("base-{i}"),
-            NonZeroU64::new(u64::MAX).expect("non-zero"),
-        );
-        let mut pending: Option<u64> = None;
-        old_bytes += read_format_1(input, |key, entity| {
-            if let Some(k) = pending.take() {
-                if key > k + 1 {
-                    absent.push(k + 1);
-                }
-            }
-            if entries % 16_384 == 0 {
-                present.push(key);
-                pending = Some(key);
-            }
-            entries += 1;
-            sim.push(key);
-            writer.push(key, entity).expect("push");
-        });
-        sim_bytes += sim.file_bytes();
-        sim = BlockSim::new(64);
-        let runs = writer.finish().expect("finish");
-        for run in runs {
-            tessera_store::fsync_written(std::slice::from_ref(&run.path)).expect("fsync");
-            drop_cache(&run.path);
-            new_bytes += std::fs::metadata(&run.path).expect("metadata").len();
-            outputs.push(run);
-        }
-    }
-    let elapsed = started.elapsed();
-    let gb = |b: u64| b as f64 / 1e9;
-    println!(
-        "rewrote {} runs, {entries} entries, in {elapsed:.2?}: format 1 {:.2} GB ({:.3} B/entry), \
-         current {:.2} GB ({:.3} B/entry); a width per 64 gaps would be {:.2} GB ({:.3} B/entry)",
-        outputs.len(),
-        gb(old_bytes),
-        old_bytes as f64 / entries as f64,
-        gb(new_bytes),
-        new_bytes as f64 / entries as f64,
-        gb(sim_bytes),
-        sim_bytes as f64 / entries as f64,
-    );
-
-    outputs.sort_by_key(|r| r.min_key);
-    let open_view = || {
-        let base = outputs
-            .iter()
-            .map(|r| {
-                drop_cache(&r.path);
-                Arc::new(KeyRun::<u64>::open(&r.path).expect("open"))
-            })
-            .collect();
-        KeyIndexView::new(vec![], base).expect("view")
-    };
-    let mut rng = StdRng::seed_from_u64(42);
-    let pick = |rng: &mut StdRng, from: &[u64], n: usize| -> Vec<u64> {
-        (0..n).map(|_| from[rng.gen_range(0..from.len())]).collect()
-    };
-    let view = open_view();
-    let probes = pick(&mut rng, &present, args.lookups);
-    let time_each = |keys: &[u64], present: bool| -> Vec<Duration> {
-        keys.iter()
-            .map(|&key| {
-                let t = Instant::now();
-                let found = view.get(key).expect("get");
-                let e = t.elapsed();
-                assert_eq!(found.len(), usize::from(present));
-                e
-            })
-            .collect()
-    };
-    summary("  single lookup, entry page cold", time_each(&probes, true));
-    summary("  single lookup, warm", time_each(&probes, true));
-    let gaps = pick(&mut rng, &absent, args.lookups);
-    summary(
-        "  single lookup, absent key, entry page cold",
-        time_each(&gaps, false),
-    );
-    drop(view);
-    for batch in [1_000usize, 100_000] {
-        let mut keys = pick(&mut rng, &present, batch);
-        keys.sort_unstable();
-        let view = open_view();
-        let t = Instant::now();
-        let hits = view.lookup_sorted(&keys).expect("lookup");
-        let cold = t.elapsed();
-        let warm = (0..5)
-            .map(|_| {
-                let t = Instant::now();
-                view.lookup_sorted(&keys).expect("lookup");
-                t.elapsed()
-            })
-            .min()
-            .expect("five runs");
-        assert_eq!(hits.len(), batch);
-        println!("batched lookup of {batch} sorted keys: cold {cold:.2?}, warm {warm:.2?}");
-    }
     std::fs::remove_dir_all(&dir).expect("remove dir");
 }

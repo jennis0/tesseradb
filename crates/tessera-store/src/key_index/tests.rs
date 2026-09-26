@@ -570,6 +570,109 @@ fn a_page_whose_count_gap_width_or_first_key_is_wrong_is_refused() {
     }
 }
 
+/// Damages one page of a run of `K` many times over, each time a random edit to its count, gap
+/// width, first key or a gap byte with its checksum rewritten to match. Nothing panics, and a run
+/// the verifier passes answers every lookup as its own entries do.
+fn check_damage<K: Key>(key: impl Fn(u32) -> K, seed: u64) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sorted(dir.path(), "r", &sample(3000, key), u64::MAX)[0]
+        .path
+        .clone();
+    let bytes = std::fs::read(&path).unwrap();
+    let pages = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
+    let head = 3 + K::WIDTH;
+    let mut rng = StdRng::seed_from_u64(seed);
+    let copy = dir.path().join("copy.keys");
+    let mut passed = 0;
+    for _ in 0..300 {
+        std::fs::copy(&path, &copy).unwrap();
+        let p = rng.gen_range(0..pages);
+        let edit = rng.gen_range(0..4);
+        let mut r = StdRng::seed_from_u64(rng.gen());
+        rewrite_page(&copy, p, |page| match edit {
+            0 => {
+                let n = u16::from_le_bytes([page[0], page[1]]);
+                let count = if r.gen() {
+                    r.gen()
+                } else {
+                    n.wrapping_add(r.gen_range(0..5)).wrapping_sub(2)
+                };
+                page[0..2].copy_from_slice(&count.to_le_bytes());
+            }
+            1 => page[2] = r.gen_range(0..=8 * K::WIDTH as u8 + 2),
+            2 => page[3 + r.gen_range(0..K::WIDTH)] ^= 1 << r.gen_range(0..8),
+            _ => {
+                let (n, bits) = (
+                    u16::from_le_bytes([page[0], page[1]]) as usize,
+                    page[2] as usize,
+                );
+                let gap_bytes = ((n - 1) * bits).div_ceil(8);
+                if gap_bytes > 0 {
+                    page[head + r.gen_range(0..gap_bytes)] ^= 1 << r.gen_range(0..8);
+                }
+            }
+        });
+        let run = open::<K>(&copy);
+        let scanned: Result<Vec<(K, u32)>, _> = run.iter().collect();
+        let probes: Vec<K> = bytes_keys::<K>(&bytes, pages);
+        let _ = run.lookup_sorted(&probes);
+        for &k in &probes {
+            let _ = run.get(k);
+        }
+        if verify_run(&copy).is_err() {
+            continue;
+        }
+        passed += 1;
+        let mut want: BTreeMap<K, Vec<u32>> = BTreeMap::new();
+        for (k, e) in scanned.unwrap() {
+            want.entry(k).or_default().push(e);
+        }
+        let run = open::<K>(&copy);
+        let mut keys: Vec<K> = want.keys().copied().chain(probes).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut single = Vec::new();
+        for (i, &k) in keys.iter().enumerate() {
+            let got = run.get(k).unwrap();
+            assert_eq!(got, want.get(&k).cloned().unwrap_or_default(), "{k:?}");
+            single.extend(got.into_iter().map(|e| (i, e)));
+        }
+        assert_eq!(run.lookup_sorted(&keys).unwrap(), single);
+    }
+    assert!(passed > 0, "some edits leave a page the verifier passes");
+}
+
+/// The first key of every page of a run of `K`, from the page index of its bytes.
+fn bytes_keys<K: Key>(bytes: &[u8], pages: usize) -> Vec<K> {
+    let index = (1 + pages) * PAGE_SIZE;
+    (0..pages)
+        .map(|p| K::read(&bytes[index + p * K::WIDTH..]))
+        .collect()
+}
+
+#[test]
+fn a_page_damaged_at_random_never_panics_and_answers_as_it_scans_when_it_verifies() {
+    check_damage::<u32>(|i| i * 7 + (i % 5) * (i % 11), 1);
+    check_damage::<u64>(|i| ((i as u64) << 20) + (i as u64 % 97) * 5000, 2);
+    check_damage::<u128>(|i| keyword_key(&format!("k{i}")), 3);
+}
+
+/// A gap that carries a key past the largest key of its width is refused, not wrapped.
+#[test]
+fn a_gap_past_the_largest_key_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_sorted(dir.path(), "r", &[(1u32, 5), (u32::MAX, 6)], 10)[0]
+        .path
+        .clone();
+    // Head: count, width 32, first key; then the one 32-bit gap.
+    rewrite_page(&path, 0, |page| {
+        page[7..11].copy_from_slice(&u32::MAX.to_le_bytes())
+    });
+    let run = open::<u32>(&path);
+    assert_eq!(part_of(run.get(1).unwrap_err()), RunPart::Page(0));
+    assert_eq!(part_of(verify_run(&path).unwrap_err()), RunPart::Page(0));
+}
+
 #[test]
 fn a_flipped_byte_in_the_header_or_page_index_is_refused_at_open_and_by_the_verifier() {
     let dir = tempfile::tempdir().unwrap();
@@ -841,7 +944,8 @@ fn a_run_takes_less_space_the_denser_its_keys() {
 
 /// Runs of `K` written from `runs`, looked up through a view of them as live runs, a view of
 /// their merge as base runs, and a view of both, answer as the set of pairs does; a batched lookup
-/// answers as the single lookups do in each.
+/// answers as the single lookups do in each. The keys looked up are `probes`, and every stored key
+/// and the keys one either side of it.
 fn check_against_a_set_of_pairs<K: Key>(
     key: impl Fn(u32) -> K,
     runs: &[(Vec<(u32, u32)>, u64)],
@@ -875,8 +979,15 @@ fn check_against_a_set_of_pairs<K: Key>(
     let back: Vec<(K, u32)> = base.iter().flat_map(|r| all(r)).collect();
     prop_assert_eq!(&back, &kept.iter().copied().collect::<Vec<_>>());
 
+    let step = |k: K, by: u128| K::narrow(k.widen().wrapping_add(by));
     let mut keys: Vec<K> = probes.iter().map(|&k| key(k)).collect();
+    keys.extend(
+        model
+            .iter()
+            .flat_map(|&(k, _)| [k, step(k, 1), step(k, u128::MAX)]),
+    );
     keys.sort_unstable();
+    keys.dedup();
     let views = [
         (KeyIndexView::new(live.clone(), vec![]).unwrap(), &model),
         (KeyIndexView::new(vec![], base.clone()).unwrap(), &kept),
@@ -912,8 +1023,69 @@ fn runs_strategy() -> impl Strategy<Value = Vec<(Vec<(u32, u32)>, u64)>> {
     )
 }
 
+/// Keys from a small domain, so one key's entries span pages and runs, mixed with keys from the
+/// whole of `u32`, so gaps range from zero to the key's width and a page's gap width grows as it
+/// fills.
+fn wide_runs_strategy() -> impl Strategy<Value = Vec<(Vec<(u32, u32)>, u64)>> {
+    prop::collection::vec(
+        (
+            prop::collection::vec((prop_oneof![0u32..16, any::<u32>()], 0u32..3000), 0..1500),
+            50u64..2000,
+        ),
+        1..4,
+    )
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(24))]
+
+    #[test]
+    fn u32_runs_of_spread_keys_answer_as_a_set_of_pairs(
+        runs in wide_runs_strategy(),
+        retired in prop::collection::vec(0u32..3000, 0..400),
+        probes in prop::collection::vec(any::<u32>(), 1..40),
+        merge_max in 50u64..800,
+    ) {
+        check_against_a_set_of_pairs::<u32>(
+            |k| k.wrapping_mul(0x9E37_79B9),
+            &runs,
+            &retired,
+            &probes,
+            merge_max,
+        )?;
+    }
+
+    #[test]
+    fn u64_runs_of_spread_keys_answer_as_a_set_of_pairs(
+        runs in wide_runs_strategy(),
+        retired in prop::collection::vec(0u32..3000, 0..400),
+        probes in prop::collection::vec(any::<u32>(), 1..40),
+        merge_max in 50u64..800,
+    ) {
+        check_against_a_set_of_pairs::<u64>(
+            |k| (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            &runs,
+            &retired,
+            &probes,
+            merge_max,
+        )?;
+    }
+
+    #[test]
+    fn u128_runs_of_spread_keys_answer_as_a_set_of_pairs(
+        runs in wide_runs_strategy(),
+        retired in prop::collection::vec(0u32..3000, 0..400),
+        probes in prop::collection::vec(any::<u32>(), 1..40),
+        merge_max in 50u64..800,
+    ) {
+        check_against_a_set_of_pairs::<u128>(
+            |k| ((k as u128) << 100) | k as u128,
+            &runs,
+            &retired,
+            &probes,
+            merge_max,
+        )?;
+    }
 
     #[test]
     fn u32_runs_views_and_merges_answer_as_a_set_of_pairs(
