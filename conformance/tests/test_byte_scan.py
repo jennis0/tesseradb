@@ -11,7 +11,7 @@ only re-subdivide tiles already covered by shallower ones).
 The server's response for every request, `/v1/items/{tessera_id}` for a sample of tessera ids, AND
 the full RUST_LOG=info log the server process wrote across the whole run (server spawned with its
 stdout/stderr redirected to a file, so nothing is lost to an unread pipe) must contain no encoding
-of any admitted or denied entity id, no encoding of the deployment identity key, and no caller
+of any admitted or denied entity id, no encoding of the bundle's identity key, and no caller
 external id anywhere except the one designed exception — within the scan scope described below.
 
 **Which corpus, and what changing it cost.** This scan ran against a 250,000-item prefix of the
@@ -43,7 +43,7 @@ previously scanned for is retired from the viewer plane (design r21, Appendix C'
 wire now carries `tessera_id: u64`, a keyed Feistel permutation of `(shard_id, entity_id)` that is
 stable across sessions by design (C17) and inverted only inside the trust boundary. This rewrite
 (Task 13) re-derives the scan against that column instead of `handle`, and adds two sweeps the
-old design had no column for: the deployment identity key (never leaves the server) and caller
+old design had no column for: the bundle's identity key (never leaves the server) and caller
 external ids (admin-plane identifiers, SA D14, legitimate in exactly one viewer-plane place: the
 `/v1/items` drill-down response, D4).
 

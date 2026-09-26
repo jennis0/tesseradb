@@ -40,7 +40,8 @@ a separate build, and every build generates its own identity key, so the same it
 `tessera_id` in each state, and a tile's points, which are served in `tessera_id` order, arrive in
 a different order. The comparison therefore inverts every row's `tessera_id` under its own
 bundle's key (read from that bundle's manifest), and compares each tile's rows as the set of
-entities it served with every other column unchanged. The allocation rules keep every base item's
+entities it served with every other column unchanged, after checking that each state served them
+in the contract's ascending `tessera_id` order. The allocation rules keep every base item's
 entity id identical across builds, so that join is exact, and the untruncated configuration below
 means a tile's served set does not depend on the key either. What the key does decide, the order
 within a tile, is not a function of visibility. `fx_key` remains planted-but-unserved and its
@@ -86,6 +87,7 @@ from oracle import identity as identity_mod
 from oracle.bundle import Bundle
 from oracle.canary_fixture import build_canary_states, verify_allocation_rules
 from oracle.harness import Server, spawn_server, stop_server
+from oracle import wire
 from oracle.wire import decode_viewport, decode_viewport_points
 from suite.canonical import Streamed, canonicalise_viewport
 
@@ -194,16 +196,29 @@ def _canonical_response(state: State, token, zoom, bbox) -> Streamed:
             f"spawn_server overrides"
         )
 
-    return dataclasses.replace(canonicalise_viewport(raw), points=_points_by_entity(raw, state.key))
+    return dataclasses.replace(
+        canonicalise_viewport(raw), points=_points_by_entity(raw, state.key, zoom)
+    )
 
 
-def _points_by_entity(raw: bytes, key: identity_mod.IdentityKey) -> bytes:
+def _points_by_entity(raw: bytes, key: identity_mod.IdentityKey, zoom: int) -> bytes:
     """The points surface with each row's `tessera_id` replaced by the entity it names under
-    `key`, the rows sorted by that entity, as one Arrow stream. The module doc says why."""
-    try:
-        points = decode_viewport_points(raw)
-    except ValueError:
+    `key`, the rows sorted by that entity, as one Arrow stream. The module doc says why.
+
+    Sorting drops the served order, so it is checked here first: each tile's rows, the tile being
+    the top `2 * zoom` bits of the row's position code, arrive in ascending `tessera_id` order."""
+    if not any(kind == wire.FRAME_POINTS for kind, _payload in wire.split_frames(raw)):
         return b""
+    points = decode_viewport_points(raw)
+    ids = points.column("tessera_id").to_pylist()
+    codes = points.column("code").to_pylist()
+    by_tile: dict[int, list[int]] = {}
+    for tessera_id, code in zip(ids, codes):
+        by_tile.setdefault(code >> (64 - 2 * zoom), []).append(tessera_id)
+    for tile, served in by_tile.items():
+        assert served == sorted(served), (
+            f"tile {tile} at zoom {zoom} serves its points out of `tessera_id` order"
+        )
     at = points.schema.get_field_index("tessera_id")
     entities = pa.array(
         [identity_mod.invert(key, t)[1] for t in points.column(at).to_pylist()], pa.uint64()

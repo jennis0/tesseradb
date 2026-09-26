@@ -113,8 +113,8 @@ def write_deployment(directory: Path) -> Path:
     return path
 
 
-def secrets_for(directory: Path) -> str:
-    """The session credential and the operator credential, once per database; returns the first.
+def secrets_for(directory: Path) -> None:
+    """Write the session credential and the operator credential, once per database.
 
     Both are written under `.tessera/`, which is owner-only, and each file is created owner-only
     rather than created and then narrowed: between a write and a `chmod` the secret is readable by
@@ -124,19 +124,17 @@ def secrets_for(directory: Path) -> str:
     private = directory / ".tessera"
     private.mkdir(parents=True, exist_ok=True)
     private.chmod(0o700)
-    session = _secret(private / "session.cred", lambda: secrets.token_urlsafe(32))
+    _secret(private / "session.cred", lambda: secrets.token_urlsafe(32))
     _secret(private / "operator.cred", lambda: secrets.token_urlsafe(32))
-    return session
 
 
-def _secret(path: Path, mint) -> str:
+def _secret(path: Path, mint) -> None:
     if path.exists():
-        return path.read_text(encoding="utf-8").strip()
+        return
     value = mint()
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as file:
         file.write(value if value.endswith("\n") else value + "\n")
-    return value.strip()
 
 
 def start(
