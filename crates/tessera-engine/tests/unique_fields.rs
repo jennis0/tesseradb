@@ -1117,6 +1117,83 @@ fn a_value_arriving_mid_build_is_indexed() {
     }
 }
 
+/// **An edit of a value's holder while `unique` is declared leaves the value held by the item.**
+/// The edit moves the holder to a new entity: acknowledged or flushed while the declaration builds,
+/// or checked before it and admitted after. The index names the item's new entity, so a second
+/// item cannot take the value and the value finds the item, across a restart.
+#[test]
+fn an_edit_of_a_holder_during_a_declaration_keeps_its_value_held() {
+    for when in ["buffered", "flushed", "admitted after"] {
+        let fx = fixture_with(false);
+        let mut engine = Arc::new(engine_over(&fx));
+        let doi = doi_of(4);
+        let holder = EntityId::new(source_to_new_map(&fx.root, "v00000")[&4]);
+        let tid = engine.tessera_id_of(holder).unwrap();
+        let edit = move |engine: &Engine| {
+            fill(
+                engine,
+                "edit",
+                "note",
+                vec![(holder, WalScalar::Utf8(format!("edited {when}")))],
+            )
+        };
+        if when == "admitted after" {
+            engine.hold_next_write_check_for_test();
+            let e = Arc::clone(&engine);
+            let held = std::thread::spawn(move || edit(&e));
+            wait_until(
+                "the edit never reached its hold",
+                Duration::from_secs(30),
+                || engine.write_check_is_holding_for_test(),
+            );
+            assert!(declare(&engine, "doi", true).expect("no two items hold one value"));
+            engine.release_write_check_for_test();
+            held.join().unwrap().expect("the edit is taken");
+        } else {
+            let held = held_declaration(&engine, "doi");
+            edit(&engine).expect("the edit is taken");
+            if when == "flushed" {
+                publish_buffered(&engine);
+            }
+            engine.set_unique_round_paused_for_test(false);
+            held.join().unwrap().expect("no two items hold one value");
+        }
+        assert!(is_unique(&engine, "doi"), "{when}");
+        assert_ne!(
+            engine.resolve_tessera_ids(&[tid]).unwrap()[0],
+            Some(holder),
+            "the edit moved the holder, {when}"
+        );
+        for pass in ["the declaration", "a restart"] {
+            assert!(
+                is_taken(try_ingest(
+                    &engine,
+                    "second",
+                    vec![naming_built(
+                        row(&engine, "second", b"0", &doi, BIG + 16, 7_300),
+                        3
+                    )]
+                )),
+                "a second item cannot take {doi}, {when}, after {pass}"
+            );
+            publish_buffered(&engine);
+            assert_eq!(
+                matching(
+                    &engine,
+                    &full(&engine),
+                    text_in("doi", std::slice::from_ref(&doi))
+                ),
+                BTreeSet::from([tid.raw()]),
+                "{doi} finds the edited item, {when}, after {pass}"
+            );
+            let owned = Arc::try_unwrap(engine)
+                .ok()
+                .expect("no other handle is held");
+            engine = Arc::new(restart(&fx, owned));
+        }
+    }
+}
+
 /// **A declaration and a fold do not overlap, and each waits for the other**: a declaration made
 /// while a fold runs is built after it, and a fold requested while a declaration builds runs
 /// after it. Both end with the index answering, across a restart, and agreeing with its column.
