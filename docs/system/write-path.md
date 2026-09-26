@@ -136,8 +136,12 @@ A row names an item by the values that identify one: its `tessera_id`, its exter
 unique field's value it carries that is not null. The request handler reads one generation for the
 whole batch, off the executor thread, and looks each value up there: a `tessera_id` by inverting
 it, an external id in the live map and the bundle's runs, a unique value in the field's index. A
-deleted item names nothing, and a `tessera_id` names an item only while it has a row or a
-buffered one, since a fold that removes a deleted item's rows also drops its deletion.
+deleted item names nothing, and a `tessera_id` names an item only while the service holds it (a
+row, a buffered row, or the label a flush wrote), since a fold that removes a deleted item also
+drops its deletion. The same
+rule answers a change naming a `tessera_id`. An external id bound since the handler's generation
+was taken, to an item that generation does not hold yet, sends the batch back to be decided
+against a newer one.
 
 | What the row's values name | What the handler decides |
 |---|---|
@@ -161,18 +165,29 @@ it, values as sent and items by `tessera_id`.
 To decide a row naming an item, the handler reads what the item stores, in ascending entity order
 across the batch: the row it holds in the buffer, or the flushed value columns, record store and
 row tails; the item's terms; its position in the batch's view, compared as the quantised cell the
-row's coordinates fall in. A batch of rows that change nothing is answered from these reads and
-writes nothing at all.
+row's coordinates fall in. A term a label names is looked up and never interned for a row that
+only compares, and the terms of the rows that create items are resolved once the whole batch is
+decided, so a refused batch leaves nothing behind.
 
-The rows that create or add go to the executor, with the sequence number of the in-memory unique
-entries the handler read. The executor never reads disc to check them. It checks what can have
-moved since the handler's generation, from memory: an item a row names that has since been deleted
-or added to the view, an item a row adds to a view that a newer item's flush, published or in
-flight, has since passed, a value a created row sets that has since been given to an item, an external
-id since bound. The values the most recent flushes moved to disc, up to a million entries, are kept
-in memory for this check. Where something has moved, nothing is written, and the handler resolves
-the batch once more against a newer generation. If that attempt has moved too, the batch is
-refused with `409` and the caller sends it again.
+Every accepted batch goes to the executor, a batch of rows that change nothing included: such a
+batch writes its batch id and its receipt alone, so it answers the same `tessera_id`s when it is
+sent again, as every accepted batch does.
+
+The batch goes with the sequence number of the in-memory unique entries the handler read, the
+items its unchanged rows named, and the rows that create or add. The executor never reads disc to
+check them. It checks what can have moved since the handler's generation, from memory:
+
+- an item a row names that has since been deleted, or added to the view;
+- the unique columns, declared or withdrawn since, where the batch creates items;
+- an item a row adds to a view that a newer item's flush, published or in flight, has since
+  passed;
+- a value a created row sets that has since been given to an item;
+- an external id since bound.
+
+The values the most recent flushes moved to disc, up to a million entries, are kept in memory for
+this check. Where something has moved, nothing is written, and the handler decides the batch once
+more against a newer generation. If that attempt finds it moved again, the batch is refused with
+`409`; sent again, it is decided against what is stored then.
 
 ### The commit window
 

@@ -1039,8 +1039,10 @@ paths:
         the value of every unique column it carries that is not null. A row whose values name no
         item creates one. A row whose values name one item addresses it: where every value the
         row carries is the one the item stores, the row changes nothing and is counted in
-        `unchanged`; where the item has no row in the batch's view and the row carries a position
-        there and changes nothing else, the row adds the item to the view, counted in `added`.
+        `unchanged`; where the item has no row in the batch's view, is newer than the newest item a
+        flush has written into it, and the row carries a position there and changes nothing else,
+        the row adds the item to the view, counted in `added`. Adding an older item would move it,
+        which is an edit.
         Not built yet: a row that would change a value, the label or the position of an item is
         `409`, saying editing an item is not available yet, and the batch writes nothing.
 
@@ -3701,11 +3703,11 @@ components:
         unchanged:
           type: integer
           minimum: 0
-          description: Rows that named an item and changed nothing. They write nothing, and a batch of only these writes nothing at all.
+          description: Rows that named an item and changed nothing. They write nothing; a batch of only these records its batch id alone, so it is answered as a replay when sent again.
         over_bound:
           type: integer
           minimum: 0
-          description: Rows creating an item whose labels resolve to more terms than the auth plugin's per-item bound. They are stored, not refused.
+          description: Rows creating an item whose labels resolve to more terms than the auth plugin's per-item bound. They are stored, not refused. A replay answers the first acceptance's count.
         over_bound_ids:
           type: array
           maxItems: 100

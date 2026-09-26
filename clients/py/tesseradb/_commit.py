@@ -12,9 +12,9 @@ two therefore cannot disagree about what would be sent.
 **The plan is built from what was inserted and what the database says it holds.** The SDK keeps no
 record of what it sent: a table goes as it was inserted. A row naming by its id an item the
 database holds, and carrying what the item stores, changes nothing and is counted as already
-present; one that would change the item is a `409` on that page which the report carries. What the database has already been told is read from
-`/v1/meta` rather than from a log: its views, its groups and its layers. A re-run of a
-cell is a re-run.
+present; one that would change the item is a `409` on that page which the report carries. What
+the database has already been told is read from `/v1/meta` rather than from a log: its views,
+its groups and its layers. A re-run of a cell is a re-run.
 
 **The target decides the route.** An insert into a view is a page of points, one into an attribute
 or a layer by key fills cells on entities the database holds, and a layer's two tables are
