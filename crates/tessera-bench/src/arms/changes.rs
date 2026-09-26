@@ -68,6 +68,7 @@
 //! loop, so this is **zoom-independent**: a flat tax on every request regardless of what the
 //! viewer is looking at, not something a cheap viewport escapes.
 
+use crate::ingest_rows::IngestRows;
 use tessera_authz::PostingsReader;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
@@ -495,7 +496,7 @@ pub fn run_deny_ack(
                     let rows =
                         crate::arms::ingest::synth_rows(n, next_id, &fill_terms, &fill_descriptors);
                     next_id += n as u64;
-                    engine.accept_ingest(rows, format!("fill-{next_id}"), [0u8; 32])?;
+                    engine.ingest_rows(rows, format!("fill-{next_id}"), [0u8; 32])?;
                     filled += n as u64;
                 }
                 let fill_ns = fill_started.elapsed().as_nanos() as u64;
@@ -541,7 +542,7 @@ pub fn run_deny_ack(
                                     descriptors,
                                 );
                                 id += ingest_batch as u64;
-                                match engine.accept_ingest(
+                                match engine.ingest_rows(
                                     rows,
                                     format!("flood-{w}-{id}"),
                                     [0u8; 32],

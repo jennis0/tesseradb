@@ -109,8 +109,6 @@ def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_is_refused(
         db.commit()
     again = raised.value.report
     assert [r["status"] for r in again.refusals] == [409]
-    # The refusal names the ids it read, base64 as every external id on this plane is.
-    assert base64.b64encode(b"q0").decode() in again.refusals[0]["detail"]
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 25
 
 

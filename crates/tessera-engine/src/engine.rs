@@ -1,7 +1,7 @@
 //! The engine's state, the bundle open protocol and the shared compute pool.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -1042,6 +1042,10 @@ impl Engine {
         // A level nothing built a form for would otherwise hold its staged pieces for the
         // process's life.
         engine.shapes.clear_staged();
+        // The rows the log held and no flush wrote, which the occupancy bound and the row trigger
+        // count from the first request, not from the first write.
+        let buffered = engine.generation().buffer.len();
+        engine.write.health().buffered_items.store(buffered, Ordering::SeqCst);
         Ok(engine)
     }
 

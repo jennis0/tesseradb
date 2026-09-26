@@ -26,7 +26,7 @@ use memberships::*;
 pub(in crate::write) use publications::*;
 use wal::*;
 use values::*;
-use window::{mint_values_codes, IngestSubmission};
+use window::mint_values_codes;
 
 
 /// How long after a failed cycle the next retry may come, so it does not retry on every wake.
@@ -70,6 +70,9 @@ pub(super) struct Executor {
     pub(super) last_tick: std::time::Instant,
     /// What every accepted write since the last tick did to each level's row forms.
     pub(super) pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
+    /// The view the last dispatched flush writes and the entity floor its segment leaves; read
+    /// only while that flush is outstanding.
+    pub(super) flush_flight: Option<(String, u64)>,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }

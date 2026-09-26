@@ -15,6 +15,7 @@
 mod arms;
 mod corpus;
 mod fixture;
+mod ingest_rows;
 mod metrics;
 mod postings;
 mod report;
@@ -226,7 +227,7 @@ enum Command {
         /// Concurrent `/control/ingest` callers.
         #[arg(long, value_delimiter = ',', default_values_t = [1usize, 2, 4, 8])]
         submitters: Vec<usize>,
-        /// Rows per `accept_ingest` call — `ingest_max_batch_rows`, at the server's default.
+        /// Rows per ingest batch — `ingest_max_batch_rows`, at the server's default.
         #[arg(long, default_value_t = 10_000)]
         batch: usize,
         /// `ingest.commit_window_max_items`. A ceiling only: a serial caller closes a window per

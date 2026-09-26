@@ -16,14 +16,14 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
-use rustc_hash::{FxHashMap, FxHashSet};
+
 use sha2::{Digest, Sha256};
 
-use tessera_engine::{AcceptError, MetaView, ScopedScalar, DENY_WINDOW_MAX_ENTRIES};
-use tessera_lifecycle::{ChangeOp, UnallocatedRow};
+use tessera_engine::{MetaView, ScopedScalar};
+use tessera_lifecycle::ChangeOp;
 
 use tessera_types::view::ViewMetadataValue;
-use tessera_types::{EntityId, TermId, TesseraId};
+use tessera_types::{EntityId, TesseraId};
 
 use crate::decode::{
     labels_col, parse_ingest_batch, parse_values_batch, Address, BodyEncoding, DecodeError,
@@ -95,8 +95,7 @@ where
 }
 
 /// The deny runtime's blocking-pool bound, tokio's default stated so it cannot move silently.
-/// A thread is held for a whole changes request, so this bounds concurrent requests; each holds
-/// at most `DENY_WINDOW_MAX_ENTRIES` pending receipts at a time.
+/// A thread is held for a whole changes request, so this bounds concurrent requests.
 const DENY_MAX_BLOCKING_THREADS: usize = 512;
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -454,7 +453,7 @@ fn run_values(
     let replayed = state
         .engine
         .accepted_batch(&batch_id)
-        .is_some_and(|(held_hash, _)| held_hash == body_hash);
+        .is_some_and(|held_hash| held_hash == body_hash);
     let receipt = state
         .engine
         .fill_values(tessera_engine::ValuesRequest {
@@ -512,7 +511,16 @@ fn resolve_view<'a>(
 
 #[derive(serde::Serialize)]
 struct IngestResp {
-    accepted: u64,
+    /// Rows the batch carried.
+    rows: u64,
+    /// Rows that named no item and created one.
+    created: u64,
+    /// Rows that changed an item they named.
+    edited: u64,
+    /// Rows that added an item they named to the batch's view.
+    added: u64,
+    /// Rows that named an item and changed nothing, which cost no write.
+    unchanged: u64,
     over_bound: u64,
     over_bound_ids: Vec<String>,
     /// Rows whose coordinates fell outside the view's projection domain and were stored on the
@@ -520,14 +528,15 @@ struct IngestResp {
     clipped: u64,
     /// Rows whose coordinates fell outside the view's extent and were stored on its edge.
     clamped: u64,
-    /// One `tessera_id` per row, in request order, whether or not the row carried an external id.
-    /// Decimal strings, since a JSON number loses `u64` precision past 2^53 in JavaScript.
+    /// One `tessera_id` per row, in request order: the item the row created or named. Decimal
+    /// strings, since a JSON number loses `u64` precision past 2^53 in JavaScript.
     tessera_ids: Vec<String>,
     /// Artifacts this batch's membership columns created, for keys no artifact held on an open
     /// layer. Reported because a minted artifact cannot be undone.
     minted: u64,
-    /// This body was already accepted under this batch id. `accepted` and `minted` are then 0,
-    /// so a client summing them over retried pages does not double-count; `tessera_ids` is full.
+    /// This body was already accepted under this batch id. Every count is then 0, so a client
+    /// summing them over retried pages does not double-count; `tessera_ids` is the first
+    /// acceptance's.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     replayed: bool,
     /// The cycle this batch's rows become visible in. A replay names the next cycle to open,
@@ -550,30 +559,36 @@ fn run_ingest(
 ) -> Result<IngestResp, ApiError> {
     let body_hash: [u8; 32] = Sha256::digest(body).into();
 
-    // One manifest snapshot per batch, so the view, projection, label default and declared
-    // columns all come from one generation.
+    // One manifest snapshot for the decode, so the view, projection and declared columns all come
+    // from one generation.
     let meta = state.engine.meta();
-    let view = resolve_view(view, &meta)?;
-    // The view's projection decides what the coordinate columns are called and what they mean,
-    // and its extent is where each row is clamped onto.
-    let projection = view.projection;
-    let extent = crate::filter_dto::view_extent(view);
-    // A row with no label takes the view's `point_visibility.default`, as a built row does.
-    let point_default = view.point_default.clone();
-    let own_group = view.roster.as_ref().map(|roster| roster.group.clone());
-    let view = view.id.clone();
+    // The view the batch names: the header's, or the deployment's only view. A deployment with
+    // several and no header gives the batch no view, and its rows carry no coordinates.
+    let view: Option<&MetaView> = match view {
+        Some(_) => Some(resolve_view(view, &meta)?),
+        None if meta.views.len() == 1 => meta.views.first(),
+        None => None,
+    };
+    let extent = view.map(crate::filter_dto::view_extent);
+    let frame = view.zip(extent.as_ref()).map(|(view, extent)| crate::decode::Frame {
+        projection: view.projection,
+        extent,
+    });
+    let view_id = view.map(|view| view.id.clone());
 
     // The group-scoped families this batch may carry: those whose group owns this view's key,
     // including a sharing group's view. A plain view gets none, so a scoped column on it is refused
     // as undeclared. Layers are looked up per column in the engine's registry.
-    let scoped: Vec<ScopedScalar> = meta
-        .scoped_scalars
-        .iter()
-        .filter(|f| meta.owning_key(&view, &f.group).is_some())
-        .cloned()
-        .collect();
+    let scoped: Vec<ScopedScalar> = match &view_id {
+        None => Vec::new(),
+        Some(view) => meta
+            .scoped_scalars
+            .iter()
+            .filter(|f| meta.owning_key(view, &f.group).is_some())
+            .cloned()
+            .collect(),
+    };
     let ParsedBatch {
-        columns,
         items,
         artifacts,
         clipped,
@@ -581,19 +596,22 @@ fn run_ingest(
     } = parse_ingest_batch(
         encoding,
         body,
-        projection,
-        &extent,
+        frame,
         &meta.declared_scalars,
         &scoped,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
-        &|group| meta.owning_key(&view, group).map(str::to_string),
+        &|group| {
+            view_id
+                .as_deref()
+                .and_then(|view| meta.owning_key(view, group))
+                .map(str::to_string)
+        },
     )
     .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
 
-    // The row cap can only be checked after the whole body is decoded. It runs before
-    // `resolve_terms`, which interns terms even for a batch refused later, so an over-cap batch
-    // interns nothing; a batch refused after this point still does.
+    // The row cap can only be checked after the whole body is decoded, and runs before any label
+    // is resolved, so an over-cap batch interns no term.
     if items.len() > state.limits.ingest_max_batch_rows {
         return Err(ApiError::Contract(format!(
             "ingest batch has {} rows, over the {}-row limit (ingest.ingest_max_batch_rows); \
@@ -603,162 +621,6 @@ fn run_ingest(
         )));
     }
 
-    // An unlabelled row on a view with no default refuses the batch before anything is interned.
-    let unlabelled = items.iter().filter(|item| item.labels.is_empty()).count();
-    if unlabelled > 0 && point_default.is_none() {
-        return Err(ApiError::Contract(format!(
-            "view '{view}': {unlabelled} row(s) carry an empty access label and the view \
-             declares no `point_visibility.default`; label the rows, or declare the default"
-        )));
-    }
-    let default_labels: Option<Vec<Vec<u8>>> = point_default
-        .as_ref()
-        .map(|label| vec![label.as_bytes().to_vec()]);
-
-    // Resolving terms is idempotent, so a replayed request reassigns nothing.
-    let bounds = state.engine.declared_bounds();
-    let mut descriptor_lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(items.len());
-    let mut terms_per_item: Vec<Vec<TermId>> = Vec::with_capacity(items.len());
-    let mut over_bound_ids: Vec<String> = Vec::new();
-    let mut over_bound: u64 = 0;
-
-    for item in &items {
-        // Each element is one label, as at a build. The default fills only an unlabelled row;
-        // adding it to a labelled row could only widen who sees it.
-        let labels: &[Vec<u8>] = match (&default_labels, item.labels.is_empty()) {
-            (Some(default), true) => default,
-            _ => &item.labels,
-        };
-        let descriptors = state
-            .engine
-            .plugin()
-            .terms_of_labels(labels)
-            .map_err(|e| ApiError::Contract(format!("access column: {e}")))?;
-        let terms = state.engine.resolve_terms(&descriptors);
-        if terms.len() as u32 > bounds.max_terms_per_item {
-            over_bound += 1;
-            // An over-bound row is counted and kept, never refused; one with no external id is
-            // counted but cannot be listed.
-            if over_bound_ids.len() < 100 {
-                if let Some(external_id) = &item.external_id {
-                    // External ids are arbitrary bytes, so base64 is the lossless JSON form.
-                    over_bound_ids
-                        .push(base64::engine::general_purpose::STANDARD.encode(external_id));
-                }
-            }
-        }
-        descriptor_lists.push(descriptors);
-        terms_per_item.push(terms);
-    }
-
-    if let Some((prev_hash, prev_entity_ids)) = state.engine.accepted_batch(&batch_id) {
-        if prev_hash == body_hash {
-            // A replay of an acknowledged batch: 200 with no effect, and the original
-            // `tessera_id`s from the recorded entity ids, since a row may have no external id.
-            let tessera_ids = tessera_ids_of(state, &prev_entity_ids)?;
-            return Ok(IngestResp {
-                accepted: 0,
-                replayed: true,
-                over_bound,
-                over_bound_ids,
-                // Clipping and clamping are properties of the rows, so a replay reports the
-                // original counts.
-                clipped,
-                clamped,
-                tessera_ids,
-                minted: 0,
-                // Filled by the handler, which is where the wait can be awaited.
-                publication: 0,
-                visible: None,
-            });
-        }
-        return Err(ApiError::Conflict(format!(
-            "batch id '{batch_id}' was already accepted with a different body"
-        )));
-    }
-
-    // Duplicate external ids, within the batch or against existing state, are a 409 with no
-    // effect, checked before allocation and after the replay check so a replay is still a 200.
-    // Rows with no external id never collide.
-    let mut seen_in_batch: FxHashSet<&[u8]> = FxHashSet::default();
-    let mut dup_ids: Vec<String> = Vec::new();
-    for item in &items {
-        let Some(external_id) = &item.external_id else {
-            continue;
-        };
-        if !seen_in_batch.insert(external_id.as_slice()) {
-            dup_ids.push(base64::engine::general_purpose::STANDARD.encode(external_id));
-        }
-    }
-    if !dup_ids.is_empty() {
-        dup_ids.sort_unstable();
-        dup_ids.dedup();
-        return Err(ApiError::Conflict(format!(
-            "duplicate external ids within this batch: {}",
-            dup_ids.join(", ")
-        )));
-    }
-
-    let supplied: Vec<(usize, Vec<u8>)> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| item.external_id.clone().map(|id| (i, id)))
-        .collect();
-    let supplied_ids: Vec<Vec<u8>> = supplied.iter().map(|(_, id)| id.clone()).collect();
-    let resolved = state
-        .engine
-        .resolve_external_ids(&supplied_ids)
-        .map_err(map_store_error)?;
-    // A known external id already in this view is a 409 naming the ids, which the caller sent. In
-    // another view it is a join onto the same entity; a deleted holder allocates fresh, and a
-    // suppressed one joins and stays hidden. Whether a row finally joins is settled on the writer.
-    let overlay_generation = state.engine.generation();
-    let mut duplicate_ids: Vec<String> = Vec::new();
-    let mut joins: Vec<(usize, EntityId)> = Vec::new();
-    for (entity, (index, id)) in resolved.iter().zip(&supplied) {
-        let Some(entity) = *entity else { continue };
-        if overlay_generation.overlay.is_deleted(entity) {
-            continue;
-        }
-        if state.engine.view_holds(entity, &view) {
-            duplicate_ids.push(base64::engine::general_purpose::STANDARD.encode(id));
-            continue;
-        }
-        joins.push((*index, entity));
-    }
-    if !duplicate_ids.is_empty() {
-        duplicate_ids.sort_unstable();
-        return Err(ApiError::Conflict(format!(
-            "these external ids already have a row in view '{view}', and a position is not \
-             updated in place: {}",
-            duplicate_ids.join(", ")
-        )));
-    }
-    // A row that creates an item carries every declared column. A join's entity-scoped values are
-    // the item's already, so it carries only the families of its view's own group, whose values
-    // are the view's; a sharing group's view is held to none, as a build reads it for none.
-    let join_of: FxHashMap<usize, EntityId> = joins.into_iter().collect();
-    let declared_count = meta.declared_scalars.len();
-    // A join that left out an entity-scoped column is admitted only as a join.
-    let mut join_only = vec![false; items.len()];
-    for (index, item) in items.iter().enumerate() {
-        if item.omitted.is_empty() {
-            continue;
-        }
-        let creates = !join_of.contains_key(&index);
-        let required = columns.iter().enumerate().filter(|(at, _)| {
-            match at.checked_sub(declared_count) {
-                None => creates,
-                Some(family) => Some(&scoped[family].group) == own_group.as_ref(),
-            }
-        });
-        tessera_engine::check_declared_present(
-            required.map(|(_, name)| (*name, *name)),
-            |name| !item.omitted.iter().any(|&at| columns[at] == name),
-        )
-        .map_err(|detail| ApiError::Contract(format!("ingest body: row {index}: {detail}")))?;
-        join_only[index] = item.omitted.iter().any(|&at| at < declared_count);
-    }
     // The buffer bound: the command queue drains in milliseconds, so between flushes the buffer
     // is what grows. Checked before submission, so a 429 costs no entity id or WAL append; the
     // figure may lag by one apply. `Retry-After` is the next tick plus the observed flush cost.
@@ -773,52 +635,88 @@ fn run_ingest(
         });
     }
 
-    // Rows go to the executor unallocated: entity ids are assigned on the writer, per commit
-    // window. The decoded vectors are moved, not cloned, so one copy is live while the handler
-    // waits. Every row keeps its descriptors, since the writer decides finally which rows join.
-    let rows: Vec<UnallocatedRow> = items
+    // An empty label is the view's default, and without one the batch is refused before anything
+    // is interned. A label left out is the engine's to decide: it keeps a named item's label.
+    let unlabelled = items
+        .iter()
+        .filter(|item| item.labels.as_ref().is_some_and(Vec::is_empty))
+        .count();
+    let default = view.and_then(|view| view.point_default.as_ref());
+    if unlabelled > 0 && default.is_none() {
+        let named = view.map_or("the batch names no view, so none".to_string(), |view| {
+            format!("view '{}'", view.id)
+        });
+        return Err(ApiError::Contract(format!(
+            "{unlabelled} row(s) carry an empty access label and {named} declares no \
+             `point_visibility.default`; label the rows, or declare the default"
+        )));
+    }
+    let mut items = items;
+    for item in &mut items {
+        if let (Some(labels), Some(default)) = (&mut item.labels, default) {
+            if labels.is_empty() {
+                labels.push(default.as_bytes().to_vec());
+            }
+        }
+    }
+
+    let rows = items.len() as u64;
+    // Kept for the over-bound report, which lists rows by the external id the caller sent.
+    let external_ids: Vec<Option<Vec<u8>>> =
+        items.iter().map(|item| item.external_id.clone()).collect();
+    let rows_in: Vec<tessera_engine::IngestRow> = items
         .into_iter()
-        .zip(terms_per_item)
-        .zip(descriptor_lists)
-        .enumerate()
-        .map(|(index, ((item, terms), descriptors))| UnallocatedRow {
+        .map(|item| tessera_engine::IngestRow {
+            tessera_id: item.tessera_id,
             external_id: item.external_id,
-            view: view.clone(),
-            join: join_of.get(&index).copied(),
-            join_only: join_only[index],
-            descriptors,
-            x: item.x,
-            y: item.y,
+            labels: item.labels,
+            position: item.position,
             scalars: item.scalars,
-            // A join keeps its scoped values, which belong to the row's key rather than the
-            // entity; the writer drops its descriptors and entity-scoped scalars.
             scoped: item.scoped,
-            terms,
+            omitted: item.omitted,
         })
         .collect();
-
-    // The executor allocates, appends, fsyncs and applies before it answers.
-    let accepted = rows.len() as u64;
-    let (entity_ids, minted) = state
+    let receipt = state
         .engine
-        .accept_ingest_joining(rows, batch_id, body_hash, artifacts)
+        .ingest(tessera_engine::IngestRequest {
+            batch_id,
+            body_hash,
+            view: view_id,
+            rows: rows_in,
+            artifacts,
+        })
         .map_err(|e| {
-            tracing::error!("an ingest batch was refused by the write executor");
+            tracing::debug!(detail = %e, "an ingest batch was refused");
             map_accept_error(e)
         })?;
 
-    // A row with no external id is reachable only by the `tessera_id` returned here.
-    let tessera_ids = tessera_ids_of(state, &entity_ids)?;
-
+    // An over-bound row is counted and kept, never refused; one with no external id is counted
+    // but cannot be listed. External ids are arbitrary bytes, so base64 is the lossless JSON form.
+    let over_bound_ids: Vec<String> = receipt
+        .over_bound
+        .iter()
+        .filter_map(|at| external_ids[*at].as_deref())
+        .take(100)
+        .map(|id| base64::engine::general_purpose::STANDARD.encode(id))
+        .collect();
     Ok(IngestResp {
-        accepted,
-        replayed: false,
-        over_bound,
+        rows,
+        created: receipt.created,
+        edited: receipt.edited,
+        added: receipt.added,
+        unchanged: receipt.unchanged,
+        over_bound: receipt.over_bound.len() as u64,
         over_bound_ids,
         clipped,
         clamped,
-        tessera_ids,
-        minted,
+        tessera_ids: receipt
+            .tessera_ids
+            .iter()
+            .map(|id| id.raw().to_string())
+            .collect(),
+        minted: receipt.minted,
+        replayed: receipt.replayed,
+        // Filled by the handler, which is where the wait can be awaited.
         publication: 0,
         visible: None,
     })
@@ -872,21 +770,6 @@ async fn ingest(
     resp.publication = ack.publication;
     resp.visible = ack.visible;
     Ok(Json(resp))
-}
-
-/// Each entity's `tessera_id`, in order: entity ids never reach a response body, and clients see
-/// `tessera_id` instead. A failure is unreachable in practice and fails closed.
-fn tessera_ids_of(state: &AppState, entity_ids: &[EntityId]) -> Result<Vec<String>, ApiError> {
-    entity_ids
-        .iter()
-        .map(|&entity| {
-            state
-                .engine
-                .tessera_id_of(entity)
-                .map(|id| id.raw().to_string())
-                .map_err(|e| ApiError::FailClosed(e.to_string()))
-        })
-        .collect()
 }
 
 /// One `/control/changes` item as sent.
@@ -1036,72 +919,16 @@ fn resolve_addresses<'a>(
         .collect())
 }
 
-/// Enqueues and collects a validated batch of changes: the apply half of [`run_changes`].
-fn apply_validated(state: &AppState, mut validated: Vec<ValidatedChange>) -> Result<(), ApiError> {
-    let mut failures: Vec<(ChangeOp, AcceptError)> = Vec::new();
-    let mut applied = 0usize;
-    // A whole chunk is enqueued before any receipt is awaited, so the executor commits it in one
-    // window with one fsync. Chunks match the window's own bound and cap pending receipts.
-    for chunk in validated.chunks_mut(DENY_WINDOW_MAX_ENTRIES) {
-        let mut pending = Vec::with_capacity(chunk.len());
-        for change in chunk.iter_mut() {
-            let op = change.op;
-            match state.engine.submit_change(change.entity, op) {
-                Ok(p) => pending.push((op, p)),
-                // Every item is submitted even after one fails: with the WAL poisoned a deny is
-                // still applied to the overlay, and aborting would leave the rest unapplied.
-                Err(e) => {
-                    alarm_change_failure(op, &e);
-                    failures.push((op, e));
-                }
-            }
-        }
-        for (op, p) in pending {
-            match p.wait() {
-                Ok(()) => applied += 1,
-                Err(e) => {
-                    alarm_change_failure(op, &e);
-                    failures.push((op, e));
-                }
-            }
-        }
-    }
-
-    // One answer over every failure, each with its op. A 503 means the node took nothing, so a
-    // batch with anything possibly in force, a lost receipt included, is a 500.
-    match map_change_batch_error(&failures, applied) {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
-}
-
-/// Logs one failed change item, saying whether its effect may be in force. Keyed on the error's
-/// disposition, not on which loop saw it: a receipt lost at enqueue may still have been applied.
-fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
-    let in_force = match e {
-        AcceptError::Submit(s) => s.may_have_taken_effect(),
-        // A deletion or suppression whose append failed was applied to the overlay anyway.
-        AcceptError::Exec(_) => matches!(op, ChangeOp::Delete | ChangeOp::Suppress),
-        // Ingest-only refusals, unreachable from a change.
-        AcceptError::OutsideExtent { .. }
-        | AcceptError::UnknownView { .. }
-        | AcceptError::ScalarArity { .. }
-        | AcceptError::UniqueIndexUnreadable(_)
-        | AcceptError::SteppedDown => false,
-    };
-    if in_force {
-        tracing::error!(
-            op = ?op,
-            "ALARM: a change failed with its effect possibly IN FORCE (item hidden immediately) \
-             and returning 500 — durability is owed, and the caller must not read this as a \
-             no-op; re-issuing is safe, treating the item as visible is not"
-        );
-    } else {
-        tracing::error!(
-            op = ?op,
-            "a change failed and nothing was applied for it; it must be re-issued"
-        );
-    }
+/// Applies a validated request as one command: the apply half of [`run_changes`]. The request
+/// is one log record, durable whole or not at all.
+fn apply_validated(state: &AppState, validated: Vec<ValidatedChange>) -> Result<(), ApiError> {
+    let changes: Vec<(EntityId, ChangeOp)> =
+        validated.iter().map(|change| (change.entity, change.op)).collect();
+    let ops: Vec<ChangeOp> = changes.iter().map(|(_, op)| *op).collect();
+    state
+        .engine
+        .accept_changes(changes)
+        .map_err(|e| map_change_batch_error(&ops, e))
 }
 
 /// `POST /control/changes`: deletions, suppressions and unsuppressions. Never answers 429, and has

@@ -202,7 +202,6 @@ fn ingest_into(engine: &Engine, batch: &str, external_id: &str, view: &str) -> E
         *slot = *byte;
     }
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: view.to_string(),
         join: None,
@@ -214,7 +213,7 @@ fn ingest_into(engine: &Engine, batch: &str, external_id: &str, view: &str) -> E
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], batch.to_string(), hash)
+        .ingest_rows(vec![row], batch.to_string(), hash)
         .expect("the batch is accepted")[0]
 }
 

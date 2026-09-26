@@ -9,14 +9,13 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{AcceptError, Engine, EngineConfig};
-use tessera_lifecycle::{ChangeOp, ExecError, UnallocatedRow};
+use tessera_engine::{Engine, EngineConfig, IngestRequest};
+use tessera_lifecycle::{ChangeOp, IngestRow, UnallocatedRow};
 
 const WAIT: Duration = Duration::from_secs(10);
 
 fn row(engine: &Engine, external_id: &[u8]) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -65,7 +64,7 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
 
     // First life: ingest doc-1, flush it so its binding reaches a sidecar run.
     let first = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row(&engine, b"doc-1")],
             "life-1".to_string(),
             [1u8; 32],
@@ -84,7 +83,7 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
     // Second life: same external id, accepted — the executor's own backstop check is the one
     // this exercises (no HTTP handler in front of it here).
     let second = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row(&engine, b"doc-1")],
             "life-2".to_string(),
             [2u8; 32],
@@ -155,58 +154,51 @@ fn open_engine(dir: &std::path::Path) -> Engine {
     engine
 }
 
-/// **A row admitted only as a join is refused if its item was deleted before the writer took it**,
-/// rather than landing as a new item without the columns it left out. The row is built as the
-/// ingest handler leaves one it resolved as a join, with the delete landing between the two; the
-/// same row unmarked becomes a new item, as a row naming a deleted holder always has.
+/// A suppressed item still holds its external id: the same row sent again names it and changes
+/// nothing, rather than creating a copy no deny reaches. The copy stays hidden.
 #[test]
-fn a_join_only_row_whose_item_was_deleted_is_refused() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let engine = open_engine(tmp.path());
-    let held = engine
-        .accept_ingest(vec![row(&engine, b"doc-3")], "held".to_string(), [5u8; 32])
-        .expect("ingest accepted")[0];
-    engine
-        .accept_change(held, ChangeOp::Delete)
-        .expect("delete accepted");
-    let joining = |join_only| UnallocatedRow {
-        join: Some(held),
-        join_only,
-        ..row(&engine, b"doc-3")
-    };
-
-    let err = engine
-        .accept_ingest(vec![joining(true)], "join-only".to_string(), [6u8; 32])
-        .expect_err("a row admitted only as a join cannot become a new item");
-    assert!(
-        matches!(err, AcceptError::Exec(ExecError::JoinRefused { .. })),
-        "{err:?}"
-    );
-    let fresh = engine
-        .accept_ingest(vec![joining(false)], "unmarked".to_string(), [7u8; 32])
-        .expect("an unmarked row becomes a new item")[0];
-    assert_ne!(fresh, held);
-}
-
-#[test]
-fn a_suppressed_holder_still_blocks_reingest() {
+fn a_suppressed_holder_is_named_by_a_reingest_and_no_copy_is_made() {
     let tmp = tempfile::TempDir::new().unwrap();
     let engine = open_engine(tmp.path());
 
     let entity = engine
-        .accept_ingest(vec![row(&engine, b"doc-2")], "s-1".to_string(), [3u8; 32])
+        .ingest_rows(vec![row(&engine, b"doc-2")], "s-1".to_string(), [3u8; 32])
         .expect("ingest accepted")[0];
     engine
         .accept_change(entity, ChangeOp::Suppress)
         .expect("suppress accepted");
 
-    // Suppression is temporary hiding, not deletion: re-ingesting a byte-identical copy past it
-    // would be the copy-no-deny-can-reach hole. The executor backstop must refuse.
-    let err = engine
-        .accept_ingest(vec![row(&engine, b"doc-2")], "s-2".to_string(), [4u8; 32])
-        .expect_err("a suppressed holder still collides");
-    assert!(
-        format!("{err}").contains("duplicate") || format!("{err:?}").contains("Duplicate"),
-        "expected the duplicate refusal, got {err:?}"
-    );
+    let again = engine
+        .ingest_rows(vec![row(&engine, b"doc-2")], "s-2".to_string(), [4u8; 32])
+        .expect("a row naming a suppressed item is accepted");
+    assert_eq!(again, vec![entity], "the row names the suppressed item");
+    assert_eq!(engine.resolve_external_id(b"doc-2").unwrap(), Some(entity));
+}
+
+/// **An item created with no external id answers none once a flush has written it**, rather than
+/// failing the lookup.
+#[test]
+fn an_item_created_without_an_external_id_answers_none_after_its_flush() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let engine = open_engine(tmp.path());
+    let receipt = engine
+        .ingest(IngestRequest {
+            batch_id: "bare".to_string(),
+            body_hash: [1u8; 32],
+            view: Some("s0".to_string()),
+            rows: vec![IngestRow {
+                tessera_id: None,
+                external_id: None,
+                labels: Some(vec![b"0".to_vec()]),
+                position: Some((0.5, 0.5)),
+                scalars: Vec::new(),
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            }],
+            artifacts: Default::default(),
+        })
+        .expect("the batch is accepted");
+    let entity = engine.resolve_tessera_ids(&receipt.tessera_ids)[0].expect("the item it made");
+    flush(&engine);
+    assert_eq!(engine.external_id_of(entity).expect("the lookup answers"), None);
 }

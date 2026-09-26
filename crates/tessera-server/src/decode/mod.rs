@@ -9,7 +9,7 @@ use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::TesseraId;
 
 pub(crate) use self::arrow::{
-    labels_col, parse_ingest_batch, parse_values_batch, ParsedBatch, ParsedValues,
+    labels_col, parse_ingest_batch, parse_values_batch, Frame, ParsedBatch, ParsedValues,
 };
 
 /// A body the decoder refuses. A refusal names a row by its index in the batch, never by the id

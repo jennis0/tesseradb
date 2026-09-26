@@ -20,15 +20,15 @@ use super::{
 
 #[derive(Debug)]
 pub(crate) struct RawIngestItem {
-    /// `None` when the caller sent no external id; the item is then addressable only by its
-    /// `tessera_id`.
+    /// `None` when the caller sent no external id.
     pub(crate) external_id: Option<Vec<u8>>,
-    /// In the view's frame, never longitude and latitude: the projection has already run.
-    pub(crate) x: f64,
-    pub(crate) y: f64,
-    /// The row's `access` labels, trimmed. Empty for a row with none, which the view's
-    /// `point_default` fills or refuses.
-    pub(crate) labels: Vec<Vec<u8>>,
+    pub(crate) tessera_id: Option<TesseraId>,
+    /// In the view's frame, never longitude and latitude: the projection has already run. `None`
+    /// for a row carrying no coordinates.
+    pub(crate) position: Option<(f64, f64)>,
+    /// The row's `access` labels, trimmed; `None` where the row leaves its label out, and empty
+    /// where it sends no label, which the view's default decides.
+    pub(crate) labels: Option<Vec<Vec<u8>>>,
     pub(crate) scalars: Vec<WalScalar>,
     /// Group-scoped values for the view's group, positional against the families the batch was
     /// parsed with; empty where the view's group owns none.
@@ -39,10 +39,7 @@ pub(crate) struct RawIngestItem {
 }
 
 /// One ingest batch, decoded, with what its membership columns said.
-pub(crate) struct ParsedBatch<'a> {
-    /// The declared scalars' names followed by the scoped families', which the positions in
-    /// [`RawIngestItem::omitted`] index.
-    pub(crate) columns: Vec<&'a str>,
+pub(crate) struct ParsedBatch {
     pub(crate) items: Vec<RawIngestItem>,
     pub(crate) artifacts: BatchArtifacts,
     /// Rows whose latitude lay outside the projection's domain and were moved onto the frame's
@@ -50,6 +47,12 @@ pub(crate) struct ParsedBatch<'a> {
     pub(crate) clipped: u64,
     /// Rows outside the view's extent, moved onto its edge.
     pub(crate) clamped: u64,
+}
+
+/// The frame an ingest batch's coordinates are read against: its view's projection and extent.
+pub(crate) struct Frame<'a> {
+    pub(crate) projection: Projection,
+    pub(crate) extent: &'a Bounds,
 }
 
 /// One category cell: its key resolved to the bound code, at the column's declared width. Codes
@@ -291,32 +294,36 @@ fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
     Ok(())
 }
 
-/// Decodes a `/control/ingest` body against the view's projection and extent, its declared
-/// scalars, its group's scoped families and the layer registry. `node_id` is accepted and not
-/// stored. Any refusal refuses the whole batch.
+/// Decodes a `/control/ingest` body against the view's frame, its declared scalars, its group's
+/// scoped families and the layer registry. A batch naming no view has no frame and carries no
+/// coordinates. `node_id` is accepted and not stored. Any refusal refuses the whole batch.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn parse_ingest_batch<'a>(
+pub(crate) fn parse_ingest_batch(
     encoding: BodyEncoding,
     body: &[u8],
-    projection: Projection,
-    extent: &Bounds,
-    declared: &'a [DeclaredScalar],
+    frame: Option<Frame<'_>>,
+    declared: &[DeclaredScalar],
     // The families of the group that owns the view, in manifest order; empty outside a group.
-    scoped: &'a [ScopedScalar],
+    scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
     // The key of the batch's view in a group, `None` where the view is none of the group's.
     view_in: &dyn Fn(&str) -> Option<String>,
-) -> Result<ParsedBatch<'a>, DecodeError> {
+) -> Result<ParsedBatch, DecodeError> {
     let body_name = "ingest body";
-    let (x_name, y_name) = coordinates::axis_names(projection);
-    let fixed = [
+    let (x_name, y_name) = match &frame {
+        Some(frame) => coordinates::axis_names(frame.projection),
+        None => ("", ""),
+    };
+    let mut fixed = vec![
         Fixed::ExternalId,
-        Fixed::Coordinate(x_name),
-        Fixed::Coordinate(y_name),
+        Fixed::TesseraId,
         Fixed::Access,
         Fixed::NodeId,
     ];
+    if frame.is_some() {
+        fixed.extend([Fixed::Coordinate(x_name), Fixed::Coordinate(y_name)]);
+    }
     let columns: Vec<&str> = declared
         .iter()
         .map(|d| d.name.as_str())
@@ -345,27 +352,54 @@ pub(crate) fn parse_ingest_batch<'a>(
         let offset = items.len();
 
         let ext = optional_binary_col(body_name, &batch, "external_id")?;
+        let tessera = tessera_id_col(body_name, &batch)?;
         let has_column = |name: &str| batch.column_by_name(name).is_some();
-        if let Some((wrong, right)) = coordinates::misnamed_axis(projection, has_column) {
-            return Err(DecodeError(format!(
-                "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}'; \
-                 rename '{wrong}' to '{right}'",
-                match projection {
-                    Projection::None =>
-                        "this view declares no projection, so it has no longitude".to_string(),
-                    _ => format!("this view is projected `{}`", projection.name()),
+        let (x, y) = match &frame {
+            None => {
+                if let Some(name) = ["x", "y", "longitude", "latitude"]
+                    .into_iter()
+                    .find(|name| has_column(name))
+                {
+                    return Err(DecodeError(format!(
+                        "ingest body: column '{name}' is a coordinate and this batch names no \
+                         view to place it in; name the view in x-tessera-view"
+                    )));
                 }
+                (None, None)
+            }
+            Some(frame) => {
+                if let Some((wrong, right)) = coordinates::misnamed_axis(frame.projection, has_column)
+                {
+                    return Err(DecodeError(format!(
+                        "ingest body: {}, so its coordinate columns are '{x_name}' and \
+                         '{y_name}'; rename '{wrong}' to '{right}'",
+                        match frame.projection {
+                            Projection::None =>
+                                "this view declares no projection, so it has no longitude"
+                                    .to_string(),
+                            _ => format!("this view is projected `{}`", frame.projection.name()),
+                        }
+                    )));
+                }
+                (
+                    coordinate_col(&batch, x_name)?,
+                    coordinate_col(&batch, y_name)?,
+                )
+            }
+        };
+        if x.is_some() != y.is_some() {
+            let (carried, missing) = if x.is_some() {
+                (x_name, y_name)
+            } else {
+                (y_name, x_name)
+            };
+            return Err(DecodeError(format!(
+                "ingest body: the batch carries '{carried}' and not '{missing}'; send both \
+                 coordinates or neither"
             )));
         }
-        let x = coordinate_col(&batch, x_name, offset)?;
-        let y = coordinate_col(&batch, y_name, offset)?;
-        let access = labels_col(body_name, &batch, "access")?.ok_or_else(|| {
-            DecodeError(
-                "ingest body: column 'access' is missing; send each row's labels as a list of \
-                 strings, an empty list for a row with no label"
-                    .to_string(),
-            )
-        })?;
+        let access_column = batch.column_by_name("access");
+        let access = labels_col(body_name, &batch, "access")?;
 
         let memberships =
             check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
@@ -380,10 +414,26 @@ pub(crate) fn parse_ingest_batch<'a>(
         };
 
         for i in 0..batch.num_rows() {
-            let placed = coordinates::place(projection, Some(extent), x[i], y[i])
-                .map_err(|e| DecodeError(format!("ingest body: row {} {e}", offset + i)))?;
-            clipped += u64::from(placed.clipped);
-            clamped += u64::from(placed.clamped());
+            let position = match (x.as_ref().map(|x| x[i]), y.as_ref().map(|y| y[i])) {
+                (Some(Some(x)), Some(Some(y))) => {
+                    let frame = frame.as_ref().expect("coordinates are read against a frame");
+                    let placed =
+                        coordinates::place(frame.projection, Some(frame.extent), x, y).map_err(
+                            |e| DecodeError(format!("ingest body: row {} {e}", offset + i)),
+                        )?;
+                    clipped += u64::from(placed.clipped);
+                    clamped += u64::from(placed.clamped());
+                    Some((placed.x, placed.y))
+                }
+                (None | Some(None), None | Some(None)) => None,
+                _ => {
+                    return Err(DecodeError(format!(
+                        "ingest body: row {} carries one coordinate and not the other; send both \
+                         or neither",
+                        offset + i
+                    )))
+                }
+            };
             for column in &memberships.columns {
                 tally.read(body_name, column, memberships.levels, i, offset)?;
             }
@@ -398,21 +448,34 @@ pub(crate) fn parse_ingest_batch<'a>(
             for (d, cells) in scoped_declared.iter().zip(&scoped_cells) {
                 scoped_values.push(value_of(cells, i, d)?);
             }
-            // A missing column and a null cell both mean the item has no external id.
             let external_id = match &ext {
                 Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
                 _ => None,
             };
-            // Checked inside the parse, so an over-length id anywhere refuses the whole batch
-            // before deduplication, allocation or the WAL append.
+            // Checked inside the parse, so an over-length id anywhere refuses the whole batch.
             if let Some(external_id) = &external_id {
                 check_external_id(external_id)?;
             }
+            let tessera_id = match &tessera {
+                Some(arr) if !arr.is_null(i) => {
+                    Some(parse_tessera_id(body_name, offset + i, arr.value(i))?)
+                }
+                _ => None,
+            };
+            let labels = match (&access, access_column) {
+                (Some(access), Some(column)) if !column.is_null(i) => Some(
+                    access
+                        .labels(i)
+                        .map(|label| label.as_bytes().to_vec())
+                        .collect(),
+                ),
+                _ => None,
+            };
             items.push(RawIngestItem {
                 external_id,
-                x: placed.x,
-                y: placed.y,
-                labels: access.labels(i).map(|label| label.as_bytes().to_vec()).collect(),
+                tessera_id,
+                position,
+                labels,
                 scalars,
                 scoped: scoped_values,
                 omitted: omitted.of(i).to_vec(),
@@ -420,11 +483,39 @@ pub(crate) fn parse_ingest_batch<'a>(
         }
     }
     Ok(ParsedBatch {
-        columns,
         items,
         artifacts: tally.into_artifacts(),
         clipped,
         clamped,
+    })
+}
+
+/// The batch's `tessera_id` column, decimal digits in a string, or `None` where it has none.
+fn tessera_id_col<'a>(
+    body_name: &str,
+    batch: &'a RecordBatch,
+) -> Result<Option<&'a arrow::array::StringArray>, DecodeError> {
+    match batch.column_by_name("tessera_id") {
+        None => Ok(None),
+        Some(col) => col
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .map(Some)
+            .ok_or_else(|| {
+                DecodeError(format!(
+                    "{body_name}: column 'tessera_id' is not utf8; send each tessera_id as \
+                     decimal digits in a string"
+                ))
+            }),
+    }
+}
+
+fn parse_tessera_id(body_name: &str, row: usize, text: &str) -> Result<TesseraId, DecodeError> {
+    text.parse::<u64>().map(TesseraId::new).map_err(|_| {
+        DecodeError(format!(
+            "{body_name}: row {row}'s tessera_id is not decimal digits; send it as a string of \
+             digits"
+        ))
     })
 }
 
@@ -501,20 +592,7 @@ pub(crate) fn parse_values_batch(
             check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
 
         let ext = optional_binary_col(body_name, &batch, "external_id")?;
-        let tessera = match batch.column_by_name("tessera_id") {
-            None => None,
-            Some(col) => Some(
-                col.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .ok_or_else(|| {
-                        DecodeError(
-                            "values body: column 'tessera_id' is not utf8; send each \
-                             tessera_id as decimal digits in a string"
-                                .to_string(),
-                        )
-                    })?,
-            ),
-        };
+        let tessera = tessera_id_col(body_name, &batch)?;
 
         let cells: Vec<Cells> = carried
             .iter()
@@ -558,13 +636,7 @@ pub(crate) fn parse_values_batch(
                     Address::External(external)
                 }
                 (None, Some(named)) => {
-                    let id = named.parse::<u64>().map_err(|_| {
-                        DecodeError(format!(
-                            "values body: row {}'s tessera_id is not decimal digits",
-                            rows.len()
-                        ))
-                    })?;
-                    Address::Tessera(TesseraId::new(id))
+                    Address::Tessera(parse_tessera_id(body_name, rows.len(), named)?)
                 }
             };
 
@@ -602,27 +674,18 @@ fn optional_binary_col<'a>(
     }
 }
 
-/// A coordinate column, read by the rule a build reads a points file's. `offset` is where this
-/// record batch's rows start in the request, so a null names its row.
+/// A coordinate column, read by the rule a build reads a points file's, with `None` for a row
+/// carrying no position; `None` for a batch without the column.
 fn coordinate_col(
     batch: &arrow::record_batch::RecordBatch,
     name: &str,
-    offset: usize,
-) -> Result<Vec<f64>, DecodeError> {
-    let column = batch.column_by_name(name).ok_or_else(|| {
-        DecodeError(format!(
-            "ingest body: column '{name}' is missing; send it as float32 or float64"
-        ))
-    })?;
-    coordinates::read_coordinates(column.as_ref()).map_err(|e| match e {
-        coordinates::ColumnError::Null { row } => DecodeError(format!(
-            "ingest body: row {}, column '{name}' {e}",
-            offset + row
-        )),
-        coordinates::ColumnError::Type(_) => {
-            DecodeError(format!("ingest body: column '{name}' {e}"))
-        }
-    })
+) -> Result<Option<Vec<Option<f64>>>, DecodeError> {
+    let Some(column) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    coordinates::read_optional_coordinates(column.as_ref())
+        .map(Some)
+        .map_err(|e| DecodeError(format!("ingest body: column '{name}' {e}")))
 }
 
 /// The batch's labels column `name`, read by the rule the build reads a points file's access
@@ -744,8 +807,10 @@ mod category_wire {
         parse_ingest_batch(
             BodyEncoding::Arrow,
             &body(column, nullable),
-            Projection::None,
-            &EXTENT,
+            Some(Frame {
+                projection: Projection::None,
+                extent: &EXTENT,
+            }),
             &declared(),
             &[],
             &vocabularies(),
@@ -815,8 +880,10 @@ mod category_wire {
         let items = parse_ingest_batch(
             BodyEncoding::Arrow,
             &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
-            Projection::None,
-            &EXTENT,
+            Some(Frame {
+                projection: Projection::None,
+                extent: &EXTENT,
+            }),
             &declared(),
             &[],
             &vocabularies_of(VocabularyKind::Discovered),
@@ -838,8 +905,10 @@ mod category_wire {
         let items = parse_ingest_batch(
             BodyEncoding::Arrow,
             &body(Arc::new(StringArray::from(vec!["ops"])), false),
-            Projection::None,
-            &EXTENT,
+            Some(Frame {
+                projection: Projection::None,
+                extent: &EXTENT,
+            }),
             &declared(),
             &[],
             &vocabularies_of(VocabularyKind::Discovered),

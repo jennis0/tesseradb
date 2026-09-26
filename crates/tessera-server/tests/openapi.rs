@@ -1835,7 +1835,7 @@ async fn ingest_and_values_match_the_description() {
         .await
         .unwrap();
     let answer = assert_answer(&doc, &post, resp, 200).await;
-    assert_eq!(answer["accepted"], 2);
+    assert_eq!(answer["created"], 2);
     assert_eq!(answer["tessera_ids"].as_array().unwrap().len(), 2);
     assert!(answer.get("replayed").is_none() && answer.get("visible").is_none());
 
@@ -1848,7 +1848,7 @@ async fn ingest_and_values_match_the_description() {
         .unwrap();
     let replay = assert_answer(&doc, &post, resp, 200).await;
     assert_eq!(replay["replayed"], true);
-    assert_eq!(replay["accepted"], 0);
+    assert_eq!(replay["created"], 0);
     assert_eq!(replay["tessera_ids"], answer["tessera_ids"]);
     let resp = ingest("openapi-json")
         .json(&json!([]))
@@ -1857,7 +1857,7 @@ async fn ingest_and_values_match_the_description() {
         .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
 
-    // Arrow leaving both declared columns out: a row that creates an item carries every one.
+    // Arrow leaving both declared columns out: the item is created with no value in either.
     let resp = control(&f.server, &post, "/control/ingest")
         .header("x-tessera-batch-id", "openapi-arrow")
         .header("content-type", ARROW)
@@ -1870,12 +1870,33 @@ async fn ingest_and_values_match_the_description() {
         .send()
         .await
         .unwrap();
+    let created = assert_answer(&doc, &post, resp, 200).await;
+    assert_eq!(created["created"], 1);
+
+    // The row again, naming the item by its `tessera_id` alone, changes nothing; a row naming no
+    // item and carrying no position creates nothing and is refused.
+    let named = json!([{ "tessera_id": created["tessera_ids"][0] }]);
+    assert_valid(&doc, "IngestRecords", &named);
+    let resp = ingest("openapi-named")
+        .header("content-type", "application/json")
+        .body(named.to_string())
+        .send()
+        .await
+        .unwrap();
+    let unchanged = assert_answer(&doc, &post, resp, 200).await;
+    assert_eq!(unchanged["unchanged"], 1);
+    let resp = ingest("openapi-unplaced")
+        .header("content-type", "application/json")
+        .body(json!([{ "access": ["0"] }]).to_string())
+        .send()
+        .await
+        .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
 
     // Waiting for the rows to be visible.
     let resp = control(&f.server, &post, "/control/ingest?wait=visible")
         .header("x-tessera-batch-id", "openapi-visible")
-        .json(&json!([{ "external_id": b64(b"openapi-2"), "x": 50.0, "y": 60.0,
+        .json(&json!([{ "external_id": b64(b"openapi-3"), "x": 50.0, "y": 60.0,
                          "access": "0", "archive": "astro", "score": null }]))
         .send()
         .await

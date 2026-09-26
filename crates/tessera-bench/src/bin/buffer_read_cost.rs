@@ -33,6 +33,9 @@
 //!
 //! The fixture is **copied** before it is opened, exactly as `write_cost` copies it.
 
+#[path = "../ingest_rows.rs"]
+mod ingest_rows;
+use ingest_rows::IngestRows;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -665,7 +668,6 @@ fn synth_rows(fx: &Fixture, count: usize, start: u64, terms: &[TermId]) -> Vec<U
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
-                join_only: false,
                 external_id: Some(format!("buffer-read-{n}").into_bytes()),
                 view: fx.view.clone(),
                 join: None,
@@ -714,7 +716,7 @@ fn experiment_e1(
                 let count = 5_000.min(depth - buffered);
                 let rows = synth_rows(fx, count, next, &terms);
                 next += count as u64;
-                engine.accept_ingest(rows, format!("fill-{round}-{next}"), [round as u8; 32])?;
+                engine.ingest_rows(rows, format!("fill-{round}-{next}"), [round as u8; 32])?;
                 buffered += count;
             }
             let [x_min, y_min, x_max, y_max] = fx.extent;

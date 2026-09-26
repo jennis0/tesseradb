@@ -88,6 +88,14 @@ impl UniqueKey {
         UniqueKey::Keyword(keyword_key(value))
     }
 
+    /// The key [`Self::widen`] made `widened` from, for a column whose keys are of `kind`.
+    pub fn of_widened(kind: KeyKind, widened: u128) -> UniqueKey {
+        match kind {
+            KeyKind::Keyword => UniqueKey::Keyword(widened),
+            KeyKind::Unsigned | KeyKind::Signed => UniqueKey::Int(widened as u64),
+        }
+    }
+
     /// The key zero-extended, as a manifest records a base run's range.
     pub fn widen(self) -> u128 {
         match self {

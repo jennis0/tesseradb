@@ -3,8 +3,10 @@
 //! then reads. This module owns only the coercion of one JSON value into one cell.
 //!
 //! An integer is parsed exactly from its digits (a JSON number or a string), never through a
-//! double. A null or absent `access` is a row with no label, which the view's default decides.
-//! `access` is read by the Arrow decode's access-column reader, as the Arrow form's is.
+//! double. A key a record leaves out and a key it sends as null are both a null cell; which
+//! declared columns a record leaves out is answered beside the batch, since a null there clears a
+//! value and a left-out key keeps it. `access` is read by the Arrow decode's access-column
+//! reader, as the Arrow form's is.
 
 use std::sync::Arc;
 
@@ -14,7 +16,7 @@ use arrow::array::{
     TimestampMicrosecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
 };
 use arrow::datatypes::{Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use base64::Engine as _;
 use serde_json::{Map, Value};
 use tessera_engine::{member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
@@ -26,18 +28,18 @@ use super::{DecodeError, Fixed};
 pub(crate) struct JsonColumns<'a> {
     /// The route's own columns, in the order the batch carries them.
     pub fixed: &'a [Fixed<'a>],
-    /// The declared and scoped columns a row may be required to carry: which of them each record
-    /// leaves out is answered beside the batch, for the caller to hold its rows to.
+    /// The declared and scoped columns whose omission matters: which of them each record leaves
+    /// out is answered beside the batch, since a left-out value keeps what is stored.
     pub required: &'a [&'a str],
     pub declared: &'a [DeclaredScalar],
     pub scoped: &'a [ScopedScalar],
     pub layer_of: &'a dyn Fn(&str) -> Option<LayerDeclaration>,
 }
 
-/// One JSON body as one record batch: the route's fixed columns in its order (a coordinate and
-/// `access` always, the others where any row carries them), then declared scalars, the scoped
-/// families any row names, and layer columns in first-appearance order. Beside it, for each record,
-/// the positions in `columns.required` of the keys it leaves out.
+/// One JSON body as one record batch: the route's fixed columns any row names, in the route's
+/// order, then declared scalars, the scoped families any row names, and layer columns in
+/// first-appearance order. Beside it, for each record, the positions in `columns.required` of the
+/// keys it leaves out.
 pub(crate) fn record_batch(
     body_name: &str,
     body: &[u8],
@@ -57,14 +59,14 @@ pub(crate) fn record_batch(
 
     let has = |name: &str| rows.iter().any(|row| row.contains_key(name));
 
+    // A fixed column no row names is left out, as the Arrow form leaves it out.
     for fixed in columns.fixed {
         let name = fixed.name();
-        let always = matches!(fixed, Fixed::Coordinate(_) | Fixed::Access);
-        if !always && !has(name) {
+        if !has(name) {
             continue;
         }
         let column = fixed_column(body_name, &rows, *fixed)?;
-        fields.push(Field::new(name, column.data_type().clone(), !always));
+        fields.push(Field::new(name, column.data_type().clone(), true));
         arrays.push(column);
     }
 
@@ -126,7 +128,8 @@ pub(crate) fn record_batch(
         arrays.push(column);
     }
 
-    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+    let options = RecordBatchOptions::new().with_row_count(Some(rows.len()));
+    let batch = RecordBatch::try_new_with_options(Arc::new(Schema::new(fields)), arrays, &options)
         .map_err(|e| DecodeError(format!("{body_name}: {e}")))?;
     Ok((batch, omitted))
 }
@@ -177,14 +180,7 @@ fn fixed_column(
                             refusal(body_name, row, name, "is not a finite number")
                         })?)
                     }
-                    None | Some(Value::Null) => {
-                        return Err(refusal(
-                            body_name,
-                            row,
-                            name,
-                            "is missing or null; send a number on every row",
-                        ))
-                    }
+                    None | Some(Value::Null) => builder.append_null(),
                     Some(_) => return Err(refusal(body_name, row, name, "is not a number")),
                 }
             }
@@ -196,7 +192,8 @@ fn fixed_column(
             let mut builder = ListBuilder::new(StringBuilder::new());
             for (row, record) in rows.iter().enumerate() {
                 match record.get("access") {
-                    None | Some(Value::Null) => builder.append(true),
+                    // A null list: the row leaves its label out.
+                    None | Some(Value::Null) => builder.append(false),
                     Some(Value::String(text)) => {
                         builder.values().append_value(text);
                         builder.append(true);

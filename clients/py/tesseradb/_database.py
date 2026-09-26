@@ -649,9 +649,8 @@ class Database:
         values it holds, wherever a column of those values is read. A column the call does not
         name is ignored, and the record returned says what was read and what was ignored. A column
         named like a declared attribute fills that attribute: at the first commit on the anchor
-        view alone, and after it on any view's rows, where a row that creates an item carries
-        every declared column. Several inserts into one target add up. Nothing is sent until
-        `commit()`.
+        view alone, and after it on any view's rows. Several inserts into one target add up.
+        Nothing is sent until `commit()`.
 
         A target that is not declared, a keyword the target does not read, a column the target
         needs and the call does not name, and a name that is not a column of the table are

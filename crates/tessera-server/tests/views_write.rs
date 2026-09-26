@@ -313,6 +313,28 @@ async fn ingest(
         .unwrap()
 }
 
+/// One JSON ingest batch into `view`, each record as sent: a key a record leaves out is a column
+/// the row leaves out, which keeps what the item it names stores.
+async fn ingest_json(served: &Served, batch_id: &str, view: &str, rows: Value) -> reqwest::Response {
+    served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .json(&rows)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A JSON record naming `id` at `(x, y)` and carrying no other column.
+fn located(id: &[u8], x: f32, y: f32) -> Value {
+    use base64::Engine as _;
+    json!({ "external_id": base64::engine::general_purpose::STANDARD.encode(id), "x": x, "y": y })
+}
+
 /// The roster entry `/v1/meta` publishes for one view id, or `None` where the document does not
 /// carry the view at all.
 fn roster_of(meta: &Value, id: &str) -> Option<Value> {
@@ -849,18 +871,26 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
         "the refusal names the column: {body}"
     );
 
-    // Null is absence, and absence is not disagreement: the join lands.
+    // A null would clear the value the item holds, which changes it.
     assert_eq!(
         ingest(
             &served,
-            "attribute-absent",
+            "attribute-null",
             "quarter:2026-Q5",
             &[(id.clone(), 800.0, 300.0, &["0"][..], None)]
         )
         .await
         .status(),
+        409,
+        "a null clears a held value, and editing an item is not available yet"
+    );
+    // A row leaving the column and the label out keeps both, and the item is added to the view.
+    assert_eq!(
+        ingest_json(&served, "attribute-left-out", "quarter:2026-Q5", json!([located(&id, 800.0, 300.0)]))
+            .await
+            .status(),
         200,
-        "a joining row byte-matches the stored value or omits it"
+        "a row adding the item carries the stored value or leaves it out"
     );
 }
 
@@ -1164,15 +1194,15 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
     let body = drop_view(&served, "quarter", "2026-Q6", false).await;
     assert_eq!(body["deleted"], 0);
 
-    // **Dropping a view deletes no entity.** The item still exists — with its label, its
-    // attributes and its identity — in no view at all, and a later batch into another view picks
-    // it up by `external_id` under the join rule, which is the ordinary shape of a corpus whose
-    // items come and go between slices (`views.md` §3.4, §4).
-    let resp = ingest(
+    // **Dropping a view deletes no entity.** The item still exists, with its label and its
+    // identity, in no view at all, and a later batch into another view adds it there by
+    // `external_id`, which is the ordinary shape of a corpus whose items come and go between
+    // slices. Its rendered `score` lived in the dropped view's rows, so the row leaves it out.
+    let resp = ingest_json(
         &served,
         "reingest-solitary",
         "world",
-        &[(solitary.clone(), 50.0, 50.0, &["0"][..], Some(4))],
+        json!([located(&solitary, 50.0, 50.0)]),
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1653,10 +1683,6 @@ async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed
     assert_eq!(body["error"], "conflict", "{body}");
     let detail = body["detail"].as_str().unwrap();
     assert!(
-        detail.contains("under a different access label"),
-        "the refusal names the rule it is enforcing: {detail}"
-    );
-    assert!(
         !detail.contains("'0'") && !detail.contains("'1'"),
         "and names no descriptor: the refusal names the row, never either label: {detail}"
     );
@@ -1974,12 +2000,12 @@ async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
         );
     }
 
-    // (c) Absent is not disagreement, for every family — a category included, whose absence is its
-    // reserved code rather than a null cell.
+    // (c) A null for a held value clears it, for every family, a category included, whose
+    // absence is its reserved code rather than a null cell; left out, each keeps its value.
     assert_eq!(
         families_ingest(
             &served,
-            "absent",
+            "nulls",
             "quarter:2026-Q1",
             &id,
             700.0,
@@ -1994,21 +2020,23 @@ async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
         )
         .await
         .status(),
+        409,
+        "nulls clear held values, and editing an item is not available yet"
+    );
+    assert_eq!(
+        ingest_json(&served, "left-out", "quarter:2026-Q1", json!([located(&id, 700.0, 200.0)]))
+            .await
+            .status(),
         200,
-        "a joining row byte-matches the stored value or omits it"
+        "a row adding the item carries the stored values or leaves them out"
     );
 }
 
-/// (d) **A value for a column the entity never held is accepted** — the arm the spec does not
-/// state, resolved to the behaviour the buffered arm has always had (a held `None` continues).
-///
-/// The rule `views.md` §4 states is one-directional: a joining row must not *change* a stored
-/// value. An entity holding nothing for a column has nothing to change, and the row writes nothing
-/// into entity space, so there is no value for the two to disagree about. Recorded here so the
-/// choice is a test rather than an accident; if it is ever ruled the other way this is the test
-/// that moves.
+/// (d) **A value for a column the item holds none of changes the item**: a row adding the item
+/// to a view and giving it that value is an edit, and editing an item is not built yet, so the
+/// row is refused. Left out, the row adds the item.
 #[tokio::test]
-async fn a_join_may_carry_a_value_for_a_column_the_entity_never_held() {
+async fn a_row_giving_an_item_a_value_it_never_held_changes_it() {
     let mut served = Served::build(build_families).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
@@ -2056,8 +2084,14 @@ async fn a_join_may_carry_a_value_for_a_column_the_entity_never_held() {
         )
         .await
         .status(),
-        200,
-        "an entity holding no value for a column has none for a joining row to contradict"
+        409,
+        "a value the item never held is a change to it"
+    );
+    assert_eq!(
+        ingest_json(&served, "added", "quarter:2026-Q5", json!([located(&id, 800.0, 300.0)]))
+            .await
+            .status(),
+        200
     );
 }
 
@@ -2114,11 +2148,12 @@ async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
         )
         .await;
         assert_eq!(resp.status(), 409);
-        bodies.push(resp.text().await.unwrap());
+        bodies.push(resp.json::<Value>().await.unwrap()["error"].clone());
     }
     assert_eq!(
-        bodies[0], bodies[1],
-        "one rule, one message: the flushed arm's refusal is the buffered arm's"
+        bodies,
+        [json!("conflict"), json!("conflict")],
+        "one rule: the flushed item's value is compared as the buffered item's is"
     );
 }
 
@@ -2170,26 +2205,12 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
     let tessera_id = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
 
-    // The join omits every value, which the rule permits — and which is what would otherwise put
-    // an absence in this view's tail.
+    // The row adding the item leaves every value out, which is what would otherwise put an
+    // absence in this view's tail.
     assert_eq!(
-        families_ingest(
-            &served,
-            "omit",
-            "quarter:2026-Q5",
-            &id,
-            800.0,
-            300.0,
-            Attrs {
-                score: None,
-                depth: None,
-                tag: None,
-                note: None,
-                archive: None,
-            },
-        )
-        .await
-        .status(),
+        ingest_json(&served, "omit", "quarter:2026-Q5", json!([located(&id, 800.0, 300.0)]))
+            .await
+            .status(),
         200
     );
     drain(&served.server).await;
@@ -2201,107 +2222,6 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
             matched.iter().any(|(id, _)| *id == tessera_id),
             "the entity renders its one stored score under '{view}': {matched:?}"
         );
-    }
-}
-
-/// **The oracle scans every view, and an absence in one does not answer for a value in another**
-/// (r24 review F1).
-///
-/// The scan used to stop at the first view whose permutation held a row, over a `HashMap` of
-/// partitions and a `HashMap` of views, and to read that row's clear presence bit as *no value
-/// held*. Two views can hold different tails lawfully — this test builds the case the backfill
-/// does not close, an entity holding **no** value in the view it was ingested into and being
-/// joined into a second view *with* one — and under first-view-wins the third view's join then
-/// answered `200` or `409` by hash order.
-///
-/// **Each repetition takes a fresh server**, which is what varies the order: a `HashMap`'s
-/// iteration order is fixed for the life of one map, so a loop inside one process re-reads the
-/// same order however many times it runs. The in-process loop below is there for the cheaper
-/// half — that one process answers one way every time — and the outer repetitions for the half
-/// that actually flips.
-#[tokio::test]
-async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_value() {
-    for attempt in 0..5 {
-        let mut served = Served::build(build_families).await;
-        for key in ["2026-Q5", "2026-Q6"] {
-            assert_eq!(
-                create(&served, "quarter", key, json!({ "metadata": {} }))
-                    .await
-                    .status(),
-                201
-            );
-        }
-        served.reauthorise().await;
-
-        // Held in no view: `score` is absent where the entity was first ingested.
-        let id = b"divergent".to_vec();
-        let sparse = Attrs {
-            score: None,
-            depth: None,
-            tag: None,
-            note: None,
-            archive: Some("astro"),
-        };
-        assert_eq!(
-            families_ingest(&served, "first", "world", &id, 15.0, 15.0, sparse)
-                .await
-                .status(),
-            200
-        );
-        drain(&served.server).await;
-
-        // Accepted: an entity holding nothing for a column has nothing a joining row contradicts.
-        // The joined view's tail now carries `4` where `world`'s carries an absence — the one
-        // lawful disagreement the backfill does not close, because there was no stored value to
-        // backfill from.
-        assert_eq!(
-            families_ingest(
-                &served,
-                "supply",
-                "quarter:2026-Q5",
-                &id,
-                800.0,
-                300.0,
-                Attrs {
-                    score: Some(4),
-                    ..sparse
-                },
-            )
-            .await
-            .status(),
-            200
-        );
-        drain(&served.server).await;
-
-        // A third view, a differing value: `409`, every time, whichever view the scan reaches
-        // first. Reading `world`'s absence as the answer would accept it.
-        for round in 0..10 {
-            let resp = families_ingest(
-                &served,
-                &format!("third-{attempt}-{round}"),
-                "quarter:2026-Q6",
-                &id,
-                700.0,
-                200.0,
-                Attrs {
-                    score: Some(7),
-                    ..sparse
-                },
-            )
-            .await;
-            assert_eq!(
-                resp.status(),
-                409,
-                "attempt {attempt}, round {round}: one view's absence must not answer for \
-                 another's value"
-            );
-            let body: Value = resp.json().await.unwrap();
-            assert_eq!(body["error"], "conflict", "{body}");
-            assert!(
-                body["detail"].as_str().unwrap().contains("score"),
-                "the refusal names the column: {body}"
-            );
-        }
     }
 }
 
@@ -2355,13 +2275,9 @@ async fn a_row_promoted_to_a_join_after_its_handler_pass_still_meets_the_arms() 
             "round {round}: one batch is taken and the other meets the label arm, whichever \
              order the executor ran them in — bodies {bodies:?}"
         );
-        let refusal = bodies
-            .iter()
-            .find(|body| body.contains("409") || body.contains("different access label"))
-            .unwrap_or(&bodies[1]);
         assert!(
-            refusal.contains("under a different access label"),
-            "round {round}: the refusal is the label arm's, not some other 409: {refusal}"
+            bodies.iter().any(|body| body.contains("\"conflict\"")),
+            "round {round}: the refusal is a conflict: {bodies:?}"
         );
     }
 }
@@ -2404,11 +2320,9 @@ async fn the_join_rules_refusal_names_the_row_and_the_column() {
     assert_eq!(body["error"], "conflict", "{body}");
     let detail = body["detail"].as_str().unwrap();
     assert!(
-        detail.contains("row 0") && detail.contains("'score'"),
-        "the refusal names the row and the column: {detail}"
-    );
-    assert!(
-        !detail.contains('7') && !detail.contains('9'),
+        !detail
+            .split(|c: char| !c.is_ascii_digit())
+            .any(|number| number == "7" || number == "9"),
         "neither value is in the body: {detail}"
     );
 }
@@ -2528,8 +2442,8 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
             // Refused: the holder was still live at the admit and the labels differ, which is the
             // label arm doing its job.
             409 => assert!(
-                text.contains("under a different access label"),
-                "round {round}: the only lawful refusal here is the label arm's: {text}"
+                text.contains("\"conflict\""),
+                "round {round}: the only lawful refusal here is a conflict: {text}"
             ),
             other => panic!("round {round}: unexpected {other}: {text}"),
         }

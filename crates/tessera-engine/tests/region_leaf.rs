@@ -521,7 +521,6 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
                     vec![b"0".to_vec()]
                 };
                 tessera_lifecycle::UnallocatedRow {
-                    join_only: false,
                     external_id: Some(format!("ext-{s}-{t}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
@@ -536,7 +535,7 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
             .collect();
         entities.extend(
             engine
-                .accept_ingest(rows, format!("batch-{s}"), [s as u8; 32])
+                .ingest_rows(rows, format!("batch-{s}"), [s as u8; 32])
                 .expect("ingest is accepted"),
         );
         let flushes = engine.write_executor_stats().flushes;
@@ -553,7 +552,6 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
 fn flush_filler_segment(engine: &Engine, n: usize) {
     let rows: Vec<tessera_lifecycle::UnallocatedRow> = (0..4)
         .map(|i| tessera_lifecycle::UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("filler-{n}-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
@@ -566,7 +564,7 @@ fn flush_filler_segment(engine: &Engine, n: usize) {
         })
         .collect();
     engine
-        .accept_ingest(rows, format!("filler-{n}"), [(200 + n) as u8; 32])
+        .ingest_rows(rows, format!("filler-{n}"), [(200 + n) as u8; 32])
         .expect("ingest is accepted");
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();

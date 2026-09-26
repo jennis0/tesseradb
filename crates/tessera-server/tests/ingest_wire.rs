@@ -414,7 +414,7 @@ async fn the_same_batch_as_json_and_as_arrow_lands_identical_rows() {
     register_layer(&server, "open").await;
     let (status, body) = ingest(&server, "arrow", Some(ARROW), arrow_body(&rows(100..110))).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["accepted"], 10);
+    assert_eq!(body["created"], 10);
     let (status, body) = ingest(
         &server,
         "json-array",
@@ -423,11 +423,11 @@ async fn the_same_batch_as_json_and_as_arrow_lands_identical_rows() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["accepted"], 10);
+    assert_eq!(body["created"], 10);
     // No content type at all is JSON, the default (ingest §1.2).
     let (status, body) = ingest(&server, "ndjson", None, ndjson_body(&rows(300..310))).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["accepted"], 10);
+    assert_eq!(body["created"], 10);
     drain(&server).await;
 
     let (ids, artifacts) = viewport(&server, &["0"], None).await;
@@ -532,22 +532,7 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
         let detail = body["detail"].as_str().unwrap();
         assert!(names_cell(detail, 1, column), "{column} = {value}: {detail}");
     }
-    // A declared column missing from a row, and a layer column that changes shape mid-column.
-    let mut records: Vec<Value> = good.iter().map(json_record).collect();
-    records[2].as_object_mut().unwrap().remove("score");
-    let (status, body) = ingest(
-        &server,
-        "missing",
-        Some("application/json"),
-        Value::Array(records).to_string().into_bytes(),
-    )
-    .await;
-    assert_eq!(status, 422, "{body}");
-    assert_eq!(body["error"], "contract", "{body}");
-    assert!(
-        names_cell(body["detail"].as_str().unwrap(), 2, "score"),
-        "{body}"
-    );
+    // A layer column that changes shape mid-column.
     let mut records: Vec<Value> = good.iter().map(json_record).collect();
     records[0][LAYER] = json!(["k0"]);
     let (status, body) = ingest(
@@ -620,7 +605,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
     let one_before = visible_to(&server, &["1"]).await;
     let (status, resp) = ingest(&server, "filled", Some("application/json"), body()).await;
     assert_eq!(status, 200, "{resp}");
-    assert_eq!(resp["accepted"], 9);
+    assert_eq!(resp["created"], 9);
     drain(&server).await;
     assert_eq!(
         visible_to(&server, &["ir:sealed"]).await,
@@ -1261,7 +1246,7 @@ async fn an_arrow_column_at_another_width_is_read_as_a_build_reads_it() {
     let body = widths_body(&[600, 601], &[Some(7), Some(255)]);
     let (status, answer) = ingest(&server, "widths", Some(ARROW), body).await;
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer["accepted"], 2);
+    assert_eq!(answer["created"], 2);
     drain(&server).await;
 
     let (matched, _) = viewport(&server, &["0"], Some(json!({ "grade": { "eq": 255 } }))).await;
@@ -1598,7 +1583,7 @@ async fn a_finite_float_past_f32_is_refused_at_every_path() {
     )
     .await;
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer["accepted"], 3, "{answer}");
+    assert_eq!(answer["created"], 3, "{answer}");
 
     let tmp = TempDir::new().unwrap();
     let points = tmp.path().join("points.parquet");

@@ -711,7 +711,6 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -723,7 +722,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row],
             String::from_utf8_lossy(external_id).into_owned(),
             key,

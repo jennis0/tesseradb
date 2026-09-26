@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use sha2::Digest;
-use tessera_engine::{Engine, EngineConfig, EngineError};
+use tessera_engine::{Engine, EngineConfig, EngineError, IngestRequest};
+use tessera_lifecycle::{ChangeOp, IngestRow};
+use tessera_types::TesseraId;
 use tessera_lifecycle::wal::{Wal, WalRecord};
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_store::StoreError;
@@ -60,6 +62,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
     {
         let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            receipt: Vec::new(),
             batch_id: "over-the-top".to_string(),
             body_hash: [0u8; 32],
             rows: vec![tessera_lifecycle::WalRow {
@@ -361,4 +364,68 @@ fn the_smallest_lawful_values_open() {
         ..config()
     });
     assert!(opened.is_ok());
+}
+
+/// An engine over the bundle at `root`, its cache and log beside it, its executor running.
+fn serving(root: &Path) -> Engine {
+    let dir = root.parent().expect("the bundle sits in a directory");
+    let mut engine = open_engine(root, &dir.join("cache"), &dir.join("wal.log"));
+    engine.start_write_executor(8).expect("the executor starts");
+    engine
+}
+
+/// Create one item per name in view `s0`, as one batch, and answer their `tessera_id`s.
+fn create(engine: &Engine, batch: &str, names: &[&str]) -> Vec<TesseraId> {
+    let rows = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| IngestRow {
+            tessera_id: None,
+            external_id: Some(name.as_bytes().to_vec()),
+            labels: Some(vec![b"0".to_vec()]),
+            position: Some((1.0 + i as f64, 1.0)),
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+            omitted: Vec::new(),
+        })
+        .collect();
+    engine
+        .ingest(IngestRequest {
+            batch_id: batch.to_string(),
+            body_hash: [7u8; 32],
+            view: Some("s0".to_string()),
+            rows,
+            artifacts: Default::default(),
+        })
+        .expect("the batch is accepted")
+        .tessera_ids
+}
+
+/// **The buffered rows an open reports are the rows it replayed**, before any write.
+#[test]
+fn the_buffered_rows_reported_after_a_restart_are_the_rows_replayed() {
+    let tmp = TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+    let engine = serving(&root);
+    create(&engine, "three", &["a", "b", "c"]);
+    assert_eq!(engine.buffered_items(), 3);
+    drop(engine);
+    assert_eq!(serving(&root).buffered_items(), 3);
+}
+
+/// **A deleted item's `tessera_id` is never given to another item**, even once a fold has removed
+/// it and a restart has read the allocator back.
+#[test]
+fn a_deleted_items_tessera_id_is_not_issued_again_after_a_fold_and_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+    let engine = serving(&root);
+    let first = create(&engine, "first", &["first"])[0];
+    let entity = engine.resolve_tessera_ids(&[first])[0].expect("the item it created");
+    engine.accept_change(entity, ChangeOp::Delete).unwrap();
+    fold(&engine);
+    drop(engine);
+    let engine = serving(&root);
+    let second = create(&engine, "second", &["second"])[0];
+    assert_ne!(second, first, "the new item has a tessera_id of its own");
 }

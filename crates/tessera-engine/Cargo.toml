@@ -91,6 +91,7 @@ tessera-build = { path = "../tessera-build" }
 # dependency graph. It is a test-only edge, exactly as `tessera-build` above is.
 tessera-corpus = { path = "../tessera-corpus" }
 parquet = { workspace = true }
+proptest = { workspace = true }
 criterion = "0.5"
 
 [[bench]]

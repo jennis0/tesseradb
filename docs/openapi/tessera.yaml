@@ -1024,49 +1024,60 @@ paths:
     post:
       tags: ["control: ingest"]
       operationId: ingest
-      summary: Insert a batch of new items into one view.
+      summary: Create items, or add existing items to a view, from a batch of rows.
       description: |
         The body is the batch's rows. `content-type` chooses the encoding: `application/json`,
         `application/x-ndjson` or none at all is JSON, an array of objects or one object per line,
         each keyed by column name; `application/vnd.apache.arrow.stream` is an Arrow IPC stream of
         one or more record batches. Any other `content-type` is `422`.
 
-        **Columns.** The coordinates are `x` and `y` on a view whose projection is `none`, and
-        `lon` and `lat` in degrees on any other; a number on every row in JSON, `float32` or
-        `float64` in Arrow. A coordinate outside the view's extent is stored on its edge and
-        counted in `clamped`; one outside the projection's domain is counted in `clipped`; a
-        non-finite one is `422`. `access` holds the row's access labels: in JSON a string, a list
-        of strings or `null`; in Arrow a required column of strings, lists of strings or a
-        dictionary of strings. A null, an empty list and a label empty once trimmed are no label. A
-        row with no label takes the view's `point_visibility.default`, and the batch is `422` where
-        the view declares none. `external_id` is optional, base64 in JSON and `binary` in Arrow, at
+        **The view.** The batch's view is the one `x-tessera-view` names. With no header, a
+        deployment with one view takes that view, and one with several gives the batch no view,
+        whose rows carry no coordinates and change only what is stored in no view.
+
+        **Which item a row names.** A row names an item by its `tessera_id`, its `external_id` and
+        the value of every unique column it carries that is not null. A row whose values name no
+        item creates one. A row whose values name one item addresses it: where every value the
+        row carries is the one the item stores, the row changes nothing and is counted in
+        `unchanged`; where the item has no row in the batch's view, is newer than the newest item a
+        flush has written into it, and the row carries a position there and changes nothing else,
+        the row adds the item to the view, counted in `added`. Adding an older item would move it,
+        which is an edit.
+        Not built yet: a row that would change a value, the label or the position of an item is
+        `409`, saying editing an item is not available yet, and the batch writes nothing.
+
+        **Columns.** Every column may be left out, and in JSON every key. A value left out keeps
+        what the item stores; a new item has no value there. A null clears it: on an item that
+        holds a value it is a change. The coordinates are `x` and `y` on a view whose projection is
+        `none`, and `lon` and `lat` in degrees on any other, `float32` or `float64` in Arrow; a row
+        carries both or neither. A row that creates an item needs them, and without them is `422`.
+        A coordinate outside the view's extent is stored on its edge and counted in `clamped`; one
+        outside the projection's domain is counted in `clipped`; a non-finite one is `422`.
+        `access` holds the row's access labels: in JSON a string or a list of strings, in Arrow a
+        column of strings, lists of strings or a dictionary of strings. Left out or null, it keeps
+        the item's label, and a new item takes the view's `point_visibility.default`. An empty
+        list, and a label empty once trimmed, is the view's default; a new item with no label on a
+        view with no default is `422`. `tessera_id` is a string of decimal digits and names an
+        item; one that names no live or suppressed item is `409`, since a new item is given its
+        `tessera_id` when it is created. `external_id` is base64 in JSON and `binary` in Arrow, at
         most 64 bytes. `node_id` is accepted and not stored. Every other column is a declared
         attribute, a group-scoped attribute of the view's group, or an enumerated layer; any other
-        name is `422`.
-
-        **Attributes.** A row that creates an item carries every declared attribute, and every
-        group-scoped attribute of the view's group, as a column: `null`, or a column of Arrow's
-        null type, where the row has no value. A batch that leaves one out is `422`. A row joining
-        an item that already exists need not carry them. A category takes its vocabulary's key: under a `closed`
-        vocabulary an unknown key is `422`, and under an `open` one it is added. An integer is
-        read exactly, from a JSON number or a string of digits; `timestamp_us` is microseconds
-        since the Unix epoch.
+        name is `422`. A category takes its vocabulary's key: under a `closed` vocabulary an
+        unknown key is `422`, and under an `open` one it is added. An integer is read exactly,
+        from a JSON number or a string of digits; `timestamp_us` is microseconds since the Unix
+        epoch.
 
         **Layers.** A column named after an enumerated layer places each row in that layer's
         artifacts: a key, or a list of keys whose meaning follows the layer's `hierarchy`, `null`
         or `-1` for none. A `level` column places the keys at a level. On a `closed` layer an
         unknown key is `422`; on an `open` one it creates the artifact, counted in `minted`. A
-        layer scoped to a view group needs the batch's view to be one of that group's.
+        layer scoped to a view group needs the batch's view to be one of that group's. A row that
+        changes nothing names only artifacts that already hold its item.
 
-        **Identity.** An external id that already has a row in this view is `409`: a position is
-        not updated in place. One that has a row in another view joins that item, and a joining row
-        whose labels or values differ from the item's is `409`. One whose item was deleted starts
-        a new item, and one whose item is suppressed joins it and stays hidden. Two rows with the
-        same external id are `409`.
-
-        **Unique columns.** A row setting a unique column's value that another live or suppressed
-        item holds is `409`, naming the row, the value and the holder's `tessera_id`; so is a batch
-        setting one value in two rows. A deleted item holds nothing. A null is no value.
+        **Refusals.** The batch is `409`, naming rows by position, values as sent and items by
+        `tessera_id`, where a row's values name more than one item, a `tessera_id` names no item,
+        two rows name one item, or two rows set one unique value or one external id. A deleted
+        item names nothing, so its values may be given to a new item. A null is no value.
 
         **Retries.** `x-tessera-batch-id` names the batch. The same bytes sent again under the same
         id answer `200` with `replayed: true` and change nothing; different bytes under a used id
@@ -1119,13 +1130,13 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: |
-            Nothing was written. The detail names the batch id or the external ids, in base64, where they are the reason.
+            Nothing was written. The detail names rows by position, values as sent and items by `tessera_id`.
 
             - The batch id was used for a different body
-            - Two rows share an external id
-            - An external id already has a row in this view
-            - A row joining an item in another view carries labels or values that differ from the item's
-            - A row sets a unique column's value another item holds, or two rows set one value; the detail names the value and the holder's `tessera_id`
+            - A row's values name more than one item, as when a row gives an item a unique value another item holds
+            - A row's `tessera_id` names no live or suppressed item
+            - Two rows name one item, or set one unique value or one external id
+            - A row would change an item it names: editing an item is not available yet
             - The items the batch names changed while it was checked twice; sending it again answers
           content:
             application/json:
@@ -1142,7 +1153,9 @@ paths:
             - A column is misnamed, undeclared or of the wrong type
             - A cell does not fit its column
             - A key is not in a closed vocabulary or layer
-            - Unlabelled rows on a view with no default
+            - A row creates an item with no label on a view with no default
+            - A row names no item and carries no coordinates
+            - A row carries one coordinate and not the other, or coordinates in a batch naming no view
             - The batch is over the row cap
           content:
             application/json:
@@ -1260,8 +1273,9 @@ paths:
 
         Every item is checked and its address resolved before any is applied, so a request with one
         bad item applies nothing. An unknown `tessera_id` is answered ahead of an unknown external
-        id. A request carries at most 10,000 items in at most 2 MiB; over either is `422`, and
-        `/control/status` publishes both under `limits.changes`.
+        id. The request is then written as one record: it is durable whole or not at all. A request
+        carries at most 10,000 items in at most 2 MiB; over either is `422`, and `/control/status`
+        publishes both under `limits.changes`.
 
         A deletion or suppression is in force from the moment it is accepted, for every request,
         and the `200` follows the write-ahead log's fsync. This route is never shed with `429` and
@@ -1308,13 +1322,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "500":
-          description: "`500 fail-closed`: the request was attempted and did not complete. The detail says whether a change may be in force and whether one was certainly not applied. Send the whole request again."
+          description: "`500 fail-closed`: the request was attempted and did not complete. The detail says whether a deletion or suppression in it may be in force. Send the whole request again."
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "503":
-          description: "`503 not-ready`: no item reached the write executor, which is not running. Nothing was applied."
+          description: "`503 not-ready`: the request did not reach the write executor, which is not running. Nothing was applied."
           content:
             application/json:
               schema:
@@ -3627,24 +3641,28 @@ components:
       type: object
       description: One row of a JSON ingest batch. The properties below are the route's own; any other key is a declared attribute, a group-scoped attribute of the view's group, or an enumerated layer's name.
       properties:
+        tessera_id:
+          type: [string, "null"]
+          pattern: "^[0-9]+$"
+          description: The item the row names, as a string of decimal digits. It must name a live or suppressed item.
         external_id:
           type: [string, "null"]
           contentEncoding: base64
-          description: The caller's identifier for the item, at most 64 bytes. Absent or `null` is an item with none, addressed later only by the `tessera_id` the answer gives.
+          description: The caller's identifier for the item, at most 64 bytes. It names the item that holds it; on a new item it is the item's own.
         x:
-          type: number
-          description: The horizontal coordinate, on a view whose projection is `none`.
+          type: [number, "null"]
+          description: The horizontal coordinate, on a view whose projection is `none`. A row carries both coordinates or neither.
         y:
-          type: number
+          type: [number, "null"]
           description: The vertical coordinate, on a view whose projection is `none`.
         lon:
-          type: number
+          type: [number, "null"]
           description: Longitude in degrees, on a projected view.
         lat:
-          type: number
+          type: [number, "null"]
           description: Latitude in degrees, on a projected view.
         access:
-          description: The row's access labels, one per element. Absent, `null` or `[]` is no label, which the view's `point_visibility.default` fills.
+          description: The row's access labels, one per element. Absent or `null` keeps the item's label, and gives a new item the view's `point_visibility.default`; `[]` is that default.
           oneOf:
             - type: string
             - type: array
@@ -3658,22 +3676,38 @@ components:
           type: [integer, string, "null"]
           description: The level at which this row's layer keys are placed, as an integer or a string of digits. Read only where the batch carries a layer column.
       additionalProperties:
-        description: "An attribute's value, or a layer's key or list of keys. A category takes its key; an integer is a JSON number or a string of digits; `timestamp_us` is microseconds since the Unix epoch; `null` is no value."
+        description: "An attribute's value, or a layer's key or list of keys. A category takes its key; an integer is a JSON number or a string of digits; `timestamp_us` is microseconds since the Unix epoch. `null` is no value, and clears one an item holds; a key left out keeps it."
         type: [boolean, number, string, array, "null"]
 
     IngestResponse:
       type: object
       additionalProperties: false
-      required: [accepted, over_bound, over_bound_ids, clipped, clamped, tessera_ids, minted, publication]
+      required: [rows, created, edited, added, unchanged, over_bound, over_bound_ids, clipped, clamped, tessera_ids, minted, publication]
       properties:
-        accepted:
+        rows:
           type: integer
           minimum: 0
-          description: Rows accepted. `0` on a replay, so a sum over retried batches counts each row once.
+          description: Rows the batch carried.
+        created:
+          type: integer
+          minimum: 0
+          description: Rows that named no item and created one. `0` on a replay, as are the three counts after it, so a sum over retried batches counts each row once.
+        edited:
+          type: integer
+          minimum: 0
+          description: Rows that changed an item they named. Not built yet, and always `0`.
+        added:
+          type: integer
+          minimum: 0
+          description: Rows that added an item they named to the batch's view.
+        unchanged:
+          type: integer
+          minimum: 0
+          description: Rows that named an item and changed nothing. They write nothing; a batch of only these records its batch id alone, so it is answered as a replay when sent again.
         over_bound:
           type: integer
           minimum: 0
-          description: Rows whose labels resolve to more terms than the auth plugin's per-item bound. They are stored, not refused.
+          description: Rows creating an item whose labels resolve to more terms than the auth plugin's per-item bound. They are stored, not refused. A replay answers the first acceptance's count.
         over_bound_ids:
           type: array
           maxItems: 100
@@ -3691,7 +3725,7 @@ components:
           description: Rows whose coordinates lay outside the view's extent and were stored on its edge.
         tessera_ids:
           type: array
-          description: One `tessera_id` per row in the order sent, as a string of decimal digits, whether or not the row carries an external id. A replay answers the original ids.
+          description: One `tessera_id` per row in the order sent, as a string of decimal digits, for the item the row created or named. A replay answers the original ids.
           items:
             type: string
             pattern: "^[0-9]+$"

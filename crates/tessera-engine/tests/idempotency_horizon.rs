@@ -69,7 +69,6 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
     let anonymous = {
         let engine = engine_at(tmp.path(), &root, 1);
         let row = UnallocatedRow {
-            join_only: false,
             external_id: None,
             view: "s0".to_string(),
             join: None,
@@ -81,7 +80,7 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
             scoped: Vec::new(),
         };
         let id = engine
-            .accept_ingest(vec![row], "anon".to_string(), [0u8; 32])
+            .ingest_rows(vec![row], "anon".to_string(), [0u8; 32])
             .expect("an item with no external id is accepted")[0];
         wait_until("the flush", WAIT, || {
             engine.write_executor_stats().flushes >= 1

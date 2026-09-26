@@ -210,7 +210,6 @@ fn restart(fx: &Fixture, engine: Engine) -> Engine {
 /// A row carrying the four declared columns, under `label`.
 fn row(engine: &Engine, id: &str, label: &[u8], doi: &str, gid: u64, serial: i64) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -240,7 +239,7 @@ fn try_ingest(
     batch: &str,
     rows: Vec<UnallocatedRow>,
 ) -> Result<Vec<EntityId>, AcceptError> {
-    engine.accept_ingest(rows, batch.to_string(), hash_of(batch))
+    engine.ingest_rows(rows, batch.to_string(), hash_of(batch))
 }
 
 fn ingest(engine: &Engine, batch: &str, rows: Vec<UnallocatedRow>) -> Vec<EntityId> {
@@ -251,8 +250,10 @@ fn is_taken(result: Result<Vec<EntityId>, AcceptError>) -> bool {
     taken(&result)
 }
 
+/// A row carrying a value another item holds names that item, and differs from it elsewhere, so
+/// the batch is refused as a change to it.
 fn taken(result: &Result<Vec<EntityId>, AcceptError>) -> bool {
-    matches!(result, Err(AcceptError::Exec(ExecError::UniqueTaken { .. })))
+    matches!(result, Err(AcceptError::Conflict(_)))
 }
 
 fn full(engine: &Engine) -> Session {
@@ -498,8 +499,20 @@ fn an_invisible_holder_answers_as_absent() {
 fn an_ingest_setting_a_held_value_is_refused() {
     let fx = fixture();
     let engine = engine_over(&fx);
-    let built = |s| row(&engine, &format!("x{s}"), b"0", &doi_of(s), BIG * 3 + s, 1_000 + s as i64);
-    assert!(is_taken(try_ingest(&engine, "built", vec![built(4)])), "a built holder");
+    let built = |s| {
+        row(
+            &engine,
+            &format!("x{s}"),
+            b"0",
+            &doi_of(s),
+            BIG * 3 + s,
+            1_000 + s as i64,
+        )
+    };
+    assert!(
+        is_taken(try_ingest(&engine, "built", vec![built(4)])),
+        "a built holder"
+    );
 
     let held = ingest(
         &engine,
@@ -579,8 +592,7 @@ fn two_concurrent_batches_setting_one_value_are_one_accepted() {
     assert_eq!(accepted, 1, "exactly one batch holds the value: {outcomes:?}");
     for (i, outcome) in outcomes.iter().enumerate().filter(|(_, o)| o.is_err()) {
         let i = i as u64;
-        let stale = matches!(outcome, Err(AcceptError::Exec(ExecError::UniqueStale(_))));
-        assert!(taken(outcome) || stale, "{outcome:?}");
+        assert!(taken(outcome), "{outcome:?}");
         // Sent again as it was, it is refused for the value; with a value of its own, accepted.
         let again = row(&engine, &format!("c{i}"), b"0", "10.race/1", BIG * 8 + i, 9_000 + i as i64);
         assert!(is_taken(try_ingest(&engine, &format!("race-{i}"), vec![again])));
@@ -610,9 +622,11 @@ fn held_ingest(
     engine.hold_next_write_check_for_test();
     let e = Arc::clone(engine);
     let handle = std::thread::spawn(move || try_ingest(&e, batch, rows));
-    wait_until("the ingest never reached its hold", Duration::from_secs(30), || {
-        engine.write_check_is_holding_for_test()
-    });
+    wait_until(
+        "the ingest never reached its hold",
+        Duration::from_secs(30),
+        || engine.write_check_is_holding_for_test(),
+    );
     handle
 }
 
@@ -650,9 +664,11 @@ fn a_join_that_becomes_a_create_is_checked_as_one() {
     let other = std::thread::spawn(move || {
         try_ingest(&e, "other", vec![row_into(&e, "s0", "k", doi, None)])
     });
-    wait_until("both batches never reached the queue", Duration::from_secs(30), || {
-        engine.work_enqueued_for_test() >= before + 2
-    });
+    wait_until(
+        "both batches never reached the queue",
+        Duration::from_secs(30),
+        || engine.work_enqueued_for_test() >= before + 2,
+    );
     engine.set_work_pass_paused_for_test(false);
     let outcomes = [held.join().unwrap(), other.join().unwrap()];
     assert_eq!(
@@ -845,9 +861,11 @@ fn held_declaration(
     engine.set_unique_round_paused_for_test(true);
     let e = Arc::clone(engine);
     let handle = std::thread::spawn(move || declare(&e, name, true));
-    wait_until("the declaration's round never held", Duration::from_secs(60), || {
-        engine.unique_round_is_holding_for_test()
-    });
+    wait_until(
+        "the declaration's round never held",
+        Duration::from_secs(60),
+        || engine.unique_round_is_holding_for_test(),
+    );
     handle
 }
 
@@ -1044,6 +1062,32 @@ fn a_values_fill_setting_a_held_value_is_refused() {
     );
 }
 
+/// **A declaration landing between a batch's check and its admission is seen.** The batch was
+/// checked while the column was not unique; admitted after the declaration, it is checked again
+/// under it, and no second item holds the value.
+#[test]
+fn a_declaration_between_a_batchs_check_and_its_admission_is_checked_again() {
+    let fx = fixture_with(false);
+    let engine = Arc::new(engine_over(&fx));
+    let doi = doi_of(4);
+    let held = held_ingest(
+        &engine,
+        "late",
+        vec![row(&engine, "late", b"0", &doi, BIG + 40, 40_000)],
+    );
+    assert!(declare(&engine, "doi", true).expect("no two items hold one value yet"));
+    engine.release_write_check_for_test();
+    // Under the declaration the row names the item holding the value, and would change it.
+    let outcome = held.join().unwrap();
+    assert!(matches!(outcome, Err(AcceptError::Conflict(_))), "{outcome:?}");
+    assert_eq!(engine.buffered_items(), 0, "the refused batch wrote nothing");
+    assert_eq!(
+        matching(&engine, &full(&engine), text_in("doi", std::slice::from_ref(&doi))).len(),
+        1,
+        "one item holds {doi}"
+    );
+}
+
 /// **A values fill checked before an ingest took its value is refused on the executor.**
 #[test]
 fn a_fill_whose_value_is_taken_after_its_check_is_refused() {
@@ -1059,10 +1103,16 @@ fn a_fill_whose_value_is_taken_after_its_check_is_refused() {
     let held = std::thread::spawn(move || {
         fill(&e, "raced", "doi", vec![(entity, WalScalar::Utf8(doi.to_string()))])
     });
-    wait_until("the fill never reached its hold", Duration::from_secs(30), || {
-        engine.write_check_is_holding_for_test()
-    });
-    ingest(&engine, "taker", vec![row(&engine, "taker", b"0", doi, BIG + 30, 30_000)]);
+    wait_until(
+        "the fill never reached its hold",
+        Duration::from_secs(30),
+        || engine.write_check_is_holding_for_test(),
+    );
+    ingest(
+        &engine,
+        "taker",
+        vec![row(&engine, "taker", b"0", doi, BIG + 30, 30_000)],
+    );
     engine.release_write_check_for_test();
     assert!(matches!(
         held.join().unwrap(),
@@ -1085,9 +1135,11 @@ fn a_flush_in_flight_across_a_declaration_is_planned_again() {
     );
     engine.set_flush_paused_for_test(true);
     engine.request_flush();
-    wait_until("the flush to hold", std::time::Duration::from_secs(30), || {
-        engine.flush_is_holding_for_test()
-    });
+    wait_until(
+        "the flush to hold",
+        std::time::Duration::from_secs(30),
+        || engine.flush_is_holding_for_test(),
+    );
     assert!(declare(&engine, "doi", true).is_ok());
     engine.set_flush_paused_for_test(false);
     flush(&engine);

@@ -31,6 +31,16 @@ pub enum ScalarValue {
 }
 
 impl ScalarValue {
+    /// Whether two values are the same stored value: equal, with a float compared by its bits, so
+    /// a NaN is the NaN it was and `-0.0` is not `0.0`.
+    pub fn same_as(&self, other: &ScalarValue) -> bool {
+        match (self, other) {
+            (ScalarValue::F32(a), ScalarValue::F32(b)) => a.to_bits() == b.to_bits(),
+            (ScalarValue::F64(a), ScalarValue::F64(b)) => a.to_bits() == b.to_bits(),
+            _ => self == other,
+        }
+    }
+
     /// This value as a render column holds it: `columns.arrow`, non-nullable with nowhere to put
     /// [`ScalarValue::Null`]. The zero goes in the column, and a presence bitmap beside it
     /// records the substitution.
@@ -199,6 +209,17 @@ impl ScalarType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_float_is_the_same_value_only_bit_for_bit() {
+        assert!(ScalarValue::F64(f64::NAN).same_as(&ScalarValue::F64(f64::NAN)));
+        assert!(!ScalarValue::F64(-0.0).same_as(&ScalarValue::F64(0.0)));
+        assert!(ScalarValue::F32(f32::NAN).same_as(&ScalarValue::F32(f32::NAN)));
+        assert!(!ScalarValue::F32(-0.0).same_as(&ScalarValue::F32(0.0)));
+        assert!(ScalarValue::F64(1.5).same_as(&ScalarValue::F64(1.5)));
+        assert!(!ScalarValue::F64(1.5).same_as(&ScalarValue::F32(1.5)));
+        assert!(ScalarValue::Utf8("a".into()).same_as(&ScalarValue::Utf8("a".into())));
+    }
 
     #[test]
     fn an_integer_type_holds_exactly_its_rust_types_values() {

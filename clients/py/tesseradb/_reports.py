@@ -182,11 +182,13 @@ class PagedReport(Summarised):
     order, and `findings` any problem found before sending. `commit()` returns the same plan with
     what happened:
 
-    - `rows_accepted`: rows added, by view. `rows` is their total.
+    - `rows_accepted`: rows added, by view: each created an item or added one to the view. `rows`
+      is their total.
     - `artifacts_minted`, `memberships_joined`: annotations added and memberships joined.
     - `values_filled`: attribute values set on items already held.
     - `values_bound`, `titles_set`: vocabulary values added and titles replaced.
-    - `already_present`: parts the database already held, which changed nothing.
+    - `already_present`: parts the database already held, which changed nothing, rows naming an
+      item they matched among them.
     - `without_content`: annotations added without the content they declare.
     - `clipped`: rows outside the range the view's projection can place, stored on the view's
       edge.

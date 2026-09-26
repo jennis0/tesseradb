@@ -255,8 +255,9 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
  * `ingest` and `values` send a batch id: the caller's `batch`, or a random id made once per call.
  * The server holds each accepted batch id against its body, so the same bytes sent again under it
  * are answered as a replay with `replayed: true` and no effect, and different bytes under it are
- * refused with `409`. The id is never derived from the body, so the same rows sent in two calls
- * are stored twice.
+ * refused with `409`. The id is never derived from the body. The same rows sent in two calls are
+ * resolved twice: a row naming its item by `tessera_id`, `external_id` or a unique value names in
+ * the second call the item the first created, and changes nothing.
  *
  * @category Control plane
  */
@@ -342,10 +343,15 @@ export class Control {
   }
 
   /**
-   * `POST /control/ingest`: inserts one page of points, given as an Arrow IPC stream. The answer's
-   * body counts the rows accepted, clipped and clamped, lists each row's `tessera_id` in request
-   * order as a decimal string, and names the `publication` the rows become visible in. A duplicate
-   * external id is refused with `409`, and nothing in the page is stored.
+   * `POST /control/ingest`: one page of rows, given as an Arrow IPC stream. A row names an item by
+   * its `tessera_id`, its `external_id` or a unique column's value; a row naming none creates an
+   * item at its position, one naming an item adds it to the view where it has no row there, and
+   * one naming an item it matches changes nothing. Any column may be left out, which keeps what
+   * the item stores; a null clears it. The answer's body counts the rows `created`, `added`,
+   * `unchanged`, `clipped` and `clamped`, lists each row's `tessera_id` in request order as a
+   * decimal string, and names the `publication` the rows become visible in. A row that would
+   * change an item, since editing is not available yet, or whose values name two items, is
+   * refused with `409`, and nothing in the page is stored.
    */
   ingest(body: Uint8Array, options: RowOptions = {}): Promise<RowAnswer> {
     return this.rows('/control/ingest', body, options);

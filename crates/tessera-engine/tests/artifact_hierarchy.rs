@@ -1818,7 +1818,6 @@ fn ingest_edges(
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1830,7 +1829,7 @@ fn ingest_edges(
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             batch.to_string(),
             hash,
@@ -2056,7 +2055,6 @@ fn ingest_levelled(
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -2068,7 +2066,7 @@ fn ingest_levelled(
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             batch.to_string(),
             hash,

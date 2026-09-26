@@ -209,7 +209,6 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -221,7 +220,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row],
             String::from_utf8_lossy(external_id).into_owned(),
             key,
@@ -241,7 +240,6 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
         .iter()
         .enumerate()
         .map(|(i, _)| tessera_lifecycle::command::UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("{batch}-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
@@ -265,7 +263,7 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
         })
         .collect();
     let (_, minted) = engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             rows,
             batch.to_string(),
             hash,
@@ -1014,7 +1012,6 @@ fn flush_interleaved(
             .map(|t| {
                 let descriptors = descriptors_of(s, t);
                 tessera_lifecycle::command::UnallocatedRow {
-                    join_only: false,
                     external_id: Some(format!("interleaved-{s}-{t}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
@@ -1029,7 +1026,7 @@ fn flush_interleaved(
             .collect();
         by_segment.push(
             engine
-                .accept_ingest(rows, format!("interleaved-{s}"), [s as u8 + 1; 32])
+                .ingest_rows(rows, format!("interleaved-{s}"), [s as u8 + 1; 32])
                 .expect("the ingest is accepted"),
         );
         flush(engine);

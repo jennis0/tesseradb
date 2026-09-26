@@ -168,7 +168,6 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
     for i in 0..FLUSHED {
         let external = format!("fresh-{i}");
         let row = UnallocatedRow {
-            join_only: false,
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
@@ -181,7 +180,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
         };
         out.push(
             engine
-                .accept_ingest(vec![row], external, [0u8; 32])
+                .ingest_rows(vec![row], external, [0u8; 32])
                 .expect("an ingest carrying prose is accepted")[0],
         );
     }
@@ -495,7 +494,6 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
     let second = {
         let external = "flight-0".to_string();
         let row = UnallocatedRow {
-            join_only: false,
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
@@ -507,7 +505,7 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
             scoped: Vec::new(),
         };
         let id = engine
-            .accept_ingest(vec![row], external, [0u8; 32])
+            .ingest_rows(vec![row], external, [0u8; 32])
             .expect("the flight ingest is accepted")[0];
         engine.request_flush();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -569,7 +567,6 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
 
     let ingest = |engine: &Engine, name: &str, value: WalScalar| {
         let row = UnallocatedRow {
-            join_only: false,
             external_id: Some(name.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
@@ -581,7 +578,7 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], name.to_string(), [0u8; 32])
+            .ingest_rows(vec![row], name.to_string(), [0u8; 32])
             .expect("the ingest is accepted")[0]
     };
 

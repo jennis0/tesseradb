@@ -403,7 +403,7 @@ def layers(tmp_path_factory, private_catalogue_bundle, base_column):
     def submit(batch: list[str | None], fx: list[int], external_base: int, offset: int) -> None:
         resp = srv.ingest(_ingest_body(batch, fx, external_base), f"text-layers-{offset}")
         assert resp.status_code == 200, resp.text
-        assert resp.json()["accepted"] == len(batch)
+        assert resp.json()["created"] == len(batch)
         # One subprocess for the batch, through the same analyser the flush is about to use.
         streams = txt.tokenise([p for p in batch if p is not None], CLI_BIN)
         stream_of = iter(streams)

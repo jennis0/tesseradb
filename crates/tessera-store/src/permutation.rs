@@ -1622,6 +1622,14 @@ impl RowSpace {
         out
     }
 
+    /// The lowest entity a new extent may hold: one past the newest extent's span, or the base's
+    /// bound. A row for an entity below it has no place in this view until a fold.
+    pub fn entity_floor(&self) -> u64 {
+        self.extents
+            .last()
+            .map_or(self.base.bound(), |extent| extent.entity_hi + 1)
+    }
+
     /// This row space plus one more segment, sharing the base.
     ///
     /// `None` if `extent` is malformed, does not begin strictly above the last extent's
@@ -1632,11 +1640,7 @@ impl RowSpace {
         if !extent.is_well_formed() {
             return None;
         }
-        let entity_floor = match self.extents.last() {
-            Some(last) => last.entity_hi + 1,
-            None => self.base.bound(),
-        };
-        if extent.entity_lo < entity_floor {
+        if extent.entity_lo < self.entity_floor() {
             return None;
         }
         if u64::from(extent.row_base) != self.total_rows {

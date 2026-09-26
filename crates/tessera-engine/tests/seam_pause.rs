@@ -240,7 +240,6 @@ fn the_manifest_publish_site_parks_a_flush_with_its_segment_unreferenced() {
 
     let descriptors = vec![b"0".to_vec()];
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"seam-flush-1".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -252,7 +251,7 @@ fn the_manifest_publish_site_parks_a_flush_with_its_segment_unreferenced() {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], "seam-batch-1".to_string(), [0u8; 32])
+        .ingest_rows(vec![row], "seam-batch-1".to_string(), [0u8; 32])
         .expect("ingest is accepted — the seam sits at publication, not on the ack path");
 
     let manifests_before = side_manifest_count(&root, "v00000");

@@ -105,37 +105,89 @@ should be hidden.
 ### Admission
 
 A request against `/control/ingest` is checked before the server commits any work to it. The
-operator credential, the body size, the row count and the declared columns are checked first, and
-a request that fails any of them takes no effect. A row that creates an item carries every
-declared column, with a null where it has no value. A row that adds an item already held to
-another view may leave them out, since the item's values are held already, but a row into a view
-of a group carries that group's own scoped columns either way. A batch with a row that leaves out
-a column it must carry is refused. Beyond those, five checks apply:
+operator credential, the body size, the row count and the columns are checked first, and a
+request that fails any of them takes no effect. Every column may be left out of a row: a value
+left out keeps what the item stores, and a null clears it. A row carries both coordinates or
+neither. Beyond those, three checks apply:
 
 1. An admission limit bounds how many ingest requests run at once, and a buffer limit bounds how
    many rows may wait for a flush. Past either, the request is refused with a retry interval
    rather than queued.
-2. Each item's access label is resolved to terms through the caller's plugin. A term is one unit
-   of access: an item carries the terms its label resolves to, a viewer's token carries the terms
-   they hold, and with the built-in plugin an item is visible to a viewer who holds at least one
-   of its terms. An item with more terms than the declared bound is indexed anyway, with a
-   warning, because refusing it would look like an authorisation decision and a resource limit
-   must not produce one.
-3. A batch id, required on every request, makes a retry safe: identical bytes under the same id
-   replay the recorded result, and different bytes under the same id are refused.
-4. Every external id in the batch is checked against ids already bound to a live item. A deleted
-   item's old binding does not count as a collision, so a re-ingest under the same external id
-   succeeds. A suppressed item's binding still collides, because suppression is temporary and a
-   copy ingested past it would defeat it.
-5. Every value a row sets in a unique field is checked against the field's index and against the
-   batch's other rows. A value another live or suppressed item holds, or one that two rows of the
-   batch set, refuses the batch with `409`. The refusal names the row, the value and the holder's
-   `tessera_id` ([unique values](#unique-values)).
+2. A batch id, required on every request, makes a retry safe: identical bytes under the same id
+   replay the recorded answer, and different bytes under the same id are refused.
+3. Each row is resolved to the item it names, and compared with what that item stores
+   ([resolving a batch](#resolving-a-batch)).
+
+A row that creates an item has its access label resolved to terms through the caller's plugin. A
+term is one unit of access: an item carries the terms its label resolves to, a viewer's token
+carries the terms they hold, and with the built-in plugin an item is visible to a viewer who holds
+at least one of its terms. An item with more terms than the declared bound is indexed anyway, with
+a warning, because refusing it would look like an authorisation decision and a resource limit must
+not produce one.
 
 A row whose coordinates fall outside the view's frame is stored on the frame's edge, as a build
 stores one, and the response counts it as `clamped`. A coordinate that is not a finite number, or
 on a projected view is outside WGS84's range, causes the request to be refused before anything is
 acknowledged, written to the WAL, or allocated an entity id.
+
+### Resolving a batch
+
+A row names an item by the values that identify one: its `tessera_id`, its external id, and each
+unique field's value it carries that is not null. The request handler reads one generation for the
+whole batch, off the executor thread, and looks each value up there: a `tessera_id` by inverting
+it, an external id in the live map and the bundle's runs, a unique value in the field's index. A
+deleted item names nothing, and a `tessera_id` names an item only while the service holds it (a
+row, a buffered row, or the label a flush wrote), since a fold that removes a deleted item also
+drops its deletion. The same
+rule answers a change naming a `tessera_id`. An external id bound since the handler's generation
+was taken, to an item that generation does not hold yet, sends the batch back to be decided
+against a newer one.
+
+| What the row's values name | What the handler decides |
+|---|---|
+| No item, and the row carries a position | The row creates an item, labelled as the row says or with the view's `point_visibility.default` |
+| No item, and no position | Refused with `422`: an item is created in a view |
+| One item, and every value the row carries is the one stored | The row changes nothing. It is counted `unchanged` and writes nothing |
+| One item with no row in the batch's view, newer than the view's newest flushed item, the row carrying a position there and changing nothing else | The row adds the item to the view, counted `added` |
+| One item with no row in the batch's view, older than the view's newest flushed item | Refused with `409`: a flush places rows only above a view's newest, so adding this item moves it, which is an edit |
+| One item, and the row would change a value, the label or a position | Refused with `409` |
+| Two items | Refused with `409`, naming the values and the items' `tessera_id`s |
+
+Not built yet: editing an item. A row that would change an item it names is refused, saying
+editing is not available yet, and the batch writes nothing.
+
+Across the batch, two rows may not name one item, and two rows may not set one unique value or one
+external id, since each row is decided without seeing the others. A `tessera_id` naming no live or
+suppressed item is refused, because a new item is given its `tessera_id` when it is created and a
+caller cannot choose one. Any refusal refuses the whole batch, and names rows by their position in
+it, values as sent and items by `tessera_id`.
+
+To decide a row naming an item, the handler reads what the item stores, in ascending entity order
+across the batch: the row it holds in the buffer, or the flushed value columns, record store and
+row tails; the item's terms; its position in the batch's view, compared as the quantised cell the
+row's coordinates fall in. A term a label names is looked up and never interned for a row that
+only compares, and the terms of the rows that create items are resolved once the whole batch is
+decided, so a refused batch leaves nothing behind.
+
+Every accepted batch goes to the executor, a batch of rows that change nothing included: such a
+batch writes its batch id and its receipt alone, so it answers the same `tessera_id`s when it is
+sent again, as every accepted batch does.
+
+The batch goes with the sequence number of the in-memory unique entries the handler read, the
+items its unchanged rows named, and the rows that create or add. The executor never reads disc to
+check them. It checks what can have moved since the handler's generation, from memory:
+
+- an item a row names that has since been deleted, or added to the view;
+- the unique columns, declared or withdrawn since, where the batch creates items;
+- an item a row adds to a view that a newer item's flush, published or in flight, has since
+  passed;
+- a value a created row sets that has since been given to an item;
+- an external id since bound.
+
+The values the most recent flushes moved to disc, up to a million entries, are kept in memory for
+this check. Where something has moved, nothing is written, and the handler decides the batch once
+more against a newer generation. If that attempt finds it moved again, the batch is refused with
+`409`; sent again, it is decided against what is stored then.
 
 ### The commit window
 
@@ -148,21 +200,26 @@ contiguous runs of ids, which the term index stores far more compactly than scat
 repairs this ordering later: a wider window produces longer runs, and a narrower one does not.
 
 The window closes when it reaches a configured row count, or when the server's incoming work is
-observed empty, whichever comes first.
+observed empty, whichever comes first. It also closes before admitting a batch that touches what a
+batch in the window touches: an item a row adds to a view, a unique value or an external id a new
+item takes. Each of these is written at the close, and the executor's check of the later batch
+reads what was written.
 
 At close, the whole window is sorted and allocated from the id allocator in one call. One WAL
-record per submission is appended, and one fsync covers the entire window. Only then is the
-window applied to build a new generation, the pointer is swapped, and every waiting request is
-acknowledged with its rows' `tessera_id`s. If the append or the fsync fails, the window applies
-nothing: every waiter is refused, and a caller retries under the same batch id.
+record per submission is appended, carrying its rows and what every row of the request became, and
+one fsync covers the entire window. Only then is the window applied to build a new generation, the
+pointer is swapped, and every waiting request is acknowledged with every row's `tessera_id`. If
+the append or the fsync fails, the window applies nothing: every waiter is refused, and a caller
+retries under the same batch id. A retry of an accepted batch answers the `tessera_id`s its first
+acceptance did, after a restart too, since the record carries them.
 
 ### What the writer observes
 
 | Outcome | Meaning | Retry |
 |---|---|---|
-| 200 | Every row is durable in the WAL, with its identity allocated. It is not yet visible | Not needed |
-| 409 | A duplicate external id, a unique field's value another item holds or two rows set, the same batch id with different bytes, or unique values that changed twice while the batch was checked. Nothing in the batch took effect | After fixing the request; the last as it was |
-| 422 | Validation failed: an undeclared column, a declared column left out, a wrong type, too many rows, or a coordinate that is not a place. Nothing took effect | After fixing the request |
+| 200 | Every row is resolved. Created and added rows are durable in the WAL, with their identity allocated, and not yet visible; unchanged rows wrote nothing | Not needed |
+| 409 | A row names two items or a `tessera_id` nobody holds, two rows name one item or set one value, a row would change an item, the same batch id with different bytes, or what the batch names moved twice while it was checked. Nothing in the batch took effect | After fixing the request; the last as it was |
+| 422 | Validation failed: an undeclared column, a wrong type, too many rows, a new item with no position or no label, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
 | 503 | The executor is not running | Later |
@@ -189,18 +246,12 @@ their commit window closes and removed when the flush that writes them is publis
 reads both parts and drops deleted items, so a value is found from the moment its row is
 acknowledged. A values batch that fills a unique field is checked and indexed as an ingest is.
 
-The check runs twice, for an ingest and a values batch alike. The request handler checks a batch
-against the generation current when the batch arrived, before the batch reaches the executor, and
-reads the run files where it needs to. Two batches checked at the same moment could each pass that
-check, so the executor checks each batch again, from memory, against the values added since the
-handler's generation. It does so after it has settled whether each row joins an item or creates
-one, since a row checked as a join creates an item if the item it joined was deleted meanwhile. A
-commit window also closes before a row that sets a value an earlier row in the same window set. Of
-two batches setting one value, the second to reach the executor is refused. The executor keeps the
-values the most recent flushes moved to disc, up to a million entries, for this second check. A
-batch whose handler's generation is older than those is handed back to its handler, which checks
-it again from the start and sends it once more. If that second attempt is handed back too, the
-batch is refused with `409` and nothing written, and the caller sends it again.
+A value an ingest row carries identifies the item that holds it ([resolving a
+batch](#resolving-a-batch)). A values batch that fills a unique field is checked twice: its
+handler checks it against the generation current when it arrived, and the executor checks it
+again, from memory, against the values added since. A value another live or suppressed item holds,
+or one two rows of the batch set, refuses the batch with `409`, naming the row, the value and the
+holder's `tessera_id`.
 
 Declaring `unique` on a field that already holds values builds its index while the service runs.
 The build reads every flushed value in rounds on a background thread. Each round after the first
@@ -219,7 +270,7 @@ adopts the files the record names after checking their digests.
 `/control/changes` accepts three operations against an already-ingested item: delete, suppress,
 and unsuppress. Editing an item's access label directly does not exist as an operation. Changing
 what an item is labelled is a delete followed by a re-ingest under the same external id, with the
-new label. A deleted item's binding does not block that re-ingest (Admission, step 4).
+new label: a deleted item names nothing, so the re-ingest creates a new item.
 
 ### Accepting a deny
 
@@ -235,9 +286,11 @@ Only the entity id is written to the WAL, never a `tessera_id`. The address is r
 the request is accepted, into the entity it names, and that entity id is stable for the item's
 life.
 
-Denies are gathered into a window before any of them is written to the WAL, the same shape ingest
-uses: append every record, then one fsync for the whole window, then one swap, then every waiter
-in the window is acknowledged.
+A request is one command and one WAL record carrying every change in it, so it is durable whole or
+not at all. Requests are gathered into a window before any of them is written, the same shape
+ingest uses: append every record, then one fsync for the whole window, then one swap, then every
+waiter in the window is acknowledged. The executor runs denies between commit windows, never
+while one is open.
 
 A deny is queued separately from ingest and is never refused for load. There is no route from this
 queue to a 429.
@@ -454,7 +507,10 @@ a server that runs out of manifests to step to refuses to serve that partition r
 reaching for one old enough to have forgotten a deny.
 
 The entity id allocator resumes from whichever is larger, the manifest's recorded high point or
-the value replay reaches, so an id already issued is never issued again. The buffer of rows
+the value replay reaches, so an id already issued is never issued again. Every side-manifest
+records the allocator's own high point, not only the highest entity a segment holds: an item
+deleted before its flush holds no row, and once the log records naming it are reclaimed, the
+manifest is what keeps its entity id, and so its `tessera_id`, from being issued to a new item. The buffer of rows
 awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in any segment,
 rather than compared against a watermark. This predicate stays correct regardless of how flush and
 allocation order have diverged from each other.
@@ -491,6 +547,10 @@ Coverage of the invariants this chapter turns on is stated in `conformance.md` Â
 else. The properties this chapter states are pinned as integration tests across the write path's
 crates:
 
+- random sequences of ingest batches, changes, flushes, compactions, restarts, resent batches
+  and `unique` declared on and off, checked after every step against a model of the items:
+  every view's points for two principals, `in` over every unique value, and every item's card
+  (`tessera-engine`'s `identity_model`);
 - a re-bound external id across a flush and a restart;
 - a row deleted before its first flush;
 - a unique value found and refused across a flush, a merge, a compaction and a restart, by
@@ -505,7 +565,9 @@ fail-closed handling of corruption.
 
 The write path lives in:
 
-- `tessera-lifecycle`: the WAL, the overlay, allocation, the commit window;
-- `tessera-engine`: flush, merge, and the compaction passes and their publication;
+- `tessera-lifecycle`: the WAL, the overlay, allocation, the commit window, and the rule that
+  resolves a row to the item it names;
+- `tessera-engine`: resolving a batch against a generation, flush, merge, and the compaction
+  passes and their publication;
 - `tessera-store`: the on-disc fold, merge, and reclamation routines the engine drives;
 - `tessera-server`'s control plane, which exposes the ingest, changes, flush and compact routes.

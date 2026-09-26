@@ -30,6 +30,7 @@ mod layer_read;
 pub mod gate;
 mod generation;
 mod geometry;
+mod ingest;
 pub mod histogram;
 pub mod layout;
 pub mod membership_column;
@@ -87,6 +88,7 @@ pub use config::{
 };
 pub use control::{GrownMembership, PublishedArtifacts};
 pub use engine::Engine;
+pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;
 pub use session::Session;
 pub use status::{GenerationStatus, PartitionStatus, ViewSegments};
@@ -162,7 +164,7 @@ pub use tessera_store::utf8;
 // can disconnect the queues and join the thread. No handler can hold one, and none of those four
 // types appears anywhere outside the `write` module.
 //
-// What a handler does hold is `Engine`, and it submits through `Engine::accept_ingest` /
+// What a handler does hold is `Engine`, and it submits through `Engine::ingest` /
 // `Engine::accept_change` — blocking calls, hence inside `spawn_blocking`. What it needs from here
 // is how to answer: `AcceptError` for the status mapping, and `ExecutorPosture`/`ExecutorStats`
 // for `readyz` and `/control/status`.
@@ -192,7 +194,7 @@ pub use write::{
 // engine API types only (SA §3).
 pub use tessera_lifecycle::AttributeRequest;
 // `POST /control/values`' body as the executor takes it, re-exported on `AttributeRequest`'s rule.
-pub use tessera_lifecycle::{IncomingValues, ValuesRequest};
+pub use tessera_lifecycle::{IncomingValues, IngestRow, ValuesRequest};
 // The two vocabulary routes' bodies, and the two view declarations', on the same rule.
 pub use tessera_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupDeclaration};
 pub use tessera_lifecycle::{DeclaredValue, VocabularyRequest};

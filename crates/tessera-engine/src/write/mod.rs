@@ -5,8 +5,7 @@
 //! happen in that order because only that thread can do any of them, and two acceptances cannot
 //! lose each other's update. The generation swap in [`Executor::publish_arc`] is the only
 //! non-atomic `store` in the crate; `scripts/check-layers.sh` holds that. The thread is a plain
-//! `std::thread`, so `Engine::accept_ingest` blocks and a tokio handler wraps it in
-//! `spawn_blocking`.
+//! `std::thread`, so `Engine::ingest` blocks and a tokio handler wraps it in `spawn_blocking`.
 //!
 //! - [`LiveState`]: the maps a handler reads and the executor writes, each behind its own lock.
 //! - [`WritePath`]: the handler side, held by `Engine`. Owns the `Wal` until the executor starts.
@@ -26,8 +25,8 @@ mod live;
 mod reconstruct;
 mod schema;
 
-pub(crate) use command::*;
 pub use command::ViewDropped;
+pub(crate) use command::*;
 pub use executor::*;
 pub use health::*;
 pub(crate) use live::*;
@@ -44,7 +43,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_authz::{DeltaTier, Dict, FragmentCache};
 use tessera_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
-use tessera_lifecycle::command::{ExecError, SubmitError, UnallocatedRow};
+use tessera_lifecycle::command::{ExecError, SubmitError};
 use tessera_lifecycle::faults::WalMeter;
 use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
 use tessera_lifecycle::overlay::replay;
@@ -199,6 +198,13 @@ pub enum AcceptError {
     /// A unique column's index could not be read while the batch's values were checked against
     /// it. Nothing was submitted.
     UniqueIndexUnreadable(String),
+    /// The batch conflicts with what is stored: a row names two items or a `tessera_id` nobody
+    /// holds, two rows name one item or set one value, or a row would change an item. The detail
+    /// names rows by position, values as sent and items by `tessera_id`. Nothing was submitted.
+    Conflict(String),
+    /// The batch cannot be taken as sent: a row creates an item with no position or no label, or
+    /// carries coordinates in a batch naming no view. Nothing was submitted.
+    Contract(String),
 }
 
 impl std::fmt::Display for AcceptError {
@@ -239,6 +245,9 @@ impl std::fmt::Display for AcceptError {
                 f,
                 "a unique column's index could not be read ({detail}); nothing was applied"
             ),
+            AcceptError::Conflict(detail) | AcceptError::Contract(detail) => {
+                write!(f, "{detail}")
+            }
         }
     }
 }
@@ -519,6 +528,7 @@ impl WritePath {
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     pending_forms: std::collections::BTreeMap::new(),
+                    flush_flight: None,
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };
@@ -641,31 +651,39 @@ impl WritePath {
         pending.accept()
     }
 
-    /// Submit an ingest batch and wait for its receipt.
+    /// Submit a resolved ingest batch and wait for what each of its rows became.
     ///
     /// Blocking: a tokio handler must call this inside `spawn_blocking`, because `tessera-engine`
     /// has no tokio dependency. Rows arrive unallocated: entity ids are assigned on the executor,
-    /// at the close of the commit window this submission lands in. Returns the assigned ids and
-    /// how many artifacts this batch's membership column created ([`Ingested::minted`]).
+    /// at the close of the commit window this submission lands in.
     pub(crate) fn accept_ingest(
         &self,
-        rows: Vec<UnallocatedRow>,
+        planned: crate::ingest::Planned,
         batch_id: String,
         body_hash: [u8; 32],
-        artifacts: tessera_lifecycle::BatchArtifacts,
         unique_seq: u64,
-    ) -> Result<(Vec<EntityId>, u64), AcceptError> {
+    ) -> Result<Ingested, AcceptError> {
         let mark = StageMark::now();
-        let answered = self.submit(|reply| Command::Ingest {
+        let crate::ingest::Planned {
             rows,
+            slots,
+            keys,
+            artifacts,
+            over_bound,
+        } = planned;
+        let submission = command::IngestSubmission {
+            rows,
+            slots,
+            keys,
             batch_id,
             body_hash,
             artifacts,
             unique_seq,
-            reply,
-        });
+            over_bound,
+        };
+        let answered = self.submit(|reply| Command::Ingest { submission, reply });
         self.health().lap(WriteStage::SubmitToReceipt, mark);
-        answered.map(|ingested| (ingested.entity_ids, ingested.minted))
+        answered
     }
 
     /// Register an annotation layer and wait for its receipt.
@@ -724,7 +742,7 @@ impl WritePath {
         &self,
         request: Box<tessera_lifecycle::ValuesRequest>,
         unique_seq: u64,
-    ) -> Result<ValuesReceipt, AcceptError> {
+    ) -> Result<ValuesOutcome, AcceptError> {
         self.submit(|reply| Command::Values {
             request,
             unique_seq,
@@ -829,40 +847,37 @@ impl WritePath {
         })
     }
 
-    /// Submit one `/control/changes` entry and wait for its receipt.
+    /// Submit one `/control/changes` request and wait for its receipt. The request is one
+    /// record, durable whole or not at all.
     ///
-    /// If the append/fsync fails and `op` is `Delete`/`Suppress`, the change is still applied, the
-    /// item hidden, before this returns `Err`: never a refusal that leaves a deny unapplied. So an
-    /// `Err` here does not mean nothing happened; see [`ExecError::Wal`]. This is the one-item
-    /// shape; a caller with a whole request's worth of changes wants [`WritePath::submit_change`],
-    /// because waiting here between items reduces the deny lane's group commit to one entry per
-    /// window.
-    pub(crate) fn accept_change(&self, entity: EntityId, op: ChangeOp) -> Result<(), AcceptError> {
-        self.submit_change(entity, op)?.wait()
+    /// If the append or fsync fails, every `Delete` and `Suppress` in the request is still
+    /// applied, the items hidden, before this returns `Err`: a refusal must never leave a deny
+    /// unapplied. So an `Err` here does not mean nothing happened; see [`ExecError::Wal`].
+    pub(crate) fn accept_changes(
+        &self,
+        changes: Vec<(EntityId, ChangeOp)>,
+    ) -> Result<(), AcceptError> {
+        self.submit_changes(changes)?.wait()
     }
 
-    /// Enqueue one `/control/changes` entry without waiting for its receipt.
-    ///
-    /// See [`LifecycleHandle::enqueue`]: a caller that enqueues a whole request and only then
-    /// collects gives the executor the queue depth its deny window needs, so one request of N
-    /// denies costs one fsync instead of N. Read that doc before treating either half's `Err` as
-    /// "nothing happened".
-    pub(crate) fn submit_change(
+    /// Enqueue one `/control/changes` request without waiting for its receipt, so that several
+    /// callers' requests reach the deny lane together and share one fsync. Read
+    /// [`LifecycleHandle::enqueue`] before treating either half's `Err` as "nothing happened".
+    pub(crate) fn submit_changes(
         &self,
-        entity: EntityId,
-        op: ChangeOp,
+        changes: Vec<(EntityId, ChangeOp)>,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(
             None,
             #[cfg(feature = "fault-injection")]
             self.faults.clone(),
         );
-        self.handle()?.enqueue(Command::Change { entity, op, reply })?;
+        self.handle()?
+            .enqueue(Command::Changes { changes, reply })?;
         Ok(PendingChange(pending))
     }
-
 }
-/// An enqueued `/control/changes` entry, awaiting its answer.
+/// An enqueued `/control/changes` request, awaiting its answer.
 ///
 /// The public face of `Pending<()>`: a change's answer carries no ids, so the only thing a caller
 /// can do with it is learn whether the change took hold, and this type says exactly that in its
@@ -870,7 +885,7 @@ impl WritePath {
 pub struct PendingChange(Pending<()>);
 
 impl PendingChange {
-    /// Block until the executor answers this change.
+    /// Block until the executor answers this request.
     ///
     /// `Err` does not mean "nothing happened": for `Delete`/`Suppress` see [`ExecError::Wal`],
     /// and for [`SubmitError::ReceiptLost`] see `Pending::wait`.
@@ -994,9 +1009,9 @@ impl std::fmt::Display for PublishGeometryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PublishGeometryError::Refused(refused) => write!(f, "{refused}"),
-            PublishGeometryError::NoExecutor => f.write_str(
-                "this engine has no write executor, so it cannot publish geometry",
-            ),
+            PublishGeometryError::NoExecutor => {
+                f.write_str("this engine has no write executor, so it cannot publish geometry")
+            }
             PublishGeometryError::PrefixNotCommitted { offered, current } => write!(
                 f,
                 "refusing to publish prefix '{offered}': CURRENT names '{current}', so the \

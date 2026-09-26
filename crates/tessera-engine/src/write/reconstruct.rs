@@ -598,7 +598,7 @@ impl WritePath {
                     identity.batch_id.to_string(),
                     AcceptedBatch {
                         body_hash: identity.body_hash,
-                        entity_ids: identity.allocation,
+                        receipt: identity.receipt.to_vec(),
                         wal_pos: *position,
                     },
                 );

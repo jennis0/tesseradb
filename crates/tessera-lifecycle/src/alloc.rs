@@ -249,7 +249,7 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
                     }
                 }
             }
-            WalRecord::ChangeByEntity { .. } => {}
+            WalRecord::ChangeBatch { .. } => {}
             // A row-less allocation moves the *other* mark, and moving this one with it would
             // hand every point id below the row-less region away in a single step. A growth
             // allocates nothing at all — it names an artifact that already has its ordinal and its
@@ -644,6 +644,7 @@ mod tests {
 
     fn row(entity_id: u64) -> WalRecord {
         WalRecord::IngestBatch {
+            receipt: Vec::new(),
             batch_id: "b".into(),
             body_hash: [0u8; 32],
             rows: vec![crate::wal::WalRow {
@@ -669,10 +670,9 @@ mod tests {
         assert_eq!(high_water_from(&[row(5), row(3)]), 6);
         // Change records carry no entity-ID information beyond an entity already allocated.
         assert_eq!(
-            high_water_from(&[WalRecord::ChangeByEntity {
-                entity_id: EntityId::new(1),
-                op: crate::wal::ChangeOp::Delete,
-            }]),
+            high_water_from(&[WalRecord::ChangeBatch {
+            changes: vec![(EntityId::new(1), crate::wal::ChangeOp::Delete)],
+        }]),
             0
         );
     }

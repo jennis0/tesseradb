@@ -207,7 +207,7 @@ impl Overlay {
         before - self.deleted.cardinality()
     }
 
-    /// Re-state this overlay as WAL records, so the `ChangeByEntity` records it was accumulated
+    /// Re-state this overlay as WAL records, so the `ChangeBatch` records it was accumulated
     /// from can be deleted (lifecycle §4's rotation; [`WalRecord::OverlaySnapshot`]).
     ///
     /// **Entries are ordered by entity id**, so the same overlay always encodes to the same bytes.
@@ -238,7 +238,7 @@ impl Overlay {
 
     /// Fold a snapshot back in.
     ///
-    /// Applied, never assigned: the snapshot is a record in a position, and a `ChangeByEntity`
+    /// Applied, never assigned: the snapshot is a record in a position, and a `ChangeBatch`
     /// earlier in the same file has already been applied when this runs.
     pub fn apply_snapshot(&mut self, entries: &[OverlaySnapshotEntry]) {
         for entry in entries {
@@ -268,7 +268,7 @@ pub(crate) fn as_u32(entity: EntityId) -> u32 {
 ///   deterministic, replay-order in-memory extension — see [`DescriptorResolver`]) and register
 ///   `external_id → entity_id` in this replay's own external-id map, which the caller keeps for
 ///   live `/control/changes` admission.
-/// - `ChangeByEntity` records apply their disposition directly. **No resolution happens here at
+/// - `ChangeBatch` records apply their disposition directly. **No resolution happens here at
 ///   all**: the entity was fixed at admission, which is what makes the record replay to the same
 ///   entity under a rotated identity key and lets it address an item that never had an external
 ///   id. The external-id-keyed `Change` record this replay once also had to resolve was deleted
@@ -349,11 +349,11 @@ pub fn replay<'a>(
                     buffer.insert_row(row, &mut resolver);
                 }
             }
-            WalRecord::ChangeByEntity { entity_id, op } => {
-                // No resolution at all: the entity was fixed at admission, which is what makes
-                // this record replay to the same entity under a rotated identity key, and what
-                // lets it address an item that never had an external id.
-                overlay.apply(*entity_id, *op);
+            WalRecord::ChangeBatch { changes } => {
+                // No resolution at all: each entity was fixed at admission.
+                for (entity_id, op) in changes {
+                    overlay.apply(*entity_id, *op);
+                }
             }
             WalRecord::OverlaySnapshot { entries } => {
                 overlay.apply_snapshot(entries);
@@ -368,13 +368,13 @@ pub fn replay<'a>(
             WalRecord::VocabularyMint { .. } => {}
             // **The registry is rebuilt by the caller, and only the deny lane is this function's
             // business.** A layer's own entity is an ordinary entity as far as the overlay is
-            // concerned: a suppression against it arrives as a `ChangeByEntity` and is applied by
+            // concerned: a suppression against it arrives as a `ChangeBatch` and is applied by
             // the arm above, with no special case, which is the whole reason a layer takes an
             // entity at all. What these records carry beyond that — the declaration and the
             // reserved runs — belongs to the registry the write path reconstructs, in the same
             // second pass as the vocabulary mints and for the same reason.
             // An artifact's own entity is an ordinary entity here too, on the same argument: its
-            // suppression arrives as a `ChangeByEntity`. The membership the record carries belongs
+            // suppression arrives as a `ChangeBatch`. The membership the record carries belongs
             // to the artifact store, rebuilt in that same second pass.
             // **A drop discards the rows the buffer held for the view, here as on the live
             // path** (`views.md` §3.4, `Executor::publish_roster`). They name a coordinate system
@@ -386,7 +386,7 @@ pub fn replay<'a>(
             // the two sets can be told apart.
             //
             // **Dropping a view still deletes no entity** (`views.md` §3.4).
-            // `delete_dangling`'s deletions arrive here as the ordinary `ChangeByEntity` records
+            // `delete_dangling`'s deletions arrive here as the ordinary `ChangeBatch` records
             // the arm above applies, which is what keeps the drop from being a second retirement
             // route.
             WalRecord::ViewDrop { view } => {
@@ -579,9 +579,8 @@ mod tests {
         let dict = Dict::load(&paths).unwrap();
 
         let entity = EntityId::new(7);
-        let suppress = WalRecord::ChangeByEntity {
-            entity_id: entity,
-            op: ChangeOp::Suppress,
+        let suppress = WalRecord::ChangeBatch {
+            changes: vec![(entity, ChangeOp::Suppress)],
         };
 
         let (once, _, established_once, _) = replay(
@@ -628,6 +627,7 @@ mod tests {
         let dict = Dict::load(&paths).unwrap();
 
         let records = vec![WalRecord::IngestBatch {
+            receipt: Vec::new(),
             batch_id: "b".to_string(),
             body_hash: [0u8; 32],
             rows: vec![

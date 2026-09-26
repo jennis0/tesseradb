@@ -621,7 +621,6 @@ fn ingest_and_flush_with(
 ) -> u64 {
     let flushes_before = engine.write_executor_stats().flushes;
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -647,7 +646,7 @@ fn ingest_and_flush_with(
         scoped: Vec::new(),
     };
     let allocated = engine
-        .accept_ingest(vec![row], external.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], external.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0];
     assert!(
         allocated.raw() >= N,
@@ -1258,7 +1257,6 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
 
     let long = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"long".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1279,7 +1277,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         scoped: Vec::new(),
     };
     let err = engine
-        .accept_ingest(vec![long], "batch-long".to_string(), [1u8; 32])
+        .ingest_rows(vec![long], "batch-long".to_string(), [1u8; 32])
         .expect_err("a long row is refused");
     assert!(
         matches!(
@@ -1294,7 +1292,6 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     );
 
     let short = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"short".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1307,7 +1304,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     };
     assert!(
         engine
-            .accept_ingest(vec![short], "batch-short".to_string(), [3u8; 32])
+            .ingest_rows(vec![short], "batch-short".to_string(), [3u8; 32])
             .is_ok(),
         "a short row is padded at the close, never indexed past its end"
     );
@@ -1315,7 +1312,6 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     // The engine is still usable — a refusal before the submit acks nothing, burns no entity id
     // (I9) and leaves the executor running.
     let good = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"good".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1335,7 +1331,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         scoped: Vec::new(),
     };
     assert!(engine
-        .accept_ingest(vec![good], "batch-good".to_string(), [2u8; 32])
+        .ingest_rows(vec![good], "batch-good".to_string(), [2u8; 32])
         .is_ok());
 }
 
@@ -1811,7 +1807,6 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
 
     // Accepted and acked, deliberately *not* flushed — so it is in the candidate and in no layer.
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"buffered".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1829,7 +1824,7 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
         scoped: Vec::new(),
     };
     let buffered = engine
-        .accept_ingest(vec![row], "batch-buffered".to_string(), [9u8; 32])
+        .ingest_rows(vec![row], "batch-buffered".to_string(), [9u8; 32])
         .expect("ingest is accepted")[0]
         .raw() as u32;
 

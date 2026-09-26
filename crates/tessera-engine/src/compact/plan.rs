@@ -230,10 +230,7 @@ pub(crate) fn plan_fold(
             continue;
         }
         let row_space = &view_data.row_space;
-        let permutation_bound = row_space
-            .extents()
-            .last()
-            .map_or(row_space.base().bound(), |extent| extent.entity_hi + 1);
+        let permutation_bound = row_space.entity_floor();
         views.push(FoldViewPlan {
             view: view.clone(),
             incarnation: view_data.incarnation,

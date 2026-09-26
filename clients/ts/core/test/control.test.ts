@@ -127,7 +127,7 @@ describe('each route', () => {
 
   for (const route of ['ingest', 'values'] as const) {
     it(`${route} sends the bytes as given, under the caller's batch id and view`, async () => {
-      const sent = recording({status: 200, body: {accepted: 4}});
+      const sent = recording({status: 200, body: {created: 4}});
       const answer = await control[route](rows, {batch: 'page-0', view: 's0'});
       expect(sent[0]).toMatchObject({method: 'POST', url: `http://control/control/${route}`, body: rows});
       expect(sent[0]!.headers).toEqual({
@@ -137,7 +137,7 @@ describe('each route', () => {
         'x-tessera-view': 's0'
       });
       expect(answer.batch).toBe('page-0');
-      expect(answer.body).toEqual({accepted: 4});
+      expect(answer.body).toEqual({created: 4});
     });
 
     it(`${route} names no view unless given one, and makes a fresh batch id for each call`, async () => {
@@ -154,7 +154,7 @@ describe('each route', () => {
 describe('an answer', () => {
   it('after a 429, waits its Retry-After and resends the same batch id and bytes', async () => {
     vi.useFakeTimers();
-    const sent = recording({status: 429, headers: {'retry-after': '2'}}, {status: 429, headers: {'retry-after': '2'}}, {status: 200, body: {accepted: 4}});
+    const sent = recording({status: 429, headers: {'retry-after': '2'}}, {status: 429, headers: {'retry-after': '2'}}, {status: 200, body: {created: 4}});
     const pending = control.ingest(rows, {view: 's0'});
     await vi.advanceTimersByTimeAsync(1_999);
     expect(sent).toHaveLength(1);
@@ -162,7 +162,7 @@ describe('an answer', () => {
     expect(sent).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(2_000);
     const answer = await pending;
-    expect(answer).toMatchObject({status: 200, ok: true, attempts: 3, body: {accepted: 4}});
+    expect(answer).toMatchObject({status: 200, ok: true, attempts: 3, body: {created: 4}});
     expect(sent.map((s) => s.body)).toEqual([rows, rows, rows]);
     expect(new Set(sent.map((s) => s.headers['x-tessera-batch-id']))).toEqual(new Set([answer.batch]));
   });

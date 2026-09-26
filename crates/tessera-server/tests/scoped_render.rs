@@ -332,6 +332,29 @@ async fn ingest_with_heat(
     assert_eq!(status, 200, "the batch is accepted: {body}");
 }
 
+/// One batch of rows carrying their geometry and label and no family column, which leaves every
+/// family's value as the item holds it; accepted.
+async fn ingest_bare(served: &Served, batch_id: &str, view: &str, rows: &[(Vec<u8>, f32, f32, &str)]) {
+    let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = rows
+        .iter()
+        .map(|(id, x, y, access)| (Some(id.as_slice()), *x, *y, *access))
+        .collect();
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(build_ingest_batch_optional(&rows))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    assert_eq!(status, 200, "the batch is accepted: {}", resp.text().await.unwrap());
+}
+
 /// The same batch, refused or not, with its status and body returned — for the cases where the
 /// refusal *is* the assertion.
 async fn try_ingest_with_heat(
@@ -943,12 +966,11 @@ async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
     assert!(body.contains("'heat'"), "{body}");
 }
 
-/// **A scoped family is required on every row into a view of its own group, and on no row into a
-/// view of a group sharing its keys**, as a build reads it from the one and not the other. A row
-/// that joins an item already held is no exception: the family's value is the view's, not the
-/// item's.
+/// **A scoped family may be left out of a row, as any column may**: a new item left without one
+/// has no value in the cell, whether its row is into the owner's view or a sharing group's, and
+/// the same row sent again names the item and changes nothing.
 #[tokio::test]
-async fn a_scoped_family_is_required_on_its_own_groups_views_and_not_on_a_sharing_groups() {
+async fn a_scoped_family_may_be_left_out_of_any_row() {
     let served = Served::build(build_with_families).await;
     const NEW: u64 = 9_901;
     let id = external_id_of(NEW);
@@ -973,16 +995,14 @@ async fn a_scoped_family_is_required_on_its_own_groups_views_and_not_on_a_sharin
         }
     };
     let (status, body) = post("owner-new", "quarter:2026-Q1", bare()).await;
-    assert_eq!(status, 422, "a new item into the owner's view: {body}");
-    assert_eq!(error_code(&body), "contract", "{body}");
+    assert_eq!(status, 200, "a new item into the owner's view: {body}");
     let (status, body) = post("sharing-new", "quarter_map:2026-Q1", bare()).await;
-    assert_eq!(status, 200, "a new item into the sharing group's view: {body}");
-    let (status, body) = post("owner-join", "quarter:2026-Q1", bare()).await;
-    assert_eq!(status, 422, "the same item joining the owner's view: {body}");
-    assert_eq!(error_code(&body), "contract", "{body}");
+    assert_eq!(status, 200, "the item into the sharing group's view: {body}");
+    let (status, body) = post("owner-again", "quarter:2026-Q1", bare()).await;
+    assert_eq!(status, 200, "the same row again changes nothing: {body}");
     ingest_with_heat(
         &served,
-        "owner-join-carrying",
+        "owner-again-carrying",
         "quarter:2026-Q1",
         &[(external_id_of(NEW), 250.0, 250.0, "0")],
         &[None],
@@ -1637,14 +1657,13 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
         &[Some(VALUE)],
     )
     .await;
-    // The same entity joins the owner's own view carrying **no** value: the cell is already
-    // written, and a join that omits a family's column names nothing to disagree with.
-    ingest_with_heat(
+    // The same entity is added to the owner's own view leaving the family out: the cell is
+    // already written, and a row leaving it out keeps it.
+    ingest_bare(
         &served,
         "sharing-door-owner",
         "quarter:2026-Q1",
         &[(external_id_of(NEW), 260.0, 260.0, "0")],
-        &[None],
     )
     .await;
     drain(&served.server).await;
@@ -1936,26 +1955,19 @@ async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
         "an equal string is refused as well, equality being unverifiable: {equal_body}"
     );
     assert_eq!(
-        equal_body, body,
-        "one rule, one message: agreement is not something this arm can establish, so it cannot \
-         answer differently for it"
+        error_code(&equal_body),
+        "conflict",
+        "one rule: agreement is not something this arm can establish: {equal_body}"
     );
 
-    // Door two, omitting the column: accepted, and the cell stands as it was.
-    let (status, body) = try_ingest_families(
+    // Door two, leaving the column out: accepted, and the cell stands as it was.
+    ingest_bare(
         &served,
         "text-absent",
         "quarter_map:2026-Q1",
         &[(external_id_of(C), 302.0, 302.0, "0")],
-        None,
-        Some(&[None]),
-        None,
     )
     .await;
-    assert_eq!(
-        status, 200,
-        "a null names no value to disagree with: {body}"
-    );
 }
 
 /// **In one window the buffer answers, so text compares exactly** (`views.md` §5, decision 0116).

@@ -223,9 +223,8 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
     let wal_path_b = tmp.path().join("wal_b.log");
     {
         let (mut wal, _initial) = Wal::open(&wal_path_b).unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: suppressed_entity,
-            op: ChangeOp::Suppress,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(suppressed_entity, ChangeOp::Suppress)],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -949,9 +948,8 @@ fn the_theta_anchor_falls_when_an_item_is_suppressed() {
     let wal_path_b = tmp.path().join("wal_b.log");
     {
         let (mut wal, _initial) = Wal::open(&wal_path_b).unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: suppressed_entity,
-            op: ChangeOp::Suppress,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(suppressed_entity, ChangeOp::Suppress)],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -1034,9 +1032,8 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
                 .resolve_external_id(&id.to_le_bytes())
                 .unwrap()
                 .expect("the source item is established in the bundle");
-            wal.append(&WalRecord::ChangeByEntity {
-                entity_id: entity,
-                op: ChangeOp::Suppress,
+            wal.append(&WalRecord::ChangeBatch {
+                changes: vec![(entity, ChangeOp::Suppress)],
             })
             .unwrap();
         }

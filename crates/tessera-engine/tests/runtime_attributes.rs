@@ -222,7 +222,6 @@ fn row_under(
     scalars: Vec<WalScalar>,
 ) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -243,7 +242,7 @@ fn ingest(engine: &Engine, batch: &str, rows: Vec<UnallocatedRow>) -> Vec<Entity
     let mut hash = [0u8; 32];
     hash[..batch.len().min(32)].copy_from_slice(&batch.as_bytes()[..batch.len().min(32)]);
     engine
-        .accept_ingest(rows, batch.to_string(), hash)
+        .ingest_rows(rows, batch.to_string(), hash)
         .unwrap_or_else(|e| panic!("batch {batch} is accepted: {e}"))
 }
 
@@ -567,7 +566,7 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     let mut long = build_columns("high", 4.0);
     long.extend([WalScalar::F32(1.0), WalScalar::F32(2.0)]);
     let refused = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row("too-long", &engine, long)],
             "after-long".to_string(),
             [7u8; 32],
