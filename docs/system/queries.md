@@ -347,12 +347,11 @@ response gives the read's columns and their types.
 A cursor is sealed, so a caller can neither read one nor make one. It opens only in the read it was
 issued for, and only in a session opened with the same authorisation data;
 [security](security.md#reading-in-bulk) lists what it is bound to. A cursor that does not open is
-one 422, whatever the reason, and one issued under another idset, the numbering `tessera_id`s are
-issued under, is the 409 the item card gives. A cursor stays valid across flushes, merges,
-compactions and restarts, because the position it holds is a value each page finds again in
-whatever segments it reads. It stops opening when the identity key is rotated. The cursor fixes
-the order, and a request naming another order is refused. It does not bind the fields, the
-filter, `keep_unmatched` or the page size, which may change between the requests of one read.
+one 422, whatever the reason, including a cursor issued by another bundle, whose key differs. A
+cursor stays valid across flushes, merges, compactions and restarts, because the position it holds
+is a value each page finds again in whatever segments it reads. The cursor fixes the order, and a
+request naming another order is refused. It does not bind the fields, the filter, `keep_unmatched`
+or the page size, which may change between the requests of one read.
 
 With `count` on its first request, a read's head carries two exact counts taken at the start of
 the response. On items they are the visible items in the view, which is the count the viewport

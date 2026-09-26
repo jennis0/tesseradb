@@ -96,7 +96,7 @@ Four identifiers name an item or a view, one for each party that needs to addres
 | Identifier | Assigned by | Held by | What changes it |
 |---|---|---|---|
 | entity id | the server, at ingest | never leaves the server | nothing; never reissued today |
-| `tessera_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rotation of the deployment's key, which ends every session |
+| `tessera_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rebuild, which creates a new bundle with a new key |
 | external id | the operator, before ingest | the operator, and any record of a write naming it | nothing, for the item's life |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
 
@@ -107,9 +107,12 @@ one batch sorts the whole corpus as one range. A later ingest commits its own ne
 already exists, in a range sorted the same way within itself but appended after the corpus already
 on disc rather than interleaved with it.
 
-The `tessera_id` is what a client receives and holds instead of the entity id. It is stable for
-the item's life unless the operator rotates the deployment's key, and a rotation ends every
-session, so a held identifier stops resolving rather than pointing at a new item.
+The `tessera_id` is what a client receives and holds instead of the entity id. The key of the
+permutation is drawn at random by `tessera build` each time it creates a bundle and is stored in
+the bundle's manifest. Nobody configures it, and no response carries it. A `tessera_id` is stable
+for the item's life in that bundle, across sessions, restarts, flushes, merges and compactions,
+and a copy of the bundle keeps it. A rebuild issues a new `tessera_id` for every item, and one from
+the old bundle does not name an item in the new one.
 
 ## Projections and the frame
 

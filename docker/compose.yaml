@@ -11,8 +11,6 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    environment:
-      TESSERA_IDENTITY_KEY: ${TESSERA_IDENTITY_KEY:-}
     volumes:
       - ./config:/etc/tessera:ro
       - tessera-data:/var/lib/tessera

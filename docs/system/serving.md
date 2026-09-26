@@ -170,9 +170,9 @@ flowchart TD
 A response carries two keys and a generation name a client can compare against what it already holds.
 
 Whether a held answer may still be shown at all depends on the identity key, carried as
-`x-tessera-identity-key`. It changes when the viewer's own session changes, and it changes for
-every session at once when the [idset rotates](access-control.md#key-rotation), because it is
-minted from that same idset.
+`x-tessera-identity-key`. It is derived from the session's authorisation data, its visible set
+and the view, and changes when any of them does. It is unrelated to the key of the `tessera_id`
+permutation.
 
 Whether a held answer may still be declared to the server as something it can skip resending
 depends on the content key, carried as an `ETag`. It changes whenever the corpus has moved in a

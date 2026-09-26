@@ -40,7 +40,6 @@ cp /path/to/schema.toml /path/to/*.parquet config/
 mkdir -p secrets
 openssl rand -hex 32 > secrets/tessera_session
 openssl rand -hex 32 > secrets/tessera_operator
-echo "TESSERA_IDENTITY_KEY=$(openssl rand -hex 16)" > .env
 
 docker compose run --rm tessera build
 docker compose up -d
@@ -49,17 +48,15 @@ curl -s localhost:8080/readyz -o /dev/null -w '%{http_code}\n'
 
 `build` creates the database in the volume. `up` serves it and restarts it unless stopped. A write sent to the control plane goes to the log in the volume and survives a restart. `docker compose down` stops the server and keeps the volume; `down -v` deletes the database.
 
-The identity key is needed by `build` only. Keep it: a later rebuild of the same corpus needs the same key, or every `tessera_id` a client holds changes.
+Each `build` creates a new bundle with a new random key for its `tessera_id`s, so a rebuild changes every `tessera_id` a client holds.
 
 Compose mounts a file secret with the file's host owner and mode. The container's uid 65532 must be able to read it, so leave the files world-readable in a private directory, or `chown 65532` them.
 
 ## Run it with `docker run`
 
 ```bash
-export TESSERA_IDENTITY_KEY=$(openssl rand -hex 16)   # keep it: a rebuild needs the same key
 docker volume create tessera-data
-docker run --rm -v "$PWD/config:/etc/tessera:ro" -v tessera-data:/var/lib/tessera \
-  -e TESSERA_IDENTITY_KEY tessera build
+docker run --rm -v "$PWD/config:/etc/tessera:ro" -v tessera-data:/var/lib/tessera tessera build
 docker run -d --name tessera --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v "$PWD/config:/etc/tessera:ro" -v "$PWD/secrets:/run/secrets:ro" -v tessera-data:/var/lib/tessera \
   -p 8080:8080 -p 8081:8081 -p 127.0.0.1:8082:8082 tessera
