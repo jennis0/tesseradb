@@ -104,10 +104,16 @@ export type DeclaredScalar = {
    */
   render: boolean;
   /**
-   * Whether the column has a filter index. A column with neither `render` nor `index` can be read
-   * on an item and cannot be filtered on.
+   * Whether the column has a filter index. A column with neither `render`, `index` nor `unique`
+   * can be read on an item and cannot be filtered on.
    */
   index: boolean;
+  /**
+   * Whether no two items hold one value. `eq` and `in` on the column answer from its unique index,
+   * so a filter `{column: {in: values}}` finds the items holding the values; a unique column with
+   * neither `render` nor `index` takes those two operators alone.
+   */
+  unique: boolean;
   /**
    * For a `text` column, the `<name>/<version>` of the analyser that split its values into terms;
    * `null` for every other type.
@@ -168,7 +174,7 @@ export type FilterOperandSet = {
   /**
    * The operators this column accepts: `eq` and `in` for a category; `eq`, `in`, `prefix` and
    * `contains` for a keyword; `eq`, `in` and `range` for a numeric column; `match` and `phrase`
-   * for text.
+   * for text; `eq` and `in` alone for a unique column with neither `render` nor `index`.
    */
   operands: string[];
   /**
@@ -269,20 +275,21 @@ export type RegionVerdict = {exact: true; depth: null} | {exact: false; depth: n
  * One column's predicate, with exactly one key; the server refuses a leaf with two. A category
  * takes its vocabulary key (a string) or its code (a number). A keyword takes exact strings. A
  * numeric column takes numbers, and `range` takes at least one bound and at most one per side.
- * A `text` column takes `match` or `phrase`.
+ * An integer or timestamp column also takes a `bigint`, sent as its decimal digits, which is exact
+ * past 2^53 where a `number` is not. A `text` column takes `match` or `phrase`.
  *
  * @category Filters
  */
 export type FilterOperator =
-  | {eq: string | number | boolean}
-  | {in: (string | number)[]}
+  | {eq: string | number | boolean | bigint}
+  | {in: (string | number | bigint)[]}
   | {prefix: string}
   | {contains: string}
   /** Every analysed term must appear, unless `minimum_should_match` says how many must. */
   | {match: string | {query: string; minimum_should_match?: number}}
   /** The analysed terms must appear next to each other, in order. */
   | {phrase: string}
-  | {range: {gte?: number; gt?: number; lte?: number; lt?: number}};
+  | {range: {gte?: number | bigint; gt?: number | bigint; lte?: number | bigint; lt?: number | bigint}};
 
 /**
  * One annotation layer, as `/v1/meta` publishes it to this principal.

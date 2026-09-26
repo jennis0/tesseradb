@@ -1,6 +1,6 @@
 {
   "api_version": 1,
-  "bundle_format": 21,
+  "bundle_format": 22,
   "declared_scalars": [
     {
       "analyser": null,
@@ -15,7 +15,8 @@
       ],
       "index": false,
       "name": "colour",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -30,7 +31,8 @@
       ],
       "index": false,
       "name": "family",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -46,7 +48,8 @@
       ],
       "index": false,
       "name": "tag",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -57,7 +60,8 @@
       ],
       "index": false,
       "name": "flag",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -68,7 +72,8 @@
       ],
       "index": false,
       "name": "small",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -79,7 +84,8 @@
       ],
       "index": false,
       "name": "medium",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -90,7 +96,8 @@
       ],
       "index": false,
       "name": "rank",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -101,7 +108,8 @@
       ],
       "index": false,
       "name": "hash",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -112,7 +120,8 @@
       ],
       "index": false,
       "name": "tiny",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -123,7 +132,8 @@
       ],
       "index": false,
       "name": "short",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -134,7 +144,8 @@
       ],
       "index": false,
       "name": "offset",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -145,7 +156,8 @@
       ],
       "index": false,
       "name": "long",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -156,7 +168,8 @@
       ],
       "index": false,
       "name": "at",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -167,7 +180,8 @@
       ],
       "index": false,
       "name": "ratio",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -178,7 +192,8 @@
       ],
       "index": false,
       "name": "exact",
-      "render": true
+      "render": true,
+      "unique": false
     },
     {
       "analyser": "unicode/icu4x-2.2/p1",
@@ -189,7 +204,8 @@
       ],
       "index": true,
       "name": "title",
-      "render": false
+      "render": false,
+      "unique": false
     },
     {
       "analyser": null,
@@ -200,7 +216,8 @@
       ],
       "index": true,
       "name": "code",
-      "render": false
+      "render": false,
+      "unique": false
     }
   ],
   "filter_operands": [

@@ -304,6 +304,7 @@ class Database:
         analyser: str | None = None,
         scope: Any = "entity",
         title: str | None = None,
+        unique: bool | None = None,
     ) -> dict:
         """Declare a column the items carry, and return its block.
 
@@ -324,11 +325,16 @@ class Database:
         - `scope`: `{"group": name}` gives the column a separate value in each view of that
           view group. The default is one value per item.
         - `title`: a display name.
+        - `unique`: `True` holds each value on one item at most. An insert giving an item a value
+          another item holds is refused, and a filter `{name: {"in": values}}` finds the items
+          holding the values from the column's index, with or without `index`. For `"keyword"`,
+          integer and `"timestamp_us"` columns scoped to the item. The default is `False`.
 
         A name already declared for an attribute is refused, and so are `render=True` after the
         first commit and a `scope` naming a view group not yet declared.
 
             db.declare_attribute("year", type="i32", render=True, index=True)
+            db.declare_attribute("doi", type="keyword", unique=True)
         """
         block = D.attribute_block(
             name,
@@ -339,11 +345,27 @@ class Database:
             analyser=analyser,
             scope=scope,
             title=title,
+            unique=unique,
         )
         self._refuse_a_render_column(name, block.get("render"))
         self._refuse_an_undeclared_group("attribute", name, block)
         self._mark_a_filled_column(block)
         return self._declared(self.blocks.add("attribute", block))
+
+    def declare_unique(self, name: str, unique: bool = True) -> dict:
+        """Make an attribute already declared unique, or stop it being unique, and return its block.
+
+        After the first commit the change reaches the database at the next `commit()`: making a
+        column unique builds its index over the values it holds, and is refused, naming up to ten
+        of them, where more than one item holds one value. Stopping it keeps the values.
+
+            db.declare_unique("doi")
+        """
+        for block in self.blocks.blocks["attribute"]:
+            if block.get("name") == name:
+                block["unique"] = bool(unique)
+                return self._declared(block)
+        raise Refusal(f"declare_unique: no attribute named {name!r} is declared")
 
     def declare_columns(
         self,
@@ -353,6 +375,7 @@ class Database:
         index: Sequence[str] = (),
         keyword: Sequence[str] = (),
         category: Sequence[str] = (),
+        unique: Sequence[str] = (),
     ) -> Declared:
         """Declare every column of a data frame from its data type, and return what was declared.
 
@@ -365,6 +388,8 @@ class Database:
         - `index`: columns to make filterable.
         - `keyword`, `category`: string columns to declare as keywords or as categories. Other
           string columns are declared as text.
+        - `unique`: columns each value of which one item holds at most, as `declare_attribute`'s
+          `unique=True` says.
 
         A categorical column (a pandas `Categorical` or an Arrow dictionary column of strings) is
         declared as a category, unless `keyword` names it. A category declared here reads a new
@@ -384,6 +409,7 @@ class Database:
             set(keyword),
             set(category),
             self.blocks.attribute_names(),
+            set(unique),
         )
         held = self.blocks.vocabulary_names()
         for block in vocabularies:
@@ -1492,6 +1518,16 @@ class Database:
         read = self.viewer().items(view, fields, **{**options, "batches": True})
         read._page = self._with_inserted_ids
         return read if options.get("batches") else read.read_all()
+
+    def lookup(self, view: str, field: str, values: Iterable[Any], fields: Sequence[str] = ()):
+        """The items in `view` holding `values` in the unique column `field`, as a pyarrow table.
+
+        This is `Viewer.lookup` as this database's own reader, which sees every item.
+
+            db.lookup("papers", "doi", ["10.1/a", "10.2/b"], fields=["title"])
+        """
+        self._refuse_before_the_first_commit("lookup")
+        return self.items(view, [field, *fields], filters={field: {"in": list(values)}})
 
     def artifacts(self, view: str, layer: str, fields: Sequence[str], **options):
         """Every artifact of `layer`, with the properties named, as one pyarrow table.

@@ -24,7 +24,7 @@ class DeclaredColumn:
     - `dtype`: its Arrow type, as text.
     - `declared_as`: the attribute type it was declared with, or `"not declared"` where no type
       fits.
-    - `render`, `index`: the flags it was declared with.
+    - `render`, `index`, `unique`: the flags it was declared with.
     - `vocabulary`: for a category, the vocabulary its values come from, and `None` otherwise.
     - `why`: why it was declared as it was, or why it was not.
     """
@@ -36,6 +36,7 @@ class DeclaredColumn:
     index: bool
     vocabulary: str | None = None
     why: str = ""
+    unique: bool = False
 
 
 _WIDTHS = {
@@ -61,6 +62,7 @@ def columns_of(
     keyword: set[str],
     category: set[str],
     declared: set[str],
+    unique: set[str] = frozenset(),
 ) -> tuple[list[dict], list[dict], list[DeclaredColumn]]:
     """The attribute blocks, the vocabulary blocks, and one row per column for the report."""
     attributes: list[dict] = []
@@ -72,6 +74,7 @@ def columns_of(
         row = _column(name, dtype, name in keyword, name in category)
         row.render = row.declared_as != "not declared" and name in render
         row.index = row.declared_as != "not declared" and name in index
+        row.unique = row.declared_as != "not declared" and name in unique
         rows.append(row)
         if row.declared_as == "not declared":
             continue
@@ -90,6 +93,8 @@ def columns_of(
             block["render"] = True
         if row.index:
             block["index"] = True
+        if row.unique:
+            block["unique"] = True
         attributes.append(block)
     return attributes, vocabularies, rows
 

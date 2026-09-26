@@ -1089,6 +1089,10 @@ paths:
         a new item, and one whose item is suppressed joins it and stays hidden. Two rows with the
         same external id are `409`.
 
+        **Unique columns.** A row setting a unique column's value that another live or suppressed
+        item holds is `409`, naming the row, the value and the holder's `tessera_id`; so is a batch
+        setting one value in two rows. A deleted item holds nothing. A null is no value.
+
         **Retries.** `x-tessera-batch-id` names the batch. The same bytes sent again under the same
         id answer `200` with `replayed: true` and change nothing; different bytes under a used id
         are `409`.
@@ -1146,6 +1150,8 @@ paths:
             - Two rows share an external id
             - An external id already has a row in this view
             - A row joining an item in another view carries labels or values that differ from the item's
+            - A row sets a unique column's value another item holds, or two rows set one value; the detail names the value and the holder's `tessera_id`
+            - The items the batch names changed while it was checked twice; sending it again answers
           content:
             application/json:
               schema:
@@ -1241,7 +1247,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A cell holds a different value, the batch id was used for a different body, or `idset` is not the deployment's. The detail never names the held value. Nothing was written.
+          description: A cell holds a different value, a unique column's value is held by another item or set twice, the batch id was used for a different body, or `idset` is not the deployment's. The detail never names a held value other than a unique one the caller sent. Nothing was written.
           content:
             application/json:
               schema:
@@ -1437,8 +1443,15 @@ paths:
         item holds no value in it until one is written.
 
         The name is the column's identity. Declaring it again with the same fields answers `200`
-        and changes nothing; with any field different it is `409`. A name a layer holds is `422`.
-        `render = true` is refused on this route: declare a rendered column at a build.
+        and changes nothing; with any field but `unique` different it is `409`. A name a layer
+        holds is `422`. `render = true` is refused on a new column: declare a rendered column at a
+        build.
+
+        `unique` is the one field a column that exists may change. Declaring it `true` builds the
+        column's index over every value stored, and the answer waits for the build: `200` once it
+        is in force, `409` naming how many values more than one item holds and up to ten of them,
+        and the column is then as it was. Declaring it `false` drops the index at once and keeps
+        the values.
       security:
         - operatorCredential: []
       parameters:
@@ -1451,7 +1464,7 @@ paths:
               $ref: "#/components/schemas/AttributeDeclaration"
       responses:
         "200":
-          description: The name already carries this declaration. Nothing was written.
+          description: The name already carries this declaration, or carried it with `unique` different and now carries it as sent.
           content:
             application/json:
               schema:
@@ -1467,7 +1480,7 @@ paths:
         "401":
           $ref: "#/components/responses/OperatorBadCredential"
         "409":
-          description: The name is declared with a different type, vocabulary, analyser, flags or scope. A column's type is written into every row, so it cannot change.
+          description: The name is declared with a different type, vocabulary, analyser, flags or scope, which is written into every row and cannot change; or `unique` was declared on a column in which more than one item holds one value, and the detail says how many values and names up to ten.
           content:
             application/json:
               schema:
@@ -1479,7 +1492,8 @@ paths:
         "422":
           description: |
             - An unknown field or type
-            - `render = true`
+            - `render = true` on a new column
+            - `unique` on a type other than `keyword`, an integer or `timestamp_us`, or on a group-scoped column
             - A name that is not a valid column name or is a layer's
             - A category with no `vocabulary`, or one naming no vocabulary
             - `vocabulary` on another type
@@ -2557,6 +2571,7 @@ components:
                 enum: [category, keyword, numeric, text]
               operands:
                 type: array
+                description: The family's operators, or `eq` and `in` alone for a unique column with neither `render` nor `index`, whose unique index is its only filter home.
                 items:
                   type: string
                   enum: [eq, in, prefix, contains, range, match, phrase]
@@ -2579,7 +2594,7 @@ components:
     DeclaredScalar:
       type: object
       additionalProperties: false
-      required: [name, arrow_type, category, analyser, render, index, homes]
+      required: [name, arrow_type, category, analyser, render, index, unique, homes]
       properties:
         name:
           type: string
@@ -2614,6 +2629,9 @@ components:
         index:
           type: boolean
           description: The column has a search structure. With neither flag set the column is stored with the record, returned by the item routes and not a filter operand.
+        unique:
+          type: boolean
+          description: No two live or suppressed items hold one value. `eq` and `in` on the column answer from its unique index; a unique column with neither `render` nor `index` takes those two operators and no others.
         homes:
           type: array
           uniqueItems: true
@@ -3159,7 +3177,12 @@ components:
         freely; a keyword takes byte-exact strings; a number column takes numbers, and `range`
         takes an object of `gte`, `gt`, `lte` and `lt`, at least one and at most one per side; a
         `text` column takes `match` with a string or `{"query", "minimum_should_match"}`, and
-        `phrase` with a string.
+        `phrase` with a string. An integer or `timestamp_us` column also takes an integer as its
+        decimal digits in a string, optionally after `-` (`"1152921504606846976"`), which is exact
+        where a JSON number read as a double is not, past 2^53.
+
+        `eq` and `in` on a unique column answer from its unique index, as the set of visible items
+        holding the values; a holder the viewer may not see answers as no holder does.
 
         An unknown column, or an operator outside the column's family, is `422`. An unknown value
         is an empty operand, so a client shows no matches alike for a value the viewer may not see
@@ -3278,7 +3301,7 @@ components:
 
     FilterLeafOperator:
       type: object
-      description: One operator from the column's family in `/v1/meta`'s `filter_operands`, with its value. Value shapes depend on the family (see `FilterExpr`) and are not narrowed further here, since this description cannot know a column's family.
+      description: One operator from the column's `operands` in `/v1/meta`'s `filter_operands`, with its value. Value shapes depend on the family (see `FilterExpr`) and are not narrowed further here, since this description cannot know a column's family.
       minProperties: 1
       maxProperties: 1
       properties:
@@ -3294,10 +3317,10 @@ components:
           additionalProperties: false
           minProperties: 1
           properties:
-            gte: { type: number }
-            gt: { type: number }
-            lte: { type: number }
-            lt: { type: number }
+            gte: { $ref: "#/components/schemas/NumericComparand" }
+            gt: { $ref: "#/components/schemas/NumericComparand" }
+            lte: { $ref: "#/components/schemas/NumericComparand" }
+            lt: { $ref: "#/components/schemas/NumericComparand" }
         match:
           oneOf:
             - type: string
@@ -3310,6 +3333,13 @@ components:
         phrase:
           type: string
       additionalProperties: false
+
+    NumericComparand:
+      description: A number, or on an integer or `timestamp_us` column its decimal digits as a string, optionally after `-`, which is exact past 2^53.
+      oneOf:
+        - type: number
+        - type: string
+          pattern: "^-?[0-9]+$"
 
     ItemsRequest:
       type: object
@@ -3858,7 +3888,11 @@ components:
         render:
           type: boolean
           default: false
-          description: Serve the column in the viewport's points frame. `true` is refused on this route.
+          description: Serve the column in the viewport's points frame. `true` is refused on this route for a new column.
+        unique:
+          type: boolean
+          default: false
+          description: No two live or suppressed items may hold one value, and `eq` and `in` filters answer from the column's index. For `keyword`, integer and `timestamp_us` columns scoped to the entity. A null is no value.
         scope:
           description: "`entity`, one value per item, or `{\"group\": \"<view_group>\"}`, one value per item for each view of that group. Absent is `entity`."
           default: entity
