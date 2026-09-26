@@ -867,3 +867,71 @@ fn an_edit_carries_every_home() {
     let engine = open(tmp.path(), &root);
     check(&engine, &expected, "a restart after the fold");
 }
+
+/// **A view dropped while an edit waits in the same commit window** does not strand the edit.
+/// The edit is committed first, its own row in the dropped view gives way to its row in another
+/// view, and the item is served there with what the edit changed, before and after a restart.
+#[test]
+fn a_view_dropped_behind_an_edit_in_one_window_keeps_the_item() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_fixture(tmp.path());
+    let mut engine = open(tmp.path(), &root);
+    let first = EntityId::new(source_to_new_map(&root, "v00000")[&X]);
+    let tid = engine.tessera_id_of(first).unwrap();
+
+    engine.set_work_pass_paused_for_test(true);
+    let enqueued = engine.work_enqueued_for_test();
+    std::thread::scope(|scope| {
+        let edited = scope.spawn(|| {
+            edit(
+                &engine,
+                "heat",
+                "quarter:q1",
+                naming(tid, |row| {
+                    row.scoped[0] = WalScalar::F32(99.5);
+                    row.omitted.retain(|at| *at != DECLARED);
+                }),
+            )
+        });
+        wait_until(
+            "the edit is queued",
+            std::time::Duration::from_secs(30),
+            || engine.work_enqueued_for_test() > enqueued,
+        );
+        let dropped = scope.spawn(|| {
+            engine
+                .drop_view("quarter".to_string(), "q1".to_string(), false)
+                .expect("the drop is accepted")
+        });
+        wait_until(
+            "the drop is queued",
+            std::time::Duration::from_secs(30),
+            || engine.work_enqueued_for_test() > enqueued + 1,
+        );
+        engine.set_work_pass_paused_for_test(false);
+        edited.join().unwrap();
+        dropped.join().unwrap();
+    });
+    flush(&engine);
+    for pass in ["the flush", "a restart"] {
+        let full = engine.authorise(&full_coverage_credential()).unwrap();
+        let card = engine
+            .item(&full, tid)
+            .unwrap()
+            .unwrap_or_else(|| panic!("the edited item has a card after {pass}"));
+        let views: Vec<&str> = card.views.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(views, ["quarter:q2", "s0"], "after {pass}");
+        assert!(
+            served(&engine, &full, "s0", None).contains(&tid.raw()),
+            "s0 serves the item after {pass}"
+        );
+        assert_eq!(
+            engine.generation().buffer.oldest_wal_pos(),
+            None,
+            "nothing buffered holds the log after {pass}"
+        );
+        drop(engine);
+        engine = open(tmp.path(), &root);
+        flush(&engine);
+    }
+}

@@ -300,10 +300,11 @@ impl Executor {
                 }
             };
             let Command::Ingest { submission, reply } = command else {
-                // A declaration reads the unique values the window holds and has not yet applied,
-                // so the window closes first. Every other command is tolerable while a window is
-                // open: none of them touch the buffer or the swap.
-                if matches!(command, Command::DeclareAttribute { .. }) && !window.is_empty() {
+                // Every other command reads or replaces what the window holds back: a declaration
+                // reads the unique values it has not applied, a view drop prunes the buffer its
+                // rows go into, and a publication names entities its edits move. So the window
+                // closes first.
+                if !window.is_empty() {
                     window = self.close_and_reopen(window);
                 }
                 self.execute(command);
