@@ -2289,7 +2289,18 @@ fn verified_open(
     let mut views = 0usize;
     let mut segments = 0usize;
     let mut rows = 0u64;
+    let current: CurrentPointer = {
+        let bytes = fs::read(root.join("CURRENT")).map_err(|e| BuildError::io(root, e))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| BuildError::Invalid(format!("CURRENT is not valid JSON: {e}")))?
+    };
     for partition in bundle.partitions.values() {
+        let prefix_dir = root.join(&current.prefix);
+        let edited = tessera_store::edited::EditedIndex::open(
+            &partition.manifest.edited_items,
+            &prefix_dir,
+            None,
+        )?;
         for (view_id, view) in &partition.views {
             views += 1;
             segments += view.segments.len();
@@ -2308,16 +2319,14 @@ fn verified_open(
                 direct_window_rows,
                 view_id,
                 view,
-                &identity_key,
-                shard_id,
+                Identity {
+                    key: &identity_key,
+                    shard_id,
+                    edited: &edited,
+                },
             )?;
         }
     }
-    let current: CurrentPointer = {
-        let bytes = fs::read(root.join("CURRENT")).map_err(|e| BuildError::io(root, e))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| BuildError::Invalid(format!("CURRENT is not valid JSON: {e}")))?
-    };
     // Sorted so two runs over one bundle report the columns in one order.
     let mut partitions: Vec<(&str, &tessera_store::manifest::SegmentsManifest)> = bundle
         .partitions
@@ -2528,8 +2537,7 @@ fn check_view_identity(
     direct_window_rows: u64,
     view_id: &str,
     view: &tessera_store::read::ViewData,
-    identity_key: &IdentityKey,
-    shard_id: u32,
+    identity: Identity<'_>,
 ) -> Result<()> {
     let total_rows = view.row_space.total_rows();
 
@@ -2578,15 +2586,7 @@ fn check_view_identity(
             Ok(())
         })?;
         surjective(claimed)?;
-        return walk_window(
-            view_id,
-            &layout,
-            &window,
-            0,
-            row_bound,
-            identity_key,
-            shard_id,
-        );
+        return walk_window(view_id, &layout, &window, 0, row_bound, identity);
     }
 
     // The one place the pass writes anything, so the one place the scratch directory is made.
@@ -2634,7 +2634,7 @@ fn check_view_identity(
         // The bucket's disk comes back before its rows are walked: the window holds everything
         // the walk needs.
         store.delete(k)?;
-        walk_window(view_id, &layout, &window, lo, hi, identity_key, shard_id)?;
+        walk_window(view_id, &layout, &window, lo, hi, identity)?;
     }
     Ok(())
 }
@@ -2664,15 +2664,24 @@ fn claim_rows(
 
 /// The rows of `[lo, hi)` that a segment holds, in row order: each one's entity from `window`, and
 /// its stored `tessera_id` against what the key derives for that entity.
+/// What a row's `tessera_id` is checked against: the key and shard it is derived under, and the
+/// edited items a moved row's entity is found in.
+#[derive(Clone, Copy)]
+struct Identity<'a> {
+    key: &'a IdentityKey,
+    shard_id: u32,
+    edited: &'a tessera_store::edited::EditedIndex,
+}
+
 fn walk_window(
     view_id: &str,
     layout: &[SegmentRows<'_>],
     window: &[u64],
     lo: u64,
     hi: u64,
-    identity_key: &IdentityKey,
-    shard_id: u32,
+    identity: Identity<'_>,
 ) -> Result<()> {
+    let (identity_key, shard_id) = (identity.key, identity.shard_id);
     for (row_base, rows, segment) in layout {
         let from = (*row_base).max(lo);
         let to = (row_base + u64::from(*rows)).min(hi);
@@ -2706,10 +2715,18 @@ fn walk_window(
             if id == expected {
                 continue;
             }
-            // A row an edit moved records its entity, and its `tessera_id` is its number's, which
-            // the deep pass checks against the edited items.
-            let (shard, _) = identity_key.invert(tessera_types::TesseraId::new(id));
-            if recorded.is_none() || shard != shard_id {
+            // A row an edit moved records its entity, and its `tessera_id` is its number's, whose
+            // entries in the edited items name the entity.
+            let (shard, number) = identity_key.invert(tessera_types::TesseraId::new(id));
+            let moved = recorded.is_some()
+                && shard == shard_id
+                && u32::try_from(number.raw()).is_ok_and(|number| {
+                    identity
+                        .edited
+                        .entities_of(&[number])
+                        .is_ok_and(|held| held.iter().any(|(_, e)| u64::from(*e) == entity))
+                });
+            if !moved {
                 return Err(BuildError::Invalid(format!(
                     "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} does not \
                      match identity.key's derivation {expected:#x} for entity {entity}",
