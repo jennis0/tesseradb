@@ -137,6 +137,75 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
     );
 }
 
+/// **The identity coordinate belongs to one bundle.** Every build generates its own identity key
+/// and so gives every item a new `tessera_id`, and a client's held bands carry the old ones: two
+/// builds of the same data must give the same credential and view different coordinates. One
+/// bundle gives the same coordinate after a restart, so a restart drops nothing a client holds.
+#[tokio::test]
+async fn the_identity_coordinate_changes_with_the_bundle_and_survives_a_restart() {
+    let (first, second) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let first_bundle = build_under_key(first.path(), "000102030405060708090a0b0c0d0e0f");
+    let second_bundle = build_under_key(second.path(), "0f0e0d0c0b0a09080706050403020100");
+    let serve = |dir: &TempDir, bundle: &std::path::Path| {
+        let (bundle, cache, wal) =
+            (bundle.to_path_buf(), dir.path().join("cache"), dir.path().join("wal.log"));
+        async move { spawn_server(&bundle, &cache, &wal).await }
+    };
+
+    let server = serve(&first, &first_bundle).await;
+    let before_restart = identity_coordinate(&server).await;
+    server.shutdown().await;
+    let server = serve(&first, &first_bundle).await;
+    assert_eq!(
+        identity_coordinate(&server).await,
+        before_restart,
+        "a restart over the same bundle must keep the coordinate"
+    );
+    server.shutdown().await;
+
+    let other = serve(&second, &second_bundle).await;
+    assert_ne!(
+        identity_coordinate(&other).await,
+        before_restart,
+        "a bundle built under another key must not share a render partition"
+    );
+}
+
+/// The standard fixture's data, built into `dir/bundle` under `key`.
+fn build_under_key(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
+    let points = dir.join("points.parquet");
+    write_points_n(&points, N_ITEMS);
+    write_pairs_n(&dir.join("pairs.parquet"), N_ITEMS);
+    let view = view_args("s0", &points, AccessInput::relation(dir.join("pairs.parquet")));
+    let out = dir.join("bundle");
+    tessera_build::build(&tessera_build::BuildArgs {
+        identity_key: tessera_types::IdentityKey::from_hex(key).unwrap(),
+        ..build_args(&out, vec![view])
+    })
+    .expect("the build succeeds");
+    out
+}
+
+/// The identity coordinate of a whole-map viewport of `s0` for a session holding term `0`.
+async fn identity_coordinate(server: &TestServer) -> String {
+    let auth = authorise(server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.headers()["x-tessera-identity-key"]
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
 /// **A request names its tile set exactly once, by bbox or by list.**
 ///
 /// The list is how a client with a replica elides: a tile it can prove it holds is simply absent,

@@ -321,8 +321,8 @@ pub struct SubCellCount {
 /// compared for equality and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewCoordinates {
-    /// Whether a held band may be rendered at all — the cache partition key: the auth-data hash,
-    /// the mask fragment's identity and the view. Keying a cache more loosely than this serves one
+    /// Whether a held band may be rendered at all — the cache partition key: the bundle's identity
+    /// key fingerprint, the auth-data hash, the mask fragment's identity and the view. Keying a cache more loosely than this serves one
     /// principal's authorised data to another.
     pub identity_key: [u8; 16],
     /// Whether a held band may be declared in a request: the identity key plus the watermark of
