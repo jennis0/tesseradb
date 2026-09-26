@@ -163,10 +163,15 @@ fn filterable_by_value(scalar: &tessera_store::manifest::DeclaredScalar) -> bool
 /// The operators a filter may apply to a filterable column, in the order `/v1/meta` publishes
 /// them: its family's, or `eq` and `in` alone for a unique column with no other filter home.
 pub fn operands_of(scalar: &tessera_store::manifest::DeclaredScalar) -> &'static [&'static str] {
-    if scalar.unique && !filterable_by_value(scalar) {
+    if unique_only(scalar) {
         return &["eq", "in"];
     }
     Family::of(scalar).operands()
+}
+
+/// Whether a column's unique index is its only filter home, so it takes `eq` and `in` alone.
+pub fn unique_only(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
+    scalar.unique && !filterable_by_value(scalar)
 }
 
 /// The character a filter leaf pins a group-scoped attribute's view with: `sentiment@2026-Q3`.

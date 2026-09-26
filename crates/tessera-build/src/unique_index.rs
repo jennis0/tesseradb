@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use tessera_spatial::ScalarValue;
 use tessera_store::unique::{
-    duplicates_message, index_dir_rel, key_of, KeyKind, UniqueKey, UniqueSpill, WrittenUniqueRun,
+    duplicates_message, index_dir_rel, key_of, key_text, value_text, KeyKind, UniqueKey,
+    UniqueSpill, WrittenUniqueRun,
 };
 
 use crate::column::EntityColumn;
@@ -22,9 +23,6 @@ use crate::error::{BuildError, Result};
 const UNIQUE_BUDGET_SHARE: u64 = 4;
 const UNIQUE_BUDGET_MIN: u64 = 64 << 20;
 const UNIQUE_BUDGET_MAX: u64 = 4 << 30;
-
-/// How many values a refusal names.
-const EXAMPLES: usize = 10;
 
 /// What a walk over a unique column's values hands each present value to: the entity, the key,
 /// and the text of a keyword.
@@ -124,7 +122,7 @@ pub(crate) fn write_unique_indexes<'a>(
         let runs = spill
             .finish(&dir, "base", |d| {
                 duplicates += 1;
-                if named.len() < EXAMPLES {
+                if named.len() < tessera_store::unique::DUPLICATE_EXAMPLES {
                     named.push(d.key);
                 }
             })
@@ -159,7 +157,7 @@ fn describe(
         source.walk(attribute, &mut |_, key, text| {
             if let Some(text) = text {
                 if keys.contains(&key) && !texts.contains_key(&key) {
-                    texts.insert(key, format!("'{text}'"));
+                    texts.insert(key, value_text(&ScalarValue::Utf8(text.to_string())));
                 }
             }
             Ok(())
@@ -167,10 +165,8 @@ fn describe(
     }
     Ok(keys
         .iter()
-        .map(|key| match (*key, kind) {
-            (UniqueKey::Int(k), KeyKind::Unsigned) => k.to_string(),
-            (UniqueKey::Int(k), _) => tessera_store::key_index::signed_value(k).to_string(),
-            (UniqueKey::Keyword(_), _) => texts.get(key).cloned().unwrap_or_default(),
+        .map(|key| {
+            key_text(*key, kind).unwrap_or_else(|| texts.get(key).cloned().unwrap_or_default())
         })
         .collect())
 }

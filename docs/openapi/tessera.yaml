@@ -1221,7 +1221,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A cell holds a different value, a unique column's value is held by another item or set twice, or the batch id was used for a different body. The detail never names a held value other than a unique one the caller sent. Nothing was written.
+          description: A cell holds a different value, a unique column's value is held by another item or set twice, the unique values the batch names changed twice while it was checked (sending it again answers), or the batch id was used for a different body. The detail never names a held value other than a unique one the caller sent. Nothing was written.
           content:
             application/json:
               schema:

@@ -313,8 +313,8 @@ impl Executor {
         let mut note = |key: UniqueKey, value: &WalScalar| {
             if !keys_found.contains(&key) {
                 keys_found.push(key);
-                if examples.len() < crate::unique::EXAMPLES {
-                    examples.push(crate::unique::describe(value));
+                if examples.len() < tessera_store::unique::DUPLICATE_EXAMPLES {
+                    examples.push(tessera_store::unique::value_text(value));
                 }
             }
         };
@@ -385,7 +385,7 @@ impl Executor {
                     let base = run.as_base(&prefix_dir)?;
                     Ok(tessera_lifecycle::wal::DeclaredRun {
                         path: base.path,
-                        sha256: sha256_bytes(&digest.sha256),
+                        sha256: digest.sha256.clone(),
                         size: digest.size,
                         first_key: base.first_key,
                         last_key: base.last_key,
@@ -592,16 +592,4 @@ impl Executor {
         });
         self.publish(next, started);
     }
-}
-
-/// A hex SHA-256 as its 32 bytes; zeros where it is not one, which no digest check accepts.
-fn sha256_bytes(hex: &str) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = hex
-            .get(2 * i..2 * i + 2)
-            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-            .unwrap_or(0);
-    }
-    out
 }

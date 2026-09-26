@@ -640,9 +640,11 @@ fn apply_unique_events(
                     for run in event.base.iter().chain(&event.live) {
                         let digest = tessera_store::digest_of(&prefix_dir.join(&run.path))
                             .map_err(EngineError::Store)?;
-                        if digest.size != run.size || digest.sha256 != hex_encode(&run.sha256) {
+                        if digest.size != run.size || digest.sha256 != run.sha256 {
                             return Err(EngineError::Malformed(format!(
-                                "the WAL declares '{}' unique over index run '{}', whose bytes                                  do not match the digest the log recorded; restore the run or                                  the bundle it was written into",
+                                "the WAL declares '{}' unique over index run '{}', whose \
+                                 bytes do not match the digest the log recorded; restore the \
+                                 run or the bundle it was written into",
                                 event.attribute, run.path
                             )));
                         }
@@ -664,7 +666,13 @@ fn apply_unique_events(
                             live: event.live.iter().map(|run| run.path.clone()).collect(),
                         });
                 }
-                _ => {}
+                // The manifest's index is the declaration's own, or, where the side-manifests of
+                // a removal and of this declaration were not written, the one from before the
+                // removal. That one indexes the same flushed values, since every flush writes a
+                // side-manifest and none came after it; the values buffered since are live
+                // entries again after the replay.
+                (true, Some(_)) => {}
+                (false, None) => {}
             }
         }
     }

@@ -718,8 +718,39 @@ pub fn with_unique_flags(manifest: &Manifest, segments: &SegmentsManifest) -> Ma
     manifest
 }
 
+/// How many values a refusal names at most.
+pub const DUPLICATE_EXAMPLES: usize = 10;
+
+/// A value as a refusal names it: a keyword quoted, a number as its digits.
+pub fn value_text(value: &ScalarValue) -> String {
+    use ScalarValue as V;
+    match value {
+        V::Utf8(s) => format!("'{s}'"),
+        V::U8(v) => v.to_string(),
+        V::U16(v) => v.to_string(),
+        V::U32(v) => v.to_string(),
+        V::U64(v) => v.to_string(),
+        V::I8(v) => v.to_string(),
+        V::I16(v) => v.to_string(),
+        V::I32(v) => v.to_string(),
+        V::I64(v) | V::TimestampUs(v) => v.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// An integer key as a refusal names its value. `None` for a keyword key, a hash whose text is
+/// read from where the value is stored.
+pub fn key_text(key: UniqueKey, kind: KeyKind) -> Option<String> {
+    match (key, kind) {
+        (UniqueKey::Int(k), KeyKind::Unsigned) => Some(k.to_string()),
+        (UniqueKey::Int(k), _) => Some(crate::key_index::signed_value(k).to_string()),
+        (UniqueKey::Keyword(_), _) => None,
+    }
+}
+
 /// The refusal of a column declared unique that holds values more than one item holds: how many
-/// such values, and up to ten of them. The build and the running service refuse in these words.
+/// such values, and up to [`DUPLICATE_EXAMPLES`] of them. The build and the running service refuse
+/// in these words.
 pub fn duplicates_message(attribute: &str, count: u64, examples: &[String]) -> String {
     let noun = match count {
         1 => "value is",

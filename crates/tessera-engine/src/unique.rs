@@ -21,7 +21,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use tessera_lifecycle::{IngestBuffer, WalScalar};
 use tessera_store::manifest::{DeclaredScalar, Manifest};
-use tessera_store::unique::{key_of, UniqueKey};
+use tessera_store::unique::{key_of, key_text, value_text, UniqueKey, DUPLICATE_EXAMPLES};
 use tessera_types::EntityId;
 
 use crate::Generation;
@@ -346,22 +346,6 @@ pub(crate) fn row_keys(declared: &[DeclaredScalar], scalars: &[WalScalar]) -> Ve
         .collect()
 }
 
-/// A value as a refusal names it: a keyword quoted, a number as its digits.
-pub(crate) fn describe(value: &WalScalar) -> String {
-    match value {
-        WalScalar::Utf8(s) => format!("'{s}'"),
-        WalScalar::U8(v) => v.to_string(),
-        WalScalar::U16(v) => v.to_string(),
-        WalScalar::U32(v) => v.to_string(),
-        WalScalar::U64(v) => v.to_string(),
-        WalScalar::I8(v) => v.to_string(),
-        WalScalar::I16(v) => v.to_string(),
-        WalScalar::I32(v) => v.to_string(),
-        WalScalar::I64(v) | WalScalar::TimestampUs(v) => v.to_string(),
-        other => format!("{other:?}"),
-    }
-}
-
 /// An item's `tessera_id` as a refusal names it.
 pub(crate) fn tessera_id_text(
     key: &tessera_types::IdentityKey,
@@ -468,7 +452,7 @@ fn taken(
              another value, or delete item {id} first",
             setting.row,
             d.name,
-            describe(setting.value)
+            value_text(setting.value)
         ),
     }
 }
@@ -501,7 +485,7 @@ fn check_settings(
                         first.row,
                         setting.row,
                         d.name,
-                        describe(setting.value)
+                        value_text(setting.value)
                     ),
                 }));
             }
@@ -671,9 +655,6 @@ pub(crate) fn for_each_flushed_value(
     failed.map_or(Ok(()), Err)
 }
 
-/// How many values one refusal names at most.
-pub(crate) const EXAMPLES: usize = 10;
-
 /// What one round of a declaration's build is given: the generation it reads, the flushed
 /// entities it reads the column's values for, the runs earlier rounds wrote, and where it writes.
 pub(crate) struct RoundInput {
@@ -690,7 +671,8 @@ pub(crate) struct RoundInput {
 /// What a round wrote and found.
 pub(crate) struct RoundOutput {
     pub(crate) runs: Vec<(tessera_store::unique::WrittenUniqueRun, tessera_store::manifest::FileDigest)>,
-    /// Keys more than one live or suppressed item holds, and up to [`EXAMPLES`] of their values.
+    /// Keys more than one live or suppressed item holds, and up to
+    /// [`DUPLICATE_EXAMPLES`] of their values.
     pub(crate) duplicates: u64,
     pub(crate) examples: Vec<String>,
     /// The buffered `(entity, key)` pairs this round checked against every run.
@@ -722,7 +704,7 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     let written = spill
         .finish(&input.out_dir, &input.stem, |d| {
             duplicates += 1;
-            if duplicate_keys.len() < EXAMPLES {
+            if duplicate_keys.len() < DUPLICATE_EXAMPLES {
                 duplicate_keys.push(d.key);
             }
         })
@@ -730,7 +712,7 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     let note = |key: UniqueKey, duplicates: &mut u64, keys: &mut Vec<UniqueKey>| {
         if !keys.contains(&key) {
             *duplicates += 1;
-            if keys.len() < EXAMPLES {
+            if keys.len() < DUPLICATE_EXAMPLES {
                 keys.push(key);
             }
         }
@@ -873,7 +855,7 @@ fn describe_keys(
         for_each_flushed_value(generation, at, wanted, &mut |_, value| {
             if let Some(key) = key_of(declared.arrow_type, &value) {
                 if missing.contains(&key) && !found.contains_key(&key) {
-                    found.insert(key, describe(&value));
+                    found.insert(key, value_text(&value));
                 }
             }
             Ok(())
@@ -881,14 +863,11 @@ fn describe_keys(
     }
     Ok(keys
         .iter()
-        .map(|key| match (*key, kind) {
-            (UniqueKey::Int(k), Some(KeyKind::Unsigned)) => k.to_string(),
-            (UniqueKey::Int(k), _) => tessera_store::key_index::signed_value(k).to_string(),
-            (UniqueKey::Keyword(_), _) => texts
-                .get(key)
-                .map(|text| format!("'{text}'"))
+        .map(|key| {
+            kind.and_then(|kind| key_text(*key, kind))
+                .or_else(|| texts.get(key).map(|text| value_text(&WalScalar::Utf8(text.clone()))))
                 .or_else(|| found.get(key).cloned())
-                .unwrap_or_else(|| "a value no longer held".to_string()),
+                .unwrap_or_else(|| "a value no longer held".to_string())
         })
         .collect())
 }

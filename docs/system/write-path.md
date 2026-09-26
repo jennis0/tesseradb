@@ -110,7 +110,7 @@ a request that fails any of them takes no effect. A row that creates an item car
 declared column, with a null where it has no value. A row that adds an item already held to
 another view may leave them out, since the item's values are held already, but a row into a view
 of a group carries that group's own scoped columns either way. A batch with a row that leaves out
-a column it must carry is refused. Beyond those, four checks apply:
+a column it must carry is refused. Beyond those, five checks apply:
 
 1. An admission limit bounds how many ingest requests run at once, and a buffer limit bounds how
    many rows may wait for a flush. Past either, the request is refused with a retry interval
@@ -161,7 +161,7 @@ nothing: every waiter is refused, and a caller retries under the same batch id.
 | Outcome | Meaning | Retry |
 |---|---|---|
 | 200 | Every row is durable in the WAL, with its identity allocated. It is not yet visible | Not needed |
-| 409 | A duplicate external id, a unique field's value another item holds or two rows set, or the same batch id with different bytes. Nothing in the batch took effect | After fixing the request |
+| 409 | A duplicate external id, a unique field's value another item holds or two rows set, the same batch id with different bytes, or unique values that changed twice while the batch was checked. Nothing in the batch took effect | After fixing the request; the last as it was |
 | 422 | Validation failed: an undeclared column, a declared column left out, a wrong type, too many rows, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
@@ -189,14 +189,18 @@ their commit window closes and removed when the flush that writes them is publis
 reads both parts and drops deleted items, so a value is found from the moment its row is
 acknowledged. A values batch that fills a unique field is checked and indexed as an ingest is.
 
-The check runs twice. The request handler checks a batch against the generation current when the
-batch arrived, before the batch reaches the executor. Two batches checked at the same moment could
-each pass that check, so the executor checks each batch again against the values added since the
-handler's generation. A commit window also closes before a row that sets a value an earlier row in
-the same window set. Of two batches setting one value, the second to reach the executor is
-refused. The executor keeps the values the most recent flushes moved to disc, up to a million
-entries, for this second check. A batch whose handler's generation is older than those is sent
-back to its handler, which checks it again from the start.
+The check runs twice, for an ingest and a values batch alike. The request handler checks a batch
+against the generation current when the batch arrived, before the batch reaches the executor, and
+reads the run files where it needs to. Two batches checked at the same moment could each pass that
+check, so the executor checks each batch again, from memory, against the values added since the
+handler's generation. It does so after it has settled whether each row joins an item or creates
+one, since a row checked as a join creates an item if the item it joined was deleted meanwhile. A
+commit window also closes before a row that sets a value an earlier row in the same window set. Of
+two batches setting one value, the second to reach the executor is refused. The executor keeps the
+values the most recent flushes moved to disc, up to a million entries, for this second check. A
+batch whose handler's generation is older than those is handed back to its handler, which checks
+it again from the start and sends it once more. If that second attempt is handed back too, the
+batch is refused with `409` and nothing written, and the caller sends it again.
 
 Declaring `unique` on a field that already holds values builds its index while the service runs.
 The build reads every flushed value in rounds on a background thread. Each round after the first

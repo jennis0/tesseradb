@@ -447,7 +447,7 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
 
     let engine = restart(&fx, engine);
     check_lookups(&engine, &expected, "after a restart");
-    let buffered = add(&engine, "d", 2, &mut expected);
+    add(&engine, "d", 2, &mut expected);
     let engine = restart(&fx, engine);
     // The rows the log held are live entries again: their values are held.
     let doi = format!("10.d/{}", 0);
@@ -457,7 +457,6 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
         vec![row(&engine, "r", b"0", &doi, BIG * 13, 7_777)]
     )));
     flush(&engine);
-    let _ = buffered;
     check_lookups(&engine, &expected, "after the restart's flush");
 }
 
@@ -901,7 +900,7 @@ fn a_value_arriving_mid_build_is_indexed() {
             flush(&engine);
         }
         let id = engine.tessera_id_of(item).unwrap().raw();
-        assert_eq!(matching(&engine, &full(&engine), text_in("doi", &[doi.clone()])), BTreeSet::from([id]));
+        assert_eq!(matching(&engine, &full(&engine), text_in("doi", std::slice::from_ref(&doi))), BTreeSet::from([id]));
     }
 }
 

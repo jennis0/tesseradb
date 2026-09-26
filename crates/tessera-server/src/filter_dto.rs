@@ -70,11 +70,13 @@ fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<Resolved, ApiError> {
             family,
             operands,
             integer,
+            unique_only,
         } => Ok(Resolved {
             column,
             family,
             operands,
             integer,
+            unique_only,
         }),
         LeafColumn::Unknown => Err(bad(format!(
             "'{leaf}' is not a filterable column; name one that `/v1/meta`'s \
@@ -100,6 +102,7 @@ struct Resolved {
     family: Family,
     operands: &'static [&'static str],
     integer: bool,
+    unique_only: bool,
 }
 
 fn bad(detail: impl Into<String>) -> ApiError {
@@ -370,7 +373,7 @@ fn parse_operand(
                 "column '{column}': `match` needs a column declared `type = \"text\"`, which \
                  `/v1/meta` lists"
             )),
-            other if resolved.operands.len() < family.operands().len() => bad(format!(
+            other if resolved.unique_only => bad(format!(
                 "column '{column}' is unique and not indexed, so it takes {:?}; declare it with \
                  `index = true` to filter it by '{other}'",
                 resolved.operands
@@ -621,6 +624,7 @@ mod tests {
                 family,
                 operands: family.operands(),
                 integer: family == Family::Numeric,
+                unique_only: false,
             };
             match c.split_once(PIN) {
                 None if c == name => plain(Family::Category),
@@ -632,6 +636,7 @@ mod tests {
                     family: Family::Keyword,
                     operands: &["eq", "in"],
                     integer: false,
+                    unique_only: true,
                 },
                 None if c == "gid" => plain(Family::Numeric),
                 None if c == "sentiment" => LeafColumn::Unpinned {
@@ -642,6 +647,7 @@ mod tests {
                     family: Family::Numeric,
                     operands: Family::Numeric.operands(),
                     integer: false,
+                    unique_only: false,
                 },
                 Some(("sentiment", pin)) => LeafColumn::UnknownPin {
                     group: "quarter".to_string(),

@@ -513,7 +513,8 @@ pub enum WalRecord {
 pub struct DeclaredRun {
     /// Prefix-relative.
     pub path: String,
-    pub sha256: [u8; 32],
+    /// In lower-case hex, as a manifest's file digest records it.
+    pub sha256: String,
     pub size: u64,
     /// The run's smallest and largest key, zero-extended, in lower-case hex.
     pub first_key: String,
@@ -2689,7 +2690,7 @@ mod tests {
                 unique: true,
                 base: vec![DeclaredRun {
                     path: "partitions/p/entities/unique/doi/declared-1-base-0.keys".into(),
-                    sha256: [3u8; 32],
+                    sha256: "03".repeat(32),
                     size: 8192,
                     first_key: "1f".into(),
                     last_key: "ffe0".into(),
