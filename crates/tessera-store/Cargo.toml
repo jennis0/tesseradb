@@ -23,6 +23,9 @@ memmap2 = { workspace = true }
 # position discloses vocabulary cardinality to anyone who can see one.
 rand = { workspace = true }
 rayon = { workspace = true }
+# The key index's page and header checksums, and the hash its keyword keys are.
+crc32fast = { workspace = true }
+twox-hash = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

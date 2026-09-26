@@ -469,6 +469,57 @@ impl PartitionStore {
         read_bucket_bytes(receipt, self.record_width)
     }
 
+    /// Bucket `k`'s records one at a time, for a bucket too large to load whole.
+    ///
+    /// The length is checked before the first record and the content anchor after the last, so a
+    /// caller treats whatever it derived from the records as provisional until this returns `Ok`.
+    pub fn read_each(&self, k: usize, mut f: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+        use std::io::Read;
+        let receipt = self.receipts[k].as_ref().ok_or_else(|| {
+            torn(format!(
+                "partition bucket {k} was read after it was deleted; read a bucket before \
+                 deleting it"
+            ))
+        })?;
+        let width = self.record_width;
+        let expected_bytes = receipt.count.checked_mul(width as u64).ok_or_else(|| {
+            torn(format!(
+                "partition bucket {}: receipt count {} overflows the byte-length computation",
+                receipt.path.display(),
+                receipt.count
+            ))
+        })?;
+        let file = File::open(&receipt.path).map_err(|e| io(&receipt.path, e))?;
+        let len = file.metadata().map_err(|e| io(&receipt.path, e))?.len();
+        if len != expected_bytes {
+            return Err(torn(format!(
+                "partition bucket {}: length mismatch: file is {len} bytes but the receipt's \
+                 count {} requires exactly {expected_bytes}",
+                receipt.path.display(),
+                receipt.count
+            )));
+        }
+        let mut reader = std::io::BufReader::with_capacity(PARTITION_BUF_BYTES, file);
+        let mut record = vec![0u8; width];
+        let mut anchor = 0u64;
+        for _ in 0..receipt.count {
+            reader
+                .read_exact(&mut record)
+                .map_err(|e| io(&receipt.path, e))?;
+            anchor = anchor.wrapping_add(mix64_bytes(&record));
+            f(&record)?;
+        }
+        if anchor != receipt.anchor {
+            return Err(torn(format!(
+                "partition bucket {}: content anchor mismatch: recomputed {anchor:#018x} and the \
+                 receipt says {:#018x}, so the file's bytes are not the bytes that were written",
+                receipt.path.display(),
+                receipt.anchor
+            )));
+        }
+        Ok(())
+    }
+
     /// Release bucket `k`'s file — the disk comes back as the pass walks the buckets rather than
     /// at the end of it.
     pub fn delete(&mut self, k: usize) -> Result<()> {
@@ -742,6 +793,32 @@ mod tests {
             format!("{error}").contains("content anchor mismatch"),
             "{error}"
         );
+    }
+
+    /// Reading a bucket one record at a time gives the records `load` gives, and a flipped byte
+    /// fails the read after the last record.
+    #[test]
+    fn a_bucket_read_record_by_record_matches_its_load_and_is_verified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut part = Partition::create_routed(dir.path(), "rows", 1, 8, 64).expect("create");
+        for key in 0..100u32 {
+            part.push_to(0, &record(key, key * 3)).expect("push");
+        }
+        let store = part.finish().expect("finish");
+        let mut streamed = Vec::new();
+        store
+            .read_each(0, |r| {
+                streamed.extend_from_slice(r);
+                Ok(())
+            })
+            .expect("read");
+        assert_eq!(streamed, store.load(0).expect("load"));
+
+        let path = store.receipts[0].as_ref().expect("bucket 0").path.clone();
+        let mut bytes = fs::read(&path).expect("read");
+        bytes[13] ^= 1;
+        fs::write(&path, &bytes).expect("write");
+        assert!(store.read_each(0, |_| Ok(())).is_err());
     }
 
     /// A truncated bucket is refused on its length before a record is decoded.

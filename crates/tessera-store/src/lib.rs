@@ -12,6 +12,7 @@ pub mod entity_terms;
 pub mod error;
 pub mod flush;
 pub mod fold;
+pub mod key_index;
 mod locator;
 pub mod manifest;
 pub mod manifest_write;
