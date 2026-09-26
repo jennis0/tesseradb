@@ -72,7 +72,6 @@ describe('each route', () => {
 
   const writes: {name: string; call: (c: Control, o: WriteOptions) => Promise<Answer>; path: string}[] = [
     {name: 'ingest', call: (c, o) => c.ingest(rows, o), path: '/control/ingest'},
-    {name: 'values', call: (c, o) => c.values(rows, o), path: '/control/values'},
     {name: 'declareLayer', call: (c, o) => c.declareLayer({}, o), path: '/control/layers'},
     {name: 'declareViewGroup', call: (c, o) => c.declareViewGroup('g', {}, o), path: '/control/view_groups/g'},
     {name: 'declareAttribute', call: (c, o) => c.declareAttribute({}, o), path: '/control/attributes'},
@@ -125,7 +124,7 @@ describe('each route', () => {
     expect(sent[0]!.body).toBe(rows);
   });
 
-  for (const route of ['ingest', 'values'] as const) {
+  for (const route of ['ingest'] as const) {
     it(`${route} sends the bytes as given, under the caller's batch id and view`, async () => {
       const sent = recording({status: 200, body: {created: 4}});
       const answer = await control[route](rows, {batch: 'page-0', view: 's0'});

@@ -12,8 +12,8 @@
 # operation to its listener.
 #
 # What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`, `POST /v1/items` and
-# `POST /v1/artifacts`, and the Arrow IPC forms of `POST /control/ingest`, `POST /control/values`
-# and `PATCH /control/layers/{name}/artifacts`. They are not JSON, so each is declared as a binary
+# `POST /v1/artifacts`, and the Arrow IPC forms of `POST /control/ingest` and
+# `PATCH /control/layers/{name}/artifacts`. They are not JSON, so each is declared as a binary
 # media type and described in prose on its route. `docs/openapi/README.md` carries worked decodes
 # of the framed bodies in Python and in JavaScript. The JSON frames of the two bulk reads have
 # schemas below (`ItemsHead`, `ArtifactsHead`, `PageEnd`, `RecordsTrailer`).
@@ -89,9 +89,7 @@ tags:
   - name: probes
     description: Liveness and readiness, on the viewer and session listeners, unauthenticated, no body.
   - name: "control: ingest"
-    description: New items, with their positions, labels and values. Control plane.
-  - name: "control: values"
-    description: Values on items that already exist. Control plane.
+    description: Items, with their positions, labels and values, created and edited. Control plane.
   - name: "control: changes"
     description: Deletions, suppressions and lifted suppressions. Control plane.
   - name: "control: status"
@@ -1024,7 +1022,7 @@ paths:
     post:
       tags: ["control: ingest"]
       operationId: ingest
-      summary: Create items, or add existing items to a view, from a batch of rows.
+      summary: Create, edit and add items to a view, from a batch of rows.
       description: |
         The body is the batch's rows. `content-type` chooses the encoding: `application/json`,
         `application/x-ndjson` or none at all is JSON, an array of objects or one object per line,
@@ -1041,10 +1039,11 @@ paths:
         row carries is the one the item stores, the row changes nothing and is counted in
         `unchanged`; where the item has no row in the batch's view, is newer than the newest item a
         flush has written into it, and the row carries a position there and changes nothing else,
-        the row adds the item to the view, counted in `added`. Adding an older item would move it,
-        which is an edit.
-        Not built yet: a row that would change a value, the label or the position of an item is
-        `409`, saying editing an item is not available yet, and the batch writes nothing.
+        the row adds the item to the view, counted in `added`. Any other row edits the item and
+        is counted in `edited`: it changes a value, the label, the external id or a position, or
+        adds the item to a view it is older than the newest item of. An edited item keeps its
+        `tessera_id`, its views, its layer memberships and a suppression; a label the edit narrows
+        applies from the answer on.
 
         **Columns.** Every column may be left out, and in JSON every key. A value left out keeps
         what the item stores; a new item has no value there. A null clears it: on an item that
@@ -1086,7 +1085,7 @@ paths:
         **Limits.** The body is at most `ingest.ingest_max_batch_bytes` and the batch at most
         `ingest.ingest_max_batch_rows` rows; either over is `422`, and `/control/status` publishes
         both under `limits.ingest`. Past `ingest.ingest_admission` requests in flight across this
-        route and `POST /control/values`, and while `ingest.ingest_buffer_max_items` items are
+        route, and while `ingest.ingest_buffer_max_items` items are
         buffered, the request is `429`. A `401` is answered before any other refusal, and a `429`
         for admission before the body is decoded.
 
@@ -1136,7 +1135,7 @@ paths:
             - A row's values name more than one item, as when a row gives an item a unique value another item holds
             - A row's `tessera_id` names no live or suppressed item
             - Two rows name one item, or set one unique value or one external id
-            - A row would change an item it names: editing an item is not available yet
+            - An item a row edits changed while the batch was checked, or its external id was given to another item; sending it again answers
             - The items the batch names changed while it was checked twice; sending it again answers
           content:
             application/json:
@@ -1171,94 +1170,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
-  /control/values:
-    post:
-      tags: ["control: values"]
-      operationId: values
-      summary: Fill attribute values, and layer memberships, on items that already exist.
-      description: |
-        The body is encoded as `POST /control/ingest`'s is, and creates no item. A row names its
-        item by exactly one of `external_id` and `tessera_id`. `tessera_id` is a string of decimal
-        digits, `utf8` in Arrow. A row naming an item the deployment does not hold is `422`, naming the
-        row by its index. The other columns are declared attributes, group-scoped attributes and enumerated
-        layers, as on ingest, and a row may leave any of them out.
-
-        **The fill rule.** A cell that holds no value takes the one sent and is counted in
-        `filled`. A cell that holds the same value is counted in `held` and is not written again.
-        A cell that holds a different value is `409`, and the batch has no effect. A layer column
-        adds each row to the artifacts it names, counted in `joined`, and on an `open` layer
-        creates the artifacts it does not find, counted in `minted`.
-
-        **Views.** A group-scoped attribute or a layer scoped to a group is written under the key
-        of the view `x-tessera-view` names, which must be a view of that group. Without the header
-        the batch may carry entity-scoped columns only.
-
-        Retries, byte and row caps and admission are `POST /control/ingest`'s, and `/control/status`
-        publishes the caps under `limits.values`. A replay answers `replayed: true`, `filled: 0`
-        and `held` equal to the row count.
-      security:
-        - operatorCredential: []
-      parameters:
-        - $ref: "#/components/parameters/BatchId"
-        - $ref: "#/components/parameters/WriteView"
-        - $ref: "#/components/parameters/Wait"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ValuesRecords"
-          application/x-ndjson:
-            schema:
-              type: string
-              description: One JSON object per line, each a `ValuesRecord`. Blank lines are skipped.
-          application/vnd.apache.arrow.stream:
-            schema:
-              type: string
-              format: binary
-              description: An Arrow IPC stream whose columns are the JSON form's. Every record batch of the stream carries the same columns.
-      responses:
-        "200":
-          description: The batch was applied, or was a replay of an applied batch.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ValuesResponse"
-        "401":
-          $ref: "#/components/responses/OperatorBadCredential"
-        "404":
-          description: "`x-tessera-view` names no view."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "409":
-          description: A cell holds a different value, a unique column's value is held by another item or set twice, the unique values the batch names changed twice while it was checked (sending it again answers), or the batch id was used for a different body. The detail never names a held value other than a unique one the caller sent. Nothing was written.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "422":
-          description: |
-            Nothing was written.
-
-            - The body is over the byte cap or cannot be read
-            - `x-tessera-batch-id` is missing
-            - A row names no item, two, or one the deployment does not hold
-            - A column is undeclared or of the wrong type
-            - A scoped column or layer without a view of its group
-            - The batch is over the row cap
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "429":
-          $ref: "#/components/responses/Backpressure"
-        "500":
-          $ref: "#/components/responses/WriteFailed"
-        "503":
-          $ref: "#/components/responses/ExecutorNotReady"
 
   /control/changes:
     post:
@@ -1431,7 +1342,7 @@ paths:
         on this plane answers once it is in force: `200` once it is in force, `409` naming how many
         values more than one item holds and up to ten of them, and the column is then as it was.
         The build reads each stored value once, so the wait grows with the column's values.
-        Ingests, values batches and denies are answered while it runs, and no fold starts until it
+        Ingests and denies are answered while it runs, and no fold starts until it
         ends. A caller that stops waiting does not stop the build, and the same declaration sent
         again answers once it ends. Declaring it `false` drops the index at once and keeps the
         values.
@@ -1853,8 +1764,7 @@ paths:
       description: |
         The view leaves every roster at once, including the rosters of groups sharing its views,
         and its rows stay on disc, unreachable, until the compaction fold. Its artifacts become
-        unreachable with it. Rows and group-scoped values buffered for it and not yet flushed are
-        discarded, and `fills_dropped` counts the values.
+        unreachable with it. Rows buffered for it and not yet flushed are discarded.
 
         No item is deleted unless `delete_dangling` is `true`: then every item with a row in this
         view and in no other is deleted, as `POST /control/changes` deletes it, and `deleted`
@@ -3695,7 +3605,7 @@ components:
         edited:
           type: integer
           minimum: 0
-          description: Rows that changed an item they named. Not built yet, and always `0`.
+          description: Rows that edited an item they named.
         added:
           type: integer
           minimum: 0
@@ -3740,67 +3650,6 @@ components:
           type: integer
           minimum: 0
           description: "`PublicationAck.publication`. A replay names the next cycle, later than the one that published its rows."
-        visible:
-          type: boolean
-          description: "`PublicationAck.visible`."
-
-    ValuesRecords:
-      type: array
-      description: A JSON values batch, one object per row.
-      items:
-        $ref: "#/components/schemas/ValuesRecord"
-
-    ValuesRecord:
-      type: object
-      description: One row of a JSON values batch. It names its item by exactly one of `external_id` and `tessera_id`. Any other key is a declared attribute, a group-scoped attribute of the view's group, or an enumerated layer's name, as on ingest.
-      properties:
-        external_id:
-          type: [string, "null"]
-          contentEncoding: base64
-          description: The item's external id.
-        tessera_id:
-          type: [string, "null"]
-          pattern: "^[0-9]+$"
-          description: The item's `tessera_id`, as a string of decimal digits.
-        level:
-          type: [integer, string, "null"]
-          description: As on `IngestRecord`.
-      additionalProperties:
-        description: An attribute's value, or a layer's key or list of keys, as on `IngestRecord`. A key the row leaves out leaves that cell as it is.
-        type: [boolean, number, string, array, "null"]
-
-    ValuesResponse:
-      type: object
-      additionalProperties: false
-      required: [rows, filled, held, joined, minted, publication]
-      properties:
-        rows:
-          type: integer
-          minimum: 0
-          description: Rows the batch carried.
-        filled:
-          type: integer
-          minimum: 0
-          description: Cells that held no value and now hold the one sent. `0` on a replay.
-        held:
-          type: integer
-          minimum: 0
-          description: Cells that already held the value sent.
-        joined:
-          type: integer
-          minimum: 0
-          description: Memberships the layer columns added, to artifacts created by this batch and to held ones alike.
-        minted:
-          type: integer
-          minimum: 0
-          description: Artifacts the layer columns created on `open` layers.
-        replayed:
-          const: true
-          description: Present only when this body was already accepted under this batch id. Nothing was written.
-        publication:
-          type: integer
-          minimum: 0
-          description: "`PublicationAck.publication`."
         visible:
           type: boolean
           description: "`PublicationAck.visible`."
@@ -4197,16 +4046,12 @@ components:
     ViewDropped:
       type: object
       additionalProperties: false
-      required: [deleted, fills_dropped, publication]
+      required: [deleted, publication]
       properties:
         deleted:
           type: integer
           minimum: 0
           description: Items `delete_dangling` deleted. `0` without it.
-        fills_dropped:
-          type: integer
-          minimum: 0
-          description: Group-scoped values written for this view and not yet flushed, which were discarded with it.
         publication:
           type: integer
           minimum: 0
@@ -4874,12 +4719,10 @@ components:
         limits:
           type: object
           additionalProperties: false
-          required: [ingest, values, publish, grow, changes, declarations]
+          required: [ingest, publish, grow, changes, declarations]
           description: Each write route's caps, so a client can size its requests. A request over one is `422` naming the limit, and is never truncated.
           properties:
             ingest:
-              $ref: "#/components/schemas/BatchLimits"
-            values:
               $ref: "#/components/schemas/BatchLimits"
             publish:
               type: object

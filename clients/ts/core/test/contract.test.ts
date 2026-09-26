@@ -112,7 +112,6 @@ const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<
 /** One call of each `Control` method that reaches an operation, with arguments enough to send its request. */
 const CONTROL_CALLS: Record<string, (c: Control) => Promise<unknown>> = {
   ingest: (c) => c.ingest(new Uint8Array()),
-  values: (c) => c.values(new Uint8Array()),
   changes: (c) => c.changes([]),
   status: (c) => c.status(),
   flush: (c) => c.flush(),

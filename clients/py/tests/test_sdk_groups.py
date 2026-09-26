@@ -292,7 +292,7 @@ def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_
     report = db.commit()
     assert report.ok, report.refusals
     assert report.rows_accepted == {"slices:b": len(fresh), "slices:c": len(added)}
-    assert report.values_filled == 50
+    assert report.items_edited == 50
     assert report.artifacts_minted == 1
 
     # The delta landed in the view its header named, and in no other.

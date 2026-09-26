@@ -170,7 +170,7 @@ insert it as a frame.
 `id=` names the column that names the rows. Its bytes are that row's external id at every door: a
 string's UTF-8, binary as it stands, and an integer's eight little-endian bytes, so a negative id
 and its two's-complement unsigned value are the same id. That is what the build reads and what
-`/control/ingest`, `/control/values` and `/control/changes` take. The declaration is what says
+`/control/ingest` and `/control/changes` take. The declaration is what says
 where identity is: a view's `fields.entity_id`, an attribute's `entity_id_field`, a members
 table's `fields.entity`. The SDK rewrites no column to say it.
 

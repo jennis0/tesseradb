@@ -3,7 +3,7 @@
 Every test here commits the notebook corpus, declares a column on the running service and reads
 the answer back through the viewer plane. The routes are `PUT /control/attributes`,
 `PUT /control/vocabularies/{name}` and `PATCH /control/vocabularies/{name}/values`; the values
-arrive on `POST /control/values` as any values delta does, so what is under test is the plan's
+arrive on rows of `POST /control/ingest` without coordinates, so what is under test is the plan's
 order and the served answer, not a second reading of the contract.
 """
 
@@ -67,7 +67,7 @@ def test_an_indexed_attribute_declared_after_the_first_commit_is_filled_and_filt
 
     report = db.commit()
     assert report.ok, report
-    assert report.values_filled == len(HELD)
+    assert report.items_edited == len(HELD)
 
     # `/v1/meta` lists the new column with the placement it was declared with.
     assert declared(db, "citations")["index"] is True
@@ -123,7 +123,7 @@ def test_a_category_over_an_inline_closed_vocabulary_is_declared_filled_and_list
 
     report = db.commit()
     assert report.ok, report
-    assert report.values_filled == len(HELD)
+    assert report.items_edited == len(HELD)
     assert report.values_bound == 3
 
     # `/v1/meta` names the vocabulary the category reads and carries none of its values.
@@ -168,7 +168,7 @@ def test_a_category_over_a_sourced_closed_vocabulary_pages_the_tables_rows(serve
         "page 3 value(s) into vocabulary 'venue'",
         "declare attribute 'venue' (category)",
     ]
-    assert report.values_filled == len(HELD)
+    assert report.items_edited == len(HELD)
     assert report.values_bound == 3
 
     # The titles came from the table's own column, which is what a sourced set is for.

@@ -55,7 +55,7 @@ export type Answer = {
 };
 
 /**
- * The answer of `ingest` or `values`, with the batch id the request carried.
+ * The answer of `ingest`, with the batch id the request carried.
  *
  * @category Control plane
  */
@@ -131,7 +131,7 @@ export type WriteOptions = CallOptions & {
 };
 
 /**
- * What `ingest` and `values` take.
+ * What `ingest` takes.
  *
  * @category Control plane
  */
@@ -243,7 +243,7 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
 /**
  * The control plane of one served database, called with the operator credential: one method per
  * route. It keeps no record of what it sent, so what a database holds is asked of the database.
- * A body is sent as the caller gave it: Arrow IPC stream bytes on `ingest` and `values`, JSON on
+ * A body is sent as the caller gave it: Arrow IPC stream bytes on `ingest`, JSON on
  * declarations, publications and changes, and either on `grow`. A JSON body is serialised once per
  * call, so every attempt of one call sends the same bytes.
  *
@@ -252,7 +252,7 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
  * thrown nor retried. A request that reaches no server is returned with status
  * {@link UNANSWERED}. A call whose `signal` aborts rejects with the signal's reason.
  *
- * `ingest` and `values` send a batch id: the caller's `batch`, or a random id made once per call.
+ * `ingest` sends a batch id: the caller's `batch`, or a random id made once per call.
  * The server holds each accepted batch id against its body, so the same bytes sent again under it
  * are answered as a replay with `replayed: true` and no effect, and different bytes under it are
  * refused with `409`. The id is never derived from the body. The same rows sent in two calls are
@@ -345,27 +345,16 @@ export class Control {
   /**
    * `POST /control/ingest`: one page of rows, given as an Arrow IPC stream. A row names an item by
    * its `tessera_id`, its `external_id` or a unique column's value; a row naming none creates an
-   * item at its position, one naming an item adds it to the view where it has no row there, and
-   * one naming an item it matches changes nothing. Any column may be left out, which keeps what
-   * the item stores; a null clears it. The answer's body counts the rows `created`, `added`,
-   * `unchanged`, `clipped` and `clamped`, lists each row's `tessera_id` in request order as a
-   * decimal string, and names the `publication` the rows become visible in. A row that would
-   * change an item, since editing is not available yet, or whose values name two items, is
-   * refused with `409`, and nothing in the page is stored.
+   * item at its position, one naming an item it matches changes nothing, one naming an item with
+   * no row in the view adds it there, and any other edits the item, which keeps its `tessera_id`.
+   * A row without coordinates changes only what it carries. Any column may be left out, which
+   * keeps what the item stores; a null clears it. The answer's body counts the rows `created`,
+   * `edited`, `added`, `unchanged`, `clipped` and `clamped`, lists each row's `tessera_id` in
+   * request order as a decimal string, and names the `publication` the rows become visible in. A
+   * row whose values name two items is refused with `409`, and nothing in the page is stored.
    */
   ingest(body: Uint8Array, options: RowOptions = {}): Promise<RowAnswer> {
     return this.rows('/control/ingest', body, options);
-  }
-
-  /**
-   * `POST /control/values`: fills attribute values on rows the database holds, one page given as an
-   * Arrow IPC stream. It creates no point. A cell that holds no value takes the one given, a cell
-   * already holding the same value is left as it is, and a cell holding a different value refuses
-   * the whole page. A page naming a column declared `render` is refused with `422`, since a filled
-   * value is not drawn. The answer's body counts the cells `filled` and `held`.
-   */
-  values(body: Uint8Array, options: RowOptions = {}): Promise<RowAnswer> {
-    return this.rows('/control/values', body, options);
   }
 
   /**

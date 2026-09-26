@@ -185,7 +185,8 @@ class PagedReport(Summarised):
     - `rows_accepted`: rows added, by view: each created an item or added one to the view. `rows`
       is their total.
     - `artifacts_minted`, `memberships_joined`: annotations added and memberships joined.
-    - `values_filled`: attribute values set on items already held.
+    - `items_edited`: items already held that a row changed: a value, the label or a position.
+      An edited item keeps its `tessera_id`.
     - `values_bound`, `titles_set`: vocabulary values added and titles replaced.
     - `already_present`: parts the database already held, which changed nothing, rows naming an
       item they matched among them.
@@ -212,7 +213,7 @@ class PagedReport(Summarised):
     artifacts_minted: int = 0
     #: Memberships the pages added, to artifacts this commit minted and to artifacts already held.
     memberships_joined: int = 0
-    values_filled: int = 0
+    items_edited: int = 0
     values_bound: int = 0
     titles_set: int = 0
     already_present: int = 0
@@ -250,13 +251,14 @@ class PagedReport(Summarised):
         for n, what in (
             (self.artifacts_minted, "annotation"),
             (self.memberships_joined, "membership"),
-            (self.values_filled, "value"),
             (self.values_bound, "vocabulary value"),
             (self.titles_set, "vocabulary title"),
         ):
             if n:
                 added.append(_count(n, what))
         line = f"commit: {'ok' if self.ok else 'FAILED'}, added " + (", ".join(added) or "nothing")
+        if self.items_edited:
+            line += f", edited {_count(self.items_edited, 'item')}"
         if self.flush_wait is not None:
             at = "" if self.publication is None else f" for publication {self.publication}"
             if self.flush_reached:
