@@ -148,9 +148,11 @@ holds. The item card route does the same for a `tessera_id`: an item the viewer 
 identifier naming nothing both answer `404 unknown`.
 
 The control plane answers differently, because its caller is the operator, who is trusted with
-every item. An ingest or a values batch setting a unique value another item holds is refused with
-`409`, naming the value and the holder's `tessera_id` whether or not any viewer can see that holder,
-so that the operator can find the item to change. It names the `tessera_id`, never the entity id. A
+every item. An ingest row carrying a unique value names the item that holds it, whether or not any
+viewer can see that item, and the receipt answers its `tessera_id`. An ingest row whose values name
+two items, or a values batch setting a unique value another item holds, is refused with `409`,
+naming the values and the holders' `tessera_id`s so that the operator can find the item to change.
+It names the `tessera_id`, never the entity id. A
 build or a declaration of `unique` refused because values are held twice names how many there are
 and up to ten of the values, and no item.
 

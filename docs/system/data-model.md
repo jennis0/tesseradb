@@ -79,11 +79,12 @@ item: a sentiment score recomputed each quarter, for instance. Reading it under 
 group returns that view's own value. Reading it from anywhere else requires naming the view
 explicitly, because the field holds no single value outside one.
 
-A batch naming an external id already known to the corpus can add the item to a further view. If
-the item is not already in the view the batch names, it joins there under the item's existing
-identity, keeping its label and any value declared once for the whole item. If the item is
-already in that view, or the batch supplies a different label, the batch is refused. This is how
-one item comes to exist in more than one view.
+An ingest row names an item by its `tessera_id`, its external id or the value of a unique field.
+A row naming an item that has no row in the batch's view, carrying a position there, adds the item
+to that view under its existing identity, keeping its label and every value declared once for the
+whole item. This is how one item comes to exist in more than one view. A row that names an item
+and carries what the item stores changes nothing. Not built yet: a row that would change an item's
+values, label or position is refused ([the write path](write-path.md#resolving-a-batch)).
 
 A view, or a view group, can also carry its own access label, narrower than the corpus's default.
 This is an additional gate on top of each item's own label, not a replacement for it: a viewer
@@ -222,12 +223,12 @@ A field that draws but carries no value for some item is stored as absent rather
 numeric zero, so a range query that happens to include zero does not wrongly match items that
 have no value at all.
 
-Every declared field is required wherever an item arrives with its fields. A build refuses a
-source file that lacks the column, or that has no row for an item the build creates, and an
-ingest refuses a row that creates an item without it; a null is how either says an item has no
-value. A row that adds an item already held to another view carries its fields already, so it may
-leave them out, and a values batch fills only the columns it names. A field may not take the name
-of a column the system reads itself, `level` among them.
+A build requires every declared field: it refuses a source file that lacks the column, or that
+has no row for an item the build creates, and a null is how a source says an item has no value.
+An ingest row may leave any field out. On a row naming an item, a field left out keeps the item's
+value and a null clears it; on a row creating one, either leaves the item with no value. A values
+batch fills only the columns it names. A field may not take the name of a column the system reads
+itself, `level` among them.
 
 ### Unique fields
 
@@ -266,8 +267,9 @@ build or at a running service. Declaring it `true` at a running service builds t
 stored value, and the declaration takes effect once that finds no value held twice. Otherwise it is
 refused with the same count and examples, and the field stays as it was. Declaring it `false` drops
 the index at once and keeps the values. Both survive a restart. How the index is built while writes
-continue, and how a write setting a held value is refused, is in
-[the write path](write-path.md#unique-values).
+continue is in [the write path](write-path.md#unique-values). An ingest row carrying a unique value
+names the item that holds it; a row whose values name two items is refused, as is a batch in which
+two rows set one value ([resolving a batch](write-path.md#resolving-a-batch)).
 
 ## Vocabularies
 
