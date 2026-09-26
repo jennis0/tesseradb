@@ -618,9 +618,7 @@ pub struct WalEdit {
 ///
 /// The index that answers `x-tessera-batch-id` is a cache of this log: what it holds after a
 /// restart is whatever the retained members say, so anything that decides "does this record carry
-/// a batch id" twice can forget a kind of batch on one of the two paths and not the other. That is
-/// exactly what happened to `/control/values` (#154): the rebuild matched [`WalRecord::IngestBatch`]
-/// alone and a values id inside the retention window came back unknown.
+/// a batch id" twice can forget a kind of batch on one of the two paths and not the other.
 ///
 /// **A `match` with no wildcard arm**, on [`unbuilt_track`]'s rule: a record kind added later is a
 /// decision taken here, and the compiler asks for it rather than a default answering "carries no
@@ -1191,7 +1189,9 @@ impl SequenceBase {
 #[cfg(unix)]
 fn allocated_bytes(path: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).map(|m| m.blocks() * 512).unwrap_or(0)
+    std::fs::metadata(path)
+        .map(|m| m.blocks() * 512)
+        .unwrap_or(0)
 }
 
 /// Apparent length, where no allocation figure is available. It understates a sparse or
@@ -1659,7 +1659,7 @@ impl Wal {
     /// lived in a member reclamation has deleted.
     ///
     /// **What a restart would find, said while the process is still running.** A replay-derived
-    /// index — the accepted-batch index of `/control/ingest` and `/control/values` — knows only
+    /// index — the accepted-batch index of `/control/ingest` — knows only
     /// what the surviving members carry, so a live process holding entries below this figure
     /// answers a replay one a restart would not. `Executor::rotate_wal` reads this after every
     /// rotation and forgets what fell below it, which is what makes the two agree.
@@ -2786,8 +2786,7 @@ mod tests {
         ];
         // The growth's rank and leaving set are applied by `ArtifactStore::grow_set`, the four
         // fills by `ArtifactStore::fill`, the attribute declaration by
-        // `Executor::declare_attribute`, the values batch by `Executor::commit_values`, the
-        // vocabulary declaration by `Executor::commit_vocabulary_declare` and the two view
+        // `Executor::declare_attribute`, the vocabulary declaration by `Executor::commit_vocabulary_declare` and the two view
         // declarations by `Executor::commit_view_group_create` and `commit_plain_view_create`.
         // **Every record of the ingest design is applied now**, so no arm names a track.
         let tracks: Vec<Option<&str>> = records
@@ -2796,19 +2795,7 @@ mod tests {
             .collect();
         assert_eq!(
             tracks,
-            [
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None
-            ]
+            [None, None, None, None, None, None, None, None, None, None, None]
         );
 
         let (mut wal, _) = Wal::open(&path).unwrap();

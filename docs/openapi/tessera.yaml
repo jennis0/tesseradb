@@ -4704,7 +4704,7 @@ components:
           type: object
           additionalProperties: false
           required: [admission, in_flight, shed_total]
-          description: The admission limit `POST /control/ingest` and `POST /control/values` share, `ingest.ingest_admission`.
+          description: The admission limit of `POST /control/ingest`, `ingest.ingest_admission`.
           properties:
             admission:
               type: integer

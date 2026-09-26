@@ -5,8 +5,7 @@ use super::*;
 // =================================================================================================
 
 /// One accepted batch, as the idempotency index holds it: what each row of the request became,
-/// so a byte-identical replay answers the `tessera_id`s the first acceptance did. An accepted
-/// values batch answers none and carries an empty receipt.
+/// so a byte-identical replay answers the `tessera_id`s the first acceptance did.
 #[derive(Clone)]
 pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) body_hash: [u8; 32],
@@ -18,7 +17,7 @@ pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) wal_pos: u64,
 }
 
-/// The `/control/ingest` and `/control/values` idempotency index: batch id -> what was accepted
+/// The `/control/ingest` idempotency index: batch id -> what was accepted
 /// under it.
 pub(in crate::write) type AcceptedBatches = FxHashMap<String, AcceptedBatch>;
 
@@ -74,7 +73,8 @@ pub(crate) struct LiveState {
     pub(in crate::write) vocabularies: Mutex<crate::vocabularies::RuntimeVocabularies>,
     /// The view groups and plain views declared while the service runs and not yet folded, on
     /// the vocabulary list's contract.
-    pub(in crate::write) view_declarations: Mutex<crate::view_declarations::RuntimeViewDeclarations>,
+    pub(in crate::write) view_declarations:
+        Mutex<crate::view_declarations::RuntimeViewDeclarations>,
 }
 
 impl LiveState {
@@ -160,7 +160,9 @@ impl LiveState {
 
     /// The supplied content of every artifact not yet in a manifest. See
     /// [`tessera_lifecycle::membership::ArtifactStore::unpublished_content`].
-    pub(in crate::write) fn unpublished_content(&self) -> Vec<(tessera_types::EntityId, Vec<(u16, String)>)> {
+    pub(in crate::write) fn unpublished_content(
+        &self,
+    ) -> Vec<(tessera_types::EntityId, Vec<(u16, String)>)> {
         lock_recover(&self.artifacts).unpublished_content()
     }
 
@@ -262,7 +264,10 @@ impl LiveState {
     /// Apply the fold's executed deletions to the resident artifact store: retired artifacts leave
     /// their levels, retired members leave the memberships that survive, and orphaned content is
     /// withdrawn. Returns the levels the retirement moved.
-    pub(in crate::write) fn retire_artifacts(&self, retired: &croaring::Bitmap) -> Vec<(String, u32)> {
+    pub(in crate::write) fn retire_artifacts(
+        &self,
+        retired: &croaring::Bitmap,
+    ) -> Vec<(String, u32)> {
         lock_recover(&self.artifacts).retire(retired)
     }
 
@@ -343,7 +348,10 @@ impl LiveState {
     }
 
     /// Run `f` with the roster held: the create and drop preparations, and nothing else.
-    pub(in crate::write) fn with_roster<R>(&self, f: impl FnOnce(&mut tessera_lifecycle::ViewRoster) -> R) -> R {
+    pub(in crate::write) fn with_roster<R>(
+        &self,
+        f: impl FnOnce(&mut tessera_lifecycle::ViewRoster) -> R,
+    ) -> R {
         let mut roster = lock_recover(&self.roster);
         f(&mut roster)
     }
@@ -472,11 +480,18 @@ impl LiveState {
 
     /// The terms `descriptors` resolve to, interning none: `None` where one is novel, which no
     /// stored label holds.
-    pub(crate) fn lookup_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Option<Vec<TermId>> {
+    pub(crate) fn lookup_terms(
+        &self,
+        dict: &Dict,
+        descriptors: &[Descriptor],
+    ) -> Option<Vec<TermId>> {
         let state = lock_recover(&self.resolver_state);
         descriptors
             .iter()
-            .map(|d| dict.lookup(d).or_else(|| state.0.get(d.as_slice()).copied()))
+            .map(|d| {
+                dict.lookup(d)
+                    .or_else(|| state.0.get(d.as_slice()).copied())
+            })
             .collect()
     }
 

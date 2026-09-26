@@ -359,7 +359,7 @@ struct RawServe {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawIngest {
-    /// Requests to `/control/ingest` and `/control/values` handled at once. One more is refused
+    /// Requests to `/control/ingest` handled at once. One more is refused
     /// with 429 at once. A value above 2305843009213693951 is refused.
     ///
     /// Default: `64`.
@@ -375,12 +375,12 @@ struct RawIngest {
     ///
     /// Default: `1000000`.
     ingest_buffer_max_items: Option<usize>,
-    /// The most rows one `/control/ingest` or `/control/values` request may carry. A request
+    /// The most rows one `/control/ingest` request may carry. A request
     /// with more is refused with 422.
     ///
     /// Default: `10000`.
     ingest_max_batch_rows: Option<usize>,
-    /// The largest body `/control/ingest` or `/control/values` accepts, in bytes. A larger one
+    /// The largest body `/control/ingest` accepts, in bytes. A larger one
     /// is refused with 422.
     ///
     /// Default: `16777216` (16 MiB).
@@ -666,7 +666,10 @@ pub fn load(path: &Path) -> Result<Config> {
 }
 
 /// [`discover`] then [`load`], with the path the deployment was found at.
-pub fn open(explicit: Option<&Path>, from: &Path) -> std::result::Result<(PathBuf, Config), String> {
+pub fn open(
+    explicit: Option<&Path>,
+    from: &Path,
+) -> std::result::Result<(PathBuf, Config), String> {
     let path = discover(explicit, from).map_err(|e| e.to_string())?;
     let config = load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok((path, config))
@@ -776,9 +779,7 @@ fn parse(text: &str) -> Result<Config> {
     let bulk_response_ms = serve.bulk_response_ms.unwrap_or(DEFAULT_BULK_RESPONSE_MS);
 
     let ingest = raw.ingest;
-    let ingest_admission = ingest
-        .ingest_admission
-        .unwrap_or(DEFAULT_INGEST_ADMISSION);
+    let ingest_admission = ingest.ingest_admission.unwrap_or(DEFAULT_INGEST_ADMISSION);
     if ingest_admission > Semaphore::MAX_PERMITS {
         return Err(ConfigError::AdmissionTooLarge {
             key: "ingest.ingest_admission",
@@ -1185,18 +1186,19 @@ mod tests {
 
     #[test]
     fn each_compaction_route_switches_off_independently() {
-        let no_window =
-            parse(&valid_toml_with("", "compaction_window_start = \"off\"")).unwrap();
+        let no_window = parse(&valid_toml_with("", "compaction_window_start = \"off\"")).unwrap();
         assert_eq!(no_window.compaction.window_start_secs, None);
         assert!(no_window.compaction.after_deletions.is_some());
 
-        let no_depth =
-            parse(&valid_toml_with("", "compaction_after_deletions = \"off\"")).unwrap();
+        let no_depth = parse(&valid_toml_with("", "compaction_after_deletions = \"off\"")).unwrap();
         assert_eq!(no_depth.compaction.after_deletions, None);
         assert!(no_depth.compaction.window_start_secs.is_some());
 
-        let err = parse(&valid_toml_with("", "compaction_after_deletions = \"never\""))
-            .unwrap_err();
+        let err = parse(&valid_toml_with(
+            "",
+            "compaction_after_deletions = \"never\"",
+        ))
+        .unwrap_err();
         assert!(matches!(
             err,
             ConfigError::NotANumberOrOff {
@@ -1426,7 +1428,9 @@ mod tests {
             Err(ConfigError::PageBytesTooLarge { .. })
         ));
         assert!(matches!(
-            parse(&valid_toml("max_page_bytes = 4096\nbulk_response_bytes = 4095")),
+            parse(&valid_toml(
+                "max_page_bytes = 4096\nbulk_response_bytes = 4095"
+            )),
             Err(ConfigError::ResponseBelowPage {
                 response_bytes: 4095,
                 page_bytes: 4096
@@ -1434,7 +1438,10 @@ mod tests {
         ));
         // A response time at or past the stream deadline loads: the deadline ends such a read
         // with a trailer to resume from.
-        assert!(parse(&valid_toml("bulk_response_ms = 60000\nstream_deadline_ms = 1")).is_ok());
+        assert!(parse(&valid_toml(
+            "bulk_response_ms = 60000\nstream_deadline_ms = 1"
+        ))
+        .is_ok());
         assert!(matches!(
             parse(&valid_toml(&format!("bulk_admission = {}", usize::MAX / 2))),
             Err(ConfigError::AdmissionTooLarge {

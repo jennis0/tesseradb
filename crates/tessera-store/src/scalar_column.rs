@@ -1,6 +1,6 @@
 //! A column of an Arrow batch read as a declared scalar type: which Arrow types may carry each
 //! declared type, and what each row's value becomes. A build reads a points file's attribute
-//! columns here and the running service reads an ingest or values batch's columns here, so one
+//! columns here and the running service reads an ingest batch's columns here, so one
 //! column loads the same way at either.
 //!
 //! Every integer type carries every integer declaration, and a row whose value does not fit the
@@ -172,9 +172,9 @@ impl ScalarColumn {
         Ok(match &self.values {
             Values::Bool(values) => ScalarValue::Bool(values.value(row)),
             Values::F32(values) => ScalarValue::F32(values[row]),
-            Values::F64AsF32(values) => ScalarValue::F32(
-                narrow_to_f32(values[row]).ok_or(OutOfRange::F32(values[row]))?,
-            ),
+            Values::F64AsF32(values) => {
+                ScalarValue::F32(narrow_to_f32(values[row]).ok_or(OutOfRange::F32(values[row]))?)
+            }
             Values::F64(values) => ScalarValue::F64(values[row]),
             Values::Text(values) => ScalarValue::Utf8(values.value(row).to_string()),
             Values::Ints(values) => self.integer(values[row].into())?,
@@ -321,18 +321,32 @@ mod tests {
     #[test]
     fn a_category_carries_strings_at_either_offset_width_and_nothing_else() {
         let strings = [DataType::Utf8, DataType::LargeUtf8];
-        let others = [DataType::UInt8, DataType::UInt32, DataType::Int64, DataType::Boolean];
+        let others = [
+            DataType::UInt8,
+            DataType::UInt32,
+            DataType::Int64,
+            DataType::Boolean,
+        ];
         for ty in [ScalarType::U8, ScalarType::U16, ScalarType::U32] {
             for found in &strings {
-                assert!(carries(ty, true, found), "{ty:?} category against {found:?}");
+                assert!(
+                    carries(ty, true, found),
+                    "{ty:?} category against {found:?}"
+                );
             }
             for found in &others {
-                assert!(!carries(ty, true, found), "{ty:?} category against {found:?}");
+                assert!(
+                    !carries(ty, true, found),
+                    "{ty:?} category against {found:?}"
+                );
             }
         }
         let keys: ArrayRef = Arc::new(LargeStringArray::from(vec![Some("k"), None]));
         let read = category_keys(&keys).unwrap();
-        assert_eq!((read.column().at(0), read.column().at(1)), (Some("k"), None));
+        assert_eq!(
+            (read.column().at(0), read.column().at(1)),
+            (Some("k"), None)
+        );
         let codes: ArrayRef = Arc::new(UInt8Array::from(vec![1u8]));
         assert!(category_keys(&codes).is_none());
     }
@@ -402,7 +416,9 @@ mod tests {
             Ok(ScalarValue::F32(0.1f32))
         );
         assert_eq!(
-            ScalarColumn::new(&narrow, ScalarType::F64).unwrap().value(0),
+            ScalarColumn::new(&narrow, ScalarType::F64)
+                .unwrap()
+                .value(0),
             Ok(ScalarValue::F64(0.5))
         );
     }

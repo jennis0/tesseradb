@@ -83,8 +83,11 @@ An ingest row names an item by its `tessera_id`, its external id or the value of
 A row naming an item that has no row in the batch's view, carrying a position there, adds the item
 to that view under its existing identity, keeping its label and every value declared once for the
 whole item. This is how one item comes to exist in more than one view. A row that names an item
-and carries what the item stores changes nothing. Not built yet: a row that would change an item's
-values, label or position is refused ([the write path](write-path.md#resolving-a-batch)).
+and carries what the item stores changes nothing. Any other row naming an item edits it: it changes
+a value, the label, the external id or a position, or adds the item to a view whose newest flushed
+item is newer than it. An edit keeps the item's `tessera_id`, the views it is in, its layer
+memberships, the contents generated from it and a suppression standing against it
+([the write path](write-path.md#edits)).
 
 A view, or a view group, can also carry its own access label, narrower than the corpus's default.
 This is an additional gate on top of each item's own label, not a replacement for it: a viewer
@@ -96,7 +99,7 @@ Four identifiers name an item or a view, one for each party that needs to addres
 
 | Identifier | Assigned by | Held by | What changes it |
 |---|---|---|---|
-| entity id | the server, at ingest | never leaves the server | nothing; never reissued today |
+| entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; an id is never reissued |
 | `tessera_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rebuild, which creates a new bundle with a new key |
 | external id | the operator, before ingest | the operator, and any record of a write naming it | nothing, for the item's life |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
@@ -111,8 +114,8 @@ on disc rather than interleaved with it.
 The `tessera_id` is what a client receives and holds instead of the entity id. The key of the
 permutation is drawn at random by `tessera build` each time it creates a bundle and is stored in
 the bundle's manifest. Nobody configures it, and no response carries it. A `tessera_id` is stable
-for the item's life in that bundle, across sessions, restarts, flushes, merges and compactions,
-and a copy of the bundle keeps it. A rebuild issues a new `tessera_id` for every item, and one from
+for the item's life in that bundle, across edits, sessions, restarts, flushes, merges and
+compactions, and a copy of the bundle keeps it. A rebuild issues a new `tessera_id` for every item, and one from
 the old bundle does not name an item in the new one.
 
 ## Projections and the frame
@@ -226,8 +229,8 @@ have no value at all.
 A build requires every declared field: it refuses a source file that lacks the column, or that
 has no row for an item the build creates, and a null is how a source says an item has no value.
 An ingest row may leave any field out. On a row naming an item, a field left out keeps the item's
-value and a null clears it; on a row creating one, either leaves the item with no value. A values
-batch fills only the columns it names. A field may not take the name of a column the system reads
+value and a null clears it; on a row creating one, either leaves the item with no value. A row
+without coordinates changes only the columns it names. A field may not take the name of a column the system reads
 itself, `level` among them.
 
 ### Unique fields
@@ -300,9 +303,6 @@ arrived first.
   entity id to the allocator; the id space only grows, which costs capacity rather than
   correctness. Reusing a freed id after compaction is a ruled design and is not built: the
   allocator stays append-only today, and no entity id is reissued.
-- **Not built yet: ingesting a value for a field that varies by view of a group.** Such a field's
-  value is read at a build, from each view's own points or from one file shared across the
-  group's views. The same value cannot yet be added through a later ingest batch.
 - **Not built yet: amending a vocabulary value's properties without a rebuild.** No control-plane
   route exists for it; changing a value's label or colour today needs a rebuild.
 
