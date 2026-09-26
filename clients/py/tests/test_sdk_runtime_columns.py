@@ -290,3 +290,49 @@ def test_a_vocabulary_no_column_names_is_redeclared_and_answered_as_held(served,
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     assert db.commit().ok
     assert [line for line in db.check().plan if "vocabulary" in line] == []
+
+
+# ---------------------------------------------------------------------------- a unique column
+
+
+def test_a_unique_column_is_declared_filled_looked_up_and_refuses_a_held_value(served, corpus):
+    """`unique=True` on a column declared after the first commit: its values are filled, `lookup`
+    finds the items holding them through `in`, and a fill giving one to a second item is refused."""
+    db = notebook(served, corpus)
+    db.declare_attribute("doi", type="keyword", unique=True)
+    fill(db, "doi", pa.array([f"10.{i}/x" for i in range(len(HELD))], pa.string()))
+    report = db.commit()
+    assert report.ok, report
+    assert declared(db, "doi")["unique"] is True
+
+    found = db.lookup("s0", "doi", ["10.3/x", "10.7/x", "10.nobody/x"])
+    assert sorted(found.column("doi").to_pylist()) == ["10.3/x", "10.7/x"]
+    assert found.num_rows == 2
+
+    # An item holding no `doi` yet, given one another item holds.
+    db.insert(
+        "doi",
+        pa.table({"entity_id": pa.array([HELD[-1] + 1], pa.uint64()), "doi": ["10.7/x"]}),
+        id="entity_id",
+        value="doi",
+    )
+    with pytest.raises(Refusal):
+        db.commit()
+
+
+def test_declare_unique_on_a_held_column_is_sent_at_the_next_commit(served, corpus):
+    """`declare_unique` changes the flag on a column the database holds; the next commit sends the
+    declaration, and the database answers it as unique from then on."""
+    db = notebook(served, corpus)
+    db.declare_attribute("ref", type="u64", index=True)
+    fill(db, "ref", pa.array([1_000 + i for i in range(len(HELD))], pa.uint64()))
+    assert db.commit().ok
+    assert declared(db, "ref")["unique"] is False
+
+    db.declare_unique("ref")
+    plan = db.check()
+    assert plan.ok, plan
+    assert "declare attribute 'ref' unique" in plan.plan
+    assert db.commit().ok
+    assert declared(db, "ref")["unique"] is True
+    assert db.lookup("s0", "ref", [1_000 + 5]).num_rows == 1
