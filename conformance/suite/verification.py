@@ -65,16 +65,17 @@ current state. Background maintenance a tick might dispatch mid-run (a merge, a 
 is entitled to change no answer, so this mechanism — unlike stage invariance — needs no isolation
 from it.
 
-## Two served shapes the expectations must meet half-way
+## How absent values and the points tail are read
 
 - **An absent value is null on the points tail and an omitted field at drill-down**, except a
   category's on the tail, which is its reserved code 0. The declaration's own key→code table
   decides a category's code ([`Declaration`], parsed from the materialised `config.toml` rather
   than restated here).
-- **The points tail is read by position.** After `tessera_id` and `code` come the render columns
-  in manifest order, each named by its column. [`check_points`] compares values by position, and
-  `test_total_verification.py` checks the names separately, so a misnamed column fails that test
-  rather than every value comparison after it.
+- **The render columns are read by position.** The points tail is `tessera_id` and `code`, then
+  the render columns in manifest order, each named by its column. [`check_points`] reads the join
+  column and `code` by name and the render columns by position, and
+  `test_the_points_tail_is_named_by_its_render_declaration` checks their names, so a misnamed
+  column fails that test rather than every value comparison after it.
 
 The drill-down surface (`/v1/items`) is where the non-rendered families are verified — it is the
 only reader of all three homes (§3) — and its `404` is a real answer: the row half requires a
@@ -549,8 +550,8 @@ def check_points(
     denied_fx: frozenset[int],
     reasons: list[str],
 ) -> int:
-    """Every row of one points surface against its own item: the code, and the render tail
-    positionally (module doc). Returns the number of rows verified."""
+    """Every row of one points surface against its own item: the code, and the render columns by
+    position (module doc). Returns the number of rows verified."""
     table = streams_table(canon.points)
     if table is None:
         return 0
@@ -563,8 +564,8 @@ def check_points(
         return 0
     fx_column = table.column("fx_key").to_pylist()
     codes = table.column("code").to_pylist()
-    # Positions 2.. are the render columns in manifest order; their names are checked elsewhere
-    # (module doc).
+    # Positions 2.. are the render columns in manifest order; their names are checked by
+    # `test_the_points_tail_is_named_by_its_render_declaration`.
     tail = [table.column(2 + i).to_pylist() for i in range(len(render))]
     rows = 0
     for i, fx in enumerate(fx_column):
@@ -633,7 +634,12 @@ def check_item(
     for col in declaration.columns:
         want = item.fields[col.name]
         served = fields.get(col.name)
-        if served != want:
+        if want is None and col.name in fields:
+            reasons.append(
+                f"{label}: item {item.e} serves {col.name!r} = {served!r} where the corpus "
+                f"holds no value, which the route leaves out"
+            )
+        elif served != want:
             reasons.append(
                 f"{label}: item {item.e} serves {col.name!r} = {served!r} where the corpus "
                 f"says {want!r}"
