@@ -45,7 +45,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from oracle.harness import CLI_BIN, REPO_ROOT, build_env, ensure_cli_built, write_deployment
+from oracle.harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
 
 # ---------------------------------------------------------------------------------------------
 # The fold — the Python oracle's own implementation of value-suggestion.md §4
@@ -487,9 +487,8 @@ def build_suggest_bundle(work_dir: Path) -> Path:
     bundle = work_dir / "bundle"
     deployment = write_deployment(work_dir / "tessera.toml", bundle=bundle, schema=config)
     subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle), "--mint-id-key"],
+        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
         cwd=REPO_ROOT,
-        env=build_env(),
         check=True,
     )
     return bundle

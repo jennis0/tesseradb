@@ -61,19 +61,13 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, REPO_ROOT, build_env, ensure_cli_built, write_deployment
+from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
 
 N_BASE_ITEMS = 400
 N_TERMS = 6
 EXTENT = "0,65536,0,65536"
 VIEW_ID = "s0"
 SEED = 20260729
-# One fixed identity key for BOTH bundles. See the build-args comment below for why an independent
-# per-bundle key made the point-set comparison vacuous under identity-ordered selection. The value
-# is arbitrary but must be a real key (`IdentityKey::from_hex` refuses degenerate ones); it is the
-# same canonical vector the Rust fixture tests use.
-CANARY_ID_KEY_HEX = "000102030405060708090a0b0c0d0e0f"
-
 # The canary's own term id — deliberately one past the base terms, and never granted to any
 # session `test_canary.py` authorises.
 CANARY_TERM_ID = N_TERMS
@@ -201,21 +195,11 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
                 f"pairs={pairs_path}",
                 "--out",
                 str(out_dir),
-                # Contracts r6 refuses to build unless a human names the identity key's lineage.
-                #
-                # **Both bundles must carry the SAME key, and this is load-bearing, not tidiness.**
-                # `--mint-id-key` was passed here originally, which minted an *independent random
-                # key per bundle*. `tessera_id = FPE_key(shard_id || entity_id)`, so under two keys
-                # the two bundles' identities are unrelated — and since design §7.2 selects the
-                # lowest identities in a tile, the two bundles necessarily draw different samples
-                # whatever the corpus. That made the point-set half of this canary vacuous the
-                # moment selection stopped being position-based: it could only ever have compared
-                # two unrelated permutations. Contracts §2.6 states the property directly — "row
-                # order is key-dependent: a key rotation reorders tied rows".
-                #
-                # Fixing the key isolates the variable this canary is actually about: the presence
-                # of one extra item carrying an ungranted term. It travels in the environment
-                # below, never in an argv: there is no flag that takes a key.
+                # **Both bundles must carry the same identity key.** `tessera_id =
+                # FPE_key(shard_id || entity_id)`, so under two keys the two bundles' identities
+                # are unrelated, and since design §7.2 selects the lowest identities in a tile, the
+                # two bundles draw different samples whatever the corpus. Every build generates
+                # its own key, so three separate builds do not meet this.
                 # Allocation rule 5 (see the module doc): the canary gets its own commit window.
                 # `--batch-items` is the build-side name for the window §11.1 r23 scopes
                 # signature-sorted assignment to. At `N_BASE_ITEMS` the canary-free corpus is
@@ -229,7 +213,6 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
                 str(N_BASE_ITEMS),
             ],
             cwd=REPO_ROOT,
-            env=build_env(CANARY_ID_KEY_HEX),
             check=True,
         )
 

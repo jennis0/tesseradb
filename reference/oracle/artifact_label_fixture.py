@@ -37,13 +37,12 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, REPO_ROOT, build_env, ensure_cli_built, write_deployment
+from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
 
 N_ITEMS = 200
 VIEW_ID = "s0"
 EXTENT_MAX = 65536.0
 SEED = 20260923
-ID_KEY_HEX = "000102030405060708090a0b0c0d0e0f"
 
 TEAMS = "teams"
 SEALED = "sealed"
@@ -272,7 +271,6 @@ def build_bundle(work_dir: Path, *, with_layers: bool) -> Path:
         [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle),
          "--mint-external-ids"],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         check=True,
     )
     return bundle

@@ -117,7 +117,6 @@ from .bundle import Bundle
 from .harness import (
     CLI_BIN,
     REPO_ROOT,
-    build_env,
     ensure_cli_built,
     fixture_dir,
     recipe_matches,
@@ -722,13 +721,6 @@ def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
 # without this comment.
 FULL_VIEWPORT = (0.0, 0.0, 65536.0, 65536.0)
 
-# One fixed identity key, never minted. A minted key is independent per build, and `tessera_id`
-# is both the storage sort key and §7.2's selection order — so two builds under two keys draw
-# different samples from the same corpus, which would make every point-set comparison across a
-# rebuild vacuous. (`canary_fixture.py` records the same reasoning at greater length; it is the
-# same trap.)
-CATALOGUE_ID_KEY_HEX = "0f0e0d0c0b0a09080706050403020100"
-
 # The depth-6 tile the `one_tile` block is confined to. Depth 6 splits each axis into 64 columns
 # of 1,024 grid cells; column 17 is an arbitrary interior choice, away from both the origin and
 # the Morton-maximal corner the canary occupies.
@@ -1193,8 +1185,7 @@ def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
 
     Everything else the build once carried on the command line is in the two documents beside the
     corpus: the declaration names its own sources and its own extent, and the deployment file names
-    the declaration. The identity key travels in the environment ([`harness.build_env`]), never in
-    an argv a CI log would keep.
+    the declaration. The build generates the bundle's identity key.
     """
     return [
         str(CLI_BIN),
@@ -1254,7 +1245,6 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "points_name": POINTS_NAME,
         "pairs_name": PAIRS_NAME,
         "one_tile": [ONE_TILE_DEPTH, ONE_TILE_TX, ONE_TILE_TY],
-        "id_key": CATALOGUE_ID_KEY_HEX,
         # The filter columns' planting rules — everything `department_of`/`title_of` are a
         # function of that the schema text is not. An edited stride under an unchanged
         # declaration would otherwise reuse a bundle whose stored values no longer match the
@@ -1342,7 +1332,6 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     subprocess.run(
         _build_argv(work_dir, bundle_root),
         cwd=REPO_ROOT,
-        env=build_env(CATALOGUE_ID_KEY_HEX),
         check=True,
     )
     write_recipe(bundle_root, wanted)
