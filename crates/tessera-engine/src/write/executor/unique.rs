@@ -181,10 +181,14 @@ impl Executor {
         };
         let attempt = pending.attempt;
         let unit = self.unique_declarations.rounds.start();
+        #[cfg(feature = "fault-injection")]
+        let switches = Arc::clone(&self.deps.switches);
         let spawned = std::thread::Builder::new()
             .name("tessera-unique".to_string())
             .spawn(move || {
                 let outcome = crate::unique::build_round(input);
+                #[cfg(feature = "fault-injection")]
+                switches.hold_unique_round_if_paused();
                 unit.complete(CompletedRound { attempt, outcome });
             });
         if let Err(e) = spawned {

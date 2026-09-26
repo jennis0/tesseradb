@@ -45,6 +45,12 @@ pub(crate) struct TestSwitches {
     /// Whether the executor waits before it drains its work queue into a commit window.
     #[cfg(feature = "fault-injection")]
     pub(crate) work_pass_paused: AtomicBool,
+    /// Whether a unique declaration's round holds between finishing and handing its result back,
+    /// and whether one is holding.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) unique_round_paused: AtomicBool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) unique_round_holding: AtomicBool,
 }
 
 impl TestSwitches {
@@ -72,6 +78,17 @@ impl TestSwitches {
             }
             self.write_check_holding.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// Called by a unique declaration's round once it has finished. Waits while a test holds it.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn hold_unique_round_if_paused(&self) {
+        use std::sync::atomic::Ordering;
+        self.unique_round_holding.store(true, Ordering::SeqCst);
+        while self.unique_round_paused.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        self.unique_round_holding.store(false, Ordering::SeqCst);
     }
 
     /// Called by the executor before it drains its work queue. Waits while a test holds it.
@@ -108,6 +125,10 @@ impl Default for TestSwitches {
             write_check_holding: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             work_pass_paused: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            unique_round_paused: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            unique_round_holding: AtomicBool::new(false),
         }
     }
 }

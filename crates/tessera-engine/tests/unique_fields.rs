@@ -751,14 +751,21 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
     let early_id = engine.tessera_id_of(early[0]).unwrap().raw();
     expected.add(early_id, "10.e/1", BIG * 9, 5_000);
     check_lookups(&engine, &expected, "declared at runtime");
-    // The same items answer on both bundles, by source.
-    let session = full(&built);
+    // The same items answer on both bundles, named by the values they hold.
     let asked: Vec<String> = (0..N).step_by(7).map(doi_of).collect();
-    let on_built = matching(&built, &session, text_in("doi", &asked)).len();
-    let on_runtime = matching(&engine, &full(&engine), text_in("doi", &asked)).len();
-    assert_eq!(on_built, on_runtime);
-    assert_eq!(on_built, asked.len());
-    let _ = expected_built;
+    let items = |engine: &Engine, expected: &Expected| -> BTreeSet<String> {
+        let by_id: BTreeMap<u64, &String> =
+            expected.by_doi.iter().map(|(doi, id)| (*id, doi)).collect();
+        matching(engine, &full(engine), text_in("doi", &asked))
+            .into_iter()
+            .map(|id| by_id[&id].clone())
+            .collect()
+    };
+    assert_eq!(items(&built, &expected_built), items(&engine, &expected));
+    assert_eq!(items(&engine, &expected), asked.iter().cloned().collect());
+    let verified = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
+        .expect("the runtime-declared indexes agree with their columns");
+    assert!(verified.unique_entries >= 3 * N, "every declared index was checked");
 
     assert!(is_taken(try_ingest(
         &engine,
@@ -775,6 +782,9 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
     fold(&engine);
     let engine = restart(&fx, engine);
     check_lookups(&engine, &expected, "declared at runtime, after a fold and a restart");
+    let verified = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
+        .expect("the folded indexes agree with their columns");
+    assert!(verified.unique_entries >= 3 * N, "every folded index was checked");
 }
 
 fn matching_result(engine: &Engine, filter: FilterExpr) -> Result<usize, String> {
@@ -825,6 +835,116 @@ fn a_runtime_declaration_over_duplicates_is_refused() {
         .expect("the twin is held");
     engine.accept_change(twin, ChangeOp::Delete).unwrap();
     assert!(declare(&engine, "doi", true).is_ok());
+}
+
+/// Declare `name` unique on its own thread, holding its build after the first round, and answer
+/// once the round holds.
+fn held_declaration(
+    engine: &Arc<Engine>,
+    name: &'static str,
+) -> std::thread::JoinHandle<Result<bool, AcceptError>> {
+    engine.set_unique_round_paused_for_test(true);
+    let e = Arc::clone(engine);
+    let handle = std::thread::spawn(move || declare(&e, name, true));
+    wait_until("the declaration's round never held", Duration::from_secs(60), || {
+        engine.unique_round_is_holding_for_test()
+    });
+    handle
+}
+
+fn is_unique(engine: &Engine, name: &str) -> bool {
+    engine.meta().declared_scalars.iter().any(|d| d.name == name && d.unique)
+}
+
+/// **A duplicate arriving while a declaration builds refuses it**, whether it is still buffered
+/// when the build ends or a flush published it during a round.
+#[test]
+fn a_duplicate_arriving_mid_build_refuses_the_declaration() {
+    for flushed in [false, true] {
+        let fx = fixture_with(false);
+        let engine = Arc::new(engine_over(&fx));
+        let held = held_declaration(&engine, "doi");
+        ingest(&engine, "twin", vec![row(&engine, "tw", b"0", &doi_of(4), BIG + 13, 7_100)]);
+        if flushed {
+            flush(&engine);
+        }
+        engine.set_unique_round_paused_for_test(false);
+        assert!(
+            matches!(held.join().unwrap(), Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))),
+            "flushed: {flushed}"
+        );
+        assert!(!is_unique(&engine, "doi"));
+    }
+}
+
+/// **A value arriving while a declaration builds is held by it**, buffered or flushed during a
+/// round: once the declaration answers, the value refuses a second holder and is found.
+#[test]
+fn a_value_arriving_mid_build_is_indexed() {
+    for flushed in [false, true] {
+        let fx = fixture_with(false);
+        let engine = Arc::new(engine_over(&fx));
+        let doi = format!("10.mid/{flushed}");
+        let held = held_declaration(&engine, "doi");
+        let item = ingest(&engine, "mid", vec![row(&engine, "mid", b"0", &doi, BIG + 14, 7_200)])[0];
+        if flushed {
+            flush(&engine);
+        }
+        engine.set_unique_round_paused_for_test(false);
+        held.join().unwrap().expect("no value is held twice");
+        assert!(is_taken(try_ingest(
+            &engine,
+            "second",
+            vec![row(&engine, "second", b"0", &doi, BIG + 15, 7_201)]
+        )));
+        if !flushed {
+            flush(&engine);
+        }
+        let id = engine.tessera_id_of(item).unwrap().raw();
+        assert_eq!(matching(&engine, &full(&engine), text_in("doi", &[doi.clone()])), BTreeSet::from([id]));
+    }
+}
+
+/// **A declaration and a fold do not overlap, and each waits for the other**: a declaration made
+/// while a fold runs is built after it, and a fold requested while a declaration builds runs
+/// after it. Both end with the index answering, across a restart, and agreeing with its column.
+#[test]
+fn a_declaration_and_a_fold_wait_for_each_other() {
+    let fx = fixture_with(false);
+    let engine = Arc::new(engine_over(&fx));
+    let expected = Expected::built(&fx, &engine);
+
+    // A fold in flight, then a declaration.
+    engine.set_fold_paused_for_test(true);
+    let folds = engine.write_executor_stats().folds;
+    engine.request_fold();
+    wait_until("the fold never held", Duration::from_secs(60), || {
+        engine.fold_is_holding_for_test()
+    });
+    let e = Arc::clone(&engine);
+    let during_fold = std::thread::spawn(move || declare(&e, "doi", true));
+    engine.set_fold_paused_for_test(false);
+    during_fold.join().unwrap().expect("the declaration is built after the fold");
+    wait_until("the fold never published", Duration::from_secs(60), || {
+        engine.write_executor_stats().folds > folds
+    });
+
+    // A declaration building, then a fold.
+    let held = held_declaration(&engine, "gid");
+    let folds = engine.write_executor_stats().folds;
+    engine.request_fold();
+    engine.set_unique_round_paused_for_test(false);
+    held.join().unwrap().expect("the declaration is built before the fold");
+    wait_until("the fold never published", Duration::from_secs(60), || {
+        engine.write_executor_stats().folds > folds
+    });
+    assert!(declare(&engine, "serial", true).is_ok());
+
+    let engine = restart(&fx, Arc::try_unwrap(engine).ok().expect("one holder"));
+    check_lookups(&engine, &expected, "declared across two folds, after a restart");
+    let verified = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
+        .expect("the indexes agree with their columns");
+    assert!(verified.unique_entries >= 3 * N);
 }
 
 /// **Removing `unique` keeps the values and stops refusing**, and survives a restart.

@@ -1413,10 +1413,14 @@ paths:
         build.
 
         `unique` is the one field a column that exists may change. Declaring it `true` builds the
-        column's index over every value stored, and the answer waits for the build: `200` once it
-        is in force, `409` naming how many values more than one item holds and up to ten of them,
-        and the column is then as it was. Declaring it `false` drops the index at once and keeps
-        the values.
+        column's index over every value stored, and the answer waits for the build, as every write
+        on this plane answers once it is in force: `200` once it is in force, `409` naming how many
+        values more than one item holds and up to ten of them, and the column is then as it was.
+        The build reads each stored value once, so the wait grows with the column's values.
+        Ingests, values batches and denies are answered while it runs, and no fold starts until it
+        ends. A caller that stops waiting does not stop the build, and the same declaration sent
+        again answers once it ends. Declaring it `false` drops the index at once and keeps the
+        values.
       security:
         - operatorCredential: []
       parameters:

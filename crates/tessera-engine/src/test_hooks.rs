@@ -444,4 +444,19 @@ impl Engine {
     pub fn work_enqueued_for_test(&self) -> u64 {
         self.write.health().work_enqueued.load(Ordering::SeqCst)
     }
+
+    /// Hold each round of a unique declaration's build once it has finished, before the executor
+    /// takes its result, so a test can land a write or a flush inside the build.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_unique_round_paused_for_test(&self, paused: bool) {
+        self.switches.unique_round_paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// Whether a round is holding at [`Self::set_unique_round_paused_for_test`]'s hold.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn unique_round_is_holding_for_test(&self) -> bool {
+        self.switches.unique_round_holding.load(Ordering::SeqCst)
+    }
 }
