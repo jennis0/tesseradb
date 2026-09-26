@@ -171,6 +171,82 @@ async fn the_identity_coordinate_changes_with_the_bundle_and_survives_a_restart(
     );
 }
 
+/// **A `tessera_id` names an item only in the bundle that issued it.** The same data built under
+/// another key serves other identifiers: every one bundle A served is an unknown item to bundle B,
+/// and a delete naming them by `tessera_id` is refused with nothing deleted.
+#[tokio::test]
+async fn a_tessera_id_from_another_bundle_names_nothing() {
+    let (first, second) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let first_bundle = build_under_key(first.path(), "000102030405060708090a0b0c0d0e0f");
+    let second_bundle = build_under_key(second.path(), "0f0e0d0c0b0a09080706050403020100");
+
+    let a = spawn_server(
+        &first_bundle,
+        &first.path().join("cache"),
+        &first.path().join("wal.log"),
+    )
+    .await;
+    let token = token_for(&a, &["0"]).await;
+    let (_, points) = decode_viewport(&whole_map(&a, &token, N_ITEMS as usize).await);
+    let issued: Vec<u64> = points.iter().map(|(tessera_id, _)| *tessera_id).collect();
+    assert!(issued.len() > 100, "bundle A serves its items: {}", issued.len());
+    drop(a);
+
+    let b = spawn_server(
+        &second_bundle,
+        &second.path().join("cache"),
+        &second.path().join("wal.log"),
+    )
+    .await;
+    let token = token_for(&b, &["0"]).await;
+    let visible = |body: Vec<u8>| -> u64 {
+        let (tiles, _) = decode_viewport(&body);
+        tiles.iter().map(|(_, visible, _)| *visible).sum()
+    };
+    let before = visible(whole_map(&b, &token, 5).await);
+    for &tessera_id in &issued {
+        assert_eq!(
+            post_item(&b, &token, tessera_id).await.status(),
+            404,
+            "bundle B answered bundle A's tessera_id {tessera_id}"
+        );
+    }
+    let deletes: Vec<serde_json::Value> = issued
+        .iter()
+        .map(|id| serde_json::json!({ "tessera_id": id.to_string(), "op": "delete" }))
+        .collect();
+    let resp = b
+        .client
+        .post(b.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&deletes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "the delete names nothing bundle B issued");
+    assert_eq!(
+        visible(whole_map(&b, &token, 5).await),
+        before,
+        "nothing was deleted"
+    );
+}
+
+/// A whole-map viewport of `s0` at zoom 0 serving at most `k` points, as body bytes.
+async fn whole_map(server: &TestServer, token: &str, k: usize) -> Vec<u8> {
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": k
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.bytes().await.unwrap().to_vec()
+}
+
 /// The standard fixture's data, built into `dir/bundle` under `key`.
 fn build_under_key(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
     let points = dir.join("points.parquet");

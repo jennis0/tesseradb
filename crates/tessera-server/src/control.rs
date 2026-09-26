@@ -942,11 +942,11 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
 
         let address = match (&item.external_id, &item.tessera_id) {
             (Some(external_id), None) => Address::External(
-                    base64::engine::general_purpose::STANDARD
-                        .decode(external_id)
-                        .map_err(|e| {
-                            ApiError::Contract(format!("external_id is not valid base64: {e}"))
-                        })?,
+                base64::engine::general_purpose::STANDARD
+                    .decode(external_id)
+                    .map_err(|e| {
+                        ApiError::Contract(format!("external_id is not valid base64: {e}"))
+                    })?,
             ),
             (None, Some(tessera_id)) => {
                 let id: u64 = tessera_id.parse().map_err(|_| {
@@ -2020,7 +2020,8 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
 }
 
 /// Resolves every member address of a batch to an entity at the boundary. `flat` holds every
-/// address and `widths` each artifact's share. An unresolvable member refuses the batch, never dropped.
+/// address and `widths` each artifact's share. An unresolvable member refuses the batch, never
+/// dropped.
 fn resolve_member_addresses(
     state: &AppState,
     addressing: Addressing,
