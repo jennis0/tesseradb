@@ -229,6 +229,46 @@ value. A row that adds an item already held to another view carries its fields a
 leave them out, and a values batch fills only the columns it names. A field may not take the name
 of a column the system reads itself, `level` among them.
 
+### Unique fields
+
+A field declared `unique` holds each value on at most one item. It suits an identifier the
+operator's data already carries beside the external id: a DOI, an accession number, a GeoNames id.
+
+```toml
+[[attribute]]
+name   = "doi"
+type   = "keyword"
+unique = true
+```
+
+`unique` is allowed on a keyword, an integer of any width and a timestamp. A float has no exact
+equality to index, a boolean has two values, a category's codes are assigned by the server, and a
+text field holds no single value, so `unique` on any of them is refused. It is also refused on a
+field that varies by view of a group, since such a field holds one value per view. A null is no
+value, and any number of items may have none. A deleted item holds nothing, so its value may be
+given to a new item at once. A suppressed item keeps its value, because a suppression is lifted
+later and the item comes back with it.
+
+Each unique field has an index from value to the item holding it, stored in entity space. An
+integer or a timestamp is indexed by its value. A keyword is indexed by a 128-bit hash of its bytes,
+so two different keywords with the same hash would count as one value; that becomes likely only
+at around 2^64 distinct values. The index is added to whatever homes the field's flags give it, and
+the value is still read from those. `/v1/meta` does not list the index among a field's `homes`. It
+publishes the field's `unique` flag, and in `filter_operands` it gives `eq` and `in` alone for a
+unique field with neither `render` nor `index`, because the index is then the field's only filter
+structure ([queries](queries.md#filters)).
+
+A build refuses a corpus in which two items hold one value of a unique field. The refusal says how
+many values are held more than once and names up to ten of them.
+
+`unique` is the one part of a field's declaration that can change once the field exists, at a
+build or at a running service. Declaring it `true` at a running service builds the index over every
+stored value, and the declaration takes effect once that finds no value held twice. Otherwise it is
+refused with the same count and examples, and the field stays as it was. Declaring it `false` drops
+the index at once and keeps the values. Both survive a restart. How the index is built while writes
+continue, and how a write setting a held value is refused, is in
+[the write path](write-path.md#unique-values).
+
 ## Vocabularies
 
 A category's value set is a named object, a vocabulary, and more than one field can draw values
