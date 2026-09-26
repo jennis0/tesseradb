@@ -637,7 +637,7 @@ def test_an_acked_ingest_moves_the_watermark_and_nobody_s_mask(
 
     The half of the journal that models **acked ≠ applied**, exercised end to end: a 200 is
     recorded as durable-and-not-yet-applied, `barrier` polls `/control/status` until the watermark
-    reflects the rows the service said it accepted, and only then is the batch marked applied. The
+    reflects the rows the service said created an item, and only then is the batch marked applied. The
     rule-level cases — a barrier that times out must not mark anything applied, a refused ingest
     must journal nothing — are in `reference/tests/test_journal.py` against a stub, where the
     states can be produced on demand.
@@ -666,7 +666,7 @@ def test_an_acked_ingest_moves_the_watermark_and_nobody_s_mask(
 
     assert len(journal.ingests) == 1
     op = journal.ingests[0]
-    assert op.accepted == 3
+    assert op.created == 3
     assert op.applied is False, "an ingest is acked on WAL fsync, which is not a visibility promise"
     assert op.required_high_water == before_high_water + 3
 

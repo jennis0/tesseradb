@@ -95,10 +95,12 @@ class IngestOp:
 
     sequence: int
     batch_id: str
-    accepted: int
+    #: The rows that created an item, each taking a new entity id. A row adding an item to a view
+    #: or changing nothing takes none.
+    created: int
     tessera_ids: tuple[str, ...] = ()
     # The `entity_id_high_water` the barrier waits for: what it was before the call, plus the
-    # rows the service said it accepted. Captured per batch because that is the only quantity
+    # rows the service said created an item. Captured per batch because that is the only quantity
     # `/control/status` exposes that moves with an ingest at all (see `barrier`).
     required_high_water: int = 0
     applied: bool = False
@@ -245,14 +247,14 @@ class AckedJournal:
         self._sequence += 1
         if response.status_code == 200:
             payload = response.json()
-            accepted = int(payload.get("accepted", 0))
+            created = int(payload["created"])
             self.ingests.append(
                 IngestOp(
                     sequence=self._sequence,
                     batch_id=batch_id,
-                    accepted=accepted,
+                    created=created,
                     tessera_ids=tuple(payload.get("tessera_ids", ()) or ()),
-                    required_high_water=before + accepted,
+                    required_high_water=before + created,
                 )
             )
         else:
@@ -279,8 +281,8 @@ class AckedJournal:
 
         Phase 1's `/control/status` exposes exactly one field that moves with an ingest —
         `entity_id_high_water` — so that is what is polled, against the value captured before the
-        call plus the rows the service said it accepted. It is a **proxy and is named as one**: it
-        establishes that allocation happened, not that a segment was written, and in Phase 1
+        call plus the rows the service said created an item. It is a **proxy and is named as
+        one**: it establishes that allocation happened, not that a segment was written, and in Phase 1
         allocation precedes the ack, so the wait is usually already over when it starts. That is
         the honest state of affairs rather than a barrier that only appears to do something. When
         the status shape gains a per-window field (Task 7a/8), this is the one place to change.
@@ -341,6 +343,6 @@ class AckedJournal:
         included deliberately: when a differential fails, "what did we ask for that was turned
         down?" is usually the question."""
         lines = [str(op) for op in self.ops]
-        lines += [f"#{op.sequence} ingest {op.batch_id} accepted={op.accepted} applied={op.applied}" for op in self.ingests]
+        lines += [f"#{op.sequence} ingest {op.batch_id} created={op.created} applied={op.applied}" for op in self.ingests]
         lines += [f"#{r.sequence} REFUSED {r.what}: {r.status} {r.detail}" for r in self.refused]
         return "\n".join(lines)
