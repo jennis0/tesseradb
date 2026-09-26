@@ -71,13 +71,10 @@ from it.
   category's on the tail, which is its reserved code 0. The declaration's own key→code table
   decides a category's code ([`Declaration`], parsed from the materialised `config.toml` rather
   than restated here).
-- **The points tail is read positionally, not by name.** The tail's buffers are the render columns
-  in manifest order, but the wire currently labels them with the first *k* names of the **full**
-  declaration — the engine hands the serialiser the whole compiled schema while the gather narrows
-  to render columns, so this corpus's `bay` codes arrive under the name `seen_at`. Found by this
-  mechanism's first run; pinned as a strict xfail in `test_total_verification.py` so the fix is
-  noticed. Positional reading is correct both before and after that fix, because the buffer order
-  is the render declaration's either way.
+- **The points tail is read by position.** After `tessera_id` and `code` come the render columns
+  in manifest order, each named by its column. [`check_points`] compares values by position, and
+  `test_total_verification.py` checks the names separately, so a misnamed column fails that test
+  rather than every value comparison after it.
 
 The drill-down surface (`/v1/items`) is where the non-rendered families are verified — it is the
 only reader of all three homes (§3) — and its `404` is a real answer: the row half requires a
@@ -566,8 +563,8 @@ def check_points(
         return 0
     fx_column = table.column("fx_key").to_pylist()
     codes = table.column("code").to_pylist()
-    # Positions 2.. are the render columns in manifest order; the name check is the strict
-    # xfail's business, not a laxity here (module doc).
+    # Positions 2.. are the render columns in manifest order; their names are checked elsewhere
+    # (module doc).
     tail = [table.column(2 + i).to_pylist() for i in range(len(render))]
     rows = 0
     for i, fx in enumerate(fx_column):
