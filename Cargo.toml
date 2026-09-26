@@ -56,6 +56,8 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 postcard = { version = "1", features = ["use-std"] }
 crc32fast = "1"
+# Keyword keys in the key index are the XXH3-128 hash of the string (`tessera_store::key_index`).
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"] }
 arc-swap = "1"
 parking_lot = "0.12"
 # Facade only, no subscriber: a no-op wherever nothing attaches one. Promoted here on its

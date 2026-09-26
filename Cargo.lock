@@ -3104,6 +3104,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "base64",
+ "crc32fast",
  "croaring",
  "memmap2",
  "parquet",
@@ -3120,6 +3121,7 @@ dependencies = [
  "tessera-spatial",
  "tessera-types",
  "tracing",
+ "twox-hash",
 ]
 
 [[package]]
