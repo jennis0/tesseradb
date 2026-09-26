@@ -210,8 +210,10 @@ class Control:
         changes nothing; one naming an item with no row in the view adds it there; any other
         edits the item, which keeps its `tessera_id`. A row without coordinates changes only what
         it carries. Any column may be left out, keeping what the item stores, and a null clears
-        it. The answer counts the rows `created`, `edited`, `added` and `unchanged`, and gives
-        each row's `tessera_id`.
+        it. The answer counts the rows `created`, `edited`, `added` and `unchanged`, and in
+        `joined` the annotation memberships the rows added, and gives each row's `tessera_id`. A
+        row that only places its item in an annotation changes the annotation, not the item, and
+        is counted unchanged.
 
         - `body`: the rows, as an Arrow IPC stream.
         - `batch`: the request's batch id. A retry sends the same id with the same bytes, and the

@@ -107,6 +107,51 @@ pub(super) fn grouped_growth<'a>(
         .collect())
 }
 
+/// How many memberships each entry adds: an entity joining an artifact that did not hold it,
+/// counted for the first entry naming the pair. A key the close mints holds nothing yet. `store`
+/// is read only where a row can restate a membership, which `restating` says.
+pub(super) fn joined_per_entry<W>(
+    closed: &[tessera_lifecycle::ClosedEntry<W>],
+    store: Option<&tessera_lifecycle::ArtifactStore>,
+) -> Vec<u64> {
+    use std::collections::BTreeMap;
+    let mut seen: BTreeMap<(&str, u32, Option<&str>, &str), croaring::Bitmap> = BTreeMap::new();
+    closed
+        .iter()
+        .map(|entry| {
+            let mut joined = 0u64;
+            for join in &entry.memberships {
+                let at = (
+                    join.layer.as_str(),
+                    join.level,
+                    join.view.as_deref(),
+                    join.key.as_str(),
+                );
+                let held = join.ordinal.zip(store).and_then(|(ordinal, store)| {
+                    store
+                        .get(&join.layer, join.level, ordinal)
+                        .map(|record| store.members_of(record))
+                });
+                let counted = seen.entry(at).or_default();
+                for row in &join.rows {
+                    let Some(entity) = entry.entity_ids.get(*row as usize) else {
+                        continue;
+                    };
+                    // Entity space is `u32`-wide, so the narrowing is total.
+                    let entity = entity.raw() as u32;
+                    if held.is_some_and(|members| members.contains(entity)) {
+                        continue;
+                    }
+                    if counted.add_checked(entity) {
+                        joined += 1;
+                    }
+                }
+            }
+            joined
+        })
+        .collect()
+}
+
 /// The artifacts both write doors' resolved memberships named and no artifact holds, one per
 /// `(layer, level, key)`. Two sources naming one unknown key mint once and both join it.
 pub(super) fn grouped_mints<'a>(

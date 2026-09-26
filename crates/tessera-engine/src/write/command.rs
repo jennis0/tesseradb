@@ -116,6 +116,9 @@ pub(crate) struct Ingested {
     /// How many artifacts this batch's membership columns created: a key no artifact held, on a
     /// layer whose `value_set` is open. Reported because a minted artifact cannot be undone.
     pub(crate) minted: u64,
+    /// How many memberships this batch's membership columns added, to artifacts it created and to
+    /// held ones alike.
+    pub(crate) joined: u64,
     /// The batch id was accepted earlier with this body, and `receipt` is that acceptance's.
     pub(crate) replayed: bool,
 }

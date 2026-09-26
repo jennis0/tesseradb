@@ -95,13 +95,20 @@ impl ClosingWindow {
     /// Committed: every waiter of an entry gets that entry's receipt and the artifacts it
     /// created. A death partway leaves some waiters unacked; each gets a 500, not a 503, since
     /// durable.
-    pub(super) fn ack(self, health: &ExecutorHealth, minted_per_entry: Vec<u64>) {
-        for (entry, minted) in self.closed.into_iter().zip(minted_per_entry) {
+    pub(super) fn ack(
+        self,
+        health: &ExecutorHealth,
+        minted_per_entry: Vec<u64>,
+        joined_per_entry: Vec<u64>,
+    ) {
+        let counts = minted_per_entry.into_iter().zip(joined_per_entry);
+        for (entry, (minted, joined)) in self.closed.into_iter().zip(counts) {
             let receipt = entry.receipt().to_vec();
             for waiter in entry.waiters {
                 waiter.ack(Ingested {
                     receipt: receipt.clone(),
                     minted,
+                    joined,
                     replayed: false,
                 });
             }
@@ -363,6 +370,7 @@ impl Executor {
                     reply.ack(Ingested {
                         receipt,
                         minted: 0,
+                        joined: 0,
                         replayed: true,
                     });
                 } else {
@@ -647,16 +655,22 @@ impl Executor {
 
         // A window carrying no join row reads no artifact.
         let restating = joining_entities(closing.entries());
-        let prepared = if restating.is_empty() {
-            growth_records(closing.entries(), None)
+        let (prepared, joined_per_entry) = if restating.is_empty() {
+            (
+                growth_records(closing.entries(), None),
+                joined_per_entry(closing.entries(), None),
+            )
         } else {
             self.live.with_artifacts(|store| {
-                growth_records(
-                    closing.entries(),
-                    Some(HeldMembers {
-                        store,
-                        restating: Some(&restating),
-                    }),
+                (
+                    growth_records(
+                        closing.entries(),
+                        Some(HeldMembers {
+                            store,
+                            restating: Some(&restating),
+                        }),
+                    ),
+                    joined_per_entry(closing.entries(), Some(store)),
                 )
             })
         };
@@ -743,7 +757,7 @@ impl Executor {
 
         self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
         log_minted_artifacts(&minted_per_entry, &mint_records);
-        closing.ack(&self.health, minted_per_entry);
+        closing.ack(&self.health, minted_per_entry, joined_per_entry);
     }
 
     /// Index every entry of a committed window by its batch id, after the swap.

@@ -460,7 +460,7 @@ async fn a_page_without_positions_mints_the_keys_nothing_holds_and_joins_every_r
     );
     // Every row but the four the build had already placed changes its item.
     assert_eq!(
-        body["edited"].as_u64(),
+        body["joined"].as_u64(),
         Some(N - BUILT),
         "every row is placed, in a held artifact or a created one: {body}"
     );
@@ -483,7 +483,7 @@ async fn a_page_without_positions_mints_the_keys_nothing_holds_and_joins_every_r
     .await;
     assert_eq!(status, 200, "{again}");
     assert_eq!(again["minted"].as_u64(), Some(0), "{again}");
-    assert_eq!(again["edited"].as_u64(), Some(0), "{again}");
+    assert_eq!(again["joined"].as_u64(), Some(0), "{again}");
 
     // **And the replay of the first page is a no-op too**, answered off the batch index: the flag
     // is what tells a replay apart from a first submission whose keys another writer had already
@@ -497,7 +497,7 @@ async fn a_page_without_positions_mints_the_keys_nothing_holds_and_joins_every_r
     assert_eq!(status, 200, "{replay}");
     assert_eq!(replay["replayed"].as_bool(), Some(true), "{replay}");
     assert_eq!(replay["minted"].as_u64(), Some(0), "{replay}");
-    assert_eq!(replay["edited"].as_u64(), Some(0), "{replay}");
+    assert_eq!(replay["joined"].as_u64(), Some(0), "{replay}");
 
     tick(&server).await;
     assert_eq!(
@@ -531,7 +531,7 @@ async fn a_restated_page_appends_no_growth_record() {
     .await;
     assert_eq!(status, 200, "{body}");
     assert!(
-        body["edited"].as_u64().unwrap() > 0,
+        body["joined"].as_u64().unwrap() > 0,
         "the first page joins the artifacts the build already held: {body}"
     );
     tick(&server).await;
@@ -546,7 +546,7 @@ async fn a_restated_page_appends_no_growth_record() {
     .await;
     assert_eq!(status, 200, "{again}");
     assert_eq!(again["minted"].as_u64(), Some(0), "{again}");
-    assert_eq!(again["edited"].as_u64(), Some(0), "{again}");
+    assert_eq!(again["joined"].as_u64(), Some(0), "{again}");
     tick(&server).await;
 
     server.shutdown().await;
@@ -596,7 +596,7 @@ async fn a_partly_restated_page_appends_only_the_new_members() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["minted"].as_u64(), Some(8 - BUILT), "{body}");
     assert_eq!(
-        body["edited"].as_u64(),
+        body["joined"].as_u64(),
         Some(N / 2 - BUILT),
         "every row but the four the build placed: {body}"
     );
@@ -613,7 +613,7 @@ async fn a_partly_restated_page_appends_only_the_new_members() {
     assert_eq!(status, 200, "{again}");
     assert_eq!(again["minted"].as_u64(), Some(0), "{again}");
     assert_eq!(
-        again["edited"].as_u64(),
+        again["joined"].as_u64(),
         Some(N / 2),
         "the new rows joined and the restated ones did not: {again}"
     );

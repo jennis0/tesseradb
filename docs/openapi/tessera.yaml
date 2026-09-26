@@ -1044,7 +1044,8 @@ paths:
         adds the item to a view it is older than the newest item of. An edited item keeps its
         `tessera_id`, its views, its layer memberships and a suppression; a label the edit narrows
         applies from the answer on. A row whose one change is placing the item in artifacts that
-        do not hold it is counted in `edited` and joins them without moving the item.
+        do not hold it changes the artifacts, not the item: it is counted in `unchanged`, and the
+        memberships it adds in `joined`.
 
         **Columns.** Every column may be left out, and in JSON every key. A value left out keeps
         what the item stores; a new item has no value there. A null clears it: on an item that
@@ -3593,7 +3594,7 @@ components:
     IngestResponse:
       type: object
       additionalProperties: false
-      required: [rows, created, edited, added, unchanged, over_bound, over_bound_ids, clipped, clamped, tessera_ids, minted, publication]
+      required: [rows, created, edited, added, unchanged, over_bound, over_bound_ids, clipped, clamped, tessera_ids, minted, joined, publication]
       properties:
         rows:
           type: integer
@@ -3644,6 +3645,10 @@ components:
           type: integer
           minimum: 0
           description: Artifacts the batch's layer columns created on `open` layers. A created artifact cannot be undone. `0` on a replay.
+        joined:
+          type: integer
+          minimum: 0
+          description: Memberships the batch's layer columns added, to artifacts it created and to held ones alike. A row whose one change is placing its item in an artifact changes the artifact, not the item, and is counted in `unchanged`. `0` on a replay.
         replayed:
           const: true
           description: Present only when this body was already accepted under this batch id. Nothing was written.

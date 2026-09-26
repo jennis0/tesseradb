@@ -155,8 +155,8 @@ pub enum Slot {
     Written { row: u32, tessera_id: Option<u64> },
     /// The row named this item and changed nothing, so it writes nothing.
     Unchanged { entity: EntityId, tessera_id: u64 },
-    /// The row places this item in artifacts that do not hold it and changes nothing else, so it
-    /// writes no row and the item keeps its entity.
+    /// The row places this item in artifacts that do not hold it and changes nothing else: a
+    /// change to the artifacts, not the item, which keeps its entity and is answered unchanged.
     Joined { entity: EntityId, tessera_id: u64 },
     /// The row moves its item to a new entity as the entry's edit at this position. `added` is a
     /// row whose one change was adding the item to a view, which the receipt counts as added.
@@ -821,7 +821,7 @@ impl<W> CommitWindow<W> {
                         over_bound: false,
                     },
                     Slot::Joined { tessera_id, .. } => RowReceipt {
-                        outcome: RowOutcome::Edited,
+                        outcome: RowOutcome::Unchanged,
                         tessera_id,
                         over_bound: false,
                     },

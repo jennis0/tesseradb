@@ -1241,6 +1241,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.items_edited += int(body.get("edited", 0))
         report.already_present += int(body.get("unchanged", 0))
         report.artifacts_minted += int(body.get("minted", 0))
+        report.memberships_joined += int(body.get("joined", 0))
         report.tessera_ids += body.get("tessera_ids", [])
         report.clipped += int(body.get("clipped", 0))
         report.clamped += int(body.get("clamped", 0))
@@ -1248,6 +1249,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.items_edited += int(body.get("edited", 0))
         report.already_present += int(body.get("unchanged", 0))
         report.artifacts_minted += int(body.get("minted", 0))
+        report.memberships_joined += int(body.get("joined", 0))
     elif page.kind == "publish":
         report.artifacts_minted += int(body.get("created", 0))
         report.already_present += int(body.get("filled", 0))

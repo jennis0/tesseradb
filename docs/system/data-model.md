@@ -87,7 +87,8 @@ and carries what the item stores changes nothing. Any other row naming an item e
 a value, the label, the external id or a position, or adds the item to a view whose newest flushed
 item is newer than it. An edit keeps the item's `tessera_id`, the views it is in, its layer
 memberships, the contents generated from it and a suppression standing against it
-([the write path](write-path.md#edits)).
+([the write path](write-path.md#edits)). A row that places an item in a layer's artifact changes
+the artifact, not the item: the item is not edited and keeps its entity.
 
 A view, or a view group, can also carry its own access label, narrower than the corpus's default.
 This is an additional gate on top of each item's own label, not a replacement for it: a viewer

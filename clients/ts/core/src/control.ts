@@ -349,9 +349,11 @@ export class Control {
    * no row in the view adds it there, and any other edits the item, which keeps its `tessera_id`.
    * A row without coordinates changes only what it carries. Any column may be left out, which
    * keeps what the item stores; a null clears it. The answer's body counts the rows `created`,
-   * `edited`, `added`, `unchanged`, `clipped` and `clamped`, lists each row's `tessera_id` in
-   * request order as a decimal string, and names the `publication` the rows become visible in. A
-   * row whose values name two items is refused with `409`, and nothing in the page is stored.
+   * `edited`, `added`, `unchanged`, `clipped` and `clamped`, counts in `joined` the annotation
+   * memberships the rows added, lists each row's `tessera_id` in request order as a decimal
+   * string, and names the `publication` the rows become visible in. A row that only places its
+   * item in an annotation changes the annotation, not the item, and is counted `unchanged`. A row
+   * whose values name two items is refused with `409`, and nothing in the page is stored.
    */
   ingest(body: Uint8Array, options: RowOptions = {}): Promise<RowAnswer> {
     return this.rows('/control/ingest', body, options);

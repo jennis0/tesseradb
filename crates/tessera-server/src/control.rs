@@ -350,6 +350,9 @@ struct IngestResp {
     /// Artifacts this batch's membership columns created, for keys no artifact held on an open
     /// layer. Reported because a minted artifact cannot be undone.
     minted: u64,
+    /// Memberships this batch's membership columns added, to artifacts it created and to held
+    /// ones alike.
+    joined: u64,
     /// This body was already accepted under this batch id. Every count is then 0, so a client
     /// summing them over retried pages does not double-count; `tessera_ids` is the first
     /// acceptance's.
@@ -533,6 +536,7 @@ fn run_ingest(
             .map(|id| id.raw().to_string())
             .collect(),
         minted: receipt.minted,
+        joined: receipt.joined,
         replayed: receipt.replayed,
         // Filled by the handler, which is where the wait can be awaited.
         publication: 0,

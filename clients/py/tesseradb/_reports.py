@@ -186,7 +186,8 @@ class PagedReport(Summarised):
       is their total.
     - `artifacts_minted`, `memberships_joined`: annotations added and memberships joined.
     - `items_edited`: items already held that a row changed: a value, the label or a position.
-      An edited item keeps its `tessera_id`.
+      An edited item keeps its `tessera_id`. Placing an item in an annotation changes the
+      annotation, not the item, and is counted in `memberships_joined`.
     - `values_bound`, `titles_set`: vocabulary values added and titles replaced.
     - `already_present`: parts the database already held, which changed nothing, rows naming an
       item they matched among them.

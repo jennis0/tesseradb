@@ -66,6 +66,10 @@ pub struct IngestReceipt {
     /// Artifacts the batch's membership columns created, for keys no artifact held on an open
     /// layer.
     pub minted: u64,
+    /// Memberships the batch's membership columns added, to artifacts it created and to held
+    /// ones alike. A row whose one change is a membership changes the artifact, not the item, and
+    /// is counted unchanged.
+    pub joined: u64,
     /// The batch id was accepted before with this body. The `tessera_id`s are the first
     /// acceptance's, and every count is zero, since this request changed nothing.
     pub replayed: bool,
@@ -75,7 +79,7 @@ pub struct IngestReceipt {
 }
 
 impl IngestReceipt {
-    fn of(receipt: &[RowReceipt], minted: u64, replayed: bool) -> IngestReceipt {
+    fn of(receipt: &[RowReceipt], minted: u64, joined: u64, replayed: bool) -> IngestReceipt {
         let count = |outcome| {
             if replayed {
                 return 0;
@@ -92,6 +96,7 @@ impl IngestReceipt {
             added: count(RowOutcome::Added),
             unchanged: count(RowOutcome::Unchanged),
             minted: if replayed { 0 } else { minted },
+            joined: if replayed { 0 } else { joined },
             replayed,
             over_bound: receipt
                 .iter()
@@ -130,7 +135,7 @@ impl Engine {
         }
         if let Some((held_hash, receipt)) = self.write.live().accepted_batch(&request.batch_id) {
             if held_hash == request.body_hash {
-                return Ok(IngestReceipt::of(&receipt, 0, true));
+                return Ok(IngestReceipt::of(&receipt, 0, 0, true));
             }
             return Err(AcceptError::Exec(ExecError::BatchConflict {
                 batch_id: request.batch_id,
@@ -154,6 +159,7 @@ impl Engine {
                     return Ok(IngestReceipt::of(
                         &ingested.receipt,
                         ingested.minted,
+                        ingested.joined,
                         ingested.replayed,
                     ))
                 }

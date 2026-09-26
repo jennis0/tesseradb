@@ -365,9 +365,10 @@ def test_a_second_clustering_over_held_rows_is_one_key_column(served, corpus):
     report = db.commit()
     assert report.ok, report
     assert report.rows_accepted == {}
-    # The two keys no artifact held were minted at this commit, and the five items joined them.
+    # The two keys no artifact held were minted at this commit, and the five items joined them
+    # without being edited.
     assert report.artifacts_minted == 2
-    assert report.items_edited == len(held)
+    assert report.memberships_joined == len(held) and report.items_edited == 0
 
     rows = {row["key"]: row["masked_count"]
             for row in browse(db, "s0", "clusters/second")["artifacts"]}
@@ -401,7 +402,7 @@ def test_a_key_column_into_a_layer_the_database_holds_joins_its_artifacts(served
     )
     report = db.commit()
     assert report.ok, report
-    assert report.items_edited == len(fresh)
+    assert report.memberships_joined == len(fresh)
     after = browse(db, "s0", "clusters/kmeans", q=key)["artifacts"][0]["masked_count"]
     assert after == before + len(fresh)
 
