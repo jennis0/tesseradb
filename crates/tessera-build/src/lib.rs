@@ -1470,7 +1470,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &args.schema,
             |column| crate::unique_index::UniqueSource::Items(&tiler_items, column),
             scratch.path(),
-            args.memory_budget.unwrap_or_else(pipeline::detect_memory_budget),
+            {
+                let budget = args.memory_budget.unwrap_or_else(pipeline::detect_memory_budget);
+                crate::unique_index::spill_budget(budget, budget)
+            },
         )?;
         scratch.close()?;
         written
@@ -1733,6 +1736,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                         )
                     },
                 )?,
+                crate::layers::publication_batch_entries(
+                    args.memory_budget.unwrap_or_else(pipeline::detect_memory_budget),
+                ),
             )?;
             // The runs and the merged table are dead the moment the publication has read them,
             // and this is the success path — so the removal is reported rather than left to
@@ -1807,6 +1813,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &view.view_id,
             n as u32,
             &mut derived_index,
+            crate::term_images_pass::derive_threads(),
         )?]
     };
 
