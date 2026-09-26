@@ -151,19 +151,18 @@ impl Engine {
     }
 
     /// `POST /v1/items/{handle}`: invert `id` to its number and the entity holding it, test
-    /// visibility in entity space, and only then locate a row and read its scalars/external id. Returns `Ok(None)` both when `id`
-    /// names nothing in this bundle and when it names an item the principal may not see: one
-    /// outcome from one code path.
+    /// visibility in entity space, and only then locate a row and read its scalars/external id.
+    /// Returns `Ok(None)` both when `id` names nothing in this bundle and when it names an item the
+    /// principal may not see: one outcome from one code path.
     /// The timing channel is kept small. Inversion is a pure function and the edited-items map is
-    /// probed for every identifier, edited or not. The visibility
-    /// test that follows is an entity-space question — three constant-time probes — and is the
-    /// same three probes for an identifier that names nothing and one that names an invisible
-    /// item: no `RowProjection` is constructed or read, so there is no per-ID cost to correlate
-    /// against. A row is located only after the answer is already visible, and the sidecar is
-    /// read only after that. Returns `Err` rather than a fail-open `None`: a digest mismatch, an
-    /// out-of-order extent or a short locator is a `500`, never an item served with
-    /// `external_id: null`. This does not reopen the timing channel, since the sidecar is touched
-    /// only for an item already established visible.
+    /// probed for every identifier, edited or not. The visibility test that follows is an
+    /// entity-space question — three constant-time probes — and is the same three probes for an
+    /// identifier that names nothing and one that names an invisible item: no `RowProjection` is
+    /// constructed or read, so there is no per-ID cost to correlate against. A row is located only
+    /// after the answer is already visible, and the sidecar is read only after that. Returns `Err`
+    /// rather than a fail-open `None`: a digest mismatch, an out-of-order extent or a short locator
+    /// is a `500`, never an item served with `external_id: null`. This does not reopen the timing
+    /// channel, since the sidecar is touched only for an item already established visible.
     pub fn item(
         &self,
         session: &Session,

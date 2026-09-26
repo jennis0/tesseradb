@@ -140,8 +140,9 @@ async fn rows_naming_items_change_nothing_and_rows_naming_none_create() {
     assert_eq!(body["tessera_ids"][0], created);
 }
 
-/// **A batch the rules refuse is `409` and writes nothing**: a row naming two items, two rows naming one, two rows setting one value, and a `tessera_id`
-/// nobody holds. Each refusal names the items by `tessera_id`, never an entity id.
+/// **A batch the rules refuse is `409` and writes nothing**: a row naming two items, two rows
+/// naming one, two rows setting one value, and a `tessera_id` nobody holds. Each refusal names the
+/// items by `tessera_id`, never an entity id.
 #[tokio::test]
 async fn refused_batches_are_conflicts_and_write_nothing() {
     let served = Served::build(fixture).await;

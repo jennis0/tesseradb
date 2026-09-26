@@ -169,8 +169,8 @@ pub enum Slot {
 
 /// What an entry's rows touch that a later entry's rows must not touch in the same window: the
 /// existing items its rows add to a view, edit or place in artifacts, and the unique values and
-/// external ids its rows give items. Each is decided against state the close writes, so a later row touching one is admitted
-/// only after the window holding it has closed.
+/// external ids its rows give items. Each is decided against state the close writes, so a later row
+/// touching one is admitted only after the window holding it has closed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowClaims {
     pub entities: Vec<EntityId>,

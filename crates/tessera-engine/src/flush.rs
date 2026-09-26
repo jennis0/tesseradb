@@ -773,7 +773,8 @@ fn execute_flush_stages(
     *mark = laps.lap(FlushStage::RecordExtent, *mark);
     let mut text_extents = write_text_extents(&plan, &ctx, laps, *mark)?;
     text_extents.extend(scoped_texts);
-    // Every file of every text extent is digested: `publish_fold` discards the fold if one digest is missing.
+    // Every file of every text extent is digested: `publish_fold` discards the fold if one digest
+    // is missing.
     for extent in &text_extents {
         for rel in extent.files() {
             to_digest.push(rel.to_string());
