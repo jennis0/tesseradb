@@ -37,7 +37,7 @@ impl FilterColumns {
         // Counted in the same pass: extents and base postings are disjoint, so the two halves add.
         let mut from_extents: FxHashMap<u32, u64> = FxHashMap::default();
         for layer in layers.iter().filter(|l| l.values_rel.is_some()) {
-            layer.values.for_each_code_in(candidate, |code| {
+            layer.values.for_each_code_in(candidate, |_, code| {
                 *from_extents.entry(code).or_default() += 1;
             });
         }

@@ -46,7 +46,7 @@
 //!
 //! ## What the batched publication changed about `attached_to`
 //!
-//! A level is published in batches sized by the memory budget ([`publication_batch_entries`]), and
+//! A level is published in batches sized by the build's plan ([`publication_batch_entries`]), and
 //! `prepare_publish` resolves a parent against the batch in hand **plus the store**. So an
 //! `attached_to` naming an artifact in an *earlier batch of the same level* now resolves, where an
 //! unbatched publication refused it as a within-level edge. Whether that shape is accepted
@@ -218,8 +218,7 @@ pub struct LayerPlan {
     minted: BTreeMap<String, u64>,
     /// Every member row's `(artifact, source)` pair, on its way to disk.
     members: MemberSpill,
-    /// The build's memory budget, which is what the publication batch is sized against
-    /// ([`PUBLICATION_BUDGET_SHARE`]).
+    /// The build's memory budget, which is what the member merge's fan-in is sized against.
     memory_budget: u64,
 }
 
@@ -1654,7 +1653,8 @@ impl tessera_lifecycle::GroupViews for DeclaredViews<'_> {
 ///
 /// `resolve` maps a **source** entity id to the entity this build assigned it, and `high_water` is
 /// the point region's mark — passed so the allocator refuses rather than letting the two regions
-/// meet unnoticed.
+/// meet unnoticed. `entries_per_batch` is how many member entries one publication batch holds
+/// ([`publication_batch_entries`]).
 #[allow(clippy::too_many_arguments)]
 pub fn publish(
     plan: &mut LayerPlan,
@@ -1664,6 +1664,7 @@ pub fn publish(
     partition: &str,
     views: &[String],
     derived: &BTreeMap<String, Vec<String>>,
+    entries_per_batch: u64,
 ) -> Result<PublishedLayers> {
     let mut registry = LayerRegistry::new();
     let mut alloc = Allocator::new(high_water);
@@ -1810,12 +1811,9 @@ pub fn publish(
         .join(partition)
         .join("members");
     std::fs::create_dir_all(&members_dir).map_err(|e| BuildError::io(&members_dir, e))?;
-    let entries_per_batch = publication_batch_entries(plan.memory_budget);
     eprintln!(
         "layers: publishing in batches of at most {entries_per_batch} member entr(ies), \
-         {PUBLICATION_BYTES_PER_ENTRY} B an entry against a {}th of the {} MiB budget",
-        PUBLICATION_BUDGET_SHARE,
-        plan.memory_budget >> 20
+         {PUBLICATION_BYTES_PER_ENTRY} B an entry"
     );
     // Each level's pack, written here under a name no final one can take and renamed at
     // [`write_membership_extents`], which is where the extent index in a pack's filename is
@@ -2982,14 +2980,10 @@ fn load_members(
     }
 }
 
-/// The share of the build's memory budget one publication batch may hold.
-///
-/// A quarter. The publication runs between the join and the assembly, where the terms beside it
-/// are the member table's reads and the store's mapped extents rather than anything anonymous, so
-/// a quarter is headroom rather than a squeeze; and a batch larger than a few million entries buys
-/// nothing, the work per artifact being the same in any batch and the batch already built across
-/// the cores.
-pub(crate) const PUBLICATION_BUDGET_SHARE: u64 = 4;
+/// The most member entries one publication batch takes, however much memory is free: 2²⁴, 384 MiB
+/// at [`PUBLICATION_BYTES_PER_ENTRY`]. A batch larger than a few million entries buys nothing, the
+/// work per artifact being the same in any batch and the batch already built across the cores.
+pub(crate) const PUBLICATION_BATCH_MAX_ENTRIES: u64 = 1 << 24;
 
 /// What one member entry costs while a batch is in flight: **24 bytes**.
 ///
@@ -3000,10 +2994,10 @@ pub(crate) const PUBLICATION_BUDGET_SHARE: u64 = 4;
 /// of each before the first is dropped.
 pub(crate) const PUBLICATION_BYTES_PER_ENTRY: u64 = 24;
 
-/// How many member entries one publication batch takes at `memory_budget` — the one arithmetic
-/// [`publish`] cuts its batches by and [`crate::residency`] charges the stage at.
-pub(crate) fn publication_batch_entries(memory_budget: u64) -> u64 {
-    ((memory_budget / PUBLICATION_BUDGET_SHARE) / PUBLICATION_BYTES_PER_ENTRY).max(1)
+/// How many member entries one publication batch takes where the rest of its stage leaves `room`
+/// bytes: what the room holds, one at least and [`PUBLICATION_BATCH_MAX_ENTRIES`] at most.
+pub(crate) fn publication_batch_entries(room: u64) -> u64 {
+    (room / PUBLICATION_BYTES_PER_ENTRY).clamp(1, PUBLICATION_BATCH_MAX_ENTRIES)
 }
 
 /// One level's membership pack, written as the level was published and waiting to be named.
@@ -4408,6 +4402,7 @@ mod tests {
             "default",
             &["world".to_string()],
             &BTreeMap::new(),
+            PUBLICATION_BATCH_MAX_ENTRIES,
         )
         .expect("two artifacts publish");
 
@@ -4897,15 +4892,5 @@ mod tests {
             open_runs_for(MEMBER_BUDGET_MAX * 8),
             MEMBER_MERGE_DESCRIPTOR_CAP
         );
-    }
-
-    /// The publication batch is the budget's share divided by what an entry costs, and never zero.
-    #[test]
-    fn the_publication_batch_is_a_share_of_the_budget() {
-        assert_eq!(
-            publication_batch_entries(24 << 30),
-            (24u64 << 30) / PUBLICATION_BUDGET_SHARE / PUBLICATION_BYTES_PER_ENTRY
-        );
-        assert_eq!(publication_batch_entries(0), 1);
     }
 }
