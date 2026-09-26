@@ -227,7 +227,7 @@ impl Executor {
                 .store(buffer.len(), Ordering::SeqCst);
             // A deleted entity names nothing, so its live unique entries go with its rows.
             let mut unique_live = (*generation.unique_live).clone();
-            unique_live.remove_entities(&deleted);
+            unique_live.remove_entities(&deleted.iter().filter_map(|e| u32::try_from(e.raw()).ok()).collect());
             (Arc::new(buffer), Arc::new(unique_live))
         };
 

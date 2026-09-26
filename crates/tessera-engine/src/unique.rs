@@ -27,21 +27,95 @@ use tessera_types::EntityId;
 use crate::Generation;
 
 /// One entity holding a key, and the sequence number the entry was added under.
-type Entry = (EntityId, u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Entry {
+    key: UniqueKey,
+    entity: EntityId,
+    seq: u64,
+}
+
+/// Entries sorted by key, then entity.
+type Sorted = Arc<[Entry]>;
+
+/// The entries that start at `key` in `run`.
+fn entries_of<'a>(run: &'a [Entry], key: &UniqueKey) -> impl Iterator<Item = &'a Entry> {
+    let key = *key;
+    let from = run.partition_point(|e| e.key < key);
+    run[from..].iter().take_while(move |e| e.key == key)
+}
+
+/// One column's live entries, as sorted runs, oldest first. A run is merged into the one before
+/// it while it is at least half that one's size, so a column holds a logarithmic number of runs,
+/// an entry is copied a logarithmic number of times, and a generation's copy shares every run.
+#[derive(Debug, Clone, Default)]
+struct Column {
+    runs: Vec<Sorted>,
+}
+
+impl Column {
+    fn push(&mut self, mut added: Vec<Entry>) {
+        if added.is_empty() {
+            return;
+        }
+        added.sort_unstable();
+        let mut run = added;
+        while let Some(last) = self.runs.last() {
+            if last.len() > 2 * run.len() {
+                break;
+            }
+            let last = self.runs.pop().expect("a last run");
+            let mut merged = Vec::with_capacity(last.len() + run.len());
+            let (mut i, mut j) = (0, 0);
+            while i < last.len() && j < run.len() {
+                if last[i] <= run[j] {
+                    merged.push(last[i]);
+                    i += 1;
+                } else {
+                    merged.push(run[j]);
+                    j += 1;
+                }
+            }
+            merged.extend_from_slice(&last[i..]);
+            merged.extend_from_slice(&run[j..]);
+            run = merged;
+        }
+        self.runs.push(run.into());
+    }
+
+    /// Remove every entry `gone` answers for, rewriting only the runs that hold one, and answer
+    /// what was removed.
+    fn remove_where(&mut self, gone: impl Fn(&Entry) -> bool) -> Vec<Entry> {
+        let mut removed = Vec::new();
+        for run in &mut self.runs {
+            if !run.iter().any(&gone) {
+                continue;
+            }
+            let (out, kept): (Vec<Entry>, Vec<Entry>) = run.iter().partition(|e| gone(e));
+            removed.extend(out);
+            *run = kept.into();
+        }
+        self.runs.retain(|run| !run.is_empty());
+        removed
+    }
+
+    fn entries<'a>(&'a self, key: &'a UniqueKey) -> impl Iterator<Item = &'a Entry> {
+        self.runs.iter().flat_map(move |run| entries_of(run, key))
+    }
+}
 
 /// The entries one flush moved into runs, by attribute.
-type Retired = BTreeMap<String, FxHashMap<UniqueKey, Vec<Entry>>>;
+type Retired = BTreeMap<String, Sorted>;
 
 /// How many moved entries are kept for the executor's re-check, across the flushes that moved
 /// them. The newest flush's are kept whatever their number.
 const RETIRED_MAX_ENTRIES: usize = 1 << 20;
 
-/// The index entries no run holds yet, per unique column.
+/// The index entries no run holds yet, per unique column. Cloning one copies a few pointers per
+/// column, since every generation shares the entries.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct UniqueLive {
-    /// Keyed by attribute name. An `Arc` per column, so a window adding to one column copies that
-    /// column's map and shares the rest.
-    columns: BTreeMap<String, Arc<FxHashMap<UniqueKey, Vec<Entry>>>>,
+    /// Keyed by attribute name.
+    columns: BTreeMap<String, Column>,
     /// The number the last entry was added under.
     seq: u64,
     /// The entries the latest flushes moved into runs, oldest first, with how many they hold.
@@ -58,38 +132,10 @@ impl UniqueLive {
     pub(crate) fn derive(manifest: &Manifest, buffer: &IngestBuffer) -> UniqueLive {
         let mut live = UniqueLive::default();
         for declared in manifest.declared_scalars.iter().filter(|d| d.unique) {
-            live.columns.insert(declared.name.clone(), Arc::default());
+            live.columns.insert(declared.name.clone(), Column::default());
         }
-        live.add_buffered(manifest, buffer, None);
+        live.add(&manifest.declared_scalars, buffered_scalars(buffer));
         live
-    }
-
-    /// Add the entries of every row and fill `buffer` holds, for `only` or every unique column.
-    fn add_buffered(&mut self, manifest: &Manifest, buffer: &IngestBuffer, only: Option<&str>) {
-        let mut entities: Vec<(EntityId, &[WalScalar])> = buffer
-            .iter()
-            .map(|(entity, item)| (*entity, item.scalars.as_slice()))
-            .chain(
-                buffer
-                    .fills()
-                    .map(|(entity, fill)| (*entity, fill.scalars.as_slice())),
-            )
-            .collect();
-        entities.sort_by_key(|(entity, _)| *entity);
-        for (entity, scalars) in entities {
-            for (at, declared) in manifest.declared_scalars.iter().enumerate() {
-                let wanted = match only {
-                    Some(name) => name == declared.name,
-                    None => declared.unique,
-                };
-                if !wanted {
-                    continue;
-                }
-                if let Some(key) = scalars.get(at).and_then(|v| key_of(declared.arrow_type, v)) {
-                    self.add(&declared.name, key, entity);
-                }
-            }
-        }
     }
 
     /// The sequence number of the last entry added: what a handler checked a batch at.
@@ -108,32 +154,36 @@ impl UniqueLive {
         self.columns.is_empty()
     }
 
-    /// Record that `entity` holds `key` in `attribute`. Does nothing for a column that is not
-    /// unique.
-    pub(crate) fn add(&mut self, attribute: &str, key: UniqueKey, entity: EntityId) {
-        let Some(column) = self.columns.get_mut(attribute) else {
-            return;
-        };
-        self.seq += 1;
-        let entries = Arc::make_mut(column).entry(key).or_default();
-        if !entries.iter().any(|(held, _)| *held == entity) {
-            entries.push((entity, self.seq));
-        }
-    }
-
-    /// Add the entries of one row's or fill's entity-scoped scalars.
-    pub(crate) fn add_scalars(
+    /// Add the entries of each entity's entity-scoped scalars, for every column held here.
+    pub(crate) fn add<'a>(
         &mut self,
         declared: &[DeclaredScalar],
-        entity: EntityId,
-        scalars: &[WalScalar],
+        rows: impl IntoIterator<Item = (EntityId, &'a [WalScalar])>,
     ) {
-        for (at, d) in declared.iter().enumerate() {
-            if !d.unique {
-                continue;
+        let columns: Vec<(usize, &DeclaredScalar)> = declared
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| self.columns.contains_key(&d.name))
+            .collect();
+        if columns.is_empty() {
+            return;
+        }
+        let mut added: Vec<Vec<Entry>> = vec![Vec::new(); columns.len()];
+        for (entity, scalars) in rows {
+            for ((at, d), into) in columns.iter().zip(&mut added) {
+                if let Some(key) = scalars.get(*at).and_then(|v| key_of(d.arrow_type, v)) {
+                    self.seq += 1;
+                    into.push(Entry {
+                        key,
+                        entity,
+                        seq: self.seq,
+                    });
+                }
             }
-            if let Some(key) = scalars.get(at).and_then(|v| key_of(d.arrow_type, v)) {
-                self.add(&d.name, key, entity);
+        }
+        for ((_, d), entries) in columns.into_iter().zip(added) {
+            if let Some(column) = self.columns.get_mut(&d.name) {
+                column.push(entries);
             }
         }
     }
@@ -150,20 +200,16 @@ impl UniqueLive {
             let Some(column) = self.columns.get_mut(attribute) else {
                 continue;
             };
-            let column = Arc::make_mut(column);
-            let into = moved.entry(attribute.to_string()).or_default();
-            for (key, entity) in entries_written {
-                let Some(entries) = column.get_mut(key) else {
-                    continue;
-                };
-                if let Some(i) = entries.iter().position(|(held, _)| held == entity) {
-                    into.entry(*key).or_default().push(entries.swap_remove(i));
-                    count += 1;
-                }
-                if entries.is_empty() {
-                    column.remove(key);
-                }
+            let mut written: Vec<(UniqueKey, EntityId)> = entries_written.to_vec();
+            written.sort_unstable();
+            let mut out =
+                column.remove_where(|e| written.binary_search(&(e.key, e.entity)).is_ok());
+            if out.is_empty() {
+                continue;
             }
+            count += out.len();
+            out.sort_unstable();
+            moved.insert(attribute.to_string(), out.into());
         }
         if count == 0 {
             return;
@@ -173,29 +219,21 @@ impl UniqueLive {
         while held > RETIRED_MAX_ENTRIES && self.retired.len() > 1 {
             let (oldest, n) = self.retired.pop_front().expect("more than one held");
             held -= n;
-            for entries in oldest.values().flat_map(|column| column.values()) {
-                for (_, seq) in entries {
-                    self.flushed_through = self.flushed_through.max(*seq);
-                }
+            for entry in oldest.values().flat_map(|run| run.iter()) {
+                self.flushed_through = self.flushed_through.max(entry.seq);
             }
         }
     }
 
     /// Remove every entry of the deleted entities. A deleted entity names nothing, so this changes
     /// no answer; it only returns the memory.
-    pub(crate) fn remove_entities(&mut self, deleted: &[EntityId]) {
+    pub(crate) fn remove_entities(&mut self, deleted: &croaring::Bitmap) {
         if deleted.is_empty() {
             return;
         }
+        let gone = |e: &Entry| u32::try_from(e.entity.raw()).is_ok_and(|id| deleted.contains(id));
         for column in self.columns.values_mut() {
-            if column.values().all(|entries| entries.iter().all(|(e, _)| !deleted.contains(e))) {
-                continue;
-            }
-            let column = Arc::make_mut(column);
-            column.retain(|_, entries| {
-                entries.retain(|(e, _)| !deleted.contains(e));
-                !entries.is_empty()
-            });
+            column.remove_where(gone);
         }
     }
 
@@ -209,8 +247,14 @@ impl UniqueLive {
         unique: bool,
     ) {
         if unique {
-            self.columns.insert(attribute.to_string(), Arc::default());
-            self.add_buffered(manifest, buffer, Some(attribute));
+            let mut only = UniqueLive {
+                seq: self.seq,
+                ..UniqueLive::default()
+            };
+            only.columns.insert(attribute.to_string(), Column::default());
+            only.add(&manifest.declared_scalars, buffered_scalars(buffer));
+            self.seq = only.seq;
+            self.columns.extend(only.columns);
         } else {
             self.columns.remove(attribute);
         }
@@ -222,11 +266,7 @@ impl UniqueLive {
     /// Every entity a live entry of `attribute` holds under each of `keys`, as `(position in keys,
     /// entity)`.
     pub(crate) fn lookup(&self, attribute: &str, keys: &[UniqueKey]) -> Vec<(usize, EntityId)> {
-        let mut out = Vec::new();
-        if let Some(column) = self.columns.get(attribute) {
-            collect(column, keys, 0, &mut out);
-        }
-        out
+        self.added_after(attribute, keys, 0, false)
     }
 
     /// [`Self::lookup`] over the entries added after `after`, the live ones and the kept ones a
@@ -237,31 +277,33 @@ impl UniqueLive {
         keys: &[UniqueKey],
         after: u64,
     ) -> Vec<(usize, EntityId)> {
+        self.added_after(attribute, keys, after, true)
+    }
+
+    fn added_after(
+        &self,
+        attribute: &str,
+        keys: &[UniqueKey],
+        after: u64,
+        retired: bool,
+    ) -> Vec<(usize, EntityId)> {
         let mut out = Vec::new();
-        if let Some(column) = self.columns.get(attribute) {
-            collect(column, keys, after, &mut out);
-        }
-        for (retired, _) in &self.retired {
-            if let Some(column) = retired.get(attribute) {
-                collect(column, keys, after, &mut out);
-            }
+        let column = self.columns.get(attribute);
+        for (i, key) in keys.iter().enumerate() {
+            let live = column.into_iter().flat_map(|c| c.entries(key));
+            let kept = self
+                .retired
+                .iter()
+                .filter(|_| retired)
+                .filter_map(|(moved, _)| moved.get(attribute))
+                .flat_map(|run| entries_of(run, key));
+            out.extend(
+                live.chain(kept)
+                    .filter(|e| e.seq > after)
+                    .map(|e| (i, e.entity)),
+            );
         }
         out
-    }
-}
-
-fn collect(
-    column: &FxHashMap<UniqueKey, Vec<Entry>>,
-    keys: &[UniqueKey],
-    after: u64,
-    out: &mut Vec<(usize, EntityId)>,
-) {
-    for (i, key) in keys.iter().enumerate() {
-        for (entity, seq) in column.get(key).into_iter().flatten() {
-            if *seq > after {
-                out.push((i, *entity));
-            }
-        }
     }
 }
 
@@ -857,8 +899,31 @@ mod tests {
 
     fn live() -> UniqueLive {
         let mut live = UniqueLive::default();
-        live.columns.insert("id".to_string(), Arc::default());
+        live.columns.insert("id".to_string(), Column::default());
         live
+    }
+
+    fn add(live: &mut UniqueLive, entries: &[(UniqueKey, EntityId)]) {
+        let declared = [DeclaredScalar {
+            name: "id".to_string(),
+            arrow_type: tessera_spatial::tiler::ScalarType::U64,
+            vocabulary: None,
+            analyser: None,
+            index: false,
+            render: false,
+            unique: true,
+        }];
+        let scalars: Vec<[WalScalar; 1]> = entries
+            .iter()
+            .map(|(key, _)| match key {
+                UniqueKey::Int(k) => [WalScalar::U64(*k)],
+                UniqueKey::Keyword(_) => unreachable!("an integer column"),
+            })
+            .collect();
+        live.add(
+            &declared,
+            entries.iter().zip(&scalars).map(|((_, e), s)| (*e, &s[..])),
+        );
     }
 
     /// An entry added after a handler's number is found by the re-check from the moment it is
@@ -870,7 +935,7 @@ mod tests {
         let seen = live.seq();
         let key = UniqueKey::unsigned(7);
         let entity = EntityId::new(3);
-        live.add("id", key, entity);
+        add(&mut live, &[(key, entity)]);
         assert_eq!(live.added_since("id", &[key], seen), vec![(0, entity)]);
         live.flushed([("id", &[(key, entity)][..])]);
         assert!(live.lookup("id", &[key]).is_empty(), "a run holds it now");
@@ -881,11 +946,37 @@ mod tests {
         let filler: Vec<(UniqueKey, EntityId)> = (0..RETIRED_MAX_ENTRIES as u64)
             .map(|i| (UniqueKey::unsigned(1_000 + i), EntityId::new(100 + i)))
             .collect();
-        for (k, e) in &filler {
-            live.add("id", *k, *e);
-        }
+        add(&mut live, &filler);
         live.flushed([("id", &filler[..])]);
         assert!(live.stale_since(seen));
         assert!(!live.stale_since(live.seq()));
+    }
+
+    /// Entries added a window at a time are all found, in a logarithmic number of runs, and a
+    /// flush or a deletion removes exactly its own.
+    #[test]
+    fn windows_of_entries_stay_in_few_runs_and_are_all_found() {
+        let mut live = live();
+        let entries: Vec<(UniqueKey, EntityId)> = (0..10_000u64)
+            .map(|i| (UniqueKey::unsigned(i * 7_919 % 10_007), EntityId::new(i)))
+            .collect();
+        for window in entries.chunks(10) {
+            add(&mut live, window);
+        }
+        let runs = live.columns["id"].runs.len();
+        assert!(runs <= 2 * 14, "{runs} runs for 1,000 windows");
+        let keys: Vec<UniqueKey> = entries.iter().map(|(k, _)| *k).collect();
+        let found = live.lookup("id", &keys);
+        assert_eq!(found.len(), entries.len());
+        assert!(found.iter().all(|(i, e)| entries[*i].1 == *e));
+
+        live.flushed([("id", &entries[..5_000])]);
+        let deleted: croaring::Bitmap = (5_000u32..6_000).collect();
+        live.remove_entities(&deleted);
+        let left: Vec<EntityId> = live.lookup("id", &keys).into_iter().map(|(_, e)| e).collect();
+        let expected: Vec<EntityId> = (6_000..10_000).map(EntityId::new).collect();
+        let mut left = left;
+        left.sort_unstable();
+        assert_eq!(left, expected);
     }
 }

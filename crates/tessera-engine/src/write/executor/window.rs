@@ -827,8 +827,7 @@ impl Executor {
         let mut buffer = (*generation.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
         let declared = &generation.bundle.manifest.declared_scalars;
-        let mut unique_live = (!generation.unique_live.is_empty_schema())
-            .then(|| (*generation.unique_live).clone());
+        let unique = !generation.unique_live.is_empty_schema();
 
         // What the buffered-row lists grow by: every entity this window buffered a row for.
         let mut inserted: Vec<EntityId> = Vec::new();
@@ -847,11 +846,6 @@ impl Executor {
                     m = self.health.lap(WriteStage::RowEstablishedInv, m);
                 }
                 buffer.insert_row_with_terms(row, row_terms);
-                if let Some(unique_live) = unique_live.as_mut() {
-                    if !row.join {
-                        unique_live.add_scalars(declared, row.entity_id, &row.scalars);
-                    }
-                }
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);
                 buffer.set_wal_pos(row.entity_id, &row.view, *wal_pos);
                 self.health.lap(WriteStage::RowWalPos, m);
@@ -860,6 +854,19 @@ impl Executor {
         }
         drop(established);
         drop(established_inverse);
+        // A joining row's values are its item's, whose entries are held already.
+        let unique_live = unique.then(|| {
+            let mut unique_live = (*generation.unique_live).clone();
+            unique_live.add(
+                declared,
+                closed
+                    .iter()
+                    .flat_map(|entry| entry.rows())
+                    .filter(|row| !row.join)
+                    .map(|row| (row.entity_id, row.scalars.as_slice())),
+            );
+            unique_live
+        });
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
         // Published here, and everywhere else buffer occupancy changes.

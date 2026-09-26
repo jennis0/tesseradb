@@ -974,8 +974,14 @@ impl Executor {
         let mut buffer = (*generation.buffer).clone();
         let declared = &generation.bundle.manifest.declared_scalars;
         let mut unique_live = (*generation.unique_live).clone();
+        unique_live.add(
+            declared,
+            planned
+                .fills
+                .iter()
+                .map(|(entity, fill)| (*entity, fill.scalars.as_slice())),
+        );
         for (entity, fill) in planned.fills {
-            unique_live.add_scalars(declared, entity, &fill.scalars);
             buffer.fill(entity, fill, |value| matches!(value, WalScalar::Null));
             buffer.set_fill_wal_pos(entity, values_position);
         }
