@@ -42,11 +42,6 @@ MACHINE_SPECIFIC_SERVE = frozenset(
 )
 
 
-#: The variable the server reads the identity key from where `[identity]` names none:
-#: `tessera_config::DEFAULT_IDENTITY_ENV`.
-DEFAULT_IDENTITY_ENV = "TESSERA_IDENTITY_KEY"
-
-
 def toml_lines(table: dict) -> str:
     """A flat TOML table's `key = value` lines. JSON and TOML spell every scalar and array here
     the same way."""
@@ -68,23 +63,17 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 
 def minted_credentials(source_dir: Path) -> dict[str, str]:
-    """A value for every credential and identity-key variable this deployment names that the
-    environment and the deployment's own `.env` do not carry, minted for this run only.
+    """A value for every credential variable this deployment names that the environment and the
+    deployment's own `.env` do not carry, minted for this run only.
     """
     deployment = tomllib.loads((source_dir / "tessera.toml").read_text())
     serve = deployment["serve"]
     env = dict(os.environ) | read_env_file(source_dir / ".env")
-    minted = {
+    return {
         serve[f"{which}_credential_env"]: secrets.token_urlsafe(32)
         for which in ("session", "operator")
         if not env.get(serve[f"{which}_credential_env"])
     }
-    # An `[identity].env` that is absent, not a string or blank names the default variable.
-    named = deployment.get("identity", {}).get("env")
-    identity = named if isinstance(named, str) and named.strip() else DEFAULT_IDENTITY_ENV
-    if not env.get(identity):
-        minted[identity] = secrets.token_hex(16)
-    return minted
 
 
 class Deployment:
@@ -171,9 +160,6 @@ schema = "{(self.source_dir / 'corpus.toml').resolve()}"
 
 [plugin]
 module = "{source.get('plugin', {}).get('module', 'builtin:passthrough')}"
-
-[identity]
-env = "{source.get('identity', {}).get('env', 'TESSERA_IDENTITY_KEY')}"
 
 [disclosure]
 {toml_lines(source.get("disclosure") or {"token_max_lifetime": 3600})}

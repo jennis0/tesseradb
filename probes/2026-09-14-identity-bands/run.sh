@@ -46,8 +46,8 @@ for prog in "$bin/tessera" "$bin/identity_bands_build" "$bin/identity_bands_prob
 done
 mkdir -p "$out"
 
-# The identity key and the rung's credentials. The deployment file below names the variable; the
-# value never goes in it (configuration.md).
+# The rung's credentials. The deployment file below names the variables; the values never go in
+# it (configuration.md).
 set -a; . "$rung/.env"; set +a
 
 ranks="${RANKS:-}"
@@ -75,9 +75,6 @@ schema = "$rung/corpus.toml"
 
 [plugin]
 module = "builtin:passthrough"
-
-[identity]
-env = "TESSERA_IDENTITY_KEY"
 
 [disclosure]
 token_max_lifetime = 3600

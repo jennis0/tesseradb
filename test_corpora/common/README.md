@@ -83,7 +83,7 @@ Holds both driver results whole, under `serve` and `ingest`, beside:
 | `started_at`, `host` | when and where |
 | `commit`, `dirty` | the checkout's git commit, and whether it had uncommitted changes |
 | `binary` | the path to the `tessera` binary measured |
-| `minted_credentials` | credential and identity-key environment variables minted for this run, sorted |
+| `minted_credentials` | credential environment variables minted for this run, sorted |
 | `ranks` | the ranks file the ladder was built from; `derived` true, with the `fields` and the number of `terms`, where the rung had none |
 | `steps` | wall time per top-level step: `binary`, `check`, `build`, `verify`, `serve`, `ingest` |
 | `check`, `build`, `verify` | each step's `returncode`, `stdout_tail`, `stderr_tail`; `build` also carries §1's fields |
@@ -309,7 +309,7 @@ concatenated.
 | `ingested_view` | the anchor view's name, the one entities are allocated on |
 | `ingest_by_view` | one entry per declared view, on `ingest`'s shape; the anchor's is duplicated at the top level as `ingest` |
 | `publish_rosters` | a column-route layer's roster (key, content, parents, no members), published before the ingest since a hold-out row's column names a key that must exist. Keyed by layer; a missing roster or failed publish carries `{failed: true, reason}` |
-| `minted_credentials` | credential and identity-key environment variables minted for this run, sorted |
+| `minted_credentials` | credential environment variables minted for this run, sorted |
 | `view_recreate` | on a rung with a view group, before the write cycle: the last key of a group owning its views is dropped through `DELETE /control/views/{group}/{key}`, which drops it in every group sharing it, created again through `PUT` with its roster record, sent every row of that key's views and that key's artifacts of every layer scoped to one of their groups, and flushed. A column-route layer's roster rows for the key go before the rows, whose batches carry the member column of every column-route layer drawn on the view; `publish_rosters` and `publish` hold the two publications. `answers_after_drop` is each view's viewport status once dropped (404), and `census` each view's census against the all-in build's, which declared the view fresh |
 | `restart` | the deployment stopped and reopened, compared against itself rather than the all-in build (a write cycle suppresses rows the all-in build still serves): `open_s`, `visible`, `visible_before`, per-view comparisons, `census_equal` |
 | `failures` | plain sentences for what did not hold — a blocked build or serve, a batch not fully accepted, a publication failure, an unequal census surface, a declared level the census compared no artifact at, a census request that did not arrive whole, a fold failure, a restart answering a different count. Empty means the cycle held |

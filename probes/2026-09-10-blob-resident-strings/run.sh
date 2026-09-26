@@ -36,9 +36,6 @@ disk="$(cd "$(dirname "$0")/../2026-09-10-build-disk" && pwd)"
 slices="${SLICES:-25 50 100 200}"
 rung6="${RUNG6:-1}"
 mkdir -p "$work"
-# A corpus with no `.env` of its own builds under this one, which is a fixture key and not a
-# deployment's: what the comparison needs is that both binaries use the same lineage.
-export TESSERA_IDENTITY_KEY="${TESSERA_IDENTITY_KEY:-000102030405060708090a0b0c0d0e0f}"
 
 # ---- part one: the same bundle, byte for byte ------------------------------------------------
 for name in ${IDENTITY:-gbif-64p multiview treeoflife-1m medcpt-1m geonames}; do

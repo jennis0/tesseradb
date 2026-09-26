@@ -193,7 +193,6 @@ def main() -> None:
     proc = subprocess.run(
         build_argv,
         cwd=work, capture_output=True, text=True,
-        env={**__import__("os").environ, "TESSERA_IDENTITY_KEY": C.IDENTITY_KEY},
     )
     if proc.returncode != 0:
         raise SystemExit(f"build failed:\n{proc.stdout}\n{proc.stderr[-4000:]}")

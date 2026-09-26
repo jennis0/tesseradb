@@ -15,22 +15,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-/tmp/tessera-1e9}"
-shift || true
-# Identity-key forwarding, not a default (plan N-1 — this script deliberately supplies NO
-# default): the operator either exports TESSERA_IDENTITY_KEY or passes one of
-# --carry-id-key-from <bundle> / --identity-file <path> / --mint-id-key as trailing arguments.
-# This script's own refusal below is a convenience so an operator who forgets gets a one-line
-# message rather than a build that dies after `df` and input reads; the binary's own N-1 refusal
-# is the actual gate. There is no flag that takes a key: one on a command line reaches shell
-# history, process listings and CI logs.
-IDENTITY_ARGS=("$@")
-if (( ${#IDENTITY_ARGS[@]} == 0 )) && [[ -z "${TESSERA_IDENTITY_KEY:-}" ]]; then
-  echo "ERROR: no identity-key decision." >&2
-  echo "Export TESSERA_IDENTITY_KEY, or pass one of --carry-id-key-from <bundle> /" >&2
-  echo "--identity-file <path> / --mint-id-key as trailing arguments; this script deliberately" >&2
-  echo "supplies NO default (plan N-1)." >&2
-  exit 1
-fi
 MIN_FREE_GB=50
 
 avail_kb=$(df --output=avail -k "$(dirname "$OUT")" 2>/dev/null | tail -1)
@@ -99,5 +83,4 @@ echo "Building the 10^9 bundle at $OUT (no --limit)..."
 /usr/bin/time -v "$BIN" build \
   --deployment "$DEPLOYMENT" \
   --out "$OUT" \
-  --mint-external-ids \
-  "${IDENTITY_ARGS[@]}"
+  --mint-external-ids

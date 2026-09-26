@@ -28,7 +28,6 @@ caps="${CAPS:-8G 6G 5G 4G}"
 cap_slice="${CAP_SLICE:-200}"
 cap_budget="${CAP_BUDGET:-4g}"
 mkdir -p "$work"
-export TESSERA_IDENTITY_KEY="${TESSERA_IDENTITY_KEY:-000102030405060708090a0b0c0d0e0f}"
 
 # Foreign load either side of every run. A build of this size is itself a load average of ten, so
 # the one-minute average says nothing; what matters is whether anything that is not this probe was
