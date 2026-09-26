@@ -84,7 +84,11 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
         seg_id: "seg0".to_string(),
         row_count: items.len() as u32,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),
-        cuts: CutIndex::load(&temp.path().join(CutIndex::FILE), items.len() as u32).unwrap(),
+        cuts: CutIndex::load(
+            &temp.path().join(CutIndex::FILE),
+            items.len() as u32,
+        )
+        .unwrap(),
         columns: ColumnsRef::load(&temp.path().join("columns.arrow")).unwrap(),
     };
     Segment {
@@ -139,15 +143,7 @@ fn mask_over_with(
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let denied = tessera_engine::denied_rows_of(overlay, &perm);
     let buffered = tessera_engine::buffered_rows_of(buffer, &perm);
-    let mask = compose(
-        &satisfied,
-        overlay,
-        buffer,
-        base,
-        &perm,
-        &denied,
-        Some(&buffered),
-    );
+    let mask = compose(&satisfied, overlay, buffer, base, &perm, &denied, Some(&buffered));
     (temp, mask)
 }
 
@@ -618,7 +614,10 @@ fn selection_matches_the_definition_over_both_internal_branches() {
     // Parameters and depths chosen so both branches fire: saturated-and-under-cap at shallow depths
     // with a generous cap, floor-covered at deep depths where tiles hold one or two rows, and a live
     // cut with a small cap to force real selection.
-    for threshold in [Threshold::Saturated, theta_at(&mask, &seg.data, 4, 3)] {
+    for threshold in [
+        Threshold::Saturated,
+        theta_at(&mask, &seg.data, 4, 3),
+    ] {
         for cap in [1usize, 4, 64, 4096] {
             for k_min in [1usize, 2, 6] {
                 let p = params(k_min, cap, threshold);
@@ -1526,10 +1525,7 @@ fn per_cell_selection_returns_what_the_scan_returns() {
         per_cell_selection_over(positions, &mut fired, &mut routed, &mut read_fewer);
     }
     for (tier, &count) in fired.iter().enumerate() {
-        assert!(
-            count > 0,
-            "tier {tier} was never reached, so it was not tested"
-        );
+        assert!(count > 0, "tier {tier} was never reached, so it was not tested");
     }
     assert!(
         routed[0] > 0 && routed[1] > 0,
@@ -1716,10 +1712,7 @@ fn per_value_selection_parts(
         if range.start >= range.end {
             continue;
         }
-        visible_rows.extend(
-            mask.rows_in_range(base + range.start..base + range.end)
-                .iter(),
-        );
+        visible_rows.extend(mask.rows_in_range(base + range.start..base + range.end).iter());
     }
 
     let floor = p.k_min.min(p.cap);
@@ -1853,7 +1846,8 @@ fn per_cell_selection_spans_segments_at_a_row_base() {
                         }
 
                         let vis_a = mask.count_range(range_a.clone());
-                        let vis_b = mask.count_range(n_a + range_b.start..n_a + range_b.end);
+                        let vis_b =
+                            mask.count_range(n_a + range_b.start..n_a + range_b.end);
                         let visible = vis_a + vis_b;
                         if visible == 0 {
                             continue;
@@ -1875,7 +1869,10 @@ fn per_cell_selection_spans_segments_at_a_row_base() {
                         ];
                         let got = Selection::of(&mask, &SelectionParts::new(&parts), &p, visible);
                         let (want_rows, want_visited) = per_value_selection_parts(
-                            &[(&seg_a, range_a.clone(), 0), (&seg_b, range_b.clone(), n_a)],
+                            &[
+                                (&seg_a, range_a.clone(), 0),
+                                (&seg_b, range_b.clone(), n_a),
+                            ],
                             &mask,
                             &p,
                             visible,
@@ -1895,8 +1892,10 @@ fn per_cell_selection_spans_segments_at_a_row_base() {
                         if got.rows_visited < want_visited {
                             read_fewer += 1;
                         }
-                        let tier_a = decode_tier(vis_a, u64::from(range_a.end - range_a.start));
-                        let tier_b = decode_tier(vis_b, u64::from(range_b.end - range_b.start));
+                        let tier_a =
+                            decode_tier(vis_a, u64::from(range_a.end - range_a.start));
+                        let tier_b =
+                            decode_tier(vis_b, u64::from(range_b.end - range_b.start));
                         if tier_a != tier_b {
                             differing_tiers += 1;
                         }

@@ -493,11 +493,7 @@ async fn a_row_may_leave_declared_columns_out_whether_it_adds_or_creates() {
     ] {
         let (status, body) = post_ingest_into(&served, "extra", batch_id, content_type, body).await;
         assert_eq!(status, 200, "{batch_id}: {body}");
-        assert_eq!(
-            (body["created"].clone(), body["added"].clone()),
-            (json!(created), json!(added)),
-            "{batch_id}: {body}"
-        );
+        assert_eq!((body["created"].clone(), body["added"].clone()), (json!(created), json!(added)), "{batch_id}: {body}");
         landed.extend(ingested_ids(&body));
     }
     drain(&served.server).await;
@@ -514,19 +510,10 @@ async fn a_row_may_leave_declared_columns_out_whether_it_adds_or_creates() {
     assert_eq!(resp.status().as_u16(), 200);
     let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
     let served_ids: BTreeSet<u64> = points.into_iter().map(|(id, _)| id).collect();
-    assert_eq!(
-        served_ids,
-        landed.iter().copied().collect(),
-        "every row is in `extra`"
-    );
+    assert_eq!(served_ids, landed.iter().copied().collect(), "every row is in `extra`");
     // An added item kept the value it was created with; a new one holds none.
-    assert_eq!(
-        item(&served, landed[0]).await["fields"]["score"],
-        json!(1.0)
-    );
-    assert!(item(&served, landed[2]).await["fields"]
-        .get("score")
-        .is_none());
+    assert_eq!(item(&served, landed[0]).await["fields"]["score"], json!(1.0));
+    assert!(item(&served, landed[2]).await["fields"].get("score").is_none());
 }
 
 /// **The declaration survives a restart**, from the log alone before any publication and from

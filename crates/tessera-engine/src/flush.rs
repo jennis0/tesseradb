@@ -783,7 +783,10 @@ fn execute_flush_stages(
 
     // ---- the digests, one pass over everything written above ---------------------------------
     for rel in to_digest {
-        files.insert(rel.clone(), digest_of(&ctx.prefix_dir.join(&rel))?);
+        files.insert(
+            rel.clone(),
+            digest_of(&ctx.prefix_dir.join(&rel))?,
+        );
     }
     *mark = laps.lap(FlushStage::Digests, *mark);
 
@@ -863,11 +866,7 @@ fn execute_flush_stages(
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,
         prefix: ctx.prefix,
-        unique_columns: ctx
-            .unique_schema
-            .iter()
-            .map(|(name, _, _)| name.clone())
-            .collect(),
+        unique_columns: ctx.unique_schema.iter().map(|(name, _, _)| name.clone()).collect(),
         unique_runs,
         edited_runs,
     };
@@ -1209,11 +1208,7 @@ fn write_value_extent(
     column: &ExtentColumn<'_>,
 ) -> Result<crate::filter::OpenedExtent, MaintenanceFailed> {
     let scoped = view.is_some();
-    let what = if scoped {
-        "scoped extent"
-    } else {
-        "filter extent"
-    };
+    let what = if scoped { "scoped extent" } else { "filter extent" };
     let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
         column_dir,
         &ctx.seg_id,
@@ -1229,10 +1224,7 @@ fn write_value_extent(
             .and_then(|p| p.to_str())
             .map(str::to_string)
             .ok_or_else(|| {
-                MaintenanceFailed(format!(
-                    "{what} path {} is not under the prefix",
-                    path.display()
-                ))
+                MaintenanceFailed(format!("{what} path {} is not under the prefix", path.display()))
             })
     };
     let values =
@@ -2107,10 +2099,15 @@ fn is_deleted(overlay: &Overlay, entity: EntityId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    
+
+    
 
     use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
     use tessera_lifecycle::IngestBuffer;
-
+    
+    
+    
     use tessera_types::TermId;
 
     const VIEW: &str = "s0";

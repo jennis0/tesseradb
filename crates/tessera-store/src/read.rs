@@ -111,14 +111,10 @@ impl ViewData {
         let segments = self
             .segments_by_row_base()
             .map_err(|seg_id| format!("segment '{seg_id}' has no row base in its view"))?;
-        let slices: Vec<Option<ScalarSlice<'_>>> = segments
-            .iter()
-            .map(|(segment, _)| segment.columns.scalar(column))
-            .collect();
+        let slices: Vec<Option<ScalarSlice<'_>>> =
+            segments.iter().map(|(segment, _)| segment.columns.scalar(column)).collect();
         for entity in entities.iter() {
-            let Some(row) = self
-                .row_space
-                .row_of(tessera_types::EntityId::new(u64::from(entity)))
+            let Some(row) = self.row_space.row_of(tessera_types::EntityId::new(u64::from(entity)))
             else {
                 continue;
             };

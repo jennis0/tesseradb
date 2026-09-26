@@ -84,9 +84,7 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
         // The first flush's rotation opened member 2 before this ingest was acked; the member
         // the next rotation opens is the one that follows the second row's flush.
         wait_until("a rotation", WAIT, || {
-            members(tmp.path())
-                .iter()
-                .any(|m| m.as_str() >= "wal-000003.log")
+            members(tmp.path()).iter().any(|m| m.as_str() >= "wal-000003.log")
         });
         second
     };

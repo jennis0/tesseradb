@@ -514,8 +514,7 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     // an arbitrary row, whereas `2³⁰/4ᵈ` is a multiple of the container width up to depth 7, and
     // a range that starts and ends on container boundaries is counted from the header alone —
     // an unrealistic advantage that a split into N parts would then appear to lose.
-    let mut jitter =
-        StdRng::seed_from_u64(args.seed ^ (u64::from(depth) << 40) ^ (u64::from(shards) << 8));
+    let mut jitter = StdRng::seed_from_u64(args.seed ^ (u64::from(depth) << 40) ^ (u64::from(shards) << 8));
     let parts: Vec<Vec<(u32, Range<u32>)>> = positions
         .iter()
         .map(|&p| {
@@ -666,12 +665,7 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
                 })
                 .collect();
             let tile_visible: u64 = vis.iter().sum();
-            let selected = Selection::of(
-                mask,
-                &SelectionParts::new(&sel_parts),
-                &params,
-                tile_visible,
-            );
+            let selected = Selection::of(mask, &SelectionParts::new(&sel_parts), &params, tile_visible);
             served += selected.rows.len();
         }
         black_box(served);
@@ -689,13 +683,7 @@ fn fmt_us(us: f64) -> String {
     }
 }
 
-fn find<'a>(
-    cells: &'a [Cell],
-    variant: &str,
-    op: &str,
-    shards: u32,
-    depth: u8,
-) -> Option<&'a Cell> {
+fn find<'a>(cells: &'a [Cell], variant: &str, op: &str, shards: u32, depth: u8) -> Option<&'a Cell> {
     cells
         .iter()
         .find(|c| c.variant == variant && c.op == op && c.shards == shards && c.depth == depth)
@@ -881,11 +869,8 @@ fn main() {
             leaves,
             cells,
         };
-        std::fs::write(
-            out,
-            serde_json::to_string_pretty(&report).expect("serialise"),
-        )
-        .expect("write result json");
+        std::fs::write(out, serde_json::to_string_pretty(&report).expect("serialise"))
+            .expect("write result json");
         eprintln!("wrote {}", out.display());
     }
 

@@ -1123,18 +1123,8 @@ mod tests {
     #[test]
     fn interleaved_and_shared_entities_merge_as_the_reader_answers() {
         let dir = tempfile::tempdir().expect("tempdir");
-        tagged_layer(
-            dir.path(),
-            "a",
-            0,
-            &[(1, "a1"), (3, "a3"), (4, "a4"), (6, "a6")],
-        );
-        tagged_layer(
-            dir.path(),
-            "b",
-            0,
-            &[(0, "b0"), (2, "b2"), (5, "b5"), (6, "b6")],
-        );
+        tagged_layer(dir.path(), "a", 0, &[(1, "a1"), (3, "a3"), (4, "a4"), (6, "a6")]);
+        tagged_layer(dir.path(), "b", 0, &[(0, "b0"), (2, "b2"), (5, "b5"), (6, "b6")]);
         tagged_layer(dir.path(), "c", 1, &[(3, "c3"), (7, "c7")]);
         let open = |name: &str| {
             let (blocks, hasrow, directory) = paths_of(dir.path(), name);
@@ -1175,11 +1165,7 @@ mod tests {
                 4 => None,
                 _ => stack_answer(dir.path(), &["a", "b", "c"], entity),
             };
-            assert_eq!(
-                folded.fields_of(entity).expect("read"),
-                expected,
-                "entity {entity}"
-            );
+            assert_eq!(folded.fields_of(entity).expect("read"), expected, "entity {entity}");
         }
     }
 

@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::fixed32;
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_store::manifest::{
-    CurrentPointer, DenySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
-    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    CurrentPointer, DenySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
+    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
@@ -229,8 +229,7 @@ pub fn flush_segment(
             shard_id: 0,
             scalar_schema: &[],
             row_base,
-        },
-        &[],
+        }, &[],
     )
     .expect("write_flush_segment");
 

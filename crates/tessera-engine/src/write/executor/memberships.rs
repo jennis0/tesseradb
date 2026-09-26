@@ -207,10 +207,8 @@ pub(super) fn mint_plan<W>(
         closed.iter().map(|entry| entry.memberships.as_slice()),
         &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
     )?;
-    let edges: Vec<tessera_lifecycle::BatchEdge> = closed
-        .iter()
-        .flat_map(|e| e.edges.iter().cloned())
-        .collect();
+    let edges: Vec<tessera_lifecycle::BatchEdge> =
+        closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
     if wanted.is_empty() && edges.is_empty() {
         return Ok(None);
     }
@@ -357,7 +355,8 @@ impl Executor {
                     // Carried to the close: on the publication that creates the child, or as a
                     // fill on a child that exists without a parent.
                     Ok(
-                        tessera_lifecycle::EdgeCheck::Mints | tessera_lifecycle::EdgeCheck::Records,
+                        tessera_lifecycle::EdgeCheck::Mints
+                        | tessera_lifecycle::EdgeCheck::Records,
                     ) => settling.push(edge.clone()),
                     Err(e) => return Err(e.to_string()),
                 }
@@ -527,7 +526,15 @@ impl Executor {
                     })
                 };
                 let record = registry
-                    .prepare_publish(layer, *level, &incoming, store, alloc, &pending, &views)
+                    .prepare_publish(
+                        layer,
+                        *level,
+                        &incoming,
+                        store,
+                        alloc,
+                        &pending,
+                        &views,
+                    )
                     .map_err(|e| e.to_string())?;
                 let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
                     unreachable!("prepare_publish returns an ArtifactPublish");
@@ -571,12 +578,8 @@ impl Executor {
             let mut fills = Vec::new();
             for edge in edges {
                 let view = edge.view.as_deref();
-                if assigned.contains_key(&(
-                    edge.layer.as_str(),
-                    edge.level,
-                    view,
-                    edge.child.as_str(),
-                )) {
+                if assigned.contains_key(&(edge.layer.as_str(), edge.level, view, edge.child.as_str()))
+                {
                     continue;
                 }
                 let pending = |key: &str| {
@@ -585,12 +588,10 @@ impl Executor {
                         .find(|((layer, _, in_view, held), _)| {
                             *layer == edge.layer && *in_view == view && *held == key
                         })
-                        .map(
-                            |((_, level, _, _), ordinal)| tessera_lifecycle::wal::ParentRef {
-                                level: *level,
-                                ordinal: *ordinal,
-                            },
-                        )
+                        .map(|((_, level, _, _), ordinal)| tessera_lifecycle::wal::ParentRef {
+                            level: *level,
+                            ordinal: *ordinal,
+                        })
                 };
                 if let Some(record) = registry
                     .prepare_parent_fill(

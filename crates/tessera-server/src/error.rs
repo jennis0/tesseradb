@@ -34,10 +34,7 @@ pub enum ApiError {
     FailClosed(String),
     /// 429: a bound shed the whole request. `Retry-After` and the body's `retry_after_s` carry the
     /// same number, chosen per [`ShedCause`].
-    Backpressure {
-        retry_after_s: u64,
-        cause: ShedCause,
-    },
+    Backpressure { retry_after_s: u64, cause: ShedCause },
     /// 503: the write executor was never started, or stopped before it was handed the command, so
     /// this node took nothing. A receipt lost after the executor took the command is a 500 instead,
     /// because the command may be in force. The detail is fixed and there is no `Retry-After`: the
@@ -262,14 +259,18 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
 /// fixed string.
 pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
     tracing::error!(detail = %e, "bundle/sidecar read failed; answering fail-closed");
-    ApiError::FailClosed("could not read this bundle's stored data".to_string())
+    ApiError::FailClosed(
+        "could not read this bundle's stored data".to_string(),
+    )
 }
 
 /// Maps a WAL append or fsync failure to a fail-closed 500. The OS error's text can name a path,
 /// so it is logged and never sent.
 pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
     tracing::error!(detail = %e, "wal append/fsync failed; answering fail-closed");
-    ApiError::FailClosed("a durability write failed".to_string())
+    ApiError::FailClosed(
+        "a durability write failed".to_string(),
+    )
 }
 
 /// Maps one write-executor outcome to its answer; every variant is named. A WAL failure's 500
@@ -428,7 +429,9 @@ fn change_request_in_force(
 /// never sent.
 pub fn map_join_error(e: tokio::task::JoinError) -> ApiError {
     tracing::error!(detail = %e, "spawn_blocking closure panicked; answering fail-closed");
-    ApiError::FailClosed("an internal error occurred while handling this request".to_string())
+    ApiError::FailClosed(
+        "an internal error occurred while handling this request".to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -525,10 +528,7 @@ mod tests {
     /// refusal, which the deny lane cannot produce, is not a 429.
     #[test]
     fn a_change_request_that_reached_nothing_is_503_never_429() {
-        for e in [
-            SubmitError::ExecutorDead,
-            SubmitError::QueueFull { retry_after_s: 1 },
-        ] {
+        for e in [SubmitError::ExecutorDead, SubmitError::QueueFull { retry_after_s: 1 }] {
             let (status, code, _) =
                 map_change_batch_error(&[ChangeOp::Suppress], AcceptError::Submit(e)).parts();
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -541,10 +541,7 @@ mod tests {
     #[test]
     fn a_change_request_that_may_be_in_force_is_500() {
         let lost = AcceptError::Submit(SubmitError::ReceiptLost);
-        assert_eq!(
-            change_request_in_force(&[ChangeOp::Unsuppress], &lost),
-            Some(true)
-        );
+        assert_eq!(change_request_in_force(&[ChangeOp::Unsuppress], &lost), Some(true));
         let both = [ChangeOp::Unsuppress, ChangeOp::Delete];
         assert_eq!(change_request_in_force(&both, &wal_failure()), Some(true));
         assert_eq!(
@@ -634,13 +631,7 @@ mod tests {
 
     fn assert_single_flight_429(e: ApiError) {
         assert!(
-            matches!(
-                e,
-                ApiError::Backpressure {
-                    cause: ShedCause::SingleFlight,
-                    ..
-                }
-            ),
+            matches!(e, ApiError::Backpressure { cause: ShedCause::SingleFlight, .. }),
             "a single-flight shed must not be reported as the compute gate's, got {e:?}"
         );
         let response = e.into_response();
@@ -730,10 +721,7 @@ mod tests {
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(code, "fail-closed");
             for fragment in ["/srv", "seg-0007", "records.blob", "144999"] {
-                assert!(
-                    !detail.contains(fragment),
-                    "{detail:?} carries {fragment:?}"
-                );
+                assert!(!detail.contains(fragment), "{detail:?} carries {fragment:?}");
             }
         }
     }

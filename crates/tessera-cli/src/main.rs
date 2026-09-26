@@ -450,10 +450,7 @@ fn readyz(mut addr: std::net::SocketAddr, timeout: std::time::Duration) -> Resul
         .send()
         .map_err(|e| {
             if e.is_timeout() {
-                format!(
-                    "{addr} did not answer /readyz within {} s",
-                    timeout.as_secs()
-                )
+                format!("{addr} did not answer /readyz within {} s", timeout.as_secs())
             } else if e.is_connect() {
                 format!("no server answering at {addr}: {}", innermost(&e))
             } else {
@@ -581,7 +578,10 @@ fn resolve_declaration(
     let bindings = collect_bindings(file)?;
     let config = tessera_build::config::Config::parse_with(&schema_path, &bindings, strictness)
         .map_err(|e| e.to_string())?;
-    Ok(Declaration { deployment, config })
+    Ok(Declaration {
+        deployment,
+        config,
+    })
 }
 
 /// The `--file` bindings as one map, refusing a key bound twice.
@@ -1068,7 +1068,10 @@ fn main() -> ExitCode {
             // whole build. Every rule in `tessera_build::config`
             // fires here, against no data at all — which is also the whole of what `tessera check`
             // does, through this same function.
-            let Declaration { deployment, config } = match resolve_declaration(
+            let Declaration {
+                deployment,
+                config,
+            } = match resolve_declaration(
                 deployment.as_deref(),
                 config,
                 file,

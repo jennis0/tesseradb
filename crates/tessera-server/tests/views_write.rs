@@ -802,7 +802,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
             &served,
             "join-again",
             "quarter:2026-Q5",
-            &[(id.clone(), 810.0, 310.0, &["0"][..], Some(7))],
+            &[(id.clone(), 810.0, 310.0, &["0"][..], Some(7))]
         )
         .await,
     )
@@ -1063,7 +1063,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "reingest-live",
             "world",
-            &[(also_elsewhere.clone(), 30.0, 30.0, &["0"][..], Some(1))],
+            &[(also_elsewhere.clone(), 30.0, 30.0, &["0"][..], Some(1))]
         )
         .await,
     )
@@ -1139,7 +1139,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             &served,
             "both-again",
             "world",
-            &[(both.clone(), 70.0, 70.0, &["0"][..], Some(6))],
+            &[(both.clone(), 70.0, 70.0, &["0"][..], Some(6))]
         )
         .await,
     )
@@ -1986,7 +1986,6 @@ async fn a_row_giving_an_item_a_value_it_never_held_changes_it() {
         "a row carrying the item's position and nothing else changes nothing: {left_out}"
     );
 }
-
 
 /// One view's points under a filter, so a test can ask what a **view's own tail** carries rather
 /// than what the drill-down reports. The drill-down answers from the first view holding a row and

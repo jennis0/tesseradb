@@ -179,10 +179,7 @@ async fn require_operator_credential(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
-    state.check_bearer(
-        crate::state::bearer_token(request.headers()),
-        &state.operator_credential,
-    )?;
+    state.check_bearer(crate::state::bearer_token(request.headers()), &state.operator_credential)?;
     Ok(next.run(request).await)
 }
 
@@ -389,12 +386,10 @@ fn run_ingest(
         None => None,
     };
     let extent = view.map(crate::filter_dto::view_extent);
-    let frame = view
-        .zip(extent.as_ref())
-        .map(|(view, extent)| crate::decode::Frame {
-            projection: view.projection,
-            extent,
-        });
+    let frame = view.zip(extent.as_ref()).map(|(view, extent)| crate::decode::Frame {
+        projection: view.projection,
+        extent,
+    });
     let view_id = view.map(|view| view.id.clone());
 
     // The group-scoped families this batch may carry: those whose group owns this view's key,
@@ -880,9 +875,8 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
 /// Holds until the counter reaches `publication` or `serve.visible_wait_max_secs` passes; a
 /// ceiling too large to add to the clock waits without one.
 async fn await_publication(state: &AppState, publication: u64) -> PublicationAck {
-    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_secs(
-        state.limits.visible_wait_max_secs,
-    ));
+    let deadline = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(state.limits.visible_wait_max_secs));
     loop {
         if state.engine.publication() >= publication {
             return PublicationAck {
@@ -986,11 +980,7 @@ async fn register_layer(
                  key of it; name {} or a view of {}, or drop the scope",
                 outside.view,
                 outside.sharing.join(" or "),
-                if outside.sharing.len() == 1 {
-                    "it"
-                } else {
-                    "them"
-                }
+                if outside.sharing.len() == 1 { "it" } else { "them" }
             ))
         })?;
     }
@@ -1565,14 +1555,12 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
         // The view each artifact belongs to, on a group-scoped layer. A null cell names none.
         let views = match batch.column_by_name("view") {
             None => None,
-            Some(column) => Some(column.as_any().downcast_ref::<StringArray>().ok_or_else(
-                || {
-                    ApiError::Contract(
-                        "growth body: column 'view' is not utf8; it names each artifact's view key"
-                            .to_string(),
-                    )
-                },
-            )?),
+            Some(column) => Some(column.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+                ApiError::Contract(
+                    "growth body: column 'view' is not utf8; it names each artifact's view key"
+                        .to_string(),
+                )
+            })?),
         };
         let access = labels_col("growth body", &batch, "access")
             .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
@@ -1990,7 +1978,8 @@ fn canonical_row_shape(
     let Some(kind) = declaration.shape.map(|s| s.kind) else {
         if !carried.is_empty() {
             return Err(refuse(
-                "carries a shape, and this layer declares no `shape`; remove the shape".to_string(),
+                "carries a shape, and this layer declares no `shape`; remove the shape"
+                    .to_string(),
             ));
         }
         return Ok(None);
@@ -2537,7 +2526,8 @@ async fn grow_memberships(
         return Err(ApiError::Contract(format!(
             "the growth names {} members, over the {}-member limit \
              (ingest.max_members_per_request); send fewer members per request",
-            members, state.limits.max_members_per_request
+            members,
+            state.limits.max_members_per_request
         )));
     }
 

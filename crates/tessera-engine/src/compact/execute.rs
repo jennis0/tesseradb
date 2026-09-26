@@ -291,7 +291,8 @@ fn fold_postings(
     let pairs_path = ctx.to_prefix_dir.join(&pairs_rel);
     let spool_path = terms_dir.join("postings.spool");
     {
-        let mut spool = PostingsSpool::create(&spool_path).map_err(failed("pass 2 (spool)"))?;
+        let mut spool =
+            PostingsSpool::create(&spool_path).map_err(failed("pass 2 (spool)"))?;
         let mut pairs =
             PairsParquetWriter::create(&pairs_path).map_err(failed("pass 2 (pairs)"))?;
         let sweep = sweep_term_postings(
@@ -399,7 +400,8 @@ fn derive_term_images(
                 view: segment.view.clone(),
                 incarnation: segment.incarnation,
                 dict_len,
-                keep_rows_per_container: tessera_store::term_images::KEEP_ROWS_PER_CONTAINER as u32,
+                keep_rows_per_container: tessera_store::term_images::KEEP_ROWS_PER_CONTAINER
+                    as u32,
             },
             summary,
         });
@@ -465,16 +467,12 @@ fn fold_unique_indexes(
             &ctx.to_prefix_dir.join(&out_rel),
             "base",
         )
-        .map_err(failed(format!(
-            "pass 3b (unique index '{}')",
-            index.attribute
-        )))?;
+        .map_err(failed(format!("pass 3b (unique index '{}')", index.attribute)))?;
         let mut base = Vec::with_capacity(written.len());
         for run in written {
-            let listed = run.as_base(&ctx.to_prefix_dir).map_err(failed(format!(
-                "pass 3b (unique index '{}')",
-                index.attribute
-            )))?;
+            let listed = run
+                .as_base(&ctx.to_prefix_dir)
+                .map_err(failed(format!("pass 3b (unique index '{}')", index.attribute)))?;
             out.push(listed.path.clone(), run.path);
             base.push(listed);
         }
@@ -535,7 +533,10 @@ fn fold_edited_items(
 fn digest_and_sync(out: &FoldOutput) -> Result<BTreeMap<String, FileDigest>, MaintenanceFailed> {
     let mut files = BTreeMap::new();
     for (rel, path) in &out.written {
-        files.insert(rel.clone(), crate::flush::digest_of(path)?);
+        files.insert(
+            rel.clone(),
+            crate::flush::digest_of(path)?,
+        );
     }
     let paths: Vec<PathBuf> = out.written.iter().map(|(_, path)| path.clone()).collect();
     tessera_store::fsync_written(&paths).map_err(failed("pass 5 (durability)"))?;

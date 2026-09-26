@@ -81,11 +81,7 @@ impl ClosingWindow {
         for (i, entry) in self.closed.into_iter().enumerate() {
             for (k, waiter) in entry.waiters.into_iter().enumerate() {
                 // A joined retry was never appended separately, so it has nothing else to be told.
-                let e = if k == 0 {
-                    blame.at(i)
-                } else {
-                    WalError::Poisoned
-                };
+                let e = if k == 0 { blame.at(i) } else { WalError::Poisoned };
                 waiter.fail(ExecError::Wal(e));
             }
         }
@@ -338,10 +334,7 @@ impl Executor {
 
     /// Close `window` and return its replacement, stamped after the close: stamped first, the
     /// replacement would charge its predecessor's whole service to itself.
-    pub(super) fn close_and_reopen(
-        &mut self,
-        window: CommitWindow<Reply<Ingested>>,
-    ) -> CommitWindow<Reply<Ingested>> {
+    pub(super) fn close_and_reopen(&mut self, window: CommitWindow<Reply<Ingested>>) -> CommitWindow<Reply<Ingested>> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
     }
@@ -749,11 +742,7 @@ impl Executor {
             .chain(growth.iter().map(|(record, _)| record))
             .chain(carried.iter())
             .collect();
-        self.apply_artifact_records(
-            &artifact_records,
-            &positions[artifacts_at..],
-            Publish::AtTick,
-        );
+        self.apply_artifact_records(&artifact_records, &positions[artifacts_at..], Publish::AtTick);
 
         self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
         log_minted_artifacts(&minted_per_entry, &mint_records);

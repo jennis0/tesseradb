@@ -321,32 +321,18 @@ mod tests {
     #[test]
     fn a_category_carries_strings_at_either_offset_width_and_nothing_else() {
         let strings = [DataType::Utf8, DataType::LargeUtf8];
-        let others = [
-            DataType::UInt8,
-            DataType::UInt32,
-            DataType::Int64,
-            DataType::Boolean,
-        ];
+        let others = [DataType::UInt8, DataType::UInt32, DataType::Int64, DataType::Boolean];
         for ty in [ScalarType::U8, ScalarType::U16, ScalarType::U32] {
             for found in &strings {
-                assert!(
-                    carries(ty, true, found),
-                    "{ty:?} category against {found:?}"
-                );
+                assert!(carries(ty, true, found), "{ty:?} category against {found:?}");
             }
             for found in &others {
-                assert!(
-                    !carries(ty, true, found),
-                    "{ty:?} category against {found:?}"
-                );
+                assert!(!carries(ty, true, found), "{ty:?} category against {found:?}");
             }
         }
         let keys: ArrayRef = Arc::new(LargeStringArray::from(vec![Some("k"), None]));
         let read = category_keys(&keys).unwrap();
-        assert_eq!(
-            (read.column().at(0), read.column().at(1)),
-            (Some("k"), None)
-        );
+        assert_eq!((read.column().at(0), read.column().at(1)), (Some("k"), None));
         let codes: ArrayRef = Arc::new(UInt8Array::from(vec![1u8]));
         assert!(category_keys(&codes).is_none());
     }
@@ -416,9 +402,7 @@ mod tests {
             Ok(ScalarValue::F32(0.1f32))
         );
         assert_eq!(
-            ScalarColumn::new(&narrow, ScalarType::F64)
-                .unwrap()
-                .value(0),
+            ScalarColumn::new(&narrow, ScalarType::F64).unwrap().value(0),
             Ok(ScalarValue::F64(0.5))
         );
     }

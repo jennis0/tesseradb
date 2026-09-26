@@ -28,9 +28,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_background_refresh_for_test(&self, enabled: bool) {
-        self.switches
-            .refresh_enabled
-            .store(enabled, Ordering::SeqCst);
+        self.switches.refresh_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// Turn the background occupancy fill off, so a request computes every rung itself, letting a
@@ -39,9 +37,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_occupancy_stage_for_test(&self, enabled: bool) {
-        self.switches
-            .occupancy_stage_enabled
-            .store(enabled, Ordering::SeqCst);
+        self.switches.occupancy_stage_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// How many background occupancy fills are still running, for a test to poll rather than
@@ -105,9 +101,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_fold_publication_paused_for_test(&self, paused: bool) {
-        self.switches
-            .fold_publication_paused
-            .store(paused, Ordering::SeqCst);
+        self.switches.fold_publication_paused.store(paused, Ordering::SeqCst);
         if !paused {
             self.write.wake();
         }
@@ -168,15 +162,10 @@ impl Engine {
         let busy = [
             (&health.flush_in_flight, &health.flush_completed_pending),
             (&health.merge_in_flight, &health.merge_completed_pending),
-            (
-                &health.coalesce_in_flight,
-                &health.coalesce_completed_pending,
-            ),
+            (&health.coalesce_in_flight, &health.coalesce_completed_pending),
             (&health.fold_in_flight, &health.fold_completed_pending),
         ];
-        !busy
-            .iter()
-            .any(|(running, pending)| outstanding(running, pending))
+        !busy.iter().any(|(running, pending)| outstanding(running, pending))
             && !self.refresh_in_flight()
     }
 
@@ -184,10 +173,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn flush_handed_back_for_test(&self) -> bool {
-        self.write
-            .health()
-            .flush_completed_pending
-            .load(Ordering::SeqCst)
+        self.write.health().flush_completed_pending.load(Ordering::SeqCst)
     }
 
     /// Hold the background refresh in flight, so a test can land a racer in that window.
@@ -232,9 +218,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_coalesce_for_test(&self, enabled: bool) {
-        self.switches
-            .coalesce_enabled
-            .store(enabled, Ordering::SeqCst);
+        self.switches.coalesce_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// Override the serial/parallel fan-out threshold (`viewport::SERIAL_FALLBACK_MAX_ROWS`),
@@ -314,10 +298,7 @@ impl Engine {
     /// and [`Self::projection_builds_by_route`] records the walk for a caller to assert on.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
-    pub fn force_projection_route_for_test(
-        &self,
-        route: Option<crate::projection::ProjectionRoute>,
-    ) {
+    pub fn force_projection_route_for_test(&self, route: Option<crate::projection::ProjectionRoute>) {
         self.projection_routes.force(route);
     }
 
@@ -397,9 +378,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn owned_memberships_for_test(&self) -> usize {
-        self.write
-            .live()
-            .with_artifacts(|store| store.owned_memberships())
+        self.write.live().with_artifacts(|store| store.owned_memberships())
     }
 
     /// Every artifact of one level as `(ordinal, members, mapped)`, where `mapped` says the
@@ -435,9 +414,7 @@ impl Engine {
     #[doc(hidden)]
     pub fn hold_next_write_check_for_test(&self) {
         self.switches.write_check_held.store(true, Ordering::SeqCst);
-        self.switches
-            .write_check_hold_wanted
-            .store(true, Ordering::SeqCst);
+        self.switches.write_check_hold_wanted.store(true, Ordering::SeqCst);
     }
 
     /// Whether a batch is waiting at [`Self::hold_next_write_check_for_test`]'s hold.
@@ -450,9 +427,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn release_write_check_for_test(&self) {
-        self.switches
-            .write_check_held
-            .store(false, Ordering::SeqCst);
+        self.switches.write_check_held.store(false, Ordering::SeqCst);
     }
 
     /// Hold the executor before it drains its work queue into a commit window, so work submitted
@@ -460,9 +435,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_work_pass_paused_for_test(&self, paused: bool) {
-        self.switches
-            .work_pass_paused
-            .store(paused, Ordering::SeqCst);
+        self.switches.work_pass_paused.store(paused, Ordering::SeqCst);
     }
 
     /// How many commands have been put on the executor's work queue.
@@ -477,9 +450,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_unique_round_paused_for_test(&self, paused: bool) {
-        self.switches
-            .unique_round_paused
-            .store(paused, Ordering::SeqCst);
+        self.switches.unique_round_paused.store(paused, Ordering::SeqCst);
     }
 
     /// Whether a round is holding at [`Self::set_unique_round_paused_for_test`]'s hold.

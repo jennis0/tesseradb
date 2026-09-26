@@ -155,11 +155,7 @@ fn measuring<T>(f: impl FnOnce() -> T) -> (T, u64, u64) {
     TRACKING.store(true, Ordering::Relaxed);
     let out = f();
     TRACKING.store(false, Ordering::Relaxed);
-    (
-        out,
-        PEAK.load(Ordering::Relaxed),
-        TOTAL.load(Ordering::Relaxed),
-    )
+    (out, PEAK.load(Ordering::Relaxed), TOTAL.load(Ordering::Relaxed))
 }
 
 // ------------------------------------------------------------------------------------------
@@ -178,10 +174,7 @@ struct SegmentLayout {
 
 impl SegmentLayout {
     fn with_bases(&self) -> Vec<(&SegmentData, u32)> {
-        self.segments
-            .iter()
-            .zip(self.bases.iter().copied())
-            .collect()
+        self.segments.iter().zip(self.bases.iter().copied()).collect()
     }
 }
 
@@ -215,10 +208,7 @@ fn deal(n: usize, parts: usize, split: Split) -> Vec<Vec<usize>> {
         Split::Flush { flush_rows } => {
             let flushes = parts - 1;
             let want = flush_rows * flushes;
-            assert!(
-                want < n,
-                "the flush segments want more rows than the corpus has"
-            );
+            assert!(want < n, "the flush segments want more rows than the corpus has");
             // A stride pick spreads the flushed points over the whole extent, which is what a
             // window of arrivals is: the flushes take every `stride`-th point and the base keeps
             // the rest.
@@ -289,10 +279,7 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
         temps.push(temp);
     }
 
-    assert!(
-        row_of.iter().all(|r| *r != u32::MAX),
-        "every point took a row"
-    );
+    assert!(row_of.iter().all(|r| *r != u32::MAX), "every point took a row");
     SegmentLayout {
         _temps: temps,
         segments,
@@ -333,17 +320,10 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     let overlay = Overlay::default();
     let buffer = IngestBuffer::default();
     let denied = tessera_engine::denied_rows_of(&overlay, &perm);
-    let mask = compose(
-        &satisfied,
-        &overlay,
-        &buffer,
-        base,
-        &perm,
-        &denied,
-        Some(&[]),
-    );
+    let mask = compose(&satisfied, &overlay, &buffer, base, &perm, &denied, Some(&[]));
     (temp, mask)
 }
+
 
 // ------------------------------------------------------------------------------------------
 // The exact reference, and the four routes under comparison
@@ -582,11 +562,7 @@ fn timed<T>(repeats: usize, mut f: impl FnMut() -> T) -> (u128, u128, T) {
         ts.push(t0.elapsed().as_nanos());
         std::hint::black_box(&out);
     }
-    (
-        *ts.iter().min().expect("a timed call"),
-        median(ts.clone()),
-        out,
-    )
+    (*ts.iter().min().expect("a timed call"), median(ts.clone()), out)
 }
 
 fn main() {
@@ -650,18 +626,8 @@ fn main() {
     println!();
     println!(
         "{:>5} {:>5} {:>11} {:>11} {:>8} {:>11} {:>11} {:>11} {:>11} {:>11} {:>9} {:>9}",
-        "segs",
-        "depth",
-        "exact",
-        "sketch",
-        "err %",
-        "union ns",
-        "tiered ns",
-        "exactlad ns",
-        "flat ns",
-        "ladder ns",
-        "ladder kB",
-        "exlad kB"
+        "segs", "depth", "exact", "sketch", "err %", "union ns", "tiered ns", "exactlad ns",
+        "flat ns", "ladder ns", "ladder kB", "exlad kB"
     );
 
     for &parts in &args.segments {
@@ -727,10 +693,7 @@ fn main() {
             assert_eq!(union_n, exact_d, "the union arm disagreed at depth {depth}");
             let (tiered_ns, tiered_med, tiered_n) =
                 timed(args.repeats, || route_tiered(&mask, &segments, depth));
-            assert_eq!(
-                tiered_n, exact_d,
-                "the tiered arm disagreed at depth {depth}"
-            );
+            assert_eq!(tiered_n, exact_d, "the tiered arm disagreed at depth {depth}");
 
             let mut per_precision = serde_json::Map::new();
             let mut headline: Option<(u64, u128, u128, u64)> = None;
@@ -757,17 +720,17 @@ fn main() {
                         }
                     })
                     .collect();
-                let (flat_ns, flat_peak) =
-                    if precision == tessera_engine::occupancy::SKETCH_PRECISION {
-                        let (ns, _, _) = timed(args.repeats, || {
-                            route_sketch_flat(&mask, &segments, depth, precision)
-                        });
-                        let (_, peak, _) =
-                            measuring(|| route_sketch_flat(&mask, &segments, depth, precision));
-                        (ns, peak)
-                    } else {
-                        (0, 0)
-                    };
+                let (flat_ns, flat_peak) = if precision == tessera_engine::occupancy::SKETCH_PRECISION
+                {
+                    let (ns, _, _) = timed(args.repeats, || {
+                        route_sketch_flat(&mask, &segments, depth, precision)
+                    });
+                    let (_, peak, _) =
+                        measuring(|| route_sketch_flat(&mask, &segments, depth, precision));
+                    (ns, peak)
+                } else {
+                    (0, 0)
+                };
                 per_precision.insert(
                     precision.to_string(),
                     serde_json::json!({

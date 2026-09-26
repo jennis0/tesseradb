@@ -332,10 +332,10 @@ mod tests {
             assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
         }
         let (reply, _pending) = Reply::channel(
-            None,
-            #[cfg(feature = "fault-injection")]
-            None,
-        );
+                None,
+                #[cfg(feature = "fault-injection")]
+                None,
+            );
         let ingest = Command::Ingest {
             submission: IngestSubmission {
                 rows: Vec::new(),

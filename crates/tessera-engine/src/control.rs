@@ -119,8 +119,7 @@ impl Engine {
         generation: &Generation,
         external_ids: &[Vec<u8>],
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        let mut results: Vec<Option<EntityId>> =
-            self.write.live().established_entities(external_ids);
+        let mut results: Vec<Option<EntityId>> = self.write.live().established_entities(external_ids);
 
         let residual_positions: Vec<usize> = results
             .iter()
@@ -343,8 +342,7 @@ impl Engine {
         mut declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
-        declaration.point_default =
-            self.check_point_default(declaration.point_default.as_deref())?;
+        declaration.point_default = self.check_point_default(declaration.point_default.as_deref())?;
         self.write.create_view_group(declaration)
     }
 
@@ -355,8 +353,7 @@ impl Engine {
         mut declaration: tessera_lifecycle::wal::PlainViewDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
-        declaration.point_default =
-            self.check_point_default(declaration.point_default.as_deref())?;
+        declaration.point_default = self.check_point_default(declaration.point_default.as_deref())?;
         self.write.create_plain_view(declaration)
     }
 
@@ -370,9 +367,7 @@ impl Engine {
             .map(|default| tessera_plugin::check_point_default(self.plugin.as_ref(), default))
             .transpose()
             .map_err(|detail| {
-                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused {
-                    detail,
-                })
+                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
             })
     }
 

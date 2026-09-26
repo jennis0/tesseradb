@@ -334,12 +334,7 @@ async fn ingest_with_heat(
 
 /// One batch of rows carrying their geometry and label and no family column, which leaves every
 /// family's value as the item holds it; accepted.
-async fn ingest_bare(
-    served: &Served,
-    batch_id: &str,
-    view: &str,
-    rows: &[(Vec<u8>, f32, f32, &str)],
-) {
+async fn ingest_bare(served: &Served, batch_id: &str, view: &str, rows: &[(Vec<u8>, f32, f32, &str)]) {
     let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = rows
         .iter()
         .map(|(id, x, y, access)| (Some(id.as_slice()), *x, *y, *access))
@@ -357,12 +352,7 @@ async fn ingest_bare(
         .await
         .unwrap();
     let status = resp.status().as_u16();
-    assert_eq!(
-        status,
-        200,
-        "the batch is accepted: {}",
-        resp.text().await.unwrap()
-    );
+    assert_eq!(status, 200, "the batch is accepted: {}", resp.text().await.unwrap());
 }
 
 /// The same batch, refused or not, with its status and body returned — for the cases where the
@@ -473,10 +463,7 @@ fn points_columns(body: &[u8]) -> (Vec<String>, BTreeMap<u64, Option<f32>>) {
                     .unwrap()
                     .clone();
                 for row in 0..batch.num_rows() {
-                    heat.insert(
-                        ids.value(row),
-                        values.is_valid(row).then(|| values.value(row)),
-                    );
+                    heat.insert(ids.value(row), values.is_valid(row).then(|| values.value(row)));
                 }
             }
         }
@@ -1010,10 +997,7 @@ async fn a_scoped_family_may_be_left_out_of_any_row() {
     let (status, body) = post("owner-new", "quarter:2026-Q1", bare()).await;
     assert_eq!(status, 200, "a new item into the owner's view: {body}");
     let (status, body) = post("sharing-new", "quarter_map:2026-Q1", bare()).await;
-    assert_eq!(
-        status, 200,
-        "the item into the sharing group's view: {body}"
-    );
+    assert_eq!(status, 200, "the item into the sharing group's view: {body}");
     let (status, body) = post("owner-again", "quarter:2026-Q1", bare()).await;
     assert_eq!(status, 200, "the same row again changes nothing: {body}");
     ingest_with_heat(
@@ -1095,11 +1079,7 @@ async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
     let expected = quarter_entities(0).count() + 1;
     let (_, values) = settled_points(&served, &served.token, "quarter:2026-Q1", expected).await;
     let before = by_entity(&served, &served.token, &values).await;
-    assert_eq!(
-        before[&NEW],
-        Some(33.5),
-        "the flushed row's value is served"
-    );
+    assert_eq!(before[&NEW], Some(33.5), "the flushed row's value is served");
 
     fold(&served.server).await;
 
@@ -1347,10 +1327,7 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
         None,
     )
     .await;
-    assert_eq!(
-        status, 200,
-        "the borrowing view's batch is accepted: {body}"
-    );
+    assert_eq!(status, 200, "the borrowing view's batch is accepted: {body}");
     drain(&served.server).await;
 
     /// What the borrowing view owes about the value its own batch carried: the leaf, the text
@@ -1363,16 +1340,9 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
         // family, so their segment has none and each of them is served a null.
         let rendered = by_entity(served, &token, &values).await;
         for built in BORROWED {
-            assert_eq!(
-                rendered[&built], None,
-                "{stage}: entity {built} has no value"
-            );
+            assert_eq!(rendered[&built], None, "{stage}: entity {built} has no value");
         }
-        assert_eq!(
-            rendered[&entity],
-            Some(80.0),
-            "{stage}: the batch's value is rendered"
-        );
+        assert_eq!(rendered[&entity], Some(80.0), "{stage}: the batch's value is rendered");
         assert_eq!(
             filtered_entities(served, &token, borrower, range("heat")).await,
             BTreeSet::from([entity]),
@@ -1880,20 +1850,10 @@ async fn a_join_naming_a_cell_an_unflushed_edit_set_restates_or_edits_it() {
         "a different value edits: {body}"
     );
 
-    let failures = served
-        .server
-        .state
-        .engine
-        .write_executor_stats()
-        .flush_failures;
+    let failures = served.server.state.engine.write_executor_stats().flush_failures;
     drain(&served.server).await;
     assert_eq!(
-        served
-            .server
-            .state
-            .engine
-            .write_executor_stats()
-            .flush_failures,
+        served.server.state.engine.write_executor_stats().flush_failures,
         failures,
         "the flush publishes the cell once"
     );
@@ -2360,13 +2320,7 @@ async fn an_edit_in_a_dropped_view_holds_nothing_in_the_log() {
         .unwrap();
     assert_eq!(resp.status(), 200, "the drop is accepted");
     assert_eq!(
-        served
-            .server
-            .state
-            .engine
-            .generation()
-            .buffer
-            .oldest_wal_pos(),
+        served.server.state.engine.generation().buffer.oldest_wal_pos(),
         None,
         "nothing buffered holds the log"
     );
@@ -2405,69 +2359,15 @@ const RUNTIME: &str = "quarter:2026-Q3";
 /// [`THRESHOLD`], so a `range` that answered from the wrong column would answer the wrong set
 /// rather than the whole population.
 const WRITTEN: [Written; 9] = [
-    Written {
-        entity: 9_001,
-        view: OWNER,
-        heat: 100.0,
-        tag: 11.0,
-        note: "kestrel",
-    },
-    Written {
-        entity: 9_002,
-        view: SHARING,
-        heat: 101.0,
-        tag: 12.0,
-        note: "marlin",
-    },
-    Written {
-        entity: 9_003,
-        view: RUNTIME,
-        heat: 102.0,
-        tag: 13.0,
-        note: "ibex",
-    },
-    Written {
-        entity: 9_004,
-        view: OWNER,
-        heat: 2.5,
-        tag: 14.0,
-        note: "gannet",
-    },
-    Written {
-        entity: 9_005,
-        view: SHARING,
-        heat: 3.5,
-        tag: 15.0,
-        note: "dipper",
-    },
-    Written {
-        entity: 9_006,
-        view: RUNTIME,
-        heat: 4.5,
-        tag: 16.0,
-        note: "vole",
-    },
-    Written {
-        entity: 9_007,
-        view: OWNER,
-        heat: 103.0,
-        tag: 17.0,
-        note: "osprey",
-    },
-    Written {
-        entity: 9_008,
-        view: SHARING,
-        heat: 104.0,
-        tag: 18.0,
-        note: "quoll",
-    },
-    Written {
-        entity: 9_009,
-        view: RUNTIME,
-        heat: 105.0,
-        tag: 19.0,
-        note: "teal",
-    },
+    Written { entity: 9_001, view: OWNER, heat: 100.0, tag: 11.0, note: "kestrel" },
+    Written { entity: 9_002, view: SHARING, heat: 101.0, tag: 12.0, note: "marlin" },
+    Written { entity: 9_003, view: RUNTIME, heat: 102.0, tag: 13.0, note: "ibex" },
+    Written { entity: 9_004, view: OWNER, heat: 2.5, tag: 14.0, note: "gannet" },
+    Written { entity: 9_005, view: SHARING, heat: 3.5, tag: 15.0, note: "dipper" },
+    Written { entity: 9_006, view: RUNTIME, heat: 4.5, tag: 16.0, note: "vole" },
+    Written { entity: 9_007, view: OWNER, heat: 103.0, tag: 17.0, note: "osprey" },
+    Written { entity: 9_008, view: SHARING, heat: 104.0, tag: 18.0, note: "quoll" },
+    Written { entity: 9_009, view: RUNTIME, heat: 105.0, tag: 19.0, note: "teal" },
 ];
 
 /// The key a view id addresses.
@@ -2657,12 +2557,7 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
             &served,
             &format!("lifecycle-{round}"),
             written.view,
-            &[(
-                external_id_of(written.entity),
-                250.0 + round as f32,
-                250.0,
-                "0",
-            )],
+            &[(external_id_of(written.entity), 250.0 + round as f32, 250.0, "0")],
             Some(&[Some(written.heat)]),
             Some(&[Some(written.note)]),
             Some(&[Some(written.tag)]),

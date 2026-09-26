@@ -354,12 +354,8 @@ fn check_unique_indexes(
         .ok_or_else(|| {
             BuildError::Invalid(format!("partition {phash}: the tombstones do not decode"))
         })?;
-    let bound = u32::try_from(
-        partition_manifest
-            .entity_id_high_water
-            .max(manifest.entity_id_high_water),
-    )
-    .unwrap_or(u32::MAX);
+    let bound = u32::try_from(partition_manifest.entity_id_high_water.max(manifest.entity_id_high_water))
+        .unwrap_or(u32::MAX);
     for index in &partition_manifest.unique_indexes {
         let attribute = &index.attribute;
         let Some((at, declared)) = served
@@ -423,20 +419,11 @@ fn check_unique_indexes(
             Ok(())
         };
         if homes_value {
-            let dir = prefix_dir
-                .join("partitions")
-                .join(phash)
-                .join("attrs")
-                .join(attribute);
+            let dir = prefix_dir.join("partitions").join(phash).join("attrs").join(attribute);
             let access = tessera_filter::Access::MappedSequential;
-            let mut layers: Vec<(
-                tessera_filter::ValueColumn,
-                Option<tessera_filter::SortedDict>,
-            )> = Vec::new();
-            let base_rel = format!(
-                "partitions/{phash}/attrs/{attribute}/{}",
-                tessera_filter::VALUES_FILE
-            );
+            let mut layers: Vec<(tessera_filter::ValueColumn, Option<tessera_filter::SortedDict>)> =
+                Vec::new();
+            let base_rel = format!("partitions/{phash}/attrs/{attribute}/{}", tessera_filter::VALUES_FILE);
             if manifest.files.contains_key(&base_rel) {
                 let values = tessera_filter::ValueColumn::open_dir(&dir, access)
                     .map_err(|e| BuildError::io(&dir, e))?;
@@ -519,19 +506,9 @@ fn check_unique_indexes(
                 return Err(e);
             }
         } else {
-            let record_dir = prefix_dir
-                .join("partitions")
-                .join(phash)
-                .join("attrs")
-                .join("record");
-            let base_rel = format!(
-                "partitions/{phash}/attrs/record/{}",
-                tessera_filter::RECORD_BLOCKS_FILE
-            );
-            let base = manifest
-                .files
-                .contains_key(&base_rel)
-                .then_some(record_dir.as_path());
+            let record_dir = prefix_dir.join("partitions").join(phash).join("attrs").join("record");
+            let base_rel = format!("partitions/{phash}/attrs/record/{}", tessera_filter::RECORD_BLOCKS_FILE);
+            let base = manifest.files.contains_key(&base_rel).then_some(record_dir.as_path());
             let extents: Vec<tessera_filter::RecordExtentPaths> = partition_manifest
                 .record_extents
                 .iter()
@@ -651,10 +628,7 @@ fn check_cut_index(
             let starts = segment.cuts.starts();
             let ids = segment.columns.tessera_id();
             let where_at = |row: usize| {
-                format!(
-                    "partition {phash}, view '{view}', segment '{}', row {row}",
-                    segment.seg_id
-                )
+                format!("partition {phash}, view '{view}', segment '{}', row {row}", segment.seg_id)
             };
             let mut cell = 0usize;
             for row in 0..codes.len() {
@@ -852,7 +826,8 @@ fn check_postings_and_pairs(
     let pairs_rel = format!("partitions/{phash}/terms/pairs.parquet");
     if named(&postings_rel) {
         let path = join_rel(prefix_dir, &postings_rel)?;
-        let reader = PostingsReader::open(&path, false).map_err(|e| BuildError::io(&path, e))?;
+        let reader =
+            PostingsReader::open(&path, false).map_err(|e| BuildError::io(&path, e))?;
 
         let mut pairs = if named(&pairs_rel) {
             Some(PairsCursor::open(&join_rel(prefix_dir, &pairs_rel)?)?)
@@ -1156,8 +1131,8 @@ fn check_dict_extents(
             if bytes.len() - offset < 4 {
                 return Err(truncated("cuts off inside its length field"));
             }
-            let len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes")) as usize;
+            let len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4 bytes"))
+                as usize;
             offset += 4;
             if bytes.len() - offset < len {
                 return Err(truncated("overruns the end of the file"));

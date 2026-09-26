@@ -1058,11 +1058,7 @@ impl Engine {
         // The rows the log held and no flush wrote, which the occupancy bound and the row trigger
         // count from the first request, not from the first write.
         let buffered = engine.generation().buffer.len();
-        engine
-            .write
-            .health()
-            .buffered_items
-            .store(buffered, Ordering::SeqCst);
+        engine.write.health().buffered_items.store(buffered, Ordering::SeqCst);
         Ok(engine)
     }
 
@@ -1348,10 +1344,7 @@ impl ExternalIdIndex {
     /// Fallible: a corrupt extent, a digest mismatch or a shuffled extent list propagates as
     /// `Err(StoreError::InvalidSidecar)` through `Engine::resolve_external_id` to the handler
     /// rather than panicking, still fail-closed in effect.
-    pub(crate) fn resolve(
-        &self,
-        external_id: &[u8],
-    ) -> std::result::Result<Option<EntityId>, StoreError> {
+    pub(crate) fn resolve(&self, external_id: &[u8]) -> std::result::Result<Option<EntityId>, StoreError> {
         self.0.resolve(external_id)
     }
 

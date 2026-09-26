@@ -9,7 +9,8 @@ use std::sync::Arc;
 use tessera_authz::{coalesce_delta_tiers, coalesce_dict_extents, DeltaTier};
 use tessera_store::coalesce_external_id_runs;
 use tessera_store::manifest::{
-    AttrExtent, DictExtent, EntityTermsExtent, FileDigest, LocatorExtent, RecordExtent, TextExtent,
+    AttrExtent, DictExtent, EntityTermsExtent, FileDigest, LocatorExtent, RecordExtent,
+    TextExtent,
 };
 
 use super::{coalesced_column_rel, CoalesceContext, ColumnWindow, OpenedTier};
@@ -56,16 +57,8 @@ pub(super) fn coalesce_runs(
         .collect();
     let extent = LocatorExtent {
         path: format!("{}/ext-locator.u32", ctx.out_rel),
-        entity_lo: locators
-            .iter()
-            .map(|e| e.entity_lo)
-            .min()
-            .expect("a window has extents"),
-        entity_hi: locators
-            .iter()
-            .map(|e| e.entity_hi)
-            .max()
-            .expect("a window has extents"),
+        entity_lo: locators.iter().map(|e| e.entity_lo).min().expect("a window has extents"),
+        entity_hi: locators.iter().map(|e| e.entity_hi).max().expect("a window has extents"),
         external_id_run: format!("{}/external-ids.arrow", ctx.out_rel),
     };
     let out_dir = ctx.prefix_dir.join(&ctx.out_rel);
@@ -494,11 +487,7 @@ pub(super) fn coalesce_unique_window(
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<Vec<String>, MaintenanceFailed> {
     let attribute = &window.attribute;
-    let inputs: Vec<PathBuf> = window
-        .runs
-        .iter()
-        .map(|rel| ctx.prefix_dir.join(rel))
-        .collect();
+    let inputs: Vec<PathBuf> = window.runs.iter().map(|rel| ctx.prefix_dir.join(rel)).collect();
     let out_rel = format!("{}/unique/{attribute}", ctx.out_rel);
     let written = tessera_store::unique::merge_unique_runs(
         &inputs,

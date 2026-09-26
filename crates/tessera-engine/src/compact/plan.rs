@@ -331,10 +331,7 @@ pub(crate) fn plan_fold(
         .locator_extents
         .iter()
         .map(|extent| extent.entity_hi + 1)
-        .fold(
-            entity_bound.max(generation.bundle.manifest.entity_id_high_water),
-            u64::max,
-        );
+        .fold(entity_bound.max(generation.bundle.manifest.entity_id_high_water), u64::max);
 
     Ok(FoldPlan {
         partition: partition.clone(),

@@ -277,7 +277,11 @@ impl Executor {
             // `BatchState::Held` is unconstructible here and the answers are exactly `admit`'s.
             Command::Ingest { submission, reply } => {
                 let window = CommitWindow::new(self.next_window_seq());
-                let (window, _) = self.admit_ingest(window, submission, reply);
+                let (window, _) = self.admit_ingest(
+                    window,
+                    submission,
+                    reply,
+                );
                 if !window.is_empty() {
                     self.close_window(window);
                 }
@@ -1375,4 +1379,5 @@ impl Executor {
         });
         self.publish(next, started);
     }
+
 }

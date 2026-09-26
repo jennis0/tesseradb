@@ -290,14 +290,6 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     let overlay = Overlay::default();
     let buffer = IngestBuffer::default();
     let denied = tessera_engine::denied_rows_of(&overlay, &perm);
-    let mask = compose(
-        &satisfied,
-        &overlay,
-        &buffer,
-        base,
-        &perm,
-        &denied,
-        Some(&[]),
-    );
+    let mask = compose(&satisfied, &overlay, &buffer, base, &perm, &denied, Some(&[]));
     (temp, mask)
 }

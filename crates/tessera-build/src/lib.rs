@@ -74,9 +74,9 @@ use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
 use tessera_spatial::{split32, Bounds};
 use tessera_store::manifest::{
-    CurrentPointer, DeclaredScalar, DictExtent, FileDigest, IdentityDescriptor, Manifest,
-    ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor, SegmentDescriptor,
-    SegmentsManifest, ViewDescriptor,
+    CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
+    IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
+    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
@@ -1960,12 +1960,7 @@ fn write_manifests(
         .iter()
         .chain(&files.external_ids_paths)
         .chain(&files.other_paths)
-        .chain(
-            files
-                .unique
-                .iter()
-                .flat_map(|(_, runs)| runs.iter().map(|run| &run.path)),
-        )
+        .chain(files.unique.iter().flat_map(|(_, runs)| runs.iter().map(|run| &run.path)))
         .collect();
     let unique_indexes = files
         .unique

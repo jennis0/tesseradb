@@ -32,9 +32,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{
-    BooleanArray, Float32Array, Float64Array, Int64Array, StringArray, UInt64Array,
-};
+use arrow::array::{BooleanArray, Float32Array, Float64Array, Int64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -849,18 +847,7 @@ fn row_gen() -> impl Strategy<Value = RowGen> {
         prop_oneof![8 => Just(0u8), 1 => any::<u8>()],
     )
         .prop_map(
-            |(
-                about,
-                by,
-                carry,
-                differ,
-                null,
-                position,
-                seed,
-                extra_carry,
-                extra_differ,
-                extra_null,
-            )| {
+            |(about, by, carry, differ, null, position, seed, extra_carry, extra_differ, extra_null)| {
                 RowGen {
                     about,
                     by,
@@ -1103,13 +1090,14 @@ impl Run {
         view: Option<&str>,
         rows: Vec<IngestRow>,
     ) -> Result<IngestReceipt, AcceptError> {
-        self.engine().ingest(IngestRequest {
-            batch_id: batch_id.to_string(),
-            body_hash: hash_of(batch_id),
-            view: view.map(str::to_string),
-            rows,
-            artifacts: Default::default(),
-        })
+        self.engine()
+            .ingest(IngestRequest {
+                batch_id: batch_id.to_string(),
+                body_hash: hash_of(batch_id),
+                view: view.map(str::to_string),
+                rows,
+                artifacts: Default::default(),
+            })
     }
 
     fn ingest(&mut self, view: u8, gens: &[RowGen]) {

@@ -59,14 +59,8 @@ impl TestSwitches {
     pub(crate) fn hold_projection_build_if_wanted(&self) {
         // The ordering is spelled on each line: `check-layers.sh` tells an atomic from a generation
         // publication by the `Ordering::` beside the call.
-        if self
-            .projection_build_hold_wanted
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            while self
-                .projection_build_held
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
+        if self.projection_build_hold_wanted.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            while self.projection_build_held.load(std::sync::atomic::Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
@@ -100,10 +94,7 @@ impl TestSwitches {
     /// Called by the executor before it drains its work queue. Waits while a test holds it.
     #[cfg(feature = "fault-injection")]
     pub(crate) fn hold_work_pass_if_paused(&self) {
-        while self
-            .work_pass_paused
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        while self.work_pass_paused.load(std::sync::atomic::Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }

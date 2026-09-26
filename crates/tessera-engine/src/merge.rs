@@ -248,11 +248,7 @@ pub(crate) fn rebase_into(
             plan.partition,
             tessera_store::view_rel(&plan.view)
         );
-        for name in [
-            "morton.u32",
-            tessera_store::read::CutIndex::FILE,
-            "columns.arrow",
-        ] {
+        for name in ["morton.u32", tessera_store::read::CutIndex::FILE, "columns.arrow"] {
             manifest.files.remove(&format!("{seg_rel}/{name}"));
         }
         let presence_prefix = format!("{seg_rel}/{RENDER_PRESENCE_DIR}/");

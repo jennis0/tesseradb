@@ -28,12 +28,7 @@ struct ColumnJob {
 }
 
 impl ColumnJob {
-    fn holds(
-        &self,
-        column: &str,
-        view: Option<&str>,
-        incarnation: Option<ViewIncarnation>,
-    ) -> bool {
+    fn holds(&self, column: &str, view: Option<&str>, incarnation: Option<ViewIncarnation>) -> bool {
         column == self.name && view == self.view.as_deref() && incarnation == self.incarnation
     }
 }

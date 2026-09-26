@@ -255,15 +255,16 @@ impl FilterColumns {
         };
         // Composes here for the same reason, plus its own: uncomposed labels leave the join
         // rule's label arm unable to compare against the batch that just landed.
-        let entity_terms = if entity_terms.is_empty() {
-            Arc::clone(&self.entity_terms)
-        } else {
-            Arc::new(
-                self.entity_terms
-                    .with_extents(entity_terms)
-                    .map_err(|e| ComposeError::EntityTermsUnreadable(e.to_string()))?,
-            )
-        };
+        let entity_terms =
+            if entity_terms.is_empty() {
+                Arc::clone(&self.entity_terms)
+            } else {
+                Arc::new(
+                    self.entity_terms
+                        .with_extents(entity_terms)
+                        .map_err(|e| ComposeError::EntityTermsUnreadable(e.to_string()))?,
+                )
+            };
         let mut next = FilterColumns {
             records,
             entity_terms,
@@ -470,6 +471,7 @@ mod tests {
         );
     }
 
+
     /// And the other direction: a dictionary for a column the schema does not call a keyword.
     #[test]
     fn a_dictionary_on_a_non_keyword_extent_is_refused() {
@@ -491,6 +493,7 @@ mod tests {
             "{err:?}"
         );
     }
+
 
     /// A coalesced keyword window installs with the dictionary its merge minted, and every entity
     /// still reads its own key.
@@ -601,6 +604,7 @@ mod tests {
             "{err:?}"
         );
     }
+
 
     /// A flush that lands between a coalesce's plan and its replace keeps its own dictionary: the
     /// replace names the consumed layers by path.

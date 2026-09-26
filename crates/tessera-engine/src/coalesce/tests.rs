@@ -108,13 +108,7 @@ impl Fixture {
     }
 
     fn plan(&self) -> Option<CoalescePlan> {
-        plan_coalesce(
-            PARTITION,
-            &self.manifest,
-            &self.build_files,
-            policy(),
-            &all_live,
-        )
+        plan_coalesce(PARTITION, &self.manifest, &self.build_files, policy(), &all_live)
     }
 
     fn execute(&self, plan: CoalescePlan) -> Result<CompletedCoalesce, MaintenanceFailed> {
@@ -178,9 +172,7 @@ impl Fixture {
         self.manifest.external_id_runs.push(run);
         let path = self.write_dict("terms", &["base-0".into(), "base-1".into()]);
         self.build_files.insert(path.clone(), self.digest_of(&path));
-        self.manifest
-            .dict_extents
-            .push(DictExtent { path, records: 2 });
+        self.manifest.dict_extents.push(DictExtent { path, records: 2 });
     }
 
     fn write_flush(&mut self, flush: u32) {
@@ -200,9 +192,7 @@ impl Fixture {
         let descriptors: Vec<String> = (0..2).map(|j| format!("flush-{flush}-{j}")).collect();
         let path = self.write_dict(&seg_rel, &descriptors);
         self.digest([path.as_str()]);
-        self.manifest
-            .dict_extents
-            .push(DictExtent { path, records: 2 });
+        self.manifest.dict_extents.push(DictExtent { path, records: 2 });
 
         let years = entities.iter().map(|e| 2000 + e).collect();
         self.write_attr("year", None, &seg, &entities, Values::Plain(years));
@@ -228,9 +218,7 @@ impl Fixture {
         let segment = self.write_segment(&seg, entities, 4 + 3 * flush);
         self.manifest.files.extend(segment.files);
         let locator = segment.locator_extent.expect("the flush binds");
-        self.manifest
-            .external_id_runs
-            .push(locator.external_id_run.clone());
+        self.manifest.external_id_runs.push(locator.external_id_run.clone());
         let seg_rel = locator.path.rsplit_once('/').unwrap().0.to_string();
         self.manifest.locator_extents.push(locator);
         seg_rel
@@ -259,17 +247,13 @@ impl Fixture {
                 let mut sorted = keys.clone();
                 sorted.sort_unstable();
                 sorted.dedup();
-                let codes = keys
-                    .iter()
-                    .map(|k| sorted.binary_search(k).unwrap() as u32)
-                    .collect();
+                let codes = keys.iter().map(|k| sorted.binary_search(k).unwrap() as u32).collect();
                 (codes, Some(sorted))
             }
         };
         let presence: croaring::Bitmap = entities.iter().copied().collect();
-        let dict_keys: Option<Vec<&str>> = dict
-            .as_ref()
-            .map(|d| d.iter().map(String::as_str).collect());
+        let dict_keys: Option<Vec<&str>> =
+            dict.as_ref().map(|d| d.iter().map(String::as_str).collect());
         let (values, presence, dict) = tessera_filter::write_extent(
             &self.path(&Self::column_rel(column, view)),
             flush,
@@ -365,18 +349,11 @@ impl Fixture {
         let words = terms.keys().map(String::as_str);
         tessera_filter::write_sorted_dict(&self.path(&extent.dict), words).unwrap();
         let per_term: Vec<Vec<u32>> = terms.into_values().collect();
-        tessera_authz::write_postings(
-            &self.path(&extent.postings),
-            &per_term,
-            SMALL_TERM_THRESHOLD,
-        )
-        .unwrap();
+        tessera_authz::write_postings(&self.path(&extent.postings), &per_term, SMALL_TERM_THRESHOLD)
+            .unwrap();
         let presence: croaring::Bitmap = entities.iter().copied().collect();
-        std::fs::write(
-            self.path(&extent.presence),
-            presence.serialize::<croaring::Portable>(),
-        )
-        .unwrap();
+        std::fs::write(self.path(&extent.presence), presence.serialize::<croaring::Portable>())
+            .unwrap();
         self.digest(extent.files());
         self.manifest.text_extents.push(extent);
     }
@@ -412,10 +389,7 @@ impl Fixture {
             let tier = DeltaTier::open(&self.path(rel)).unwrap();
             for term in tier.terms() {
                 let mut entities = Vec::new();
-                tier.posting(term)
-                    .unwrap()
-                    .unwrap()
-                    .extend_into(&mut entities);
+                tier.posting(term).unwrap().unwrap().extend_into(&mut entities);
                 pairs.entry(term.raw()).or_default().extend(entities);
             }
         }
@@ -444,8 +418,8 @@ impl Fixture {
         let mut bundle = generation.bundle.manifest.clone();
         bundle.files = self.build_files.clone();
         bundle.entity_id_high_water = 4;
-        let sidecar =
-            ExternalIdSidecar::deferred_from_manifest(&bundle, manifest, &self.prefix_dir).unwrap();
+        let sidecar = ExternalIdSidecar::deferred_from_manifest(&bundle, manifest, &self.prefix_dir)
+            .unwrap();
         entities
             .into_iter()
             .map(|e| {
@@ -463,9 +437,7 @@ impl Fixture {
         let descriptors = ["base-0".to_string(), "base-1".to_string()]
             .into_iter()
             .chain((0..4).flat_map(|f| (0..2).map(move |j| format!("flush-{f}-{j}"))));
-        descriptors
-            .map(|d| dict.lookup(d.as_bytes()).map(TermId::raw))
-            .collect()
+        descriptors.map(|d| dict.lookup(d.as_bytes()).map(TermId::raw)).collect()
     }
 
     /// Each column's value per entity, read through `extents` as a restart opens them.
@@ -480,9 +452,7 @@ impl Fixture {
                 .dict
                 .as_ref()
                 .map(|d| tessera_filter::SortedDict::open(&self.path(d), access).unwrap());
-            let column = out
-                .entry((extent.column.clone(), extent.view.clone()))
-                .or_default();
+            let column = out.entry((extent.column.clone(), extent.view.clone())).or_default();
             for e in flushed_entities() {
                 let Some(value) = values.value_of(e) else {
                     continue;
@@ -528,10 +498,7 @@ impl Fixture {
             let postings = tessera_filter::ColumnPostings::open(&postings, false).unwrap();
             dict.walk(|ordinal, word| {
                 let entities = postings.entities(AttrLocalId::new(ordinal)).unwrap();
-                words
-                    .entry(word.to_string())
-                    .or_default()
-                    .extend(entities.iter());
+                words.entry(word.to_string()).or_default().extend(entities.iter());
             })
             .unwrap();
             let bytes = std::fs::read(self.path(&extent.presence)).unwrap();
@@ -572,11 +539,7 @@ fn coalesced() -> Coalesced {
     let plan = fx.plan().expect("every kind qualifies");
     let completed = fx.execute(plan).expect("the pass writes");
     let after = rebased(&fx.manifest, &completed).expect("nothing moved under the pass");
-    Coalesced {
-        fx,
-        completed,
-        after,
-    }
+    Coalesced { fx, completed, after }
 }
 
 impl Coalesced {
@@ -600,10 +563,7 @@ impl Coalesced {
         written: impl IntoIterator<Item = &'a str>,
     ) {
         for rel in consumed {
-            assert!(
-                !self.after.files.contains_key(rel),
-                "{rel} is consumed but still digested"
-            );
+            assert!(!self.after.files.contains_key(rel), "{rel} is consumed but still digested");
         }
         for rel in written {
             let listed = self.after.files.get(rel);
@@ -615,10 +575,7 @@ impl Coalesced {
 
 /// `list` with `consumed` removed and `replacement` where the first of them stood.
 fn replaced(list: &[String], consumed: &[&str], replacement: &str) -> Vec<String> {
-    let at = list
-        .iter()
-        .position(|k| k == consumed[0])
-        .expect("the window is listed");
+    let at = list.iter().position(|k| k == consumed[0]).expect("the window is listed");
     let kept = list.iter().filter(|k| !consumed.contains(&k.as_str()));
     let mut out: Vec<String> = kept.cloned().collect();
     out.insert(at, replacement.to_string());
@@ -635,10 +592,7 @@ fn coalesced_tiers_keep_every_pair() {
     let c = coalesced();
     let m = c.completed.tier.as_ref().expect("the tiers are taken");
     let consumed: Vec<&str> = m.consumed.iter().map(String::as_str).collect();
-    assert_eq!(
-        c.after.deltas,
-        replaced(&c.before().deltas, &consumed, &m.output.0)
-    );
+    assert_eq!(c.after.deltas, replaced(&c.before().deltas, &consumed, &m.output.0));
     c.assert_files(consumed, [m.output.0.as_str()]);
     c.assert_reads_same(|fx, m| fx.tier_pairs(&m.deltas));
 }
@@ -649,16 +603,9 @@ fn coalesced_tiers_keep_every_pair() {
 fn coalesced_runs_keep_every_binding() {
     let c = coalesced();
     let m = c.completed.run.as_ref().expect("the runs are taken");
-    let runs: Vec<&str> = m
-        .consumed
-        .iter()
-        .map(|e| e.external_id_run.as_str())
-        .collect();
+    let runs: Vec<&str> = m.consumed.iter().map(|e| e.external_id_run.as_str()).collect();
     let before_runs = &c.before().external_id_runs;
-    assert_eq!(
-        c.after.external_id_runs,
-        replaced(before_runs, &runs, &m.output.external_id_run)
-    );
+    assert_eq!(c.after.external_id_runs, replaced(before_runs, &runs, &m.output.external_id_run));
     let locators: Vec<&str> = m.consumed.iter().map(|e| e.path.as_str()).collect();
     assert_eq!(
         keys(&c.after.locator_extents, |e| &e.path),
@@ -680,19 +627,11 @@ fn coalesced_runs_keep_every_binding() {
 #[test]
 fn coalesced_dictionaries_keep_every_term_id() {
     let c = coalesced();
-    let m = c
-        .completed
-        .dict
-        .as_ref()
-        .expect("the dictionaries are taken");
+    let m = c.completed.dict.as_ref().expect("the dictionaries are taken");
     let consumed: Vec<&str> = m.consumed.iter().map(|e| e.path.as_str()).collect();
     assert_eq!(
         keys(&c.after.dict_extents, |e| &e.path),
-        replaced(
-            &keys(&c.before().dict_extents, |e| &e.path),
-            &consumed,
-            &m.output.path
-        )
+        replaced(&keys(&c.before().dict_extents, |e| &e.path), &consumed, &m.output.path)
     );
     c.assert_files(consumed, [m.output.path.as_str()]);
     c.assert_reads_same(|fx, m| fx.term_ids(&m.dict_extents));
@@ -715,18 +654,10 @@ fn coalesced_attributes_keep_every_value() {
 
     let mut list = keys(&c.before().attr_extents, |e| &e.values);
     for m in &c.completed.attrs {
-        let consumed: Vec<&str> = m
-            .consumed
-            .extents
-            .iter()
-            .map(|e| e.values.as_str())
-            .collect();
+        let consumed: Vec<&str> = m.consumed.extents.iter().map(|e| e.values.as_str()).collect();
         list = replaced(&list, &consumed, &m.output.extent.values);
         let written = m.output.extent.files();
-        c.assert_files(
-            m.consumed.extents.iter().flat_map(AttrExtent::files),
-            written,
-        );
+        c.assert_files(m.consumed.extents.iter().flat_map(AttrExtent::files), written);
         assert_eq!(m.output.dict.is_some(), m.output.extent.dict.is_some());
     }
     assert_eq!(keys(&c.after.attr_extents, |e| &e.values), list);
@@ -764,10 +695,7 @@ fn coalesced_texts_keep_every_posting() {
     for m in &c.completed.texts {
         let consumed: Vec<&str> = m.consumed.extents.iter().map(|e| e.dict.as_str()).collect();
         list = replaced(&list, &consumed, &m.output.dict);
-        c.assert_files(
-            m.consumed.extents.iter().flat_map(TextExtent::files),
-            m.output.files(),
-        );
+        c.assert_files(m.consumed.extents.iter().flat_map(TextExtent::files), m.output.files());
     }
     assert_eq!(keys(&c.after.text_extents, |e| &e.dict), list);
     c.assert_reads_same(|fx, m| fx.text_postings(&m.text_extents));
@@ -777,11 +705,7 @@ fn coalesced_texts_keep_every_posting() {
 #[test]
 fn coalesced_entity_terms_keep_every_list() {
     let c = coalesced();
-    let m = c
-        .completed
-        .terms
-        .as_ref()
-        .expect("the entity terms are taken");
+    let m = c.completed.terms.as_ref().expect("the entity terms are taken");
     let consumed: Vec<&str> = m.consumed.iter().map(|e| e.terms.as_str()).collect();
     assert_eq!(
         keys(&c.after.entity_terms_extents, |e| &e.terms),
@@ -805,18 +729,12 @@ fn a_window_whose_entry_has_gone_does_not_rebase() {
     let tier = &c.completed.tier.as_ref().unwrap().consumed[1];
     let mut manifest = c.before().clone();
     manifest.deltas.retain(|t| t != tier);
-    assert!(
-        rebased(&manifest, &c.completed).is_none(),
-        "a tier has gone"
-    );
+    assert!(rebased(&manifest, &c.completed).is_none(), "a tier has gone");
 
     let attr = &c.completed.attrs[0].consumed.extents[1].values;
     let mut manifest = c.before().clone();
     manifest.attr_extents.retain(|e| &e.values != attr);
-    assert!(
-        rebased(&manifest, &c.completed).is_none(),
-        "an attribute extent has gone"
-    );
+    assert!(rebased(&manifest, &c.completed).is_none(), "an attribute extent has gone");
 }
 
 /// A flush that lists another column's extent inside a window, and the same column's extent
@@ -824,36 +742,21 @@ fn a_window_whose_entry_has_gone_does_not_rebase() {
 #[test]
 fn a_flush_published_during_the_pass_does_not_disturb_the_rebase() {
     let c = coalesced();
-    let window = &c
-        .completed
-        .attrs
-        .iter()
-        .find(|m| m.consumed.column == "year")
-        .unwrap()
-        .consumed;
+    let window = &c.completed.attrs.iter().find(|m| m.consumed.column == "year").unwrap().consumed;
     let mut manifest = c.before().clone();
     let (mut elsewhere, mut late) = (window.extents[0].clone(), window.extents[0].clone());
     elsewhere.column = "elsewhere".to_string();
     elsewhere.values = "late/elsewhere.arrow".to_string();
     late.values = "late/year.arrow".to_string();
     let second = &window.extents[1].values;
-    let inside = manifest
-        .attr_extents
-        .iter()
-        .position(|e| &e.values == second)
-        .unwrap();
+    let inside = manifest.attr_extents.iter().position(|e| &e.values == second).unwrap();
     manifest.attr_extents.insert(inside, elsewhere);
     manifest.attr_extents.push(late);
 
     let after = rebased(&manifest, &c.completed).expect("the windows are still in place");
     let mut list = keys(&manifest.attr_extents, |e| &e.values);
     for m in &c.completed.attrs {
-        let consumed: Vec<&str> = m
-            .consumed
-            .extents
-            .iter()
-            .map(|e| e.values.as_str())
-            .collect();
+        let consumed: Vec<&str> = m.consumed.extents.iter().map(|e| e.values.as_str()).collect();
         list = replaced(&list, &consumed, &m.output.extent.values);
     }
     assert_eq!(keys(&after.attr_extents, |e| &e.values), list);
@@ -868,13 +771,7 @@ fn title_flushes(keyword: [bool; 3]) -> Fixture {
             true => Values::Keyword(entities.iter().map(|&e| key_of(e)).collect()),
             false => Values::Plain(entities.clone()),
         };
-        fx.write_attr(
-            "title",
-            None,
-            &format!("flush-{flush}-1"),
-            &entities,
-            values,
-        );
+        fx.write_attr("title", None, &format!("flush-{flush}-1"), &entities, values);
     }
     fx
 }
@@ -884,22 +781,14 @@ fn title_flushes(keyword: [bool; 3]) -> Fixture {
 #[test]
 fn a_window_the_merge_refuses_fails_alone() {
     let fx = Fixture::with_every_kind();
-    let faulted = fx
-        .manifest
-        .attr_extents
-        .iter()
-        .find(|e| e.column == "title")
-        .unwrap();
+    let faulted = fx.manifest.attr_extents.iter().find(|e| e.column == "title").unwrap();
     let faulted = faulted.dict.clone().unwrap();
     tessera_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();
     let plan = fx.plan().expect("every kind qualifies");
     let completed = fx.execute(plan).expect("the other windows write");
     assert_eq!(completed.failures.len(), 1, "the title window failed");
-    let windows: BTreeSet<&str> = completed
-        .attrs
-        .iter()
-        .map(|m| m.consumed.column.as_str())
-        .collect();
+    let windows: BTreeSet<&str> =
+        completed.attrs.iter().map(|m| m.consumed.column.as_str()).collect();
     assert_eq!(windows, BTreeSet::from(["year", "mood"]));
     assert!(completed.tier.is_some() && completed.record.is_some() && completed.terms.is_some());
 
@@ -908,16 +797,9 @@ fn a_window_the_merge_refuses_fails_alone() {
         let listed = m.attr_extents.iter().filter(|e| e.column == "title");
         listed.map(|e| e.values.clone()).collect::<Vec<_>>()
     };
-    assert_eq!(
-        titles(&after),
-        titles(&fx.manifest),
-        "the failed window stays listed"
-    );
+    assert_eq!(titles(&after), titles(&fx.manifest), "the failed window stays listed");
     for rel in completed.files.keys() {
-        assert!(
-            !rel.contains("/attrs/title"),
-            "{rel} is digested from the failed window"
-        );
+        assert!(!rel.contains("/attrs/title"), "{rel} is digested from the failed window");
     }
 }
 
@@ -964,18 +846,11 @@ fn listed(flushes: u64) -> (SegmentsManifest, BTreeMap<String, FileDigest>) {
     };
     for i in 0..flushes {
         let seg = format!("segments/flush-{i}");
-        for name in [
-            "delta.arrow",
-            "external-ids.arrow",
-            "ext-locator.u32",
-            "terms-0.dict",
-        ] {
+        for name in ["delta.arrow", "external-ids.arrow", "ext-locator.u32", "terms-0.dict"] {
             manifest.files.insert(format!("{seg}/{name}"), digest(1024));
         }
         manifest.deltas.push(format!("{seg}/delta.arrow"));
-        manifest
-            .external_id_runs
-            .push(format!("{seg}/external-ids.arrow"));
+        manifest.external_id_runs.push(format!("{seg}/external-ids.arrow"));
         manifest.locator_extents.push(LocatorExtent {
             path: format!("{seg}/ext-locator.u32"),
             entity_lo: i * 10,
@@ -1025,10 +900,7 @@ fn plan(manifest: &SegmentsManifest, build: &BTreeMap<String, FileDigest>) -> Op
 }
 
 fn window_len(plan: &CoalescePlan, column: &str) -> Option<usize> {
-    plan.attrs
-        .iter()
-        .find(|w| w.column == column)
-        .map(|w| w.extents.len())
+    plan.attrs.iter().find(|w| w.column == column).map(|w| w.extents.len())
 }
 
 /// The build's run and dictionary are never taken, and every later entry is, whether the
@@ -1082,27 +954,15 @@ fn overlapping_locator_spans_coalesce_and_keep_every_binding() {
     for (entity, (key, resolved)) in entities.clone().zip(&before) {
         let expected = (entity % 10 != 2).then(|| format!("ext-{entity}").into_bytes());
         assert_eq!(key, &expected, "entity {entity} names its key");
-        assert_eq!(
-            *resolved,
-            expected.map(|_| u64::from(entity)),
-            "ext-{entity} names its entity"
-        );
+        assert_eq!(*resolved, expected.map(|_| u64::from(entity)), "ext-{entity} names its entity");
     }
 
     let plan = fx.plan().expect("a plan");
     assert_eq!(plan.locators.len(), 3, "the overlapping extents are taken");
     let completed = fx.execute(plan).expect("the pass writes");
     let after = rebased(&fx.manifest, &completed).expect("nothing moved under the pass");
-    let merged = &completed
-        .run
-        .as_ref()
-        .expect("the runs are coalesced")
-        .output;
-    assert_eq!(
-        (merged.entity_lo, merged.entity_hi),
-        (10, 18),
-        "the union of the spans"
-    );
+    let merged = &completed.run.as_ref().expect("the runs are coalesced").output;
+    assert_eq!((merged.entity_lo, merged.entity_hi), (10, 18), "the union of the spans");
     assert_eq!(fx.external_ids_of(&after, entities), before);
 }
 
@@ -1110,9 +970,7 @@ fn overlapping_locator_spans_coalesce_and_keep_every_binding() {
 #[test]
 fn a_window_spanning_two_size_classes_is_not_taken() {
     let (mut manifest, build_files) = listed(3);
-    manifest
-        .files
-        .insert(manifest.deltas[1].clone(), digest(64 << 20));
+    manifest.files.insert(manifest.deltas[1].clone(), digest(64 << 20));
     let plan = plan(&manifest, &build_files).expect("the other kinds qualify");
     assert!(plan.tiers.is_empty());
 }
@@ -1151,9 +1009,7 @@ fn nothing_is_taken_below_the_width() {
 fn the_input_cap_narrows_one_columns_window_and_stalls_only_that_column() {
     let (mut manifest, build_files) = listed(4);
     for extent in manifest.attr_extents.iter().filter(|e| e.column == "title") {
-        manifest
-            .files
-            .insert(extent.values.clone(), digest(2 << 20));
+        manifest.files.insert(extent.values.clone(), digest(2 << 20));
     }
     let mut policy = policy();
     policy.max_input_bytes = 5 << 20;
@@ -1174,9 +1030,7 @@ fn a_layers_dictionary_counts_toward_the_input_cap() {
     for flush in 0..3 {
         let mut extent = list_attr(&mut manifest, "submitter", None, flush);
         let dict = format!("attrs/submitter/flush-{flush}.dict");
-        manifest
-            .files
-            .insert(extent.values.clone(), digest(1 << 20));
+        manifest.files.insert(extent.values.clone(), digest(1 << 20));
         manifest.files.insert(extent.presence.clone(), digest(0));
         manifest.files.insert(dict.clone(), digest(1 << 20));
         extent.dict = Some(dict);
@@ -1185,11 +1039,7 @@ fn a_layers_dictionary_counts_toward_the_input_cap() {
     let mut policy = policy();
     policy.max_input_bytes = 4 << 20;
     let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy, &all_live).unwrap();
-    assert_eq!(
-        window_len(&plan, "submitter"),
-        Some(2),
-        "three are 6 MiB with dictionaries"
-    );
+    assert_eq!(window_len(&plan, "submitter"), Some(2), "three are 6 MiB with dictionaries");
 }
 
 /// Each column's window is taken from its own extents, and a column whose layers carry
@@ -1197,11 +1047,7 @@ fn a_layers_dictionary_counts_toward_the_input_cap() {
 #[test]
 fn each_column_takes_a_window_of_its_own_extents() {
     let (mut manifest, build_files) = listed(4);
-    for extent in manifest
-        .attr_extents
-        .iter_mut()
-        .filter(|e| e.column == "title")
-    {
+    for extent in manifest.attr_extents.iter_mut().filter(|e| e.column == "title") {
         let dict = format!("{}.dict", extent.values);
         manifest.files.insert(dict.clone(), digest(64));
         extent.dict = Some(dict);
@@ -1211,10 +1057,7 @@ fn each_column_takes_a_window_of_its_own_extents() {
     for window in &plan.attrs {
         assert_eq!(window.extents.len(), 3);
         assert!(window.extents.iter().all(|e| e.column == window.column));
-        assert!(window
-            .extents
-            .iter()
-            .all(|e| e.dict.is_some() == (window.column == "title")));
+        assert!(window.extents.iter().all(|e| e.dict.is_some() == (window.column == "title")));
     }
 }
 
@@ -1225,12 +1068,7 @@ fn a_scoped_column_gets_one_window_per_view() {
     let (mut manifest, build_files) = listed(3);
     for flush in 0..3 {
         for view in VIEWS {
-            list_attr(
-                &mut manifest,
-                "mood",
-                Some((view, DECLARED_INCARNATION)),
-                flush,
-            );
+            list_attr(&mut manifest, "mood", Some((view, DECLARED_INCARNATION)), flush);
         }
     }
     let plan = plan(&manifest, &build_files).expect("a plan");
@@ -1238,12 +1076,7 @@ fn a_scoped_column_gets_one_window_per_view() {
     for window in &plan.attrs {
         assert_eq!(window.extents.len(), 3);
         if window.column == "mood" {
-            views.insert(
-                window
-                    .view
-                    .as_deref()
-                    .expect("a scoped window names its view"),
-            );
+            views.insert(window.view.as_deref().expect("a scoped window names its view"));
             assert_eq!(window.incarnation, Some(DECLARED_INCARNATION));
         } else {
             assert_eq!((window.view.as_deref(), window.incarnation), (None, None));
@@ -1267,8 +1100,5 @@ fn a_dead_incarnations_window_is_not_planned() {
     let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy(), &is_live).unwrap();
     assert_eq!(plan.attrs.len(), 1);
     assert_eq!(plan.attrs[0].incarnation, Some(4));
-    assert!(plan.attrs[0]
-        .extents
-        .iter()
-        .all(|e| e.incarnation == Some(4)));
+    assert!(plan.attrs[0].extents.iter().all(|e| e.incarnation == Some(4)));
 }

@@ -254,16 +254,8 @@ fn placed(ids: &[u64]) -> Vec<(Field, ArrayRef)> {
             true,
             BinaryArray::from_iter_values(external.iter().map(|v| v.as_slice())),
         ),
-        column(
-            "x",
-            false,
-            Float32Array::from_iter_values(ids.iter().map(|_| 10.0)),
-        ),
-        column(
-            "y",
-            false,
-            Float32Array::from_iter_values(ids.iter().map(|_| 20.0)),
-        ),
+        column("x", false, Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
+        column("y", false, Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
         (access_field(&access), Arc::new(access)),
     ]
 }
@@ -538,10 +530,7 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
         assert_eq!(status, 422, "{column} = {value}: {body}");
         assert_eq!(body["error"], "contract");
         let detail = body["detail"].as_str().unwrap();
-        assert!(
-            names_cell(detail, 1, column),
-            "{column} = {value}: {detail}"
-        );
+        assert!(names_cell(detail, 1, column), "{column} = {value}: {detail}");
     }
     // A layer column that changes shape mid-column.
     let mut records: Vec<Value> = good.iter().map(json_record).collect();
@@ -648,10 +637,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
             .into_bytes(),
     )
     .await;
-    assert_eq!(
-        status, 422,
-        "an empty element is no label, and no default is declared: {resp}"
-    );
+    assert_eq!(status, 422, "an empty element is no label, and no default is declared: {resp}");
 }
 
 /// Rows at the plain fixture's shape, which declares no scalar tail.
@@ -1209,29 +1195,14 @@ async fn declare(server: &TestServer, body: Value) {
         .unwrap();
     let status = resp.status().as_u16();
     let answer: Value = resp.json().await.unwrap_or(Value::Null);
-    assert!(
-        status == 200 || status == 201,
-        "the declaration is accepted: {answer}"
-    );
+    assert!(status == 200 || status == 201, "the declaration is accepted: {answer}");
 }
 
 /// Three attributes declared live whose Arrow columns below arrive at another width.
 async fn declare_widths(server: &TestServer) {
-    declare(
-        server,
-        json!({ "name": "grade", "type": "u8", "index": true }),
-    )
-    .await;
-    declare(
-        server,
-        json!({ "name": "precise", "type": "f64", "index": true }),
-    )
-    .await;
-    declare(
-        server,
-        json!({ "name": "label", "type": "keyword", "index": true }),
-    )
-    .await;
+    declare(server, json!({ "name": "grade", "type": "u8", "index": true })).await;
+    declare(server, json!({ "name": "precise", "type": "f64", "index": true })).await;
+    declare(server, json!({ "name": "label", "type": "keyword", "index": true })).await;
 }
 
 /// An ingest batch whose declared columns are each at a width other than the declaration's:
@@ -1241,16 +1212,8 @@ fn widths_body(ids: &[u64], grades: &[Option<i64>]) -> Vec<u8> {
     let mut columns = placed(ids);
     columns.extend([
         column("grade", true, Int64Array::from(grades.to_vec())),
-        column(
-            "weight",
-            true,
-            Float64Array::from_iter_values(ids.iter().map(|_| 0.5)),
-        ),
-        column(
-            "precise",
-            true,
-            Float32Array::from_iter_values(ids.iter().map(|_| 2.5)),
-        ),
+        column("weight", true, Float64Array::from_iter_values(ids.iter().map(|_| 0.5))),
+        column("precise", true, Float32Array::from_iter_values(ids.iter().map(|_| 2.5))),
         column(
             "label",
             true,
@@ -1524,10 +1487,7 @@ async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
     assert_eq!(answer["error"], "contract");
     let detail = answer["detail"].as_str().unwrap();
     assert!(names_cell(detail, 1, "score"), "{detail}");
-    assert!(
-        detail.contains(&PAST_I64.to_string()),
-        "the value as sent: {detail}"
-    );
+    assert!(detail.contains(&PAST_I64.to_string()), "the value as sent: {detail}");
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water,
@@ -1559,11 +1519,7 @@ async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
 async fn a_wrong_typed_column_in_an_empty_batch_is_refused() {
     let (_tmp, server) = served_declared().await;
     let mut columns = placed(&[]);
-    columns.push(column(
-        "weight",
-        true,
-        StringArray::from(Vec::<&str>::new()),
-    ));
+    columns.push(column("weight", true, StringArray::from(Vec::<&str>::new())));
     let (status, answer) = ingest(&server, "empty", Some(ARROW), body_of(columns)).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
@@ -1618,10 +1574,7 @@ async fn a_finite_float_past_f32_is_refused_at_every_path() {
         &server,
         "infinite",
         Some(ARROW),
-        weights_body(
-            &[1002, 1003, 1004],
-            &[f64::INFINITY, f64::NEG_INFINITY, f64::NAN],
-        ),
+        weights_body(&[1002, 1003, 1004], &[f64::INFINITY, f64::NEG_INFINITY, f64::NAN]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");

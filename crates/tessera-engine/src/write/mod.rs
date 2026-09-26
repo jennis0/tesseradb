@@ -291,10 +291,7 @@ pub(crate) fn retire_dead_view_artifacts(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Vec<(String, u32)> {
     store.retire_dead_views(|layer, key, incarnation| {
-        match registry
-            .get(layer)
-            .and_then(|held| held.declaration.scope.group())
-        {
+        match registry.get(layer).and_then(|held| held.declaration.scope.group()) {
             Some(group) => manifest.incarnation_of_key(group, key) == Some(incarnation),
             None => true,
         }

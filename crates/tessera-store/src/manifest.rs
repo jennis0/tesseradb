@@ -1200,10 +1200,7 @@ impl Manifest {
             let group = &mut manifest.groups[g];
             if position.as_ref().is_none_or(|(held, _)| *held != g) {
                 let ids = group.views.iter().enumerate().map(|(i, v)| {
-                    (
-                        format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, v.key),
-                        i,
-                    )
+                    (format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, v.key), i)
                 });
                 position = Some((g, ids.collect()));
             }
@@ -2369,30 +2366,28 @@ impl SegmentsManifest {
         .filter(|(_, undecodable)| *undecodable)
         .map(|(name, _)| name)
         .collect();
-        fields.extend(
-            [
-                ("deltas", !self.deltas.is_empty()),
-                (
-                    "vocabulary_extensions",
-                    !self.vocabulary_extensions.is_empty(),
-                ),
-                ("layers", !self.layers.is_empty()),
-                ("layer_tombstones", !self.layer_tombstones.is_empty()),
-                ("views", !self.views.is_empty()),
-                (
-                    "dead_view_incarnations",
-                    !self.dead_view_incarnations.is_empty(),
-                ),
-                ("attributes", !self.attributes.is_empty()),
-                ("scoped_attributes", !self.scoped_attributes.is_empty()),
-                ("vocabularies", !self.vocabularies.is_empty()),
-                ("groups", !self.groups.is_empty()),
-                ("plain_views", !self.plain_views.is_empty()),
-            ]
-            .into_iter()
-            .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
-            .map(|(name, _)| name),
-        );
+        fields.extend([
+            ("deltas", !self.deltas.is_empty()),
+            (
+                "vocabulary_extensions",
+                !self.vocabulary_extensions.is_empty(),
+            ),
+            ("layers", !self.layers.is_empty()),
+            ("layer_tombstones", !self.layer_tombstones.is_empty()),
+            ("views", !self.views.is_empty()),
+            (
+                "dead_view_incarnations",
+                !self.dead_view_incarnations.is_empty(),
+            ),
+            ("attributes", !self.attributes.is_empty()),
+            ("scoped_attributes", !self.scoped_attributes.is_empty()),
+            ("vocabularies", !self.vocabularies.is_empty()),
+            ("groups", !self.groups.is_empty()),
+            ("plain_views", !self.plain_views.is_empty()),
+        ]
+        .into_iter()
+        .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
+        .map(|(name, _)| name));
         fields
     }
 
@@ -2920,8 +2915,7 @@ mod tests {
                 .iter()
                 .any(|f| f.views.contains(&view_id))
         };
-        let rostered =
-            |manifest: &Manifest| manifest.groups[0].views.iter().any(|v| v.key == "2026-Q1");
+        let rostered = |manifest: &Manifest| manifest.groups[0].views.iter().any(|v| v.key == "2026-Q1");
 
         // Recreated: the predecessor's death leaves it alone.
         let recreated = folded.with_roster(&[created(1)], &[stone(0)]);

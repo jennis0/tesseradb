@@ -128,6 +128,7 @@ pub struct GenerationParts {
     pub suggest: Arc<crate::suggest::SuggestIndexes>,
 }
 
+
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
 ///
 /// **⊘ No compaction exists**, but this type is what one would publish: the fields a fold rotates

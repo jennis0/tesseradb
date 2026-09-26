@@ -199,18 +199,11 @@ fn flush_a_window(engine: &Engine, root: &Path, from: usize) -> Vec<u32> {
     let entities: Vec<u32> = (from..from + COALESCE_WIDTH)
         .map(|i| ingest_and_flush(engine, root, &format!("fresh-{i}"), flushed_prose(i)))
         .collect();
-    tick_until(
-        engine,
-        "the text layers to coalesce",
-        std::time::Duration::from_secs(60),
-        || {
-            let generation = engine.generation();
-            let live = &generation.bundle.partitions["default"]
-                .manifest
-                .text_extents;
-            live.iter().filter(|e| e.column == "prose").count() < COALESCE_WIDTH
-        },
-    );
+    tick_until(engine, "the text layers to coalesce", std::time::Duration::from_secs(60), || {
+        let generation = engine.generation();
+        let live = &generation.bundle.partitions["default"].manifest.text_extents;
+        live.iter().filter(|e| e.column == "prose").count() < COALESCE_WIDTH
+    });
     entities
 }
 

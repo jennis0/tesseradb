@@ -449,10 +449,7 @@ mod tests {
 
     #[test]
     fn a_vocabulary_answers_its_width_and_bounds_its_reserved_codes() {
-        assert_eq!(
-            check_vocabulary("dept", "u8", &[1, 255]),
-            Ok(ScalarType::U8)
-        );
+        assert_eq!(check_vocabulary("dept", "u8", &[1, 255]), Ok(ScalarType::U8));
         assert!(check_vocabulary("dept", "u8", &[0]).is_err());
         assert!(check_vocabulary("dept", "u8", &[256]).is_err());
         assert!(check_vocabulary("dept", "u64", &[]).is_err());

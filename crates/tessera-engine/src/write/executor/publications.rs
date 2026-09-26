@@ -97,11 +97,7 @@ pub(super) fn entity_terms_extent_paths(
 ///
 /// The two lists are positional against each other: `tiers` was opened from `rels`, which is the
 /// `deltas` list of the manifest they came from.
-pub(super) fn held_tier(
-    tiers: &[Arc<DeltaTier>],
-    rels: &[String],
-    rel: &str,
-) -> Option<Arc<DeltaTier>> {
+pub(super) fn held_tier(tiers: &[Arc<DeltaTier>], rels: &[String], rel: &str) -> Option<Arc<DeltaTier>> {
     tiers
         .iter()
         .zip(rels)
@@ -122,9 +118,7 @@ pub(super) fn stored_membership(declaration: &tessera_types::layer::LayerDeclara
 }
 
 /// A layer whose memberships are resolved from shapes: spatial, with a shape declared.
-pub(in crate::write) fn spatial_membership(
-    declaration: &tessera_types::layer::LayerDeclaration,
-) -> bool {
+pub(in crate::write) fn spatial_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
     matches!(
         declaration.membership,
         tessera_types::layer::MembershipSource::Spatial
@@ -238,12 +232,8 @@ impl Executor {
                     // Nothing happened, retry next tick: the manifest is the only commit point,
                     // so a failure before it leaves orphan files nothing references and every
                     // consumed entry still stands.
-                    health
-                        .coalesce_failures
-                        .fetch_add(windows, Ordering::Relaxed);
-                    health
-                        .coalesce_passes_failed
-                        .fetch_add(1, Ordering::Relaxed);
+                    health.coalesce_failures.fetch_add(windows, Ordering::Relaxed);
+                    health.coalesce_passes_failed.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
                         error = %e,
                         "an entity-space coalesce failed; the axes it would have bounded keep \
@@ -306,9 +296,8 @@ impl Executor {
 
         let unit = self.merge.start();
         let health = Arc::clone(&self.health);
-        self.deps
-            .pool
-            .spawn(move || match crate::merge::execute(plan, ctx) {
+        self.deps.pool.spawn(move || {
+            match crate::merge::execute(plan, ctx) {
                 Ok(completed) => unit.complete(completed),
                 Err(e) => {
                     health.merge_failures.fetch_add(1, Ordering::Relaxed);
@@ -318,7 +307,8 @@ impl Executor {
                          next tick"
                     );
                 }
-            });
+            }
+        });
     }
 
     /// Dispatch a suggestion-index rebuild where one vocabulary's side map has run far enough
@@ -410,7 +400,8 @@ impl Executor {
         let values = crate::suggest::values_of(minter);
         let build = self.suggest.next_attempt();
         let dir = self.deps.suggest_dir.join(vocabulary);
-        let Ok(index) = crate::suggest::SuggestIndex::build(&dir, build, &values, &self.deps.pool)
+        let Ok(index) =
+            crate::suggest::SuggestIndex::build(&dir, build, &values, &self.deps.pool)
         else {
             return;
         };
@@ -461,12 +452,7 @@ impl Executor {
     pub(super) fn publish_completed_merges(&mut self) -> bool {
         // Left in the channel rather than dropped; see
         // `MaintenanceDeps::switches`. Always false in a shipped build.
-        if self
-            .deps
-            .switches
-            .merge_publication_paused
-            .load(Ordering::SeqCst)
-        {
+        if self.deps.switches.merge_publication_paused.load(Ordering::SeqCst) {
             return false;
         }
         let mut any = false;
@@ -649,8 +635,7 @@ impl Executor {
         }));
         // The claim names the generation it is for, so a pass that is superseded mid-flight
         // releases nothing when it ends; see `refresh::clear_if_current`.
-        self.deps
-            .refresh
+        self.deps.refresh
             .in_flight
             .store(segments_version, Ordering::SeqCst);
         self.publish_arc(Arc::clone(&next), started);
@@ -701,9 +686,7 @@ impl Executor {
             let health = Arc::clone(&self.health);
             move |reason: &str| {
                 health.coalesce_failures.fetch_add(taken, Ordering::Relaxed);
-                health
-                    .coalesce_passes_failed
-                    .fetch_add(1, Ordering::Relaxed);
+                health.coalesce_passes_failed.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     "ALARM: discarding a completed coalesce: {reason}. Its files are orphans, \
                      every consumed entry still stands, and the next tick re-plans"
@@ -737,12 +720,7 @@ impl Executor {
             .attrs
             .iter()
             .map(|merged| crate::filter::CoalescedWindow {
-                consumed: merged
-                    .consumed
-                    .extents
-                    .iter()
-                    .map(|e| e.values.clone())
-                    .collect(),
+                consumed: merged.consumed.extents.iter().map(|e| e.values.clone()).collect(),
                 // A keyword window's merged dictionary travels here beside the ordinals it
                 // numbers; the composition installs the pair as one layer or refuses.
                 replacement: merged.output.clone(),
@@ -757,12 +735,7 @@ impl Executor {
             .texts
             .iter()
             .map(|merged| crate::filter::CoalescedTextWindow {
-                consumed: merged
-                    .consumed
-                    .extents
-                    .iter()
-                    .map(|e| e.dict.clone())
-                    .collect(),
+                consumed: merged.consumed.extents.iter().map(|e| e.dict.clone()).collect(),
                 paths: crate::filter::TextExtentPaths::of(&prefix_dir, &merged.output),
             })
             .collect();
@@ -775,7 +748,9 @@ impl Executor {
         let entity_terms = if completed.terms.is_none() {
             None
         } else {
-            let partition_dir = prefix_dir.join("partitions").join(&completed.partition);
+            let partition_dir = prefix_dir
+                .join("partitions")
+                .join(&completed.partition);
             let extents: Vec<tessera_store::EntityTermsExtentPaths> = manifest
                 .entity_terms_extents
                 .iter()
@@ -798,40 +773,43 @@ impl Executor {
         // process serves from layers its own manifest no longer names until a restart. Affordable
         // for the same reason: the layers are memory-mapped, and a coalesce fires once per
         // `width` ticks. `None` where the axis did not run, and the live stack rides through.
-        let records = if completed.record.is_none() {
-            None
-        } else {
-            let partition_dir = prefix_dir.join("partitions").join(&completed.partition);
-            // Both lists, one stack, as the open composes them: an artifact's content extents
-            // hold the same format and the same reader, and the two never share an entity.
-            let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
-                .record_extents
-                .iter()
-                .chain(manifest.artifact_record_extents.iter())
-                .map(|e| record_extent_paths(&prefix_dir, e))
-                .collect();
-            // The columns whose base no fold has written yet, which the schema owes no base
-            // for — the list `Engine::open` passes, so this stack and the one a restart opens
-            // are the same stack.
-            let unfolded = self.live.with_attributes(|a| a.entity_names());
-            match crate::filter::open_record_stack(
-                &partition_dir,
-                &live.bundle.manifest.declared_scalars,
-                &live.bundle.manifest.vocabularies,
-                &unfolded,
-                &extents,
-                live.filter_columns.access(),
-            ) {
-                Ok(stack) => Some(Arc::new(stack)),
-                Err(e) => {
-                    discard(&format!(
-                        "its record extent would not compose into a stack ({e}), and a \
+        let records =
+            if completed.record.is_none() {
+                None
+            } else {
+                let partition_dir = prefix_dir
+                    .join("partitions")
+                    .join(&completed.partition);
+                // Both lists, one stack, as the open composes them: an artifact's content extents
+                // hold the same format and the same reader, and the two never share an entity.
+                let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
+                    .record_extents
+                    .iter()
+                    .chain(manifest.artifact_record_extents.iter())
+                    .map(|e| record_extent_paths(&prefix_dir, e))
+                    .collect();
+                // The columns whose base no fold has written yet, which the schema owes no base
+                // for — the list `Engine::open` passes, so this stack and the one a restart opens
+                // are the same stack.
+                let unfolded = self.live.with_attributes(|a| a.entity_names());
+                match crate::filter::open_record_stack(
+                    &partition_dir,
+                    &live.bundle.manifest.declared_scalars,
+                    &live.bundle.manifest.vocabularies,
+                    &unfolded,
+                    &extents,
+                    live.filter_columns.access(),
+                ) {
+                    Ok(stack) => Some(Arc::new(stack)),
+                    Err(e) => {
+                        discard(&format!(
+                            "its record extent would not compose into a stack ({e}), and a \
                              manifest must not name a layer this process cannot serve"
-                    ));
-                    return;
+                        ));
+                        return;
+                    }
                 }
-            }
-        };
+            };
         let filter_columns =
             match live
                 .filter_columns
@@ -1946,12 +1924,7 @@ impl Executor {
             .filter(|d| d.unique)
             .map(|d| d.name.as_str())
             .collect();
-        if !completed
-            .unique_columns
-            .iter()
-            .map(String::as_str)
-            .eq(unique_now)
-        {
+        if !completed.unique_columns.iter().map(String::as_str).eq(unique_now) {
             tracing::warn!(
                 "discarding a completed flush planned before a unique declaration changed; the \
                  next tick re-plans it"
@@ -2152,9 +2125,7 @@ impl Executor {
             manifest.segments.push(segment.descriptor.clone());
             manifest.deltas.push(segment.tier_path.clone());
             if let Some(extent) = &segment.locator_extent {
-                manifest
-                    .external_id_runs
-                    .push(extent.external_id_run.clone());
+                manifest.external_id_runs.push(extent.external_id_run.clone());
                 manifest.locator_extents.push(extent.clone());
             }
         }
@@ -2537,8 +2508,7 @@ impl Executor {
         // duration of the refresh instead.
         // The claim names the generation it is for, so a pass that is superseded mid-flight
         // releases nothing when it ends; see `refresh::clear_if_current`.
-        self.deps
-            .refresh
+        self.deps.refresh
             .in_flight
             .store(segments_version, Ordering::SeqCst);
         self.publish_arc(Arc::clone(&next), started);
@@ -2578,6 +2548,7 @@ impl Executor {
             .flush_lap(crate::flush::FlushStage::DropSuperseded, *mark);
         true
     }
+
 }
 
 /// The one plan a dispatch sends, chosen by oldest unflushed row. Free and pure so the choice can

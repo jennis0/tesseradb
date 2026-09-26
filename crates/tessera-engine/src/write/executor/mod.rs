@@ -65,8 +65,7 @@ pub(super) struct Executor {
     /// So the first tick lands one period after construction, not immediately.
     pub(super) last_tick: std::time::Instant,
     /// What every accepted write since the last tick did to each level's row forms.
-    pub(super) pending_forms:
-        std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
+    pub(super) pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
     /// The view the last dispatched flush writes and the entity floor its segment leaves; read
     /// only while that flush is outstanding.
     pub(super) flush_flight: Option<(String, u64)>,
@@ -84,8 +83,7 @@ impl Executor {
     /// Drop the region decompositions of generations older than the retention depth.
     pub(super) fn prune_region_cache(&self, segments_version: u64) {
         let floor = segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS);
-        self.deps
-            .region_cache
+        self.deps.region_cache
             .retain_keys(|key| key.segments_version >= floor);
     }
 
@@ -343,6 +341,7 @@ impl Executor {
             }
             _ => (Arc::clone(&previous.overlay), previous.overlay_version),
         };
+
 
         let next = previous.with(|g| {
             g.prefix = prefix;

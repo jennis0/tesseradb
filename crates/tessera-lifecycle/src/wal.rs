@@ -1189,9 +1189,7 @@ impl SequenceBase {
 #[cfg(unix)]
 fn allocated_bytes(path: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path)
-        .map(|m| m.blocks() * 512)
-        .unwrap_or(0)
+    std::fs::metadata(path).map(|m| m.blocks() * 512).unwrap_or(0)
 }
 
 /// Apparent length, where no allocation figure is available. It understates a sparse or
@@ -2795,7 +2793,19 @@ mod tests {
             .collect();
         assert_eq!(
             tracks,
-            [None, None, None, None, None, None, None, None, None, None, None]
+            [
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            ]
         );
 
         let (mut wal, _) = Wal::open(&path).unwrap();
