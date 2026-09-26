@@ -117,7 +117,7 @@ describe('/v1/meta', () => {
     idset: 7,
     views: [{id: 's0', display_name: 'S0', quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536}, projection: 'none', world_aspect: null, tile_scheme: null, tile: null, group: null, key: null, metadata: null}],
     groups: [{name: 'quarter', title: null, members_of: null, views: []}],
-    declared_scalars: [{name: 'abstract', arrow_type: 'text', category: null, analyser: 'unicode/1', render: false, index: true, homes: ['record']}],
+    declared_scalars: [{name: 'abstract', arrow_type: 'text', category: null, analyser: 'unicode/1', render: false, index: true, unique: false, homes: ['record']}],
     scoped_scalars: [
       {name: 'mood', arrow_type: 'u8', scope: {group: 'quarter'}, category: {vocabulary: 'moods', kind: 'declared', visibility: 'public'}, analyser: null, render: true, index: true, views: ['quarter:q1']}
     ],
@@ -151,7 +151,7 @@ describe('/v1/meta', () => {
       idset: 7,
       views: [{id: 's0', displayName: 'S0', quantisation: {xMin: 0, xMax: 65536, yMin: 0, yMax: 65536}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
       groups: [{name: 'quarter', title: null, membersOf: null, views: []}],
-      declaredScalars: [{name: 'abstract', arrowType: 'text', category: null, analyser: 'unicode/1', render: false, index: true, homes: ['record']}],
+      declaredScalars: [{name: 'abstract', arrowType: 'text', category: null, analyser: 'unicode/1', render: false, index: true, unique: false, homes: ['record']}],
       scopedScalars: [
         {name: 'mood', arrowType: 'u8', scope: {group: 'quarter'}, category: {vocabulary: 'moods', kind: 'declared', visibility: 'public'}, analyser: null, render: true, index: true, views: ['quarter:q1']}
       ],

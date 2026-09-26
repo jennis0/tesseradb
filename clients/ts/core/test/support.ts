@@ -307,7 +307,7 @@ export function view(id: string, over: Partial<ViewInfo> = {}): ViewInfo {
 
 /** A declared column that is indexed, not rendered and read from the record, unless `over` says. */
 export function scalar(name: string, arrowType: DeclaredScalar['arrowType'], over: Partial<DeclaredScalar> = {}): DeclaredScalar {
-  return {name, arrowType, category: null, render: false, index: true, analyser: null, homes: ['record'], ...over};
+  return {name, arrowType, category: null, render: false, index: true, unique: false, analyser: null, homes: ['record'], ...over};
 }
 
 /** `/v1/meta`'s `selection` block with the server's defaults for the ceilings. */

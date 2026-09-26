@@ -207,6 +207,14 @@ describe('TesseraClient.items and artifacts', () => {
     expect(sent[2]!.body).toEqual({view: 's0', layer: 'clusters', fields: ['key', 'parents'], parent: '9223372036854775813', level: 1, q: 'ab'});
   });
 
+  it('sends a bigint comparand as its decimal digits, exact past 2^53', async () => {
+    const empty = responseOf([[page([]), null]], null, {order: 'stored', page_rows: 10});
+    const {client, sent} = clientFor(() => chunked(empty));
+    const big = 2n ** 60n + 1n;
+    await drain(await client.items('tok', {view: 's0', fields: ['gid'], filters: {gid: {in: [big, 5, -(2n ** 62n)]}}}));
+    expect(sent[0]!.body.filters).toEqual({gid: {in: ['1152921504606846977', 5, '-4611686018427387904']}});
+  });
+
   it('yields each page as a table with the cursor after it, however the body is split', async () => {
     const body = framed(parts());
     const headers = {'x-tessera-region': 'exact', 'x-tessera-identity-key': 'ik', 'x-tessera-server-us': '41', 'x-tessera-admission-us': '3'};

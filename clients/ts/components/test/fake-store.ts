@@ -16,7 +16,7 @@ export type FakeStore = Store & {
 
 /** A declared column that is indexed, not rendered and read from the record, unless `over` says. */
 export function scalar(name: string, arrowType: DeclaredScalar['arrowType'], over: Partial<DeclaredScalar> = {}): DeclaredScalar {
-  return {name, arrowType, category: null, render: false, index: true, analyser: null, homes: ['record'], ...over};
+  return {name, arrowType, category: null, render: false, index: true, unique: false, analyser: null, homes: ['record'], ...over};
 }
 
 /** A deployment of one plain view `s0` over the unit square with nothing declared, and whichever fields `over` names. */
