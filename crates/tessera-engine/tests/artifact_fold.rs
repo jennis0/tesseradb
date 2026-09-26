@@ -768,7 +768,7 @@ fn a_member_ingested_since_the_last_fold_counts_from_its_flush() {
         "buffered: the member has no row at all yet, so it is in no count"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         count(&engine),
         301,
@@ -799,7 +799,7 @@ fn a_flush_disturbs_no_artifacts_count() {
     assert_eq!(count(&engine), 300);
 
     ingest(&engine, b"unrelated");
-    flush(&engine);
+    publish_buffered(&engine);
 
     assert_eq!(
         count(&engine),
@@ -840,12 +840,12 @@ fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
         b"merge-d".as_slice(),
     ] {
         ingest(&engine, batch);
-        flush(&engine);
+        publish_buffered(&engine);
     }
 
     engine.set_merge_for_test(true);
     ingest(&engine, b"merge-e");
-    flush(&engine);
+    publish_buffered(&engine);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while engine.write_executor_stats().merges == 0 {
         assert!(
@@ -1856,7 +1856,7 @@ fn a_borrowing_label_takes_its_targets_flushed_member() {
         "the label is counted over the cluster's members"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(count_of(&engine, "clusters/a", "c0"), 301);
     assert_eq!(
         count_of(&engine, LABELS, "l0"),
@@ -1880,7 +1880,7 @@ fn a_borrowing_label_keeps_its_targets_membership_across_a_fold() {
     assert_eq!(count_of(&engine, LABELS, "l0"), 300);
 
     ingest(&engine, b"folded-for-the-label");
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
 
     assert_eq!(count_of(&engine, "clusters/a", "c0"), 300);

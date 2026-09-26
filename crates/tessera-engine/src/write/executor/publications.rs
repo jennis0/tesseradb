@@ -1888,7 +1888,8 @@ impl Executor {
         if self.publish_flush_stages(completed, &mut mark) {
             // The publication cycle closes at the swap (`ExecutorHealth::publication`): the
             // generation carrying this unit's rows, fills and extents is the live one from here,
-            // so the number being reached and the work being served are one event.
+            // so the number being reached and the work being served are one event. A request it
+            // re-arms needs no wake: the loop ticks again after any publication.
             self.health.close_publication_cycle();
         } else {
             // A discard leaves the unit's files orphaned and its inputs standing, so the cycle is

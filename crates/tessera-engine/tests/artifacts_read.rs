@@ -894,7 +894,7 @@ fn a_read_continues_across_a_flush_a_fold_a_restart_and_a_publication() {
         .accept_change(fx.entities([899])[0], ChangeOp::Delete)
         .unwrap();
     ingest(engine, "late-arrival");
-    flush(engine);
+    publish_buffered(engine);
     let (sink, trailer) =
         respond(engine, &session, ArtifactsRequest { cursor: cursor.as_deref(), ..base.clone() })
             .unwrap();
@@ -1375,7 +1375,7 @@ fn a_merge_between_two_pages_of_one_response_renews_the_filter() {
                 .count() as u64;
             ingested.extend(entities);
         }
-        flush(engine);
+        publish_buffered(engine);
     }
     let late = IncomingArtifact::from_entities(Some("f-late".into()), ingested.clone());
     engine.publish_artifacts(FLOOR.into(), 0, vec![late]).unwrap();

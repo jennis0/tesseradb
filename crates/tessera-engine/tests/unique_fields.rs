@@ -24,7 +24,9 @@ use parquet::arrow::ArrowWriter;
 
 use common::*;
 use tessera_engine::filter::{FilterExpr, FilterOperand, Scalar};
-use tessera_engine::{AcceptError, AttributeRequest, Engine, EngineConfig, Session, ViewportRequest};
+use tessera_engine::{
+    AcceptError, AttributeRequest, Engine, EngineConfig, Session, ViewportRequest,
+};
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::{ChangeOp, ExecError};
@@ -91,15 +93,27 @@ fn write_points(path: &Path, n: u64) {
         vec![
             Arc::new(UInt64Array::from(ids.clone())),
             Arc::new(Float64Array::from(
-                ids.iter().map(|e| ((e * 37) % 1000) as f64).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|e| ((e * 37) % 1000) as f64)
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(Float64Array::from(
-                ids.iter().map(|e| ((e * 53) % 1000) as f64).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|e| ((e * 53) % 1000) as f64)
+                    .collect::<Vec<_>>(),
             )),
-            Arc::new(StringArray::from(ids.iter().map(|e| doi_of(*e)).collect::<Vec<_>>())),
-            Arc::new(UInt64Array::from(ids.iter().map(|e| gid_of(*e)).collect::<Vec<_>>())),
-            Arc::new(Int64Array::from(ids.iter().map(|e| serial_of(*e)).collect::<Vec<_>>())),
-            Arc::new(StringArray::from(ids.iter().map(|e| note_of(*e)).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(
+                ids.iter().map(|e| doi_of(*e)).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                ids.iter().map(|e| gid_of(*e)).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                ids.iter().map(|e| serial_of(*e)).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                ids.iter().map(|e| note_of(*e)).collect::<Vec<_>>(),
+            )),
         ],
     )
     .unwrap();
@@ -208,7 +222,14 @@ fn restart(fx: &Fixture, engine: Engine) -> Engine {
 }
 
 /// A row carrying the four declared columns, under `label`.
-fn row(engine: &Engine, id: &str, label: &[u8], doi: &str, gid: u64, serial: i64) -> UnallocatedRow {
+fn row(
+    engine: &Engine,
+    id: &str,
+    label: &[u8],
+    doi: &str,
+    gid: u64,
+    serial: i64,
+) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(id.as_bytes().to_vec()),
         view: "s0".to_string(),
@@ -272,7 +293,12 @@ fn matching(engine: &Engine, session: &Session, filter: FilterExpr) -> BTreeSet<
 }
 
 /// The `tessera_id`s a viewport of `view` under `filter` returns.
-fn matching_in(engine: &Engine, session: &Session, view: &str, filter: FilterExpr) -> BTreeSet<u64> {
+fn matching_in(
+    engine: &Engine,
+    session: &Session,
+    view: &str,
+    filter: FilterExpr,
+) -> BTreeSet<u64> {
     let mut req = ViewportRequest::new(view, 0, VIEWPORT, 10_000);
     req.filter = Some(filter);
     engine
@@ -341,8 +367,16 @@ fn check_lookups(engine: &Engine, expected: &Expected, when: &str) {
         .cloned()
         .chain(["10.nobody/x".to_string()])
         .collect();
-    let want: BTreeSet<u64> = dois.iter().filter_map(|d| expected.by_doi.get(d)).copied().collect();
-    assert_eq!(matching(engine, &session, text_in("doi", &dois)), want, "doi, {when}");
+    let want: BTreeSet<u64> = dois
+        .iter()
+        .filter_map(|d| expected.by_doi.get(d))
+        .copied()
+        .collect();
+    assert_eq!(
+        matching(engine, &session, text_in("doi", &dois)),
+        want,
+        "doi, {when}"
+    );
 
     let gids: Vec<i128> = expected
         .by_gid
@@ -356,7 +390,11 @@ fn check_lookups(engine: &Engine, expected: &Expected, when: &str) {
         .filter_map(|g| expected.by_gid.get(&(*g as u64)))
         .copied()
         .collect();
-    assert_eq!(matching(engine, &session, number_in("gid", &gids)), want, "gid, {when}");
+    assert_eq!(
+        matching(engine, &session, number_in("gid", &gids)),
+        want,
+        "gid, {when}"
+    );
 
     let serials: Vec<i128> = expected
         .by_serial
@@ -407,7 +445,14 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
                 let id = format!("{batch}-{i}");
                 let doi = format!("10.{batch}/{i}");
                 let base = u64::from(batch.as_bytes()[0]) * 1000;
-                row(engine, &id, b"0", &doi, BIG * 2 + base + i, -1_000_000 - (base + i) as i64 * 7)
+                row(
+                    engine,
+                    &id,
+                    b"0",
+                    &doi,
+                    BIG * 2 + base + i,
+                    -1_000_000 - (base + i) as i64 * 7,
+                )
             })
             .collect();
         let values: Vec<(String, u64, i64)> = rows
@@ -427,19 +472,24 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
 
     // A buffered row has no position until its flush, so a lookup through the map meets it then.
     let first = add(&engine, "a", 3, &mut expected);
-    flush(&engine);
+    publish_buffered(&engine);
     check_lookups(&engine, &expected, "after one flush");
     add(&engine, "b", 4, &mut expected);
-    flush(&engine);
+    publish_buffered(&engine);
     add(&engine, "c", 2, &mut expected);
-    flush(&engine);
+    publish_buffered(&engine);
 
     let before = engine.write_executor_stats();
     engine.set_coalesce_for_test(true);
-    tick_until(&engine, "a coalesce", std::time::Duration::from_secs(60), || {
-        let now = engine.write_executor_stats();
-        now.coalesces > before.coalesces
-    });
+    tick_until(
+        &engine,
+        "a coalesce",
+        std::time::Duration::from_secs(60),
+        || {
+            let now = engine.write_executor_stats();
+            now.coalesces > before.coalesces
+        },
+    );
     engine.set_coalesce_for_test(false);
     assert_eq!(engine.write_executor_stats().coalesce_failures, 0);
     check_lookups(&engine, &expected, "after a coalesce");
@@ -461,9 +511,12 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
     assert!(is_taken(try_ingest(
         &engine,
         "after-restart",
-        vec![naming_built(row(&engine, "r", b"0", &doi, BIG * 13, 7_777), 1)]
+        vec![naming_built(
+            row(&engine, "r", b"0", &doi, BIG * 13, 7_777),
+            1
+        )]
     )));
-    flush(&engine);
+    publish_buffered(&engine);
     check_lookups(&engine, &expected, "after the restart's flush");
 }
 
@@ -480,8 +533,15 @@ fn an_invisible_holder_answers_as_absent() {
         (0..N).find(|s| !subset_sees(*s)).unwrap(),
         (0..N).find(|s| subset_sees(*s)).unwrap(),
     );
-    let shown_id = engine.tessera_id_of(EntityId::new(map[&shown])).unwrap().raw();
-    let nobody = matching(&engine, &restricted, text_in("doi", &["10.nobody/x".to_string()]));
+    let shown_id = engine
+        .tessera_id_of(EntityId::new(map[&shown]))
+        .unwrap()
+        .raw();
+    let nobody = matching(
+        &engine,
+        &restricted,
+        text_in("doi", &["10.nobody/x".to_string()]),
+    );
     assert!(nobody.is_empty());
     assert_eq!(
         matching(&engine, &restricted, text_in("doi", &[doi_of(hidden)])),
@@ -489,11 +549,19 @@ fn an_invisible_holder_answers_as_absent() {
         "an invisible holder's value answers as a value nobody holds"
     );
     assert_eq!(
-        matching(&engine, &restricted, text_in("doi", &[doi_of(hidden), doi_of(shown)])),
+        matching(
+            &engine,
+            &restricted,
+            text_in("doi", &[doi_of(hidden), doi_of(shown)])
+        ),
         BTreeSet::from([shown_id])
     );
     assert_eq!(
-        matching(&engine, &restricted, number_in("gid", &[gid_of(hidden) as i128])),
+        matching(
+            &engine,
+            &restricted,
+            number_in("gid", &[gid_of(hidden) as i128])
+        ),
         nobody
     );
 }
@@ -507,10 +575,17 @@ fn an_ingest_setting_a_held_value_is_refused() {
     let fx = fixture();
     let engine = engine_over(&fx);
     let giving = |source: u64, doi: &str, gid: u64| {
-        naming_built(row(&engine, "x", b"0", doi, gid, 1_000 + gid as i64), source)
+        naming_built(
+            row(&engine, "x", b"0", doi, gid, 1_000 + gid as i64),
+            source,
+        )
     };
     assert!(
-        is_taken(try_ingest(&engine, "built", vec![giving(5, &doi_of(4), BIG * 3)])),
+        is_taken(try_ingest(
+            &engine,
+            "built",
+            vec![giving(5, &doi_of(4), BIG * 3)]
+        )),
         "a built holder"
     );
 
@@ -520,7 +595,11 @@ fn an_ingest_setting_a_held_value_is_refused() {
         vec![row(&engine, "h1", b"0", "10.h/1", BIG * 4, 2_000)],
     );
     assert!(
-        is_taken(try_ingest(&engine, "buffered", vec![giving(5, "10.h/other", BIG * 4)])),
+        is_taken(try_ingest(
+            &engine,
+            "buffered",
+            vec![giving(5, "10.h/other", BIG * 4)]
+        )),
         "a buffered holder of gid"
     );
     assert!(
@@ -534,9 +613,13 @@ fn an_ingest_setting_a_held_value_is_refused() {
         )),
         "one value twice in a batch"
     );
-    flush(&engine);
+    publish_buffered(&engine);
     assert!(
-        is_taken(try_ingest(&engine, "flushed", vec![giving(5, "10.h/1", BIG * 6)])),
+        is_taken(try_ingest(
+            &engine,
+            "flushed",
+            vec![giving(5, "10.h/1", BIG * 6)]
+        )),
         "a flushed holder of doi"
     );
 
@@ -572,7 +655,12 @@ fn an_ingest_setting_a_held_value_is_refused() {
     // Nulls never collide.
     let nulls = |id: &str| {
         let mut r = row(&engine, id, b"0", "unused", 0, 0);
-        r.scalars = vec![WalScalar::Null, WalScalar::Null, WalScalar::Null, WalScalar::Null];
+        r.scalars = vec![
+            WalScalar::Null,
+            WalScalar::Null,
+            WalScalar::Null,
+            WalScalar::Null,
+        ];
         r
     };
     ingest(&engine, "nulls", vec![nulls("z1"), nulls("z2")]);
@@ -589,7 +677,14 @@ fn two_concurrent_batches_setting_one_value_are_one_accepted() {
         .map(|i| {
             let engine = Arc::clone(&engine);
             std::thread::spawn(move || {
-                let r = row(&engine, &format!("c{i}"), b"0", "10.race/1", BIG * 8 + i, 9_000 + i as i64);
+                let r = row(
+                    &engine,
+                    &format!("c{i}"),
+                    b"0",
+                    "10.race/1",
+                    BIG * 8 + i,
+                    9_000 + i as i64,
+                );
                 try_ingest(&engine, &format!("race-{i}"), vec![r])
             })
         })
@@ -601,7 +696,11 @@ fn two_concurrent_batches_setting_one_value_are_one_accepted() {
         .filter_map(|o| o.as_ref().ok())
         .map(|entities| engine.tessera_id_of(entities[0]).unwrap().raw())
         .collect();
-    assert_eq!(named.len(), 1, "every accepted batch names one item: {outcomes:?}");
+    assert_eq!(
+        named.len(),
+        1,
+        "every accepted batch names one item: {outcomes:?}"
+    );
     for outcome in outcomes.iter().filter(|o| o.is_err()) {
         assert!(taken(outcome), "{outcome:?}");
     }
@@ -609,7 +708,13 @@ fn two_concurrent_batches_setting_one_value_are_one_accepted() {
 }
 
 /// A row of the fixture's shape into `view`, joining `join` where the handler found one.
-fn row_into(engine: &Engine, view: &str, id: &str, doi: &str, join: Option<EntityId>) -> UnallocatedRow {
+fn row_into(
+    engine: &Engine,
+    view: &str,
+    id: &str,
+    doi: &str,
+    join: Option<EntityId>,
+) -> UnallocatedRow {
     let mut r = row(engine, id, b"0", doi, 0, 0);
     r.scalars[1] = WalScalar::Null;
     r.scalars[2] = WalScalar::Null;
@@ -640,12 +745,12 @@ fn held_ingest(
 /// How many live items in views `s0` and `s1` hold `doi`, once every buffered row is flushed.
 /// How many items hold `doi` in `s0`, once the buffer has flushed.
 fn holders(engine: &Engine, doi: &str) -> usize {
-    flush(engine);
+    publish_buffered(engine);
     matching(engine, &full(engine), text_in("doi", &[doi.to_string()])).len()
 }
 
 fn holders_of(engine: &Engine, doi: &str) -> usize {
-    flush(engine);
+    publish_buffered(engine);
     let session = full(engine);
     let filter = || text_in("doi", &[doi.to_string()]);
     let mut found = matching_in(engine, &session, "s0", filter());
@@ -661,7 +766,11 @@ fn a_join_that_becomes_a_create_is_checked_as_one() {
     let fx = fixture_of(true, &["s0", "s1"]);
     let engine = Arc::new(engine_over(&fx));
     let doi = "10.join/created";
-    let joined = ingest(&engine, "first", vec![row_into(&engine, "s0", "j", doi, None)])[0];
+    let joined = ingest(
+        &engine,
+        "first",
+        vec![row_into(&engine, "s0", "j", doi, None)],
+    )[0];
     let held = held_ingest(
         &engine,
         "join",
@@ -689,7 +798,10 @@ fn a_join_that_becomes_a_create_is_checked_as_one() {
         1,
         "one batch holds the value: {outcomes:?}"
     );
-    assert!(outcomes.iter().any(taken), "the other is refused: {outcomes:?}");
+    assert!(
+        outcomes.iter().any(taken),
+        "the other is refused: {outcomes:?}"
+    );
     assert_eq!(holders_of(&engine, doi), 1);
 }
 
@@ -701,11 +813,26 @@ fn a_create_that_becomes_a_join_carries_its_own_value() {
     let fx = fixture_of(true, &["s0", "s1"]);
     let engine = Arc::new(engine_over(&fx));
     let doi = "10.join/joined";
-    let held = held_ingest(&engine, "late", vec![row_into(&engine, "s1", "x", doi, None)]);
-    let created = ingest(&engine, "early", vec![row_into(&engine, "s0", "x", doi, None)])[0];
+    let held = held_ingest(
+        &engine,
+        "late",
+        vec![row_into(&engine, "s1", "x", doi, None)],
+    );
+    let created = ingest(
+        &engine,
+        "early",
+        vec![row_into(&engine, "s0", "x", doi, None)],
+    )[0];
     engine.release_write_check_for_test();
-    let joined = held.join().unwrap().expect("the row joins the item holding its value");
-    assert_eq!(joined, vec![created], "the row joined the item its external id names");
+    let joined = held
+        .join()
+        .unwrap()
+        .expect("the row joins the item holding its value");
+    assert_eq!(
+        joined,
+        vec![created],
+        "the row joined the item its external id names"
+    );
     assert_eq!(holders_of(&engine, doi), 1);
 }
 
@@ -715,8 +842,16 @@ fn a_join_row_carrying_its_own_value_is_accepted() {
     let fx = fixture_of(true, &["s0", "s1"]);
     let engine = engine_over(&fx);
     let doi = "10.join/own";
-    let item = ingest(&engine, "own", vec![row_into(&engine, "s0", "o", doi, None)])[0];
-    let joined = ingest(&engine, "own-join", vec![row_into(&engine, "s1", "o", doi, Some(item))]);
+    let item = ingest(
+        &engine,
+        "own",
+        vec![row_into(&engine, "s0", "o", doi, None)],
+    )[0];
+    let joined = ingest(
+        &engine,
+        "own-join",
+        vec![row_into(&engine, "s1", "o", doi, Some(item))],
+    );
     assert_eq!(joined, vec![item]);
     assert_eq!(holders_of(&engine, doi), 1);
 }
@@ -764,17 +899,23 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
         vec![row(&engine, "e1", b"0", "10.e/1", BIG * 9, 5_000)],
     );
     for name in ["doi", "gid", "serial"] {
-        assert!(declare(&engine, name, true).is_ok(), "'{name}' holds no value twice");
+        assert!(
+            declare(&engine, name, true).is_ok(),
+            "'{name}' holds no value twice"
+        );
     }
     assert!(
         is_taken(try_ingest(
             &engine,
             "early-dup",
-            vec![naming_built(row(&engine, "e2", b"0", "10.e/1", BIG * 9 + 1, 5_001), 2)]
+            vec![naming_built(
+                row(&engine, "e2", b"0", "10.e/1", BIG * 9 + 1, 5_001),
+                2
+            )]
         )),
         "a row buffered before the declaration holds its value"
     );
-    flush(&engine);
+    publish_buffered(&engine);
     let mut expected = Expected::built(&fx, &engine);
     let early_id = engine.tessera_id_of(early[0]).unwrap().raw();
     expected.add(early_id, "10.e/1", BIG * 9, 5_000);
@@ -793,26 +934,42 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
     assert_eq!(items(&engine, &expected), asked.iter().cloned().collect());
     let verified = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
         .expect("the runtime-declared indexes agree with their columns");
-    assert!(verified.unique_entries >= 3 * N, "every declared index was checked");
+    assert!(
+        verified.unique_entries >= 3 * N,
+        "every declared index was checked"
+    );
 
     assert!(is_taken(try_ingest(
         &engine,
         "dup",
-        vec![naming_built(row(&engine, "d1", b"0", &doi_of(3), BIG * 10, 6_000), 5)]
+        vec![naming_built(
+            row(&engine, "d1", b"0", &doi_of(3), BIG * 10, 6_000),
+            5
+        )]
     )));
     let engine = restart(&fx, engine);
     check_lookups(&engine, &expected, "declared at runtime, after a restart");
     assert!(is_taken(try_ingest(
         &engine,
         "dup-2",
-        vec![naming_built(row(&engine, "d2", b"0", &doi_of(3), BIG * 11, 6_001), 5)]
+        vec![naming_built(
+            row(&engine, "d2", b"0", &doi_of(3), BIG * 11, 6_001),
+            5
+        )]
     )));
     fold(&engine);
     let engine = restart(&fx, engine);
-    check_lookups(&engine, &expected, "declared at runtime, after a fold and a restart");
+    check_lookups(
+        &engine,
+        &expected,
+        "declared at runtime, after a fold and a restart",
+    );
     let verified = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
         .expect("the folded indexes agree with their columns");
-    assert!(verified.unique_entries >= 3 * N, "every folded index was checked");
+    assert!(
+        verified.unique_entries >= 3 * N,
+        "every folded index was checked"
+    );
 }
 
 fn matching_result(engine: &Engine, filter: FilterExpr) -> Result<usize, String> {
@@ -851,7 +1008,7 @@ fn a_runtime_declaration_over_duplicates_is_refused() {
         Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
     ));
     // And after the duplicate is flushed.
-    flush(&engine);
+    publish_buffered(&engine);
     assert!(matches!(
         declare(&engine, "doi", true),
         Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
@@ -883,7 +1040,11 @@ fn held_declaration(
 }
 
 fn is_unique(engine: &Engine, name: &str) -> bool {
-    engine.meta().declared_scalars.iter().any(|d| d.name == name && d.unique)
+    engine
+        .meta()
+        .declared_scalars
+        .iter()
+        .any(|d| d.name == name && d.unique)
 }
 
 /// **A duplicate arriving while a declaration builds refuses it**, whether it is still buffered
@@ -894,13 +1055,20 @@ fn a_duplicate_arriving_mid_build_refuses_the_declaration() {
         let fx = fixture_with(false);
         let engine = Arc::new(engine_over(&fx));
         let held = held_declaration(&engine, "doi");
-        ingest(&engine, "twin", vec![row(&engine, "tw", b"0", &doi_of(4), BIG + 13, 7_100)]);
+        ingest(
+            &engine,
+            "twin",
+            vec![row(&engine, "tw", b"0", &doi_of(4), BIG + 13, 7_100)],
+        );
         if flushed {
-            flush(&engine);
+            publish_buffered(&engine);
         }
         engine.set_unique_round_paused_for_test(false);
         assert!(
-            matches!(held.join().unwrap(), Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))),
+            matches!(
+                held.join().unwrap(),
+                Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
+            ),
             "flushed: {flushed}"
         );
         assert!(!is_unique(&engine, "doi"));
@@ -916,22 +1084,36 @@ fn a_value_arriving_mid_build_is_indexed() {
         let engine = Arc::new(engine_over(&fx));
         let doi = format!("10.mid/{flushed}");
         let held = held_declaration(&engine, "doi");
-        let item = ingest(&engine, "mid", vec![row(&engine, "mid", b"0", &doi, BIG + 14, 7_200)])[0];
+        let item = ingest(
+            &engine,
+            "mid",
+            vec![row(&engine, "mid", b"0", &doi, BIG + 14, 7_200)],
+        )[0];
         if flushed {
-            flush(&engine);
+            publish_buffered(&engine);
         }
         engine.set_unique_round_paused_for_test(false);
         held.join().unwrap().expect("no value is held twice");
         assert!(is_taken(try_ingest(
             &engine,
             "second",
-            vec![naming_built(row(&engine, "second", b"0", &doi, BIG + 15, 7_201), 3)]
+            vec![naming_built(
+                row(&engine, "second", b"0", &doi, BIG + 15, 7_201),
+                3
+            )]
         )));
         if !flushed {
-            flush(&engine);
+            publish_buffered(&engine);
         }
         let id = engine.tessera_id_of(item).unwrap().raw();
-        assert_eq!(matching(&engine, &full(&engine), text_in("doi", std::slice::from_ref(&doi))), BTreeSet::from([id]));
+        assert_eq!(
+            matching(
+                &engine,
+                &full(&engine),
+                text_in("doi", std::slice::from_ref(&doi))
+            ),
+            BTreeSet::from([id])
+        );
     }
 }
 
@@ -954,7 +1136,10 @@ fn a_declaration_and_a_fold_wait_for_each_other() {
     let e = Arc::clone(&engine);
     let during_fold = std::thread::spawn(move || declare(&e, "doi", true));
     engine.set_fold_paused_for_test(false);
-    during_fold.join().unwrap().expect("the declaration is built after the fold");
+    during_fold
+        .join()
+        .unwrap()
+        .expect("the declaration is built after the fold");
     wait_until("the fold never published", Duration::from_secs(60), || {
         engine.write_executor_stats().folds > folds
     });
@@ -964,14 +1149,20 @@ fn a_declaration_and_a_fold_wait_for_each_other() {
     let folds = engine.write_executor_stats().folds;
     engine.request_fold();
     engine.set_unique_round_paused_for_test(false);
-    held.join().unwrap().expect("the declaration is built before the fold");
+    held.join()
+        .unwrap()
+        .expect("the declaration is built before the fold");
     wait_until("the fold never published", Duration::from_secs(60), || {
         engine.write_executor_stats().folds > folds
     });
     assert!(declare(&engine, "serial", true).is_ok());
 
     let engine = restart(&fx, Arc::try_unwrap(engine).ok().expect("one holder"));
-    check_lookups(&engine, &expected, "declared across two folds, after a restart");
+    check_lookups(
+        &engine,
+        &expected,
+        "declared across two folds, after a restart",
+    );
     let verified = tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
         .expect("the indexes agree with their columns");
     assert!(verified.unique_entries >= 3 * N);
@@ -983,39 +1174,57 @@ fn removing_unique_keeps_the_values() {
     let fx = fixture();
     let engine = engine_over(&fx);
     assert!(declare(&engine, "gid", false).is_ok());
-    assert!(!engine
-        .meta()
-        .declared_scalars
-        .iter()
-        .find(|d| d.name == "gid")
-        .unwrap()
-        .unique);
+    assert!(
+        !engine
+            .meta()
+            .declared_scalars
+            .iter()
+            .find(|d| d.name == "gid")
+            .unwrap()
+            .unique
+    );
     // The column's own index still answers, since it was declared `index`.
     let session = full(&engine);
-    assert_eq!(matching(&engine, &session, number_in("gid", &[gid_of(5) as i128])).len(), 1);
+    assert_eq!(
+        matching(&engine, &session, number_in("gid", &[gid_of(5) as i128])).len(),
+        1
+    );
     ingest(
         &engine,
         "same-gid",
         vec![row(&engine, "g1", b"0", "10.g/1", gid_of(5), 8_000)],
     );
-    flush(&engine);
+    publish_buffered(&engine);
     let session = full(&engine);
-    assert_eq!(matching(&engine, &session, number_in("gid", &[gid_of(5) as i128])).len(), 2);
+    assert_eq!(
+        matching(&engine, &session, number_in("gid", &[gid_of(5) as i128])).len(),
+        2
+    );
     let engine = restart(&fx, engine);
-    assert!(!engine
-        .meta()
-        .declared_scalars
-        .iter()
-        .find(|d| d.name == "gid")
-        .unwrap()
-        .unique);
+    assert!(
+        !engine
+            .meta()
+            .declared_scalars
+            .iter()
+            .find(|d| d.name == "gid")
+            .unwrap()
+            .unique
+    );
     let session = full(&engine);
-    assert_eq!(matching(&engine, &session, number_in("gid", &[gid_of(5) as i128])).len(), 2);
+    assert_eq!(
+        matching(&engine, &session, number_in("gid", &[gid_of(5) as i128])).len(),
+        2
+    );
 }
 
 /// Set one column's value on items that exist: an ingest batch naming no view, each row naming
 /// its item by `tessera_id` and carrying that column alone.
-fn fill(engine: &Engine, batch: &str, column: &str, rows: Vec<(EntityId, WalScalar)>) -> Result<(), AcceptError> {
+fn fill(
+    engine: &Engine,
+    batch: &str,
+    column: &str,
+    rows: Vec<(EntityId, WalScalar)>,
+) -> Result<(), AcceptError> {
     let declared = engine.meta().declared_scalars;
     let at = declared
         .iter()
@@ -1055,16 +1264,31 @@ fn a_values_fill_setting_a_held_value_is_refused() {
     let fx = fixture();
     let engine = engine_over(&fx);
     let mut blank = row(&engine, "blank", b"0", "unused", 0, 0);
-    blank.scalars = vec![WalScalar::Null, WalScalar::Null, WalScalar::Null, WalScalar::Null];
+    blank.scalars = vec![
+        WalScalar::Null,
+        WalScalar::Null,
+        WalScalar::Null,
+        WalScalar::Null,
+    ];
     let other = {
         let mut r = row(&engine, "other", b"0", "unused", 0, 0);
-        r.scalars = vec![WalScalar::Null, WalScalar::Null, WalScalar::Null, WalScalar::Null];
+        r.scalars = vec![
+            WalScalar::Null,
+            WalScalar::Null,
+            WalScalar::Null,
+            WalScalar::Null,
+        ];
         r
     };
     let entities = ingest(&engine, "blanks", vec![blank, other]);
-    flush(&engine);
+    publish_buffered(&engine);
     let taken = |r: Result<(), AcceptError>| matches!(r, Err(AcceptError::Conflict(_)));
-    assert!(taken(fill(&engine, "f1", "doi", vec![(entities[0], WalScalar::Utf8(doi_of(3)))])));
+    assert!(taken(fill(
+        &engine,
+        "f1",
+        "doi",
+        vec![(entities[0], WalScalar::Utf8(doi_of(3)))]
+    )));
     assert!(taken(fill(
         &engine,
         "f2",
@@ -1074,13 +1298,23 @@ fn a_values_fill_setting_a_held_value_is_refused() {
             (entities[1], WalScalar::Utf8("10.f/1".to_string())),
         ]
     )));
-    fill(&engine, "f3", "doi", vec![(entities[0], WalScalar::Utf8("10.f/1".to_string()))])
-        .expect("a free value fills");
+    fill(
+        &engine,
+        "f3",
+        "doi",
+        vec![(entities[0], WalScalar::Utf8("10.f/1".to_string()))],
+    )
+    .expect("a free value fills");
     assert!(
-        taken(fill(&engine, "f4", "doi", vec![(entities[1], WalScalar::Utf8("10.f/1".to_string()))])),
+        taken(fill(
+            &engine,
+            "f4",
+            "doi",
+            vec![(entities[1], WalScalar::Utf8("10.f/1".to_string()))]
+        )),
         "a buffered fill holds its value"
     );
-    flush(&engine);
+    publish_buffered(&engine);
     let session = full(&engine);
     let id = engine.tessera_id_of(entities[0]).unwrap().raw();
     assert_eq!(
@@ -1105,7 +1339,10 @@ fn a_declaration_between_a_batchs_check_and_its_admission_is_checked_again() {
     assert!(declare(&engine, "doi", true).expect("no two items hold one value yet"));
     engine.release_write_check_for_test();
     // Under the declaration the row names the item holding the value, and edits it.
-    let outcome = held.join().unwrap().expect("the row edits the item holding the value");
+    let outcome = held
+        .join()
+        .unwrap()
+        .expect("the row edits the item holding the value");
     let map = source_to_new_map(&fx.root, "v00000");
     assert_eq!(
         engine.tessera_id_of(outcome[0]).unwrap(),
@@ -1121,14 +1358,24 @@ fn a_fill_whose_value_is_taken_after_its_check_is_refused() {
     let fx = fixture();
     let engine = Arc::new(engine_over(&fx));
     let mut blank = row(&engine, "blank", b"0", "unused", 0, 0);
-    blank.scalars = vec![WalScalar::Null, WalScalar::Null, WalScalar::Null, WalScalar::Null];
+    blank.scalars = vec![
+        WalScalar::Null,
+        WalScalar::Null,
+        WalScalar::Null,
+        WalScalar::Null,
+    ];
     let entity = ingest(&engine, "blank", vec![blank])[0];
-    flush(&engine);
+    publish_buffered(&engine);
     let doi = "10.fill/raced";
     engine.hold_next_write_check_for_test();
     let e = Arc::clone(&engine);
     let held = std::thread::spawn(move || {
-        fill(&e, "raced", "doi", vec![(entity, WalScalar::Utf8(doi.to_string()))])
+        fill(
+            &e,
+            "raced",
+            "doi",
+            vec![(entity, WalScalar::Utf8(doi.to_string()))],
+        )
     });
     wait_until(
         "the fill never reached its hold",
@@ -1142,9 +1389,15 @@ fn a_fill_whose_value_is_taken_after_its_check_is_refused() {
     );
     engine.release_write_check_for_test();
     // Checked again after the ingest, the row names its item and the value's new holder.
-    assert!(matches!(held.join().unwrap(), Err(AcceptError::Conflict(_))));
-    flush(&engine);
-    assert_eq!(matching(&engine, &full(&engine), text_in("doi", &[doi.to_string()])).len(), 1);
+    assert!(matches!(
+        held.join().unwrap(),
+        Err(AcceptError::Conflict(_))
+    ));
+    publish_buffered(&engine);
+    assert_eq!(
+        matching(&engine, &full(&engine), text_in("doi", &[doi.to_string()])).len(),
+        1
+    );
 }
 
 /// **A flush planned before a declaration is planned again after it**, so the rows it carried
@@ -1167,7 +1420,7 @@ fn a_flush_in_flight_across_a_declaration_is_planned_again() {
     );
     assert!(declare(&engine, "doi", true).is_ok());
     engine.set_flush_paused_for_test(false);
-    flush(&engine);
+    publish_buffered(&engine);
     let session = full(&engine);
     let id = engine.tessera_id_of(entities[0]).unwrap().raw();
     assert_eq!(
@@ -1176,7 +1429,11 @@ fn a_flush_in_flight_across_a_declaration_is_planned_again() {
     );
     let engine = restart(&fx, engine);
     assert_eq!(
-        matching(&engine, &full(&engine), text_in("doi", &["10.fl/1".to_string()])),
+        matching(
+            &engine,
+            &full(&engine),
+            text_in("doi", &["10.fl/1".to_string()])
+        ),
         BTreeSet::from([id]),
         "the row reached a run, not only the live entries a restart rebuilds from the buffer"
     );
@@ -1206,26 +1463,44 @@ fn a_new_unique_column_declared_at_runtime_is_enforced_and_indexed() {
         r.scalars.push(WalScalar::Utf8(isbn.to_string()));
         r
     };
-    let first = ingest(&engine, "isbn-1", vec![with_isbn(&engine, "i1", "10.i/1", BIG * 15, "978-1")]);
+    let first = ingest(
+        &engine,
+        "isbn-1",
+        vec![with_isbn(&engine, "i1", "10.i/1", BIG * 15, "978-1")],
+    );
     assert!(is_taken(try_ingest(
         &engine,
         "isbn-2",
-        vec![naming_built(with_isbn(&engine, "i2", "10.i/2", BIG * 15 + 1, "978-1"), 3)]
+        vec![naming_built(
+            with_isbn(&engine, "i2", "10.i/2", BIG * 15 + 1, "978-1"),
+            3
+        )]
     )));
-    flush(&engine);
+    publish_buffered(&engine);
     let id = engine.tessera_id_of(first[0]).unwrap().raw();
     assert_eq!(
-        matching(&engine, &full(&engine), text_in("isbn", &["978-1".to_string()])),
+        matching(
+            &engine,
+            &full(&engine),
+            text_in("isbn", &["978-1".to_string()])
+        ),
         BTreeSet::from([id])
     );
     let engine = restart(&fx, engine);
     assert_eq!(
-        matching(&engine, &full(&engine), text_in("isbn", &["978-1".to_string()])),
+        matching(
+            &engine,
+            &full(&engine),
+            text_in("isbn", &["978-1".to_string()])
+        ),
         BTreeSet::from([id])
     );
     assert!(is_taken(try_ingest(
         &engine,
         "isbn-3",
-        vec![naming_built(with_isbn(&engine, "i3", "10.i/3", BIG * 15 + 2, "978-1"), 3)]
+        vec![naming_built(
+            with_isbn(&engine, "i3", "10.i/3", BIG * 15 + 2, "978-1"),
+            3
+        )]
     )));
 }

@@ -1460,30 +1460,6 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         report_attribute_coverage(&attribute_coverage);
     }
 
-    // ---- 6b′. the unique indexes ------------------------------------------------------
-    // Before `sort_batch`, while `tiler_items` is still in entity order.
-    let unique = {
-        let scratch = crate::spill::TmpDir::create(&args.out)?;
-        let written = crate::unique_index::write_unique_indexes(
-            &args.out.join(PREFIX),
-            PHASH,
-            &args.schema,
-            |column| crate::unique_index::UniqueSource::Items(&tiler_items, column),
-            scratch.path(),
-            args.memory_budget
-                .unwrap_or_else(pipeline::detect_memory_budget),
-        )?;
-        scratch.close()?;
-        written
-    };
-
-    // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
-    // Before `sort_batch`, which permutes `tiler_items` into row order: entity id is a staged
-    // item's *position*, so the values are entity-major exactly here and nowhere after.
-    // Transposed into one vector per column because that is the shape the emit consumes — the
-    // streaming pipeline reads its attributes column-major already, and one of the two builds
-    // paying a transpose is better than two emit paths that could disagree about a record's
-    // contents (which `write_manifests` exists to prevent for the same reason).
     // **The same route, derived the same way**: the streaming build's plan chooses a string
     // column's home from the modelled arena and the free space (`residency::plan_routes`), and the
     // oracle must reach the same answer over the same inputs. A column one build spilled and the
@@ -1503,15 +1479,42 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         slots: n,
         max_id: points.last().map_or(0, |p| p.source_id),
     };
-    let routes = residency::routes_for(
+    //
+    // The model's sizes for the stages that take what their phase leaves are the streaming
+    // build's too, so both builds cut the same batches.
+    let (routes, model) = residency::routes_for(
         args,
         n,
         ids,
         &residency::payloads_per_item(args),
         pipeline::available_disk(&args.out),
         ExtentRoute::Derived,
-    )
-    .0;
+        &id_space,
+    );
+
+    // ---- 6b′. the unique indexes ------------------------------------------------------
+    // Before `sort_batch`, while `tiler_items` is still in entity order.
+    let unique = {
+        let scratch = crate::spill::TmpDir::create(&args.out)?;
+        let written = crate::unique_index::write_unique_indexes(
+            &args.out.join(PREFIX),
+            PHASH,
+            &args.schema,
+            |column| crate::unique_index::UniqueSource::Items(&tiler_items, column),
+            scratch.path(),
+            model.sizing.unique_spill as usize,
+        )?;
+        scratch.close()?;
+        written
+    };
+
+    // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
+    // Before `sort_batch`, which permutes `tiler_items` into row order: entity id is a staged
+    // item's *position*, so the values are entity-major exactly here and nowhere after.
+    // Transposed into one vector per column because that is the shape the emit consumes — the
+    // streaming pipeline reads its attributes column-major already, and one of the two builds
+    // paying a transpose is better than two emit paths that could disagree about a record's
+    // contents (which `write_manifests` exists to prevent for the same reason).
     let filter_paths = {
         // The oracle's columns are mapped exactly as the streaming pipeline's are (`column.rs`),
         // so this path holds its own `.build-tmp/` for the length of the emit.
@@ -1734,6 +1737,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                         )
                     },
                 )?,
+                model.sizing.publication_batch,
             )?;
             // The runs and the merged table are dead the moment the publication has read them,
             // and this is the success path — so the removal is reported rather than left to
@@ -1808,6 +1812,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &view.view_id,
             n as u32,
             &mut derived_index,
+            model.sizing.term_image_workers as usize,
         )?]
     };
 

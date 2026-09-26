@@ -441,12 +441,9 @@ fn a_hasrow_naming_another_entity_at_a_rank_refuses() {
 }
 
 /// **A has-row bitmap that renames a block's first entity.** Removing rank 0's member and adding
-/// one that sorts below rank 1's leaves every later rank naming the entity it named before, so no
-/// row read past the first would notice. The block states its first entity, and the bitmap's
-/// rank-0 member must be it.
-///
-/// Mutation killed: dropping the `first_entity` comparison in `header_of` — after which a read of
-/// rank 1 answers normally out of a blob whose rank space has shifted under it.
+/// one that sorts below rank 1's leaves every later rank naming the entity it named before. The
+/// renamed rank refuses, since its row belongs to the entity the bitmap no longer names, and the
+/// walk refuses.
 #[test]
 fn a_hasrow_renaming_a_blocks_first_entity_refuses() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -454,21 +451,25 @@ fn a_hasrow_renaming_a_blocks_first_entity_refuses() {
     let bytes = std::fs::read(&p.hasrow).expect("read");
     let mut bitmap = Bitmap::try_deserialize::<Portable>(&bytes).expect("portable");
     assert!(bitmap.remove_checked(entity_of_rank(0)), "rank 0 was there");
-    bitmap.add(entity_of_rank(0) + 1);
-    assert!(
-        entity_of_rank(0) + 1 < entity_of_rank(1),
-        "rank 1 is unmoved"
-    );
+    let renamed = entity_of_rank(0) + 1;
+    bitmap.add(renamed);
+    assert!(renamed < entity_of_rank(1), "rank 1 is unmoved");
     std::fs::write(&p.hasrow, bitmap.serialize::<Portable>()).expect("doctor");
 
     let blob = open(&p).expect("cardinality is unchanged, so the open-time checks pass");
-    // Rank 1 still names entity 10 and its row still belongs to entity 10; only the block's
-    // first entity disagrees, and that is what must refuse.
     let err = blob
-        .fields_of(entity_of_rank(1))
-        .expect_err("the bitmap and the block disagree about rank 0");
+        .fields_of(renamed)
+        .expect_err("rank 0's row belongs to another entity");
     assert!(matches!(err, RecordError::Malformed(_)), "{err}");
-    assert!(err.to_string().contains("first entity"), "{err}");
+    let mut walked = Vec::new();
+    let walk = blob.for_each_row_in(&bitmap, &mut |entity, _| {
+        walked.push(entity);
+        Ok(())
+    });
+    assert!(
+        walk.is_err() && walked.is_empty(),
+        "the renamed rank is read first"
+    );
     assert!(blob.self_check().is_err());
 }
 
@@ -768,6 +769,52 @@ fn a_stack_of_disjoint_layers_answers_each_from_its_own() {
         refused.is_err(),
         "a truncated extent refuses the whole stack"
     );
+}
+
+/// **Over a has-row bitmap of runs, the set read answers each wanted entity with its own row.**
+/// A dense corpus's entities come in long runs with short gaps, and the set read carries each
+/// rank along those runs rather than looking it up; the wanted sets here start and end inside
+/// runs and inside gaps, cross blocks, and number more runs than one buffered read holds.
+#[test]
+fn a_set_read_over_runs_answers_each_entity_with_its_own_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    let mut writer = RecordBlobWriter::create(&p.blocks, &p.hasrow, &p.directory, 7 * ROW_BYTES)
+        .expect("create the writer");
+    let mut held = Bitmap::new();
+    for run in 0..300u32 {
+        let start = 5 + run * 40;
+        for entity in start..start + 3 + run % 29 {
+            push(&mut writer, entity, &fields_for(entity)).expect("push a row");
+            held.add(entity);
+        }
+    }
+    writer.finish().expect("finish");
+    let blob = open(&p).expect("the blob opens");
+
+    let every_third: Bitmap = (0..12_100u32).step_by(3).collect();
+    let sparse: Bitmap = [5u32, 6, 44, 4_000, 11_965, 11_966, 50_000]
+        .into_iter()
+        .collect();
+    for wanted in [
+        Bitmap::from_range(0..u32::MAX),
+        Bitmap::from_range(40..6_010),
+        every_third,
+        sparse,
+    ] {
+        let mut got = Vec::new();
+        blob.for_each_row_in(&wanted, &mut |entity, fields| {
+            got.push((entity, fields));
+            Ok(())
+        })
+        .expect("a well-formed set read");
+        let want: Vec<(u32, Vec<RecordField>)> = wanted
+            .and(&held)
+            .iter()
+            .map(|entity| (entity, fields_for(entity)))
+            .collect();
+        assert_eq!(got, want);
+    }
 }
 
 /// **The set read and the single read agree, row for row, and the set read decompresses each block

@@ -91,15 +91,16 @@
 //!
 //! **The block header is that something.** Its `first_rank` is the directory's claim restated in
 //! the bytes the directory addresses, so a corrupt compressed offset or a mis-chosen block refuses
-//! instead of answering. Its `first_entity` is the has-row bitmap's rank-`first_rank` member
-//! restated in the block, so a corrupt bitmap refuses rather than shifting every row of the blob by
-//! one. Its `row_count` is the count the directory's first ranks imply for the block, so a
-//! directory whose blocks and ranks disagree refuses before a row is read. The gaps then give each
-//! row its own entity, checked against the entity the caller resolved through the rank, so a wrong
-//! rank inside the right block refuses too. Every row length is bounds-checked against its block
-//! as the walk reaches it, the walk must reach the block's end exactly at its last row, and any
-//! mismatch, short file or malformed directory is a typed [`RecordError`] — never a neighbour's
-//! row, never a silent absence.
+//! instead of answering. Its `row_count` is the count the directory's first ranks imply for the
+//! block, so a directory whose blocks and ranks disagree refuses before a row is read. Its
+//! `first_entity` and the gaps then give each row its own entity, checked against the entity the
+//! caller resolved through the rank, or against the bitmap's next member in a walk, so a corrupt
+//! bitmap, a wrong first entity or a wrong rank inside the right block refuses at the first row
+//! read. A block's first entity is not looked up in the bitmap on its own: that is a select, which
+//! sums every container below the rank, and a walk would pay it once a block. Every row length is
+//! bounds-checked against its block as the walk reaches it, the walk must reach the block's end
+//! exactly at its last row, and any mismatch, short file or malformed directory is a typed
+//! [`RecordError`] — never a neighbour's row, never a silent absence.
 //!
 //! Entity ids in the block are an index internal and are never serialised to any client (**I10**
 //! as corrected by decision 0065: the blob is an index internal, not a gather artefact).
@@ -997,16 +998,15 @@ impl RecordBlob {
     /// entity set on the heap. Opened this way an extent costs its block directory and one block
     /// buffer, and nothing that rises with the column's rows.
     ///
-    /// **What this gives up, and what stands instead.** The bitmap is one side of three of the
-    /// blob's addressing checks: that the directory addresses exactly as many rows as the bitmap
-    /// holds, that a block's stated first entity is the bitmap's member at its stated first rank,
-    /// and that each row's entity from the gaps is the bitmap's next member. None of the three can
-    /// be made here. Everything else does hold — the directory contiguous and exactly covering
-    /// `blocks.bin`, the first ranks agreeing with the per-block row counts, each block's header
-    /// agreeing with the directory about its row count and first rank, the rows tiling each block
-    /// exactly, every row decoding inside its bounds — so a short, truncated or mis-addressed
-    /// extent still refuses. The build makes the first of the three itself, against the same
-    /// has-row files it streams once to decide which extent's row for a repeated entity wins
+    /// **What this gives up, and what stands instead.** The bitmap is one side of two of the blob's
+    /// addressing checks: that the directory addresses exactly as many rows as the bitmap holds,
+    /// and that each row's entity from the block's first entity and gaps is the bitmap's next
+    /// member. Neither can be made here. Everything else does hold — the directory contiguous and
+    /// exactly covering `blocks.bin`, the first ranks agreeing with the per-block row counts, each
+    /// block's header agreeing with the directory about its row count and first rank, the rows
+    /// tiling each block exactly, every row decoding inside its bounds — so a short, truncated or
+    /// mis-addressed extent still refuses. The build makes the first of the two itself, against the
+    /// same has-row files it streams once to decide which extent's row for a repeated entity wins
     /// (`tessera-build`'s `extents::DuplicateMap`).
     ///
     /// [`Self::hasrow`], [`Self::has_row`], [`Self::fields_of`], [`Self::for_each_row_in`] and
@@ -1197,11 +1197,11 @@ impl RecordBlob {
         self.first_rank.partition_point(|&fr| fr <= rank) - 1
     }
 
-    /// A decompressed block's header, checked against everything the other two files say about
-    /// the block — the directory's row count and first rank, the has-row bitmap's member at that
-    /// rank — and against the block's own bytes through the tiling walk below. Past this, the
-    /// block and the files that address it are known to be describing the same rows, and every
-    /// row of the block is known to be reachable inside it.
+    /// A decompressed block's header, checked against what the directory says about the block — its
+    /// row count and first rank — and against the block's own bytes through the tiling walk below.
+    /// Its first entity is checked row by row, by the reader that resolves each row's entity
+    /// through the has-row bitmap. Past this, the block and the files that address it are known to
+    /// be describing the same rows, and every row of the block is known to be reachable inside it.
     fn header_of(&self, block: usize, bytes: &[u8]) -> Result<BlockHeader, RecordError> {
         let header = decode_block_header(bytes, block)?;
         let rows = self.rows_in_block(block)?;
@@ -1220,25 +1220,6 @@ impl RecordBlob {
                  block and the directory address different rows",
                 header.first_rank, self.first_rank[block]
             )));
-        }
-        // The block's first entity against the has-row bitmap's member at that rank. A blob
-        // opened for a sequential walk alone holds no bitmap, and this is one of the three checks
-        // `open_rows_only` names as given up there.
-        if let Some(hasrow) = &self.hasrow {
-            let expect = hasrow.select(header.first_rank).ok_or_else(|| {
-                malformed(format!(
-                    "block {block} claims first rank {} which the has-row bitmap has no member for",
-                    header.first_rank
-                ))
-            })?;
-            if header.first_entity != expect {
-                return Err(malformed(format!(
-                    "block {block} states first entity {} where the has-row bitmap's rank-{} \
-                     member is {expect}; the bitmap and the blocks disagree about which entity a \
-                     rank names",
-                    header.first_entity, header.first_rank
-                )));
-            }
         }
         // **The rows tile the block, checked once per block rather than once per row.** Each row
         // states how many bytes of fields follow it, so the block's delimiters are checkable
@@ -1376,25 +1357,30 @@ impl RecordBlob {
         f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
         let hasrow = self.hasrow()?;
-        let mut present = wanted.clone();
-        present.and_inplace(hasrow);
         let mut loaded: Option<(usize, BlockHeader, BlockScan)> = None;
         let mut bytes: Vec<u8> = Vec::new();
-        for entity in present.iter() {
-            let rank = (hasrow.rank(entity) - 1) as u32;
-            let block = self.block_of(rank);
-            if loaded.map(|(b, _, _)| b) != Some(block) {
-                bytes = self.block_bytes(block)?;
-                let header = self.header_of(block, &bytes)?;
-                let scan = BlockScan::start(&header);
-                loaded = Some((block, header, scan));
+        // Ranks are carried along runs of the has-row bitmap rather than taken per entity: a rank
+        // sums every container below it, which over a whole blob is quadratic.
+        for (lo, hi, first) in tessera_roaring::RankedRuns::new(hasrow, wanted) {
+            for (entity, rank) in (lo..=hi).zip(first..) {
+                let rank = rank as u32;
+                let held = loaded.as_ref().is_some_and(|(_, header, _)| {
+                    (rank.wrapping_sub(header.first_rank) as usize) < header.row_count
+                });
+                if !held {
+                    let block = self.block_of(rank);
+                    bytes = self.block_bytes(block)?;
+                    let header = self.header_of(block, &bytes)?;
+                    let scan = BlockScan::start(&header);
+                    loaded = Some((block, header, scan));
+                }
+                let (block, header, scan) = loaded.as_mut().expect("just loaded");
+                let (block, header) = (*block, *header);
+                f(
+                    entity,
+                    self.row_at(&bytes, block, &header, scan, rank, entity)?,
+                )?;
             }
-            let (_, header, scan) = loaded.as_mut().expect("just loaded");
-            let header = *header;
-            f(
-                entity,
-                self.row_at(&bytes, block, &header, scan, rank, entity)?,
-            )?;
         }
         Ok(())
     }
@@ -1584,7 +1570,7 @@ impl<'a> RecordRowCursor<'a> {
             }
             // The row's entity comes from the block's own gaps, and is checked against the
             // has-row bitmap's next member where the blob holds one. A blob opened for a
-            // sequential walk alone has only the gaps, which is the third of the three checks
+            // sequential walk alone has only the gaps, which is the second of the two checks
             // [`RecordBlob::open_rows_only`] names as given up there.
             let entity = self.scan.entity;
             if let Some(entities) = self.entities.as_mut() {

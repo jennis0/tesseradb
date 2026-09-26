@@ -776,15 +776,6 @@ fn naming(tid: TesseraId, set: impl FnOnce(&mut IngestRow)) -> IngestRow {
     row
 }
 
-fn flush(engine: &Engine) {
-    tick_until(
-        engine,
-        "the edit flushes",
-        std::time::Duration::from_secs(60),
-        || engine.generation().buffer.is_empty(),
-    );
-}
-
 #[test]
 fn an_edit_carries_every_home() {
     let tmp = tempfile::tempdir().unwrap();
@@ -822,7 +813,7 @@ fn an_edit_carries_every_home() {
         }),
     );
     check(&engine, &expected, "an edit of the suppressed item");
-    flush(&engine);
+    publish_buffered(&engine);
     check(&engine, &expected, "its flush");
     let moved = engine.resolve_tessera_ids(&[tid]).unwrap()[0].unwrap();
     assert_ne!(moved, expected.first, "the edit gave the item a new entity");
@@ -850,7 +841,7 @@ fn an_edit_carries_every_home() {
     }
     drop(engine);
     engine = open(tmp.path(), &root);
-    flush(&engine);
+    publish_buffered(&engine);
     check(&engine, &expected, "a restart before the edit's flush");
     // Two edits, each giving the item an entity with a row in its three views; the first entity
     // is deleted and still on disc until the fold.
@@ -912,7 +903,7 @@ fn a_view_dropped_behind_an_edit_in_one_window_keeps_the_item() {
         edited.join().unwrap();
         dropped.join().unwrap();
     });
-    flush(&engine);
+    publish_buffered(&engine);
     for pass in ["the flush", "a restart"] {
         let full = engine.authorise(&full_coverage_credential()).unwrap();
         let card = engine
@@ -932,7 +923,7 @@ fn a_view_dropped_behind_an_edit_in_one_window_keeps_the_item() {
         );
         drop(engine);
         engine = open(tmp.path(), &root);
-        flush(&engine);
+        publish_buffered(&engine);
     }
 }
 
@@ -1019,7 +1010,7 @@ fn a_growth_and_a_publication_queued_behind_an_edit_follow_the_item() {
         growth.join().unwrap();
         publication.join().unwrap();
     });
-    flush(&engine);
+    publish_buffered(&engine);
     assert_ne!(
         engine.resolve_tessera_ids(&[tid]).unwrap()[0],
         Some(entity(X)),
@@ -1108,7 +1099,7 @@ fn verify_refuses_edited_items_that_disagree() {
             row.omitted.retain(|at| *at != SCORE_AT);
         }),
     );
-    flush(&engine);
+    publish_buffered(&engine);
     drop(engine);
     let verify =
         |root: &Path| tessera_build::verify_deep(root, &tessera_build::VerifyOpts::default());

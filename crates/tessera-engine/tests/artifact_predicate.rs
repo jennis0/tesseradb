@@ -327,7 +327,7 @@ fn a_point_ingested_with_a_value_counts_on_the_next_request() {
     let versions = fx.engine.write_executor_stats();
 
     ingest_point(&fx.engine, "fresh-1", value, 0, 5.0, 5.0);
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
 
     let after = served(&fx.engine, grant, BY_RULE, 0, WHOLE_MAP);
     assert_eq!(
@@ -380,7 +380,7 @@ fn a_new_value_mints_its_artifact_at_the_windows_close() {
         "the novel value minted no artifact at the window's close"
     );
 
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     let after = served(&fx.engine, grant, BY_RULE, 0, WHOLE_MAP);
     assert_eq!(
         after.get(&novel.to_string()),
@@ -396,7 +396,7 @@ fn a_new_value_mints_its_artifact_at_the_windows_close() {
         artifacts_before + 1,
         "the same value minted a second artifact"
     );
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     assert_eq!(
         served(&fx.engine, grant, BY_RULE, 0, WHOLE_MAP).get(&novel.to_string()),
         Some(&2)
@@ -666,7 +666,7 @@ fn a_suppressed_values_key_never_mints_again() {
         artifacts,
         "a point carrying a suppressed value minted a second artifact for it"
     );
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     assert!(
         !served(&fx.engine, grant, BANDS, 0, WHOLE_MAP).contains_key(&anchor),
         "the suppression was defeated by ingesting a point"
@@ -706,7 +706,7 @@ fn a_deleted_values_key_returns_as_a_new_artifact() {
         13.0,
         13.0,
     );
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
 
     let after = served(&fx.engine, grant, BANDS, 0, WHOLE_MAP);
     assert!(

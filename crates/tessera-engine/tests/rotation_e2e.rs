@@ -48,9 +48,11 @@ fn a_published_flush_rotates_the_log() {
     // reclaimable and member 1 goes. What survives is the member the snapshot was just written to.
     // Only a rotation deletes a member, and it opens the next one in the same call, so the two
     // are waited for as one state.
-    wait_until("the rotation to follow it and reclaim member 1", WAIT, || {
-        !members(tmp.path()).contains(&"wal-000001.log".to_string())
-    });
+    wait_until(
+        "the rotation to follow it and reclaim member 1",
+        WAIT,
+        || !members(tmp.path()).contains(&"wal-000001.log".to_string()),
+    );
 }
 
 /// **A row acked while a flush was in flight survives the rotation that follows it.**
@@ -82,7 +84,9 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
         // The first flush's rotation opened member 2 before this ingest was acked; the member
         // the next rotation opens is the one that follows the second row's flush.
         wait_until("a rotation", WAIT, || {
-            members(tmp.path()).iter().any(|m| m.as_str() >= "wal-000003.log")
+            members(tmp.path())
+                .iter()
+                .any(|m| m.as_str() >= "wal-000003.log")
         });
         second
     };
@@ -242,7 +246,7 @@ fn create_second_view(engine: &Engine) {
 /// will ever consume stays for the life of the process, and so does every member after it.
 fn inherited_members_reclaimed(engine: &Engine, tmp: &std::path::Path, inherited: &[String]) {
     ingest_into(engine, "wake", "ext-wake", "s0");
-    flush(engine);
+    publish_buffered(engine);
     wait_until("the inherited members to be reclaimed", WAIT, || {
         let now = members(tmp);
         !inherited.iter().any(|name| now.contains(name))
@@ -265,7 +269,7 @@ fn a_deleted_entitys_join_row_is_not_rebuilt_at_a_restart() {
         let engine = engine_at(tmp.path(), &root, 3600);
         create_second_view(&engine);
         let id = ingest_into(&engine, "b1", "ext-1", "s0");
-        flush(&engine);
+        publish_buffered(&engine);
 
         // A row in the second view, unflushed, and then the delete that takes both.
         assert_eq!(ingest_into(&engine, "b2", "ext-1", "s1"), id);
@@ -305,7 +309,7 @@ fn a_deleted_edits_rows_are_not_rebuilt_at_a_restart() {
     let (edited, inherited) = {
         let engine = engine_at(tmp.path(), &root, 3600);
         let first = ingest_into(&engine, "b1", "ext-1", "s0");
-        flush(&engine);
+        publish_buffered(&engine);
         assert!(!engine.generation().buffer.contains(first));
 
         let mut hash = [2u8; 32];

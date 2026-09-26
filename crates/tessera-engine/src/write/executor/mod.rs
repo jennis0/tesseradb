@@ -104,13 +104,13 @@ impl Executor {
                 | self.publish_completed_folds()
                 | self.publish_completed_suggests()
                 | self.publish_completed_unique_rounds();
-            self.tick_if_due();
+            let owed = self.tick_if_due();
             while self.run_deny_pass() {}
             // The prompt half only; a batch's memberships wait for the tick.
             if self.side_manifests.behind_live {
                 self.publish_overlay_state();
             }
-            if self.run_work_pass() || published {
+            if self.run_work_pass() || published || owed {
                 continue;
             }
             if !self.wait_for_work() {
@@ -119,17 +119,18 @@ impl Executor {
         }
     }
 
-    /// The flush tick: the cadence on which geometry publishes; also drives `reclaim`.
-    pub(super) fn tick_if_due(&mut self) {
+    /// The flush tick: the cadence on which geometry publishes; also drives `reclaim`. Returns
+    /// whether it closed a cycle owing a later requested one.
+    pub(super) fn tick_if_due(&mut self) -> bool {
         let Some(TickDue { due, period_due }) = self.tick_due() else {
-            return;
+            return false;
         };
         // A flush handed back after this loop's drain is not yet in the generation, and a plan
         // taken now would carry its rows again at its `row_base`. It is not a tick behind a
         // running flush either: the next loop drains it and ticks straight away.
         let flush_in_flight = self.flush.in_flight();
         if !flush_in_flight && self.flush.completed_pending() {
-            return;
+            return false;
         }
         if !flush_in_flight {
             self.health.open_publication_cycle();
@@ -149,17 +150,18 @@ impl Executor {
             if due {
                 self.tick_behind_flush(&generation, period_due);
             }
-            return;
+            return false;
         }
 
         self.last_tick = std::time::Instant::now();
         self.health.mark_tick(self.last_tick);
 
         let (plans, gated) = self.plan_view_flushes(&generation);
-        self.dispatch_planned_tick(&generation, plans, gated);
+        let owed = self.dispatch_planned_tick(&generation, plans, gated);
         drop(generation);
         // Last, so a reader that sees the count move sees everything else this tick did.
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
+        owed
     }
 
     /// Whether this tick fires, and on what. `None` is a wake that is not a tick.
@@ -243,19 +245,21 @@ impl Executor {
     }
 
     /// Dispatch what the tick planned: the flushes, and the three background units it also drives.
+    /// Returns whether a cycle closed owing a later requested one.
     fn dispatch_planned_tick(
         &mut self,
         generation: &Arc<Generation>,
         plans: Vec<(String, crate::flush::FlushPlan)>,
         gated: bool,
-    ) {
+    ) -> bool {
+        let mut owed = false;
         if plans.is_empty() {
             self.health.deferred_plans.store(false, Ordering::SeqCst);
             self.rotate_if_grown();
             if gated {
                 self.health.fail_publication_cycle();
             } else {
-                self.health.close_publication_cycle();
+                owed = self.health.close_publication_cycle();
             }
         } else if !self.dispatch_flushes(generation, plans) {
             self.health.fail_publication_cycle();
@@ -265,6 +269,7 @@ impl Executor {
         self.dispatch_fold(generation);
         self.dispatch_coalesce(generation);
         self.dispatch_merge(generation);
+        owed
     }
 
     /// Whether this executor may still write durable state, asked in one place. Excludes the

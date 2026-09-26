@@ -19,9 +19,10 @@ use crate::column::EntityColumn;
 use crate::config::{Attribute, Schema};
 use crate::error::{BuildError, Result};
 
-/// The share of the build's memory budget one column's spill holds, and its floor and ceiling.
+/// The most of the build's memory budget one column's spill holds, as a share and a ceiling, and
+/// the least it is given however little its stage has left.
 const UNIQUE_BUDGET_SHARE: u64 = 4;
-const UNIQUE_BUDGET_MIN: u64 = 64 << 20;
+const UNIQUE_BUDGET_MIN: u64 = 4 << 20;
 const UNIQUE_BUDGET_MAX: u64 = 4 << 30;
 
 /// What a walk over a unique column's values hands each present value to: the entity, the key,
@@ -84,21 +85,26 @@ impl UniqueSource<'_> {
     }
 }
 
-/// The spill's memory for one column under a build budget of `budget` bytes.
-pub(crate) fn spill_budget(budget: u64) -> usize {
-    (budget / UNIQUE_BUDGET_SHARE).clamp(UNIQUE_BUDGET_MIN, UNIQUE_BUDGET_MAX) as usize
+/// The spill's memory for one column under a build budget of `budget` bytes, where the rest of
+/// its stage leaves `room`: the room, up to the share and the ceiling.
+pub(crate) fn spill_budget(budget: u64, room: u64) -> usize {
+    (budget / UNIQUE_BUDGET_SHARE)
+        .min(UNIQUE_BUDGET_MAX)
+        .min(room)
+        .max(UNIQUE_BUDGET_MIN) as usize
 }
 
-/// Write the index of every unique column in `schema`, reading each through `source_of`, and
-/// refuse a column holding one value for two entities. Returns each column's runs, in key order
-/// with disjoint ranges; a column with no values has none. The runs are fsynced.
+/// Write the index of every unique column in `schema`, reading each through `source_of` and sorting
+/// it in `spill_bytes` of memory, and refuse a column holding one value for two entities. Returns
+/// each column's runs, in key order with disjoint ranges; a column with no values has none. The
+/// runs are fsynced.
 pub(crate) fn write_unique_indexes<'a>(
     prefix_dir: &Path,
     partition: &str,
     schema: &Schema,
     source_of: impl Fn(usize) -> UniqueSource<'a>,
     scratch: &Path,
-    budget: u64,
+    spill_bytes: usize,
 ) -> Result<Vec<(String, Vec<WrittenUniqueRun>)>> {
     let mut out = Vec::new();
     for (column, attribute) in schema.attributes.iter().enumerate() {
@@ -113,7 +119,7 @@ pub(crate) fn write_unique_indexes<'a>(
         })?;
         let source = source_of(column);
         let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
-        let mut spill = UniqueSpill::create(kind, scratch, spill_budget(budget)).map_err(store)?;
+        let mut spill = UniqueSpill::create(kind, scratch, spill_bytes).map_err(store)?;
         source.walk(attribute, &mut |entity, key, _| spill.push(key, entity).map_err(store))?;
         let dir = prefix_dir.join(index_dir_rel(partition, &attribute.name));
         std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;

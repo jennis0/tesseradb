@@ -134,7 +134,11 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
 /// An engine over the fixture in `dir`, its executor running and no flush or fold of its own.
 fn open_engine(dir: &std::path::Path) -> Engine {
     let root = dir.join("bundle");
-    build_fixture(&root, &dir.join("points.parquet"), &dir.join("pairs.parquet"));
+    build_fixture(
+        &root,
+        &dir.join("points.parquet"),
+        &dir.join("pairs.parquet"),
+    );
     let mut engine = Engine::open(
         &root,
         &dir.join("cache"),
@@ -198,7 +202,11 @@ fn an_item_created_without_an_external_id_answers_none_after_its_flush() {
             artifacts: Default::default(),
         })
         .expect("the batch is accepted");
-    let entity = engine.resolve_tessera_ids(&receipt.tessera_ids).unwrap()[0].expect("the item it made");
-    flush(&engine);
-    assert_eq!(engine.external_id_of(entity).expect("the lookup answers"), None);
+    let entity =
+        engine.resolve_tessera_ids(&receipt.tessera_ids).unwrap()[0].expect("the item it made");
+    publish_buffered(&engine);
+    assert_eq!(
+        engine.external_id_of(entity).expect("the lookup answers"),
+        None
+    );
 }

@@ -261,7 +261,7 @@ fn count_of(engine: &Engine, key: &str) -> Option<u64> {
 /// in the bundle already. Which of the two publications carries the projection is not asserted here
 /// — only that a batch's own point is not countable until both have run.
 fn settle(engine: &Engine) {
-    flush(engine);
+    publish_buffered(engine);
     fold(engine);
 }
 
@@ -715,7 +715,7 @@ fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
         assert_eq!(batch.join().unwrap(), 0, "c0 exists, so nothing is minted");
     });
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         count_of(&engine, "c0"),
         None,

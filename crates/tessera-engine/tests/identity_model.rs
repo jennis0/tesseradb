@@ -32,7 +32,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{BooleanArray, Float32Array, Float64Array, Int64Array, StringArray, UInt64Array};
+use arrow::array::{
+    BooleanArray, Float32Array, Float64Array, Int64Array, StringArray, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -392,7 +394,10 @@ enum Expect {
     Unchanged(u64),
     /// The item joins the batch's view; `moved` where it is older than the view's newest rows
     /// and so moves to a new entity.
-    Added { tid: u64, moved: bool },
+    Added {
+        tid: u64,
+        moved: bool,
+    },
     Edited(u64),
 }
 
@@ -683,7 +688,18 @@ fn row_gen() -> impl Strategy<Value = RowGen> {
         prop_oneof![8 => Just(0u8), 1 => any::<u8>()],
     )
         .prop_map(
-            |(about, by, carry, differ, null, position, seed, extra_carry, extra_differ, extra_null)| {
+            |(
+                about,
+                by,
+                carry,
+                differ,
+                null,
+                position,
+                seed,
+                extra_carry,
+                extra_differ,
+                extra_null,
+            )| {
                 RowGen {
                     about,
                     by,
@@ -895,14 +911,13 @@ impl Run {
         view: Option<&str>,
         rows: Vec<IngestRow>,
     ) -> Result<IngestReceipt, AcceptError> {
-        self.engine()
-            .ingest(IngestRequest {
-                batch_id: batch_id.to_string(),
-                body_hash: hash_of(batch_id),
-                view: view.map(str::to_string),
-                rows,
-                artifacts: Default::default(),
-            })
+        self.engine().ingest(IngestRequest {
+            batch_id: batch_id.to_string(),
+            body_hash: hash_of(batch_id),
+            view: view.map(str::to_string),
+            rows,
+            artifacts: Default::default(),
+        })
     }
 
     fn ingest(&mut self, view: u8, gens: &[RowGen]) {
@@ -1068,7 +1083,10 @@ impl Run {
         for (target, op) in targets {
             let tid = live[*target as usize % live.len()];
             let op = [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress][*op as usize];
-            let entity = self.engine().resolve_tessera_ids(&[TesseraId::new(tid)]).unwrap()[0]
+            let entity = self
+                .engine()
+                .resolve_tessera_ids(&[TesseraId::new(tid)])
+                .unwrap()[0]
                 .expect("a live item's tessera_id names it");
             changes.push((entity, op));
             match op {
@@ -1092,14 +1110,10 @@ impl Run {
             .expect("a change batch naming live items is accepted");
     }
 
+    /// Publish every buffered row. The model marks rows flushed only here, so the wait leaves no
+    /// flush request behind to publish the next step's rows before the model expects them.
     fn flush(&mut self) {
-        let engine = self.engine();
-        tick_until(
-            engine,
-            "every buffered row flushes",
-            Duration::from_secs(60),
-            || engine.generation().buffer.is_empty(),
-        );
+        publish_buffered(self.engine());
         for item in self.model.items.values() {
             for view in item.views.keys() {
                 self.model.flushed.insert((item.tid, view.clone()));
@@ -1443,7 +1457,9 @@ fn label_layer() -> tessera_types::layer::LayerDeclaration {
 fn publish_content(engine: &Engine, root: &Path) -> BTreeSet<u64> {
     use tessera_lifecycle::membership::IncomingContent;
     use tessera_lifecycle::IncomingArtifact;
-    engine.register_layer(label_layer()).expect("the layer registers");
+    engine
+        .register_layer(label_layer())
+        .expect("the layer registers");
     let map = source_to_new_map(root, "v00000");
     let entity = |source: u64| EntityId::new(map[&source]);
     engine
@@ -1455,7 +1471,10 @@ fn publish_content(engine: &Engine, root: &Path) -> BTreeSet<u64> {
                 (0..BUILT).map(entity).collect::<Vec<_>>(),
                 vec![IncomingContent::new(
                     vec![CONTENT.to_string()],
-                    CONTENT_SOURCES.iter().map(|s| entity(*s)).collect::<Vec<_>>(),
+                    CONTENT_SOURCES
+                        .iter()
+                        .map(|s| entity(*s))
+                        .collect::<Vec<_>>(),
                 )],
             )],
         )
@@ -1618,14 +1637,7 @@ fn an_item_older_than_a_views_newest_rows_moves_to_join_it() {
             artifacts: Default::default(),
         })
     };
-    let flush = || {
-        tick_until(
-            &engine,
-            "every buffered row flushes",
-            Duration::from_secs(60),
-            || engine.generation().buffer.is_empty(),
-        )
-    };
+    let flush = || publish_buffered(&engine);
     let older = send("older", VIEWS[0], vec![row(b"older", (10.0, 10.0))])
         .expect("a new item is created")
         .tessera_ids[0];
@@ -1643,8 +1655,15 @@ fn an_item_older_than_a_views_newest_rows_moves_to_join_it() {
     let moved = send("add-older", VIEWS[1], vec![row(b"older", (30.0, 30.0))])
         .expect("an item older than the view's newest rows is added by moving it");
     assert_eq!((moved.added, moved.edited), (1, 0));
-    assert_eq!(moved.tessera_ids, vec![older], "the item keeps its tessera_id");
-    assert!(card_views(older).is_empty(), "the moved item is hidden until its flush");
+    assert_eq!(
+        moved.tessera_ids,
+        vec![older],
+        "the item keeps its tessera_id"
+    );
+    assert!(
+        card_views(older).is_empty(),
+        "the moved item is hidden until its flush"
+    );
     flush();
     assert_eq!(
         card_views(older),
@@ -1665,5 +1684,8 @@ fn an_item_older_than_a_views_newest_rows_moves_to_join_it() {
         "added in place, it stays in the view it was in while the join is buffered"
     );
     flush();
-    assert_eq!(card_views(newest), VIEWS.iter().map(|v| v.to_string()).collect());
+    assert_eq!(
+        card_views(newest),
+        VIEWS.iter().map(|v| v.to_string()).collect()
+    );
 }
