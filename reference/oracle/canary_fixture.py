@@ -74,7 +74,7 @@ CANARY_TERM_ID = N_TERMS
 
 # The **visible** state's extra item carries a base term instead, so a tested principal can see it.
 # That single change is what makes the comparator's positive control a control: the visible state is
-# built exactly like the canary state — same corner, same commit window, same key, allocated last —
+# built exactly like the canary state — same corner, same commit window, allocated last —
 # so the only thing that differs between "the comparator must agree" and "the comparator must
 # disagree" is whether the extra item is inside the principal's `M_auth`. A control that also
 # differed in placement or allocation would prove the comparator notices *something*, which is not
@@ -195,11 +195,9 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
                 f"pairs={pairs_path}",
                 "--out",
                 str(out_dir),
-                # **Both bundles must carry the same identity key.** `tessera_id =
-                # FPE_key(shard_id || entity_id)`, so under two keys the two bundles' identities
-                # are unrelated, and since design §7.2 selects the lowest identities in a tile, the
-                # two bundles draw different samples whatever the corpus. Every build generates
-                # its own key, so three separate builds do not meet this.
+                # Each build generates its own identity key, so the three bundles' `tessera_id`s
+                # are unrelated. `test_canary.py` compares them by entity under each bundle's own
+                # key, and serves every point untruncated so that no sample depends on the key.
                 # Allocation rule 5 (see the module doc): the canary gets its own commit window.
                 # `--batch-items` is the build-side name for the window §11.1 r23 scopes
                 # signature-sorted assignment to. At `N_BASE_ITEMS` the canary-free corpus is
@@ -264,18 +262,20 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
         # *builds* placed the same items at the same rows, not whether either agrees with the
         # source — so comparing what each wrote is exactly right, and an integer position makes
         # the comparison exact where the old `f32` pair made it approximate.
+        # The entity, not the `tessera_id`: each build generates its own identity key, so the
+        # same entity has a different `tessera_id` in each bundle.
         if (
             free.stored_code(row) != canary.stored_code(row)
-            or int(free.tessera_id[row]) != int(canary.tessera_id[row])
+            or int(free.entity_id[row]) != int(canary.entity_id[row])
         ):
             failures.append(
                 f"row {row} differs between the two bundles: the canary displaced a real item, so "
                 f"one of allocation rules 1, 2, 3 or 5 is broken and the canary comparison would "
                 f"be measuring fixture perturbation rather than disclosure. "
                 f"free=(code={free.stored_code(row):#018x}, "
-                f"tessera_id={int(free.tessera_id[row])}) "
+                f"entity={int(free.entity_id[row])}) "
                 f"canary=(code={canary.stored_code(row):#018x}, "
-                f"tessera_id={int(canary.tessera_id[row])})"
+                f"entity={int(canary.entity_id[row])})"
             )
             break
 

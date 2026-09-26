@@ -35,10 +35,16 @@ and pin bytes never match". **The handle column that made it impossible no longe
 bundle and none is a function of the session. The per-session bytes that remain are the token and
 `x-tessera-pin`, both of which live in headers and never enter the body this compares.
 
-The two states' `tessera_id`s agree because the fixture builds every state with **one identity key**
-and the allocation rules keep every base item's entity id identical across builds — so the join
-§4.2 wanted `fx_key` for is already an equality on a column the wire carries. `fx_key` remains
-planted-but-unserved and its strict xfail in `test_mask_catalogue.py` remains the marker for that.
+**The points are compared by the entity each row names, not by its `tessera_id`.** Each state is
+a separate build, and every build generates its own identity key, so the same item has a different
+`tessera_id` in each state, and a tile's points, which are served in `tessera_id` order, arrive in
+a different order. The comparison therefore inverts every row's `tessera_id` under its own
+bundle's key (read from that bundle's manifest), and compares each tile's rows as the set of
+entities it served with every other column unchanged. The allocation rules keep every base item's
+entity id identical across builds, so that join is exact, and the untruncated configuration below
+means a tile's served set does not depend on the key either. What the key does decide, the order
+within a tile, is not a function of visibility. `fx_key` remains planted-but-unserved and its
+strict xfail in `test_mask_catalogue.py` remains the marker for that.
 
 The canonicalisation itself is `suite.canonical`'s (correctness-suite §12.2), of which this module
 was the origin and onto which it is refactored — one implementation, deliberately, for the same
@@ -68,11 +74,19 @@ and a run at a different thread count is outside what has been argued.
 
 from __future__ import annotations
 
+import dataclasses
+import io
+from dataclasses import dataclass
+
+import pyarrow as pa
+import pyarrow.ipc as ipc
 import pytest
 
+from oracle import identity as identity_mod
+from oracle.bundle import Bundle
 from oracle.canary_fixture import build_canary_states, verify_allocation_rules
-from oracle.harness import spawn_server, stop_server
-from oracle.wire import decode_viewport
+from oracle.harness import Server, spawn_server, stop_server
+from oracle.wire import decode_viewport, decode_viewport_points
 from suite.canonical import Streamed, canonicalise_viewport
 
 GRID_MAX = 65536.0
@@ -115,6 +129,14 @@ def canary_bundles(tmp_path_factory):
     return build_canary_states(work_dir)
 
 
+@dataclass(frozen=True)
+class State:
+    """One fixture state's server, and the identity key its bundle was built under."""
+
+    server: Server
+    key: identity_mod.IdentityKey
+
+
 @pytest.fixture(scope="module")
 def canary_servers(tmp_path_factory, canary_bundles):
     """One server per state, all pinned to the same untruncated selection configuration.
@@ -132,19 +154,19 @@ def canary_servers(tmp_path_factory, canary_bundles):
         "theta_target_marks": 1 << 40,
         "max_underlay_cells": 1 << 20,
     }
-    servers = []
+    states = []
     procs = []
     for bundle, name in zip(canary_bundles, ("free", "canary", "visible")):
         tmp = tmp_path_factory.mktemp(f"canary-serve-{name}")
         srv, proc = spawn_server(bundle, tmp, **untruncated)
-        servers.append(srv)
+        states.append(State(srv, Bundle(bundle).identity_key))
         procs.append(proc)
-    yield tuple(servers)
+    yield tuple(states)
     for proc in procs:
         stop_server(proc)
 
 
-def _canonical_response(server, token, zoom, bbox) -> Streamed:
+def _canonical_response(state: State, token, zoom, bbox) -> Streamed:
     """One viewport response, canonicalised by the shared module, **surfaces kept separate**.
 
     `suite.canonical` (correctness-suite §12.2) does the work and carries the argument for its
@@ -162,7 +184,7 @@ def _canonical_response(server, token, zoom, bbox) -> Streamed:
     review pointed out that an I2 defect confined to the underlay path moves no tile count and no
     point set, so every canary comparison would have passed while §4.6 called I2 covered.
     """
-    raw = server.viewport(token, VIEW, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
+    raw = state.server.viewport(token, VIEW, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
 
     tiles, _points = decode_viewport(raw)
     for tile, visible, _matched, served, _highlighted in tiles:
@@ -172,7 +194,27 @@ def _canonical_response(server, token, zoom, bbox) -> Streamed:
             f"spawn_server overrides"
         )
 
-    return canonicalise_viewport(raw)
+    return dataclasses.replace(canonicalise_viewport(raw), points=_points_by_entity(raw, state.key))
+
+
+def _points_by_entity(raw: bytes, key: identity_mod.IdentityKey) -> bytes:
+    """The points surface with each row's `tessera_id` replaced by the entity it names under
+    `key`, the rows sorted by that entity, as one Arrow stream. The module doc says why."""
+    try:
+        points = decode_viewport_points(raw)
+    except ValueError:
+        return b""
+    at = points.schema.get_field_index("tessera_id")
+    entities = pa.array(
+        [identity_mod.invert(key, t)[1] for t in points.column(at).to_pylist()], pa.uint64()
+    )
+    points = points.set_column(at, pa.field("entity", pa.uint64()), entities)
+    points = points.sort_by([("entity", "ascending")]).combine_chunks()
+    sink = io.BytesIO()
+    with ipc.new_stream(sink, points.schema) as writer:
+        for batch in points.to_batches():
+            writer.write_batch(batch)
+    return sink.getvalue()
 
 
 # The three streamed surfaces of §12.2 plus the trailer's deterministic remainder — kept apart
@@ -197,8 +239,8 @@ def compare_states(server_a, server_b, bbox) -> list[tuple[str, str]]:
     """
     differences: list[tuple[str, str]] = []
     for terms in GRANT_SETS:
-        auth_a = server_a.authorise(terms)
-        auth_b = server_b.authorise(terms)
+        auth_a = server_a.server.authorise(terms)
+        auth_b = server_b.server.authorise(terms)
         for zoom in ZOOM_RANGE:
             a = _canonical_response(server_a, auth_a["token"], zoom, bbox).surfaces()
             b = _canonical_response(server_b, auth_b["token"], zoom, bbox).surfaces()
@@ -303,8 +345,8 @@ def test_the_response_body_carries_nothing_session_dependent(canary_servers):
     free_srv, _canary_srv, _visible_srv = canary_servers
     bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
     terms = [str(t) for t in range(3)]
-    token_a = free_srv.authorise(terms)["token"]
-    token_b = free_srv.authorise(terms)["token"]
+    token_a = free_srv.server.authorise(terms)["token"]
+    token_b = free_srv.server.authorise(terms)["token"]
     assert token_a != token_b, "two authorise calls must mint distinct sessions for this to test"
     for zoom in ZOOM_RANGE:
         assert _canonical_response(free_srv, token_a, zoom, bbox) == _canonical_response(
@@ -328,7 +370,7 @@ def test_the_canary_occupies_a_tile_no_state_reports(canary_servers):
     bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
     zoom = max(ZOOM_RANGE)
     corner = (1 << (2 * zoom)) - 1
-    for srv in (free_srv, canary_srv):
-        token = srv.authorise([str(t) for t in range(6)])["token"]
-        tiles, _points = decode_viewport(srv.viewport(token, VIEW, zoom, bbox, k=K))
+    for state in (free_srv, canary_srv):
+        token = state.server.authorise([str(t) for t in range(6)])["token"]
+        tiles, _points = decode_viewport(state.server.viewport(token, VIEW, zoom, bbox, k=K))
         assert corner not in {t for t, _v, _m, _s, _h in tiles}
