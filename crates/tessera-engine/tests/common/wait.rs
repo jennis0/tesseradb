@@ -32,6 +32,19 @@ pub fn tick_until(engine: &Engine, what: &str, within: Duration, mut cond: impl 
     });
 }
 
+/// Request a flush once and wait for the publication cycle that honours it: every row buffered
+/// before the request is then served, and no request is left armed to publish rows buffered
+/// after this returns. [`tick_until`] asks again every 50 ms and asks before it tests, so it
+/// always returns with a request outstanding.
+pub fn publish(engine: &Engine) {
+    let publication = engine.request_flush_publication();
+    wait_until(
+        "the publication honouring the flush",
+        Duration::from_secs(60),
+        || engine.publication() >= publication,
+    );
+}
+
 /// Force a flush and wait for it to publish.
 pub fn flush(engine: &Engine) {
     let before = engine.write_executor_stats().flushes;

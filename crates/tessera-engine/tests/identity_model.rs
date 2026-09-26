@@ -1002,14 +1002,10 @@ impl Run {
             .expect("a change batch naming live items is accepted");
     }
 
+    /// Publish every buffered row. The model marks rows flushed only here, so the wait leaves no
+    /// flush request behind to publish the next step's rows before the model expects them.
     fn flush(&mut self) {
-        let engine = self.engine();
-        tick_until(
-            engine,
-            "every buffered row flushes",
-            Duration::from_secs(60),
-            || engine.buffered_items() == 0,
-        );
+        publish(self.engine());
         for item in self.model.items.values() {
             for view in item.views.keys() {
                 self.model.flushed.insert((item.tid, view.clone()));
@@ -1406,17 +1402,9 @@ fn an_item_older_than_a_views_newest_rows_is_not_added_in_place() {
             artifacts: Default::default(),
         })
     };
-    let flush = || {
-        tick_until(
-            &engine,
-            "every buffered row flushes",
-            Duration::from_secs(60),
-            || engine.buffered_items() == 0,
-        )
-    };
     send("older", VIEWS[0], vec![row(b"older", (10.0, 10.0))]).expect("a new item is created");
     send("newer", VIEWS[1], vec![row(b"newer", (20.0, 20.0))]).expect("a new item is created");
-    flush();
+    publish(&engine);
 
     let refused = send("add-older", VIEWS[1], vec![row(b"older", (30.0, 30.0))]);
     assert!(
@@ -1426,9 +1414,9 @@ fn an_item_older_than_a_views_newest_rows_is_not_added_in_place() {
     assert_eq!(engine.buffered_items(), 0, "a refused batch writes nothing");
 
     send("newest", VIEWS[0], vec![row(b"newest", (40.0, 40.0))]).expect("a new item is created");
-    flush();
+    publish(&engine);
     let added = send("add-newest", VIEWS[1], vec![row(b"newest", (50.0, 50.0))])
         .expect("an item newer than the view's newest rows is added");
     assert_eq!(added.added, 1);
-    flush();
+    publish(&engine);
 }
