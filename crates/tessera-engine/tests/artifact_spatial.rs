@@ -491,7 +491,7 @@ fn a_point_ingested_inside_a_boundary_counts_on_the_next_request() {
     ingest_point(&engine, "inside-1", 0, inside[0].0, inside[0].1);
     ingest_point(&engine, "inside-2", 0, inside[1].0, inside[1].1);
     ingest_point(&engine, "outside-1", 0, outside.0, outside.1);
-    flush(&engine);
+    publish_buffered(&engine);
 
     let after = served(&engine, "0", 0, WHOLE_MAP);
     let mut extra: Vec<(f64, f64)> = inside.to_vec();
@@ -531,7 +531,7 @@ fn a_fold_leaves_a_boundarys_answers_unchanged() {
 
     // Something to fold: a flushed extent above the base, so the fold has rows to renumber.
     ingest_point(&engine, "pre-fold", 0, 3.0, 3.0);
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
 
     let after = served(&engine, grant, 0, WHOLE_MAP);
@@ -688,7 +688,7 @@ fn a_boundarys_box_survives_a_restart() {
     // And again after a fold, which rewrites every extent whole — the path a restored box takes
     // through `repack_all` rather than through the publication that first wrote it.
     ingest_point(&engine, "pre-fold", 0, 3.0, 3.0);
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     drop(engine);
 
@@ -745,7 +745,7 @@ fn an_open_claims_the_persisted_pieces_and_resolves_only_the_flushed_segments() 
     // A flush adds a segment nothing persisted covers: claimed 2, resolved 2, and the ingested
     // point counts.
     ingest_point(&engine, "flushed", 0, 3.0, 3.0);
-    flush(&engine);
+    publish_buffered(&engine);
     drop(engine);
     let engine = fx.open();
     let warm = engine.shape_warm_report();
@@ -823,11 +823,11 @@ fn merge(engine: &Engine, at: (f64, f64)) -> Vec<(f64, f64)> {
     engine.set_merge_for_test(false);
     for id in ["merge-a", "merge-b", "merge-c", "merge-d"] {
         ingest_point(engine, id, 0, at.0, at.1);
-        flush(engine);
+        publish_buffered(engine);
     }
     engine.set_merge_for_test(true);
     ingest_point(engine, "merge-e", 0, at.0, at.1);
-    flush(engine);
+    publish_buffered(engine);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while engine.write_executor_stats().merges == merges {
         assert!(
@@ -911,7 +911,7 @@ fn a_flush_and_a_merge_extend_a_boundarys_form_rather_than_rebuilding_it() {
 
     ingest_point(&engine, "flushed-inside", 0, centre.0, centre.1);
     ingest_point(&engine, "flushed-outside", 0, 700.0, 702.0);
-    flush(&engine);
+    publish_buffered(&engine);
     let mut extra = vec![centre, (700.0, 702.0)];
     let after_flush = served(&engine, grant, 0, WHOLE_MAP);
     assert_eq!(after_flush, fx.expected(grant, &[], &extra));
@@ -953,10 +953,10 @@ fn a_maintained_boundary_form_equals_one_resolved_from_scratch() {
     // Inside a box, inside the diamond's edge, outside everything: two points per segment.
     ingest_point(&engine, "d-1", 0, centre.0, centre.1);
     ingest_point(&engine, "d-2", 0, 700.0, 698.0);
-    flush(&engine);
+    publish_buffered(&engine);
     ingest_point(&engine, "d-3", 1, 700.0, 702.0);
     ingest_point(&engine, "d-4", 1, 200.0, 200.0);
-    flush(&engine);
+    publish_buffered(&engine);
     let mut extra = vec![centre, (700.0, 698.0), (700.0, 702.0), (200.0, 200.0)];
     extra.extend(merge(&engine, (500.0, 500.0)));
     assert_eq!(

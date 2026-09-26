@@ -51,15 +51,6 @@ pub fn publish_buffered(engine: &Engine) {
     );
 }
 
-/// Force a flush and wait for it to publish.
-pub fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    wait_until("the flush never published", Duration::from_secs(60), || {
-        engine.write_executor_stats().flushes > before
-    });
-}
-
 /// Force a fold and wait for it to publish, failing the moment one is discarded rather than
 /// published — a discarded fold leaves the counters where a timeout would.
 pub fn fold(engine: &Engine) {

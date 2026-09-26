@@ -410,7 +410,7 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
             full("n3", 0.7, "alpha", "the quick grey wolf", "eng", 9),
         ],
     );
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = session(&engine);
     let out = viewport(&engine, &session, None);
@@ -593,7 +593,7 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
         })],
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = session(&engine);
     let id = |e: EntityId| engine.tessera_id_of(e).unwrap().raw();
@@ -655,7 +655,7 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
             s
         })],
     );
-    flush(&engine);
+    publish_buffered(&engine);
     let side = open_bundle(&fx.root).unwrap();
     let published: Vec<&str> = side
         .partitions
@@ -713,7 +713,7 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
             s
         })],
     );
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         partitions_with_base(&fx.root, "sentiment"),
         (0, 1),
@@ -809,7 +809,7 @@ fn a_runtime_category_offers_a_restricted_principal_only_its_visible_values() {
         "labelled",
         vec![tagged("e1", b"0", "eng"), tagged("o1", b"1", "ops")],
     );
-    flush(&engine);
+    publish_buffered(&engine);
 
     let offered = |credential: &[u8]| -> Vec<String> {
         let session = engine.authorise(credential).unwrap();
@@ -860,7 +860,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
             s
         })],
     );
-    flush(&engine);
+    publish_buffered(&engine);
 
     engine.set_fold_paused_for_test(true);
     let stats_before = engine.write_executor_stats();
@@ -934,7 +934,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
         "the declaration made during the fold is on the side manifest"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     let check = |engine: &Engine| {
         let session = session(engine);
         assert_eq!(
@@ -1098,7 +1098,7 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
         scalars.push(WalScalar::U16(i + 1));
         let batch = format!("memo-{i}");
         ingested.push(ingest(&engine, &batch, vec![row(&format!("m{i}"), &engine, scalars)])[0]);
-        flush(&engine);
+        publish_buffered(&engine);
     }
     engine.request_flush();
     wait_until(

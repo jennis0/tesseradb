@@ -292,14 +292,14 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
     );
 }
 
-/// **A request made while a cycle is open and not yet planned is honoured by a prompt cycle.** A
-/// tick dispatches one view's flush per cycle, so a cycle holding rows in two views is still open
-/// when its first flush runs. A request made then is answered with the cycle after it; the open
-/// cycle's next tick consumes the request's flag, so that later cycle comes only because closing
-/// the open one arms it again. The period here is an hour, so the number arriving at all is the
-/// re-armed request's doing.
+/// **A request made while a cycle's second view waits is honoured by a prompt cycle.** A cycle
+/// holding rows in two views plans both, dispatches one and defers the other, and stays open
+/// until the deferred view publishes. A request made meanwhile is answered with the cycle after
+/// it; the tick that takes the deferred view consumes the request's flag, so that later cycle
+/// comes only because closing the open one arms it again. The period here is an hour, so the
+/// number arriving at all is the re-armed request's doing.
 #[test]
-fn a_request_made_before_an_open_cycle_plans_is_honoured_without_the_period() {
+fn a_request_made_while_a_view_is_deferred_is_honoured_without_the_period() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     build_fixture(
@@ -323,6 +323,7 @@ fn a_request_made_before_an_open_cycle_plans_is_honoured_without_the_period() {
             point_default: None,
         })
         .expect("the second view is created");
+    let mut ingested = Vec::new();
     for (i, view) in ["s0", "s1"].into_iter().enumerate() {
         let row = tessera_lifecycle::UnallocatedRow {
             external_id: Some(format!("open-cycle-{view}").into_bytes()),
@@ -335,22 +336,86 @@ fn a_request_made_before_an_open_cycle_plans_is_honoured_without_the_period() {
             terms: engine.resolve_terms(&[b"0".to_vec()]),
             scoped: Vec::new(),
         };
-        engine
+        let entity = engine
             .ingest_rows(vec![row], format!("open-cycle-{view}"), [i as u8 + 1; 32])
-            .expect("the row is accepted");
+            .expect("the row is accepted")[0];
+        ingested.push((view, entity));
     }
 
-    // The first view's flush is held, so the cycle is open and its second view unplanned.
+    // The first view's flush is held, so the cycle is open and the second view deferred.
     engine.set_flush_paused_for_test(true);
     let first = engine.request_flush_publication();
     wait_until("the first view's flush is held", WAIT, || {
         engine.flush_is_holding_for_test()
     });
     let second = engine.request_flush_publication();
-    assert_eq!(second, first + 1, "a request during an open cycle names the cycle after it");
+    assert_eq!(
+        second,
+        first + 1,
+        "a request during an open cycle names the cycle after it"
+    );
 
     engine.set_flush_paused_for_test(false);
     wait_until("the open cycle publishes both views", WAIT, || {
+        engine.publication() >= first
+    });
+    for (view, entity) in &ingested {
+        assert!(
+            serves(&engine, view, *entity),
+            "the row in {view} is served at the number the first request was answered with"
+        );
+    }
+    wait_until(
+        "the cycle the second request was answered with publishes, well inside the period",
+        WAIT,
+        || engine.publication() >= second,
+    );
+}
+
+/// **A retry that finds nothing to flush still reaches the number a request was promised.** A
+/// flush that fails holds its cycle open and retries. A request made meanwhile is answered with the
+/// cycle after it. The row is deleted before the retry, so the retry plans nothing and closes the
+/// open cycle inside the tick, with no publication to wake the executor again: only the re-armed
+/// request brings the promised cycle before the hour-long period.
+///
+/// The flush is made to fail by a read-only segments directory. No fault switch fails a flush and
+/// lets it recover: a WAL fault leaves the overlay diverged and a step-down stays, and both refuse
+/// every later flush until a restart.
+#[test]
+fn a_retry_that_finds_nothing_to_flush_still_reaches_the_promised_number() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    let entity = ingest(&engine, "failed-cycle");
+
+    let segments = segments_dir(&root, "s0");
+    let writable = std::fs::metadata(&segments).unwrap().permissions();
+    std::fs::set_permissions(&segments, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let first = engine.request_flush_publication();
+    wait_until("the flush fails", WAIT, || {
+        engine.write_executor_stats().flush_failures >= 1
+    });
+    let second = engine.request_flush_publication();
+    assert_eq!(
+        second,
+        first + 1,
+        "a request during an open cycle names the cycle after it"
+    );
+
+    engine
+        .accept_change(entity, ChangeOp::Delete)
+        .expect("the deletion is accepted");
+    std::fs::set_permissions(&segments, writable).unwrap();
+
+    wait_until("the retry closes the failed cycle", WAIT, || {
         engine.publication() >= first
     });
     wait_until(
@@ -358,4 +423,40 @@ fn a_request_made_before_an_open_cycle_plans_is_honoured_without_the_period() {
         WAIT,
         || engine.publication() >= second,
     );
+    assert_eq!(
+        engine.write_executor_stats().flushes,
+        0,
+        "the deleted row was never flushed, so no cycle published a segment"
+    );
+}
+
+/// The directory `view`'s flushed segments are written into.
+fn segments_dir(root: &std::path::Path, view: &str) -> std::path::PathBuf {
+    let current: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
+    let partitions = root
+        .join(current["prefix"].as_str().unwrap())
+        .join("partitions");
+    let partition = std::fs::read_dir(&partitions)
+        .unwrap()
+        .next()
+        .expect("the bundle has a partition")
+        .unwrap()
+        .path();
+    tessera_store::view_path(&partition, view).join("segments")
+}
+
+/// Whether a full-coverage viewer is served `entity`, ingested at (0.5, 0.5), in `view`.
+fn serves(engine: &Engine, view: &str, entity: EntityId) -> bool {
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let wanted = engine.tessera_id_of(entity).unwrap();
+    engine
+        .viewport(
+            &session,
+            tessera_engine::ViewportRequest::new(view, 10, [0.4, 0.4, 0.6, 0.6], 200),
+        )
+        .unwrap()
+        .points
+        .iter()
+        .any(|(id, _)| id == wanted)
 }

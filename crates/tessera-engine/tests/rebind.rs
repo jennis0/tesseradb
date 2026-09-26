@@ -199,6 +199,6 @@ fn an_item_created_without_an_external_id_answers_none_after_its_flush() {
         })
         .expect("the batch is accepted");
     let entity = engine.resolve_tessera_ids(&receipt.tessera_ids)[0].expect("the item it made");
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(engine.external_id_of(entity).expect("the lookup answers"), None);
 }

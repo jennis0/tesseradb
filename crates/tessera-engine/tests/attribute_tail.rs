@@ -449,7 +449,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
         )
         .expect("an ingest carrying the declared tail is accepted")[0];
 
-    flush(&engine);
+    publish_buffered(&engine);
     drop(engine);
 
     let tail = tail_by_identity(&root);
@@ -512,7 +512,7 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
                 [batch as u8; 32],
             )
             .expect("accepted")[0];
-        flush(&engine);
+        publish_buffered(&engine);
         let id = test_key().forward(0, entity).unwrap();
         expected.insert(
             id.raw(),
@@ -596,7 +596,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             [7u8; 32],
         )
         .expect("accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     drop(engine);
 
@@ -696,7 +696,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let out = engine
@@ -819,7 +819,7 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
         engine
             .ingest_rows(rows, batch.to_string(), [0u8; 32])
             .expect("the ingest is accepted");
-        flush(&engine);
+        publish_buffered(&engine);
     };
     // Five rows in `(2, 0)` and two in `(3, 3)`, every one scored.
     ingest(
@@ -1200,7 +1200,7 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let out = engine
@@ -1296,7 +1296,7 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let expect_item = |id, audit: i64, band_key: &str, score: f32, label: &str| {
@@ -1601,7 +1601,7 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
             [0u8; 32],
         )
         .expect("an ingest carrying blob-resident values is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     // **Before the engine is dropped**: a published record extent that no *live* stack holds
     // answers no drill-down. The manifest entry below makes the bytes reachable to a reopen; this
@@ -1701,7 +1701,7 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
             [1u8; 32],
         )
         .expect("accepted");
-    flush(&engine);
+    publish_buffered(&engine);
 
     let manifest = side_manifest(&root);
     assert_eq!(manifest.record_extents.len(), 1);
@@ -1738,7 +1738,7 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
             [2u8; 32],
         )
         .expect("accepted");
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         before,
         extent_files(),

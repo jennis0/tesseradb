@@ -242,7 +242,7 @@ fn create_second_view(engine: &Engine) {
 /// will ever consume stays for the life of the process, and so does every member after it.
 fn inherited_members_reclaimed(engine: &Engine, tmp: &std::path::Path, inherited: &[String]) {
     ingest_into(engine, "wake", "ext-wake", "s0");
-    flush(engine);
+    publish_buffered(engine);
     wait_until("the inherited members to be reclaimed", WAIT, || {
         let now = members(tmp);
         !inherited.iter().any(|name| now.contains(name))
@@ -265,7 +265,7 @@ fn a_deleted_entitys_join_row_is_not_rebuilt_at_a_restart() {
         let engine = engine_at(tmp.path(), &root, 3600);
         create_second_view(&engine);
         let id = ingest_into(&engine, "b1", "ext-1", "s0");
-        flush(&engine);
+        publish_buffered(&engine);
 
         // A row in the second view, unflushed, and then the delete that takes both.
         assert_eq!(ingest_into(&engine, "b2", "ext-1", "s1"), id);
@@ -319,7 +319,7 @@ fn a_deleted_entitys_values_fill_is_not_rebuilt_at_a_restart() {
             })
             .expect("the column is declared");
         let id = ingest_into(&engine, "b1", "ext-1", "s0");
-        flush(&engine);
+        publish_buffered(&engine);
         assert!(
             !engine.generation().buffer.contains(id),
             "the flush consumed the row, so the fill below is all the buffer holds for it"

@@ -291,11 +291,11 @@ fn merge(engine: &Engine) -> Vec<EntityId> {
         b"merge-d".as_slice(),
     ] {
         ingested.push(ingest(engine, batch));
-        flush(engine);
+        publish_buffered(engine);
     }
     engine.set_merge_for_test(true);
     ingested.push(ingest(engine, b"merge-e"));
-    flush(engine);
+    publish_buffered(engine);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while engine.write_executor_stats().merges == merges {
         assert!(
@@ -577,7 +577,7 @@ fn a_member_that_joins_after_its_flush_counts_at_the_growth() {
     publish(&engine, "a0", fx.members(0..100));
 
     let fresh = ingest(&engine, b"joins-later");
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         served(&engine),
         vec![("a0".to_string(), 100)],
@@ -672,7 +672,7 @@ fn a_merge_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
         // A member on an extent row before the merge, so the span the merge renumbers holds a
         // labelled row and not only unclaimed ones.
         let fresh = ingest(&engine, b"pre-merge");
-        flush(&engine);
+        publish_buffered(&engine);
         grow(&engine, "a0", vec![fresh]);
         assert_eq!(
             served(&engine),
@@ -781,13 +781,13 @@ fn an_amended_form_equals_one_built_from_scratch() {
         publish(&engine, "a1", fx.members(500..600));
         grow(&engine, "a0", fx.members(100..150));
         let fresh = ingest(&engine, b"differential");
-        flush(&engine);
+        publish_buffered(&engine);
         grow(&engine, "a1", vec![fresh]);
         // **A publication *after* the flush**, so the ordinal it places is placed into a form whose
         // row space carries an extent — the case `publish_at` takes and a pre-flush publication
         // does not reach.
         let later = ingest(&engine, b"differential-later");
-        flush(&engine);
+        publish_buffered(&engine);
         publish(&engine, "a2", vec![later]);
 
         let maintained_answers = served(&engine);
@@ -1029,7 +1029,7 @@ fn flush_interleaved(
                 .ingest_rows(rows, format!("interleaved-{s}"), [s as u8 + 1; 32])
                 .expect("the ingest is accepted"),
         );
-        flush(engine);
+        publish_buffered(engine);
     }
     by_segment
 }

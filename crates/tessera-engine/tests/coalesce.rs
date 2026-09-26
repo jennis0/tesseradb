@@ -201,7 +201,7 @@ fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
         for i in 0..WIDTH {
             let entity = ingest_novel(&engine, i);
             ingested.push((entity, format!("ext-{i}").into_bytes()));
-            flush(&engine);
+            publish_buffered(&engine);
         }
         settle_coalesce(&engine);
         let coalesced = manifest_of(&root);
@@ -700,7 +700,7 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
         let descriptors: &[&[u8]] = if i % 2 == 0 { &[b"0", b"1"] } else { &[b"0"] };
         let entity = ingest_with(&engine, &key, descriptors, &format!("carried-{i}"));
         carried.push((entity, key));
-        flush(&engine);
+        publish_buffered(&engine);
     }
 
     // Denied during the flight, after the fold's snapshot: these stand after the fold.

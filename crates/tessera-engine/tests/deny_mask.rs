@@ -684,7 +684,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
             if published(&engine) {
                 break;
             }
-            flush(&engine);
+            publish_buffered(&engine);
         }
         assert!(published(&engine), "every buffered row reached a segment");
         let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);

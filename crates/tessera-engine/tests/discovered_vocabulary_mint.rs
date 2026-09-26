@@ -285,7 +285,7 @@ fn a_novel_key_mints_and_the_row_stores_the_code() {
         .expect("the novel key is bound as soon as the window that minted it is published");
     assert_ne!(code, 0, "0 is the absent sentinel, never a minted code");
 
-    flush(&engine);
+    publish_buffered(&engine);
 
     assert_eq!(
         stored_code_of(&root, "department", entity),
@@ -372,7 +372,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     assert_eq!(finance_mints[0].2, code);
 
     let engine = engine_over(tmp.path(), &root, config());
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(stored_code_of(&root, "department", entities[0]), Some(code));
     assert_eq!(stored_code_of(&root, "department", entities[1]), Some(code));
     drop(engine);
@@ -682,7 +682,7 @@ fn a_declared_vocabulary_is_unaffected_by_the_mint_loop() {
         "nothing mints for a declared vocabulary — the assigned set must not grow"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         stored_code_of(&root, "band", entity),
         Some(2),
