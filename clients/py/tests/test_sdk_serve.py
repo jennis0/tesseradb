@@ -130,14 +130,13 @@ def test_the_deployment_file_names_three_loopback_planes_at_port_zero(tmp_path):
 
 
 def test_the_secrets_are_generated_once_and_owner_only(tmp_path):
-    session, identity = _instance.secrets_for(tmp_path)
-    assert len(identity) == 32 and int(identity, 16) >= 0
-    for name in ("session.cred", "operator.cred", "identity.key", "identity.toml"):
+    session = _instance.secrets_for(tmp_path)
+    for name in ("session.cred", "operator.cred"):
         assert oct((tmp_path / ".tessera" / name).stat().st_mode)[-3:] == "600"
     # The directory too, and each file is created owner-only rather than narrowed afterwards.
     assert oct((tmp_path / ".tessera").stat().st_mode)[-3:] == "700"
     again = _instance.secrets_for(tmp_path)
-    assert again == (session, identity)
+    assert again == session
 
 
 def test_the_binary_is_found_at_tessera_bin(tmp_path, monkeypatch):

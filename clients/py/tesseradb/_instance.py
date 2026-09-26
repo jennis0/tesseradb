@@ -52,8 +52,6 @@ def serve_timeout() -> float:
 #: The deployment's token lifetime, which `[disclosure]` requires and has no backstop default.
 TOKEN_MAX_LIFETIME = 3600
 
-IDENTITY_ENV = "TESSERA_IDENTITY_KEY"
-
 _running: dict[int, subprocess.Popen] = {}
 
 #: The directories of the temporary databases this process made and has not closed.
@@ -103,7 +101,6 @@ def write_deployment(directory: Path) -> Path:
             "wal": ".tessera/wal.log",
         },
         "build": {"schema": "schema.toml"},
-        "identity": {"env": IDENTITY_ENV},
         "plugin": {"module": "builtin:passthrough"},
         "disclosure": {"token_max_lifetime": TOKEN_MAX_LIFETIME},
         "serve": serve,
@@ -116,24 +113,20 @@ def write_deployment(directory: Path) -> Path:
     return path
 
 
-def secrets_for(directory: Path) -> tuple[str, str]:
-    """The session credential, the operator credential and the identity key, once per database.
+def secrets_for(directory: Path) -> str:
+    """The session credential and the operator credential, once per database; returns the first.
 
-    All three are written under `.tessera/`, which is owner-only, and each file is created
-    owner-only rather than created and then narrowed: between a write and a `chmod` the secret is
-    readable by anyone on the machine. The identity key is named by `[identity].env` rather than
-    by a path, so it is passed to the child in its environment; the file is where this database
-    keeps it between processes. The operator credential is generated beside the session one
-    because the deployment file requires both.
+    Both are written under `.tessera/`, which is owner-only, and each file is created owner-only
+    rather than created and then narrowed: between a write and a `chmod` the secret is readable by
+    anyone on the machine. The operator credential is generated beside the session one because the
+    deployment file requires both.
     """
     private = directory / ".tessera"
     private.mkdir(parents=True, exist_ok=True)
     private.chmod(0o700)
     session = _secret(private / "session.cred", lambda: secrets.token_urlsafe(32))
     _secret(private / "operator.cred", lambda: secrets.token_urlsafe(32))
-    identity = _secret(private / "identity.key", lambda: secrets.token_hex(16))
-    _secret(private / "identity.toml", lambda: f'[identity]\nkey = "{identity}"\n')
-    return session, identity
+    return session
 
 
 def _secret(path: Path, mint) -> str:
@@ -149,19 +142,15 @@ def _secret(path: Path, mint) -> str:
 def start(
     binary: str,
     deployment: Path,
-    identity_key: str,
     timeout: float | None = None,
 ) -> tuple[subprocess.Popen, Listening]:
     """Start `tessera serve` and read the addresses it bound."""
-    environment = dict(os.environ)
-    environment[IDENTITY_ENV] = identity_key
     child = subprocess.Popen(
         [binary, "serve", "--deployment", str(deployment)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
-        env=environment,
         cwd=str(Path(deployment).parent),
     )
     _running[child.pid] = child

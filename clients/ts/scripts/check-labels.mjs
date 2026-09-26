@@ -37,7 +37,7 @@ const labelLayer = args.labels ?? 'topics/ctfidf-2026-08';
 const labelTerm = args.term ?? '46';
 const presets = JSON.parse(await readFile(args.presets ?? '../../tessera-demo/presets/stage3.json', 'utf8'));
 
-/** This deployment's first view and its idset, from `/v1/meta`. */
+/** This deployment's `/v1/meta`. */
 async function metaOf(token) {
   const r = await fetch(`${viewer}/v1/meta`, {headers: {authorization: `Bearer ${token}`}});
   if (!r.ok) throw new Error(`meta: ${r.status} ${await r.text()}`);
@@ -196,8 +196,7 @@ if (!cluster) throw new Error(`no cluster ${label.key.replace(/^l-/, '')} served
 expect('the label answers on its identifier before the suppression', (await byIdentifier(witnessToken, label.id)) !== null);
 
 const change = async (op) => {
-  // Each item carries the idset its `tessera_id` was issued under.
-  accepted(op, await control.changes([{tessera_id: cluster.id.toString(), idset: (await metaOf(witnessToken)).idset, op}]));
+  accepted(op, await control.changes([{tessera_id: cluster.id.toString(), op}]));
 };
 
 // The unsuppress runs in `finally`, so a throw does not leave the cluster hidden.

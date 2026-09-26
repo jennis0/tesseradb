@@ -54,7 +54,6 @@ describe('@tesseradb/react/components', () => {
   it('the pickers take a store as a property and switch through it', async () => {
     const meta = {
       apiVersion: 1,
-      idset: 0,
       views: [
         {id: 'knn', displayName: 'knn', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null},
         {id: 'quarter:a', displayName: 'a', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: {group: 'quarter', key: 'a', metadata: {}}},
@@ -97,7 +96,6 @@ describe('@tesseradb/react/components', () => {
   it('an on* prop on a picker receives its switch event, with the frames compared', async () => {
     const meta = {
       apiVersion: 1,
-      idset: 0,
       views: [
         {id: 'knn', displayName: 'knn', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null},
         {id: 'pca64', displayName: 'pca64', quantisation: {xMin: -1, xMax: 1, yMin: -1, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}
@@ -131,7 +129,6 @@ describe('@tesseradb/react/components', () => {
   it('TesseraHierarchy hands its clause event to an on* prop, the id a decimal string', async () => {
     const meta = {
       apiVersion: 1,
-      idset: 0,
       views: [{id: 's0', displayName: 's0', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
       groups: [],
       declaredScalars: [],

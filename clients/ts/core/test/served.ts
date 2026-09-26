@@ -94,9 +94,6 @@ wal   = ".tessera/wal.log"
 [build]
 schema = "schema.toml"
 
-[identity]
-env = "TESSERA_IDENTITY_KEY"
-
 [plugin]
 module = "builtin:passthrough"
 
@@ -134,14 +131,13 @@ function listening(child: ChildProcess, errors: () => string, timeoutMs: number)
 }
 
 /**
- * Build a corpus into a temporary deployment and serve it: the notebook's, or `corpus`. The
- * identity key, which decides every `tessera_id`, is `identityKey` (32 hex digits) or a fresh one.
+ * Build a corpus into a temporary deployment and serve it: the notebook's, or `corpus`.
  *
  * Returns a string, the reason, where the binary or the notebook corpus is not on this machine. A
  * build or a serve that fails throws: those are failures, not absences.
  */
 export async function start(
-  options: {corpus?: {directory: string; schema: string}; identityKey?: string} = {}
+  options: {corpus?: {directory: string; schema: string}} = {}
 ): Promise<Served | string> {
   let corpus = options.corpus;
   const found = findBinary();
@@ -168,13 +164,12 @@ export async function start(
     writeFileSync(join(secrets, 'session.cred'), `${sessionCredential}\n`, {mode: 0o600});
     const operatorCredential = randomBytes(24).toString('hex');
     writeFileSync(join(secrets, 'operator.cred'), `${operatorCredential}\n`, {mode: 0o600});
-    const env = {...process.env, TESSERA_IDENTITY_KEY: options.identityKey ?? randomBytes(16).toString('hex')};
     const deployment = join(directory, 'tessera.toml');
 
-    const build = spawnSync(binary, ['build', '--deployment', deployment], {cwd: directory, env, encoding: 'utf8'});
+    const build = spawnSync(binary, ['build', '--deployment', deployment], {cwd: directory, encoding: 'utf8'});
     if (build.status !== 0) throw new Error(`tessera build failed (${build.status}):\n${build.stderr}${build.stdout}`);
 
-    const child = spawn(binary, ['serve', '--deployment', deployment], {cwd: directory, env, stdio: ['ignore', 'pipe', 'pipe']});
+    const child = spawn(binary, ['serve', '--deployment', deployment], {cwd: directory, stdio: ['ignore', 'pipe', 'pipe']});
     let stderr = '';
     child.stderr!.on('data', (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-8192);

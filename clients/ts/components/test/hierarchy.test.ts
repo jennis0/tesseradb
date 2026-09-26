@@ -31,7 +31,6 @@ const layer = (name: string, kind: Layer['hierarchy']['kind'], computedContent: 
 
 const META = {
   apiVersion: 1,
-  idset: 0,
   views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
   groups: [],
   declaredScalars: [],

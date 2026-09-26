@@ -67,8 +67,7 @@ export type RowAnswer = Answer & {
 /**
  * One item of a `POST /control/changes` request, in the route's own field names. The item is
  * addressed by `external_id`, base64 of the id's bytes as {@link addressed} makes it, or by
- * `tessera_id`, a decimal string, with the `idset` from {@link TesseraClient.meta} that it was
- * issued under.
+ * `tessera_id`, a decimal string.
  *
  * @category Control plane
  */
@@ -81,7 +80,7 @@ export type ChangeItem = {
   op: 'delete' | 'suppress' | 'unsuppress';
 } & (
   | {external_id: string}
-  | {tessera_id: string; idset: number}
+  | {tessera_id: string}
 );
 
 /**
