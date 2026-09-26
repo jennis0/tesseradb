@@ -451,6 +451,57 @@ fn an_edit_carries_every_home() {
     check(&engine, &expected, "a restart after the fold");
 }
 
+/// **A value scoped to a key goes where the item has a row under that key.** An item in no view of
+/// the key is sent its value with its position there, which adds it; a row carrying the value alone
+/// is refused, since no row would hold it.
+#[test]
+fn a_scoped_value_needs_a_row_under_its_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let engine = open(tmp.path(), &root);
+    // Held by `q2` alone.
+    let item = EntityId::new(source_to_new_map(&root, "v00000")[&20]);
+    let tid = engine.tessera_id_of(item).unwrap();
+    let send = |batch: &str, position: Option<(f64, f64)>| {
+        let row = naming(tid, |row| {
+            row.scoped[0] = WalScalar::F32(12.5);
+            row.omitted.retain(|at| *at != DECLARED);
+            row.position = position;
+        });
+        let mut body_hash = [0u8; 32];
+        body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
+        engine.ingest(IngestRequest {
+            batch_id: batch.to_string(),
+            body_hash,
+            view: Some("quarter:q1".to_string()),
+            rows: vec![row],
+            artifacts: Default::default(),
+        })
+    };
+    let refused = send("alone", None);
+    assert!(
+        matches!(refused, Err(tessera_engine::AcceptError::Contract(_))),
+        "a scoped value with no row to hold it is refused: {refused:?}"
+    );
+    assert_eq!(engine.buffered_items(), 0, "and nothing is written");
+
+    let added = send("placed", Some(position(20))).expect("sent with a position, it is taken");
+    assert_eq!(added.added, 1, "{added:?}");
+    publish_buffered(&engine);
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let card = engine
+        .item(&full, tid)
+        .unwrap()
+        .expect("the item has a card");
+    assert_eq!(
+        scoped_of(&card, "heat"),
+        vec![
+            ("q1".to_string(), ScalarOut::F32(12.5)),
+            ("q2".to_string(), ScalarOut::F32(heat(1, 20))),
+        ]
+    );
+}
+
 /// **A view dropped while an edit waits in the same commit window** does not strand the edit.
 /// The edit is committed first, its own row in the dropped view gives way to its row in another
 /// view, and the item is served there with what the edit changed, before and after a restart.

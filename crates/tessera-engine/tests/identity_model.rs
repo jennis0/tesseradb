@@ -48,10 +48,19 @@ use tessera_engine::{
 };
 use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::{ChangeOp, IngestRow};
+use tessera_spatial::tiler::ScalarType;
 use tessera_types::layer::LayerScope;
 use tessera_types::{EntityId, TesseraId};
 
 const VIEWS: [&str; 2] = ["s0", "s1"];
+/// The one key of the group `quarter`, whose view every built item is in beside [`VIEWS`].
+const GROUP: (&str, &str) = ("quarter", "q1");
+const GROUP_VIEW: &str = "quarter:q1";
+/// The families scoped to the group, a float and a text: a row through [`GROUP_VIEW`] carries them
+/// after the declared columns.
+const SCOPED: [&str; 2] = ["heat", "memo"];
+/// The declared columns: `gid`, `doi`, `score` and [`EXTRAS`].
+const DECLARED: usize = 8;
 const BUILT: u64 = 12;
 const VIEWPORT: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
@@ -125,6 +134,14 @@ fn extra(at: usize, seed: u64) -> WalScalar {
         2 => WalScalar::Bool(seed.is_multiple_of(2)),
         3 => WalScalar::Utf8(["alpha", "beta", "gamma"][(seed % 3) as usize].to_string()),
         _ => WalScalar::Utf8(format!("note {}", seed % 5)),
+    }
+}
+
+/// Family `SCOPED[at]`'s value for `seed`.
+fn scoped_value(at: usize, seed: u64) -> WalScalar {
+    match at {
+        0 => WalScalar::F32((seed % 9) as f32 * 0.5),
+        _ => WalScalar::Utf8(format!("memo w{}", seed % 5)),
     }
 }
 
@@ -271,29 +288,72 @@ fn fixture() -> Fixture {
     let points = tmp.path().join("points.parquet");
     let pairs = tmp.path().join("pairs.parquet");
     write_points(&points);
+    let group_points = tmp.path().join("group.parquet");
+    write_group_points(&group_points);
     write_pairs_n(&pairs, BUILT);
     let schema_path = tmp.path().join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the fixture schema parses")
         .schema;
+    let view_args = |view: &str, points: &Path| tessera_build::ViewArgs {
+        visibility: None,
+        view_id: view.to_string(),
+        projection: tessera_spatial::Projection::None,
+        extent: extent(),
+        points: points.to_path_buf(),
+        point_fields: Default::default(),
+        select: None,
+        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+    };
+    let scoped = |at: usize| tessera_build::ScopedColumnFamily {
+        attribute: tessera_build::config::Attribute {
+            name: SCOPED[at].to_string(),
+            title: None,
+            field: None,
+            ty: [ScalarType::F32, ScalarType::Text][at],
+            analyser: (at == 1)
+                .then(|| tessera_analyse::identity_of("unicode").expect("the analyser is carried")),
+            vocabulary: None,
+            value_set: None,
+            index: true,
+            render: false,
+            unique: false,
+        },
+        group: GROUP.0.to_string(),
+        views: vec![VIEWS.len()],
+        source: None,
+    };
+    let e = extent();
     tessera_build::build(&tessera_build::BuildArgs {
         views: VIEWS
             .iter()
-            .map(|view| tessera_build::ViewArgs {
-                visibility: None,
-                view_id: view.to_string(),
-                projection: tessera_spatial::Projection::None,
-                extent: extent(),
-                points: points.clone(),
-                point_fields: Default::default(),
-                select: None,
-                access: tessera_build::config::AccessInput::relation(pairs.clone()),
-            })
+            .map(|view| view_args(view, &points))
+            .chain([view_args(GROUP_VIEW, &group_points)])
             .collect(),
         anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
+        groups: vec![tessera_build::GroupDescriptor {
+            title: None,
+            point_default: Some("public".to_string()),
+            visibility: None,
+            name: GROUP.0.to_string(),
+            members_of: None,
+            views: vec![tessera_build::GroupViewDescriptor {
+                key: GROUP.1.to_string(),
+                visibility: None,
+                metadata: Default::default(),
+            }],
+            quantisation: tessera_build::Quantisation {
+                x_min: e.x_min,
+                x_max: e.x_max,
+                y_min: e.y_min,
+                y_max: e.y_max,
+            },
+            projection: tessera_spatial::Projection::None,
+            metadata: Vec::new(),
+            scoped_scalars: Vec::new(),
+        }],
+        scoped_attributes: vec![scoped(0), scoped(1)],
         attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
         out: root.clone(),
         limit: None,
@@ -311,6 +371,50 @@ fn fixture() -> Fixture {
     })
     .expect("the build succeeds");
     Fixture { tmp, root }
+}
+
+/// The group's view: every built item at its position, with its value in each scoped family.
+fn write_group_points(path: &Path) {
+    let ids: Vec<u64> = (0..BUILT).collect();
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new(SCOPED[0], DataType::Float32, false),
+        Field::new(SCOPED[1], DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids.clone())),
+            Arc::new(Float64Array::from_iter_values(
+                ids.iter().map(|s| built_position(*s).0),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                ids.iter().map(|s| built_position(*s).1),
+            )),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(
+                |s| match built_scoped(0, *s) {
+                    WalScalar::F32(x) => x,
+                    _ => unreachable!(),
+                },
+            ))),
+            Arc::new(StringArray::from_iter_values(ids.iter().map(
+                |s| match built_scoped(1, *s) {
+                    WalScalar::Utf8(x) => x,
+                    _ => unreachable!(),
+                },
+            ))),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+fn built_scoped(at: usize, source: u64) -> WalScalar {
+    scoped_value(at, source * 3 + 1)
 }
 
 fn open(fx: &Fixture) -> Engine {
@@ -343,6 +447,8 @@ struct Item {
     score: Option<f64>,
     /// The item's value in each of [`EXTRAS`].
     extras: [Option<WalScalar>; 5],
+    /// Its value in each of [`SCOPED`] under the group's key.
+    scoped: [Option<WalScalar>; 2],
     /// Each view the item has a row in, with its position there.
     views: BTreeMap<String, (f64, f64)>,
     suppressed: bool,
@@ -360,6 +466,8 @@ struct Model {
     /// The `(tessera_id, view)` rows a flush has given a position.
     flushed: BTreeSet<(u64, String)>,
     doi_unique: bool,
+    /// Whether [`GROUP_VIEW`] has not been dropped.
+    group: bool,
     /// Items made so far, built ones included.
     made: u64,
     /// Per view, one past the newest item a flush has given a row there. An item older than that
@@ -383,6 +491,7 @@ struct Row {
     doi: Option<Option<String>>,
     score: Option<Option<f64>>,
     extras: [Option<Option<WalScalar>>; 5],
+    scoped: [Option<Option<WalScalar>>; 2],
     labels: Option<BTreeSet<String>>,
     position: Option<(f64, f64)>,
 }
@@ -405,6 +514,7 @@ impl Model {
     fn built(engine: &Engine, root: &Path) -> Model {
         let mut model = Model {
             doi_unique: true,
+            group: true,
             defaults: engine
                 .meta()
                 .views
@@ -412,7 +522,11 @@ impl Model {
                 .map(|v| (v.id.clone(), v.point_default.clone()))
                 .collect(),
             made: BUILT,
-            floors: VIEWS.iter().map(|v| (v.to_string(), BUILT)).collect(),
+            floors: VIEWS
+                .iter()
+                .chain([&GROUP_VIEW])
+                .map(|v| (v.to_string(), BUILT))
+                .collect(),
             ..Model::default()
         };
         for (source, entity) in source_to_new_map(root, "v00000") {
@@ -429,12 +543,17 @@ impl Model {
                     doi: Some(built_doi(source)),
                     score: Some(built_score(source)),
                     extras: std::array::from_fn(|at| Some(built_extra(at, source))),
-                    views: VIEWS.iter().map(|v| (v.to_string(), position)).collect(),
+                    scoped: std::array::from_fn(|at| Some(built_scoped(at, source))),
+                    views: VIEWS
+                        .iter()
+                        .chain([&GROUP_VIEW])
+                        .map(|v| (v.to_string(), position))
+                        .collect(),
                     suppressed: false,
                     made: entity,
                 },
             );
-            for view in VIEWS {
+            for view in VIEWS.iter().chain([&GROUP_VIEW]) {
                 model.flushed.insert((tid, view.to_string()));
             }
         }
@@ -464,6 +583,9 @@ impl Model {
 
     /// What the service must do with a batch: `None` where it refuses it.
     fn decide(&self, view: Option<&str>, rows: &[Row]) -> Option<Vec<Expect>> {
+        if view == Some(GROUP_VIEW) && !self.group {
+            return None;
+        }
         let mut named: Vec<Option<u64>> = Vec::new();
         for row in rows {
             let items = self.named(row).ok()?;
@@ -518,6 +640,20 @@ impl Model {
                     .zip(&item.extras)
                     .any(|(sent, held)| sent.as_ref().is_some_and(|v| !same(v, held)))
                 || row.labels.as_ref().is_some_and(|l| *l != item.labels);
+            // A scoped value fills an empty cell where the row adds the item to the view, and
+            // otherwise differs from no value.
+            let adding =
+                view.is_some_and(|v| row.position.is_some() && !item.views.contains_key(v));
+            let scoped_differs =
+                row.scoped
+                    .iter()
+                    .zip(&item.scoped)
+                    .any(|(sent, held)| match (sent, held) {
+                        (None, _) | (Some(None), None) => false,
+                        (Some(Some(_)), None) => !adding,
+                        (Some(sent), held) => !same(sent, held),
+                    });
+            let differs = differs || scoped_differs;
             let mut joins = None;
             let mut moves = false;
             if let (Some(view), Some(position)) = (view, row.position) {
@@ -526,6 +662,14 @@ impl Model {
                     Some(_) => moves = true,
                     None => joins = Some(item.made < self.floors[view]),
                 }
+            }
+            // An edit places the item's new entity in every view it is in, so an item in none
+            // needs a position in the batch's view; and a scoped value needs a row in the view.
+            let unplaced = view.is_none_or(|v| !item.views.contains_key(v)) && joins.is_none();
+            if (differs || moves) && item.views.is_empty() && joins.is_none()
+                || (differs && unplaced && row.scoped.iter().any(|v| matches!(v, Some(Some(_)))))
+            {
+                return None;
             }
             expect.push(match (differs || moves, joins) {
                 (true, _) => Expect::Edited(*tid),
@@ -554,6 +698,7 @@ impl Model {
                         doi: row.doi.clone().flatten(),
                         score: row.score.flatten(),
                         extras: row.extras.clone().map(Option::flatten),
+                        scoped: row.scoped.clone().map(Option::flatten),
                         views: BTreeMap::from([(view, row.position.unwrap())]),
                         suppressed: false,
                         made: self.made,
@@ -569,11 +714,13 @@ impl Model {
                 Expect::Added { tid: named, moved } => {
                     assert_eq!(tid, named, "a row adding an item answers its tessera_id");
                     let view = view.expect("a row adding an item names a view").to_string();
-                    self.items
-                        .get_mut(named)
-                        .unwrap()
-                        .views
-                        .insert(view, row.position.unwrap());
+                    let item = self.items.get_mut(named).unwrap();
+                    item.views.insert(view, row.position.unwrap());
+                    for (held, sent) in item.scoped.iter_mut().zip(&row.scoped) {
+                        if let Some(Some(sent)) = sent {
+                            *held = Some(sent.clone());
+                        }
+                    }
                     if *moved {
                         self.moved(*named);
                     }
@@ -601,6 +748,11 @@ impl Model {
                             *held = sent.clone();
                         }
                     }
+                    for (held, sent) in item.scoped.iter_mut().zip(&row.scoped) {
+                        if let Some(sent) = sent {
+                            *held = sent.clone();
+                        }
+                    }
                     if let (Some(view), Some(position)) = (view, row.position) {
                         item.views.insert(view.to_string(), position);
                     }
@@ -619,6 +771,12 @@ impl Model {
         for view in item.views.keys() {
             self.flushed.remove(&(tid, view.clone()));
         }
+    }
+
+    /// The views that exist: [`VIEWS`], and [`GROUP_VIEW`] until it is dropped.
+    fn views(&self) -> Vec<&'static str> {
+        let group = self.group.then_some(GROUP_VIEW);
+        VIEWS.iter().copied().chain(group).collect()
     }
 
     fn live(&self) -> Vec<u64> {
@@ -647,7 +805,8 @@ struct RowGen {
     differ: u8,
     /// Bits of carried fields sent as null.
     null: u8,
-    /// Bits of [`EXTRAS`] the row carries, those given another value, and those sent as null.
+    /// Bits of [`EXTRAS`] the row carries, those given another value, and those sent as null; the
+    /// two above them are [`SCOPED`], carried only through [`GROUP_VIEW`].
     extra_carry: u8,
     extra_differ: u8,
     extra_null: u8,
@@ -658,7 +817,7 @@ struct RowGen {
 
 #[derive(Debug, Clone)]
 enum Op {
-    /// A batch into view 0 or 1, or naming no view.
+    /// A batch into view 0 or 1, naming no view (2), or into [`GROUP_VIEW`] (3).
     Ingest {
         view: u8,
         rows: Vec<RowGen>,
@@ -672,6 +831,8 @@ enum Op {
     Resend(u16),
     /// Declare `unique` on `doi`, or take it off.
     DoiUnique(bool),
+    /// Drop [`GROUP_VIEW`], leaving its items in their other views.
+    DropView,
 }
 
 fn row_gen() -> impl Strategy<Value = RowGen> {
@@ -718,14 +879,15 @@ fn row_gen() -> impl Strategy<Value = RowGen> {
 
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
-        12 => (0u8..3, prop::collection::vec(row_gen(), 1..5))
+        48 => (0u8..4, prop::collection::vec(row_gen(), 1..5))
             .prop_map(|(view, rows)| Op::Ingest { view, rows }),
-        3 => prop::collection::vec((any::<u16>(), 0u8..3), 1..4).prop_map(Op::Changes),
-        3 => Just(Op::Flush),
-        1 => Just(Op::Fold),
-        2 => Just(Op::Restart),
-        2 => any::<u16>().prop_map(Op::Resend),
-        1 => any::<bool>().prop_map(Op::DoiUnique),
+        12 => prop::collection::vec((any::<u16>(), 0u8..3), 1..4).prop_map(Op::Changes),
+        12 => Just(Op::Flush),
+        4 => Just(Op::Fold),
+        8 => Just(Op::Restart),
+        8 => any::<u16>().prop_map(Op::Resend),
+        4 => any::<bool>().prop_map(Op::DoiUnique),
+        1 => Just(Op::DropView),
     ]
 }
 
@@ -790,6 +952,7 @@ impl Run {
             doi: None,
             score: None,
             extras: Default::default(),
+            scoped: Default::default(),
             labels: None,
             position: None,
         };
@@ -840,6 +1003,21 @@ impl Run {
             } else {
                 subject.and_then(|i| i.extras[at].clone())
             });
+        }
+        if view == Some(GROUP_VIEW) {
+            for at in 0..SCOPED.len() {
+                let bit = 1u8 << (EXTRAS.len() + at);
+                if gen.extra_carry & bit == 0 {
+                    continue;
+                }
+                row.scoped[at] = Some(if gen.extra_null & bit != 0 {
+                    None
+                } else if gen.extra_differ & bit != 0 || subject.is_none() {
+                    Some(scoped_value(at, seed / 5 + at as u64))
+                } else {
+                    subject.and_then(|i| i.scoped[at].clone())
+                });
+            }
         }
         if carry & 8 != 0 {
             row.labels = Some(match (subject, gen.differ & 8 != 0) {
@@ -899,7 +1077,21 @@ impl Run {
                 .map(|l| l.iter().map(|s| s.as_bytes().to_vec()).collect()),
             position: row.position,
             scalars,
-            scoped: Vec::new(),
+            scoped: match view {
+                Some(GROUP_VIEW) => row
+                    .scoped
+                    .iter()
+                    .enumerate()
+                    .map(|(at, value)| match value {
+                        Some(value) => value.clone().unwrap_or(WalScalar::Null),
+                        None => {
+                            omitted.push(DECLARED + at);
+                            WalScalar::Null
+                        }
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
             omitted,
         };
         (row, wire)
@@ -921,7 +1113,10 @@ impl Run {
     }
 
     fn ingest(&mut self, view: u8, gens: &[RowGen]) {
-        let view = VIEWS.get(view as usize).copied();
+        let view = match view {
+            3 => Some(GROUP_VIEW),
+            view => VIEWS.get(view as usize).copied(),
+        };
         let (rows, wire): (Vec<Row>, Vec<IngestRow>) =
             gens.iter().map(|g| self.build_row(view, g)).unzip();
         self.batches += 1;
@@ -930,7 +1125,12 @@ impl Run {
         let answered = self.send(&batch_id, view, wire.clone());
         match (expected, answered) {
             (None, Err(e)) => assert!(
-                matches!(e, AcceptError::Conflict(_) | AcceptError::Contract(_)),
+                matches!(
+                    e,
+                    AcceptError::Conflict(_)
+                        | AcceptError::Contract(_)
+                        | AcceptError::UnknownView { .. }
+                ),
                 "batch {batch_id} is refused as the model refuses it: {e:?}"
             ),
             (None, Ok(receipt)) => panic!(
@@ -1068,7 +1268,12 @@ impl Run {
             }
             Err(e) => assert!(
                 expected.is_none()
-                    && matches!(e, AcceptError::Conflict(_) | AcceptError::Contract(_)),
+                    && matches!(
+                        e,
+                        AcceptError::Conflict(_)
+                            | AcceptError::Contract(_)
+                            | AcceptError::UnknownView { .. }
+                    ),
                 "{batch_id} sent again was refused and the model accepts it: {e:?}"
             ),
         }
@@ -1157,6 +1362,47 @@ impl Run {
         }
     }
 
+    /// Drop the group's view. Its items stay, in whatever other views they are in, and its scoped
+    /// values go with the key. An item whose only row is still buffered in the view would lose its
+    /// label and values with the row, which the model does not follow, so such a view is flushed
+    /// first.
+    fn drop_view(&mut self) {
+        let buffered_only_there = self.model.items.values().any(|item| {
+            item.views.keys().eq([GROUP_VIEW])
+                && !self
+                    .model
+                    .flushed
+                    .contains(&(item.tid, GROUP_VIEW.to_string()))
+        });
+        if buffered_only_there {
+            self.flush();
+        }
+        let answered = self
+            .engine()
+            .drop_view(GROUP.0.to_string(), GROUP.1.to_string(), false);
+        if !self.model.group {
+            assert!(
+                answered.is_err(),
+                "a dropped view is dropped again: {answered:?}"
+            );
+            return;
+        }
+        answered.expect("the view drops");
+        self.model.group = false;
+        for item in self.model.items.values_mut() {
+            item.views.remove(GROUP_VIEW);
+            item.scoped = Default::default();
+            // A render-only column's value is held in the item's rows alone, so an item left in
+            // no view loses it.
+            if item.views.is_empty() {
+                item.score = None;
+                item.extras[0] = None;
+            }
+        }
+        self.model.flushed.retain(|(_, view)| view != GROUP_VIEW);
+        self.model.floors.remove(GROUP_VIEW);
+    }
+
     // ---- what is served ----------------------------------------------------------------------
 
     fn served(&self, session: &Session, view: &str, filter: Option<FilterExpr>) -> BTreeSet<u64> {
@@ -1195,7 +1441,7 @@ impl Run {
             .chain(["nobody".to_string()])
             .collect();
         for (session, labels) in &principals {
-            for view in VIEWS {
+            for view in model.views() {
                 let visible: BTreeSet<u64> = model
                     .items
                     .values()
@@ -1237,6 +1483,28 @@ impl Run {
                     with_gid,
                     "gid in, {view} for {labels:?}, after {after}"
                 );
+                if view == GROUP_VIEW {
+                    for n in 0..5 {
+                        let memo = WalScalar::Utf8(format!("memo w{n}"));
+                        let with_memo: BTreeSet<u64> = visible
+                            .iter()
+                            .filter(|t| same(&model.items[t].scoped[1], &Some(memo.clone())))
+                            .copied()
+                            .collect();
+                        let matches = FilterExpr::Leaf {
+                            column: format!("{}@{GROUP_VIEW}", SCOPED[1]),
+                            operand: FilterOperand::Match {
+                                query: format!("w{n}"),
+                                minimum: None,
+                            },
+                        };
+                        assert_eq!(
+                            self.served(session, view, Some(matches)),
+                            with_memo,
+                            "memo matching w{n}, {view} for {labels:?}, after {after}"
+                        );
+                    }
+                }
                 if model.doi_unique {
                     let with_doi: BTreeSet<u64> = visible
                         .iter()
@@ -1255,7 +1523,7 @@ impl Run {
                 }
             }
         }
-        self.check_cards(&principals[0].0, after);
+        self.check_cards(&principals, after);
         self.check_content(after);
     }
 
@@ -1284,93 +1552,116 @@ impl Run {
         );
     }
 
-    /// Every item's card, for items whose every row a flush has placed: its fields and its
-    /// positions. A deleted item's `tessera_id` answers nothing.
-    fn check_cards(&self, session: &Session, after: &str) {
+    /// Every item's card, for each principal. An item is shown only to a principal whose labels
+    /// reach it, and only in the views a flush has placed it in: an edited item has no card from
+    /// its acknowledgement until its flush, and the card then shows only what the edit left. A
+    /// deleted item's `tessera_id` answers nothing.
+    fn check_cards(&self, principals: &[(Session, Vec<&str>)], after: &str) {
         let engine = self.engine();
         let model = &self.model;
-        for item in model.items.values() {
-            let placed = item
-                .views
-                .keys()
-                .all(|v| model.flushed.contains(&(item.tid, v.clone())));
-            if !placed {
-                continue;
-            }
-            let card = engine
-                .item(session, TesseraId::new(item.tid))
-                .unwrap_or_else(|e| panic!("item {}'s card, after {after}: {e}", item.tid));
-            if !model.visible_to(item, &["0"]) {
-                assert!(
-                    card.is_none(),
-                    "item {} is not visible, after {after}",
+        for (session, labels) in principals {
+            for item in model.items.values() {
+                let placed: BTreeMap<&String, &(f64, f64)> = item
+                    .views
+                    .iter()
+                    .filter(|(view, _)| model.flushed.contains(&(item.tid, view.to_string())))
+                    .collect();
+                let card = engine
+                    .item(session, TesseraId::new(item.tid))
+                    .unwrap_or_else(|e| panic!("item {}'s card, after {after}: {e}", item.tid));
+                if placed.is_empty() || !model.visible_to(item, labels) {
+                    assert!(
+                        card.is_none(),
+                        "item {} has a card for {labels:?}, placed in {placed:?}, after {after}",
+                        item.tid
+                    );
+                    continue;
+                }
+                let card = card.unwrap_or_else(|| {
+                    panic!(
+                        "item {} has no card for {labels:?}, after {after}",
+                        item.tid
+                    )
+                });
+                let field = |name: &str| {
+                    card.fields
+                        .iter()
+                        .find(|f| f.name == name)
+                        .map(|f| f.value.clone())
+                };
+                assert_eq!(
+                    field("gid"),
+                    item.gid.map(ScalarOut::U64),
+                    "gid of {}, after {after}",
                     item.tid
                 );
-                continue;
-            }
-            let card =
-                card.unwrap_or_else(|| panic!("item {} has a card, after {after}", item.tid));
-            let field = |name: &str| {
-                card.fields
+                assert_eq!(
+                    field("doi"),
+                    item.doi.clone().map(ScalarOut::Utf8),
+                    "doi of {}, after {after}",
+                    item.tid
+                );
+                assert_eq!(
+                    field("score"),
+                    item.score.map(ScalarOut::F64),
+                    "score of {}, after {after}",
+                    item.tid
+                );
+                for (at, name) in EXTRAS.iter().enumerate() {
+                    let value = field(name);
+                    assert!(
+                        shows(&value, &item.extras[at]),
+                        "{name} of {} is {value:?}, expected {:?}, after {after}",
+                        item.tid,
+                        item.extras[at]
+                    );
+                }
+                // A card serves no scoped text family; its words are checked by `match`.
+                let scoped: BTreeMap<&str, &[(String, ScalarOut)]> = card
+                    .scoped
                     .iter()
-                    .find(|f| f.name == name)
-                    .map(|f| f.value.clone())
-            };
-            assert_eq!(
-                field("gid"),
-                item.gid.map(ScalarOut::U64),
-                "gid of {}, after {after}",
-                item.tid
-            );
-            assert_eq!(
-                field("doi"),
-                item.doi.clone().map(ScalarOut::Utf8),
-                "doi of {}, after {after}",
-                item.tid
-            );
-            assert_eq!(
-                field("score"),
-                item.score.map(ScalarOut::F64),
-                "score of {}, after {after}",
-                item.tid
-            );
-            for (at, name) in EXTRAS.iter().enumerate() {
-                let value = field(name);
+                    .map(|f| (f.name.as_str(), f.values.as_slice()))
+                    .collect();
+                let heat = match scoped.get(SCOPED[0]).copied() {
+                    None => None,
+                    Some([(key, value)]) if key == GROUP.1 => Some(value.clone()),
+                    Some(other) => panic!("heat of {} under {other:?}, after {after}", item.tid),
+                };
                 assert!(
-                    shows(&value, &item.extras[at]),
-                    "{name} of {} is {value:?}, expected {:?}, after {after}",
+                    shows(&heat, &item.scoped[0]) && scoped.len() <= 1,
+                    "heat of {} is {heat:?}, expected {:?}; families {:?}, after {after}",
                     item.tid,
-                    item.extras[at]
+                    item.scoped[0],
+                    scoped.keys()
+                );
+                let views: BTreeMap<String, (u32, u32)> = card
+                    .views
+                    .iter()
+                    .map(|v| (v.id.clone(), (v.x, v.y)))
+                    .collect();
+                let expected: BTreeMap<String, (u32, u32)> = placed
+                    .iter()
+                    .map(|(view, (x, y))| {
+                        (
+                            view.to_string(),
+                            (
+                                tessera_spatial::fixed32(*x, 0.0, 1000.0),
+                                tessera_spatial::fixed32(*y, 0.0, 1000.0),
+                            ),
+                        )
+                    })
+                    .collect();
+                assert_eq!(views, expected, "positions of {}, after {after}", item.tid);
+            }
+            for tid in &model.deleted {
+                assert!(
+                    engine
+                        .item(session, TesseraId::new(*tid))
+                        .unwrap()
+                        .is_none(),
+                    "deleted item {tid} has no card, after {after}"
                 );
             }
-            let views: BTreeMap<String, (u32, u32)> = card
-                .views
-                .iter()
-                .map(|v| (v.id.clone(), (v.x, v.y)))
-                .collect();
-            let expected: BTreeMap<String, (u32, u32)> = item
-                .views
-                .iter()
-                .map(|(view, (x, y))| {
-                    (
-                        view.clone(),
-                        (
-                            tessera_spatial::fixed32(*x, 0.0, 1000.0),
-                            tessera_spatial::fixed32(*y, 0.0, 1000.0),
-                        ),
-                    )
-                })
-                .collect();
-            assert_eq!(views, expected, "positions of {}, after {after}", item.tid);
-        }
-        for tid in &model.deleted {
-            assert!(
-                engine
-                    .item(session, TesseraId::new(*tid))
-                    .unwrap()
-                    .is_none(),
-                "deleted item {tid} has no card, after {after}"
-            );
         }
     }
 
@@ -1403,6 +1694,7 @@ impl Run {
             Op::Restart => self.restart(),
             Op::Resend(which) => self.resend(*which),
             Op::DoiUnique(unique) => self.doi_unique(*unique),
+            Op::DropView => self.drop_view(),
         }
         self.check(&format!("{op:?}"));
     }
@@ -1587,6 +1879,29 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
                 ..about(3, 0, 4, 0)
             }],
         },
+        // Through the group's view: a scoped value edited with no position, a new item added
+        // carrying its values, and one carried as held.
+        Op::Ingest {
+            view: 3,
+            rows: vec![RowGen {
+                extra_carry: 32 | 64,
+                extra_differ: 32,
+                ..about(6, 0, 0, 0)
+            }],
+        },
+        Op::Ingest {
+            view: 3,
+            rows: vec![
+                RowGen {
+                    extra_carry: 32 | 64,
+                    ..about(12, 0, 0, 2)
+                },
+                RowGen {
+                    extra_carry: 32 | 64,
+                    ..about(7, 0, 0, 1)
+                },
+            ],
+        },
         // A tessera_id nobody holds, a row naming two items, two rows naming one.
         Op::Ingest {
             view: 0,
@@ -1606,6 +1921,14 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
             rows: vec![about(5, 1, 31, 0)],
         },
         Op::DoiUnique(true),
+        Op::Fold,
+        // The group's view dropped, then named again.
+        Op::DropView,
+        Op::Ingest {
+            view: 3,
+            rows: vec![fresh(4)],
+        },
+        Op::DropView,
         Op::Fold,
     ];
     run(&ops);

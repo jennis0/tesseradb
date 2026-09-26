@@ -507,6 +507,7 @@ impl Engine {
         // A key shared by several views is one cell per family, carried by the first row that
         // addresses it.
         let mut owners_carried: Vec<String> = Vec::new();
+        let mut addressed = false;
         for view_id in &views {
             let (x, y) = match placing {
                 Some((view, position)) if view.id == *view_id => position,
@@ -529,6 +530,7 @@ impl Engine {
             let families = crate::write::scoped_families_of_view(manifest, view_id);
             let owner = crate::write::scoped_owner_view_of(manifest, view_id);
             let from_row = batch_owner.as_deref() == Some(owner.as_str());
+            addressed |= from_row;
             let repeated = owners_carried.contains(&owner);
             owners_carried.push(owner.clone());
             let scoped: Vec<WalScalar> = families
@@ -585,6 +587,26 @@ impl Engine {
                 scoped,
                 terms: Vec::new(),
             });
+        }
+        // The row's scoped values are the batch view's key's, which only a row in a view of that
+        // key holds.
+        if let (Some(view), false) = (view, addressed) {
+            let supplies = crate::write::scoped_families_of_view(manifest, &view.id)
+                .iter()
+                .enumerate()
+                .any(|(position, family)| {
+                    !row.omitted.contains(&(declared_len + position))
+                        && row.scoped.get(position).is_some_and(|value| {
+                            !joined::scalar_is_absent(value, &joined::declared_of_scoped(family))
+                        })
+                });
+            if supplies {
+                return Err(AcceptError::Contract(format!(
+                    "row {at} sets values scoped to view '{}' for an item with no row there; send \
+                     the item's position in that view with them",
+                    view.id
+                )));
+            }
         }
         Ok(SubmittedEdit {
             edit: UnallocatedEdit { old, number, rows },
@@ -925,15 +947,11 @@ impl Engine {
     /// Whether `row` carries a column whose value lives in the record blob.
     fn carries_resident(generation: &Generation, row: &IngestRow) -> bool {
         let manifest = &generation.bundle.manifest;
-        manifest
-            .declared_scalars
-            .iter()
-            .enumerate()
-            .any(|(at, d)| {
-                at < row.scalars.len()
-                    && !row.omitted.contains(&at)
-                    && crate::filter::blob_resident(d, &manifest.vocabularies)
-            })
+        manifest.declared_scalars.iter().enumerate().any(|(at, d)| {
+            at < row.scalars.len()
+                && !row.omitted.contains(&at)
+                && crate::filter::blob_resident(d, &manifest.vocabularies)
+        })
     }
 
     /// The item's external id: its own buffered row's, or the one a flush bound.

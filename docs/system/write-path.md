@@ -201,8 +201,11 @@ The handler builds the new entity whole from what the old one stores, so the WAL
 everything and a replay reads no stored file. It carries a row for every view the item is in, the
 batch's view first: the position there, the label, every value and the external id, the row's
 values over the stored ones, and the group-scoped values and prose of every key the item holds. A
-view the batch names and the item is not in is added. What cannot be read fails the batch closed
-rather than writing an item with less than it held.
+view the batch names and the item is not in is added. A row carrying values scoped to the batch's
+view for an item with no row under that view's key is refused, since no row would hold them; sent
+with the item's position in the view, it adds the item there with them. An item left in no view,
+its views all dropped, is edited only by a row that places it in one. What cannot be read fails the
+batch closed rather than writing an item with less than it held.
 
 At the commit the executor carries what lives outside the item's own rows, from memory, in the same
 append:
