@@ -532,24 +532,16 @@ fn a_page_whose_count_gap_width_or_first_key_is_wrong_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = nine_pages(dir.path());
     let in_page_3 = first_keys(&path)[3] + 7 * 5;
-    let set_count = |n: u16| move |page: &mut [u8]| page[0..2].copy_from_slice(&n.to_le_bytes());
-    let cases: Vec<(&str, Box<dyn Fn(&mut [u8])>)> = vec![
-        ("no entries", Box::new(set_count(0))),
-        ("more entries than fit", Box::new(set_count(1000))),
-        ("one entry fewer", Box::new(set_count(931))),
-        (
-            "a gap width past the key's",
-            Box::new(|page: &mut [u8]| page[2] = 65),
-        ),
-        (
-            "a narrower gap width",
-            Box::new(|page: &mut [u8]| page[2] = 2),
-        ),
-        ("a wider gap width", Box::new(|page: &mut [u8]| page[2] = 4)),
-        (
-            "another first key",
-            Box::new(|page: &mut [u8]| page[3] ^= 1),
-        ),
+    let first = first_keys(&path)[3];
+    // Each case writes its bytes at its offset in page 3.
+    let cases: [(&str, usize, Vec<u8>); 7] = [
+        ("no entries", 0, 0u16.to_le_bytes().to_vec()),
+        ("more entries than fit", 0, 1000u16.to_le_bytes().to_vec()),
+        ("one entry fewer", 0, 931u16.to_le_bytes().to_vec()),
+        ("a gap width past the key's", 2, vec![65]),
+        ("a narrower gap width", 2, vec![2]),
+        ("a wider gap width", 2, vec![4]),
+        ("another first key", 3, (first + 7).to_le_bytes().to_vec()),
     ];
     assert_eq!(all(&open::<u64>(&path)).len(), 8000);
     assert_eq!(
@@ -557,10 +549,12 @@ fn a_page_whose_count_gap_width_or_first_key_is_wrong_is_refused() {
         932,
         "page 3 holds 932 entries"
     );
-    for (name, edit) in cases {
+    for (name, at, bytes) in cases {
         let copy = dir.path().join("copy.keys");
         std::fs::copy(&path, &copy).unwrap();
-        rewrite_page(&copy, 3, edit);
+        rewrite_page(&copy, 3, |page| {
+            page[at..at + bytes.len()].copy_from_slice(&bytes)
+        });
         let run = open::<u64>(&copy);
         assert_eq!(run.get(0).unwrap(), vec![0], "{name}");
         assert_eq!(

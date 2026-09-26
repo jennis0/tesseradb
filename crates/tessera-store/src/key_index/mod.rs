@@ -30,7 +30,7 @@
 //!
 //! A writer fills a page with entries until the next would not fit at the gap width the page
 //! would then need, and an entry never straddles a page, so an entry page is read and checked on
-//! its own. Record numbers with a few holes pack at two to five bits a gap, about 4.5 bytes an
+//! its own. Record numbers with a few holes pack at two to five bits a gap, about 4.4 bytes an
 //! entry. Keys spread across their whole width, as keyword hashes in a small run are, pack at the
 //! full key width: 511, 340 and 204 entries a page for 4-, 8- and 16-byte keys. A key held by
 //! several entities is a gap of zero.
