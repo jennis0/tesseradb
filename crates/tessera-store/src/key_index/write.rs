@@ -5,7 +5,8 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use super::{entries_per_page, Header, Key, PAGE_BODY, PAGE_SIZE};
+use super::page::PageBuilder;
+use super::{Header, Key, PAGE_SIZE};
 use crate::error::{Result, StoreError};
 
 /// One run file a writer finished.
@@ -121,14 +122,12 @@ struct OpenRun<K: Key> {
     path: PathBuf,
     out: BufWriter<File>,
     page: Vec<u8>,
-    in_page: usize,
+    filling: PageBuilder<K>,
     first_keys: Vec<K>,
     header: Header,
 }
 
 impl<K: Key> OpenRun<K> {
-    const PER_PAGE: usize = entries_per_page(K::WIDTH);
-
     fn create(path: PathBuf) -> Result<Self> {
         let io = |source| StoreError::Io {
             path: path.clone(),
@@ -145,7 +144,7 @@ impl<K: Key> OpenRun<K> {
             path: path.clone(),
             out,
             page: vec![0u8; PAGE_SIZE],
-            in_page: 0,
+            filling: PageBuilder::new(),
             first_keys: Vec::new(),
             header: Header {
                 key_width: K::WIDTH as u32,
@@ -165,36 +164,35 @@ impl<K: Key> OpenRun<K> {
     }
 
     fn push(&mut self, key: K, entity: u32) -> Result<()> {
-        if self.in_page == 0 {
-            self.first_keys.push(key);
-        }
         if self.header.entries == 0 {
             self.header.min_key = key.widen();
         }
         self.header.max_key = key.widen();
-        let at = self.in_page * (K::WIDTH + 4);
-        key.write(&mut self.page[at..]);
-        self.page[at + K::WIDTH..at + K::WIDTH + 4].copy_from_slice(&entity.to_le_bytes());
-        self.in_page += 1;
         self.header.entries += 1;
-        if self.in_page == Self::PER_PAGE {
+        if !self.filling.try_push(key, entity) {
             self.seal_page()?;
+            assert!(
+                self.filling.try_push(key, entity),
+                "an empty page takes any entry"
+            );
         }
         Ok(())
     }
 
     fn seal_page(&mut self) -> Result<()> {
-        let crc = crc32fast::hash(&self.page[..PAGE_BODY]);
-        self.page[PAGE_BODY..].copy_from_slice(&crc.to_le_bytes());
+        self.first_keys.push(
+            self.filling
+                .first_key()
+                .expect("a page is sealed with entries"),
+        );
+        self.filling.seal(&mut self.page);
         self.out.write_all(&self.page).map_err(|e| self.io(e))?;
-        self.page.fill(0);
-        self.in_page = 0;
         self.header.pages += 1;
         Ok(())
     }
 
     fn finish(mut self) -> Result<WrittenRun<K>> {
-        if self.in_page > 0 {
+        if !self.filling.is_empty() {
             self.seal_page()?;
         }
         let mut index = vec![0u8; self.first_keys.len() * K::WIDTH];
