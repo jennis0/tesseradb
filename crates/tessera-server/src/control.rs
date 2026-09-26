@@ -2861,11 +2861,6 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "max_batch_rows": state.limits.ingest_max_batch_rows,
                 "max_batch_bytes": state.limits.ingest_max_batch_bytes,
             },
-            "values": {
-                "route": "POST /control/values",
-                "max_batch_rows": state.limits.ingest_max_batch_rows,
-                "max_batch_bytes": state.limits.ingest_max_batch_bytes,
-            },
             "publish": {
                 "route": "PUT /control/layers/{name}/artifacts",
                 "max_artifacts_per_request": state.limits.max_artifacts_per_request,

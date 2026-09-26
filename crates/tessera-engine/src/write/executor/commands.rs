@@ -1337,18 +1337,7 @@ impl Executor {
             Arc::clone(&generation.buffer)
         } else {
             let mut buffer = (*generation.buffer).clone();
-            // Rows, not entities, and by (entity, view): an entity whose row in the dropped view
-            // was a join keeps the row it holds elsewhere, and `rows()` is what sees the join at
-            // all.
-            let orphaned: Vec<(EntityId, String)> = generation
-                .buffer
-                .rows()
-                .filter(|(_, item)| dropped.contains(&item.view))
-                .map(|(entity, item)| (*entity, item.view.clone()))
-                .collect();
-            for (entity, view) in orphaned {
-                buffer.remove_in_view(entity, &view);
-            }
+            buffer.remove_views(dropped);
             self.health
                 .buffered_items
                 .store(buffer.len(), Ordering::SeqCst);

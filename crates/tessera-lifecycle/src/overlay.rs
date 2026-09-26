@@ -406,15 +406,7 @@ pub fn replay<'a>(
                 // leave the sharing group's buffered rows to be flushed into whatever takes the
                 // key next. The expansion is `Manifest::view_ids_for_key`'s, passed in because
                 // this crate holds no manifest.
-                let ids = view_ids_of_key(&view.group, &view.key);
-                let orphaned: Vec<(EntityId, String)> = buffer
-                    .rows()
-                    .filter(|(_, item)| ids.iter().any(|id| id == &item.view))
-                    .map(|(entity, item)| (*entity, item.view.clone()))
-                    .collect();
-                for (entity, view) in orphaned {
-                    buffer.remove_in_view(entity, &view);
-                }
+                buffer.remove_views(&view_ids_of_key(&view.group, &view.key));
             }
             // A view create is the roster's, rebuilt by the caller in that same second pass, and
             // names no entity.

@@ -749,10 +749,8 @@ impl Engine {
             return Ok(membership());
         }
         // A flush places rows only above a view's newest, so an item older than that moves to a
-        // new entity to join the view; so does one whose row changes a membership.
-        if !joined::joins_in_place(generation, entity, &view.id)
-            || stored.not_members.contains_key(&at)
-        {
+        // new entity to join the view.
+        if !joined::joins_in_place(generation, entity, &view.id) {
             return Ok(Decided::Edited { added: true });
         }
         // The row a view gains carries the item's values. A rendered value is read from the item

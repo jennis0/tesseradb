@@ -395,6 +395,43 @@ impl IngestBuffer {
         }
     }
 
+    /// Remove every row of the views `ids` name, as a dropped view does: they name a coordinate
+    /// system that no longer exists, so nothing will ever give them geometry.
+    ///
+    /// An entity whose own row goes and which keeps a row in another view is not lost with it:
+    /// that row becomes its own, taking the label, the external id and the values the own row
+    /// carried, so the flush of the view it is in writes what the item holds.
+    pub fn remove_views(&mut self, ids: &[String]) {
+        let entities: Vec<EntityId> = self
+            .items
+            .iter()
+            .filter(|(_, rows)| rows.iter().any(|item| ids.contains(&item.view)))
+            .map(|(entity, _)| *entity)
+            .collect();
+        for entity in entities {
+            let rows = Arc::make_mut(self.items.get_mut(&entity).expect("listed above"));
+            let own = rows
+                .iter()
+                .find(|item| !item.join && ids.contains(&item.view))
+                .cloned();
+            let before = rows.len();
+            rows.retain(|item| !ids.contains(&item.view));
+            self.rows -= before - rows.len();
+            if let (Some(own), Some(first)) = (own, rows.first_mut()) {
+                if first.join {
+                    let first = Arc::make_mut(first);
+                    first.join = false;
+                    first.terms = own.terms.clone();
+                    first.external_id = own.external_id.clone();
+                    first.scalars = own.scalars.clone();
+                }
+            }
+            if rows.is_empty() {
+                self.items.remove(&entity);
+            }
+        }
+    }
+
     /// The entity's **own** row — the one carrying its terms, its external id and its scalars —
     /// or `None` where every buffered row for it is a join (`views.md` §4).
     ///
@@ -527,6 +564,28 @@ mod tests {
         assert!(!buffer.contains(EntityId::new(1)));
         assert_eq!(buffer.len(), 1, "the entity the predicate spared keeps its row");
         assert_eq!(buffer.oldest_wal_pos(), Some(None), "and nothing else holds the log");
+    }
+
+    /// A dropped view's own row gives what it carried to the entity's row in another view, so
+    /// the item is not lost with the view; a join-only entity's row just goes.
+    #[test]
+    fn a_dropped_views_own_row_passes_its_item_to_another_view() {
+        let mut buffer = IngestBuffer::new();
+        let mut own = row(1, "a", false);
+        own.scalars = vec![WalScalar::U8(7)];
+        buffer.insert_row_with_terms(&own, vec![TermId::new(3)]);
+        buffer.insert_row_with_terms(&row(1, "b", true), Vec::new());
+        buffer.insert_row_with_terms(&row(2, "a", true), Vec::new());
+
+        buffer.remove_views(&["a".to_string()]);
+
+        let kept = buffer.get(EntityId::new(1)).expect("entity 1 keeps an own row");
+        assert_eq!(kept.view, "b");
+        assert_eq!(kept.terms, vec![TermId::new(3)]);
+        assert_eq!(kept.scalars, vec![WalScalar::U8(7)]);
+        assert_eq!(kept.external_id, own.external_id);
+        assert!(!buffer.contains(EntityId::new(2)));
+        assert_eq!(buffer.len(), 1);
     }
 
     /// Extension ids must never be able to collide with a dictionary ordinal,
