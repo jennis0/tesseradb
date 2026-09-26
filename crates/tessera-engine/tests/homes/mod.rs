@@ -6,9 +6,24 @@
 //! Both tests match on [`Home`] exhaustively, so a home added here does not compile until each
 //! says what it does about it.
 
-/// One home of an item's data.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Home {
+pub mod fixture;
+
+/// Declares [`Home`] and [`Home::ALL`] from one list, so no home can be left out of `ALL`.
+macro_rules! homes {
+    ($($(#[$doc:meta])* $home:ident,)*) => {
+        /// One home of an item's data.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Home {
+            $($(#[$doc])* $home,)*
+        }
+
+        impl Home {
+            pub const ALL: &'static [Home] = &[$(Home::$home,)*];
+        }
+    };
+}
+
+homes! {
     /// The item's row in each view's row space, and its position there.
     Row,
     /// A `render` column's value, in the hot row.
@@ -44,26 +59,4 @@ pub enum Home {
     ScopedValue,
     /// A group-scoped text family's prose and its token index, per key.
     ScopedProse,
-}
-
-impl Home {
-    pub const ALL: [Home; 17] = [
-        Home::Row,
-        Home::RenderColumn,
-        Home::RenderPresence,
-        Home::ValueColumn,
-        Home::CategoryPostings,
-        Home::KeywordDictionary,
-        Home::TextIndex,
-        Home::RecordBlob,
-        Home::ExternalIdSidecar,
-        Home::TermPostings,
-        Home::UniqueIndex,
-        Home::EditedItems,
-        Home::Membership,
-        Home::GeneratingSet,
-        Home::Suppression,
-        Home::ScopedValue,
-        Home::ScopedProse,
-    ];
 }
