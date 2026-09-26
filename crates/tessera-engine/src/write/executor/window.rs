@@ -301,6 +301,8 @@ impl Executor {
     /// done. Closes at `commit_window_max_rows`, an empty queue, or a conflicting external id.
     pub(super) fn run_work_pass(&mut self) -> bool {
         let max_rows = self.health.commit_window_max_rows();
+        #[cfg(feature = "fault-injection")]
+        self.deps.switches.hold_work_pass_if_paused();
         let mut window: CommitWindow<Reply<Ingested>> = CommitWindow::new(self.next_window_seq());
         let mut did_work = false;
 
@@ -463,13 +465,27 @@ impl Executor {
             }
             BatchState::Unknown => {
                 let mut admission = Admission::Admitted;
+                // An external id the open window holds is bound at its close, and the joins below
+                // read the bindings.
+                if window.holds_external_id_of(&rows) {
+                    window = self.close_and_reopen(window);
+                    admission = Admission::YieldedAfterClose;
+                }
+                let rows = match self.resolve_joins(rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        reply.fail(e);
+                        return (window, Admission::Answered);
+                    }
+                };
+                // Over the rows as they will be applied: a join may have become a create above,
+                // or a create a join. A value the open window holds is added at its close, and
+                // the re-check below reads the added values.
                 let unique_keys = {
                     let generation = self.generation.load();
                     crate::unique::window_keys(&generation.bundle.manifest.declared_scalars, &rows)
                 };
-                // Only external ids and unique values reach here: a held batch id was answered
-                // above. Either held by the open window is checked against state its close writes.
-                if window.holds_external_id_of(&rows) || window.holds_unique_key(&unique_keys) {
+                if window.holds_unique_key(&unique_keys) {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
@@ -488,29 +504,15 @@ impl Executor {
         }
     }
 
-    /// The external-id admission check. `None` means the caller has already been answered. This
-    /// reads state written at apply, which is why an entry naming an id the open window holds must
-    /// close it first.
-    pub(super) fn admit(
+    /// The external-id admission check: whether each row joins the item its external id is bound
+    /// to or creates one, against state written at apply, which is why an entry naming an id the
+    /// open window holds must close it first.
+    fn resolve_joins(
         &mut self,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        artifacts: tessera_lifecycle::BatchArtifacts,
-        unique_seq: u64,
-        reply: Reply<Ingested>,
-    ) -> Option<WindowEntry<Reply<Ingested>>> {
-        // From the same generation the apply below clones, so the exemption cannot race a delete.
+        mut rows: Vec<UnallocatedRow>,
+    ) -> std::result::Result<Vec<UnallocatedRow>, ExecError> {
+        // From one generation, so the exemption cannot race a delete.
         let generation = self.generation.load();
-        // The unique values against what was added since the handler checked them, from memory.
-        if let Err(e) =
-            crate::unique::recheck_rows(&generation, &rows, unique_seq, &self.deps.identity_key)
-        {
-            drop(generation);
-            reply.fail(e);
-            return None;
-        }
-        let mut rows = rows;
         let collisions = self.live.established_collisions(
             &mut rows,
             |e| generation.overlay.is_deleted(e),
@@ -524,29 +526,40 @@ impl Executor {
             },
         );
         if let Some(index) = rows.iter().position(|row| row.join_only && row.join.is_none()) {
-            drop(generation);
-            reply.fail(ExecError::JoinRefused {
+            return Err(ExecError::JoinRefused {
                 detail: format!(
                     "row {index} joins an item deleted since the batch was checked; send the \
                      batch again"
                 ),
             });
-            return None;
         }
-        if collisions == 0 {
-            if let Err(detail) = settle_joins(&generation, &mut rows) {
-                drop(generation);
-                reply.fail(ExecError::JoinRefused { detail });
-                return None;
-            }
+        if collisions > 0 {
+            return Err(ExecError::DuplicateExternalId { count: collisions });
+        }
+        settle_joins(&generation, &mut rows).map_err(|detail| ExecError::JoinRefused { detail })?;
+        Ok(rows)
+    }
+
+    /// The unique values against what was added since the handler checked them, from memory, and
+    /// the artifacts the batch names. `None` means the caller has already been answered.
+    pub(super) fn admit(
+        &mut self,
+        rows: Vec<UnallocatedRow>,
+        batch_id: String,
+        body_hash: [u8; 32],
+        artifacts: tessera_lifecycle::BatchArtifacts,
+        unique_seq: u64,
+        reply: Reply<Ingested>,
+    ) -> Option<WindowEntry<Reply<Ingested>>> {
+        let generation = self.generation.load();
+        if let Err(e) =
+            crate::unique::recheck_rows(&generation, &rows, unique_seq, &self.deps.identity_key)
+        {
+            drop(generation);
+            reply.fail(e);
+            return None;
         }
         drop(generation);
-        if collisions > 0 {
-            reply.fail(ExecError::DuplicateExternalId { count: collisions },
-            );
-            return None;
-        }
-
         let (memberships, edges) = match self.resolve_memberships(&artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {

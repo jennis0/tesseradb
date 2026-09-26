@@ -406,4 +406,42 @@ impl Engine {
                 .collect()
         })
     }
+
+    /// Hold the next ingest whose handler's check passes, before it reaches the executor, so a
+    /// test can change what it was checked against. [`Self::release_ingest_check_for_test`] lets
+    /// it go.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn hold_next_ingest_check_for_test(&self) {
+        self.switches.ingest_check_held.store(true, Ordering::SeqCst);
+        self.switches.ingest_check_hold_wanted.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether an ingest is waiting at [`Self::hold_next_ingest_check_for_test`]'s hold.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn ingest_check_is_holding_for_test(&self) -> bool {
+        self.switches.ingest_check_holding.load(Ordering::SeqCst)
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn release_ingest_check_for_test(&self) {
+        self.switches.ingest_check_held.store(false, Ordering::SeqCst);
+    }
+
+    /// Hold the executor before it drains its work queue into a commit window, so work submitted
+    /// meanwhile lands in one window.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_work_pass_paused_for_test(&self, paused: bool) {
+        self.switches.work_pass_paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// How many commands have been put on the executor's work queue.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn work_enqueued_for_test(&self) -> u64 {
+        self.write.health().work_enqueued.load(Ordering::SeqCst)
+    }
 }

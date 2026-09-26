@@ -636,6 +636,8 @@ impl WritePath {
         // A reply built here counts its job completed, which is right only for the work lane.
         debug_assert!(!command.is_never_shed());
         self.handle()?.enqueue(command)?;
+        #[cfg(feature = "fault-injection")]
+        self.health.work_enqueued.fetch_add(1, Ordering::SeqCst);
         pending.accept()
     }
 

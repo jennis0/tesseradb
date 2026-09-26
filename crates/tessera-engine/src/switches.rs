@@ -34,6 +34,17 @@ pub(crate) struct TestSwitches {
     pub(crate) projection_build_hold_wanted: AtomicBool,
     #[cfg(feature = "fault-injection")]
     pub(crate) projection_build_held: AtomicBool,
+    /// Whether the next ingest to pass its handler's check waits there until this is cleared,
+    /// and whether one is waiting. The ingest that takes the hold clears the first.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) ingest_check_hold_wanted: AtomicBool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) ingest_check_held: AtomicBool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) ingest_check_holding: AtomicBool,
+    /// Whether the executor waits before it drains its work queue into a commit window.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) work_pass_paused: AtomicBool,
 }
 
 impl TestSwitches {
@@ -46,6 +57,28 @@ impl TestSwitches {
             while self.projection_build_held.load(std::sync::atomic::Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
+        }
+    }
+
+    /// Called by an ingest handler once its check has passed. Waits if a test asked for the next
+    /// one to be held.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn hold_ingest_check_if_wanted(&self) {
+        use std::sync::atomic::Ordering;
+        if self.ingest_check_hold_wanted.swap(false, Ordering::SeqCst) {
+            self.ingest_check_holding.store(true, Ordering::SeqCst);
+            while self.ingest_check_held.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            self.ingest_check_holding.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Called by the executor before it drains its work queue. Waits while a test holds it.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn hold_work_pass_if_paused(&self) {
+        while self.work_pass_paused.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 }
@@ -67,6 +100,14 @@ impl Default for TestSwitches {
             projection_build_hold_wanted: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             projection_build_held: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            ingest_check_hold_wanted: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            ingest_check_held: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            ingest_check_holding: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            work_pass_paused: AtomicBool::new(false),
         }
     }
 }

@@ -264,6 +264,8 @@ impl Engine {
         let mut submission = (rows, batch_id, artifacts);
         loop {
             let seq = crate::unique::check_rows(&self.generation(), &submission.0, &self.identity_key)?;
+            #[cfg(feature = "fault-injection")]
+            self.switches.hold_ingest_check_if_wanted();
             let (rows, batch_id, artifacts) = submission;
             match self
                 .write

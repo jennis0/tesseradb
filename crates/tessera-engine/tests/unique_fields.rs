@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::array::{Float64Array, Int64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
@@ -115,6 +116,12 @@ struct Fixture {
 /// The fixture, with `unique` taken off every column where `unique` is false, so a runtime
 /// declaration can be compared with a build one over the same values.
 fn fixture_with(unique: bool) -> Fixture {
+    fixture_of(unique, &["s0"])
+}
+
+/// The fixture over `views`, each holding every built item, so an item ingested into one can
+/// join another.
+fn fixture_of(unique: bool, views: &[&str]) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("bundle");
     let points = tmp.path().join("points.parquet");
@@ -131,16 +138,19 @@ fn fixture_with(unique: bool) -> Fixture {
         .expect("the fixture schema parses")
         .schema;
     tessera_build::build(&tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
+        views: views
+            .iter()
+            .map(|view| tessera_build::ViewArgs {
+                visibility: None,
+                view_id: view.to_string(),
+                projection: tessera_spatial::Projection::None,
+                extent: extent(),
+                points: points.clone(),
+                point_fields: Default::default(),
+                select: None,
+                access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            })
+            .collect(),
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
@@ -565,6 +575,105 @@ fn two_concurrent_batches_setting_one_value_are_one_accepted() {
     assert_eq!(accepted, 1, "exactly one batch holds the value: {outcomes:?}");
     assert!(outcomes.iter().filter(|o| o.is_err()).all(|o| taken(o)
         || matches!(o, Err(AcceptError::Exec(ExecError::UniqueStale)))));
+}
+
+/// A row of the fixture's shape into `view`, joining `join` where the handler found one.
+fn row_into(engine: &Engine, view: &str, id: &str, doi: &str, join: Option<EntityId>) -> UnallocatedRow {
+    let mut r = row(engine, id, b"0", doi, 0, 0);
+    r.scalars[1] = WalScalar::Null;
+    r.scalars[2] = WalScalar::Null;
+    r.scalars[3] = WalScalar::Utf8(format!("note-{doi}"));
+    r.view = view.to_string();
+    r.join = join;
+    r
+}
+
+/// Submit `rows` on its own thread, holding it after its handler's check, and answer once it
+/// holds there.
+fn held_ingest(
+    engine: &Arc<Engine>,
+    batch: &'static str,
+    rows: Vec<UnallocatedRow>,
+) -> std::thread::JoinHandle<Result<Vec<EntityId>, AcceptError>> {
+    engine.hold_next_ingest_check_for_test();
+    let e = Arc::clone(engine);
+    let handle = std::thread::spawn(move || try_ingest(&e, batch, rows));
+    wait_until("the ingest never reached its hold", Duration::from_secs(30), || {
+        engine.ingest_check_is_holding_for_test()
+    });
+    handle
+}
+
+/// How many live items hold `doi`, once every buffered row is flushed.
+fn holders_of(engine: &Engine, doi: &str) -> usize {
+    flush(engine);
+    matching(engine, &full(engine), text_in("doi", &[doi.to_string()])).len()
+}
+
+/// **A join that becomes a create on the executor is checked as a create.** The item a row joins
+/// is deleted after the handler checked the row, so the row creates an item holding its value;
+/// another batch setting that value in the same commit window is refused.
+#[test]
+fn a_join_that_becomes_a_create_is_checked_as_one() {
+    let fx = fixture_of(true, &["s0", "s1"]);
+    let engine = Arc::new(engine_over(&fx));
+    let doi = "10.join/created";
+    let joined = ingest(&engine, "first", vec![row_into(&engine, "s0", "j", doi, None)])[0];
+    let held = held_ingest(
+        &engine,
+        "join",
+        vec![row_into(&engine, "s1", "j", doi, Some(joined))],
+    );
+    engine.accept_change(joined, ChangeOp::Delete).unwrap();
+
+    // The joining row and another batch setting its value reach the executor together.
+    engine.set_work_pass_paused_for_test(true);
+    let before = engine.work_enqueued_for_test();
+    engine.release_ingest_check_for_test();
+    let e = Arc::clone(&engine);
+    let other = std::thread::spawn(move || {
+        try_ingest(&e, "other", vec![row_into(&e, "s0", "k", doi, None)])
+    });
+    wait_until("both batches never reached the queue", Duration::from_secs(30), || {
+        engine.work_enqueued_for_test() >= before + 2
+    });
+    engine.set_work_pass_paused_for_test(false);
+    let outcomes = [held.join().unwrap(), other.join().unwrap()];
+    assert_eq!(
+        outcomes.iter().filter(|o| o.is_ok()).count(),
+        1,
+        "one batch holds the value: {outcomes:?}"
+    );
+    assert!(outcomes.iter().any(taken), "the other is refused: {outcomes:?}");
+    assert_eq!(holders_of(&engine, doi), 1);
+}
+
+/// **A create that becomes a join on the executor carries its own value.** The handler found no
+/// item for the row's external id, and another batch then created that item with the row's
+/// value; the row joins it and is accepted.
+#[test]
+fn a_create_that_becomes_a_join_carries_its_own_value() {
+    let fx = fixture_of(true, &["s0", "s1"]);
+    let engine = Arc::new(engine_over(&fx));
+    let doi = "10.join/joined";
+    let held = held_ingest(&engine, "late", vec![row_into(&engine, "s1", "x", doi, None)]);
+    let created = ingest(&engine, "early", vec![row_into(&engine, "s0", "x", doi, None)])[0];
+    engine.release_ingest_check_for_test();
+    let joined = held.join().unwrap().expect("the row joins the item holding its value");
+    assert_eq!(joined, vec![created], "the row joined the item its external id names");
+    assert_eq!(holders_of(&engine, doi), 1);
+}
+
+/// **A row joining an item carries the item's own value**, and is accepted.
+#[test]
+fn a_join_row_carrying_its_own_value_is_accepted() {
+    let fx = fixture_of(true, &["s0", "s1"]);
+    let engine = engine_over(&fx);
+    let doi = "10.join/own";
+    let item = ingest(&engine, "own", vec![row_into(&engine, "s0", "o", doi, None)])[0];
+    let joined = ingest(&engine, "own-join", vec![row_into(&engine, "s1", "o", doi, Some(item))]);
+    assert_eq!(joined, vec![item]);
+    assert_eq!(holders_of(&engine, doi), 1);
 }
 
 /// Declare one of the fixture's columns again, as the build declared it, with `unique` as given.
