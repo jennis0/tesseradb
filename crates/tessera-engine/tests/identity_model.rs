@@ -117,7 +117,7 @@ fn extra(at: usize, seed: u64) -> WalScalar {
             n => n as f32 * 0.25,
         }),
         1 => WalScalar::TimestampUs(1_600_000_000_000_000 + (seed % 7) as i64 * 1_000),
-        2 => WalScalar::Bool(seed % 2 == 0),
+        2 => WalScalar::Bool(seed.is_multiple_of(2)),
         3 => WalScalar::Utf8(["alpha", "beta", "gamma"][(seed % 3) as usize].to_string()),
         _ => WalScalar::Utf8(format!("note {}", seed % 5)),
     }

@@ -1082,7 +1082,7 @@ fn a_declaration_between_a_batchs_check_and_its_admission_is_checked_again() {
     assert!(matches!(outcome, Err(AcceptError::Conflict(_))), "{outcome:?}");
     assert_eq!(engine.buffered_items(), 0, "the refused batch wrote nothing");
     assert_eq!(
-        matching(&engine, &full(&engine), text_in("doi", &[doi.clone()])).len(),
+        matching(&engine, &full(&engine), text_in("doi", std::slice::from_ref(&doi))).len(),
         1,
         "one item holds {doi}"
     );
