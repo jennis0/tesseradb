@@ -475,7 +475,8 @@ impl Executor {
                     Ok(rows) => rows,
                     Err(e) => {
                         reply.fail(e);
-                        return (window, Admission::Answered);
+                        // A close above still owes the pass its yield to a deny.
+                        return (window, admission);
                     }
                 };
                 // Over the rows as they will be applied: a join may have become a create above,
