@@ -19,11 +19,24 @@ use crate::error::Result;
 /// it is reached; memory is one page cursor per input.
 pub fn merge_runs<K: Key>(
     inputs: &[PathBuf],
-    mut retired: impl FnMut(K, u32) -> bool,
+    retired: impl FnMut(K, u32) -> bool,
     out_dir: &Path,
     stem: &str,
     max_entries: NonZeroU64,
 ) -> Result<Vec<WrittenRun<K>>> {
+    let mut writer = KeyRunWriter::create(out_dir, stem, max_entries);
+    for_each_merged(inputs, retired, |key, entity| writer.push(key, entity))?;
+    writer.finish()
+}
+
+/// Every entry of the runs at `inputs` in `(key, entity)` order, once each, less every entry for
+/// which `retired(key, entity)` is true, to `visit`: [`merge_runs`] without the writing. Memory is
+/// one page cursor per input.
+pub fn for_each_merged<K: Key>(
+    inputs: &[PathBuf],
+    mut retired: impl FnMut(K, u32) -> bool,
+    mut visit: impl FnMut(K, u32) -> Result<()>,
+) -> Result<()> {
     let runs = inputs
         .iter()
         .map(|path| KeyRun::<K>::open_sequential(path))
@@ -36,8 +49,6 @@ pub fn merge_runs<K: Key>(
             heap.push(Reverse((key, entity, i)));
         }
     }
-
-    let mut writer = KeyRunWriter::create(out_dir, stem, max_entries);
     let mut last: Option<(K, u32)> = None;
     while let Some(Reverse((key, entity, i))) = heap.pop() {
         if let Some(entry) = cursors[i].next() {
@@ -47,8 +58,8 @@ pub fn merge_runs<K: Key>(
         if last == Some((key, entity)) || retired(key, entity) {
             continue;
         }
-        writer.push(key, entity)?;
+        visit(key, entity)?;
         last = Some((key, entity));
     }
-    writer.finish()
+    Ok(())
 }

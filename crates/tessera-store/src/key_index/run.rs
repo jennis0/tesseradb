@@ -75,7 +75,7 @@ impl<K: Key> KeyRun<K> {
     }
 
     /// Open the run at `path` to be read front to back, as a merge does.
-    pub(super) fn open_sequential(path: &Path) -> Result<Self> {
+    pub(crate) fn open_sequential(path: &Path) -> Result<Self> {
         Self::open_with(path, Advice::Sequential)
     }
 

@@ -219,7 +219,7 @@ fn check_unique_indexes(
     partition: &tessera_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
-    use tessera_store::unique::{key_of, KeyKind, UniqueKey, UniqueSpill};
+    use tessera_store::unique::{key_of, KeyKind, UniqueSpill};
     let partition_manifest = &partition.manifest;
     if partition_manifest.unique_indexes.is_empty() {
         return Ok(());
@@ -283,14 +283,6 @@ fn check_unique_indexes(
             inputs.push(path);
         }
         let scratch = crate::VerifyTmp::create(root)?;
-        let index_side = tessera_store::unique::merge_unique_runs(
-            &inputs,
-            &tombstones,
-            &scratch.path().join("index"),
-            "index",
-        )
-        .map_err(store)?;
-
         let homes_value = declared.index;
         let blob = !declared.render && !declared.index;
         let mut spill = UniqueSpill::create(kind, scratch.path(), 64 << 20).map_err(store)?;
@@ -430,49 +422,34 @@ fn check_unique_indexes(
         let mut twice = 0u64;
         let column_dir = scratch.path().join("column");
         fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
-        let column_side = spill
+        let column_side: Vec<PathBuf> = spill
             .finish(&column_dir, "column", |_| twice += 1)
-            .map_err(store)?;
+            .map_err(store)?
+            .into_iter()
+            .map(|run| run.path)
+            .collect();
         if twice > 0 {
             return Err(BuildError::Invalid(format!(
                 "unique column '{attribute}' holds {twice} value(s) for more than one live item"
             )));
         }
-        let read_all = |runs: &[tessera_store::unique::WrittenUniqueRun]| -> Result<Vec<(UniqueKey, u32)>> {
-            let mut all = Vec::new();
-            for run in runs {
-                tessera_store::unique::for_each_entry(kind, &run.path, |key, entity| {
-                    all.push((key, entity));
-                    Ok(())
-                })
+        let compared =
+            tessera_store::unique::compare_unique_runs(kind, &inputs, &tombstones, &column_side)
                 .map_err(store)?;
-            }
-            Ok(all)
-        };
-        let from_index = read_all(&index_side)?;
-        let from_column = read_all(&column_side)?;
-        if let Some(w) = from_index.windows(2).find(|w| w[0].0 == w[1].0) {
+        if let Some((key, one, other)) = compared.shared_key {
             return Err(BuildError::Invalid(format!(
-                "unique index '{attribute}': key {:x} names entities {} and {}, both live",
-                w[0].0.widen(),
-                w[0].1,
-                w[1].1
+                "unique index '{attribute}': key {:x} names entities {one} and {other}, both live",
+                key.widen()
             )));
         }
-        if from_index != from_column {
-            let first = from_index
-                .iter()
-                .zip(&from_column)
-                .position(|(a, b)| a != b)
-                .unwrap_or(from_index.len().min(from_column.len()));
+        if let Some(first) = compared.first_difference {
             return Err(BuildError::Invalid(format!(
                 "unique index '{attribute}' holds {} live entries and its column {} values; they \
                  first differ at entry {first}",
-                from_index.len(),
-                from_column.len()
+                compared.index_entries, compared.column_entries
             )));
         }
-        report.unique_entries += from_index.len() as u64;
+        report.unique_entries += compared.index_entries;
     }
     Ok(())
 }

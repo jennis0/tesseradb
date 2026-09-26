@@ -379,6 +379,86 @@ pub fn merge_unique_runs(
     })
 }
 
+/// How a unique index's live entries compare with a column's values, as
+/// [`compare_unique_runs`] finds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexComparison {
+    /// The index's entries less the retired entities'.
+    pub index_entries: u64,
+    /// The column's entries.
+    pub column_entries: u64,
+    /// The position of the first entry the two disagree at, where they do.
+    pub first_difference: Option<u64>,
+    /// A key the index names two live entities for, where it does, with the two.
+    pub shared_key: Option<(UniqueKey, u32, u32)>,
+}
+
+/// Compare the runs at `index`, less every entity in `retired`, with the runs at `column`, written
+/// in key order with disjoint ranges, entry by entry. Each side is read once, a page at a time.
+pub fn compare_unique_runs(
+    kind: KeyKind,
+    index: &[PathBuf],
+    retired: &croaring::Bitmap,
+    column: &[PathBuf],
+) -> Result<IndexComparison> {
+    match kind {
+        KeyKind::Keyword => compare_runs::<u128>(index, retired, column, UniqueKey::Keyword),
+        KeyKind::Unsigned | KeyKind::Signed => {
+            compare_runs::<u64>(index, retired, column, UniqueKey::Int)
+        }
+    }
+}
+
+fn compare_runs<K: crate::key_index::Key>(
+    index: &[PathBuf],
+    retired: &croaring::Bitmap,
+    column: &[PathBuf],
+    wrap: fn(K) -> UniqueKey,
+) -> Result<IndexComparison> {
+    let column_runs = column
+        .iter()
+        .map(|path| KeyRun::<K>::open_sequential(path))
+        .collect::<Result<Vec<_>>>()?;
+    let mut column_entries = column_runs.iter().flat_map(KeyRun::iter);
+    let mut out = IndexComparison {
+        index_entries: 0,
+        column_entries: 0,
+        first_difference: None,
+        shared_key: None,
+    };
+    let mut previous: Option<(K, u32)> = None;
+    crate::key_index::for_each_merged::<K>(
+        index,
+        |_, entity| retired.contains(entity),
+        |key, entity| {
+            if let Some((held, other)) = previous {
+                if held == key && out.shared_key.is_none() {
+                    out.shared_key = Some((wrap(key), other, entity));
+                }
+            }
+            previous = Some((key, entity));
+            let at = out.index_entries;
+            out.index_entries += 1;
+            let theirs = column_entries.next().transpose()?;
+            if theirs.is_some() {
+                out.column_entries += 1;
+            }
+            if theirs != Some((key, entity)) && out.first_difference.is_none() {
+                out.first_difference = Some(at);
+            }
+            Ok(())
+        },
+    )?;
+    for entry in column_entries {
+        entry?;
+        if out.first_difference.is_none() {
+            out.first_difference = Some(out.column_entries);
+        }
+        out.column_entries += 1;
+    }
+    Ok(out)
+}
+
 /// Every entry of the run at `path`, in `(key, entity)` order, to `visit`. Every page is checked
 /// as it is read.
 pub fn for_each_entry(
