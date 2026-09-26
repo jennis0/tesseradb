@@ -65,21 +65,17 @@ current state. Background maintenance a tick might dispatch mid-run (a merge, a 
 is entitled to change no answer, so this mechanism — unlike stage invariance — needs no isolation
 from it.
 
-## Two served shapes the expectations must meet half-way
+## How absent values and the points tail are read
 
-- **A rendered number's absence is served as the type's zero** — the hot column cannot express
-  absence and decision 0064's wire half is deferred — so the expected side maps an absent render
-  number to 0 on both the points tail and the drill-down. A category's absence is its reserved
-  code 0 on the tail and an omitted field at drill-down, which the declaration's own key→code
-  table decides ([`Declaration`], parsed from the materialised `config.toml` rather than restated
-  here).
-- **The points tail is read positionally, not by name.** The tail's buffers are the render columns
-  in manifest order, but the wire currently labels them with the first *k* names of the **full**
-  declaration — the engine hands the serialiser the whole compiled schema while the gather narrows
-  to render columns, so this corpus's `bay` codes arrive under the name `seen_at`. Found by this
-  mechanism's first run; pinned as a strict xfail in `test_total_verification.py` so the fix is
-  noticed. Positional reading is correct both before and after that fix, because the buffer order
-  is the render declaration's either way.
+- **An absent value is null on the points tail and an omitted field at drill-down**, except a
+  category's on the tail, which is its reserved code 0. The declaration's own key→code table
+  decides a category's code ([`Declaration`], parsed from the materialised `config.toml` rather
+  than restated here).
+- **The render columns are read by position.** The points tail is `tessera_id` and `code`, then
+  the render columns in manifest order, each named by its column. [`check_points`] reads the join
+  column and `code` by name and the render columns by position, and
+  `test_the_points_tail_is_named_by_its_render_declaration` checks their names, so a misnamed
+  column fails that test rather than every value comparison after it.
 
 The drill-down surface (`/v1/items`) is where the non-rendered families are verified — it is the
 only reader of all three homes (§3) — and its `404` is a real answer: the row half requires a
@@ -554,8 +550,8 @@ def check_points(
     denied_fx: frozenset[int],
     reasons: list[str],
 ) -> int:
-    """Every row of one points surface against its own item: the code, and the render tail
-    positionally (module doc). Returns the number of rows verified."""
+    """Every row of one points surface against its own item: the code, and the render columns by
+    position (module doc). Returns the number of rows verified."""
     table = streams_table(canon.points)
     if table is None:
         return 0
@@ -568,8 +564,8 @@ def check_points(
         return 0
     fx_column = table.column("fx_key").to_pylist()
     codes = table.column("code").to_pylist()
-    # Positions 2.. are the render columns in manifest order; the name check is the strict
-    # xfail's business, not a laxity here (module doc).
+    # Positions 2.. are the render columns in manifest order; their names are checked by
+    # `test_the_points_tail_is_named_by_its_render_declaration`.
     tail = [table.column(2 + i).to_pylist() for i in range(len(render))]
     rows = 0
     for i, fx in enumerate(fx_column):
@@ -598,7 +594,7 @@ def check_points(
             if col.values is not None:
                 want = col.values[value] if value is not None else 0
             else:
-                want = value if value is not None else 0
+                want = value
             if served != want:
                 reasons.append(
                     f"{label}: row {i} (fx {fx:#x}, item {item.e}) serves {col.name!r} = "
@@ -636,13 +632,14 @@ def check_item(
     body = canon.payload["body"]
     fields = body["fields"]
     for col in declaration.columns:
-        value = item.fields[col.name]
-        if col.render and col.values is None and value is None:
-            want = 0  # a rendered number's absence is the stored zero (module doc)
-        else:
-            want = value
+        want = item.fields[col.name]
         served = fields.get(col.name)
-        if served != want:
+        if want is None and col.name in fields:
+            reasons.append(
+                f"{label}: item {item.e} serves {col.name!r} = {served!r} where the corpus "
+                f"holds no value, which the route leaves out"
+            )
+        elif served != want:
             reasons.append(
                 f"{label}: item {item.e} serves {col.name!r} = {served!r} where the corpus "
                 f"says {want!r}"
