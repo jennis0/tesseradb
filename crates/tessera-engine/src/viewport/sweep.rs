@@ -556,53 +556,19 @@ pub(crate) fn segment_holding(segments: &[(&SegmentData, u32)], row: u32) -> Opt
     Some((at, row - segments[at].1))
 }
 
-/// A view's segments paired with their `row_base` in view row space, ascending.
-///
-/// Keyed on `seg_id`, never zipped positionally: a merge pushes the merged segment to the end of
-/// `segments` while the row space puts the merged extent where the consumed run was, so after one
-/// merge a positional zip would silently pair a segment with another segment's `row_base` — every
-/// count right, every point drawn from the wrong entity. `seg_id`s are never reused, so a lookup
-/// keyed on them is exact.
-///
-/// The build segment has no extent and is therefore the one with no entry in the row space; its
-/// rows begin at 0.
-///
-/// One definition shared by the two read paths that need it: `Engine::viewport` selects over the
-/// parts and `Engine::item` resolves a single row to its owner.
+/// [`tessera_store::read::ViewData::segments_by_row_base`], refused in this crate's error.
 // Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
 #[doc(hidden)]
 pub fn segments_with_row_bases<'a>(
     view: &str,
     view_data: &'a tessera_store::read::ViewData,
 ) -> Result<Vec<(&'a SegmentData, u32)>> {
-    let row_bases: std::collections::HashMap<&str, u32> = view_data
-        .row_space
-        .extents()
-        .iter()
-        .map(|extent| (extent.seg_id.as_str(), extent.row_base))
-        .collect();
-    let mut base_seen = false;
-    let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(view_data.segments.len());
-    for segment in &view_data.segments {
-        let row_base = match row_bases.get(segment.seg_id.as_str()) {
-            Some(&row_base) => row_base,
-            // No extent: the build segment, at 0. Legitimate exactly once.
-            None if !base_seen => {
-                base_seen = true;
-                0
-            }
-            None => {
-                return Err(EngineError::SegmentWithoutRowBase {
-                    view: view.to_string(),
-                    seg_id: segment.seg_id.clone(),
-                })
-            }
-        };
-        segments.push((segment.as_ref(), row_base));
-    }
-    // Ascending in `row_base`, which `SelectionParts::resolve`'s reverse scan relies on.
-    segments.sort_unstable_by_key(|&(_, row_base)| row_base);
-    Ok(segments)
+    view_data
+        .segments_by_row_base()
+        .map_err(|seg_id| EngineError::SegmentWithoutRowBase {
+            view: view.to_string(),
+            seg_id,
+        })
 }
 
 /// One segment's declared columns, resolved once, in declaration order. Resolving per column per

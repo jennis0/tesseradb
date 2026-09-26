@@ -528,8 +528,9 @@ pub(crate) fn recheck_rows(
 }
 
 /// Every value `generation` has flushed for column `at` among `wanted`, to `visit`, deleted
-/// entities left out. A blob-resident column is read a block at a time; every other home is read
-/// entity by entity.
+/// entities left out, read from the column's own home: its value layers where it has them, the
+/// record blob a block at a time where it is blob-resident, and each view's row tail where it is
+/// rendered alone.
 pub(crate) fn for_each_flushed_value(
     generation: &Generation,
     at: usize,
@@ -538,45 +539,62 @@ pub(crate) fn for_each_flushed_value(
 ) -> Result<(), String> {
     let manifest = &generation.bundle.manifest;
     let declared = &manifest.declared_scalars[at];
-    let deleted = |entity: u32| generation.overlay.is_deleted(EntityId::new(u64::from(entity)));
-    if crate::filter::blob_resident(declared, &manifest.vocabularies) {
-        let mut failed: Option<String> = None;
+    let mut wanted = wanted.clone();
+    wanted.andnot_inplace(&generation.overlay.deleted_set());
+    let mut failed: Option<String> = None;
+    let mut send = |entity: u32, value: WalScalar| {
+        if failed.is_none() {
+            if let Err(e) = visit(entity, value) {
+                failed = Some(e);
+            }
+        }
+    };
+    if crate::filter::owes_value_column(declared, &manifest.vocabularies) {
+        let columns = &generation.filter_columns;
+        let mut present = croaring::Bitmap::new();
+        if let Some(layers) = columns.value_layers(&declared.name) {
+            for layer in layers.base().into_iter().chain(layers.extents()) {
+                present |= layer.present_in(&wanted);
+            }
+        }
+        for entity in present.iter() {
+            if let Some(value) = columns
+                .stored_value(&declared.name, entity)
+                .and_then(|v| crate::write::joined::stored_as_wal(v, declared))
+            {
+                send(entity, value);
+            }
+        }
+    } else if crate::filter::blob_resident(declared, &manifest.vocabularies) {
         generation
             .filter_columns
             .records()
-            .for_each_row_in(wanted, &mut |entity, fields| {
-                if failed.is_some() || deleted(entity) {
-                    return Ok(());
-                }
+            .for_each_row_in(&wanted, &mut |entity, fields| {
                 let value = fields
                     .into_iter()
                     .find(|field| field.tag as usize == at)
                     .and_then(|field| crate::write::joined::stored_as_wal(field.value, declared));
                 if let Some(value) = value {
-                    if let Err(e) = visit(entity, value) {
-                        failed = Some(e);
-                    }
+                    send(entity, value);
                 }
                 Ok(())
             })
             .map_err(|e| format!("the record blob could not be read: {e}"))?;
-        return failed.map_or(Ok(()), Err);
-    }
-    let mut blob = crate::write::joined::BlobRow::default();
-    for entity in wanted.iter() {
-        if deleted(entity) {
-            continue;
-        }
-        if let Some(value) = crate::write::joined::flushed_scalar_of(
-            generation,
-            EntityId::new(u64::from(entity)),
-            at,
-            &mut blob,
-        ) {
-            visit(entity, value)?;
+    } else {
+        // Rendered alone: every view's rows carry the value, so each entity is read from the
+        // first view that holds it.
+        for partition in generation.bundle.partitions.values() {
+            for view in partition.views.values() {
+                let mut read = croaring::Bitmap::new();
+                view.for_each_rendered(&declared.name, &wanted, &mut |entity, value| {
+                    read.add(entity);
+                    send(entity, value);
+                })?;
+                wanted.andnot_inplace(&read);
+            }
         }
     }
-    Ok(())
+    failed.map_or(Ok(()), Err)
 }
 
 /// How many values one refusal names at most.

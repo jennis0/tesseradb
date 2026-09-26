@@ -343,52 +343,61 @@ fn refresh_digest(root: &Path, rel: &str) {
     fs::write(root.join("CURRENT"), serde_json::to_vec_pretty(&current).unwrap()).unwrap();
 }
 
-/// **A run whose bytes no longer match the manifest is refused**, and so is one whose pages are
-/// intact but whose entries name another entity than the column says holds the value.
-#[test]
-fn a_damaged_index_is_refused_by_the_deep_verifier() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = build_in(temp.path(), false, true).unwrap();
-    let index = segments_manifest(&root)
+/// The path of `attribute`'s first base run, prefix-relative, and on disc.
+fn first_run(root: &Path, attribute: &str) -> (String, PathBuf) {
+    let index = segments_manifest(root)
         .unique_indexes
         .into_iter()
-        .find(|i| i.attribute == "signed")
+        .find(|i| i.attribute == attribute)
         .unwrap();
     let rel = index.base[0].path.clone();
     let path = root.join("v00000").join(&rel);
-    let original = fs::read(&path).unwrap();
+    (rel, path)
+}
 
-    // A byte of the first entry page changed: the digest fails first.
-    let mut damaged = original.clone();
+/// **A run whose bytes no longer match the manifest is refused.**
+#[test]
+fn a_run_failing_its_digest_is_refused_by_the_deep_verifier() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = build_in(temp.path(), false, true).unwrap();
+    let (_, path) = first_run(&root, "signed");
+    let mut damaged = fs::read(&path).unwrap();
     damaged[4096 + 9] ^= 0x01;
     fs::write(&path, &damaged).unwrap();
     assert!(verify_deep(&root, &VerifyOpts::default()).is_err());
+}
 
-    // The same run written again with the second entry's entity moved to a third item's, pages
-    // and checksums intact and the digest refreshed: the column disagrees.
-    fs::write(&path, &original).unwrap();
-    let mut entries: Vec<(u64, u32)> = Vec::new();
-    let run = tessera_store::key_index::KeyRun::<u64>::open(&path).unwrap();
-    for entry in run.iter() {
-        entries.push(entry.unwrap());
+/// **An index whose pages are intact but whose entries name another entity than the column says
+/// holds the value is refused**, for a column in the record blob and one rendered alone.
+#[test]
+fn an_index_disagreeing_with_its_column_is_refused_by_the_deep_verifier() {
+    for attribute in ["signed", "small"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = build_in(temp.path(), false, true).unwrap();
+        let (rel, path) = first_run(&root, attribute);
+        let mut entries: Vec<(u64, u32)> = Vec::new();
+        let run = tessera_store::key_index::KeyRun::<u64>::open(&path).unwrap();
+        for entry in run.iter() {
+            entries.push(entry.unwrap());
+        }
+        drop(run);
+        entries[1].1 = entries[2].1;
+        entries.sort_unstable();
+        entries.dedup();
+        fs::remove_file(&path).unwrap();
+        let dir = path.parent().unwrap();
+        let stem = path.file_stem().unwrap().to_str().unwrap().trim_end_matches("-0");
+        let mut writer = tessera_store::key_index::KeyRunWriter::<u64>::create(
+            dir,
+            stem,
+            std::num::NonZeroU64::new(u64::MAX).unwrap(),
+        );
+        for (key, entity) in entries {
+            writer.push(key, entity).unwrap();
+        }
+        writer.finish().unwrap();
+        refresh_digest(&root, &rel);
+        let refused = verify_deep(&root, &VerifyOpts::default()).expect_err("the index disagrees");
+        assert!(refused.to_string().contains(attribute), "{refused}");
     }
-    drop(run);
-    entries[1].1 = entries[2].1;
-    entries.sort_unstable();
-    entries.dedup();
-    fs::remove_file(&path).unwrap();
-    let dir = path.parent().unwrap();
-    let stem = path.file_stem().unwrap().to_str().unwrap().trim_end_matches("-0");
-    let mut writer = tessera_store::key_index::KeyRunWriter::<u64>::create(
-        dir,
-        stem,
-        std::num::NonZeroU64::new(u64::MAX).unwrap(),
-    );
-    for (key, entity) in entries {
-        writer.push(key, entity).unwrap();
-    }
-    writer.finish().unwrap();
-    refresh_digest(&root, &rel);
-    let refused = verify_deep(&root, &VerifyOpts::default()).expect_err("the index disagrees");
-    assert!(refused.to_string().contains("signed"), "{refused}");
 }

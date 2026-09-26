@@ -194,7 +194,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             &prefix_dir,
             phash,
             &bundle.manifest,
-            &partition.manifest,
+            partition,
             &mut report,
         )?;
     }
@@ -208,19 +208,19 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
 /// pages' own checksums, and checked page by page ([`tessera_store::key_index::verify_run`]).
 /// The runs are then merged, the manifest's tombstoned entities dropped, into one sorted stream,
 /// and the column's values for every entity not tombstoned are sorted into another through the
-/// same spill; the two must be equal entry for entry, and no key may carry two entities.
-///
-/// Not built yet: a column whose only home is the row tail (`render` without `index`) is not
-/// read back here, so its index is checked for its own structure and not against its values.
+/// same spill; the two must be equal entry for entry, and no key may carry two entities. The
+/// values are read from the column's own home: its value column, the record blob, or, for a
+/// column rendered alone, each view's row tail.
 fn check_unique_indexes(
     root: &Path,
     prefix_dir: &Path,
     phash: &str,
     manifest: &Manifest,
-    partition_manifest: &SegmentsManifest,
+    partition: &tessera_store::read::PartitionData,
     report: &mut VerifyDeepReport,
 ) -> Result<()> {
     use tessera_store::unique::{key_of, KeyKind, UniqueKey, UniqueSpill};
+    let partition_manifest = &partition.manifest;
     if partition_manifest.unique_indexes.is_empty() {
         return Ok(());
     }
@@ -293,27 +293,6 @@ fn check_unique_indexes(
 
         let homes_value = declared.index;
         let blob = !declared.render && !declared.index;
-        if !homes_value && !blob {
-            // The row tail alone: its structure is checked above, its agreement is not.
-            let mut last: Option<(UniqueKey, u32)> = None;
-            for run in &index_side {
-                tessera_store::unique::for_each_entry(kind, &run.path, |key, entity| {
-                    if last.is_some_and(|(k, e)| k == key && e != entity) {
-                        return Err(tessera_store::StoreError::MalformedBundle {
-                            detail: format!(
-                                "unique index '{attribute}': one key names two live entities"
-                            ),
-                        });
-                    }
-                    last = Some((key, entity));
-                    report.unique_entries += 1;
-                    Ok(())
-                })
-                .map_err(store)?;
-            }
-            continue;
-        }
-
         let mut spill = UniqueSpill::create(kind, scratch.path(), 64 << 20).map_err(store)?;
         let mut push = |entity: u32, value: &tessera_spatial::ScalarValue| -> Result<()> {
             if entity >= bound || tombstones.contains(entity) {
@@ -382,6 +361,30 @@ fn check_unique_indexes(
                     };
                     push(entity, &value)?;
                 }
+            }
+        } else if !blob {
+            // Rendered alone: every view's rows carry the value, so each entity is read from the
+            // first view that holds it.
+            let mut wanted = croaring::Bitmap::new();
+            wanted.add_range(0..bound);
+            let mut views: Vec<_> = partition.views.iter().collect();
+            views.sort_by(|a, b| a.0.cmp(b.0));
+            let mut failed: Option<BuildError> = None;
+            for (view, data) in views {
+                let mut read = croaring::Bitmap::new();
+                data.for_each_rendered(attribute, &wanted, &mut |entity, value| {
+                    read.add(entity);
+                    if failed.is_none() {
+                        if let Err(e) = push(entity, &value) {
+                            failed = Some(e);
+                        }
+                    }
+                })
+                .map_err(|e| BuildError::Invalid(format!("view '{view}': {e}")))?;
+                wanted.andnot_inplace(&read);
+            }
+            if let Some(e) = failed {
+                return Err(e);
             }
         } else {
             let record_dir = prefix_dir.join("partitions").join(phash).join("attrs").join("record");

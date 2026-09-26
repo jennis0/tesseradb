@@ -70,6 +70,74 @@ pub struct ViewData {
     pub term_images: Option<Arc<crate::term_images::TermImages>>,
 }
 
+impl ViewData {
+    /// The segments paired with their `row_base` in the view's row space, ascending, or `Err`
+    /// naming a segment the row space holds no base for. Keyed on `seg_id`, never zipped by
+    /// position: a merge pushes its segment to the end of `segments` while the row space puts its
+    /// extent where the consumed run was. The build segment has no extent, and its rows begin at 0.
+    pub fn segments_by_row_base(&self) -> std::result::Result<Vec<(&SegmentData, u32)>, String> {
+        let row_bases: HashMap<&str, u32> = self
+            .row_space
+            .extents()
+            .iter()
+            .map(|extent| (extent.seg_id.as_str(), extent.row_base))
+            .collect();
+        let mut base_seen = false;
+        let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(self.segments.len());
+        for segment in &self.segments {
+            let row_base = match row_bases.get(segment.seg_id.as_str()) {
+                Some(&row_base) => row_base,
+                None if !base_seen => {
+                    base_seen = true;
+                    0
+                }
+                None => return Err(segment.seg_id.clone()),
+            };
+            segments.push((segment.as_ref(), row_base));
+        }
+        segments.sort_unstable_by_key(|&(_, row_base)| row_base);
+        Ok(segments)
+    }
+
+    /// The value rendered column `column` holds for each of `entities` this view has a row for,
+    /// to `visit` in ascending entity order; an absent value is not visited. Each segment's column
+    /// is resolved once, and each entity costs its row lookup and one slot read.
+    pub fn for_each_rendered(
+        &self,
+        column: &str,
+        entities: &croaring::Bitmap,
+        visit: &mut dyn FnMut(u32, tessera_types::scalar::ScalarValue),
+    ) -> std::result::Result<(), String> {
+        let segments = self
+            .segments_by_row_base()
+            .map_err(|seg_id| format!("segment '{seg_id}' has no row base in its view"))?;
+        let slices: Vec<Option<ScalarSlice<'_>>> =
+            segments.iter().map(|(segment, _)| segment.columns.scalar(column)).collect();
+        for entity in entities.iter() {
+            let Some(row) = self.row_space.row_of(tessera_types::EntityId::new(u64::from(entity)))
+            else {
+                continue;
+            };
+            let row = row.raw();
+            let Some(at) = segments
+                .partition_point(|&(_, base)| base <= row)
+                .checked_sub(1)
+            else {
+                continue;
+            };
+            let (segment, base) = segments[at];
+            let local = row - base;
+            if !segment.columns.presence(column).contains(local) {
+                continue;
+            }
+            if let Some(value) = slices[at].as_ref().and_then(|s| s.value_at(local as usize)) {
+                visit(entity, value);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One loaded segment: its row count, its Morton codes (row order, ascending), and a zero-copy
 /// view into its `columns.arrow`.
 #[derive(Debug)]
@@ -1841,6 +1909,30 @@ pub enum ScalarSlice<'a> {
 }
 
 impl ScalarSlice<'_> {
+    /// Row `local`'s slot as a value of the stored type, or `None` past the end. Presence is the
+    /// caller's to ask.
+    pub fn value_at(&self, local: usize) -> Option<tessera_types::scalar::ScalarValue> {
+        use tessera_types::scalar::ScalarValue as V;
+        Some(match self {
+            ScalarSlice::Bool(a) => {
+                (local < arrow::array::Array::len(*a)).then(|| V::Bool(a.value(local)))?
+            }
+            ScalarSlice::Utf8(a) => (local < arrow::array::Array::len(*a))
+                .then(|| V::Utf8(a.value(local).to_string()))?,
+            ScalarSlice::U8(s) => V::U8(*s.get(local)?),
+            ScalarSlice::U16(s) => V::U16(*s.get(local)?),
+            ScalarSlice::U32(s) => V::U32(*s.get(local)?),
+            ScalarSlice::U64(s) => V::U64(*s.get(local)?),
+            ScalarSlice::I8(s) => V::I8(*s.get(local)?),
+            ScalarSlice::I16(s) => V::I16(*s.get(local)?),
+            ScalarSlice::I32(s) => V::I32(*s.get(local)?),
+            ScalarSlice::I64(s) => V::I64(*s.get(local)?),
+            ScalarSlice::F32(s) => V::F32(*s.get(local)?),
+            ScalarSlice::F64(s) => V::F64(*s.get(local)?),
+            ScalarSlice::TimestampUs(s) => V::TimestampUs(*s.get(local)?),
+        })
+    }
+
     /// The stored type's name, for a diagnostic that has to say what it found. Deliberately the
     /// same spelling `ScalarType::arrow_type_name` uses, so a mismatch message names the two sides
     /// in one vocabulary rather than making a reader translate between them.
