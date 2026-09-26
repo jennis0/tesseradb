@@ -899,9 +899,9 @@ fn both_orders_return_the_same_rows_once_for_every_leaf_and_page_size() {
 fn a_view_of_several_segments_is_read_whole_in_both_orders() {
     let mut fx = Fx::new();
     fx.ingest("b1", &(N..N + 60).collect::<Vec<_>>());
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     fx.ingest("b2", &(N + 60..N + 150).collect::<Vec<_>>());
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     let segments = fx.engine.generation().bundle.partitions["default"].views["s0"]
         .segments
         .len();
@@ -979,7 +979,7 @@ fn read_across_a_flush_and_a_merge(order: RecordsOrder, filtered: bool) {
     for batch in 0..4u64 {
         let start = N + batch * 40;
         fx.ingest(&format!("pre-{batch}"), &(start..start + 40).collect::<Vec<_>>());
-        flush(&fx.engine);
+        publish_buffered(&fx.engine);
     }
     let before: Vec<u64> = (0..N + 160).collect();
     let later: Vec<u64> = (N + 160..N + 260).collect();
@@ -1007,7 +1007,7 @@ fn read_across_a_flush_and_a_merge(order: RecordsOrder, filtered: bool) {
         fx.engine.write_executor_stats().merges > merges
     });
     fx.ingest("later", &later);
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
 
     let cut = *ids.last().expect("the first response returned rows");
     ids.extend(continue_read(&fx.engine, &session, &base, trailer.next.unwrap()));
@@ -1443,7 +1443,7 @@ fn a_viewport_point_is_null_where_its_item_has_no_rendered_value() {
         .ingest_rows(vec![zero], "zero".to_string(), [0u8; 32])
         .expect("the ingest is accepted")[0];
     fx.entity.insert(ZERO, entity.raw());
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
 
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
     let by_tid = sources_by_tid(&fx);
@@ -2080,7 +2080,7 @@ fn a_merge_and_a_flush_between_two_pages_of_one_filtered_response_keep_it_exact(
         for batch in 0..4u64 {
             let start = N + batch * 40;
             fx.ingest(&format!("pre-{batch}"), &(start..start + 40).collect::<Vec<_>>());
-            flush(&fx.engine);
+            publish_buffered(&fx.engine);
         }
         let before: Vec<u64> = (0..N + 160).collect();
         let later: Vec<u64> = (N + 160..N + 260).collect();
@@ -2103,7 +2103,7 @@ fn a_merge_and_a_flush_between_two_pages_of_one_filtered_response_keep_it_exact(
                 engine.write_executor_stats().merges > merges
             });
             *inserted.borrow_mut() = ingest_sources(engine, "later", &later);
-            flush(engine);
+            publish_buffered(engine);
         });
         assert_eq!(trailer.ended_by, ResponseEndedBy::End, "{order:?}: one response");
         for (&s, entity) in later.iter().zip(inserted.into_inner()) {
@@ -2281,7 +2281,7 @@ fn the_stored_walk_serves_what_the_mask_admits_where_the_candidate_is_wider() {
     let (before, _) = viewport_counts(&fx.engine, &session, "s0", None);
     assert_eq!(before, N);
     fx.ingest("late", &(N..N + 30).collect::<Vec<_>>());
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     let (visible, _) = viewport_counts(&fx.engine, &session, "s0", None);
     let fields: Vec<String> = Vec::new();
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
@@ -2331,7 +2331,7 @@ fn thirty_thousand(batches: u64) -> (tempfile::TempDir, Engine) {
         engine
             .ingest_rows(rows, format!("batch-{batch}"), [0u8; 32])
             .expect("the ingest is accepted");
-        flush(&engine);
+        publish_buffered(&engine);
     }
     (tmp, engine)
 }
@@ -2520,7 +2520,7 @@ fn rows_a_refreshed_projection_makes_visible_are_served_and_matched() {
                         Box::new(|| {
                             engine.set_refresh_paused_for_test(true);
                             *inserted.borrow_mut() = ingest_sources(engine, "late", &later);
-                            flush(engine);
+                            publish_buffered(engine);
                             assert_eq!(
                                 viewport_counts(engine, &session, "s0", None).0,
                                 held,
@@ -2667,7 +2667,7 @@ fn a_columns_first_null_is_counted_against_the_ceiling() {
         })
         .collect();
     fx.engine.ingest_rows(rows, "late".to_string(), [0u8; 32]).unwrap();
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
     let fields = names(&["score"]);
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
@@ -2812,7 +2812,7 @@ fn a_cell_larger_than_a_stretch_is_read_whole() {
     engine
         .ingest_rows(rows, "crowd".to_string(), [0u8; 32])
         .expect("the ingest is accepted");
-    flush(&engine);
+    publish_buffered(&engine);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let (visible, _) = viewport_counts(&engine, &session, "s0", None);
     assert_eq!(visible, 11_000);

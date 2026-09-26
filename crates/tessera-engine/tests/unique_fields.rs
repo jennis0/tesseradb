@@ -421,12 +421,12 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
 
     // A buffered row has no position until its flush, so a lookup through the map meets it then.
     let first = add(&engine, "a", 3, &mut expected);
-    flush(&engine);
+    publish_buffered(&engine);
     check_lookups(&engine, &expected, "after one flush");
     add(&engine, "b", 4, &mut expected);
-    flush(&engine);
+    publish_buffered(&engine);
     add(&engine, "c", 2, &mut expected);
-    flush(&engine);
+    publish_buffered(&engine);
 
     let before = engine.write_executor_stats();
     engine.set_coalesce_for_test(true);
@@ -457,7 +457,7 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
         "after-restart",
         vec![row(&engine, "r", b"0", &doi, BIG * 13, 7_777)]
     )));
-    flush(&engine);
+    publish_buffered(&engine);
     check_lookups(&engine, &expected, "after the restart's flush");
 }
 
@@ -538,7 +538,7 @@ fn an_ingest_setting_a_held_value_is_refused() {
         )),
         "one value twice in a batch"
     );
-    flush(&engine);
+    publish_buffered(&engine);
     assert!(
         is_taken(try_ingest(
             &engine,
@@ -632,7 +632,7 @@ fn held_ingest(
 
 /// How many live items in views `s0` and `s1` hold `doi`, once every buffered row is flushed.
 fn holders_of(engine: &Engine, doi: &str) -> usize {
-    flush(engine);
+    publish_buffered(engine);
     let session = full(engine);
     let filter = || text_in("doi", &[doi.to_string()]);
     let mut found = matching_in(engine, &session, "s0", filter());
@@ -761,7 +761,7 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
         )),
         "a row buffered before the declaration holds its value"
     );
-    flush(&engine);
+    publish_buffered(&engine);
     let mut expected = Expected::built(&fx, &engine);
     let early_id = engine.tessera_id_of(early[0]).unwrap().raw();
     expected.add(early_id, "10.e/1", BIG * 9, 5_000);
@@ -838,7 +838,7 @@ fn a_runtime_declaration_over_duplicates_is_refused() {
         Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
     ));
     // And after the duplicate is flushed.
-    flush(&engine);
+    publish_buffered(&engine);
     assert!(matches!(
         declare(&engine, "doi", true),
         Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
@@ -883,7 +883,7 @@ fn a_duplicate_arriving_mid_build_refuses_the_declaration() {
         let held = held_declaration(&engine, "doi");
         ingest(&engine, "twin", vec![row(&engine, "tw", b"0", &doi_of(4), BIG + 13, 7_100)]);
         if flushed {
-            flush(&engine);
+            publish_buffered(&engine);
         }
         engine.set_unique_round_paused_for_test(false);
         assert!(
@@ -905,7 +905,7 @@ fn a_value_arriving_mid_build_is_indexed() {
         let held = held_declaration(&engine, "doi");
         let item = ingest(&engine, "mid", vec![row(&engine, "mid", b"0", &doi, BIG + 14, 7_200)])[0];
         if flushed {
-            flush(&engine);
+            publish_buffered(&engine);
         }
         engine.set_unique_round_paused_for_test(false);
         held.join().unwrap().expect("no value is held twice");
@@ -915,7 +915,7 @@ fn a_value_arriving_mid_build_is_indexed() {
             vec![row(&engine, "second", b"0", &doi, BIG + 15, 7_201)]
         )));
         if !flushed {
-            flush(&engine);
+            publish_buffered(&engine);
         }
         let id = engine.tessera_id_of(item).unwrap().raw();
         assert_eq!(matching(&engine, &full(&engine), text_in("doi", std::slice::from_ref(&doi))), BTreeSet::from([id]));
@@ -985,7 +985,7 @@ fn removing_unique_keeps_the_values() {
         "same-gid",
         vec![row(&engine, "g1", b"0", "10.g/1", gid_of(5), 8_000)],
     );
-    flush(&engine);
+    publish_buffered(&engine);
     let session = full(&engine);
     assert_eq!(matching(&engine, &session, number_in("gid", &[gid_of(5) as i128])).len(), 2);
     let engine = restart(&fx, engine);
@@ -1033,7 +1033,7 @@ fn a_values_fill_setting_a_held_value_is_refused() {
         r
     };
     let entities = ingest(&engine, "blanks", vec![blank, other]);
-    flush(&engine);
+    publish_buffered(&engine);
     let taken = |r: Result<(), AcceptError>| {
         matches!(r, Err(AcceptError::Exec(ExecError::UniqueTaken { .. })))
     };
@@ -1053,7 +1053,7 @@ fn a_values_fill_setting_a_held_value_is_refused() {
         taken(fill(&engine, "f4", "doi", vec![(entities[1], WalScalar::Utf8("10.f/1".to_string()))])),
         "a buffered fill holds its value"
     );
-    flush(&engine);
+    publish_buffered(&engine);
     let session = full(&engine);
     let id = engine.tessera_id_of(entities[0]).unwrap().raw();
     assert_eq!(
@@ -1096,7 +1096,7 @@ fn a_fill_whose_value_is_taken_after_its_check_is_refused() {
     let mut blank = row(&engine, "blank", b"0", "unused", 0, 0);
     blank.scalars = vec![WalScalar::Null, WalScalar::Null, WalScalar::Null, WalScalar::Null];
     let entity = ingest(&engine, "blank", vec![blank])[0];
-    flush(&engine);
+    publish_buffered(&engine);
     let doi = "10.fill/raced";
     engine.hold_next_write_check_for_test();
     let e = Arc::clone(&engine);
@@ -1118,7 +1118,7 @@ fn a_fill_whose_value_is_taken_after_its_check_is_refused() {
         held.join().unwrap(),
         Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
     ));
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(matching(&engine, &full(&engine), text_in("doi", &[doi.to_string()])).len(), 1);
 }
 
@@ -1142,7 +1142,7 @@ fn a_flush_in_flight_across_a_declaration_is_planned_again() {
     );
     assert!(declare(&engine, "doi", true).is_ok());
     engine.set_flush_paused_for_test(false);
-    flush(&engine);
+    publish_buffered(&engine);
     let session = full(&engine);
     let id = engine.tessera_id_of(entities[0]).unwrap().raw();
     assert_eq!(
@@ -1187,7 +1187,7 @@ fn a_new_unique_column_declared_at_runtime_is_enforced_and_indexed() {
         "isbn-2",
         vec![with_isbn(&engine, "i2", "10.i/2", BIG * 15 + 1, "978-1")]
     )));
-    flush(&engine);
+    publish_buffered(&engine);
     let id = engine.tessera_id_of(first[0]).unwrap().raw();
     assert_eq!(
         matching(&engine, &full(&engine), text_in("isbn", &["978-1".to_string()])),

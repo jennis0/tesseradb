@@ -220,7 +220,7 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
         .ingest_rows(rows, "batch-1".to_string(), [7u8; 32])
         .expect("the batch is accepted");
     assert_eq!(ingested.len(), points.len());
-    flush(&engine);
+    publish_buffered(&engine);
 
     let built = source_to_new_map(&root, "v00000");
     let positions = served_positions(&engine);

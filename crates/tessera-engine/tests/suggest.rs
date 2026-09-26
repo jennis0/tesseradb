@@ -933,7 +933,7 @@ fn suppressing_a_minted_values_only_member_retires_it_from_the_side_map() {
         "…and the value must nonetheless be in the side map, or this proves nothing"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         keys(&page(&engine, &full, "team", "platform")),
         ["Platform Infrastructure"],
@@ -1257,7 +1257,7 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
     // until its flush (`filter-index.md` §5, in its vocabulary form).
     mint(&engine, "alpha", "batch-a");
     mint(&engine, "zulu", "batch-z");
-    flush(&engine);
+    publish_buffered(&engine);
     assert!(
         engine.rebuild_suggestion_index_for_test("team"),
         "the executor must publish the rebuild"
