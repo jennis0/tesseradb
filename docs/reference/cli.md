@@ -70,7 +70,7 @@ It also prints to stderr each indexed keyword column's count of distinct values 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `BUNDLE` |  |  | The bundle directory, the one holding `CURRENT`. |
-| `--deep` |  |  | Also check the bundle's internal structures. The external-id files and their locator are hashed against the manifest. The term lists must be sorted, free of duplicates and in range; the external-id index and its locator must agree in both directions; dictionary records must not repeat; record blobs and Morton cells must agree with their indexes; each group-scoped render column must be present in every segment; and `pairs.parquet`, when present, must match the term lists it was written with. Run it on a bundle no running server is writing to. |
+| `--deep` |  |  | Also check the bundle's internal structures. The external-id files and their locator are hashed against the manifest. The term lists must be sorted, free of duplicates and in range; the external-id index and its locator must agree in both directions; dictionary records must not repeat; record blobs and Morton cells must agree with their indexes; each group-scoped render column must be present in every segment; each unique column's index must be hashed against the manifest, name at most one live item for a value and agree with the column's values in both directions; and `pairs.parquet`, when present, must match the term lists it was written with. Run it on a bundle no running server is writing to. |
 
 ## `tessera tokenise`
 
