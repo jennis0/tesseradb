@@ -100,6 +100,8 @@ pub struct FoldSegmentInput {
     /// generation's directory, named by the fold's plan-time snapshot — not necessarily under the
     /// fold's own output prefix, since the fold reads the old generation and writes a new one.
     pub dir: PathBuf,
+    /// Where its rows' entities are read.
+    pub entities: crate::edited::RowEntities,
 }
 
 /// Everything [`fold_row_space`] needs beyond its inputs and where to write.
@@ -146,9 +148,6 @@ pub struct FoldRowSpaceOutput {
     /// entity named by `tombstones` that has no row anywhere in `inputs` costs nothing (see the
     /// module doc and `a_tombstone_naming_no_row_is_harmless` in the test suite).
     pub row_count: u32,
-    /// Whether the segment carries [`crate::edited::EDITED_ROWS_FILE`], which the caller names
-    /// and digests.
-    pub edited_rows: bool,
 }
 
 /// Run the fold's row-space pass: merge every entry of `spec.inputs` into one new segment under
@@ -174,7 +173,12 @@ pub fn fold_row_space(
 ) -> Result<FoldRowSpaceOutput> {
     let mut cursors: Vec<SegmentCursor> = Vec::with_capacity(spec.inputs.len());
     for input in spec.inputs {
-        cursors.push(SegmentCursor::open(&input.dir, input.seg_id.clone(), OP)?);
+        cursors.push(SegmentCursor::open(
+            &input.dir,
+            input.seg_id.clone(),
+            OP,
+            input.entities.clone(),
+        )?);
     }
 
     std::fs::create_dir_all(output_dir).map_err(|source| StoreError::Io {
@@ -252,7 +256,6 @@ pub fn fold_row_space(
     // anything computed before this row's drop decision. This is what makes the shift a dropped
     // row causes to every later row automatic rather than something tracked.
     let mut row_count: u32 = 0;
-    let mut edited: Vec<(u32, u32)> = Vec::new();
     while let Some(Reverse((morton, tessera_raw, index))) = heap.pop() {
         let cursor = &mut cursors[index];
         let row = cursor.row;
@@ -290,9 +293,6 @@ pub fn fold_row_space(
             .map_err(columns_io)?;
         permutation.set(entity, row_count).map_err(perm_io)?;
         row_entity.push(entity_u32);
-        if spec.identity_key.invert(tessera_id).1 != entity {
-            edited.push((row_count, entity_u32));
-        }
         for (column, absent_rows) in &mut absent {
             let (name, _) = &spec.scalar_schema[*column];
             let columns = &cursors[index].columns;
@@ -309,7 +309,6 @@ pub fn fold_row_space(
 
     let rows = writer.finish().map_err(columns_io)?;
     debug_assert_eq!(rows as u32, row_count);
-    let edited_rows = crate::edited::write_edited_rows(output_dir, &edited)?;
 
     // The present set is the complement of what this pass recorded, over the rows it actually
     // emitted. A column whose absent rows were all dropped by a tombstone has none left and gets
@@ -342,7 +341,6 @@ pub fn fold_row_space(
     Ok(FoldRowSpaceOutput {
         row_count,
         presence_columns,
-        edited_rows,
     })
 }
 
@@ -399,12 +397,14 @@ mod tests {
                 shard_id: 0,
                 scalar_schema: &schema(),
                 row_base: 0,
-            }, &[],
+            },
+            &[],
         )
         .expect("flush");
         FoldSegmentInput {
             seg_id: seg_id.to_string(),
             dir: dir.join(format!("partitions/p/views/s/segments/{seg_id}")),
+            entities: crate::edited::RowEntities::Numbers,
         }
     }
 

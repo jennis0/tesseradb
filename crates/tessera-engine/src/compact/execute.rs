@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tessera_authz::{sweep_term_postings, DeltaTier, PostingsReader, PostingsSpool};
 use tessera_spatial::tiler::ScalarType;
+use tessera_store::edited::{EditedRows, RowEntities};
 use tessera_store::manifest::{DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor};
 use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::{
@@ -17,7 +18,7 @@ use super::attributes::{
     fold_entity_terms, fold_record_blob, fold_text_columns, fold_value_columns,
 };
 use super::cost::{PassCost, Staircase};
-use super::plan::{FoldPlan, TERM_IMAGE_MANIFEST_N, TERM_IMAGE_THREADS};
+use super::plan::{FoldPlan, PlannedEntities, TERM_IMAGE_MANIFEST_N, TERM_IMAGE_THREADS};
 
 /// Everything [`execute`] needs beyond its plan, taken from the generation and then immutable.
 /// The two `Arc`s are the live readers, so the fold reads the mappings requests are served from.
@@ -210,11 +211,25 @@ fn fold_row_spaces(
         let inputs: Vec<FoldSegmentInput> = view
             .segments
             .iter()
-            .map(|planned| FoldSegmentInput {
-                seg_id: planned.seg_id.clone(),
-                dir: ctx.from_prefix_dir.join(&planned.dir),
+            .map(|planned| {
+                let dir = ctx.from_prefix_dir.join(&planned.dir);
+                let entities = match &planned.entities {
+                    PlannedEntities::Numbers => RowEntities::Numbers,
+                    PlannedEntities::Listed(listed) => {
+                        RowEntities::Listed(Arc::new(EditedRows::open(&dir, *listed)?))
+                    }
+                    PlannedEntities::Table(rel) => RowEntities::Table(std::sync::Arc::new(
+                        tessera_store::RowToEntity::load(&ctx.from_prefix_dir.join(rel))?,
+                    )),
+                };
+                Ok(FoldSegmentInput {
+                    seg_id: planned.seg_id.clone(),
+                    dir,
+                    entities,
+                })
             })
-            .collect();
+            .collect::<Result<_, tessera_store::StoreError>>()
+            .map_err(failed("pass 1 (row space: the inputs' entities)"))?;
         let out = fold_row_space(
             &segment_dir,
             &permutation_path,
@@ -243,10 +258,6 @@ fn fold_row_spaces(
                 format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
                 tessera_store::render_presence::render_presence_path(&segment_dir, column),
             );
-        }
-        if out.edited_rows {
-            let name = tessera_store::edited::EDITED_ROWS_FILE;
-            output.push(format!("{segment_rel}/{name}"), segment_dir.join(name));
         }
         output.push(permutation_rel, permutation_path);
         output.push(row_entity_rel, row_entity_path);
@@ -280,8 +291,7 @@ fn fold_postings(
     let pairs_path = ctx.to_prefix_dir.join(&pairs_rel);
     let spool_path = terms_dir.join("postings.spool");
     {
-        let mut spool =
-            PostingsSpool::create(&spool_path).map_err(failed("pass 2 (spool)"))?;
+        let mut spool = PostingsSpool::create(&spool_path).map_err(failed("pass 2 (spool)"))?;
         let mut pairs =
             PairsParquetWriter::create(&pairs_path).map_err(failed("pass 2 (pairs)"))?;
         let sweep = sweep_term_postings(
@@ -389,8 +399,7 @@ fn derive_term_images(
                 view: segment.view.clone(),
                 incarnation: segment.incarnation,
                 dict_len,
-                keep_rows_per_container: tessera_store::term_images::KEEP_ROWS_PER_CONTAINER
-                    as u32,
+                keep_rows_per_container: tessera_store::term_images::KEEP_ROWS_PER_CONTAINER as u32,
             },
             summary,
         });
@@ -456,12 +465,16 @@ fn fold_unique_indexes(
             &ctx.to_prefix_dir.join(&out_rel),
             "base",
         )
-        .map_err(failed(format!("pass 3b (unique index '{}')", index.attribute)))?;
+        .map_err(failed(format!(
+            "pass 3b (unique index '{}')",
+            index.attribute
+        )))?;
         let mut base = Vec::with_capacity(written.len());
         for run in written {
-            let listed = run
-                .as_base(&ctx.to_prefix_dir)
-                .map_err(failed(format!("pass 3b (unique index '{}')", index.attribute)))?;
+            let listed = run.as_base(&ctx.to_prefix_dir).map_err(failed(format!(
+                "pass 3b (unique index '{}')",
+                index.attribute
+            )))?;
             out.push(listed.path.clone(), run.path);
             base.push(listed);
         }
@@ -481,8 +494,16 @@ fn fold_edited_items(
     use tessera_store::edited::Direction;
     let mut folded = tessera_store::manifest::EditedItemsRuns::default();
     for (direction, runs, into) in [
-        (Direction::ByNumber, &plan.edited.by_number, &mut folded.by_number),
-        (Direction::ByEntity, &plan.edited.by_entity, &mut folded.by_entity),
+        (
+            Direction::ByNumber,
+            &plan.edited.by_number,
+            &mut folded.by_number,
+        ),
+        (
+            Direction::ByEntity,
+            &plan.edited.by_entity,
+            &mut folded.by_entity,
+        ),
     ] {
         let inputs: Vec<PathBuf> = runs
             .files()
@@ -492,7 +513,10 @@ fn fold_edited_items(
             direction,
             &inputs,
             &plan.tombstones,
-            &ctx.to_prefix_dir.join(tessera_store::edited::runs_dir_rel(&plan.partition, direction)),
+            &ctx.to_prefix_dir.join(tessera_store::edited::runs_dir_rel(
+                &plan.partition,
+                direction,
+            )),
             "base",
         )
         .map_err(failed("pass 3c (edited items)"))?;
@@ -511,10 +535,7 @@ fn fold_edited_items(
 fn digest_and_sync(out: &FoldOutput) -> Result<BTreeMap<String, FileDigest>, MaintenanceFailed> {
     let mut files = BTreeMap::new();
     for (rel, path) in &out.written {
-        files.insert(
-            rel.clone(),
-            crate::flush::digest_of(path)?,
-        );
+        files.insert(rel.clone(), crate::flush::digest_of(path)?);
     }
     let paths: Vec<PathBuf> = out.written.iter().map(|(_, path)| path.clone()).collect();
     tessera_store::fsync_written(&paths).map_err(failed("pass 5 (durability)"))?;

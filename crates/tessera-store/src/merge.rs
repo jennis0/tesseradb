@@ -147,6 +147,8 @@ pub struct MergeInput {
     pub seg_id: String,
     pub entity_lo: u64,
     pub entity_hi: u64,
+    /// The manifest names the segment's [`crate::edited::EDITED_ROWS_FILE`].
+    pub edited_rows: bool,
 }
 
 /// Everything [`execute_merge`] needs beyond its inputs.
@@ -224,7 +226,13 @@ pub fn execute_merge(
     let mut cursors: Vec<SegmentCursor> = spec
         .inputs
         .iter()
-        .map(|input| SegmentCursor::open(&seg_path(&input.seg_id), input.seg_id.clone(), OP))
+        .map(|input| {
+            let dir = seg_path(&input.seg_id);
+            let entities = crate::edited::RowEntities::Listed(std::sync::Arc::new(
+                crate::edited::EditedRows::open(&dir, input.edited_rows)?,
+            ));
+            SegmentCursor::open(&dir, input.seg_id.clone(), OP, entities)
+        })
         .collect::<Result<_>>()?;
 
     let entity_lo = spec.inputs[0].entity_lo;
@@ -449,13 +457,15 @@ mod tests {
                 shard_id: 0,
                 scalar_schema: &schema(),
                 row_base: 0,
-            }, &[],
+            },
+            &[],
         )
         .expect("flush");
         MergeInput {
             seg_id: seg_id.to_string(),
             entity_lo: rows[0].0,
             entity_hi: rows[rows.len() - 1].0,
+            edited_rows: false,
         }
     }
 

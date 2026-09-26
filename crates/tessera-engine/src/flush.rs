@@ -791,8 +791,15 @@ fn execute_flush_stages(
         None => None,
         Some(out) => {
             let seg_dir = segment_dir(&ctx);
+            let entities = tessera_store::edited::RowEntities::Listed(std::sync::Arc::new(
+                tessera_store::edited::EditedRows::open(
+                    &seg_dir,
+                    tessera_store::edited::lists_edited_rows(out.files.keys()),
+                )
+                .map_err(|e| MaintenanceFailed(e.to_string()))?,
+            ));
             Some(
-                SegmentData::load(&seg_dir, &ctx.seg_id, out.segment.row_count)
+                SegmentData::load(&seg_dir, &ctx.seg_id, out.segment.row_count, entities)
                     .map_err(|e| MaintenanceFailed(e.to_string()))?,
             )
         }

@@ -8,6 +8,16 @@ use crate::Generation;
 pub(crate) struct PlannedSegment {
     pub(crate) seg_id: String,
     pub(crate) dir: String,
+    /// Where its rows' entities are read: the view's row-to-entity file, prefix-relative, for a
+    /// base that has one; whether the manifest lists the segment's edited rows otherwise.
+    pub(crate) entities: PlannedEntities,
+}
+
+/// A [`PlannedSegment`]'s rows' entities, as the manifest says where they are.
+pub(crate) enum PlannedEntities {
+    Numbers,
+    Listed(bool),
+    Table(String),
 }
 
 pub(crate) struct FoldViewPlan {
@@ -239,13 +249,32 @@ pub(crate) fn plan_fold(
             segments: view_data
                 .segments
                 .iter()
-                .map(|segment| PlannedSegment {
-                    dir: format!(
+                .map(|segment| {
+                    let dir = format!(
                         "partitions/{partition}/{}/segments/{}",
                         tessera_store::view_rel(view),
                         segment.seg_id
-                    ),
-                    seg_id: segment.seg_id.clone(),
+                    );
+                    let base = !row_space
+                        .extents()
+                        .iter()
+                        .any(|e| e.seg_id == segment.seg_id);
+                    let entities = match (base, row_space.row_entity()) {
+                        (true, Some(_)) => PlannedEntities::Table(format!(
+                            "partitions/{partition}/{}/{}",
+                            tessera_store::view_rel(view),
+                            tessera_store::ROW_ENTITY_FILE
+                        )),
+                        (true, None) => PlannedEntities::Numbers,
+                        (false, _) => PlannedEntities::Listed(manifest.files.contains_key(
+                            &format!("{dir}/{}", tessera_store::edited::EDITED_ROWS_FILE),
+                        )),
+                    };
+                    PlannedSegment {
+                        dir,
+                        seg_id: segment.seg_id.clone(),
+                        entities,
+                    }
                 })
                 .collect(),
             permutation_bound,
@@ -297,7 +326,10 @@ pub(crate) fn plan_fold(
         .locator_extents
         .iter()
         .map(|extent| extent.entity_hi + 1)
-        .fold(entity_bound.max(generation.bundle.manifest.entity_id_high_water), u64::max);
+        .fold(
+            entity_bound.max(generation.bundle.manifest.entity_id_high_water),
+            u64::max,
+        );
 
     Ok(FoldPlan {
         partition: partition.clone(),

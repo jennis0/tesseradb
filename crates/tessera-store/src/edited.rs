@@ -360,64 +360,182 @@ pub fn write_edited_rows(seg_dir: &Path, rows: &[(u32, u32)]) -> Result<bool> {
     Ok(true)
 }
 
-/// The `(row, entity)` pairs of the segment at `seg_dir`, empty where it has no
-/// [`EDITED_ROWS_FILE`]. Refused where the file is not whole pairs strictly ascending by row.
-pub fn read_edited_rows(seg_dir: &Path) -> Result<Vec<(u32, u32)>> {
-    let path = seg_dir.join(EDITED_ROWS_FILE);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(StoreError::Io { path, source }),
-    };
-    if bytes.len() % 8 != 0 {
-        return Err(StoreError::MalformedBundle {
-            detail: format!(
-                "{} is {} bytes, not a whole number of (row, entity) pairs",
-                path.display(),
-                bytes.len()
-            ),
-        });
-    }
-    let rows: Vec<(u32, u32)> = bytes
-        .chunks_exact(8)
-        .map(|pair| {
-            (
-                u32::from_le_bytes(pair[0..4].try_into().unwrap()),
-                u32::from_le_bytes(pair[4..8].try_into().unwrap()),
-            )
-        })
-        .collect();
-    if rows.windows(2).any(|w| w[0].0 >= w[1].0) {
-        return Err(StoreError::MalformedBundle {
-            detail: format!("{} is not strictly ascending by row", path.display()),
-        });
-    }
-    Ok(rows)
+/// A segment's [`EDITED_ROWS_FILE`], mapped: `(row, entity)` pairs strictly ascending by row.
+#[derive(Debug)]
+pub struct EditedRows {
+    map: Option<memmap2::Mmap>,
 }
 
-/// The entity a segment row belongs to: the one its pairs list, or the one its `tessera_id`
-/// inverts to. Refused where the inversion names another shard.
-pub fn entity_of_row(
-    edited: &[(u32, u32)],
-    row: u32,
-    tessera_id: u64,
-    key: &tessera_types::IdentityKey,
-    shard_id: u32,
-    seg_id: &str,
-) -> Result<tessera_types::EntityId> {
-    let (shard, number) = key.invert(tessera_types::TesseraId::new(tessera_id));
-    if shard != shard_id {
-        return Err(StoreError::MalformedBundle {
-            detail: format!(
-                "segment '{seg_id}': row {row}'s tessera_id inverts to shard {shard}, but the \
-                 manifest declares shard {shard_id}"
-            ),
-        });
+impl EditedRows {
+    /// No pairs.
+    pub fn none() -> EditedRows {
+        EditedRows { map: None }
     }
-    Ok(match edited.binary_search_by_key(&row, |&(r, _)| r) {
-        Ok(at) => tessera_types::EntityId::new(u64::from(edited[at].1)),
-        Err(_) => number,
-    })
+
+    /// The file under `seg_dir` where `listed` says a manifest names it, refused where it is
+    /// missing, is not whole pairs or does not ascend by row; no pairs where it is not listed.
+    pub fn open(seg_dir: &Path, listed: bool) -> Result<EditedRows> {
+        if !listed {
+            return Ok(EditedRows::none());
+        }
+        let path = seg_dir.join(EDITED_ROWS_FILE);
+        let file = std::fs::File::open(&path).map_err(|source| StoreError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        // SAFETY: a manifest names this file and a publisher never changes a file it has named;
+        // see `MortonSlice::load` for the shared hazard of a concurrently truncated file.
+        let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|source| StoreError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if map.len() % 8 != 0 {
+            return Err(StoreError::MalformedBundle {
+                detail: format!(
+                    "{} is {} bytes, not a whole number of (row, entity) pairs",
+                    path.display(),
+                    map.len()
+                ),
+            });
+        }
+        let rows = EditedRows { map: Some(map) };
+        if rows
+            .iter()
+            .zip(rows.iter().skip(1))
+            .any(|(a, b)| a.0 >= b.0)
+        {
+            return Err(StoreError::MalformedBundle {
+                detail: format!("{} is not strictly ascending by row", path.display()),
+            });
+        }
+        Ok(rows)
+    }
+
+    fn flat(&self) -> &[u32] {
+        match &self.map {
+            // SAFETY: the length is a checked multiple of 8 and a mapping is page-aligned.
+            Some(map) => unsafe {
+                std::slice::from_raw_parts(map.as_ptr() as *const u32, map.len() / 4)
+            },
+            None => &[],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.flat().len() / 2
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Every pair, ascending by row.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.flat().chunks_exact(2).map(|pair| (pair[0], pair[1]))
+    }
+
+    /// The entity `row` lists, if it is one an edit moved.
+    pub fn entity_of(&self, row: u32) -> Option<u32> {
+        let pairs = self.flat();
+        let (mut lo, mut hi) = (0usize, pairs.len() / 2);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match pairs[2 * mid].cmp(&row) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(pairs[2 * mid + 1]),
+            }
+        }
+        None
+    }
+}
+
+/// Whether a file list names a segment's [`EDITED_ROWS_FILE`].
+pub fn lists_edited_rows<'a>(files: impl IntoIterator<Item = &'a String>) -> bool {
+    files
+        .into_iter()
+        .any(|rel| rel.rsplit('/').next() == Some(EDITED_ROWS_FILE))
+}
+
+/// Where the entity of each of a segment's rows is read.
+#[derive(Debug, Clone)]
+pub enum RowEntities {
+    /// Every row's entity is the number its `tessera_id` inverts to.
+    Numbers,
+    /// A flush or merge segment: the rows an edit moved are listed, and every other row's entity
+    /// is its number.
+    Listed(Arc<EditedRows>),
+    /// A base segment: its view's row-to-entity file names every row's entity.
+    Table(Arc<crate::row_entity::RowToEntity>),
+}
+
+impl RowEntities {
+    /// The `(row, entity)` of every row an edit moved: every listed row, and every base row whose
+    /// table names another entity than its `tessera_id`'s number.
+    pub fn moved<'a>(
+        &'a self,
+        tessera_ids: &'a [u64],
+        key: &'a tessera_types::IdentityKey,
+    ) -> Box<dyn Iterator<Item = (u32, u32)> + 'a> {
+        match self {
+            RowEntities::Numbers => Box::new(std::iter::empty()),
+            RowEntities::Listed(rows) => Box::new(rows.iter()),
+            RowEntities::Table(_) => {
+                Box::new((0..tessera_ids.len() as u32).filter_map(move |row| {
+                    let entity = self.recorded(row)?;
+                    let (_, number) =
+                        key.invert(tessera_types::TesseraId::new(tessera_ids[row as usize]));
+                    (u64::from(entity) != number.raw()).then_some((row, entity))
+                }))
+            }
+        }
+    }
+
+    /// The entity `row` is recorded under, where one is recorded: every base row with a table,
+    /// and every row an edit moved in a flush or merge segment.
+    pub fn recorded(&self, row: u32) -> Option<u32> {
+        match self {
+            RowEntities::Numbers => None,
+            RowEntities::Listed(rows) => rows.entity_of(row),
+            RowEntities::Table(table) => table
+                .entity_of(tessera_types::RowId::new(row))
+                .map(|entity| entity.raw() as u32),
+        }
+    }
+
+    /// The entity `row` belongs to. Refused where its `tessera_id` inverts to another shard, or
+    /// a base row lies past its table.
+    pub fn entity_of(
+        &self,
+        row: u32,
+        tessera_id: u64,
+        key: &tessera_types::IdentityKey,
+        shard_id: u32,
+        seg_id: &str,
+    ) -> Result<tessera_types::EntityId> {
+        let (shard, number) = key.invert(tessera_types::TesseraId::new(tessera_id));
+        if shard != shard_id {
+            return Err(StoreError::MalformedBundle {
+                detail: format!(
+                    "segment '{seg_id}': row {row}'s tessera_id inverts to shard {shard}, but the \
+                     manifest declares shard {shard_id}"
+                ),
+            });
+        }
+        Ok(match self {
+            RowEntities::Numbers => number,
+            RowEntities::Listed(rows) => rows.entity_of(row).map_or(number, |entity| {
+                tessera_types::EntityId::new(u64::from(entity))
+            }),
+            RowEntities::Table(table) => table
+                .entity_of(tessera_types::RowId::new(row))
+                .ok_or_else(|| StoreError::MalformedBundle {
+                    detail: format!(
+                        "segment '{seg_id}': row {row} lies past its view's row-to-entity file"
+                    ),
+                })?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -489,23 +607,28 @@ mod tests {
     #[test]
     fn a_segments_pairs_name_the_entity_of_their_rows_and_nothing_else() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(read_edited_rows(tmp.path()).unwrap().is_empty());
+        assert!(EditedRows::open(tmp.path(), false).unwrap().is_empty());
+        assert!(
+            EditedRows::open(tmp.path(), true).is_err(),
+            "a listed file that is missing is refused"
+        );
         assert!(!write_edited_rows(tmp.path(), &[]).unwrap());
         assert!(write_edited_rows(tmp.path(), &[(1, 90), (4, 91)]).unwrap());
-        let rows = read_edited_rows(tmp.path()).unwrap();
-        assert_eq!(rows, vec![(1, 90), (4, 91)]);
+        let rows = EditedRows::open(tmp.path(), true).unwrap();
+        assert_eq!(rows.iter().collect::<Vec<_>>(), vec![(1, 90), (4, 91)]);
         let key = tessera_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
         let tid = |n: u64| {
             key.forward(0, tessera_types::EntityId::new(n))
                 .unwrap()
                 .raw()
         };
+        let rows = RowEntities::Listed(Arc::new(rows));
         assert_eq!(
-            entity_of_row(&rows, 4, tid(5), &key, 0, "s").unwrap(),
+            rows.entity_of(4, tid(5), &key, 0, "s").unwrap(),
             tessera_types::EntityId::new(91)
         );
         assert_eq!(
-            entity_of_row(&rows, 2, tid(5), &key, 0, "s").unwrap(),
+            rows.entity_of(2, tid(5), &key, 0, "s").unwrap(),
             tessera_types::EntityId::new(5)
         );
     }

@@ -29,14 +29,20 @@ pub(crate) struct SegmentCursor {
     pub(crate) columns: ColumnsRef,
     pub(crate) row: usize,
     pub(crate) rows: usize,
-    /// The rows whose entity is not their number ([`crate::edited`]).
-    edited: Vec<(u32, u32)>,
+    /// Where each row's entity is read ([`crate::edited`]).
+    entities: crate::edited::RowEntities,
 }
 
 impl SegmentCursor {
-    /// Map `dir`'s `morton.u32` and `columns.arrow`. `op` names the caller in any error this
-    /// raises — the one thing the two producers legitimately differ about.
-    pub(crate) fn open(dir: &Path, seg_id: String, op: &str) -> Result<Self> {
+    /// Map `dir`'s `morton.u32` and `columns.arrow`, the rows' entities read from `entities`.
+    /// `op` names the caller in any error this raises — the one thing the two producers
+    /// legitimately differ about.
+    pub(crate) fn open(
+        dir: &Path,
+        seg_id: String,
+        op: &str,
+        entities: crate::edited::RowEntities,
+    ) -> Result<Self> {
         let morton = MortonSlice::load(&dir.join("morton.u32"))?;
         let columns = ColumnsRef::load(&dir.join("columns.arrow"))?;
         // **Both of this cursor's callers stream, and neither shares these mappings with a
@@ -57,14 +63,13 @@ impl SegmentCursor {
                 ),
             });
         }
-        let edited = crate::edited::read_edited_rows(dir)?;
         Ok(SegmentCursor {
             seg_id,
             morton,
             columns,
             row: 0,
             rows,
-            edited,
+            entities,
         })
     }
 
@@ -74,8 +79,7 @@ impl SegmentCursor {
         key: &tessera_types::IdentityKey,
         shard_id: u32,
     ) -> Result<tessera_types::EntityId> {
-        crate::edited::entity_of_row(
-            &self.edited,
+        self.entities.entity_of(
             self.row as u32,
             self.columns.tessera_id()[self.row],
             key,

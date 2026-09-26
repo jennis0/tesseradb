@@ -581,7 +581,12 @@ fn load_build_segment(
     let dir = tessera_store::view_path(&prefix_dir.join("partitions").join(partition), view)
         .join("segments")
         .join(crate::BUILD_SEG_ID);
-    match SegmentData::load(&dir, crate::BUILD_SEG_ID, row_count) {
+    match SegmentData::load(
+        &dir,
+        crate::BUILD_SEG_ID,
+        row_count,
+        tessera_store::edited::RowEntities::Numbers,
+    ) {
         Ok(segment) => Some(segment),
         Err(error) => {
             eprintln!(

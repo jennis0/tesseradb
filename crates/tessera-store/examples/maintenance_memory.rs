@@ -116,13 +116,15 @@ fn write_inputs(root: &Path, rows: u64, segments: u64) -> Vec<MergeInput> {
                     shard_id: 0,
                     scalar_schema: &[],
                     row_base: (s * rows) as u32,
-                }, &[],
+                },
+                &[],
             )
             .expect("the input segment writes");
             MergeInput {
                 seg_id: format!("in-{s}"),
                 entity_lo,
                 entity_hi: entity_lo + rows - 1,
+                edited_rows: false,
             }
         })
         .collect()

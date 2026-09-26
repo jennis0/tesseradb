@@ -1373,11 +1373,7 @@ impl SegmentExtent {
         key: &tessera_types::IdentityKey,
         shard_id: u32,
     ) -> Result<Self> {
-        let (seg_id, tessera_ids, edited) = (
-            segment.seg_id.as_str(),
-            segment.columns.tessera_id(),
-            &segment.edited,
-        );
+        let (seg_id, tessera_ids) = (segment.seg_id.as_str(), segment.columns.tessera_id());
         let malformed = |detail: String| StoreError::MalformedBundle { detail };
         let span = entity_hi
             .checked_sub(entity_lo)
@@ -1395,8 +1391,9 @@ impl SegmentExtent {
             // A wrong shard means this segment was written under a different identity
             // configuration than the manifest declares — corruption, not a row to skip. Serving
             // past it would put a row under an entity id that names a different item.
-            let entity =
-                crate::edited::entity_of_row(edited, local as u32, raw, key, shard_id, seg_id)?;
+            let entity = segment
+                .entities
+                .entity_of(local as u32, raw, key, shard_id, seg_id)?;
             let raw_entity = entity.raw();
             if raw_entity < entity_lo || raw_entity > entity_hi {
                 return Err(malformed(format!(
@@ -1566,6 +1563,11 @@ impl RowSpace {
     pub fn with_row_entity(mut self, table: Arc<crate::row_entity::RowToEntity>) -> Self {
         self.base_inverse = Some(table);
         self
+    }
+
+    /// The base's row-to-entity table, where it published one.
+    pub fn row_entity(&self) -> Option<&Arc<crate::row_entity::RowToEntity>> {
+        self.base_inverse.as_ref()
     }
 
     /// Can this row space cross row→entity at all?

@@ -213,8 +213,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
 }
 
 /// **The edited-items map agrees with itself and with the rows.** Its two directions hold the same
-/// pairs, an entity holds one number, and every row whose entity is not its number is a pair of
-/// the map, its number being what its `tessera_id` inverts to.
+/// pairs, an entity holds one number, a number has at most one live entity, and every row an edit
+/// moved is a pair of the map, its number being what its `tessera_id` inverts to.
 fn check_edited_items(
     prefix_dir: &Path,
     phash: &str,
@@ -238,7 +238,8 @@ fn check_edited_items(
         if let Some(held) = number_of.insert(entity, number) {
             if held != number {
                 return Err(BuildError::Invalid(format!(
-                    "partition {phash}: the edited items give entity {entity} two numbers,                      {held} and {number}"
+                    "partition {phash}: the edited items give entity {entity} two numbers, \
+                     {held} and {number}"
                 )));
             }
         }
@@ -250,10 +251,45 @@ fn check_edited_items(
             false => ("by entity", "by number"),
         };
         return Err(BuildError::Invalid(format!(
-            "partition {phash}: the edited items hold number {number} and entity {entity} {held}              and not {missing}"
+            "partition {phash}: the edited items hold number {number} and entity {entity} {held} \
+             and not {missing}"
         )));
     }
     report.edited_pairs += forward.len() as u64;
+
+    // A number's live entity is one no deletion names that has a row: an edit deletes the entity
+    // it moves an item away from.
+    let deleted = partition
+        .manifest
+        .tombstones
+        .entities()
+        .cloned()
+        .unwrap_or_default();
+    let live = |entity: u32| {
+        !deleted.contains(entity)
+            && partition.views.values().any(|data| {
+                data.row_space
+                    .row_of(tessera_types::EntityId::new(u64::from(entity)))
+                    .is_some()
+            })
+    };
+    let mut entities_of: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for &(number, entity) in &forward {
+        entities_of.entry(number).or_default().push(entity);
+    }
+    for (number, entities) in &entities_of {
+        let alive: Vec<u32> = std::iter::once(*number)
+            .chain(entities.iter().copied())
+            .filter(|entity| live(*entity))
+            .collect();
+        if alive.len() > 1 {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} has {} live entities, {alive:?}; an item is \
+                 held by one",
+                alive.len()
+            )));
+        }
+    }
 
     let key = IdentityKey::from_hex(&manifest.identity.key)
         .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
@@ -262,10 +298,10 @@ fn check_edited_items(
     for (view, data) in views {
         for segment in &data.segments {
             let ids = segment.columns.tessera_id();
-            for &(row, entity) in &segment.edited {
+            for (row, entity) in segment.entities.moved(ids, &key) {
                 let tessera_id = ids.get(row as usize).copied().ok_or_else(|| {
                     BuildError::Invalid(format!(
-                        "view {view}, segment {}: edited row {row} is past its {} rows",
+                        "view {view}, segment {}: moved row {row} is past its {} rows",
                         segment.seg_id,
                         ids.len()
                     ))
@@ -273,7 +309,8 @@ fn check_edited_items(
                 let (_, number) = key.invert(TesseraId::new(tessera_id));
                 if !u32::try_from(number.raw()).is_ok_and(|n| forward.contains(&(n, entity))) {
                     return Err(BuildError::Invalid(format!(
-                        "view {view}, segment {}: row {row} holds entity {entity}, which the                          edited items do not give number {}",
+                        "view {view}, segment {}: row {row} holds entity {entity}, which the \
+                         edited items do not give number {}",
                         segment.seg_id,
                         number.raw()
                     )));

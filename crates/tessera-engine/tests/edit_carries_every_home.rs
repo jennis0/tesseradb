@@ -1051,3 +1051,104 @@ fn a_growth_and_a_publication_queued_behind_an_edit_follow_the_item() {
         fold(&engine);
     }
 }
+
+/// Every file under `from`, copied to `to`.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The newest side manifest of `root`'s partition, and its path.
+fn side_manifest(root: &Path) -> (std::path::PathBuf, serde_json::Value) {
+    let partition = root.join(current_prefix(root)).join("partitions/default");
+    let newest = std::fs::read_dir(&partition)
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            let n: u64 = name
+                .strip_prefix("SEGMENTS-")?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()?;
+            Some(n)
+        })
+        .max()
+        .unwrap();
+    let path = partition.join(format!("SEGMENTS-{newest}.json"));
+    let manifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    (path, manifest)
+}
+
+/// **A bundle whose edited items disagree with themselves or with its rows is refused.** An
+/// edited item's flushed rows list their entities and the map holds its pairs both ways; a map
+/// missing one direction, a segment whose moved rows are not recorded, and a listed file that is
+/// missing are each refused, by `verify --deep` or at open.
+#[test]
+fn verify_refuses_edited_items_that_disagree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_fixture(tmp.path());
+    let engine = open(tmp.path(), &root);
+    let tid = engine
+        .tessera_id_of(EntityId::new(source_to_new_map(&root, "v00000")[&X]))
+        .unwrap();
+    edit(
+        &engine,
+        "score",
+        "s0",
+        naming(tid, |row| {
+            row.scalars[SCORE_AT] = WalScalar::I32(555);
+            row.omitted.retain(|at| *at != SCORE_AT);
+        }),
+    );
+    flush(&engine);
+    drop(engine);
+    let verify =
+        |root: &Path| tessera_build::verify_deep(root, &tessera_build::VerifyOpts::default());
+    let verified = verify(&root).expect("the edited bundle verifies");
+    assert_eq!((verified.edited_pairs, verified.edited_rows), (1, 3));
+
+    // One direction of the map dropped.
+    let one_way = tmp.path().join("one-way");
+    copy_tree(&root, &one_way);
+    let (path, mut manifest) = side_manifest(&one_way);
+    manifest["edited_items"]["by_entity"]["live"] = serde_json::json!([]);
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(verify(&one_way).is_err(), "a map held one way is refused");
+
+    // The moved rows' entities no longer recorded.
+    let unrecorded = tmp.path().join("unrecorded");
+    copy_tree(&root, &unrecorded);
+    let (path, mut manifest) = side_manifest(&unrecorded);
+    let files = manifest["files"].as_object_mut().unwrap();
+    let listed: Vec<String> = files
+        .keys()
+        .filter(|rel| rel.ends_with(tessera_store::edited::EDITED_ROWS_FILE))
+        .cloned()
+        .collect();
+    assert_eq!(listed.len(), 3, "one list per view the item holds a row in");
+    for rel in &listed {
+        files.remove(rel);
+    }
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(
+        verify(&unrecorded).is_err(),
+        "rows whose entity is not recorded are refused"
+    );
+
+    // A listed file that is missing.
+    let missing = tmp.path().join("missing");
+    copy_tree(&root, &missing);
+    std::fs::remove_file(missing.join(current_prefix(&missing)).join(&listed[0])).unwrap();
+    assert!(
+        tessera_store::read::open_bundle(&missing).is_err(),
+        "a listed edited-rows file that is missing refuses the open"
+    );
+}

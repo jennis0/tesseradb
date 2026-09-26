@@ -95,6 +95,12 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
                     seg_id: d.seg_id.clone(),
                     entity_lo: d.entity_lo,
                     entity_hi: d.entity_hi,
+                    edited_rows: partition_data.manifest.files.contains_key(&format!(
+                        "partitions/{partition}/{}/segments/{}/{}",
+                        tessera_store::view_rel(view),
+                        d.seg_id,
+                        tessera_store::edited::EDITED_ROWS_FILE
+                    )),
                 })
                 .collect(),
             row_base: first.row_base,
@@ -179,7 +185,14 @@ pub(crate) fn execute(
     )
     .join("segments")
     .join(&ctx.seg_id);
-    let segment = SegmentData::load(&seg_dir, &ctx.seg_id, output.segment.row_count)
+    let entities = tessera_store::edited::RowEntities::Listed(std::sync::Arc::new(
+        tessera_store::edited::EditedRows::open(
+            &seg_dir,
+            tessera_store::edited::lists_edited_rows(output.files.keys()),
+        )
+        .map_err(|e| MaintenanceFailed(format!("merge: {e}")))?,
+    ));
+    let segment = SegmentData::load(&seg_dir, &ctx.seg_id, output.segment.row_count, entities)
         .map_err(|e| MaintenanceFailed(e.to_string()))?;
 
     Ok(CompletedMerge {
@@ -230,7 +243,11 @@ pub(crate) fn rebase_into(
             plan.partition,
             tessera_store::view_rel(&plan.view)
         );
-        for name in ["morton.u32", tessera_store::read::CutIndex::FILE, "columns.arrow"] {
+        for name in [
+            "morton.u32",
+            tessera_store::read::CutIndex::FILE,
+            "columns.arrow",
+        ] {
             manifest.files.remove(&format!("{seg_rel}/{name}"));
         }
         let presence_prefix = format!("{seg_rel}/{RENDER_PRESENCE_DIR}/");

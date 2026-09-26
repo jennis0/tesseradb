@@ -153,17 +153,18 @@ pub struct SegmentData {
     /// `morton`, which selection evaluates per cell instead of per row.
     pub cuts: CutIndex,
     pub columns: ColumnsRef,
-    /// The `(row, entity)` pairs of the rows whose entity is not their number
-    /// ([`crate::edited`]), ascending by row.
-    pub edited: Vec<(u32, u32)>,
+    /// Where each row's entity is read ([`crate::edited`]).
+    pub entities: crate::edited::RowEntities,
 }
 
 impl SegmentData {
-    /// Opens a segment's three files from its directory. The error names the one that failed.
+    /// Opens a segment's three files from its directory, its rows' entities read from
+    /// `entities`. The error names the file that failed.
     pub fn load(
         dir: &Path,
         seg_id: &str,
         row_count: u32,
+        entities: crate::edited::RowEntities,
     ) -> std::result::Result<Self, SegmentLoadError> {
         Ok(SegmentData {
             seg_id: seg_id.to_string(),
@@ -186,10 +187,7 @@ impl SegmentData {
                     source,
                 }
             })?,
-            edited: crate::edited::read_edited_rows(dir).map_err(|source| SegmentLoadError {
-                file: "edited rows",
-                source,
-            })?,
+            entities,
         })
     }
 
@@ -200,8 +198,7 @@ impl SegmentData {
         key: &tessera_types::IdentityKey,
         shard_id: u32,
     ) -> Result<tessera_types::EntityId> {
-        crate::edited::entity_of_row(
-            &self.edited,
+        self.entities.entity_of(
             local,
             self.columns.tessera_id()[local as usize],
             key,
@@ -868,9 +865,15 @@ fn open_prefix(
                 }
             }
 
-            // The rows whose entity their `tessera_id` does not name, read by the segment's load
-            // and so held to the membership rule the files above are.
-            if seg_dir.join(crate::edited::EDITED_ROWS_FILE).exists() {
+            // A base segment's rows name their entities in the view's row-to-entity file. A flush
+            // or merge segment lists the rows an edit moved, a file that must be there and verify
+            // where the manifest names it.
+            let entities = if is_base_segment {
+                match view_entry.row_space.row_entity() {
+                    Some(table) => crate::edited::RowEntities::Table(std::sync::Arc::clone(table)),
+                    None => crate::edited::RowEntities::Numbers,
+                }
+            } else {
                 let rel = format!(
                     "partitions/{}/{}/segments/{}/{}",
                     partition_desc.phash,
@@ -878,15 +881,23 @@ fn open_prefix(
                     seg_desc.seg_id,
                     crate::edited::EDITED_ROWS_FILE
                 );
-                ensure_verified(
-                    &rel,
-                    &segments_manifest,
-                    &manifest.files,
-                    &seg_dir.join(crate::edited::EDITED_ROWS_FILE),
-                )?;
-            }
-            let segment = SegmentData::load(&seg_dir, &seg_desc.seg_id, seg_desc.row_count)
-                .map_err(|e| e.source)?;
+                let listed =
+                    segments_manifest.files.contains_key(&rel) || manifest.files.contains_key(&rel);
+                if listed {
+                    ensure_verified(
+                        &rel,
+                        &segments_manifest,
+                        &manifest.files,
+                        &seg_dir.join(crate::edited::EDITED_ROWS_FILE),
+                    )?;
+                }
+                crate::edited::RowEntities::Listed(std::sync::Arc::new(
+                    crate::edited::EditedRows::open(&seg_dir, listed)?,
+                ))
+            };
+            let segment =
+                SegmentData::load(&seg_dir, &seg_desc.seg_id, seg_desc.row_count, entities)
+                    .map_err(|e| e.source)?;
             let (morton, columns) = (&segment.morton, &segment.columns);
 
             if morton.len() as u32 != seg_desc.row_count

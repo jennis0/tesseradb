@@ -106,13 +106,15 @@ fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> Merg
             shard_id: 0,
             scalar_schema: &[],
             row_base: 0,
-        }, &[],
+        },
+        &[],
     )
     .expect("the input segment writes");
     MergeInput {
         seg_id,
         entity_lo,
         entity_hi: entity_lo + shape.count - 1,
+        edited_rows: false,
     }
 }
 

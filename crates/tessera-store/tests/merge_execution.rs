@@ -52,13 +52,15 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
             shard_id: 0,
             scalar_schema: &[],
             row_base: 0,
-        }, &[],
+        },
+        &[],
     )
     .expect("the input segment writes");
     MergeInput {
         seg_id: seg_id.to_string(),
         entity_lo,
         entity_hi: entity_lo + count - 1,
+        edited_rows: false,
     }
 }
 

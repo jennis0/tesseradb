@@ -160,7 +160,10 @@ pub(in crate::write) fn sweep_orphan_prefixes(bundle_root: &Path, live: &str) {
 ///
 /// `named` sums both the bundle-level `MANIFEST.json` and the partition's `SEGMENTS-<n>.json`;
 /// the build's own artefacts are in the first and would be missed by reading only the second.
-pub(super) fn dead_bytes_of(prefix_dir: &Path, generation: &Generation) -> Option<crate::compact::DeadBytes> {
+pub(super) fn dead_bytes_of(
+    prefix_dir: &Path,
+    generation: &Generation,
+) -> Option<crate::compact::DeadBytes> {
     pub(super) fn walk(dir: &Path, total: &mut u64) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -452,7 +455,11 @@ pub(super) fn carried_forward<'a>(
             .unique_indexes
             .iter()
             .map(|index| {
-                match plan.unique.iter().find(|folded| folded.attribute == index.attribute) {
+                match plan
+                    .unique
+                    .iter()
+                    .find(|folded| folded.attribute == index.attribute)
+                {
                     None => index.clone(),
                     Some(folded) => {
                         let consumed: FxHashSet<&str> = folded.files().collect();
@@ -472,8 +479,8 @@ pub(super) fn carried_forward<'a>(
             .collect(),
         edited: {
             let consumed: FxHashSet<&str> = plan.edited.files().collect();
-            let unconsumed = |runs: &tessera_store::manifest::KeyRuns| {
-                tessera_store::manifest::KeyRuns {
+            let unconsumed =
+                |runs: &tessera_store::manifest::KeyRuns| tessera_store::manifest::KeyRuns {
                     base: Vec::new(),
                     live: runs
                         .live
@@ -481,8 +488,7 @@ pub(super) fn carried_forward<'a>(
                         .filter(|rel| !consumed.contains(rel.as_str()))
                         .cloned()
                         .collect(),
-                }
-            };
+                };
             tessera_store::manifest::EditedItemsRuns {
                 by_number: unconsumed(&live_manifest.edited_items.by_number),
                 by_entity: unconsumed(&live_manifest.edited_items.by_entity),
@@ -524,7 +530,10 @@ pub(super) fn carried_files(
                 .filter(|rel| rel.starts_with(&presence_prefix))
                 .cloned(),
         );
-        let edited_rows = format!("{segment_prefix}/{}", tessera_store::edited::EDITED_ROWS_FILE);
+        let edited_rows = format!(
+            "{segment_prefix}/{}",
+            tessera_store::edited::EDITED_ROWS_FILE
+        );
         if live_manifest.files.contains_key(&edited_rows) {
             rels.insert(edited_rows);
         }
@@ -565,7 +574,10 @@ impl Executor {
     /// The dead-bytes gauge is a directory walk and is passed as a closure: `due` calls it only
     /// after every cheaper gauge has declined. It walks the live prefix, not the bundle root; an
     /// orphaned prefix is the startup sweep's to reclaim, not a fold's.
-    pub(super) fn scheduled_fold(&self, generation: &Arc<Generation>) -> Option<crate::compact::FoldTrigger> {
+    pub(super) fn scheduled_fold(
+        &self,
+        generation: &Arc<Generation>,
+    ) -> Option<crate::compact::FoldTrigger> {
         let now = unix_now()?;
         let live_rows: u64 = generation
             .bundle
@@ -823,7 +835,12 @@ impl Executor {
     /// Apply every completed fold waiting from its thread, and report whether any did.
     pub(super) fn publish_completed_folds(&mut self) -> bool {
         // Test hook; always false in a shipped build. See `MaintenanceDeps::switches`.
-        if self.deps.switches.fold_publication_paused.load(Ordering::SeqCst) {
+        if self
+            .deps
+            .switches
+            .fold_publication_paused
+            .load(Ordering::SeqCst)
+        {
             return false;
         }
         let mut any = false;
@@ -898,9 +915,11 @@ impl Executor {
         // poison after `plan_fold` checked it, and this manifest would then publish deny state no
         // durable record backs. The divergence half is already asked by `may_publish` above.
         if self.log.wal.is_poisoned() {
-            return Err("the WAL poisoned during its flight, so its manifest would publish deny state \
+            return Err(
+                "the WAL poisoned during its flight, so its manifest would publish deny state \
                      no durable record backs"
-                .to_string());
+                    .to_string(),
+            );
         }
 
         if live.prefix != plan.prefix {
@@ -925,7 +944,9 @@ impl Executor {
             })
             .collect();
         if !fold_rebases(plan, live_manifest, &consumed_segments) {
-            return Err("an artefact it consumed is no longer listed in the live manifest".to_string());
+            return Err(
+                "an artefact it consumed is no longer listed in the live manifest".to_string(),
+            );
         }
 
         // ---- the carry-forward set ----------------------------------------------------------------
@@ -947,9 +968,11 @@ impl Executor {
             .iter()
             .any(|view| live_incarnations.get(view.view.as_str()) != Some(&view.incarnation))
         {
-            return Err("a view it folded was dropped during its flight; the next fold plans over \
+            return Err(
+                "a view it folded was dropped during its flight; the next fold plans over \
                      the views as they now stand"
-                .to_string());
+                    .to_string(),
+            );
         }
         let forward = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
 
@@ -960,18 +983,26 @@ impl Executor {
             let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
                 // A view created and flushed since the plan was taken has no base here; that is
                 // transient, and the next fold plans over a bundle that holds it.
-                return Err("a carried-forward segment names a view created since the plan was taken, so \
+                return Err(
+                    "a carried-forward segment names a view created since the plan was taken, so \
                      the fold has no base for it; the next fold plans over a bundle that has it"
-                    .to_string());
+                        .to_string(),
+                );
             };
             if descriptor.entity_lo < view.permutation_bound {
-                return Err("a carried-forward segment begins below the fold's own base permutation".to_string());
+                return Err(
+                    "a carried-forward segment begins below the fold's own base permutation"
+                        .to_string(),
+                );
             }
         }
         // A run arriving during the flight would become `external_id_runs[0]`, and the sidecar
         // would then take a flush's entity-range extent for the full-length base locator.
         if completed.external_id_run.is_none() && !forward.runs.is_empty() {
-            return Err("the deployment gained its first external-id run during the fold's flight".to_string());
+            return Err(
+                "the deployment gained its first external-id run during the fold's flight"
+                    .to_string(),
+            );
         }
 
         // ---- retirement, evaluated here and nowhere earlier ---------------------------------------
@@ -1294,9 +1325,11 @@ impl Executor {
         stairs.record("10 manifest");
 
         self.pause_point(PauseSiteArg::BeforeCurrentFlip);
-        if let Err(e) =
-            tessera_store::write_current(&self.deps.bundle_root, &completed.prefix, &manifest_digest)
-        {
+        if let Err(e) = tessera_store::write_current(
+            &self.deps.bundle_root,
+            &completed.prefix,
+            &manifest_digest,
+        ) {
             discard(&format!("CURRENT would not flip ({e})"));
             return;
         }
@@ -2423,7 +2456,6 @@ impl Executor {
             "the fold's artifact pass rebuilt every level's row form"
         );
     }
-
 }
 /// The segments a fold wrote, opened from the prefix it wrote them into: what its artifact pass
 /// resolves every spatial level against. A segment that will not open is skipped and logged; the
@@ -2439,10 +2471,33 @@ pub(super) fn fold_segments(
         let dir = tessera_store::view_path(&partition_dir, &descriptor.view)
             .join("segments")
             .join(&descriptor.seg_id);
+        // A fold writes each view's base, whose rows name their entities in the view's table.
+        let table = dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map(|view| view.join(tessera_store::ROW_ENTITY_FILE))
+            .filter(|path| path.exists())
+            .map(|path| tessera_store::RowToEntity::load(&path));
+        let entities = match table {
+            Some(Ok(table)) => {
+                tessera_store::edited::RowEntities::Table(std::sync::Arc::new(table))
+            }
+            Some(Err(e)) => {
+                tracing::warn!(
+                    view = %descriptor.view,
+                    error = %e,
+                    "the fold could not reopen a row-to-entity file it just wrote; its spatial \
+                     memberships are resolved at the flip instead"
+                );
+                continue;
+            }
+            None => tessera_store::edited::RowEntities::Numbers,
+        };
         match tessera_store::read::SegmentData::load(
             &dir,
             &descriptor.seg_id,
             descriptor.row_count,
+            entities,
         ) {
             Ok(segment) => out.push((descriptor.view.clone(), segment)),
             Err(e) => tracing::warn!(

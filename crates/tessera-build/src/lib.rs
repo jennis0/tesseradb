@@ -2690,33 +2690,26 @@ fn walk_window(
                 )));
             }
             let id = ids[local];
-            // A row an edit moved lists its entity, and its `tessera_id` is its number's, which
-            // the deep pass checks against the edited items.
-            if let Ok(at) = segment
-                .edited
-                .binary_search_by_key(&(local as u32), |&(row, _)| row)
-            {
-                let listed = u64::from(segment.edited[at].1);
-                if listed != entity {
-                    return Err(BuildError::Invalid(format!(
-                        "view '{view_id}' segment '{}' row {local}: the row space claims entity                          {entity} and the segment lists entity {listed}",
-                        segment.seg_id
-                    )));
-                }
-                let (shard, _) = identity_key.invert(tessera_types::TesseraId::new(id));
-                if shard != shard_id {
-                    return Err(BuildError::Invalid(format!(
-                        "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} names                          shard {shard}, not {shard_id}",
-                        segment.seg_id
-                    )));
-                }
-                continue;
+            let recorded = segment.entities.recorded(local as u32).map(u64::from);
+            if recorded.is_some_and(|recorded| recorded != entity) {
+                return Err(BuildError::Invalid(format!(
+                    "view '{view_id}' segment '{}' row {local}: the row space claims entity \
+                     {entity} and the segment records entity {}",
+                    segment.seg_id,
+                    recorded.unwrap_or_default()
+                )));
             }
             let expected = identity_key
                 .forward(shard_id, EntityId::new(entity))
                 .map_err(BuildError::Identity)?
                 .raw();
-            if id != expected {
+            if id == expected {
+                continue;
+            }
+            // A row an edit moved records its entity, and its `tessera_id` is its number's, which
+            // the deep pass checks against the edited items.
+            let (shard, _) = identity_key.invert(tessera_types::TesseraId::new(id));
+            if recorded.is_none() || shard != shard_id {
                 return Err(BuildError::Invalid(format!(
                     "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} does not \
                      match identity.key's derivation {expected:#x} for entity {entity}",
