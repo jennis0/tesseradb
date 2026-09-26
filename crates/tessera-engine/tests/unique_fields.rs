@@ -830,3 +830,51 @@ fn a_flush_in_flight_across_a_declaration_is_planned_again() {
         "the row reached a run, not only the live entries a restart rebuilds from the buffer"
     );
 }
+
+/// **A unique column declared new at a running service** holds no value, refuses a duplicate
+/// from its first rows, and answers lookups through a flush and a restart.
+#[test]
+fn a_new_unique_column_declared_at_runtime_is_enforced_and_indexed() {
+    let fx = fixture();
+    let engine = engine_over(&fx);
+    assert!(!engine
+        .declare_attribute(AttributeRequest {
+            name: "isbn".to_string(),
+            title: None,
+            ty: "keyword".to_string(),
+            vocabulary: None,
+            analyser: None,
+            index: false,
+            render: false,
+            scope: LayerScope::Entity,
+            unique: true,
+        })
+        .expect("a new unique column is declared"));
+    let with_isbn = |engine: &Engine, id: &str, doi: &str, gid: u64, isbn: &str| {
+        let mut r = row(engine, id, b"0", doi, gid, gid as i64 % 1_000_000 + 50_000);
+        r.scalars.push(WalScalar::Utf8(isbn.to_string()));
+        r
+    };
+    let first = ingest(&engine, "isbn-1", vec![with_isbn(&engine, "i1", "10.i/1", BIG * 15, "978-1")]);
+    assert!(is_taken(try_ingest(
+        &engine,
+        "isbn-2",
+        vec![with_isbn(&engine, "i2", "10.i/2", BIG * 15 + 1, "978-1")]
+    )));
+    flush(&engine);
+    let id = engine.tessera_id_of(first[0]).unwrap().raw();
+    assert_eq!(
+        matching(&engine, &full(&engine), text_in("isbn", &["978-1".to_string()])),
+        BTreeSet::from([id])
+    );
+    let engine = restart(&fx, engine);
+    assert_eq!(
+        matching(&engine, &full(&engine), text_in("isbn", &["978-1".to_string()])),
+        BTreeSet::from([id])
+    );
+    assert!(is_taken(try_ingest(
+        &engine,
+        "isbn-3",
+        vec![with_isbn(&engine, "i3", "10.i/3", BIG * 15 + 2, "978-1")]
+    )));
+}

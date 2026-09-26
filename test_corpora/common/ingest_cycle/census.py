@@ -212,8 +212,9 @@ def family_probes(
     binary: Path,
     analyser: str | None,
 ) -> list[dict]:
-    """A numeric column's presence and upper half, a category or keyword column's three commonest
-    values and a category's value list, and a text column's two commonest words."""
+    """A numeric column's presence and upper half, or three of its values where it takes `in`
+    alone, a category or keyword column's three commonest values and a category's value list, and
+    a text column's two commonest words."""
     if len(values) == 0:
         return []
     if family == "numeric" and "range" in operators:
@@ -224,6 +225,14 @@ def family_probes(
             {"name": f"{column} >= {bound}", "filters": {column: {"range": {"gte": bound.item()}}}}
             for bound in (numbers[0], numbers[len(numbers) // 2])
         ]
+    if family == "numeric" and "in" in operators:
+        # A unique column with no other filter home: three held values, sent as decimal strings,
+        # which the server compares exactly past 2^53.
+        if pa.types.is_timestamp(values.type):
+            values = values.cast(pa.timestamp("us")).cast(pa.int64())
+        numbers = np.sort(values.to_numpy(zero_copy_only=False))
+        picked = [str(numbers[i].item()) for i in (0, len(numbers) // 2, len(numbers) - 1)]
+        return [{"name": f"{column} in {picked}", "filters": {column: {"in": picked}}}]
     if family in ("category", "keyword") and "eq" in operators:
         counted = sorted(
             pc.value_counts(values).to_pylist(), key=lambda entry: (-entry["counts"], str(entry["values"]))

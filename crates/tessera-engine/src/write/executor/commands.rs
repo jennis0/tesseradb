@@ -1154,6 +1154,12 @@ impl Executor {
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
         self.side_manifests.behind_live = true;
+        // A new unique column holds no value, so its index starts empty.
+        if let crate::attributes::CompiledAttribute::Entity(d) = &compiled {
+            if d.unique {
+                self.publish_new_unique_index(&d.name, started);
+            }
+        }
         reply.ack(false);
     }
 

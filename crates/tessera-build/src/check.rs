@@ -1057,7 +1057,7 @@ fn write_disclosure(out: &mut String, disclosure: &crate::disclosure::Disclosure
         for attribute in &disclosure.attributes {
             let _ = writeln!(
                 out,
-                "  {:<26} {}{}, {}, from column '{}'{}",
+                "  {:<26} {}{}, {}{}, from column '{}'{}",
                 attribute.name,
                 attribute.ty,
                 match &attribute.vocabulary {
@@ -1065,6 +1065,7 @@ fn write_disclosure(out: &mut String, disclosure: &crate::disclosure::Disclosure
                     None => String::new(),
                 },
                 attribute.placement,
+                if attribute.unique { ", unique" } else { "" },
                 attribute.field,
                 // A family is one column per view of the group, read from those views' own points
                 // and stored under `attrs/<column>/<group>/<key>/`.

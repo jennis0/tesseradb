@@ -9,9 +9,11 @@
 //!
 //! Every entry carries the sequence number it was added under. A handler that checked a batch
 //! against one generation sends that generation's number with it, and the executor re-checks the
-//! batch against the entries added since. That is complete only while every entry added since is
-//! still here: [`UniqueLive::stale_since`] answers when a flush has moved one into a run, or when
-//! the set of unique columns has changed, and the handler then checks the batch again.
+//! batch against the entries added since. The entries the last few flushes moved into runs are
+//! kept beside the live ones for that re-check, so it stays complete across a flush.
+//! [`UniqueLive::stale_since`] answers where an entry added after the handler's number has left
+//! even those, or where the set of unique columns has changed, and the handler then checks the
+//! batch again.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -27,6 +29,13 @@ use crate::Generation;
 /// One entity holding a key, and the sequence number the entry was added under.
 type Entry = (EntityId, u64);
 
+/// The entries one flush moved into runs, by attribute.
+type Retired = BTreeMap<String, FxHashMap<UniqueKey, Vec<Entry>>>;
+
+/// How many moved entries are kept for the executor's re-check, across the flushes that moved
+/// them. The newest flush's are kept whatever their number.
+const RETIRED_MAX_ENTRIES: usize = 1 << 20;
+
 /// The index entries no run holds yet, per unique column.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct UniqueLive {
@@ -35,7 +44,9 @@ pub(crate) struct UniqueLive {
     columns: BTreeMap<String, Arc<FxHashMap<UniqueKey, Vec<Entry>>>>,
     /// The number the last entry was added under.
     seq: u64,
-    /// The highest number among the entries a flush has moved into a run.
+    /// The entries the latest flushes moved into runs, oldest first, with how many they hold.
+    retired: std::collections::VecDeque<(Arc<Retired>, usize)>,
+    /// The highest number among the moved entries no longer kept in `retired`.
     flushed_through: u64,
     /// The number current when the set of unique columns last changed.
     columns_changed_at: u64,
@@ -127,22 +138,45 @@ impl UniqueLive {
         }
     }
 
-    /// Remove the entries a flush wrote into a run for `attribute`.
-    pub(crate) fn flushed(&mut self, attribute: &str, written: &[(UniqueKey, EntityId)]) {
-        let Some(column) = self.columns.get_mut(attribute) else {
-            return;
-        };
-        let column = Arc::make_mut(column);
-        for (key, entity) in written {
-            let Some(entries) = column.get_mut(key) else {
+    /// Move the entries one flush wrote into runs, per attribute, from the live entries to the
+    /// kept ones, forgetting the oldest kept flushes past [`RETIRED_MAX_ENTRIES`].
+    pub(crate) fn flushed<'a>(
+        &mut self,
+        written: impl IntoIterator<Item = (&'a str, &'a [(UniqueKey, EntityId)])>,
+    ) {
+        let mut moved: Retired = BTreeMap::new();
+        let mut count = 0usize;
+        for (attribute, entries_written) in written {
+            let Some(column) = self.columns.get_mut(attribute) else {
                 continue;
             };
-            if let Some(i) = entries.iter().position(|(held, _)| held == entity) {
-                let (_, seq) = entries.swap_remove(i);
-                self.flushed_through = self.flushed_through.max(seq);
+            let column = Arc::make_mut(column);
+            let into = moved.entry(attribute.to_string()).or_default();
+            for (key, entity) in entries_written {
+                let Some(entries) = column.get_mut(key) else {
+                    continue;
+                };
+                if let Some(i) = entries.iter().position(|(held, _)| held == entity) {
+                    into.entry(*key).or_default().push(entries.swap_remove(i));
+                    count += 1;
+                }
+                if entries.is_empty() {
+                    column.remove(key);
+                }
             }
-            if entries.is_empty() {
-                column.remove(key);
+        }
+        if count == 0 {
+            return;
+        }
+        self.retired.push_back((Arc::new(moved), count));
+        let mut held: usize = self.retired.iter().map(|(_, n)| n).sum();
+        while held > RETIRED_MAX_ENTRIES && self.retired.len() > 1 {
+            let (oldest, n) = self.retired.pop_front().expect("more than one held");
+            held -= n;
+            for entries in oldest.values().flat_map(|column| column.values()) {
+                for (_, seq) in entries {
+                    self.flushed_through = self.flushed_through.max(*seq);
+                }
             }
         }
     }
@@ -186,25 +220,48 @@ impl UniqueLive {
     }
 
     /// Every entity a live entry of `attribute` holds under each of `keys`, as `(position in keys,
-    /// entity)`. `after` keeps only the entries added after that number.
-    pub(crate) fn lookup(
+    /// entity)`.
+    pub(crate) fn lookup(&self, attribute: &str, keys: &[UniqueKey]) -> Vec<(usize, EntityId)> {
+        let mut out = Vec::new();
+        if let Some(column) = self.columns.get(attribute) {
+            collect(column, keys, 0, &mut out);
+        }
+        out
+    }
+
+    /// [`Self::lookup`] over the entries added after `after`, the live ones and the kept ones a
+    /// flush has moved into runs: the executor's re-check.
+    pub(crate) fn added_since(
         &self,
         attribute: &str,
         keys: &[UniqueKey],
         after: u64,
     ) -> Vec<(usize, EntityId)> {
-        let Some(column) = self.columns.get(attribute) else {
-            return Vec::new();
-        };
         let mut out = Vec::new();
-        for (i, key) in keys.iter().enumerate() {
-            for (entity, seq) in column.get(key).into_iter().flatten() {
-                if *seq > after {
-                    out.push((i, *entity));
-                }
+        if let Some(column) = self.columns.get(attribute) {
+            collect(column, keys, after, &mut out);
+        }
+        for (retired, _) in &self.retired {
+            if let Some(column) = retired.get(attribute) {
+                collect(column, keys, after, &mut out);
             }
         }
         out
+    }
+}
+
+fn collect(
+    column: &FxHashMap<UniqueKey, Vec<Entry>>,
+    keys: &[UniqueKey],
+    after: u64,
+    out: &mut Vec<(usize, EntityId)>,
+) {
+    for (i, key) in keys.iter().enumerate() {
+        for (entity, seq) in column.get(key).into_iter().flatten() {
+            if *seq > after {
+                out.push((i, *entity));
+            }
+        }
     }
 }
 
@@ -225,7 +282,7 @@ pub(crate) fn holders(
             .collect(),
         None => Vec::new(),
     };
-    out.extend(generation.unique_live.lookup(attribute, keys, 0));
+    out.extend(generation.unique_live.lookup(attribute, keys));
     out.retain(|(_, entity)| !generation.overlay.is_deleted(*entity));
     out.sort_unstable();
     out.dedup();
@@ -460,7 +517,7 @@ pub(crate) fn recheck_rows(
             continue;
         }
         let keys: Vec<UniqueKey> = set.iter().map(|s| s.key).collect();
-        let found = generation.unique_live.lookup(&d.name, &keys, seq);
+        let found = generation.unique_live.added_since(&d.name, &keys, seq);
         if let Some((i, holder)) = found.into_iter().find(|(i, holder)| {
             set[*i].target != Some(*holder) && !generation.overlay.is_deleted(*holder)
         }) {
@@ -742,4 +799,43 @@ fn describe_keys(
                 .unwrap_or_else(|| "a value no longer held".to_string()),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn live() -> UniqueLive {
+        let mut live = UniqueLive::default();
+        live.columns.insert("id".to_string(), Arc::default());
+        live
+    }
+
+    /// An entry added after a handler's number is found by the re-check from the moment it is
+    /// added, and still after a flush moves it into a run; the re-check is stale only once the
+    /// entry has left the kept flushes.
+    #[test]
+    fn an_entry_added_after_a_check_is_found_until_it_leaves_the_kept_flushes() {
+        let mut live = live();
+        let seen = live.seq();
+        let key = UniqueKey::unsigned(7);
+        let entity = EntityId::new(3);
+        live.add("id", key, entity);
+        assert_eq!(live.added_since("id", &[key], seen), vec![(0, entity)]);
+        live.flushed([("id", &[(key, entity)][..])]);
+        assert!(live.lookup("id", &[key]).is_empty(), "a run holds it now");
+        assert_eq!(live.added_since("id", &[key], seen), vec![(0, entity)]);
+        assert!(!live.stale_since(seen));
+
+        // Enough later flushes push it out, and the check made before it is then stale.
+        let filler: Vec<(UniqueKey, EntityId)> = (0..RETIRED_MAX_ENTRIES as u64)
+            .map(|i| (UniqueKey::unsigned(1_000 + i), EntityId::new(100 + i)))
+            .collect();
+        for (k, e) in &filler {
+            live.add("id", *k, *e);
+        }
+        live.flushed([("id", &filler[..])]);
+        assert!(live.stale_since(seen));
+        assert!(!live.stale_since(live.seq()));
+    }
 }

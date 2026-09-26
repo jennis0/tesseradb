@@ -2393,9 +2393,12 @@ impl Executor {
             Arc::clone(&live.unique_live)
         } else {
             let mut unique_live = (*live.unique_live).clone();
-            for flushed in &completed.unique_runs {
-                unique_live.flushed(&flushed.attribute, &flushed.written);
-            }
+            unique_live.flushed(
+                completed
+                    .unique_runs
+                    .iter()
+                    .map(|f| (f.attribute.as_str(), f.written.as_slice())),
+            );
             Arc::new(unique_live)
         };
         self.unique_declarations

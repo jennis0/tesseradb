@@ -317,6 +317,7 @@ impl Executor {
         let mut held: FxHashMap<UniqueKey, EntityId> = pending
             .checked
             .iter()
+            .filter(|(entity, _)| !generation.overlay.is_deleted(**entity))
             .map(|(entity, key)| (*key, *entity))
             .collect();
         for (entity, key, value) in arrived {
@@ -447,6 +448,17 @@ impl Executor {
         }
         self.publish_unique_change(&generation, &attribute, None, started);
         reply.ack(true);
+    }
+
+    /// Publish the empty index of a unique column declared new at a running service.
+    pub(super) fn publish_new_unique_index(&mut self, attribute: &str, started: std::time::Instant) {
+        let generation = self.generation.load_full();
+        let runs = UniqueIndexRuns {
+            attribute: attribute.to_string(),
+            base: Vec::new(),
+            live: Vec::new(),
+        };
+        self.publish_unique_change(&generation, attribute, Some((runs, Vec::new())), started);
     }
 
     /// Publish a column's index added (`Some`) or removed (`None`): a side-manifest, then the
