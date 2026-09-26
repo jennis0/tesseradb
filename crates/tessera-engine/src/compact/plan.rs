@@ -266,9 +266,14 @@ pub(crate) fn plan_fold(
                             tessera_store::ROW_ENTITY_FILE
                         )),
                         (true, None) => PlannedEntities::Numbers,
-                        (false, _) => PlannedEntities::Listed(manifest.files.contains_key(
-                            &format!("{dir}/{}", tessera_store::edited::EDITED_ROWS_FILE),
-                        )),
+                        (false, _) => {
+                            let rel = format!("{dir}/{}", tessera_store::edited::EDITED_ROWS_FILE);
+                            // A segment a fold carried is listed in the bundle's manifest.
+                            PlannedEntities::Listed(
+                                manifest.files.contains_key(&rel)
+                                    || generation.bundle.manifest.files.contains_key(&rel),
+                            )
+                        }
                     };
                     PlannedSegment {
                         dir,

@@ -505,8 +505,12 @@ pub(super) fn carried_forward<'a>(
 pub(super) fn carried_files(
     partition: &str,
     live_manifest: &SegmentsManifest,
+    bundle_files: &std::collections::BTreeMap<String, tessera_store::manifest::FileDigest>,
     forward: &CarriedExtents,
 ) -> std::collections::BTreeSet<String> {
+    // A segment an earlier fold carried has its files listed in the bundle's manifest.
+    let listed =
+        |rel: &str| live_manifest.files.contains_key(rel) || bundle_files.contains_key(rel);
     let mut rels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for descriptor in &forward.segments {
         let segment_prefix = format!(
@@ -527,6 +531,7 @@ pub(super) fn carried_files(
             live_manifest
                 .files
                 .keys()
+                .chain(bundle_files.keys())
                 .filter(|rel| rel.starts_with(&presence_prefix))
                 .cloned(),
         );
@@ -534,7 +539,7 @@ pub(super) fn carried_files(
             "{segment_prefix}/{}",
             tessera_store::edited::EDITED_ROWS_FILE
         );
-        if live_manifest.files.contains_key(&edited_rows) {
+        if listed(&edited_rows) {
             rels.insert(edited_rows);
         }
     }
@@ -1246,7 +1251,12 @@ impl Executor {
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
         let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, plan);
 
-        let carried_rels = carried_files(&plan.partition, live_manifest, &forward);
+        let carried_rels = carried_files(
+            &plan.partition,
+            live_manifest,
+            &live.bundle.manifest.files,
+            &forward,
+        );
         for rel in &carried_rels {
             let Some(digest) = live_manifest
                 .files

@@ -95,12 +95,17 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
                     seg_id: d.seg_id.clone(),
                     entity_lo: d.entity_lo,
                     entity_hi: d.entity_hi,
-                    edited_rows: partition_data.manifest.files.contains_key(&format!(
-                        "partitions/{partition}/{}/segments/{}/{}",
-                        tessera_store::view_rel(view),
-                        d.seg_id,
-                        tessera_store::edited::EDITED_ROWS_FILE
-                    )),
+                    edited_rows: {
+                        let rel = format!(
+                            "partitions/{partition}/{}/segments/{}/{}",
+                            tessera_store::view_rel(view),
+                            d.seg_id,
+                            tessera_store::edited::EDITED_ROWS_FILE
+                        );
+                        // A segment a fold carried is listed in the bundle's manifest.
+                        partition_data.manifest.files.contains_key(&rel)
+                            || generation.bundle.manifest.files.contains_key(&rel)
+                    },
                 })
                 .collect(),
             row_base: first.row_base,

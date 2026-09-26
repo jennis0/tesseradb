@@ -245,6 +245,17 @@ impl DirectionIndex {
         self.base.iter().map(|(_, _, slot)| slot).chain(&self.live)
     }
 
+    /// The highest key any run holds, `None` for no runs.
+    fn highest(&self) -> Result<Option<u32>> {
+        let mut highest = self.base.last().map(|(_, hi, _)| *hi);
+        for slot in &self.live {
+            if let Some((_, hi)) = slot.run()?.key_range() {
+                highest = highest.max(Some(hi));
+            }
+        }
+        Ok(highest)
+    }
+
     /// Every value stored under each of `keys`, as `(position in keys, value)`, ascending by
     /// position, each pair once.
     fn lookup(&self, keys: &[u32]) -> Result<Vec<(usize, u32)>> {
@@ -325,6 +336,12 @@ impl EditedIndex {
     /// The number of each of `entities` that holds an edited item, as `(position, number)`.
     pub fn numbers_of(&self, entities: &[u32]) -> Result<Vec<(usize, u32)>> {
         self.by_entity.lookup(entities)
+    }
+
+    /// The highest entity any run gives a number, `None` where no run holds one: an entity above
+    /// it holds no edited item's number in a run.
+    pub fn highest_entity(&self) -> Result<Option<u32>> {
+        self.by_entity.highest()
     }
 }
 

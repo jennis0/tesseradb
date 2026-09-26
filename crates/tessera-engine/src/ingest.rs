@@ -289,8 +289,21 @@ impl Engine {
             .copied()
             .filter(|(_, at)| matches!(decided.get(at), Some(Decided::Edited { .. })))
             .collect();
-        if !edited.is_empty() {
-            stored.blobs = Self::read_blobs(generation, request, &edited, true)?;
+        // The first read took the rows carrying a blob-resident column; the rest are read here.
+        let unread: Vec<(EntityId, usize)> = match &stored.blobs {
+            Some(_) => edited
+                .iter()
+                .copied()
+                .filter(|(_, at)| !Self::carries_resident(generation, &request.rows[*at]))
+                .collect(),
+            None => edited.clone(),
+        };
+        if !unread.is_empty() {
+            let more = Self::read_blobs(generation, request, &unread, true)?.unwrap_or_default();
+            match stored.blobs.as_mut() {
+                Some(blobs) => blobs.extend(more),
+                None => stored.blobs = Some(more),
+            }
         }
         // Each named item's number, which its `tessera_id` is taken from and an edit keeps.
         let entities: Vec<EntityId> = order.iter().map(|(entity, _)| *entity).collect();
@@ -544,6 +557,19 @@ impl Engine {
                 })
                 .collect::<Result<_, AcceptError>>()?;
             let first = rows.is_empty();
+            // A join row carries the rendered values alone, as a row adding an item in place
+            // does: the item's own row holds the rest.
+            let scalars: Vec<WalScalar> = match first {
+                true => scalars.clone(),
+                false => declared
+                    .iter()
+                    .zip(&scalars)
+                    .map(|(d, value)| match d.render {
+                        true => value.clone(),
+                        false => WalScalar::Null,
+                    })
+                    .collect(),
+            };
             rows.push(UnallocatedRow {
                 external_id: if first { external_id.clone() } else { None },
                 view: view_id.clone(),
@@ -555,7 +581,7 @@ impl Engine {
                 },
                 x,
                 y,
-                scalars: scalars.clone(),
+                scalars,
                 scoped,
                 terms: Vec::new(),
             });
@@ -874,13 +900,7 @@ impl Engine {
             .collect();
         let wanted: croaring::Bitmap = order
             .iter()
-            .filter(|(_, at)| {
-                let row = &request.rows[*at];
-                whole
-                    || resident
-                        .iter()
-                        .any(|p| *p < row.scalars.len() && !row.omitted.contains(p))
-            })
+            .filter(|(_, at)| whole || Self::carries_resident(generation, &request.rows[*at]))
             .filter_map(|(entity, _)| u32::try_from(entity.raw()).ok())
             .collect();
         let mut blobs = FxHashMap::default();
@@ -900,6 +920,20 @@ impl Engine {
             Err(e) if whole => Err(AcceptError::Unreadable(format!("the record blob: {e}"))),
             Err(_) => Ok(None),
         }
+    }
+
+    /// Whether `row` carries a column whose value lives in the record blob.
+    fn carries_resident(generation: &Generation, row: &IngestRow) -> bool {
+        let manifest = &generation.bundle.manifest;
+        manifest
+            .declared_scalars
+            .iter()
+            .enumerate()
+            .any(|(at, d)| {
+                at < row.scalars.len()
+                    && !row.omitted.contains(&at)
+                    && crate::filter::blob_resident(d, &manifest.vocabularies)
+            })
     }
 
     /// The item's external id: its own buffered row's, or the one a flush bound.

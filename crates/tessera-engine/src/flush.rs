@@ -1083,10 +1083,20 @@ fn numbers_of(plan: &FlushPlan, ctx: &FlushContext) -> Result<Vec<EntityId>, Mai
     if unresolved.is_empty() {
         return Ok(numbers);
     }
-    let asked: Vec<u32> = unresolved
-        .iter()
-        .map(|&at| narrow_entity(numbers[at]))
-        .collect::<Result<_, _>>()?;
+    // A flush's entities are mostly new ones, above every entity a run gives a number.
+    let highest = ctx
+        .edited
+        .highest_entity()
+        .map_err(failed("the edited items' runs"))?;
+    let mut asked: Vec<u32> = Vec::new();
+    unresolved.retain(|&at| {
+        let raw = numbers[at].raw() as u32;
+        let in_runs = highest.is_some_and(|highest| raw <= highest);
+        if in_runs {
+            asked.push(raw);
+        }
+        in_runs
+    });
     for (at, number) in ctx
         .edited
         .numbers_of(&asked)
