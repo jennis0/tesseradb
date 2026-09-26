@@ -96,6 +96,11 @@ pub struct DeclaredScalar {
     /// No `serde(default)`: pre-release there is no bundle to stay compatible with (decision 0048),
     /// and a defaulted placement is one that reads as declared when it was inferred.
     pub render: bool,
+    /// Declared `unique`: no two live or suppressed items hold one value, and `eq` and `in` are
+    /// answered from the column's index ([`crate::unique`]). The served value is set from the
+    /// partition manifest's `unique_indexes` at open ([`crate::unique::with_unique_flags`]), so a
+    /// declaration made at a running service reads the same as one made at the build.
+    pub unique: bool,
 }
 
 impl DeclaredScalar {
@@ -1846,6 +1851,39 @@ impl LocatorExtent {
     }
 }
 
+/// One unique column's index in [`SegmentsManifest::unique_indexes`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UniqueIndexRuns {
+    pub attribute: String,
+    /// The runs the build or the last fold wrote, ascending by key range with disjoint ranges.
+    pub base: Vec<BaseKeyRun>,
+    /// Every run written since, prefix-relative, oldest first. Any key may be in any of them.
+    pub live: Vec<String>,
+}
+
+impl UniqueIndexRuns {
+    /// Every run file this index names.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.base
+            .iter()
+            .map(|run| run.path.as_str())
+            .chain(self.live.iter().map(String::as_str))
+    }
+}
+
+/// One base run of a unique index and its key range, so a lookup opens only the run whose range
+/// holds its key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaseKeyRun {
+    pub path: String,
+    /// The run's smallest key, zero-extended, in lower-case hex.
+    pub first_key: String,
+    /// The run's largest key, the same way.
+    pub last_key: String,
+}
+
 /// `SEGMENTS-<n>.json` (contracts §2.3): complete current state for one partition, written by
 /// that partition's worker only after every file it names is durable.
 ///
@@ -2100,6 +2138,13 @@ pub struct SegmentsManifest {
     pub text_extents: Vec<TextExtent>,
     #[serde(default)]
     pub external_id_runs: Vec<String>,
+    /// One entry per unique column: the runs of its index ([`crate::unique`]). A column is unique
+    /// exactly where it has an entry, empty lists and all, so this list is also the served
+    /// schema's `unique` flags.
+    ///
+    /// No `serde(default)`: an absent list would read as no column being unique, and the ingest
+    /// refusal and the `eq` route would then stop without anything reporting it.
+    pub unique_indexes: Vec<UniqueIndexRuns>,
     /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
     /// a bundle straight out of `tessera build`, whose one `ext-locator.u32` covers every entity
     /// it knows about.
@@ -2248,6 +2293,7 @@ impl SegmentsManifest {
             entity_terms_extents: Vec::new(),
             text_extents: Vec::new(),
             external_id_runs: Vec::new(),
+            unique_indexes: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: DenySet::default(),
             deny: DenySet::default(),
@@ -2372,7 +2418,7 @@ mod tests {
     #[test]
     fn an_unknown_arrow_type_refuses_the_declaration() {
         let good: DeclaredScalar = serde_json::from_str(
-            r#"{"name": "score", "arrow_type": "f32", "index": false, "render": true}"#,
+            r#"{"name": "score", "arrow_type": "f32", "index": false, "render": true, "unique": false}"#,
         )
         .expect("f32 parses");
         assert_eq!(good.arrow_type, ScalarType::F32);
@@ -2405,6 +2451,7 @@ mod tests {
             analyser: None,
             index: false,
             render: true,
+            unique: false,
         };
         assert_eq!(category.wire_type(), ScalarType::Utf8);
         assert_eq!(category.arrow_type, ScalarType::U16);
@@ -2416,6 +2463,7 @@ mod tests {
             analyser: None,
             index: false,
             render: true,
+            unique: false,
         };
         assert_eq!(
             plain.wire_type(),

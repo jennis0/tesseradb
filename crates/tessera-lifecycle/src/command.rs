@@ -399,6 +399,8 @@ pub struct AttributeRequest {
     pub index: bool,
     pub render: bool,
     pub scope: tessera_types::layer::LayerScope,
+    /// On a column that exists, declaring or removing `unique` is the one change accepted.
+    pub unique: bool,
 }
 
 /// A vocabulary as `PUT /control/vocabularies/{name}` declares it: the `[[vocabulary]]` block
@@ -576,6 +578,15 @@ pub enum ExecError {
     /// held identity is one the caller cannot have — a value's key and code are baked into every
     /// row that carries them, and its properties are supplied once with the value.
     VocabularyConflict { detail: String },
+    /// A row would give an item a value of a unique column that another live or suppressed item
+    /// holds, or a column declared unique already holds a value twice → HTTP **409**, no effect.
+    /// The detail names the values and, for an ingest, the holders' `tessera_id`s; never an entity
+    /// id.
+    UniqueTaken { detail: String },
+    /// The executor could not re-check a batch's unique values from memory, because what the
+    /// handler checked them against has changed since → the handler checks the batch again and
+    /// resubmits it. Nothing took effect.
+    UniqueStale,
 }
 
 impl std::fmt::Display for ExecError {
@@ -604,7 +615,12 @@ impl std::fmt::Display for ExecError {
             | ExecError::ViewUnknown { detail }
             | ExecError::ValueConflict { detail }
             | ExecError::ValuesRefused { detail }
+            | ExecError::UniqueTaken { detail }
             | ExecError::JoinRefused { detail } => write!(f, "{detail}"),
+            ExecError::UniqueStale => write!(
+                f,
+                "the items this batch names changed while it was checked; send it again"
+            ),
         }
     }
 }

@@ -1465,7 +1465,14 @@ const DIGEST_CHUNK_BYTES: usize = 1 << 20;
 /// entry at first touch, plus sortedness and declared length, before any answer comes out of it
 /// — see `crate::sidecar`. A file skipped here is a file no request path has read yet; the first
 /// read of it is fully checked.
+///
+/// A key run (`*.keys`, [`crate::key_index`]) is skipped too: each of its pages carries its own
+/// checksum, checked the first time the page is read, so a unique index is not read whole before
+/// its first lookup. `tessera verify --deep` digests it.
 fn is_sidecar_deferred(rel: &str) -> bool {
+    if rel.ends_with(".keys") {
+        return true;
+    }
     let Some((dir, file)) = rel.rsplit_once('/') else {
         return false;
     };

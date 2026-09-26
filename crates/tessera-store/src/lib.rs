@@ -30,6 +30,7 @@ pub mod scalar_column;
 mod segment_cursor;
 mod sidecar;
 pub mod term_images;
+pub mod unique;
 pub mod utf8;
 mod view_path;
 pub mod vocabulary;

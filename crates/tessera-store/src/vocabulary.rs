@@ -1060,6 +1060,7 @@ mod tests {
             analyser: None,
             index: false,
             render: true,
+            unique: false,
         }
     }
 

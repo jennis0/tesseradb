@@ -42,6 +42,8 @@ pub struct AttributeSpec<'a> {
     pub render: bool,
     /// Whether the column is scoped to a view group rather than to the entity.
     pub group_scoped: bool,
+    /// Whether no two items may hold one value of the column.
+    pub unique: bool,
 }
 
 /// What a checked attribute stores.
@@ -51,6 +53,7 @@ pub struct Column {
     pub vocabulary: Option<String>,
     /// The analyser's recorded identity, for a `text` column.
     pub analyser: Option<String>,
+    pub unique: bool,
 }
 
 /// Check an attribute. `vocabulary_width` answers the width of a declared vocabulary, or `None`
@@ -73,10 +76,14 @@ pub fn check_attribute(
                 "attribute '{name}': `analyser` applies to `text` only"
             ));
         }
+        if spec.unique {
+            return Err(unique_refused(name));
+        }
         return Ok(Column {
             ty: width,
             vocabulary: Some(vocabulary.to_string()),
             analyser: None,
+            unique: false,
         });
     }
 
@@ -127,11 +134,28 @@ pub fn check_attribute(
             "attribute '{name}': a group-scoped `text` column needs `index = true`"
         ));
     }
+    if spec.unique && !crate::unique::allows_unique(ty) {
+        return Err(unique_refused(name));
+    }
+    if spec.unique && spec.group_scoped {
+        return Err(format!(
+            "attribute '{name}': `unique` applies to an entity-scoped column; declare '{name}' \
+             without it, or without a group scope"
+        ));
+    }
     Ok(Column {
         ty,
         vocabulary: None,
         analyser,
+        unique: spec.unique,
     })
+}
+
+fn unique_refused(name: &str) -> String {
+    format!(
+        "attribute '{name}': `unique` applies to keyword, integer and timestamp columns; declare \
+         '{name}' without it"
+    )
 }
 
 /// A column name is a URL path segment (`/v1/categories/{column}`) and a key in a filter
@@ -255,6 +279,7 @@ mod tests {
             index: false,
             render: false,
             group_scoped: false,
+            unique: false,
         }
     }
 
@@ -374,6 +399,43 @@ mod tests {
                 "{what} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn unique_is_accepted_on_keyword_integer_and_timestamp_columns_only() {
+        let unique = |ty| AttributeSpec {
+            unique: true,
+            ..spec("id", ty)
+        };
+        for ty in [
+            "keyword",
+            "u8",
+            "u16",
+            "u32",
+            "u64",
+            "i8",
+            "i16",
+            "i32",
+            "i64",
+            "timestamp_us",
+        ] {
+            let column = check_attribute(&unique(ty), widths).unwrap();
+            assert!(column.unique, "{ty}");
+        }
+        for ty in ["bool", "f32", "f64", "text"] {
+            assert!(check_attribute(&unique(ty), widths).is_err(), "{ty}");
+        }
+        let category = AttributeSpec {
+            vocabulary: Some("dept"),
+            ..unique("category")
+        };
+        assert!(check_attribute(&category, widths).is_err());
+        let scoped = AttributeSpec {
+            group_scoped: true,
+            ..unique("u64")
+        };
+        assert!(check_attribute(&scoped, widths).is_err());
+        assert!(!check_attribute(&spec("id", "u64"), widths).unwrap().unique);
     }
 
     #[test]

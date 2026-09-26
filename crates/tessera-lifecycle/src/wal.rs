@@ -491,6 +491,33 @@ pub enum WalRecord {
     PlainViewCreate {
         declaration: Box<PlainViewDeclaration>,
     },
+    /// `unique` declared or removed on a column that exists (`PUT /control/attributes`). A
+    /// declaration lists the index runs built over the values flushed when it was checked, which
+    /// are durable before this record is; replay adopts them, each checked against its digest,
+    /// and derives the index's entries for rows not yet flushed from the buffer. A removal lists
+    /// none, and replay drops the index.
+    UniqueDeclare {
+        attribute: String,
+        unique: bool,
+        /// Written by one sort, so their key ranges are disjoint.
+        base: Vec<DeclaredRun>,
+        /// Written by later rounds over values flushed while the first ran.
+        live: Vec<DeclaredRun>,
+    },
+}
+
+/// One index run a [`WalRecord::UniqueDeclare`] adopts.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredRun {
+    /// Prefix-relative.
+    pub path: String,
+    pub sha256: [u8; 32],
+    pub size: u64,
+    /// The run's smallest and largest key, zero-extended, in lower-case hex.
+    pub first_key: String,
+    pub last_key: String,
 }
 
 /// A plain view as `PUT /control/views/{name}` declares it (`ingest.md` §1.3): the fields a
@@ -545,7 +572,8 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         | WalRecord::LayerDrop { .. }
         | WalRecord::ArtifactPublish { .. }
         | WalRecord::ArtifactGrow { .. }
-        | WalRecord::ArtifactFill { .. } => None,
+        | WalRecord::ArtifactFill { .. }
+        | WalRecord::UniqueDeclare { .. } => None,
     }
 }
 
@@ -607,6 +635,7 @@ pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
         | WalRecord::PlainViewCreate { .. }
         | WalRecord::ViewGroupCreate { .. }
         | WalRecord::AttributeDeclare { .. }
+        | WalRecord::UniqueDeclare { .. }
         | WalRecord::VocabularyDeclare { .. }
         | WalRecord::ArtifactPublish { .. }
         | WalRecord::ArtifactGrow { .. }
@@ -715,6 +744,8 @@ pub struct AttributeDeclaration {
     pub render: bool,
     /// Entity-scoped, or a family per view of a group (`views.md` §5).
     pub scope: tessera_types::layer::LayerScope,
+    /// A column declared `unique` starts with an empty index: it holds no value yet.
+    pub unique: bool,
 }
 
 /// A vocabulary as `PUT /control/vocabularies/{name}` declares it: the `[[vocabulary]]` block minus
@@ -1027,7 +1058,9 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // **24**: `PublishedArtifact` gained `incarnation`, the incarnation of its view it was published
 // under. A log at 23 is refused.
 // **25**: every access label and declared word is stored trimmed. A log at 24 is refused.
-const WAL_VERSION: u16 = 25;
+// **26**: `AttributeDeclaration` gained `unique`, and the variant table gained `UniqueDeclare`. A
+// log at 25 is refused.
+const WAL_VERSION: u16 = 26;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2648,7 +2681,20 @@ mod tests {
                     index: true,
                     render: true,
                     scope: tessera_types::layer::LayerScope::Group("quarter".into()),
+                    unique: false,
                 }),
+            },
+            WalRecord::UniqueDeclare {
+                attribute: "doi".into(),
+                unique: true,
+                base: vec![DeclaredRun {
+                    path: "partitions/p/entities/unique/doi/declared-1-base-0.keys".into(),
+                    sha256: [3u8; 32],
+                    size: 8192,
+                    first_key: "1f".into(),
+                    last_key: "ffe0".into(),
+                }],
+                live: Vec::new(),
             },
             WalRecord::VocabularyDeclare {
                 declaration: Box::new(VocabularyDeclaration {
@@ -2715,6 +2761,7 @@ mod tests {
         assert_eq!(
             tracks,
             [
+                None,
                 None,
                 None,
                 None,

@@ -479,6 +479,10 @@ pub struct CommitWindow<W> {
     /// **Hashes** of the external ids held by this window — see [`CommitWindow::holds_external_id_of`]
     /// for why hashes and not ids, and why `None` is absent from it.
     external_ids: FxHashSet<u64>,
+    /// The unique values this window's rows set, each as `(declared position, key widened)`. A
+    /// row setting one of them waits for this window to close, since a unique value is checked
+    /// against the entries the close adds.
+    unique_keys: FxHashSet<(u16, u128)>,
     rows: usize,
     /// When this window opened. Read by the executor to time the window's service, and by nothing
     /// else: **there is no age bound and no timer**. A window closes on its row bound or on the work
@@ -497,10 +501,21 @@ impl<W> CommitWindow<W> {
             entries: Vec::new(),
             by_batch: FxHashMap::default(),
             external_ids: FxHashSet::default(),
+            unique_keys: FxHashSet::default(),
             rows: 0,
             opened_at: Instant::now(),
             seq,
         }
+    }
+
+    /// Whether this window holds any of `keys`.
+    pub fn holds_unique_key(&self, keys: &[(u16, u128)]) -> bool {
+        keys.iter().any(|key| self.unique_keys.contains(key))
+    }
+
+    /// Record the unique values an admitted entry's rows set.
+    pub fn hold_unique_keys(&mut self, keys: impl IntoIterator<Item = (u16, u128)>) {
+        self.unique_keys.extend(keys);
     }
 
     pub fn is_empty(&self) -> bool {

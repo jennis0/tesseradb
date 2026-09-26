@@ -458,6 +458,24 @@ impl<K: Key> Iterator for Entries<'_, K> {
     }
 }
 
+/// The key width, in bytes, the run at `path` was written with, from its header page alone.
+pub fn run_key_width(path: &Path) -> Result<usize> {
+    let io = |source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut first = Vec::with_capacity(PAGE_SIZE);
+    {
+        use std::io::Read;
+        let file = File::open(path).map_err(io)?;
+        file.take(PAGE_SIZE as u64)
+            .read_to_end(&mut first)
+            .map_err(io)?;
+    }
+    let header = Header::decode(&first).map_err(|detail| corrupt(path, RunPart::Header, detail))?;
+    Ok(header.key_width as usize)
+}
+
 /// What [`verify_run`] found in a run that passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunCheck {
