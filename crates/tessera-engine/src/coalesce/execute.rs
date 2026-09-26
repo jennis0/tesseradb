@@ -9,8 +9,7 @@ use std::sync::Arc;
 use tessera_authz::{coalesce_delta_tiers, coalesce_dict_extents, DeltaTier};
 use tessera_store::coalesce_external_id_runs;
 use tessera_store::manifest::{
-    AttrExtent, DictExtent, EntityTermsExtent, FileDigest, LocatorExtent, RecordExtent,
-    TextExtent,
+    AttrExtent, DictExtent, EntityTermsExtent, FileDigest, LocatorExtent, RecordExtent, TextExtent,
 };
 
 use super::{coalesced_column_rel, CoalesceContext, ColumnWindow, OpenedTier};
@@ -57,8 +56,16 @@ pub(super) fn coalesce_runs(
         .collect();
     let extent = LocatorExtent {
         path: format!("{}/ext-locator.u32", ctx.out_rel),
-        entity_lo: locators.iter().map(|e| e.entity_lo).min().expect("a window has extents"),
-        entity_hi: locators.iter().map(|e| e.entity_hi).max().expect("a window has extents"),
+        entity_lo: locators
+            .iter()
+            .map(|e| e.entity_lo)
+            .min()
+            .expect("a window has extents"),
+        entity_hi: locators
+            .iter()
+            .map(|e| e.entity_hi)
+            .max()
+            .expect("a window has extents"),
         external_id_run: format!("{}/external-ids.arrow", ctx.out_rel),
     };
     let out_dir = ctx.prefix_dir.join(&ctx.out_rel);
@@ -143,9 +150,14 @@ pub(super) fn coalesce_attr_window(
     let presence_path = ctx.prefix_dir.join(&extent.presence);
     let dict_path = extent.dict.as_ref().map(|rel| ctx.prefix_dir.join(rel));
     match &dict_path {
-        Some(dict_path) => {
-            merge_keyword_window(window, &inputs, ctx, &values_path, &presence_path, dict_path)?
-        }
+        Some(dict_path) => merge_keyword_window(
+            window,
+            &inputs,
+            ctx,
+            &values_path,
+            &presence_path,
+            dict_path,
+        )?,
         None => merge_values_window(column, &inputs, &values_path, &presence_path)?,
     }
     digest_outputs(files, ctx, extent.files())?;
@@ -217,9 +229,24 @@ pub(super) fn coalesce_records(
     ctx: &CoalesceContext,
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<RecordExtent, MaintenanceFailed> {
-    let record_rel = format!("{}/attrs/record", ctx.out_rel);
-    std::fs::create_dir_all(ctx.prefix_dir.join(&record_rel))
-        .map_err(failed("coalesce dir for the record blob"))?;
+    coalesce_record_blobs(
+        records,
+        &format!("{}/attrs/record", ctx.out_rel),
+        ctx,
+        files,
+    )
+}
+
+/// Record blobs merged by entity into one under `record_rel`, re-blocked toward the format's
+/// target block size.
+fn coalesce_record_blobs(
+    records: &[RecordExtent],
+    record_rel: &str,
+    ctx: &CoalesceContext,
+    files: &mut BTreeMap<String, FileDigest>,
+) -> Result<RecordExtent, MaintenanceFailed> {
+    std::fs::create_dir_all(ctx.prefix_dir.join(record_rel))
+        .map_err(failed(format!("coalesce dir {record_rel}")))?;
     let open = |extent: &RecordExtent| {
         tessera_filter::RecordBlob::open(
             &ctx.prefix_dir.join(&extent.blocks),
@@ -307,6 +334,29 @@ pub(super) fn coalesce_text_window(
         )
         .collect();
 
+    // A group-scoped column's prose, merged as the record blob is.
+    let prose = match window.view {
+        None => None,
+        Some(_) => {
+            let consumed: Vec<RecordExtent> = window
+                .extents
+                .iter()
+                .map(|extent| {
+                    extent.prose.clone().ok_or_else(|| {
+                        MaintenanceFailed(format!(
+                            "a text extent of group-scoped column '{column}' names no prose"
+                        ))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            Some(coalesce_record_blobs(
+                &consumed,
+                &format!("{column_rel}/{}", tessera_store::manifest::SCOPED_PROSE_DIR),
+                ctx,
+                files,
+            )?)
+        }
+    };
     let extent = TextExtent {
         column: column.clone(),
         view: window.view.clone(),
@@ -314,6 +364,7 @@ pub(super) fn coalesce_text_window(
         dict: format!("{column_rel}/{}", tessera_filter::DICT_FILE),
         postings: format!("{column_rel}/postings.arrow"),
         presence: format!("{column_rel}/presence.roaring"),
+        prose,
     };
     let dict_path = ctx.prefix_dir.join(&extent.dict);
     let postings_path = ctx.prefix_dir.join(&extent.postings);
@@ -329,7 +380,11 @@ pub(super) fn coalesce_text_window(
         &spool_path,
     )
     .map_err(failed(format!("text coalesce for '{column}'")))?;
-    digest_outputs(files, ctx, extent.files())?;
+    digest_outputs(
+        files,
+        ctx,
+        [&extent.dict, &extent.postings, &extent.presence].map(String::as_str),
+    )?;
 
     // A dictionary and postings that disagree would give ordinals that name the wrong words.
     let no_reopen = "the coalesced text extent does not reopen";
@@ -406,7 +461,11 @@ pub(super) fn coalesce_edited_window(
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<Vec<String>, MaintenanceFailed> {
     let what = format!("edited-item runs ({})", window.direction.name());
-    let inputs: Vec<PathBuf> = window.runs.iter().map(|rel| ctx.prefix_dir.join(rel)).collect();
+    let inputs: Vec<PathBuf> = window
+        .runs
+        .iter()
+        .map(|rel| ctx.prefix_dir.join(rel))
+        .collect();
     let out_rel = format!("{}/edited/{}", ctx.out_rel, window.direction.name());
     let written = tessera_store::edited::merge_edited_runs(
         window.direction,
@@ -435,7 +494,11 @@ pub(super) fn coalesce_unique_window(
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<Vec<String>, MaintenanceFailed> {
     let attribute = &window.attribute;
-    let inputs: Vec<PathBuf> = window.runs.iter().map(|rel| ctx.prefix_dir.join(rel)).collect();
+    let inputs: Vec<PathBuf> = window
+        .runs
+        .iter()
+        .map(|rel| ctx.prefix_dir.join(rel))
+        .collect();
     let out_rel = format!("{}/unique/{attribute}", ctx.out_rel);
     let written = tessera_store::unique::merge_unique_runs(
         &inputs,

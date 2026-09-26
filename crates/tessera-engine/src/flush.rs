@@ -741,13 +741,17 @@ fn execute_flush_stages(
         // The writer's own derivation, so the base is digested at the exact path it was written to.
         let rel =
             tessera_store::scoped_column_rel(&ctx.partition, column, view, ctx.scoped_incarnation);
+        let prose = |name: &str| format!("{}/{name}", tessera_store::manifest::SCOPED_PROSE_DIR);
         for name in [
-            tessera_filter::VALUES_FILE,
-            tessera_filter::PRESENCE_FILE,
-            tessera_filter::DICT_FILE,
-            "postings.arrow",
+            tessera_filter::VALUES_FILE.to_string(),
+            tessera_filter::PRESENCE_FILE.to_string(),
+            tessera_filter::DICT_FILE.to_string(),
+            "postings.arrow".to_string(),
+            prose(tessera_filter::RECORD_BLOCKS_FILE),
+            prose(tessera_filter::RECORD_HASROW_FILE),
+            prose(tessera_filter::RECORD_DIRECTORY_FILE),
         ] {
-            if ctx.prefix_dir.join(&rel).join(name).exists() {
+            if ctx.prefix_dir.join(&rel).join(&name).exists() {
                 to_digest.push(format!("{rel}/{name}"));
             }
         }
@@ -769,7 +773,7 @@ fn execute_flush_stages(
     *mark = laps.lap(FlushStage::RecordExtent, *mark);
     let mut text_extents = write_text_extents(&plan, &ctx, laps, *mark)?;
     text_extents.extend(scoped_texts);
-    // All three files of every text extent are digested: `publish_fold` discards the fold if one digest is missing.
+    // Every file of every text extent is digested: `publish_fold` discards the fold if one digest is missing.
     for extent in &text_extents {
         for rel in extent.files() {
             to_digest.push(rel.to_string());
@@ -779,10 +783,7 @@ fn execute_flush_stages(
 
     // ---- the digests, one pass over everything written above ---------------------------------
     for rel in to_digest {
-        files.insert(
-            rel.clone(),
-            digest_of(&ctx.prefix_dir.join(&rel))?,
-        );
+        files.insert(rel.clone(), digest_of(&ctx.prefix_dir.join(&rel))?);
     }
     *mark = laps.lap(FlushStage::Digests, *mark);
 
@@ -855,7 +856,11 @@ fn execute_flush_stages(
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,
         prefix: ctx.prefix,
-        unique_columns: ctx.unique_schema.iter().map(|(name, _, _)| name.clone()).collect(),
+        unique_columns: ctx
+            .unique_schema
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect(),
         unique_runs,
         edited_runs,
     };
@@ -1104,9 +1109,13 @@ fn write_edited_runs(
     if pairs.is_empty() {
         return Ok(FlushedEdited::default());
     }
-    let written =
-        tessera_store::edited::write_edited_runs(&ctx.prefix_dir, &ctx.partition, &ctx.seg_id, &pairs)
-            .map_err(failed("the edited items' runs"))?;
+    let written = tessera_store::edited::write_edited_runs(
+        &ctx.prefix_dir,
+        &ctx.partition,
+        &ctx.seg_id,
+        &pairs,
+    )
+    .map_err(failed("the edited items' runs"))?;
     let paths: Vec<std::path::PathBuf> = written.paths().map(Path::to_path_buf).collect();
     tessera_store::fsync_written(&paths).map_err(failed("the edited items' runs"))?;
     let based = |runs: &[tessera_store::key_index::WrittenRun<u32>]| {
@@ -1183,7 +1192,11 @@ fn write_value_extent(
     column: &ExtentColumn<'_>,
 ) -> Result<crate::filter::OpenedExtent, MaintenanceFailed> {
     let scoped = view.is_some();
-    let what = if scoped { "scoped extent" } else { "filter extent" };
+    let what = if scoped {
+        "scoped extent"
+    } else {
+        "filter extent"
+    };
     let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
         column_dir,
         &ctx.seg_id,
@@ -1199,7 +1212,10 @@ fn write_value_extent(
             .and_then(|p| p.to_str())
             .map(str::to_string)
             .ok_or_else(|| {
-                MaintenanceFailed(format!("{what} path {} is not under the prefix", path.display()))
+                MaintenanceFailed(format!(
+                    "{what} path {} is not under the prefix",
+                    path.display()
+                ))
             })
     };
     let values =
@@ -1563,6 +1579,7 @@ fn write_text_layer(
 
     let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
     let mut presence = croaring::Bitmap::new();
+    let mut prose_rows: Vec<(u32, &str)> = Vec::new();
     let mut scratch = tessera_analyse::TokenScratch::default();
     for (entity, value) in rows {
         let prose = match value {
@@ -1575,6 +1592,9 @@ fn write_text_layer(
             }
         };
         presence.add(entity);
+        if view.is_some() {
+            prose_rows.push((entity, prose));
+        }
         analyser.for_each_token(
             prose,
             &mut scratch,
@@ -1618,6 +1638,26 @@ fn write_text_layer(
     )
     .map_err(|e| MaintenanceFailed(format!("{presence_rel}: {e}")))?;
     text_lap(&mut sub, FlushStage::TextPresence);
+    // A group-scoped column's prose, which its postings cannot give back.
+    let prose = match view {
+        None => None,
+        Some(_) => {
+            let prose = tessera_store::manifest::RecordExtent {
+                blocks: format!("{rel_dir}/{}-prose.blocks.bin", target.seg_id),
+                hasrow: format!("{rel_dir}/{}-prose.hasrow.roaring", target.seg_id),
+                directory: format!("{rel_dir}/{}-prose.directory.arrow", target.seg_id),
+            };
+            prose_rows.sort_by_key(|(entity, _)| *entity);
+            tessera_filter_write::write_prose(
+                &target.prefix_dir.join(&prose.blocks),
+                &target.prefix_dir.join(&prose.hasrow),
+                &target.prefix_dir.join(&prose.directory),
+                prose_rows,
+            )
+            .map_err(|e| MaintenanceFailed(format!("{}: {e}", prose.blocks)))?;
+            Some(prose)
+        }
+    };
 
     Ok(Some(tessera_store::manifest::TextExtent {
         column: column.to_string(),
@@ -1627,6 +1667,7 @@ fn write_text_layer(
         dict: dict_rel,
         postings: postings_rel,
         presence: presence_rel,
+        prose,
     }))
 }
 
@@ -1749,6 +1790,15 @@ fn write_empty_scoped_base(
             tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
         )
         .map_err(|e| failed("the token postings", &e))?;
+        let prose = column_dir.join(tessera_store::manifest::SCOPED_PROSE_DIR);
+        std::fs::create_dir_all(&prose).map_err(|e| failed("the prose", &e))?;
+        tessera_filter_write::write_prose(
+            &prose.join(tessera_filter::RECORD_BLOCKS_FILE),
+            &prose.join(tessera_filter::RECORD_HASROW_FILE),
+            &prose.join(tessera_filter::RECORD_DIRECTORY_FILE),
+            std::iter::empty(),
+        )
+        .map_err(|e| failed("the prose", &e))?;
         return Ok(());
     }
     let codes = empty_codes(spec.ty, spec.category);
@@ -2040,15 +2090,10 @@ fn is_deleted(overlay: &Overlay, entity: EntityId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-
-    
 
     use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
     use tessera_lifecycle::IngestBuffer;
-    
-    
-    
+
     use tessera_types::TermId;
 
     const VIEW: &str = "s0";

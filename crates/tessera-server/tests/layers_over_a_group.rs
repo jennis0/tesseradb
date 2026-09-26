@@ -53,8 +53,16 @@ fn text(values: impl Iterator<Item = String>) -> ArrayRef {
 /// The points of both row spaces, and the member tables the build's layers read.
 fn write_sources(dir: &Path, keyed: &dyn Fn(u64) -> bool) {
     let ids = || 0..ENTITIES;
-    let xs = || Arc::new(Float64Array::from_iter_values(ids().map(|e| ((e * 37) % 1000) as f64)));
-    let ys = || Arc::new(Float64Array::from_iter_values(ids().map(|e| ((e * 53) % 1000) as f64)));
+    let xs = || {
+        Arc::new(Float64Array::from_iter_values(
+            ids().map(|e| ((e * 37) % 1000) as f64),
+        ))
+    };
+    let ys = || {
+        Arc::new(Float64Array::from_iter_values(
+            ids().map(|e| ((e * 53) % 1000) as f64),
+        ))
+    };
     let entity = || Arc::new(UInt64Array::from_iter_values(ids())) as ArrayRef;
     write(
         &dir.join("papers.parquet"),
@@ -176,7 +184,8 @@ struct Built {
 fn parse(dir: &Path, layers: &str) -> Result<tessera_build::config::Config, String> {
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, format!("{VIEWS_TOML}{layers}")).unwrap();
-    tessera_build::config::Config::parse(&config_path, &Default::default()).map_err(|e| e.to_string())
+    tessera_build::config::Config::parse(&config_path, &Default::default())
+        .map_err(|e| e.to_string())
 }
 
 /// Build the fixture the way the binary does, with `layers` declared and `keyed` saying which
@@ -187,7 +196,9 @@ fn build_side(layers: &str, keyed: &dyn Fn(u64) -> bool) -> Built {
     write_sources(&dir, keyed);
     let mut config = parse(&dir, layers).expect("the declaration parses");
     let registry = config.build_views().expect("the roster enumerates");
-    let anchor = config.anchor_view(&registry).expect("the anchor is declared");
+    let anchor = config
+        .anchor_view(&registry)
+        .expect("the anchor is declared");
     let views: Vec<ViewArgs> = registry
         .iter()
         .map(|view| ViewArgs {
@@ -233,8 +244,8 @@ fn build_side(layers: &str, keyed: &dyn Fn(u64) -> bool) -> Built {
     Built { _tmp: tmp, dir }
 }
 
-/// `POST /control/values` in Arrow: an id column and a column named for the layer, under the view
-/// header where `view` is given.
+/// `POST /control/ingest` in Arrow, rows without coordinates: an id column and a column named for
+/// the layer, under the view header where `view` is given.
 async fn post_keys(
     server: &TestServer,
     batch_id: &str,
@@ -261,7 +272,7 @@ async fn post_keys(
     let body = writer.into_inner().unwrap();
     let mut request = server
         .client
-        .post(server.control_url("/control/values"))
+        .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream");
@@ -405,7 +416,10 @@ async fn a_group_scoped_layer_naming_a_view_outside_its_group_is_refused_at_both
     assert_eq!(drawn_on(&live, LAYER).await.len(), YEARS.len());
 }
 
-fn counts(rows: impl Iterator<Item = u64>, key_of: &dyn Fn(u64) -> String) -> BTreeMap<String, u64> {
+fn counts(
+    rows: impl Iterator<Item = u64>,
+    key_of: &dyn Fn(u64) -> String,
+) -> BTreeMap<String, u64> {
     let mut sizes = BTreeMap::new();
     for e in rows {
         *sizes.entry(key_of(e)).or_default() += 1;
@@ -418,7 +432,7 @@ fn of_year(year: &str) -> Vec<u64> {
 }
 
 /// **A key column on a group-scoped layer mints per view, at both paths.** The build reads the
-/// view off each member row; the values route reads it off the page's view header, which is how a
+/// view off each member row; an ingest of rows without coordinates reads it off the page's view header, which is how a
 /// client sends one page per view.
 #[tokio::test]
 async fn a_key_column_on_a_group_scoped_layer_mints_in_the_view_it_names() {
@@ -444,11 +458,15 @@ async fn a_key_column_on_a_group_scoped_layer_mints_in_the_view_it_names() {
     for year in YEARS {
         let view = format!("years:{year}");
         let expected = counts(of_year(year).into_iter(), &yearly_of);
-        assert_eq!(browse(&by_build, &view, LAYER).await, expected, "the build, {view}");
+        assert_eq!(
+            browse(&by_build, &view, LAYER).await,
+            expected,
+            "the build, {view}"
+        );
         assert_eq!(
             browse(&reopened, &view, LAYER).await,
             expected,
-            "the values route, after a restart, {view}"
+            "rows without coordinates, after a restart, {view}"
         );
     }
 }
@@ -469,7 +487,11 @@ async fn a_key_column_on_an_entity_scoped_layer_needs_no_view_header() {
     let tail: Vec<u64> = (SEEDED..ENTITIES).collect();
     let (status, body) = post_keys(&live, "week", None, LAYER, &tail, &cluster_of).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["minted"].as_u64(), Some(0), "every key was seeded: {body}");
+    assert_eq!(
+        body["minted"].as_u64(),
+        Some(0),
+        "every key was seeded: {body}"
+    );
     tick(&live).await;
 
     let expected = counts(0..ENTITIES, &cluster_of);
@@ -489,7 +511,14 @@ async fn a_key_column_on_an_entity_scoped_layer_needs_no_view_header() {
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    let (status, body) =
-        post_keys(&live, "no-view", None, "clusters/yearly", &of_year("2010"), &yearly_of).await;
+    let (status, body) = post_keys(
+        &live,
+        "no-view",
+        None,
+        "clusters/yearly",
+        &of_year("2010"),
+        &yearly_of,
+    )
+    .await;
     assert_eq!(status, 422, "{body}");
 }

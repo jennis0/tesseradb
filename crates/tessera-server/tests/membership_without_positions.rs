@@ -1,18 +1,11 @@
-//! **A layer's key column arriving at `POST /control/values` mints and joins** (`ingest.md` §1.4;
-//! python-sdk §11.2 F).
+//! A layer's key column on rows without coordinates, at `POST /control/ingest`, mints the keys no
+//! artifact holds and places each named item in the artifact its key names.
 //!
 //! A table with an id column and a value column is insertable whatever the source's history, so a
-//! corpus whose clustering arrives after its points reaches this door as it reaches the other two
-//! ([decision 0091]). A key an artifact holds joins the entity to it; a key no artifact holds and
-//! whose layer's value set is `open` creates the artifact it names, with the batch's rows as its
-//! first members, through the one code path `/control/ingest`'s window close mints by
-//! (decision 0139).
-//!
-//! What is pinned here is the door's behaviour and the equivalence. The cases where minting is
-//! hard — a chain created parent before child, a suppressed key that must not mint again — are
-//! `membership_column.rs`'s, over the ingest door and the same implementation.
-//!
-//! [decision 0091]: ../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md
+//! corpus whose clustering arrives after its points reaches the database as it would at a build.
+//! A key no artifact holds on an `open` layer creates the artifact it names, with the batch's rows
+//! as its first members. The cases where minting is hard (a chain created parent before child, a
+//! suppressed key that must not mint again) are `membership_column.rs`'s.
 
 mod common;
 
@@ -187,8 +180,9 @@ fn build_side_as(
 // The wire
 // ---------------------------------------------------------------------------------------------
 
-/// One `POST /control/values` batch in JSON: an id column and a column named for the layer.
-fn values_body(rows: &[u64], column: &str, key_of: &dyn Fn(u64) -> Value) -> Value {
+/// One `POST /control/ingest` batch in JSON without coordinates: an id column and a column named
+/// for the layer.
+fn rows_body(rows: &[u64], column: &str, key_of: &dyn Fn(u64) -> Value) -> Value {
     Value::Array(
         rows.iter()
             .map(|e| json!({ "external_id": member(*e), column: key_of(*e) }))
@@ -196,10 +190,10 @@ fn values_body(rows: &[u64], column: &str, key_of: &dyn Fn(u64) -> Value) -> Val
     )
 }
 
-async fn post_values(server: &TestServer, batch_id: &str, body: Value) -> (u16, Value) {
+async fn post_rows(server: &TestServer, batch_id: &str, body: Value) -> (u16, Value) {
     let resp = server
         .client
-        .post(server.control_url("/control/values"))
+        .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", "s0")
@@ -213,7 +207,7 @@ async fn post_values(server: &TestServer, batch_id: &str, body: Value) -> (u16, 
 
 /// The same batch as an Arrow IPC stream, which is how a **list** column travels: a JSON body
 /// carries one key per row and a lineage is a list per row.
-fn values_arrow(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
+fn rows_arrow(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new(column, keys.data_type().clone(), true),
@@ -234,10 +228,10 @@ fn values_arrow(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-async fn post_values_arrow(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, Value) {
+async fn post_rows_arrow(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, Value) {
     let resp = server
         .client
-        .post(server.control_url("/control/values"))
+        .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", "s0")
@@ -423,12 +417,12 @@ async fn register_layer(server: &TestServer, name: &str, value_set: &str, suppli
 // The cases
 // ---------------------------------------------------------------------------------------------
 
-/// **The headline.** A values page carrying held ids and a mix of held and new keys mints the keys
-/// nothing holds, joins every row, and the counts a client browses are the fixture's own. A second
+/// **The headline.** A page of rows without coordinates carrying held ids and a mix of held and new
+/// keys mints the keys nothing holds, joins every row, and the counts a client browses are the fixture's own. A second
 /// identical page under a fresh batch id creates nothing and joins nothing: membership grows
 /// monotonically and a row already a member is a no-op.
 #[tokio::test]
-async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
+async fn a_page_without_positions_mints_the_keys_nothing_holds_and_joins_every_row() {
     let built = build_side(
         &(0..N).collect::<Vec<_>>(),
         &|e| e < BUILT,
@@ -446,10 +440,10 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
     );
 
     let rows: Vec<u64> = (0..N).collect();
-    let (status, body) = post_values(
+    let (status, body) = post_rows(
         &server,
-        "values-1",
-        values_body(&rows, LAYER, &|e| json!(key_of(e))),
+        "page-1",
+        rows_body(&rows, LAYER, &|e| json!(key_of(e))),
     )
     .await;
     assert_eq!(status, 200, "{body}");
@@ -458,10 +452,9 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
         Some(8 - BUILT),
         "the keys no artifact held were created: {body}"
     );
-    // **`joined` counts every membership the page added**, to the artifacts it created and to the
-    // held ones alike: every row but the four the build had already placed.
+    // Every row but the four the build had already placed changes its item.
     assert_eq!(
-        body["joined"].as_u64(),
+        body["edited"].as_u64(),
         Some(N - BUILT),
         "every row is placed, in a held artifact or a created one: {body}"
     );
@@ -476,29 +469,29 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
 
     // **A second identical page is a no-op**, under a fresh batch id — so this is the resolution
     // and the set join answering, rather than the replay index.
-    let (status, again) = post_values(
+    let (status, again) = post_rows(
         &server,
-        "values-2",
-        values_body(&rows, LAYER, &|e| json!(key_of(e))),
+        "page-2",
+        rows_body(&rows, LAYER, &|e| json!(key_of(e))),
     )
     .await;
     assert_eq!(status, 200, "{again}");
     assert_eq!(again["minted"].as_u64(), Some(0), "{again}");
-    assert_eq!(again["joined"].as_u64(), Some(0), "{again}");
+    assert_eq!(again["edited"].as_u64(), Some(0), "{again}");
 
     // **And the replay of the first page is a no-op too**, answered off the batch index: the flag
     // is what tells a replay apart from a first submission whose keys another writer had already
     // minted, and the count beside it says this submission created nothing.
-    let (status, replay) = post_values(
+    let (status, replay) = post_rows(
         &server,
-        "values-1",
-        values_body(&rows, LAYER, &|e| json!(key_of(e))),
+        "page-1",
+        rows_body(&rows, LAYER, &|e| json!(key_of(e))),
     )
     .await;
     assert_eq!(status, 200, "{replay}");
     assert_eq!(replay["replayed"].as_bool(), Some(true), "{replay}");
     assert_eq!(replay["minted"].as_u64(), Some(0), "{replay}");
-    assert_eq!(replay["joined"].as_u64(), Some(0), "{replay}");
+    assert_eq!(replay["edited"].as_u64(), Some(0), "{replay}");
 
     tick(&server).await;
     assert_eq!(
@@ -508,16 +501,13 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
     );
 }
 
-/// **A restated page appends no growth record** (issue #155). `joined` already reported zero, but
-/// the record was written anyway: `values_growth_records` built its joining bitmaps from the
-/// batch's rows alone, and `growth_record` drops only an *empty* one — so a producer re-sending
-/// its last page put a delta that changes nothing into the log and pinned the log at it, a pin
-/// only the compaction fold releases.
+/// **A restated page appends no growth record.** A delta that changes nothing would pin the log
+/// until the compaction fold releases it.
 ///
 /// Counted from the log itself rather than from a gauge: `wal.members` is sampled at most once a
 /// flush period, and what is under test is a record, not a byte count.
 #[tokio::test]
-async fn a_restated_values_page_appends_no_growth_record() {
+async fn a_restated_page_appends_no_growth_record() {
     let built = build_side(
         &(0..N).collect::<Vec<_>>(),
         &|e| e < BUILT,
@@ -527,30 +517,30 @@ async fn a_restated_values_page_appends_no_growth_record() {
     let server = open(&built.dir).await;
 
     let rows: Vec<u64> = (0..N).collect();
-    let (status, body) = post_values(
+    let (status, body) = post_rows(
         &server,
-        "values-1",
-        values_body(&rows, LAYER, &|e| json!(key_of(e))),
+        "page-1",
+        rows_body(&rows, LAYER, &|e| json!(key_of(e))),
     )
     .await;
     assert_eq!(status, 200, "{body}");
     assert!(
-        body["joined"].as_u64().unwrap() > 0,
+        body["edited"].as_u64().unwrap() > 0,
         "the first page joins the artifacts the build already held: {body}"
     );
     tick(&server).await;
 
     // The same page again, under a batch id the replay index has never seen — so what answers is
     // the membership, not the batch index.
-    let (status, again) = post_values(
+    let (status, again) = post_rows(
         &server,
-        "values-2",
-        values_body(&rows, LAYER, &|e| json!(key_of(e))),
+        "page-2",
+        rows_body(&rows, LAYER, &|e| json!(key_of(e))),
     )
     .await;
     assert_eq!(status, 200, "{again}");
     assert_eq!(again["minted"].as_u64(), Some(0), "{again}");
-    assert_eq!(again["joined"].as_u64(), Some(0), "{again}");
+    assert_eq!(again["edited"].as_u64(), Some(0), "{again}");
     tick(&server).await;
 
     server.shutdown().await;
@@ -571,15 +561,15 @@ async fn a_restated_values_page_appends_no_growth_record() {
     );
 }
 
-/// **A page that restates part of a membership appends the rest of it alone** (issue #155). The
+/// **A page that restates part of a membership appends the rest of it alone**. The
 /// subtraction is per artifact and per entity, so a producer that resends its last page with more
 /// rows on the end grows each artifact by the rows it has not sent before.
 ///
 /// The record's own contents are read, rather than only its presence: a delta carrying the
-/// restated members would produce the same served membership and the same `joined`, and would
+/// restated members would produce the same served membership and the same counts, and would
 /// differ only in what the log holds.
 #[tokio::test]
-async fn a_partly_restated_values_page_appends_only_the_new_members() {
+async fn a_partly_restated_page_appends_only_the_new_members() {
     let built = build_side(
         &(0..N).collect::<Vec<_>>(),
         &|e| e < BUILT,
@@ -591,16 +581,16 @@ async fn a_partly_restated_values_page_appends_only_the_new_members() {
     // The first half of the corpus: three rows of each of the eight keys, of which the four keys
     // the build minted already hold one member each.
     let first: Vec<u64> = (0..N / 2).collect();
-    let (status, body) = post_values(
+    let (status, body) = post_rows(
         &server,
-        "values-1",
-        values_body(&first, LAYER, &|e| json!(key_of(e))),
+        "page-1",
+        rows_body(&first, LAYER, &|e| json!(key_of(e))),
     )
     .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["minted"].as_u64(), Some(8 - BUILT), "{body}");
     assert_eq!(
-        body["joined"].as_u64(),
+        body["edited"].as_u64(),
         Some(N / 2 - BUILT),
         "every row but the four the build placed: {body}"
     );
@@ -608,16 +598,16 @@ async fn a_partly_restated_values_page_appends_only_the_new_members() {
 
     // The whole corpus: every row of the page above restated, and the second half new.
     let all: Vec<u64> = (0..N).collect();
-    let (status, again) = post_values(
+    let (status, again) = post_rows(
         &server,
-        "values-2",
-        values_body(&all, LAYER, &|e| json!(key_of(e))),
+        "page-2",
+        rows_body(&all, LAYER, &|e| json!(key_of(e))),
     )
     .await;
     assert_eq!(status, 200, "{again}");
     assert_eq!(again["minted"].as_u64(), Some(0), "{again}");
     assert_eq!(
-        again["joined"].as_u64(),
+        again["edited"].as_u64(),
         Some(N / 2),
         "the new rows joined and the restated ones did not: {again}"
     );
@@ -667,10 +657,10 @@ async fn a_closed_layer_refuses_a_key_no_artifact_holds() {
     let server = open(&built.dir).await;
     register_layer(&server, "roster/c", "closed", json!([])).await;
 
-    let (status, body) = post_values(
+    let (status, body) = post_rows(
         &server,
         "closed",
-        values_body(&[0], "roster/c", &|_| json!("nobody-published-this")),
+        rows_body(&[0], "roster/c", &|_| json!("nobody-published-this")),
     )
     .await;
     assert_eq!(status, 422, "{body}");
@@ -702,10 +692,10 @@ async fn a_layer_with_supplied_content_refuses_the_column() {
     )
     .await;
 
-    let (status, body) = post_values(
+    let (status, body) = post_rows(
         &server,
         "unmintable",
-        values_body(&[0], "labels/x", &|_| json!("nobody-declared-this")),
+        rows_body(&[0], "labels/x", &|_| json!("nobody-declared-this")),
     )
     .await;
     assert_eq!(status, 422, "{body}");
@@ -730,10 +720,10 @@ async fn a_tiered_list_column_mints_the_chain_it_declares() {
     let server = open(&built.dir).await;
 
     let rows: Vec<u64> = (0..N).collect();
-    let (status, body) = post_values_arrow(
+    let (status, body) = post_rows_arrow(
         &server,
         "chain",
-        values_arrow(&rows, LAYER, chain_column(&rows)),
+        rows_arrow(&rows, LAYER, chain_column(&rows)),
     )
     .await;
     assert_eq!(status, 200, "{body}");
@@ -790,18 +780,14 @@ async fn a_tiered_list_column_mints_the_chain_it_declares() {
     );
 }
 
-/// **The conformance case: one membership, three doors, one database.** The same clustering
-/// arriving by build column, by ingest column and by values column gives the same counts to the
-/// same principal — which is [decision 0091]'s claim, now over the third door.
+/// **One membership, three routes, one database.** The same clustering arriving in the build's
+/// file, with ingested points, and as a later column on rows without coordinates gives the same
+/// counts to the same principal.
 ///
-/// **Per principal and not only for a full-coverage one.** A count is taken inside the viewer's
-/// own mask (I2), so three databases could agree about the whole corpus and disagree about what
-/// one principal may see. The two partial principals are where a membership recorded against the
-/// wrong entity would show.
-///
-/// [decision 0091]: ../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md
+/// Compared per principal, since a count is taken inside the viewer's own mask: the two partial
+/// principals are where a membership recorded against the wrong entity would show.
 #[tokio::test]
-async fn the_same_membership_by_build_ingest_and_values_is_the_same_database() {
+async fn the_same_membership_by_build_ingest_and_a_later_column_is_the_same_database() {
     let all: Vec<u64> = (0..N).collect();
     let seed: Vec<u64> = (0..BUILT).collect();
     let tail: Vec<u64> = (BUILT..N).collect();
@@ -822,21 +808,21 @@ async fn the_same_membership_by_build_ingest_and_values_is_the_same_database() {
         "the ingested tail created the keys the seed never held: {body}"
     );
 
-    // The values door: every point built, and only the seed's rows keyed in the file — the rest of
+    // The later column: every point built, and only the seed's rows keyed in the file — the rest of
     // the clustering arrives afterwards, over entities that already exist.
     let built_c = build_side(&all, &|e| e < BUILT, &layer);
     let by_values = open(&built_c.dir).await;
-    let (status, body) = post_values(
+    let (status, body) = post_rows(
         &by_values,
         "tail",
-        values_body(&tail, LAYER, &|e| json!(key_of(e))),
+        rows_body(&tail, LAYER, &|e| json!(key_of(e))),
     )
     .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
         body["minted"].as_u64(),
         Some(8 - BUILT),
-        "the values page created the same keys: {body}"
+        "the later column created the same keys: {body}"
     );
 
     for server in [&by_build, &by_ingest, &by_values] {
@@ -853,7 +839,7 @@ async fn the_same_membership_by_build_ingest_and_values_is_the_same_database() {
         );
         assert_eq!(
             build, values,
-            "the build and values doors disagree for {terms:?}"
+            "the build and the later column disagree for {terms:?}"
         );
         assert!(
             !build.is_empty(),
@@ -869,14 +855,17 @@ async fn the_same_membership_by_build_ingest_and_values_is_the_same_database() {
     );
 }
 
-
-/// **A values page records the edge its list column names on an artifact that holds none** — the
+/// **A page without positions records the edge its list column names on an artifact that holds none** — the
 /// same rule the ingest door follows, at the door that carries no geometry. A roster published with
 /// names and no parents is the state the rule exists for.
 #[tokio::test]
-async fn a_values_page_records_an_edge_the_artifact_does_not_hold() {
+async fn a_page_without_positions_records_an_edge_the_artifact_does_not_hold() {
     // No row carries the column, so the layer is registered and empty.
-    let built = build_side(&(0..N).collect::<Vec<_>>(), &|_| false, &layer_toml("nested"));
+    let built = build_side(
+        &(0..N).collect::<Vec<_>>(),
+        &|_| false,
+        &layer_toml("nested"),
+    );
     let server = open(&built.dir).await;
 
     let members: Vec<String> = members(0..N);
@@ -915,7 +904,7 @@ async fn a_values_page_records_an_edge_the_artifact_does_not_hold() {
         Arc::new(StringArray::from(entries)) as ArrayRef,
         None,
     ));
-    let (status, body) = post_values_arrow(&server, "edge", values_arrow(&rows, LAYER, keys)).await;
+    let (status, body) = post_rows_arrow(&server, "edge", rows_arrow(&rows, LAYER, keys)).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["minted"].as_u64(), Some(0), "both keys exist: {body}");
 
@@ -943,7 +932,7 @@ async fn a_values_page_records_an_edge_the_artifact_does_not_hold() {
 
 /// **A key column is text at any of Arrow's string types, at every door.** pandas writes
 /// `large_utf8` and polars `utf8_view`; the bytes are the same and so is the key. A build reading
-/// the file and a values page carrying the column, scalar or as a list's elements, store the same
+/// the file and a page without positions carrying the column, scalar or as a list's elements, store the same
 /// memberships.
 #[tokio::test]
 async fn a_key_column_at_any_string_type_stores_what_utf8_stores() {
@@ -963,13 +952,16 @@ async fn a_key_column_at_any_string_type_stores_what_utf8_stores() {
         let by_values = open(&built.dir).await;
         let keys = text_keys(tail.iter().map(|e| Some(key_of(*e))).collect(), &key_type);
         let (status, body) =
-            post_values_arrow(&by_values, "typed", values_arrow(&tail, LAYER, keys)).await;
-        assert_eq!(status, 200, "a {key_type:?} key column at the values route: {body}");
+            post_rows_arrow(&by_values, "typed", rows_arrow(&tail, LAYER, keys)).await;
+        assert_eq!(
+            status, 200,
+            "a {key_type:?} key column on rows without positions: {body}"
+        );
         tick(&by_values).await;
         assert_eq!(
             browse_counts(&by_values, &["0", "1"], LAYER, None).await,
             expected_members(),
-            "the values route reads a {key_type:?} key column"
+            "rows without positions read a {key_type:?} key column"
         );
     }
 
@@ -980,13 +972,16 @@ async fn a_key_column_at_any_string_type_stores_what_utf8_stores() {
     for element in [DataType::LargeUtf8, DataType::Utf8View] {
         let built = build_side(&all, &|_| false, &layer);
         let server = open(&built.dir).await;
-        let (status, body) = post_values_arrow(
+        let (status, body) = post_rows_arrow(
             &server,
             "chain",
-            values_arrow(&all, LAYER, chain_column_as(&all, &element)),
+            rows_arrow(&all, LAYER, chain_column_as(&all, &element)),
         )
         .await;
-        assert_eq!(status, 200, "a list of {element:?} at the values route: {body}");
+        assert_eq!(
+            status, 200,
+            "a list of {element:?} on rows without positions: {body}"
+        );
         assert_eq!(body["minted"].as_u64(), Some(1 + 3 + 8), "{body}");
     }
 }

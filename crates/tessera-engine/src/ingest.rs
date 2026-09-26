@@ -453,18 +453,17 @@ impl Engine {
                 .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))?,
             None => self.stored_label(generation, old)?,
         };
-        let carried = |position: usize| {
-            position < row.scalars.len() && !row.omitted.contains(&position)
-        };
+        let carried =
+            |position: usize| position < row.scalars.len() && !row.omitted.contains(&position);
         let scalars: Vec<WalScalar> = declared
             .iter()
             .enumerate()
             .map(|(position, d)| match carried(position) {
                 true => row.scalars[position].clone(),
-                false => joined::held_entity_value(
-                    generation, old, position, d, buffered, &mut blob,
-                )
-                .unwrap_or(WalScalar::Null),
+                false => {
+                    joined::held_entity_value(generation, old, position, d, buffered, &mut blob)
+                        .unwrap_or(WalScalar::Null)
+                }
             })
             .collect();
         let external_id = match &row.external_id {
@@ -509,32 +508,36 @@ impl Engine {
                 .enumerate()
                 .map(|(position, family)| {
                     if repeated {
-                        return WalScalar::Null;
+                        return Ok(WalScalar::Null);
                     }
                     let supplied = row
                         .scoped
                         .get(position)
                         .filter(|_| from_row && !row.omitted.contains(&(declared_len + position)));
                     match supplied {
-                        Some(value) => value.clone(),
-                        None => joined::held_scoped_value(
+                        Some(value) => Ok(value.clone()),
+                        None => Ok(joined::held_scoped_value(
                             generation,
                             old,
                             position,
                             family,
                             &joined::declared_of_scoped(family),
                             &owner,
-                        )
-                        .unwrap_or(WalScalar::Null),
+                        )?
+                        .unwrap_or(WalScalar::Null)),
                     }
                 })
-                .collect();
+                .collect::<Result<_, AcceptError>>()?;
             let first = rows.is_empty();
             rows.push(UnallocatedRow {
                 external_id: if first { external_id.clone() } else { None },
                 view: view_id.clone(),
                 join: None,
-                descriptors: if first { descriptors.clone() } else { Vec::new() },
+                descriptors: if first {
+                    descriptors.clone()
+                } else {
+                    Vec::new()
+                },
                 x,
                 y,
                 scalars: scalars.clone(),
@@ -605,12 +608,14 @@ impl Engine {
             return Ok(Some((item.x, item.y)));
         }
         let q = view.quantisation;
-        Ok(self.stored_position(generation, entity, view)?.map(|(fx, fy)| {
-            (
-                tessera_spatial::unfixed32(fx, q.x_min, q.x_max),
-                tessera_spatial::unfixed32(fy, q.y_min, q.y_max),
-            )
-        }))
+        Ok(self
+            .stored_position(generation, entity, view)?
+            .map(|(fx, fy)| {
+                (
+                    tessera_spatial::unfixed32(fx, q.x_min, q.x_max),
+                    tessera_spatial::unfixed32(fy, q.y_min, q.y_max),
+                )
+            }))
     }
 
     /// A new item's label as descriptors: the row's, or the view's default where it leaves its
@@ -672,7 +677,10 @@ impl Engine {
                 .terms_of_labels(labels)
                 .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))?;
             // A novel descriptor is on no stored label.
-            let supplied = self.write.live().lookup_terms(&generation.dict, &descriptors);
+            let supplied = self
+                .write
+                .live()
+                .lookup_terms(&generation.dict, &descriptors);
             let held: Option<Vec<TermId>> = match buffered {
                 Some(item) => Some(item.terms.clone()),
                 None => joined::flushed_terms_of(generation, entity),
@@ -706,7 +714,8 @@ impl Engine {
                 continue;
             };
             let value = (!joined::scalar_is_absent(value, d)).then_some(value);
-            let held = joined::held_entity_value(generation, entity, position, d, buffered, &mut blob);
+            let held =
+                joined::held_entity_value(generation, entity, position, d, buffered, &mut blob);
             let same = match (value, &held) {
                 (Some(value), Some(held)) => {
                     joined::supplied_as_stored(generation, value, d).same_as(held)
@@ -722,7 +731,7 @@ impl Engine {
         let (Some(view), Some((x, y))) = (view, row.position) else {
             // No position: nothing about the item's views changes.
             if let Some(owner_view) = owner_view {
-                if scoped_against_held(generation, entity, row, scoped_families, owner_view, false)
+                if scoped_against_held(generation, entity, row, scoped_families, owner_view, false)?
                     .is_none()
                 {
                     return Ok(Decided::Edited { added: false });
@@ -741,7 +750,7 @@ impl Engine {
             None => true,
         };
         let Some(repeated) =
-            scoped_against_held(generation, entity, row, scoped_families, owner_view, adding)
+            scoped_against_held(generation, entity, row, scoped_families, owner_view, adding)?
         else {
             return Ok(Decided::Edited { added: false });
         };
@@ -863,13 +872,14 @@ impl Engine {
         if wanted.is_empty() || resident.is_empty() {
             return Ok(Some(blobs));
         }
-        let read = generation
-            .filter_columns
-            .records()
-            .for_each_row_in(&wanted, &mut |entity, fields| {
-                blobs.insert(EntityId::new(u64::from(entity)), fields);
-                Ok(())
-            });
+        let read =
+            generation
+                .filter_columns
+                .records()
+                .for_each_row_in(&wanted, &mut |entity, fields| {
+                    blobs.insert(EntityId::new(u64::from(entity)), fields);
+                    Ok(())
+                });
         match read {
             Ok(()) => Ok(Some(blobs)),
             Err(e) if whole => Err(AcceptError::Unreadable(format!("the record blob: {e}"))),
@@ -965,9 +975,7 @@ impl Engine {
         request: &IngestRequest,
         refusal: &Refusal,
     ) -> String {
-        let tid = |entity: EntityId| {
-            crate::unique::tessera_id_text(self, generation, entity)
-        };
+        let tid = |entity: EntityId| crate::unique::tessera_id_text(self, generation, entity);
         let value = |row: usize, field: Identifier| match field {
             Identifier::TesseraId => "its tessera_id".to_string(),
             Identifier::ExternalId => "its external_id".to_string(),
@@ -1044,7 +1052,9 @@ enum Decided {
     Added(Box<UnallocatedRow>),
     /// The row changes the item, which moves to a new entity. `added` where adding it to the
     /// batch's view is the one change.
-    Edited { added: bool },
+    Edited {
+        added: bool,
+    },
 }
 
 /// The unique values a row carries, as the resolver takes them. A null never identifies an item.
@@ -1070,8 +1080,7 @@ fn fixed(q: tessera_store::manifest::Quantisation, x: f64, y: f64) -> (u32, u32)
 
 /// The group-scoped values a row carries against the cells they address: the positions whose held
 /// value the row repeats, or `None` where one differs. An empty cell takes a value where the row
-/// adds the item to the view (`adding`), and differs from one otherwise. A cell holding prose that
-/// a flush has made uncomparable differs from any value.
+/// adds the item to the view (`adding`), and differs from one otherwise.
 fn scoped_against_held(
     generation: &Generation,
     entity: EntityId,
@@ -1079,7 +1088,7 @@ fn scoped_against_held(
     families: &[tessera_store::manifest::ScopedScalar],
     owner_view: &str,
     adding: bool,
-) -> Option<Vec<usize>> {
+) -> Result<Option<Vec<usize>>, AcceptError> {
     let declared_len = generation.bundle.manifest.declared_scalars.len();
     let mut repeated = Vec::new();
     for (position, family) in families.iter().enumerate() {
@@ -1091,22 +1100,19 @@ fn scoped_against_held(
         };
         let d = joined::declared_of_scoped(family);
         let supplied = (!joined::scalar_is_absent(supplied, &d)).then_some(supplied);
-        let held = joined::held_scoped_value(generation, entity, position, family, &d, owner_view);
-        let prose = held.is_none()
-            && family.arrow_type == tessera_spatial::tiler::ScalarType::Text
-            && joined::flushed_scoped_text_present(generation, entity, family, owner_view);
+        let held = joined::held_scoped_value(generation, entity, position, family, &d, owner_view)?;
         match (supplied, held) {
-            (None, None) if !prose => {}
-            (Some(_), None) if adding && !prose => {}
+            (None, None) => {}
+            (Some(_), None) if adding => {}
             (Some(value), Some(held))
                 if joined::supplied_as_stored(generation, value, &d).same_as(&held) =>
             {
                 repeated.push(position)
             }
-            _ => return None,
+            _ => return Ok(None),
         }
     }
-    Some(repeated)
+    Ok(Some(repeated))
 }
 
 /// Who holds what in one generation: the unique indexes and their live entries, the external ids

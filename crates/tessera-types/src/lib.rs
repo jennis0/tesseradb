@@ -198,7 +198,7 @@ pub struct GenerationStamp {
 // its first key; a format 1 run is refused at open.
 // 25: a side-manifest carries `edited_items`, the runs mapping an edited item's number to its
 // entity and back, and a segment may carry `edited-rows.u32`. A 24 manifest lacks the field and is
-// refused as malformed.
+// refused as malformed. A group-scoped text column stores its prose beside its postings.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
 pub const BUNDLE_FORMAT: u32 = 25;

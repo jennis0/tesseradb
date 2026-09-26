@@ -3002,11 +3002,9 @@ fn write_scoped_columns(
             // is no per-entity slot for a scan to read. It leaves before the value column below is
             // written rather than writing one nothing opens.
             //
-            // ⊘ Its prose has **no blob row per view**, which is the one thing the entity-scoped
-            // family has that this one does not: the record blob is bundle-wide and addressed by a
-            // column's position in `declared_scalars`, which a family has none of. So a scoped
-            // text column answers `match` and is returned by no drill-down — the same restriction
-            // `render` has here, and for the same reason.
+            // Its prose is kept beside the postings, in a record blob of its own: the bundle-wide
+            // blob is addressed by a column's position in `declared_scalars`, which a family has
+            // none of, and an edit of the item carries the prose to its new entity.
             if attribute.ty == ScalarType::Text {
                 // **And it therefore writes no row lane**, which is only sound because `render`
                 // on `text` is refused at the declaration (`config::compile_attributes`'s
@@ -3033,6 +3031,7 @@ fn write_scoped_columns(
                     )?;
                     paths.extend(written.paths);
                 }
+                paths.extend(write_scoped_prose(&column_dir, &column.values)?);
                 report_scoped_coverage(attribute, view, column.present, n);
                 continue;
             }
@@ -3094,6 +3093,31 @@ fn write_scoped_columns(
         }
     }
     Ok((paths, render_columns))
+}
+
+/// One view's column of a group-scoped `text` family, its prose as a record blob under
+/// [`tessera_store::manifest::SCOPED_PROSE_DIR`]. Returns the files written.
+fn write_scoped_prose(
+    column_dir: &Path,
+    values: &crate::column::EntityColumn,
+) -> Result<Vec<PathBuf>> {
+    let dir = column_dir.join(tessera_store::manifest::SCOPED_PROSE_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+    let files = [
+        tessera_filter::RECORD_BLOCKS_FILE,
+        tessera_filter::RECORD_HASROW_FILE,
+        tessera_filter::RECORD_DIRECTORY_FILE,
+    ]
+    .map(|name| dir.join(name));
+    let rows = values
+        .present_entities()
+        .filter_map(|entity| Some((u32::try_from(entity).ok()?, values.str_at(entity)?)));
+    tessera_filter_write::write_prose(&files[0], &files[1], &files[2], rows)
+        .map_err(|e| BuildError::io(&dir, e))?;
+    for file in &files {
+        fsync_file(file)?;
+    }
+    Ok(files.to_vec())
 }
 
 /// One view's column of a **rendered** group-scoped attribute, held from the pass that read it

@@ -89,7 +89,7 @@ use tessera_filter::{Codes, ColumnKind, ValueColumn, ValueColumnWriter};
 
 pub use keyword::{coalesce_keyword_extents, fold_keyword_column, KeywordLayer};
 pub use record::{
-    coalesce_record_extents, fold_record_blob, merge_record_rows, BlobRows, BlockPool,
+    coalesce_record_extents, fold_record_blob, merge_record_rows, write_prose, BlobRows, BlockPool,
     RecordBlobWriter, RecordRows,
 };
 pub use text::{coalesce_text_extents, merge_text_layers, TextLayerRef};
@@ -311,7 +311,9 @@ pub(crate) fn write_merged(
     let mut recoloured: Vec<u32> = Vec::new();
     while !live.is_empty() {
         // The window is a handful of layers, so a scan beats a heap.
-        let lowest = (0..live.len()).min_by_key(|&i| live[i].1 .0).expect("a live layer");
+        let lowest = (0..live.len())
+            .min_by_key(|&i| live[i].1 .0)
+            .expect("a live layer");
         let bound = (0..live.len())
             .filter(|&i| i != lowest)
             .map(|i| live[i].1 .0)
@@ -793,7 +795,11 @@ mod tests {
             let out = coalesce_to(dir.path(), "coalesced", &inputs).expect("the coalesce");
             assert_eq!(out.present().iter().collect::<Vec<_>>(), every);
             for e in 0..=10u32 {
-                assert_eq!(out.value_of(e).map(|v| v.raw()), Some(e * 100), "entity {e}");
+                assert_eq!(
+                    out.value_of(e).map(|v| v.raw()),
+                    Some(e * 100),
+                    "entity {e}"
+                );
             }
         }
 

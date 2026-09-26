@@ -44,8 +44,16 @@ fn fixture(dir: &Path) -> std::path::PathBuf {
         &ids,
         scatter,
         vec![
-            column("gid", false, UInt64Array::from_iter_values(ids.iter().map(|e| gid_of(*e)))),
-            column("code", false, StringArray::from_iter_values(ids.iter().map(|e| format!("c{e}")))),
+            column(
+                "gid",
+                false,
+                UInt64Array::from_iter_values(ids.iter().map(|e| gid_of(*e))),
+            ),
+            column(
+                "code",
+                false,
+                StringArray::from_iter_values(ids.iter().map(|e| format!("c{e}"))),
+            ),
         ],
     );
     write_pairs_n(&pairs, N);
@@ -140,8 +148,7 @@ async fn rows_naming_items_change_nothing_and_rows_naming_none_create() {
     assert_eq!(body["tessera_ids"][0], created);
 }
 
-/// **A batch the rules refuse is `409` and writes nothing**: a row that would change an item, a
-/// row naming two items, two rows naming one, two rows setting one value, and a `tessera_id`
+/// **A batch the rules refuse is `409` and writes nothing**: a row naming two items, two rows naming one, two rows setting one value, and a `tessera_id`
 /// nobody holds. Each refusal names the items by `tessera_id`, never an entity id.
 #[tokio::test]
 async fn refused_batches_are_conflicts_and_write_nothing() {
@@ -150,9 +157,14 @@ async fn refused_batches_are_conflicts_and_write_nothing() {
     let four = holder(&served, gid_of(4)).await;
 
     let refused = [
-        ("edit", json!([{ "tessera_id": three, "code": "changed" }])),
-        ("two-items", json!([{ "tessera_id": three, "gid": gid_of(4) }])),
-        ("one-item-twice", json!([{ "tessera_id": three }, { "gid": gid_of(3) }])),
+        (
+            "two-items",
+            json!([{ "tessera_id": three, "gid": gid_of(4) }]),
+        ),
+        (
+            "one-item-twice",
+            json!([{ "tessera_id": three }, { "gid": gid_of(3) }]),
+        ),
         (
             "one-value-twice",
             json!([
@@ -160,17 +172,28 @@ async fn refused_batches_are_conflicts_and_write_nothing() {
                 { "x": 2.0, "y": 2.0, "access": ["0"], "gid": 9 },
             ]),
         ),
-        ("unknown", json!([{ "tessera_id": "12345", "x": 1.0, "y": 1.0, "access": ["0"] }])),
+        (
+            "unknown",
+            json!([{ "tessera_id": "12345", "x": 1.0, "y": 1.0, "access": ["0"] }]),
+        ),
     ];
     for (batch, rows) in refused {
         let (status, body) = ingest(&served, batch, rows).await;
         assert_eq!(status, 409, "{batch}: {body}");
     }
-    let (_, body) = ingest(&served, "two-items-again", json!([{ "tessera_id": three, "gid": gid_of(4) }])).await;
+    let (_, body) = ingest(
+        &served,
+        "two-items-again",
+        json!([{ "tessera_id": three, "gid": gid_of(4) }]),
+    )
+    .await;
     let detail = body["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains(&three) && detail.contains(&four), "{detail}");
+    assert!(
+        detail.contains(&three) && detail.contains(&four),
+        "{detail}"
+    );
 
-    // Nothing was written: gid 9 names no item, and the edited item still carries its code.
+    // Nothing was written: gid 9 names no item.
     let (status, body) = ingest(
         &served,
         "after",
@@ -178,7 +201,10 @@ async fn refused_batches_are_conflicts_and_write_nothing() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!((body["unchanged"].clone(), body["created"].clone()), (json!(1), json!(1)));
+    assert_eq!(
+        (body["unchanged"].clone(), body["created"].clone()),
+        (json!(1), json!(1))
+    );
 }
 
 /// **A row creating an item needs a position, and a row carries both coordinates or neither**:
@@ -186,10 +212,19 @@ async fn refused_batches_are_conflicts_and_write_nothing() {
 #[tokio::test]
 async fn a_new_item_needs_both_coordinates() {
     let served = Served::build(fixture).await;
-    let (status, body) = ingest(&served, "no-position", json!([{ "access": ["0"], "gid": 11 }])).await;
+    let (status, body) = ingest(
+        &served,
+        "no-position",
+        json!([{ "access": ["0"], "gid": 11 }]),
+    )
+    .await;
     assert_eq!(status, 422, "{body}");
-    let (status, body) =
-        ingest(&served, "one-coordinate", json!([{ "x": 5.0, "access": ["0"], "gid": 11 }])).await;
+    let (status, body) = ingest(
+        &served,
+        "one-coordinate",
+        json!([{ "x": 5.0, "access": ["0"], "gid": 11 }]),
+    )
+    .await;
     assert_eq!(status, 422, "{body}");
 }
 
@@ -222,8 +257,12 @@ async fn a_resent_batch_answers_its_first_tessera_ids_across_a_restart() {
 #[tokio::test]
 async fn a_folded_away_items_tessera_id_names_nothing() {
     let served = Served::build(fixture).await;
-    let (status, body) =
-        ingest(&served, "made", json!([{ "x": 5.0, "y": 5.0, "access": ["0"], "gid": 21 }])).await;
+    let (status, body) = ingest(
+        &served,
+        "made",
+        json!([{ "x": 5.0, "y": 5.0, "access": ["0"], "gid": 21 }]),
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     let made = body["tessera_ids"][0].as_str().unwrap().to_string();
     tick(&served.server).await;

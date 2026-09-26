@@ -199,11 +199,18 @@ fn flush_a_window(engine: &Engine, root: &Path, from: usize) -> Vec<u32> {
     let entities: Vec<u32> = (from..from + COALESCE_WIDTH)
         .map(|i| ingest_and_flush(engine, root, &format!("fresh-{i}"), flushed_prose(i)))
         .collect();
-    tick_until(engine, "the text layers to coalesce", std::time::Duration::from_secs(60), || {
-        let generation = engine.generation();
-        let live = &generation.bundle.partitions["default"].manifest.text_extents;
-        live.iter().filter(|e| e.column == "prose").count() < COALESCE_WIDTH
-    });
+    tick_until(
+        engine,
+        "the text layers to coalesce",
+        std::time::Duration::from_secs(60),
+        || {
+            let generation = engine.generation();
+            let live = &generation.bundle.partitions["default"]
+                .manifest
+                .text_extents;
+            live.iter().filter(|e| e.column == "prose").count() < COALESCE_WIDTH
+        },
+    );
     entities
 }
 
@@ -425,6 +432,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
         dict: prefix.join(&extent.dict),
         postings: prefix.join(&extent.postings),
         presence: presence.to_path_buf(),
+        prose: None,
     };
 
     // A layer this generation does not hold.

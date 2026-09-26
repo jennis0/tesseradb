@@ -288,20 +288,33 @@ struct TextLayer {
     present: Bitmap,
     /// The manifest path that named this layer, or `None` for the base build's index.
     dict_rel: Option<String>,
+    /// A group-scoped column's prose for the entities this layer holds.
+    prose: Option<Arc<tessera_filter::RecordBlob>>,
 }
 
 /// One text layer's two halves, checked against each other before the layer is served: a
 /// postings file short of its dictionary would report every word past the gap as carried by
 /// nobody, an under-report with no symptom.
 impl TextLayer {
-    /// A text column's base index: the token dictionary and the positional postings over it. The
-    /// base writes no presence file of its own, so nothing here can say which entities carry a
-    /// value. See [`TextLayer::present`].
+    /// A text column's base index: the token dictionary and the positional postings over it, and
+    /// for a group-scoped column its prose. The base writes no presence file of its own, so
+    /// nothing here can say which entities carry a value. See [`TextLayer::present`].
     fn open_base(
         column: &str,
         dir: &Path,
+        scoped: bool,
         access: tessera_filter::Access,
     ) -> Result<TextLayer, ComposeError> {
+        let prose = match scoped {
+            true => Some(
+                tessera_filter::RecordBlob::open_dir(
+                    &dir.join(tessera_store::manifest::SCOPED_PROSE_DIR),
+                    access,
+                )
+                .map_err(|e| prose_unreadable(column, e))?,
+            ),
+            false => None,
+        };
         text_layer(
             SortedDict::open_dir(dir, access)?,
             ColumnPostings::open(
@@ -312,27 +325,41 @@ impl TextLayer {
             "base",
             Bitmap::new(),
             None,
+            prose,
         )
     }
 
-    /// One published text layer, from the three files the manifest names it by. `dict_rel` is the
-    /// manifest's own path, the layer's identity.
+    /// One published text layer, from the files the manifest names it by.
     fn open(
-        column: &str,
-        dict_rel: &str,
-        dict: &Path,
-        postings: &Path,
-        presence: &Path,
+        paths: &crate::filter::TextExtentPaths,
         access: tessera_filter::Access,
     ) -> Result<TextLayer, ComposeError> {
+        let prose = paths
+            .prose
+            .as_ref()
+            .map(|p| {
+                tessera_filter::RecordBlob::open(&p.blocks, &p.hasrow, &p.directory, access)
+                    .map_err(|e| prose_unreadable(&paths.column, e))
+            })
+            .transpose()?;
         text_layer(
-            SortedDict::open(dict, access)?,
-            ColumnPostings::open(postings, access != tessera_filter::Access::Read)?,
-            column,
-            dict_rel,
-            Bitmap::deserialize::<croaring::Portable>(&std::fs::read(presence)?),
-            Some(dict_rel.to_string()),
+            SortedDict::open(&paths.dict, access)?,
+            ColumnPostings::open(&paths.postings, access != tessera_filter::Access::Read)?,
+            &paths.column,
+            &paths.dict_rel,
+            Bitmap::deserialize::<croaring::Portable>(&std::fs::read(&paths.presence)?),
+            Some(paths.dict_rel.clone()),
+            prose,
         )
+    }
+}
+
+fn prose_unreadable(column: &str, e: tessera_filter::RecordError) -> ComposeError {
+    match e {
+        tessera_filter::RecordError::Io(io) => ComposeError::Io(io),
+        malformed => {
+            ComposeError::RecordUnreadable(format!("the prose of column '{column}': {malformed}"))
+        }
     }
 }
 
@@ -343,6 +370,7 @@ fn text_layer(
     which: &str,
     present: Bitmap,
     dict_rel: Option<String>,
+    prose: Option<tessera_filter::RecordBlob>,
 ) -> Result<TextLayer, ComposeError> {
     if dict.len() != postings.record_count() {
         return Err(ComposeError::TermsAndPostingsDisagree {
@@ -357,6 +385,7 @@ fn text_layer(
         postings: Arc::new(postings),
         present,
         dict_rel,
+        prose: prose.map(Arc::new),
     })
 }
 
@@ -450,19 +479,26 @@ impl FilterColumns {
         self.placements.get(column).copied()
     }
 
-    /// Does any flushed `text` layer of `column` hold prose for `entity`? The scoped cell join's
-    /// fail-closed source for a text family, since it cannot compare a supplied string with a
-    /// stored one across a flush boundary; it checks occupancy instead. The base is not covered,
-    /// since it writes no presence file, so a cell whose only prose came from the build reads as
-    /// empty here.
-    pub(crate) fn text_present(&self, column: &str, entity: u32) -> bool {
+    /// The prose group-scoped text `column` holds for `entity`, or `None` where no layer holds
+    /// any.
+    pub(crate) fn scoped_prose(
+        &self,
+        column: &str,
+        entity: u32,
+    ) -> Result<Option<String>, tessera_filter::RecordError> {
         let Some(column) = self.columns.get(column) else {
-            return false;
+            return Ok(None);
         };
-        column
+        for prose in column
             .text_layers()
             .iter()
-            .any(|layer| layer.present.contains(entity))
+            .filter_map(|l| l.prose.as_deref())
+        {
+            if let Some(held) = prose.prose_of(entity)? {
+                return Ok(Some(held));
+            }
+        }
+        Ok(None)
     }
 
     /// The entity-space value `column` stores for `entity`, or `None` where no layer holds one:

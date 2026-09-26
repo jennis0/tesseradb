@@ -28,7 +28,12 @@ struct ColumnJob {
 }
 
 impl ColumnJob {
-    fn holds(&self, column: &str, view: Option<&str>, incarnation: Option<ViewIncarnation>) -> bool {
+    fn holds(
+        &self,
+        column: &str,
+        view: Option<&str>,
+        incarnation: Option<ViewIncarnation>,
+    ) -> bool {
         column == self.name && view == self.view.as_deref() && incarnation == self.incarnation
     }
 }
@@ -160,6 +165,77 @@ pub(super) fn fold_text_columns(
 
         out.wrote(dict_rel, dict_path);
         out.wrote(postings_rel, postings_path);
+        if job.view.is_some() {
+            fold_scoped_prose(plan, ctx, job, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Pass 4a, a group-scoped text column's prose: its base and every extent's merged into a new base
+/// without the tombstoned entities.
+fn fold_scoped_prose(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    job: &ColumnJob,
+    out: &mut FoldOutput,
+) -> Result<(), MaintenanceFailed> {
+    let unreadable = |e: &dyn std::fmt::Display| {
+        MaintenanceFailed(format!("pass 4a (text: the prose of '{}'): {e}", job.name))
+    };
+    let prose_rel = format!("{}/{}", job.rel, tessera_store::manifest::SCOPED_PROSE_DIR);
+    let names = [
+        tessera_filter::RECORD_BLOCKS_FILE,
+        tessera_filter::RECORD_HASROW_FILE,
+        tessera_filter::RECORD_DIRECTORY_FILE,
+    ];
+    let mut layers = Vec::new();
+    if job.has_base {
+        let from = ctx.from_prefix_dir.join(&prose_rel);
+        layers.push(
+            tessera_filter::RecordBlob::open_dir(&from, tessera_filter::Access::MappedSequential)
+                .map_err(|e| unreadable(&e))?,
+        );
+        out.read(&from, names);
+    }
+    for extent in plan
+        .text_extents
+        .iter()
+        .filter(|e| job.holds(&e.column, e.view.as_deref(), e.incarnation))
+    {
+        let Some(prose) = &extent.prose else {
+            return Err(MaintenanceFailed(format!(
+                "pass 4a (text): an extent of group-scoped column '{}' names no prose",
+                job.name
+            )));
+        };
+        layers.push(
+            tessera_filter::RecordBlob::open(
+                &ctx.from_prefix_dir.join(&prose.blocks),
+                &ctx.from_prefix_dir.join(&prose.hasrow),
+                &ctx.from_prefix_dir.join(&prose.directory),
+                tessera_filter::Access::MappedSequential,
+            )
+            .map_err(|e| unreadable(&e))?,
+        );
+    }
+    let to = ctx.to_prefix_dir.join(&prose_rel);
+    std::fs::create_dir_all(&to).map_err(|e| unreadable(&e))?;
+    let paths = names.map(|name| to.join(name));
+    match layers.is_empty() {
+        true => tessera_filter_write::write_prose(&paths[0], &paths[1], &paths[2], []),
+        false => tessera_filter_write::fold_record_blob(
+            &layers.iter().collect::<Vec<_>>(),
+            &plan.tombstones,
+            &paths[0],
+            &paths[1],
+            &paths[2],
+            tessera_filter::RECORD_BLOCK_TARGET,
+        ),
+    }
+    .map_err(|e| unreadable(&e))?;
+    for (name, path) in names.into_iter().zip(paths) {
+        out.wrote(format!("{prose_rel}/{name}"), path);
     }
     Ok(())
 }

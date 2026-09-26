@@ -127,8 +127,7 @@ pub fn check_attribute(
             spec.ty
         ));
     }
-    // A group-scoped column has no slot in the record blob, so the token index is the only place
-    // a scoped text column's values can live.
+    // A group-scoped text column's prose is kept with its token index, so it needs one.
     if spec.group_scoped && ty == ScalarType::Text && !spec.index {
         return Err(format!(
             "attribute '{name}': a group-scoped `text` column needs `index = true`"
@@ -450,7 +449,10 @@ mod tests {
 
     #[test]
     fn a_vocabulary_answers_its_width_and_bounds_its_reserved_codes() {
-        assert_eq!(check_vocabulary("dept", "u8", &[1, 255]), Ok(ScalarType::U8));
+        assert_eq!(
+            check_vocabulary("dept", "u8", &[1, 255]),
+            Ok(ScalarType::U8)
+        );
         assert!(check_vocabulary("dept", "u8", &[0]).is_err());
         assert!(check_vocabulary("dept", "u8", &[256]).is_err());
         assert!(check_vocabulary("dept", "u64", &[]).is_err());

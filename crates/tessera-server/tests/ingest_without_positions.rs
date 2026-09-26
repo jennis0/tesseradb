@@ -45,7 +45,11 @@ index  = true
 /// category, each of which a row without coordinates can set.
 async fn serve() -> Served {
     let served = Served::build(|dir| build_scored(dir, N, SCHEMA_TOML)).await;
-    declare(&served, json!({"name": "tag", "type": "keyword", "index": true})).await;
+    declare(
+        &served,
+        json!({"name": "tag", "type": "keyword", "index": true}),
+    )
+    .await;
     declare(
         &served,
         json!({"name": "dept", "type": "category", "vocabulary": "dept", "index": true}),
@@ -122,12 +126,7 @@ fn base64_of(text: &str) -> String {
 
 /// One `POST /control/ingest` request of rows without coordinates, with the view header where
 /// `view` says so.
-async fn values(
-    served: &Served,
-    batch_id: &str,
-    view: Option<&str>,
-    body: Value,
-) -> (u16, Value) {
+async fn values(served: &Served, batch_id: &str, view: Option<&str>, body: Value) -> (u16, Value) {
     let mut request = served
         .server
         .client
@@ -180,19 +179,6 @@ async fn item_fields(served: &Served, id: u64) -> Value {
     body["fields"].clone()
 }
 
-async fn status(served: &Served) -> Value {
-    let resp = served
-        .server
-        .client
-        .get(served.server.control_url("/control/status"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    resp.json().await.unwrap()
-}
-
 // ---------------------------------------------------------------------------------------------
 
 /// **A row without coordinates edits the item it names, restates, and names nothing it cannot
@@ -215,13 +201,21 @@ async fn rows_without_coordinates_edit_restate_and_create_nothing() {
     assert_eq!(status, 200, "the row is accepted: {answer}");
     assert_eq!(answer["rows"], 1);
     assert_eq!(answer["edited"], 1, "{answer}");
-    assert_eq!(ingested_ids(&answer), vec![id], "the item keeps its tessera_id");
+    assert_eq!(
+        ingested_ids(&answer),
+        vec![id],
+        "the item keeps its tessera_id"
+    );
     tick(&served.server).await;
 
     let fields = item_fields(&served, id).await;
     assert_eq!(fields["tag"], json!("alpha"), "{fields}");
     assert_eq!(fields["dept"], json!("ops"), "{fields}");
-    assert_eq!(fields["score"], json!(1.0), "a value the row left out is kept: {fields}");
+    assert_eq!(
+        fields["score"],
+        json!(1.0),
+        "a value the row left out is kept: {fields}"
+    );
 
     // A restatement under a fresh batch id changes nothing and is counted unchanged.
     let (status, answer) = values(
@@ -258,7 +252,10 @@ async fn rows_without_coordinates_edit_restate_and_create_nothing() {
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
     assert!(
-        answer["detail"].as_str().unwrap_or_default().contains("row 0"),
+        answer["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("row 0"),
         "the refusal names the row and not the id: {answer}"
     );
 }
@@ -323,12 +320,18 @@ async fn a_row_without_coordinates_mints_a_new_key_of_an_open_vocabulary() {
         json!([{"external_id": base64_of("subject"), "dept": "legal"}]),
     )
     .await;
-    assert_eq!(status, 422, "a closed vocabulary's unknown key is refused: {answer}");
+    assert_eq!(
+        status, 422,
+        "a closed vocabulary's unknown key is refused: {answer}"
+    );
 
     tick(&served.server).await;
     let fields = item_fields(&served, id).await;
     assert_eq!(fields["grade"], json!("g0"), "{fields}");
-    assert!(fields["dept"].is_null(), "the refused batch wrote nothing: {fields}");
+    assert!(
+        fields["dept"].is_null(),
+        "the refused batch wrote nothing: {fields}"
+    );
     assert_minted_key_is_listed(&served, "g0").await;
 
     let served = served.restart().await;
@@ -535,8 +538,13 @@ async fn a_row_naming_its_item_by_both_forms_or_neither() {
     assert_eq!(status, 200, "{answer}");
     assert_eq!(ingested_ids(&answer), vec![id]);
 
-    let (status, answer) =
-        values(&served, "values-neither", Some("s0"), json!([{"tag": "beta"}])).await;
+    let (status, answer) = values(
+        &served,
+        "values-neither",
+        Some("s0"),
+        json!([{"tag": "beta"}]),
+    )
+    .await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
     tick(&served.server).await;
@@ -562,7 +570,10 @@ async fn an_undeclared_column_is_refused_naming_the_column() {
     .await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
-    assert!(answer["detail"].as_str().unwrap().contains("'sentiment'"), "{answer}");
+    assert!(
+        answer["detail"].as_str().unwrap().contains("'sentiment'"),
+        "{answer}"
+    );
 
     // And a batch that names no view at all takes the same refusal, which is what keeps a scoped
     // column un-nameable without a header.

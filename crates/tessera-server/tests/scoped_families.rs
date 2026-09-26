@@ -617,7 +617,10 @@ async fn a_bare_scoped_leaf_off_the_group_names_the_group() {
         assert_eq!(resp.status().as_u16(), 422, "{filters}");
         let body: Value = resp.json().await.unwrap();
         assert_eq!(body["error"], "contract", "{body}");
-        assert!(body["detail"].as_str().unwrap().contains("quarter"), "{body}");
+        assert!(
+            body["detail"].as_str().unwrap().contains("quarter"),
+            "{body}"
+        );
     }
 }
 
@@ -933,7 +936,10 @@ async fn a_value_list_with_no_view_names_the_group() {
     assert_eq!(resp.status().as_u16(), 422);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "contract", "{body}");
-    assert!(body["detail"].as_str().unwrap().contains("quarter"), "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("quarter"),
+        "{body}"
+    );
 
     let resp = categories(&served, "sector@2027-Q9").await;
     assert_eq!(resp.status().as_u16(), 404);
@@ -1101,7 +1107,9 @@ const FILLER: Written = Written {
 fn scoped_batch(rows: &[(u64, f64, f64, Written)], nulls: &[&str]) -> Vec<u8> {
     use arrow::array::BinaryArray;
     let access = access_column(rows.iter().map(|_| "0"));
-    let nulls: Vec<&str> = std::iter::once("tone").chain(nulls.iter().copied()).collect();
+    let nulls: Vec<&str> = std::iter::once("tone")
+        .chain(nulls.iter().copied())
+        .collect();
     let mut fields = vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float64, false),
@@ -1112,7 +1120,11 @@ fn scoped_batch(rows: &[(u64, f64, f64, Written)], nulls: &[&str]) -> Vec<u8> {
         Field::new("note", DataType::Utf8, true),
         Field::new("score", DataType::Float32, true),
     ];
-    fields.extend(nulls.iter().map(|name| Field::new(*name, DataType::Utf8, true)));
+    fields.extend(
+        nulls
+            .iter()
+            .map(|name| Field::new(*name, DataType::Utf8, true)),
+    );
     let schema = Arc::new(ArrowSchema::new(fields));
     let ids: Vec<Vec<u8>> = rows.iter().map(|(e, ..)| external_id_of(*e)).collect();
     let null_column = || -> arrow::array::ArrayRef {
@@ -1569,7 +1581,14 @@ async fn family_answers(served: &Served, view: &str) -> Vec<BTreeSet<u64>> {
             answers.push(ids(served, view, Some(filter)).await);
         }
     }
-    answers.push(ids(served, view, Some(json!({"score": {"range": {"gte": THRESHOLD}}}))).await);
+    answers.push(
+        ids(
+            served,
+            view,
+            Some(json!({"score": {"range": {"gte": THRESHOLD}}})),
+        )
+        .await,
+    );
     answers
 }
 
@@ -1664,7 +1683,13 @@ async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
         .unwrap();
     assert_eq!(other.status().as_u16(), 201);
     served.token = token(&served, &["0", "1"]).await;
-    check_recreated(&served, "after another view is created", &expected, &untouched).await;
+    check_recreated(
+        &served,
+        "after another view is created",
+        &expected,
+        &untouched,
+    )
+    .await;
 
     let served = served.restart().await;
     check_recreated(&served, "after a restart", &expected, &untouched).await;
@@ -1674,11 +1699,12 @@ async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
     check_recreated(&served, "after a fold and a restart", &expected, &untouched).await;
 }
 
-/// An entity whose point lives in `2026-Q3` alone, for the fill below.
+/// An entity whose point lives in `2026-Q3` alone, for the edits below.
 const FILLED: u64 = 9_004;
 
-/// One `POST /control/values` JSON batch naming no view, addressed by external id.
-async fn values_without_view(
+/// One `POST /control/ingest` JSON row without coordinates and naming no view, addressed by
+/// external id.
+async fn row_without_view(
     served: &Served,
     batch_id: &str,
     wait: bool,
@@ -1691,9 +1717,9 @@ async fn values_without_view(
         row[name] = value.clone();
     }
     let path = if wait {
-        "/control/values?wait=visible"
+        "/control/ingest?wait=visible"
     } else {
-        "/control/values"
+        "/control/ingest"
     };
     let resp = served
         .server
@@ -1724,12 +1750,12 @@ async fn filled_answer(served: &Served, id: u64, column: &str, value: &str) -> (
 }
 
 /// **An entity-scoped cell needs no view header.** Its value is the entity's whichever view's
-/// flush writes it, so a values batch naming no view fills it on a deployment of five views, and
+/// flush writes it, so a row naming no view sets it on a deployment of five views, and
 /// the value is served under the one view the entity's point lives in: at once, after a restart
-/// that replays an unflushed fill from the log, and after a fold. A group-scoped column still
+/// that replays an unflushed edit from the log, and after a fold. A group-scoped column still
 /// needs the header, which is what says whose cell it is.
 #[tokio::test]
-async fn an_entity_scoped_fill_needs_no_view_header() {
+async fn an_entity_scoped_cell_needs_no_view_header() {
     let served = Served::build(build_families).await;
     for name in ["grade", "tier"] {
         let resp = served
@@ -1754,7 +1780,7 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
     drain(&served.server).await;
 
     let (status, answer) =
-        values_without_view(&served, "grade", true, json!({ "grade": "gold" })).await;
+        row_without_view(&served, "grade", true, json!({ "grade": "gold" })).await;
     assert_eq!(status, 200, "{answer}");
     assert_eq!(answer["visible"], json!(true), "{answer}");
     assert_eq!(
@@ -1763,12 +1789,15 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
     );
 
     let (status, answer) =
-        values_without_view(&served, "mood", false, json!({ "mood": "calm" })).await;
-    assert_eq!(status, 422, "a group-scoped cell still needs a view: {answer}");
+        row_without_view(&served, "mood", false, json!({ "mood": "calm" })).await;
+    assert_eq!(
+        status, 422,
+        "a group-scoped cell still needs a view: {answer}"
+    );
 
     // Left unflushed, so the restart has to replay it from the log.
     let (status, answer) =
-        values_without_view(&served, "tier", false, json!({ "tier": "upper" })).await;
+        row_without_view(&served, "tier", false, json!({ "tier": "upper" })).await;
     assert_eq!(status, 200, "{answer}");
     let served = served.restart().await;
     drain(&served.server).await;
@@ -1792,11 +1821,11 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
     );
 }
 
-/// **A group-scoped family's new key is minted by the values batch that names it**, on an open
+/// **A group-scoped family's new key is minted by the row without coordinates that names it**, on an open
 /// vocabulary no ingest has used, and the cell is served under its view after a flush and after a
 /// restart.
 #[tokio::test]
-async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
+async fn a_row_without_coordinates_mints_a_new_key_for_a_group_scoped_family() {
     let served = Served::build(build_families).await;
     let declarations = [
         (
@@ -1840,7 +1869,7 @@ async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
     let resp = served
         .server
         .client
-        .post(served.server.control_url("/control/values"))
+        .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "scoped-grade")
         .header("x-tessera-view", "quarter:2026-Q3")
@@ -1848,7 +1877,12 @@ async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().await.unwrap_or_default());
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "{}",
+        resp.text().await.unwrap_or_default()
+    );
     drain(&served.server).await;
     assert_eq!(scoped_grade(&served, id).await, (true, json!("g7")));
 
@@ -1863,5 +1897,8 @@ async fn scoped_grade(served: &Served, id: u64) -> (bool, Value) {
     let resp = post_item(&served.server, &served.token, id).await;
     assert_eq!(resp.status().as_u16(), 200);
     let card: Value = resp.json().await.unwrap();
-    (matched.contains(&id), card["scoped"]["grade"]["2026-Q3"].clone())
+    (
+        matched.contains(&id),
+        card["scoped"]["grade"]["2026-Q3"].clone(),
+    )
 }

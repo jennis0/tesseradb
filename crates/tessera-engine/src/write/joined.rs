@@ -108,47 +108,30 @@ pub(crate) fn flushed_terms_of(generation: &Generation, entity: EntityId) -> Opt
 }
 
 /// One already-flushed `(entity, attribute, key)` cell's value, at the shape a batch carries it
-/// in. `owner_view` is the cell's address, so a value written through a sharing group's door and
-/// one through the owner's are read from the one column. A family with no value column, or a
-/// `text` family (no per-entity value), answers `None`.
-///
-/// The condition is the **value column**, not the filter licence: a family declaring neither
-/// `index` nor `render` still has one, so its cell holds a value to compare against.
+/// in: a text family's prose, or the value column's value. `owner_view` is the cell's address, so a
+/// value written through a sharing group's door and one through the owner's are read from the one
+/// column.
 pub(crate) fn flushed_scoped_of(
     generation: &Generation,
     entity: EntityId,
     family: &tessera_store::manifest::ScopedScalar,
     owner_view: &str,
-) -> Option<tessera_lifecycle::WalScalar> {
-    if !crate::filter::scoped_has_value_column(family) {
-        return None;
-    }
-    let entity = u32::try_from(entity.raw()).ok()?;
-    let column = crate::filter::scoped_column_name(&family.name, owner_view);
-    let stored = generation.filter_columns.stored_value(&column, entity)?;
-    stored_as_wal(stored, &declared_of_scoped(family))
-}
-
-/// Does a flushed layer of this `(entity, attribute, key)` cell hold prose? A text family has no
-/// per-entity value for [`flushed_scoped_of`], so this asks occupancy instead of equality.
-/// `false` for every other family and for one with no filter surface.
-///
-/// Not built yet: the build's base writes no presence file, so a cell whose only prose came from
-/// the build reads as unoccupied.
-pub(crate) fn flushed_scoped_text_present(
-    generation: &Generation,
-    entity: EntityId,
-    family: &tessera_store::manifest::ScopedScalar,
-    owner_view: &str,
-) -> bool {
-    if !crate::filter::scoped_is_filterable(family) {
-        return false;
-    }
+) -> Result<Option<tessera_lifecycle::WalScalar>, crate::write::AcceptError> {
     let Ok(entity) = u32::try_from(entity.raw()) else {
-        return false;
+        return Ok(None);
     };
     let column = crate::filter::scoped_column_name(&family.name, owner_view);
-    generation.filter_columns.text_present(&column, entity)
+    if !family.has_value_column() {
+        return generation
+            .filter_columns
+            .scoped_prose(&column, entity)
+            .map(|prose| prose.map(tessera_lifecycle::WalScalar::Utf8))
+            .map_err(|e| crate::write::AcceptError::Unreadable(format!("'{column}': {e}")));
+    }
+    let Some(stored) = generation.filter_columns.stored_value(&column, entity) else {
+        return Ok(None);
+    };
+    Ok(stored_as_wal(stored, &declared_of_scoped(family)))
 }
 
 /// A scoped family as the entity-scoped declaration the absence and comparison helpers take: same
@@ -302,17 +285,20 @@ pub(crate) fn held_scoped_value(
     family: &tessera_store::manifest::ScopedScalar,
     declared: &tessera_store::manifest::DeclaredScalar,
     owner_view: &str,
-) -> Option<tessera_lifecycle::WalScalar> {
+) -> Result<Option<tessera_lifecycle::WalScalar>, crate::write::AcceptError> {
     let manifest = &generation.bundle.manifest;
     let held = |value: tessera_lifecycle::WalScalar| {
         (!scalar_is_absent(&value, declared)).then_some(value)
     };
-    generation
+    let buffered = generation
         .buffer
         .rows_of(entity)
         .filter(|item| crate::write::scoped_owner_view_of(manifest, &item.view) == owner_view)
-        .find_map(|item| item.scoped.get(at).cloned().and_then(held))
-        .or_else(|| flushed_scoped_of(generation, entity, family, owner_view).and_then(held))
+        .find_map(|item| item.scoped.get(at).cloned().and_then(held));
+    match buffered {
+        Some(value) => Ok(Some(value)),
+        None => Ok(flushed_scoped_of(generation, entity, family, owner_view)?.and_then(held)),
+    }
 }
 
 /// Whether `entity` can gain a row in `view` where it is: a flush places rows only above the

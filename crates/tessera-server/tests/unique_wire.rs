@@ -51,8 +51,16 @@ fn fixture(dir: &Path) -> std::path::PathBuf {
         &ids,
         scatter,
         vec![
-            column("gid", false, UInt64Array::from_iter_values(ids.iter().map(|e| gid_of(*e)))),
-            column("code", false, StringArray::from_iter_values(ids.iter().map(|e| code_of(*e)))),
+            column(
+                "gid",
+                false,
+                UInt64Array::from_iter_values(ids.iter().map(|e| gid_of(*e))),
+            ),
+            column(
+                "code",
+                false,
+                StringArray::from_iter_values(ids.iter().map(|e| code_of(*e))),
+            ),
         ],
     );
     write_pairs_n(&pairs, N);
@@ -197,7 +205,11 @@ async fn a_decimal_string_finds_an_integer_past_two_to_the_fifty_three() {
     let (status, one) = filtered(&served, json!({ "gid": { "eq": gid_of(0).to_string() } })).await;
     assert_eq!(status, 200);
     assert_eq!(one.len(), 1);
-    let (_, none) = filtered(&served, json!({ "gid": { "eq": (gid_of(0) + 1).to_string() } })).await;
+    let (_, none) = filtered(
+        &served,
+        json!({ "gid": { "eq": (gid_of(0) + 1).to_string() } }),
+    )
+    .await;
     assert!(none.is_empty(), "no item holds the odd neighbour");
     let asked: Vec<String> = (0..5).map(|e| gid_of(e).to_string()).collect();
     let (_, five) = filtered(&served, json!({ "gid": { "in": asked } })).await;
@@ -207,24 +219,19 @@ async fn a_decimal_string_finds_an_integer_past_two_to_the_fifty_three() {
 }
 
 /// **A row carrying a held value names its holder**: with an external id the holder does not
-/// carry, it would change the holder and is `409` naming the holder's `tessera_id`, and nothing
-/// is written; a batch setting one new value in two rows is `409` too.
+/// carry, it edits the holder, which keeps its `tessera_id`; a batch setting one new value in two
+/// rows is `409`.
 #[tokio::test]
 async fn a_row_carrying_a_held_value_names_the_holder() {
     let served = Served::build(fixture).await;
     let (_, holder) = filtered(&served, json!({ "gid": { "eq": gid_of(3).to_string() } })).await;
     let holder = *holder.iter().next().unwrap();
     let (status, body) = ingest(&served, "held", batch(&[("x1", gid_of(3), "fresh")])).await;
-    assert_eq!(status, 409, "{body}");
-    let detail = body["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains(&holder.to_string()), "{detail}");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["edited"], 1, "{body}");
+    assert_eq!(body["tessera_ids"][0], holder.to_string(), "{body}");
 
-    let (status, body) = ingest(
-        &served,
-        "twice",
-        batch(&[("x2", 7, "a"), ("x3", 7, "b")]),
-    )
-    .await;
+    let (status, body) = ingest(&served, "twice", batch(&[("x2", 7, "a"), ("x3", 7, "b")])).await;
     assert_eq!(status, 409, "one value in two rows: {body}");
 
     let (status, body) = ingest(&served, "free", batch(&[("x4", 7, "a")])).await;
@@ -237,7 +244,11 @@ async fn a_row_carrying_a_held_value_names_the_holder() {
 #[tokio::test]
 async fn unique_is_declared_and_removed_on_a_column_that_exists() {
     let served = Served::build(fixture).await;
-    let (status, body) = declare(&served, json!({ "name": "code", "type": "keyword", "unique": true })).await;
+    let (status, body) = declare(
+        &served,
+        json!({ "name": "code", "type": "keyword", "unique": true }),
+    )
+    .await;
     assert_eq!(status, 409, "{body}");
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
@@ -245,14 +256,29 @@ async fn unique_is_declared_and_removed_on_a_column_that_exists() {
         "the refusal names a value held twice: {body}"
     );
 
-    let (status, body) = declare(&served, json!({ "name": "gid", "type": "u64", "unique": false })).await;
+    let (status, body) = declare(
+        &served,
+        json!({ "name": "gid", "type": "u64", "unique": false }),
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     let (status, body) = ingest(&served, "same", batch(&[("y1", gid_of(3), "z")])).await;
-    assert_eq!(status, 200, "no longer unique, so the value names no item: {body}");
+    assert_eq!(
+        status, 200,
+        "no longer unique, so the value names no item: {body}"
+    );
     assert_eq!(body["created"], 1, "{body}");
-    let (status, body) = declare(&served, json!({ "name": "gid", "type": "u64", "unique": true })).await;
+    let (status, body) = declare(
+        &served,
+        json!({ "name": "gid", "type": "u64", "unique": true }),
+    )
+    .await;
     assert_eq!(status, 409, "two items hold the value now: {body}");
 
-    let (status, body) = declare(&served, json!({ "name": "f", "type": "f64", "unique": true })).await;
+    let (status, body) = declare(
+        &served,
+        json!({ "name": "f", "type": "f64", "unique": true }),
+    )
+    .await;
     assert_eq!(status, 422, "unique on a float: {body}");
 }
