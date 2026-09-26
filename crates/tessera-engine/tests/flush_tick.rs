@@ -121,7 +121,6 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
 
     // Buffered row: a second request publishes it without waiting out the deadline.
     let row = tessera_lifecycle::UnallocatedRow {
-        join_only: false,
         external_id: Some(b"prompt-flush".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -213,7 +212,7 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
         .accept_change(EntityId::new(entity), ChangeOp::Suppress)
         .expect("a suppression is accepted");
 
-    // The tick fires within a second; growth (the ChangeByEntity record) triggers a rotation,
+    // The tick fires within a second; growth (the ChangeBatch record) triggers a rotation,
     // whose reclaim deletes the original member — the buffer is empty, so the whole durable
     // prefix below the snapshot is reclaimable.
     wait_until(
@@ -271,7 +270,6 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
 
     for i in 0..4u8 {
         let row = tessera_lifecycle::UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("rows-trigger-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,

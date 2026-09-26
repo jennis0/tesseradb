@@ -866,7 +866,7 @@ async fn the_wait_is_bounded_and_says_so() {
     assert_eq!(resp.status().as_u16(), 200, "the write is not refused");
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["visible"], json!(false), "{body}");
-    assert_eq!(body["accepted"], json!(1), "the rows were taken: {body}");
+    assert_eq!(body["created"], json!(1), "the rows were taken: {body}");
 
     // The number stands, and the caller reaches it by reading status as it would have anyway.
     await_publication(&server, body["publication"].as_u64().unwrap()).await;
@@ -1030,7 +1030,7 @@ async fn an_unknown_wait_value_on_the_flush_is_refused() {
 
 // ---- The replay answer ---------------------------------------------------------------------------
 
-/// **A replayed page accepts nothing and says so** (write-path §2.4). `accepted` is the effect
+/// **A replayed page accepts nothing and says so** (write-path §2.4). `created` is the effect
 /// this submission had, so a client summing it over its pages is not made to double-count every
 /// page it retried; `tessera_ids` is the full list either way, which is what a caller correlates
 /// its rows by.
@@ -1041,7 +1041,7 @@ async fn a_replayed_page_accepts_nothing_and_says_so() {
 
     let ext = external_id_of(N_ITEMS + 1);
     let first = ingest_one(&server, "replay-1", &ext).await;
-    assert_eq!(first["accepted"], json!(1));
+    assert_eq!(first["created"], json!(1));
     assert!(
         first.get("replayed").is_none(),
         "a first submission carries no flag: {first}"
@@ -1050,7 +1050,7 @@ async fn a_replayed_page_accepts_nothing_and_says_so() {
     let second = ingest_one(&server, "replay-1", &ext).await;
     assert_eq!(second["replayed"], json!(true), "{second}");
     assert_eq!(
-        second["accepted"],
+        second["created"],
         json!(0),
         "the replay took no rows, so a client's sum stays honest: {second}"
     );

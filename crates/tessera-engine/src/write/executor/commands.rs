@@ -293,6 +293,8 @@ impl Executor {
             // `BatchState::Held` is unconstructible here and the answers are exactly `admit`'s.
             Command::Ingest {
                 rows,
+                slots,
+                keys,
                 batch_id,
                 body_hash,
                 artifacts,
@@ -304,6 +306,8 @@ impl Executor {
                     window,
                     IngestSubmission {
                         rows,
+                        slots,
+                        keys,
                         batch_id,
                         body_hash,
                         artifacts,
@@ -317,19 +321,13 @@ impl Executor {
             }
             // A window of one entry is exactly the per-command semantics, which is why there is
             // no second deny implementation to keep in step with the first.
-            Command::Change { entity, op, reply } => {
+            Command::Changes { changes, reply } => {
                 let mut entries = vec![DenyEntry {
-                    record: WalRecord::ChangeByEntity {
-                        entity_id: entity,
-                        op,
-                    },
-                    entity,
-                    op,
+                    changes,
                     reply: Some(reply),
                 }];
-                // The cascade rides this path too: a window of one is still a window, and a
-                // deletion admitted here that skipped it would strand every artifact depending on
-                // the one deleted.
+                // The cascade rides this path too: a deletion admitted here that skipped it would
+                // strand every artifact depending on the one deleted.
                 self.cascade_dependents(&mut entries);
                 self.commit_denies(entries)
             }
@@ -829,9 +827,7 @@ impl Executor {
                 return;
             }
             Err(crate::unique::Recheck::Stale) => {
-                reply.fail(ExecError::UniqueStale(Box::new(
-                    tessera_lifecycle::StaleSubmission::Values(request),
-                )));
+                reply.fail(ExecError::Stale);
                 return;
             }
         }
@@ -1007,20 +1003,10 @@ impl Executor {
             g.unique_live = Arc::new(unique_live);
         });
         self.publish(next, started);
-        // A values batch allocates no entity, so the index records none: the batch id and the
-        // body hash are the whole of what a retry is answered off. Indexed at the values record's
-        // own position, so the rotation that reclaims that record forgets the id with it, the
-        // horizon a restart rebuilds.
-        let identity = tessera_lifecycle::batch_identity(&values_record);
-        debug_assert_eq!(
-            identity,
-            Some(tessera_lifecycle::BatchIdentity {
-                batch_id: &request.batch_id,
-                body_hash: request.body_hash,
-                allocation: Vec::new(),
-            }),
-            "the accepted-batch index disagrees with the record it caches"
-        );
+        // A values batch answers no `tessera_id`s, so the index records none: the batch id and
+        // the body hash are the whole of what a retry is answered off. Indexed at the values
+        // record's own position, so the rotation that reclaims that record forgets the id with
+        // it, the horizon a restart rebuilds.
         self.live.record_accepted_batch(
             request.batch_id.clone(),
             request.body_hash,
@@ -1614,18 +1600,13 @@ impl Executor {
         // log is concerned.
         let deleted = dangling.len() as u64;
         if !dangling.is_empty() {
-            let mut entries: Vec<DenyEntry> = dangling
-                .into_iter()
-                .map(|entity| DenyEntry {
-                    record: WalRecord::ChangeByEntity {
-                        entity_id: entity,
-                        op: tessera_lifecycle::ChangeOp::Delete,
-                    },
-                    entity,
-                    op: tessera_lifecycle::ChangeOp::Delete,
-                    reply: None,
-                })
-                .collect();
+            let mut entries = vec![DenyEntry {
+                changes: dangling
+                    .into_iter()
+                    .map(|entity| (entity, tessera_lifecycle::ChangeOp::Delete))
+                    .collect(),
+                reply: None,
+            }];
             self.cascade_dependents(&mut entries);
             self.commit_denies(entries);
         }

@@ -1086,6 +1086,10 @@ impl Executor {
         let Some((view, plan)) = plan_to_dispatch(plans) else {
             return false;
         };
+        self.flush_flight = plan
+            .items
+            .last()
+            .map(|(entity, _)| (view.clone(), entity.raw() + 1));
 
         let context = {
             let Some(view_data) = partition_data.views.get(&view) else {
@@ -2198,6 +2202,10 @@ impl Executor {
         // A values-only publication substitutes the manifest and leaves the row space alone. It
         // wrote no segment, so there is nothing to rebase and nothing that could fail to; what it
         // publishes is the value extents its manifest now names.
+        let binds = completed
+            .segment
+            .as_ref()
+            .is_some_and(|segment| segment.locator_extent.is_some());
         let (seg_id, shape_pieces, tier, tier_tally, next_bundle) = match completed.segment {
             None => {
                 let bundle = match live.bundle.with_manifest(&completed.partition, published) {
@@ -2401,6 +2409,35 @@ impl Executor {
             );
             Arc::new(unique_live)
         };
+        // The sidecar gains the locator extent this flush wrote, so an item it created with no
+        // external id is answered as having none rather than as unknown.
+        let external_index = match next_bundle.partitions.get(&completed.partition) {
+            Some(partition) if binds => match crate::engine::ExternalIdIndex::open(
+                &next_bundle.manifest,
+                &partition.manifest,
+                &self.prefix_dir(&live),
+            ) {
+                Ok(index) => Arc::new(index),
+                Err(e) => {
+                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a flush's side-manifest was committed naming an external-id \
+                         locator extent this process could not open; a restart opens the \
+                         committed manifest"
+                    );
+                    return false;
+                }
+            },
+            _ => Arc::clone(&live.external_index),
+        };
+        if binds {
+            // Remembered as a coalesce's outgoing sidecar is: see `superseded_sidecars`.
+            self.superseded_sidecars
+                .retain(|held| held.strong_count() > 0);
+            self.superseded_sidecars
+                .push(Arc::downgrade(&live.external_index));
+        }
         self.unique_declarations
             .flushed(&completed.consumed, &completed.filled);
         let next = Arc::new(live.with(|g| {
@@ -2415,6 +2452,7 @@ impl Executor {
             g.buffer = Arc::new(buffer);
             g.unique = unique;
             g.unique_live = unique_live;
+            g.external_index = external_index;
         }));
         // Armed before the swap, and that ordering is the mechanism. A request landing between
         // the swap and the pool task's first insert must find the flag set, or it takes the cost

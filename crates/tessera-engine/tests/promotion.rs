@@ -119,7 +119,6 @@ fn reader_at(tmp: &Path, root: &Path) -> Engine {
 fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> EntityId {
     let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,

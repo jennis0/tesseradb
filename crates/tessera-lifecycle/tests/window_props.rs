@@ -13,12 +13,11 @@ use proptest::prelude::*;
 use tessera_lifecycle::alloc::Allocator;
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalRecord;
-use tessera_lifecycle::window::{CommitWindow, FragmentationTally, WindowEntry};
+use tessera_lifecycle::window::{CommitWindow, FragmentationTally, Slot, WindowClaims, WindowEntry};
 use tessera_types::TermId;
 
 fn row(key: &str, terms: &[u32]) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(key.as_bytes().to_vec()),
         view: "default".to_string(),
         join: None,
@@ -70,17 +69,19 @@ proptest! {
                     .enumerate()
                     .map(|(i, t)| row(&format!("w{w}-e{e}-r{i}"), &[*t]))
                     .collect();
-                window.push(WindowEntry {
+                window.push(
+                    WindowEntry {
+                    slots: (0..rows.len() as u32).map(Slot::Written).collect(),
                     rows,
                     batch_id: format!("w{w}-e{e}"),
                     body_hash: [0u8; 32],
                     memberships: Vec::new(),
                 edges: Vec::new(),
                     waiters: vec![()],
-                });
+                }, WindowClaims::default());
             }
             let rows_in_window = window.rows();
-            let (closed, _) = window.allocate(&mut alloc).expect("the id space is not exhausted");
+            let (closed, _) = window.allocate(&mut alloc, |e| e.raw()).expect("the id space is not exhausted");
 
             let mut issued: Vec<u64> = Vec::new();
             for entry in &closed {
@@ -122,17 +123,19 @@ proptest! {
 
         let mut chunked: CommitWindow<()> = CommitWindow::new(0);
         for (c, part) in rows.chunks(chunk).enumerate() {
-            chunked.push(WindowEntry {
+            chunked.push(
+                WindowEntry {
+                slots: (0..part.len() as u32).map(Slot::Written).collect(),
                 rows: part.to_vec(),
                 batch_id: format!("c{c}"),
                 body_hash: [0u8; 32],
                 memberships: Vec::new(),
                 edges: Vec::new(),
                 waiters: vec![()],
-            });
+            }, WindowClaims::default());
         }
         let chunked_ids: Vec<u64> = chunked
-            .allocate(&mut Allocator::new(9))
+            .allocate(&mut Allocator::new(9), |e| e.raw())
             .unwrap()
             .0
             .iter()
@@ -140,16 +143,18 @@ proptest! {
             .collect();
 
         let mut whole: CommitWindow<()> = CommitWindow::new(0);
-        whole.push(WindowEntry {
+        whole.push(
+            WindowEntry {
+            slots: (0..rows.len() as u32).map(Slot::Written).collect(),
             rows,
             batch_id: "one".into(),
             body_hash: [0u8; 32],
             memberships: Vec::new(),
                 edges: Vec::new(),
             waiters: vec![()],
-        });
+        }, WindowClaims::default());
         let whole_ids: Vec<u64> = whole
-            .allocate(&mut Allocator::new(9))
+            .allocate(&mut Allocator::new(9), |e| e.raw())
             .unwrap()
             .0
             .iter()
@@ -199,15 +204,17 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
             // One window per `chunk` rows; the window's scope is the only thing that differs
             // between the three arms.
             let mut window: CommitWindow<()> = CommitWindow::new(0);
-            window.push(WindowEntry {
+            window.push(
+                WindowEntry {
+                slots: (0..group.len() as u32).map(Slot::Written).collect(),
                 rows: group.to_vec(),
                 batch_id: "b".into(),
                 body_hash: [0u8; 32],
                 memberships: Vec::new(),
                 edges: Vec::new(),
                 waiters: vec![()],
-            });
-            for entry in window.allocate(&mut alloc).unwrap().0 {
+            }, WindowClaims::default());
+            for entry in window.allocate(&mut alloc, |e| e.raw()).unwrap().0 {
                 for (row, id) in group.iter().zip(entry.entity_ids.iter()) {
                     postings[row.terms[0].raw() as usize].push(id.raw());
                 }
@@ -290,15 +297,17 @@ fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_cei
         let mut total = FragmentationTally::default();
         for group in corpus.chunks(chunk) {
             let mut window: CommitWindow<()> = CommitWindow::new(0);
-            window.push(WindowEntry {
+            window.push(
+                WindowEntry {
+                slots: (0..group.len() as u32).map(Slot::Written).collect(),
                 rows: group.to_vec(),
                 batch_id: "b".into(),
                 body_hash: [0u8; 32],
                 memberships: Vec::new(),
                 edges: Vec::new(),
                 waiters: vec![()],
-            });
-            let (_, tally) = window.allocate(&mut alloc).unwrap();
+            }, WindowClaims::default());
+            let (_, tally) = window.allocate(&mut alloc, |e| e.raw()).unwrap();
             total.merge(tally);
         }
         (

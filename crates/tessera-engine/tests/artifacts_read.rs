@@ -1305,7 +1305,6 @@ fn ingest_at(engine: &Engine, batch: &str, places: &[(f64, f64)]) -> Vec<EntityI
         .iter()
         .enumerate()
         .map(|(i, &(x, y))| tessera_lifecycle::UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("{batch}-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,

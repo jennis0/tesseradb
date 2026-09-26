@@ -60,6 +60,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
     {
         let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            receipt: Vec::new(),
             batch_id: "over-the-top".to_string(),
             body_hash: [0u8; 32],
             rows: vec![tessera_lifecycle::WalRow {

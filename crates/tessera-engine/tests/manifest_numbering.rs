@@ -90,7 +90,6 @@ fn a_flush_publishes_above_a_side_manifest_a_second_writer_left() {
     .unwrap();
 
     let row = tessera_lifecycle::UnallocatedRow {
-        join_only: false,
         external_id: Some(b"above-the-planted-manifest".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -185,7 +184,6 @@ fn an_executor_seeds_above_a_side_manifest_no_manifest_names() {
         .expect("the executor starts once");
 
     let row = tessera_lifecycle::UnallocatedRow {
-        join_only: false,
         external_id: Some(b"after-the-seed".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -259,7 +257,6 @@ fn a_refused_publication_re_plans_above_the_number_it_was_refused_at() {
     let prefix = engine.generation().prefix.clone();
     let dir = partition_dir(&root, &prefix);
     let row = tessera_lifecycle::UnallocatedRow {
-        join_only: false,
         external_id: Some(b"refused-then-published".to_vec()),
         view: "s0".to_string(),
         join: None,

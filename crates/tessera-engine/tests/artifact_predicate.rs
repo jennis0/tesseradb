@@ -272,7 +272,6 @@ fn ingest_point_into(
     let ids = engine
         .accept_ingest(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,

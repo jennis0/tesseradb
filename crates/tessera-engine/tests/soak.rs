@@ -112,7 +112,6 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         // visibility assertion below would then be measuring that rule instead of the merge's.
         let descriptors = vec![b"0".to_vec(), format!("soak-term-{round}").into_bytes()];
         let row = UnallocatedRow {
-            join_only: false,
             external_id: Some(external_id.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
@@ -281,7 +280,6 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
         let external_id = format!("soak-{round}");
         let descriptors = vec![b"0".to_vec(), format!("soak-term-{round}").into_bytes()];
         let row = UnallocatedRow {
-            join_only: false,
             external_id: Some(external_id.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,

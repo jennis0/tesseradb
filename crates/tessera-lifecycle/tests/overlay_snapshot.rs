@@ -122,9 +122,8 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
 
     {
         let (mut wal, _) = Wal::open(&path).unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: EntityId::new(8),
-            op: ChangeOp::Delete,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(EntityId::new(8), ChangeOp::Delete)],
         })
         .unwrap();
         wal.append(&WalRecord::OverlaySnapshot {

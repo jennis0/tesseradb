@@ -59,6 +59,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
     {
         let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            receipt: Vec::new(),
             batch_id: "pre-existing".to_string(),
             body_hash: [1u8; 32],
             rows: vec![WalRow {
@@ -104,7 +105,6 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
 
     // Ingest is refused at the engine boundary, before anything is acked or WAL-durable.
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"refused-on-stepdown".to_vec()),
         view: "s0".to_string(),
         join: None,

@@ -111,20 +111,13 @@ impl<T> Pending<T> {
 /// What one accepted ingest batch did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ingested {
-    /// One `EntityId` per submitted row, in the caller's submitted row order, not the
-    /// signature-sorted order the IDs were assigned in. The handler turns each into a
-    /// `tessera_id` for the response, the only reason an entity ID is materialised outside the
-    /// engine at all.
-    pub(crate) entity_ids: Vec<EntityId>,
-    /// How many artifacts this batch's membership column created: a key no artifact held, on a
-    /// layer whose `value_set` is open. Zero for every batch that named none, which is every batch
-    /// that carries no membership column and every one whose keys all existed.
-    ///
-    /// Reported because minting is not undoable: a typo creates a permanent object rather than
-    /// being refused, and the mitigation is that the caller who made it is told, in the same 200
-    /// that accepted the rows. A replayed batch reports zero: the count is what this submission
-    /// created, and a duplicate batch id creates nothing.
+    /// One per row of the request, in request order.
+    pub(crate) receipt: Vec<tessera_lifecycle::RowReceipt>,
+    /// How many artifacts this batch's membership columns created: a key no artifact held, on a
+    /// layer whose `value_set` is open. Reported because a minted artifact cannot be undone.
     pub(crate) minted: u64,
+    /// The batch id was accepted earlier with this body, and `receipt` is that acceptance's.
+    pub(crate) replayed: bool,
 }
 
 /// What one vocabulary declaration did.
@@ -173,26 +166,29 @@ pub struct ViewDropped {
 /// resolves at the boundary, because a `tessera_id` means nothing without its key. Large payloads
 /// are boxed so one variant does not set the size of every command in the queue.
 pub(crate) enum Command {
-    /// An accepted `/control/ingest` batch. `batch_id` and `body_hash` are the idempotency key.
-    /// The answer is the entity per row, in the caller's order, and how many artifacts it minted.
+    /// An accepted `/control/ingest` batch, resolved by its handler. `batch_id` and `body_hash`
+    /// are the idempotency key. The answer is what each row of the request became.
     Ingest {
+        /// The rows the batch writes: items it creates, and items it adds to its view.
         rows: Vec<UnallocatedRow>,
+        /// One per row of the request: the written row it became, or the item it left unchanged.
+        slots: Vec<tessera_lifecycle::Slot>,
+        /// The unique values the created rows set, as `(declared position, key widened)`.
+        keys: Vec<(u16, u128)>,
         batch_id: String,
         body_hash: [u8; 32],
-        /// The artifacts this batch's rows named in a column named for a layer, empty for a batch
-        /// that named none. Resolved and grown when the window closes, in the same commit as the
-        /// rows, so there is no state in which a point is ingested and its membership is not.
+        /// The artifacts the written rows name in a column named for a layer. Resolved and grown
+        /// when the window closes, in the same commit as the rows.
         artifacts: BatchArtifacts,
-        /// The live unique entries' sequence number the handler checked this batch's unique values
-        /// at; the executor re-checks them against the entries added since.
+        /// The live unique entries' sequence number the handler resolved the batch at; the
+        /// executor re-checks the created rows' values against the entries added since.
         unique_seq: u64,
         reply: Reply<Ingested>,
     },
-    /// One accepted `/control/changes` entry. The only command on the deny lane
+    /// One accepted `/control/changes` request, applied whole. The only command on the deny lane
     /// ([`Command::is_never_shed`]).
-    Change {
-        entity: EntityId,
-        op: ChangeOp,
+    Changes {
+        changes: Vec<(EntityId, ChangeOp)>,
         reply: Reply<()>,
     },
     /// Register an annotation layer. The answer is the layer's own entity, which the handler turns
@@ -295,7 +291,7 @@ impl Command {
     /// unrefusable answer to. There is no `submit_deny` to reach for instead: the lane follows the
     /// command, and this function is the whole of the rule.
     pub(crate) fn is_never_shed(&self) -> bool {
-        matches!(self, Command::Change { .. })
+        matches!(self, Command::Changes { .. })
     }
 }
 
@@ -314,9 +310,8 @@ mod tests {
                 #[cfg(feature = "fault-injection")]
                 None,
             );
-            let cmd = Command::Change {
-                entity: EntityId::new(1),
-                op,
+            let cmd = Command::Changes {
+                changes: vec![(EntityId::new(1), op)],
                 reply,
             };
             assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
@@ -328,6 +323,8 @@ mod tests {
             );
         let ingest = Command::Ingest {
             rows: Vec::new(),
+            slots: Vec::new(),
+            keys: Vec::new(),
             batch_id: "b".into(),
             body_hash: [0u8; 32],
             artifacts: Default::default(),

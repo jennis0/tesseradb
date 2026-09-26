@@ -1084,10 +1084,10 @@ class Write(Stage):
         resp = h.server.ingest(self._body, self._batch_id)
         if resp.status_code != 200:
             raise RuntimeError(f"ingest refused ({resp.status_code}): {resp.text}")
-        accepted = resp.json().get("accepted")
-        if accepted != len(self._fx_keys):
+        created = resp.json().get("created")
+        if created != len(self._fx_keys):
             raise RuntimeError(
-                f"ingest accepted {accepted} rows where the batch carried {len(self._fx_keys)}"
+                f"ingest created {created} items where the batch carried {len(self._fx_keys)} rows"
             )
 
     def apply(self, h: SuiteHarness) -> None:

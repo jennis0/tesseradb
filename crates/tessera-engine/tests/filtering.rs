@@ -621,7 +621,6 @@ fn ingest_and_flush_with(
 ) -> u64 {
     let flushes_before = engine.write_executor_stats().flushes;
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1258,7 +1257,6 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
 
     let long = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"long".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1294,7 +1292,6 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     );
 
     let short = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"short".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1315,7 +1312,6 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     // The engine is still usable — a refusal before the submit acks nothing, burns no entity id
     // (I9) and leaves the executor running.
     let good = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"good".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1811,7 +1807,6 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
 
     // Accepted and acked, deliberately *not* flushed — so it is in the candidate and in no layer.
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(b"buffered".to_vec()),
         view: "s0".to_string(),
         join: None,

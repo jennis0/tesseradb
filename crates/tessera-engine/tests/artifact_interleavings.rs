@@ -208,7 +208,6 @@ fn body_hash(seed: &str) -> [u8; 32] {
 fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
     let descriptors = vec![b"0".to_vec()];
     UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,

@@ -10,8 +10,9 @@ order matters for existence and for nothing else.
 two therefore cannot disagree about what would be sent.
 
 **The plan is built from what was inserted and what the database says it holds.** The SDK keeps no
-record of what it sent: a table goes as it was inserted, and a row the database already holds is a
-`409` on that page which the report carries. What the database has already been told is read from
+record of what it sent: a table goes as it was inserted. A row naming by its id an item the
+database holds, and carrying what the item stores, changes nothing and is counted as already
+present; one that would change the item is a `409` on that page which the report carries. What the database has already been told is read from
 `/v1/meta` rather than from a log: its views, its groups and its layers. A re-run of a
 cell is a re-run.
 
@@ -1243,9 +1244,12 @@ def _fold(report, page: Page, answer: Answer) -> None:
         return
     if page.kind == "points":
         view = page.view or ""
+        # A row that created an item or added one to the view is added here; one that named an
+        # item and changed nothing is already present.
         report.rows_accepted[view] = report.rows_accepted.get(view, 0) + int(
-            body.get("accepted", 0)
-        )
+            body.get("created", 0)
+        ) + int(body.get("added", 0))
+        report.already_present += int(body.get("unchanged", 0))
         report.artifacts_minted += int(body.get("minted", 0))
         report.tessera_ids += body.get("tessera_ids", [])
         report.clipped += int(body.get("clipped", 0))

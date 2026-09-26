@@ -141,9 +141,9 @@ The one place a name is matched is an attribute's value column: the attribute wa
 column of its name in the frame inserted into the **allocation view** fills it, as SQL's `INSERT BY
 NAME` does. At the first commit, attribute-named columns on any other view's insert are ignored,
 since the build reads an attribute from one file. After it, every view's points carry the declared
-columns their frame holds, a group's scoped ones included, and a row that creates an item must
-carry every declared column, with nulls (`pa.nulls(n)`) where it has no value; the SDK adds none
-itself, and the server's refusal names a column left out. `columns={attribute: column}` names
+columns their frame holds, a group's scoped ones included. A column left out of a page leaves the
+value as it is: a new item has none there, and an item the row names keeps what it holds. A null
+clears a value. The SDK adds no column itself. `columns={attribute: column}` names
 one explicitly, on the allocation view's insert and, after the first commit, on any view's. The
 first commit reads each attribute from one table, the allocation view's frame or the attribute's
 own insert, and that table holds a row for every item, with nulls where it has no value; the build

@@ -212,10 +212,11 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
 ):
     """§3: a re-run of a cell is a re-run, and the database is what says the rows are there.
 
-    The SDK keeps no record of what it sent, so the same frame inserted again is sent again — as a
-    **new request**, under a fresh batch id (§6.4, owner ruling 2026-09-18). What happens then is
-    the server's to decide, and here every id on the page is one the database holds, so the page is
-    a `409` on the whole of it, reported by the page it refused and applied nowhere.
+    The SDK keeps no record of what it sent, so the same frame inserted again is sent again, as a
+    new request under a fresh batch id. Every row names by its id an item the database holds and
+    carries what that item stores, so the page changes nothing and every row is already present.
+    The same rows moved a little would change the items' positions, and editing an item is not
+    available yet, so that page is a `409` on the whole of it.
     """
     db = notebook(served, corpus)
     delta = new_papers(db)
@@ -228,20 +229,17 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
     plan = db.check()
     # One page, and the flush that publishes it.
     assert len(plan.plan) == 2 and plan.plan[0].startswith("points"), plan
-    with pytest.raises(Refusal) as raised:
-        db.commit()
-    refused = raised.value.report
-    assert [r["status"] for r in refused.refusals] == [409]
-    assert refused.rows_accepted == {}
-    assert not refused.replayed, refused
+    again = db.commit()
+    assert again.ok, again
+    assert again.rows_accepted == {"s0": 0} and again.already_present == len(NEW_IDS), again
+    assert not again.replayed, again
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
-    # The same rows moved a little: the ids are still ones the database holds, and the answer is
-    # the same refusal. Nothing about the bytes decides it.
     insert_the_new_papers(db, x_offset=0.5)
     with pytest.raises(Refusal) as raised:
         db.commit()
     assert [r["status"] for r in raised.value.report.refusals] == [409]
+    assert raised.value.report.rows_accepted == {}
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
 
@@ -249,9 +247,8 @@ def test_the_same_id_less_frame_committed_three_times_lands_three_times(served, 
     """**Five loads for five commits** (owner ruling, 2026-09-18).
 
     A request's identity is an id the client chose, never a hash of what it carries, so committing
-    the same id-less frame again is a second load and not a replay. The SDK's id used to be derived
-    from the page's bytes, which answered the second commit `replayed: true, accepted: 0` and
-    inserted nothing — a user testing a loader by running the cell again saw one load.
+    the same id-less frame again is a second load and not a replay: a row with no id names no item,
+    so each commit creates its rows again.
     """
     db = notebook(served, corpus)
     before = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
@@ -285,11 +282,11 @@ def test_a_retried_request_inside_one_commit_is_a_replay_and_lands_nothing(serve
     assert not findings, findings
     page = next(p for p in pages if p.kind == "points")
     first = control.ingest(page.body, page.batch, page.view)
-    assert first.ok and first.body["accepted"] == len(NEW_IDS), first
+    assert first.ok and first.body["created"] == len(NEW_IDS), first
     retry = control.ingest(page.body, page.batch, page.view)
     assert retry.ok, retry
     assert retry.body["replayed"] is True, retry.body
-    assert retry.body["accepted"] == 0, retry.body
+    assert retry.body["created"] == 0, retry.body
     assert retry.body["tessera_ids"] == first.body["tessera_ids"], retry.body
 
     control.flush(wait=True)
@@ -462,18 +459,16 @@ def rows(ids, x0: float = 20.0, **columns) -> pa.Table:
     )
 
 
-def test_a_later_insert_of_new_items_without_a_declared_column_is_refused_naming_it(
+def test_a_later_insert_of_new_items_without_a_declared_column_creates_them_without_it(
     served, corpus
 ):
     """The SDK adds no column: a frame of new items without `score` reaches the server as it
-    was given, and the refusal the user reads names the column."""
+    was given, and the items are created holding no value in it."""
     db = served(small)
     db.insert("map", rows(["s0", "s1"]), id="id", x="x", y="y", access="labels")
-    with pytest.raises(Refusal) as raised:
-        db.commit()
-    refusals = raised.value.report.refusals
-    assert [refusal["status"] for refusal in refusals] == [422]
-    assert "'score'" in refusals[0]["detail"]
+    report = db.commit()
+    assert report.ok, report
+    assert report.rows_accepted == {"map": 2}
 
 
 def test_a_column_declared_after_the_first_commit_travels_with_the_rows_that_carry_it(

@@ -23,7 +23,6 @@ const WAIT: Duration = Duration::from_secs(30);
 fn ingest_rows(engine: &Engine, batch: &str, n: usize) {
     let rows: Vec<tessera_lifecycle::UnallocatedRow> = (0..n)
         .map(|i| tessera_lifecycle::UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("{batch}-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,

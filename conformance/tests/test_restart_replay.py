@@ -440,7 +440,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
         resp = srv.ingest(batch_body, BATCH_ID)
         assert resp.status_code == 200, resp.text
         ingest_body = resp.json()
-        assert ingest_body["accepted"] == 3
+        assert ingest_body["created"] == 3
 
         status_after_ingest = srv.status()
         high_water_after_ingest = status_after_ingest["entity_id_high_water"]
@@ -517,11 +517,11 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
             resp2 = srv2.ingest(batch_body, BATCH_ID)
             assert resp2.status_code == 200, resp2.text
             replay_body = resp2.json()
-            # A replay takes no rows, and says so (contracts §3.4). `accepted` is the effect this
-            # submission had, so a client summing it over its pages is not made to double-count a
-            # page it retried; the identifiers come back in full either way, which is what the
-            # caller correlates its rows by, and they are the ones the first acceptance minted.
-            assert replay_body["accepted"] == 0, replay_body
+            # A replay takes no rows, and says so. `created` is the effect this submission had, so
+            # a client summing it over its pages is not made to double-count a page it retried;
+            # the identifiers come back in full either way, and they are the ones the first
+            # acceptance gave.
+            assert replay_body["created"] == 0, replay_body
             assert replay_body["replayed"] is True, replay_body
             assert replay_body["tessera_ids"] == ingest_body["tessera_ids"], replay_body
 

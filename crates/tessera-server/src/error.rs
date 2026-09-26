@@ -317,10 +317,6 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::BatchConflict { batch_id }) => ApiError::Conflict(format!(
             "batch id '{batch_id}' was already accepted with a different body"
         )),
-        AcceptError::Exec(ExecError::DuplicateExternalId { count }) => ApiError::Conflict(format!(
-            "{count} row(s) name an external id this deployment already knows; the batch had no \
-             effect"
-        )),
         AcceptError::Exec(e @ (ExecError::Wal(_) | ExecError::Alloc(_))) => {
             tracing::error!(detail = %e, "the write executor refused; answering fail-closed");
             ApiError::FailClosed(
@@ -345,8 +341,6 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::ViewRefused { detail }) => ApiError::Contract(detail),
         AcceptError::Exec(ExecError::ViewConflict { detail }) => ApiError::Conflict(detail),
         AcceptError::Exec(ExecError::ViewUnknown { detail }) => ApiError::Unknown(detail),
-        // The detail names a row index, a column and a view key, and nothing else.
-        AcceptError::Exec(ExecError::JoinRefused { detail }) => ApiError::Conflict(detail),
         // A refused declaration is corrected and resent. A name held under another identity cannot
         // be had, since a column's width is baked into every row. Neither took effect.
         AcceptError::Exec(ExecError::AttributeRefused { detail }) => {
@@ -366,7 +360,10 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // The detail names the values and the holders' `tessera_id`s, never an entity id.
         AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
         // Reached only where the handler's one re-check was stale too.
-        AcceptError::Exec(e @ ExecError::UniqueStale(_)) => ApiError::Conflict(e.to_string()),
+        AcceptError::Exec(e @ ExecError::Stale) => ApiError::Conflict(e.to_string()),
+        // The detail names rows by position, values as sent and items by `tessera_id`.
+        AcceptError::Conflict(detail) => ApiError::Conflict(detail),
+        AcceptError::Contract(detail) => ApiError::Contract(detail),
         // 404, as an unknown view is on every plane.
         AcceptError::UnknownView { view, .. } => {
             ApiError::Unknown(format!("unknown view '{view}'"))
@@ -385,143 +382,56 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
     }
 }
 
-/// The answer for a whole `/control/changes` batch, folded over every item rather than taken from
-/// the first failure. A 500 if anything may have taken effect, since a 503 says the node took
-/// nothing; otherwise a 503. Never a 429, since `/control/changes` is never shed. The detail says
-/// whether something may be in force and whether something was not applied. `None` when nothing
-/// failed.
+/// The answer for a `/control/changes` request that failed: a 503 where it never reached the
+/// executor, and otherwise a 500, since the request is one record and may be in force. Never a
+/// 429, since `/control/changes` is never shed. The detail says whether a change may be in force:
+/// a lost receipt may have completed in full, and a failed log write applies every deletion and
+/// suppression in the request anyway.
 pub fn map_change_batch_error(
-    failures: &[(tessera_lifecycle::ChangeOp, tessera_engine::AcceptError)],
-    applied: usize,
-) -> Option<ApiError> {
-    if failures.is_empty() {
-        return None;
-    }
-
-    // Derived here, not passed in, so no caller can turn a partly applied batch into a 503.
-    let BatchOutcome {
-        reached_executor,
-        may_be_in_force,
-        some_not_applied,
-    } = fold_change_failures(failures, applied);
-    if !reached_executor {
-        tracing::error!(
-            failures = failures.len(),
-            "no item in this change batch reached the write executor; answering 503 not-ready"
-        );
-        return Some(ApiError::NotReady);
-    }
-
+    ops: &[tessera_lifecycle::ChangeOp],
+    failure: tessera_engine::AcceptError,
+) -> ApiError {
+    let Some(may_be_in_force) = change_request_in_force(ops, &failure) else {
+        tracing::error!(detail = %failure, "a change request did not reach the write executor; answering 503 not-ready");
+        return ApiError::NotReady;
+    };
     tracing::error!(
-        failures = failures.len(),
-        applied,
+        detail = %failure,
         may_be_in_force,
-        some_not_applied,
-        "a change batch did not complete; answering fail-closed"
+        "a change request did not complete; answering fail-closed"
     );
-
-    let mut detail = String::from("this change request was attempted in full and did not complete");
+    let mut detail = String::from("this change request did not complete");
     if may_be_in_force {
-        // "May be": an applied item is durable, and a lost receipt may have completed in full; only
-        // a deny applied after a failed WAL write is in force without being durable.
         detail.push_str(
-            "; a change in it may be in force, so do not treat this as a no-op",
+            "; a deletion or suppression in it may be in force, so do not treat this as a no-op",
         );
     }
-    if some_not_applied {
-        detail.push_str(
-            "; at least one item was not applied, so re-submit the whole request",
-        );
-    }
-    Some(ApiError::FailClosed(detail))
+    detail.push_str("; send the whole request again");
+    ApiError::FailClosed(detail)
 }
 
-/// Where one failed change stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChangeFailure {
-    /// Refused before it reached the executor: certainly not applied.
-    BeforeExecutor,
-    /// Reached the executor and may be in force: a deny applied anyway, or a lost receipt.
-    MayBeInForce,
-    /// Reached the executor and was not applied.
-    NotApplied,
-}
-
-fn classify_change_failure(
-    op: tessera_lifecycle::ChangeOp,
+/// Whether a failed change request may be in force, or `None` where it never reached the
+/// executor. A lost receipt may have completed in full. A failed log write applies every deletion
+/// and suppression anyway, and no unsuppression: applied without durability, one would re-expose
+/// an item replay still hides.
+fn change_request_in_force(
+    ops: &[tessera_lifecycle::ChangeOp],
     failure: &tessera_engine::AcceptError,
-) -> ChangeFailure {
+) -> Option<bool> {
     use tessera_engine::AcceptError;
-    match failure {
-        AcceptError::Exec(e) if exec_failure_may_be_in_force(op, e) => ChangeFailure::MayBeInForce,
-        AcceptError::Exec(_) => ChangeFailure::NotApplied,
-        // A `Submit` failure reached the executor exactly when non-enqueue is not proven.
-        AcceptError::Submit(e) if e.may_have_taken_effect() => ChangeFailure::MayBeInForce,
-        AcceptError::Submit(_) => ChangeFailure::BeforeExecutor,
-        // Refused before the submit. Ingest-only in practice; named rather than folded.
-        AcceptError::OutsideExtent { .. }
-        | AcceptError::UnknownView { .. }
-        | AcceptError::ScalarArity { .. }
-        | AcceptError::UniqueIndexUnreadable(_)
-        | AcceptError::SteppedDown => ChangeFailure::BeforeExecutor,
-    }
-}
-
-/// The three facts [`map_change_batch_error`] answers from.
-#[derive(Debug, PartialEq, Eq)]
-struct BatchOutcome {
-    /// Anything reached the executor, which rules out the 503 even for a refusal with no effect.
-    reached_executor: bool,
-    /// Anything may have taken effect: an applied item, or a failure that may be in force.
-    may_be_in_force: bool,
-    /// At least one item was certainly not applied. A lost receipt is in `may_be_in_force` and not
-    /// here, because its disposition is unknown.
-    some_not_applied: bool,
-}
-
-fn fold_change_failures(
-    failures: &[(tessera_lifecycle::ChangeOp, tessera_engine::AcceptError)],
-    applied: usize,
-) -> BatchOutcome {
-    let classes: Vec<ChangeFailure> = failures
-        .iter()
-        .map(|(op, f)| classify_change_failure(*op, f))
-        .collect();
-    BatchOutcome {
-        reached_executor: applied > 0
-            || classes.iter().any(|c| *c != ChangeFailure::BeforeExecutor),
-        may_be_in_force: applied > 0 || classes.contains(&ChangeFailure::MayBeInForce),
-        some_not_applied: classes.iter().any(|c| *c != ChangeFailure::MayBeInForce),
-    }
-}
-
-/// Whether a change that failed in the executor may still be in force: only a WAL failure on a
-/// `Delete` or `Suppress`, which is applied anyway. An `Unsuppress` is refused instead, since
-/// applying it without durability would re-expose an item that replay still hides.
-fn exec_failure_may_be_in_force(
-    op: tessera_lifecycle::ChangeOp,
-    e: &tessera_lifecycle::ExecError,
-) -> bool {
     use tessera_lifecycle::{ChangeOp, ExecError};
-    match e {
-        ExecError::Wal(_) => matches!(op, ChangeOp::Delete | ChangeOp::Suppress),
-        ExecError::BatchConflict { .. }
-        | ExecError::DuplicateExternalId { .. }
-        | ExecError::VocabularyRefused { .. } => false,
-        // Refusals from other endpoints, decided before the WAL append, so nothing is in force. If
-        // a change op could be refused this way, `map_change_batch_error` would answer it 500.
-        ExecError::LayerRefused { .. } | ExecError::PartConflict { .. } => false,
-        ExecError::ViewRefused { .. }
-        | ExecError::ViewConflict { .. }
-        | ExecError::ViewUnknown { .. } => false,
-        ExecError::JoinRefused { .. } => false,
-        ExecError::ValueConflict { .. } | ExecError::ValuesRefused { .. } => false,
-        ExecError::AttributeRefused { .. }
-        | ExecError::AttributeConflict { .. }
-        | ExecError::VocabularyConflict { .. } => false,
-        ExecError::UniqueTaken { .. } | ExecError::UniqueStale(_) => false,
-        ExecError::Alloc(_) => false,
-    }
+    Some(match failure {
+        AcceptError::Submit(e) => {
+            if !e.may_have_taken_effect() {
+                return None;
+            }
+            true
+        }
+        AcceptError::Exec(ExecError::Wal(_)) => ops
+            .iter()
+            .any(|op| matches!(op, ChangeOp::Delete | ChangeOp::Suppress)),
+        _ => false,
+    })
 }
 
 /// Maps a panicked `spawn_blocking` closure to a fail-closed 500 rather than an empty body or a
@@ -624,165 +534,35 @@ mod tests {
         assert!(SubmitError::ReceiptLost.may_have_taken_effect());
     }
 
-    /// A batch where nothing reached the executor is the only shape that may answer 503.
+    /// A request that reached nothing is the only shape that may answer 503, and a queue-full
+    /// refusal, which the deny lane cannot produce, is not a 429.
     #[test]
-    fn a_change_batch_that_reached_nothing_is_503() {
-        let failures = vec![
-            (
-                ChangeOp::Suppress,
-                AcceptError::Submit(SubmitError::ExecutorDead),
-            ),
-            (
-                ChangeOp::Suppress,
-                AcceptError::Submit(SubmitError::ExecutorDead),
-            ),
-        ];
-        let (status, code, _) = map_change_batch_error(&failures, 0).unwrap().parts();
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(code, "not-ready");
-    }
-
-    /// One item applied, then the executor died: a 500 whose body says both that something may be
-    /// in force and that something was not applied.
-    #[test]
-    fn a_partially_applied_change_batch_is_500_not_503() {
-        let failures = vec![(
-            ChangeOp::Suppress,
-            AcceptError::Submit(SubmitError::ExecutorDead),
-        )];
-        let (status, code, _) = map_change_batch_error(&failures, 1).unwrap().parts();
-        assert_eq!(
-            status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "one item applied durably; 503 would report the batch as a no-op"
-        );
-        assert_eq!(code, "fail-closed");
-        assert_eq!(
-            fold_change_failures(&failures, 1),
-            BatchOutcome {
-                reached_executor: true,
-                may_be_in_force: true,
-                some_not_applied: true,
-            },
-            "both halves must be reported, or the operator cannot know to re-submit"
-        );
-    }
-
-    /// A WAL failure (applied anyway) then a dead executor: a 500 with both halves.
-    #[test]
-    fn a_wal_failure_then_a_dead_executor_is_500_with_both_halves() {
-        let failures = vec![
-            (ChangeOp::Suppress, wal_failure()),
-            (
-                ChangeOp::Suppress,
-                AcceptError::Submit(SubmitError::ExecutorDead),
-            ),
-        ];
-        let (status, _, _) = map_change_batch_error(&failures, 0).unwrap().parts();
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        let outcome = fold_change_failures(&failures, 0);
-        assert!(outcome.may_be_in_force && outcome.some_not_applied, "{outcome:?}");
-    }
-
-    /// A lost receipt anywhere in a batch is enough on its own: its disposition is unknown, so the
-    /// batch cannot claim the node took nothing.
-    #[test]
-    fn a_lost_receipt_alone_keeps_the_batch_off_the_503_arm() {
-        let failures = vec![(
-            ChangeOp::Suppress,
-            AcceptError::Submit(SubmitError::ReceiptLost),
-        )];
-        let (status, _, _) = map_change_batch_error(&failures, 0).unwrap().parts();
-        assert_eq!(
-            status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "an enqueued command with no receipt may be fully applied"
-        );
-    }
-
-    /// A WAL failure on an `Unsuppress` is refused without applying, so a batch of only that claims
-    /// nothing is in force and still asks for a re-submit.
-    #[test]
-    fn a_batch_of_only_refused_non_deny_changes_claims_nothing_is_in_force() {
-        let op = ChangeOp::Unsuppress;
-        let failures = vec![(op, wal_failure())];
-        let (status, code, _) = map_change_batch_error(&failures, 0).unwrap().parts();
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(code, "fail-closed");
-        assert_eq!(classify_change_failure(op, &failures[0].1), ChangeFailure::NotApplied);
-        let outcome = fold_change_failures(&failures, 0);
-        assert!(
-            !outcome.may_be_in_force,
-            "a refused-not-applied {op:?} leaves no effect; asserting one invites the operator \
-             to hunt for a deny that is not there"
-        );
-        assert!(outcome.some_not_applied, "the operator must be told to re-submit");
-    }
-
-    /// An applied-anyway `Suppress` beside a refused `Unsuppress` reports both halves.
-    #[test]
-    fn an_applied_anyway_suppress_beside_a_refused_unsuppress_reports_both_halves() {
-        let failures = vec![
-            (ChangeOp::Suppress, wal_failure()),
-            (ChangeOp::Unsuppress, wal_failure()),
-        ];
-        let (status, _, _) = map_change_batch_error(&failures, 0).unwrap().parts();
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        let outcome = fold_change_failures(&failures, 0);
-        assert!(
-            outcome.may_be_in_force,
-            "the suppress was applied anyway (lifecycle §4)"
-        );
-        assert!(
-            outcome.some_not_applied,
-            "the unsuppress was refused without applying, and an operator who is not told that \
-             believes the item is visible again"
-        );
-    }
-
-    /// The classification, per op.
-    #[test]
-    fn only_a_deny_ops_wal_failure_may_be_in_force() {
-        let wal = ExecError::Wal(tessera_lifecycle::wal::WalError::Io(std::io::Error::other(
-            "no space left on device",
-        )));
-        assert!(exec_failure_may_be_in_force(ChangeOp::Delete, &wal));
-        assert!(exec_failure_may_be_in_force(ChangeOp::Suppress, &wal));
-        assert!(
-            !exec_failure_may_be_in_force(ChangeOp::Unsuppress, &wal),
-            "an unsuppress applied without durability would re-expose an item replay still hides, \
-             so the executor refuses it — it is never in force"
-        );
-
-        // The 409-class and allocation failures have no effect, whatever the op.
-        for op in [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress] {
-            assert!(!exec_failure_may_be_in_force(
-                op,
-                &ExecError::DuplicateExternalId { count: 1 }
-            ));
+    fn a_change_request_that_reached_nothing_is_503_never_429() {
+        for e in [SubmitError::ExecutorDead, SubmitError::QueueFull { retry_after_s: 1 }] {
+            let (status, code, _) =
+                map_change_batch_error(&[ChangeOp::Suppress], AcceptError::Submit(e)).parts();
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(code, "not-ready");
         }
     }
 
-    /// `/control/changes` never answers 429, even if a `QueueFull` reached the fold.
+    /// A lost receipt, or a failed log write under a deletion or suppression, may be in force and
+    /// is a 500. A failed log write under unsuppressions alone applied nothing, and is a 500 too.
     #[test]
-    fn a_change_batch_never_answers_429() {
-        let failures = vec![(
-            ChangeOp::Suppress,
-            AcceptError::Submit(SubmitError::QueueFull { retry_after_s: 1 }),
-        )];
-        let (status, code, _) = map_change_batch_error(&failures, 0).unwrap().parts();
-        assert_ne!(
-            status,
-            StatusCode::TOO_MANY_REQUESTS,
-            "refusing a security operation for load is fail-open (contracts §3.1)"
+    fn a_change_request_that_may_be_in_force_is_500() {
+        let lost = AcceptError::Submit(SubmitError::ReceiptLost);
+        assert_eq!(change_request_in_force(&[ChangeOp::Unsuppress], &lost), Some(true));
+        let both = [ChangeOp::Unsuppress, ChangeOp::Delete];
+        assert_eq!(change_request_in_force(&both, &wal_failure()), Some(true));
+        assert_eq!(
+            change_request_in_force(&[ChangeOp::Unsuppress], &wal_failure()),
+            Some(false)
         );
-        assert_eq!(code, "not-ready");
-    }
-
-    /// A fully successful batch folds to no error.
-    #[test]
-    fn a_successful_change_batch_folds_to_no_error() {
-        assert!(map_change_batch_error(&[], 3).is_none());
+        for failure in [lost, wal_failure()] {
+            let (status, code, _) = map_change_batch_error(&both, failure).parts();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(code, "fail-closed");
+        }
     }
 
     /// A WAL error's text, which can name a path, never reaches the body.

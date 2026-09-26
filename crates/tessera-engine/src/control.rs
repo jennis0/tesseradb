@@ -2,7 +2,6 @@
 
 use std::sync::atomic::Ordering;
 
-use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_plugin::Descriptor;
 use tessera_store::StoreError;
@@ -142,11 +141,13 @@ impl Engine {
             .external_id_of_checked(entity, self.allocator_high_water())
     }
 
-    /// The body hash and per-row entity ids a batch id was previously accepted with — the
-    /// idempotency check for `/control/ingest`: equal hash is a 200 no-op; different hash is 409.
-    /// An accelerant, not the authority: the same check runs again on the executor, race-free.
-    pub fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
-        self.write.live().accepted_batch(batch_id)
+    /// The body hash a batch id was accepted with, if it was: a values batch replayed with the
+    /// same bytes is reported as a replay. The executor decides the same question again, race-free.
+    pub fn accepted_batch(&self, batch_id: &str) -> Option<[u8; 32]> {
+        self.write
+            .live()
+            .accepted_batch(batch_id)
+            .map(|(hash, _)| hash)
     }
 
     /// Compute the wire `tessera_id` for `entity`, returned instead of the raw `EntityId`, which
@@ -181,130 +182,35 @@ impl Engine {
         self.write.wake();
     }
 
-    /// Submit an ingest batch whose rows name no artifacts — the plain form, and every batch that
-    /// carries no membership column.
-    pub fn accept_ingest(
-        &self,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-    ) -> std::result::Result<Vec<EntityId>, crate::write::AcceptError> {
-        self.accept_ingest_joining(rows, batch_id, body_hash, Default::default())
-            .map(|(entity_ids, _)| entity_ids)
-    }
-
-    /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids
-    /// are assigned on the executor, at the close of the commit window this submission lands in.
-    /// `artifacts` says which artifacts these rows join, resolved and grown in the same commit so
-    /// a batch is never half-applied: a closed layer refuses the whole batch if a key names no
-    /// artifact; an open layer creates it.
-    ///
-    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
-    pub fn accept_ingest_joining(
-        &self,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        artifacts: tessera_lifecycle::BatchArtifacts,
-    ) -> std::result::Result<(Vec<EntityId>, u64), crate::write::AcceptError> {
-        // Checked before the submit, so an out-of-extent row is refused with nothing acked,
-        // nothing WAL-durable and no entity id burned. `plan_flush` assumes this holds.
-        //
-        // A stepped-down node refuses ingest here, before the per-row checks: this keeps it from
-        // accepting rows a flush would bury under a manifest assembled from older served state.
-        // Denies are not gated; see `AcceptError::SteppedDown`.
-        if self.any_partition_stepped_down() {
-            return Err(crate::write::AcceptError::SteppedDown);
-        }
-        // A row longer than the schema would pair values with columns that do not exist. A
-        // shorter row is lawful: a column declared while the service runs appends at the tail, so
-        // a row decoded before the declaration holds nothing for it, padded at the window's close.
-        let declared = self.meta().declared_scalars.len();
-        if let Some((index, row)) = rows
-            .iter()
-            .enumerate()
-            .find(|(_, row)| row.scalars.len() > declared)
-        {
-            return Err(crate::write::AcceptError::ScalarArity {
-                index,
-                expected: declared,
-                got: row.scalars.len(),
-            });
-        }
-        // Checked against each row's own view, not the bundle as a whole: a bundle-wide check
-        // would pass a row with no cell in the view it targets.
-        let meta = self.meta();
-        for (index, row) in rows.iter().enumerate() {
-            let Some(quantisation) = meta.quantisation_of(&row.view) else {
-                return Err(crate::write::AcceptError::UnknownView {
-                    index,
-                    view: row.view.clone(),
-                });
-            };
-            if !quantisation.contains(row.x, row.y) {
-                return Err(crate::write::AcceptError::OutsideExtent {
-                    index,
-                    x: row.x,
-                    y: row.y,
-                    quantisation,
-                });
-            }
-        }
-        // Unique values are checked here, and re-checked on the executor against what was added
-        // since. Where the executor cannot re-check from memory it hands the batch back, and it is
-        // checked here once more.
-        let mut submission = (rows, batch_id, artifacts);
-        let mut checks = 0;
-        loop {
-            let seq = crate::unique::check_rows(&self.generation(), &submission.0, &self.identity_key)?;
-            #[cfg(feature = "fault-injection")]
-            self.switches.hold_write_check_if_wanted();
-            checks += 1;
-            let (rows, batch_id, artifacts) = submission;
-            match self
-                .write
-                .accept_ingest(rows, batch_id, body_hash, artifacts, seq)
-            {
-                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::UniqueStale(
-                    stale,
-                ))) if checks < 2 => match *stale {
-                    tessera_lifecycle::StaleSubmission::Ingest {
-                        rows,
-                        batch_id,
-                        artifacts,
-                    } => submission = (rows, batch_id, artifacts),
-                    other => {
-                        return Err(crate::write::AcceptError::Exec(
-                            tessera_lifecycle::ExecError::UniqueStale(Box::new(other)),
-                        ))
-                    }
-                },
-                answered => return answered,
-            }
-        }
-    }
-
-    /// Submit one `/control/changes` entry and wait for its receipt. An `Err` does not mean
-    /// nothing happened: for `Delete`/`Suppress` a WAL failure still
-    /// applies the change. See `ExecError::Wal`. A caller with several wants
-    /// [`Engine::submit_change`] instead.
+    /// Apply one `/control/changes` request of one change, and wait for its receipt. See
+    /// [`Engine::accept_changes`].
     pub fn accept_change(
         &self,
         entity: EntityId,
         op: ChangeOp,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.accept_change(entity, op)
+        self.write.accept_changes(vec![(entity, op)])
     }
 
-    /// Enqueue one `/control/changes` entry without waiting, so several from one request reach
-    /// the executor's queue together — the precondition for the deny lane's group commit. Read
-    /// `PendingChange::wait` before treating either half's `Err` as "nothing happened".
-    pub fn submit_change(
+    /// Apply one `/control/changes` request and wait for its receipt. The request is one log
+    /// record: durable whole or not at all. An `Err` does not mean nothing happened: where the
+    /// append or fsync fails, every deletion and suppression is applied all the same. See
+    /// `ExecError::Wal`.
+    pub fn accept_changes(
         &self,
-        entity: EntityId,
-        op: ChangeOp,
+        changes: Vec<(EntityId, ChangeOp)>,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
+        self.write.accept_changes(changes)
+    }
+
+    /// Enqueue one `/control/changes` request without waiting, so requests from several callers
+    /// reach the deny lane together and share one fsync. Read `PendingChange::wait` before
+    /// treating either half's `Err` as "nothing happened".
+    pub fn submit_changes(
+        &self,
+        changes: Vec<(EntityId, ChangeOp)>,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
-        self.write.submit_change(entity, op)
+        self.write.submit_changes(changes)
     }
 
     /// One registered layer's declaration, by name, with no gate. Answers what a declaration
@@ -386,25 +292,17 @@ impl Engine {
         &self,
         request: tessera_lifecycle::ValuesRequest,
     ) -> std::result::Result<crate::write::ValuesReceipt, crate::write::AcceptError> {
-        // Checked and re-checked as an ingest's unique values are.
-        let mut request = Box::new(request);
+        // Checked here, and re-checked on the executor against what was added since. Where the
+        // executor cannot re-check from memory, the batch is checked here once more.
         let mut checks = 0;
         loop {
             let seq = crate::unique::check_fills(&self.generation(), &request, &self.identity_key)?;
             #[cfg(feature = "fault-injection")]
             self.switches.hold_write_check_if_wanted();
             checks += 1;
-            match self.write.fill_values(request, seq) {
-                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::UniqueStale(
-                    stale,
-                ))) if checks < 2 => match *stale {
-                    tessera_lifecycle::StaleSubmission::Values(again) => request = again,
-                    other => {
-                        return Err(crate::write::AcceptError::Exec(
-                            tessera_lifecycle::ExecError::UniqueStale(Box::new(other)),
-                        ))
-                    }
-                },
+            match self.write.fill_values(Box::new(request.clone()), seq) {
+                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::Stale))
+                    if checks < 2 => {}
                 answered => return answered,
             }
         }

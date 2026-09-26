@@ -55,7 +55,6 @@ fn ingest_into_view(
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: view.to_string(),
         join: None,

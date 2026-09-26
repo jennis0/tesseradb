@@ -47,10 +47,7 @@ function live(ctx: TestContext): void {
 
 const bytes = (id: string) => new TextEncoder().encode(id);
 
-/**
- * The columns declared when the tests insert: the notebook's six and the `note` the first test
- * declares. A row that creates an item carries every declared column.
- */
+/** The columns declared when the tests insert: the notebook's six and the `note` the first test declares. */
 const DECLARED = ['archive', 'primary_category', 'submitted_at', 'title', 'abstract', 'arxiv_id', 'note'];
 
 /** Each declared column, null on every one of `rows` rows. */
@@ -113,7 +110,11 @@ describe('Control against a live server', () => {
     expect(await seen()).toEqual({visible: 0n, ids: []});
 
     const inserted = await control.ingest(points(), {view: 's0'});
-    expect(inserted).toMatchObject({status: 200, body: {accepted: 4}});
+    expect(inserted).toMatchObject({status: 200, body: {rows: 4, created: 4}});
+    // The same rows again name the items they created, by external id, and change nothing.
+    const again = await control.ingest(points(), {view: 's0'});
+    expect(again).toMatchObject({status: 200, body: {rows: 4, created: 0, unchanged: 4}});
+    expect(again.body.tessera_ids).toEqual(inserted.body.tessera_ids);
     await flushed();
     token = (await client.authorise([TERM])).token;
     const after = await seen();
@@ -124,7 +125,7 @@ describe('Control against a live server', () => {
 
   it('replays a page resent under its batch id, and lands it again under a fresh one', async (ctx) => {
     live(ctx);
-    // No external id, so the second landing is not refused as a position already held.
+    // Nothing in the row names an item, so under a fresh batch id it creates a second one.
     const body = new Table({
       x: vectorFromArray([meta.views.find((v) => v.id === 's0')!.quantisation.xMin], new Float64()),
       y: vectorFromArray([meta.views.find((v) => v.id === 's0')!.quantisation.yMin], new Float64()),
@@ -133,13 +134,13 @@ describe('Control against a live server', () => {
     });
     const page = tableToIPC(body, 'stream');
     const first = await control.ingest(page, {view: 's0'});
-    expect(first.body).toMatchObject({accepted: 1});
+    expect(first.body).toMatchObject({created: 1});
     const again = await control.ingest(page, {view: 's0', batch: first.batch});
-    expect(again.body).toMatchObject({accepted: 0, replayed: true});
+    expect(again.body).toMatchObject({created: 0, replayed: true});
     // Another batch id is another request, carrying the same bytes.
     const other = await control.ingest(page, {view: 's0'});
     expect(other.batch).not.toBe(first.batch);
-    expect(other.body).toMatchObject({accepted: 1});
+    expect(other.body).toMatchObject({created: 1});
   });
 
   it('fills a declared column on rows it holds, which the item card then carries', async (ctx) => {

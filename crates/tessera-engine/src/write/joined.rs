@@ -243,3 +243,74 @@ pub(crate) fn stored_as_wal(
         (_, RV::List(_)) => return None,
     })
 }
+
+/// What this deployment already holds for one entity and one entity-scoped column: the entity's
+/// own buffered row, then `pending`, then the flushed homes.
+///
+/// Each source is asked for a held value, not for a slot: a source holding the column's absence
+/// falls through to the next, so an absent cell in one source is not read as unheld while another
+/// holds a value for it.
+pub(crate) fn held_entity_value(
+    generation: &Generation,
+    entity: EntityId,
+    at: usize,
+    declared: &tessera_store::manifest::DeclaredScalar,
+    buffered: Option<&tessera_lifecycle::BufferedItem>,
+    pending: Option<&tessera_lifecycle::Fill>,
+    blob: &mut BlobRow,
+) -> Option<tessera_lifecycle::WalScalar> {
+    let held = |value: tessera_lifecycle::WalScalar| {
+        (!scalar_is_absent(&value, declared)).then_some(value)
+    };
+    buffered
+        .and_then(|item| item.scalars.get(at).cloned())
+        .and_then(held)
+        .or_else(|| {
+            pending
+                .and_then(|fill| fill.scalars.get(at).cloned())
+                .and_then(held)
+        })
+        .or_else(|| flushed_scalar_of(generation, entity, at, blob).and_then(held))
+}
+
+/// What this deployment already holds for one `(entity, attribute, key)` cell, on
+/// [`held_entity_value`]'s rule for absence.
+///
+/// The buffered source is every row of the entity whose view addresses this same key: the cell's
+/// own rows, not the entity's own row, which is a different question.
+pub(crate) fn held_scoped_value(
+    generation: &Generation,
+    entity: EntityId,
+    at: usize,
+    family: &tessera_store::manifest::ScopedScalar,
+    declared: &tessera_store::manifest::DeclaredScalar,
+    owner_view: &str,
+    pending: Option<&tessera_lifecycle::ScopedFill>,
+) -> Option<tessera_lifecycle::WalScalar> {
+    let manifest = &generation.bundle.manifest;
+    let held = |value: tessera_lifecycle::WalScalar| {
+        (!scalar_is_absent(&value, declared)).then_some(value)
+    };
+    generation
+        .buffer
+        .rows_of(entity)
+        .filter(|item| crate::write::scoped_owner_view_of(manifest, &item.view) == owner_view)
+        .find_map(|item| item.scoped.get(at).cloned().and_then(held))
+        .or_else(|| {
+            pending
+                .and_then(|fill| fill.scoped.get(at).cloned())
+                .and_then(held)
+        })
+        .or_else(|| flushed_scoped_of(generation, entity, family, owner_view).and_then(held))
+}
+
+/// Whether `entity` can gain a row in `view` where it is: a flush places rows only above the
+/// view's newest, so an item older than that is added to the view by moving it.
+pub(crate) fn joins_in_place(generation: &Generation, entity: EntityId, view: &str) -> bool {
+    generation.bundle.partitions.values().all(|partition| {
+        partition
+            .views
+            .get(view)
+            .is_none_or(|data| entity.raw() >= data.row_space.entity_floor())
+    })
+}

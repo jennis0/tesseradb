@@ -1042,6 +1042,12 @@ impl Engine {
         // A level nothing built a form for would otherwise hold its staged pieces for the
         // process's life.
         engine.shapes.clear_staged();
+        // The rows the log held and no flush wrote, which the occupancy bound and the row trigger
+        // count from the first request, not from the first write.
+        engine.write.health().buffered_items.store(
+            engine.generation().buffer.len(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         Ok(engine)
     }
 

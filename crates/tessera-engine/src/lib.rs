@@ -30,6 +30,7 @@ mod layer_read;
 pub mod gate;
 mod generation;
 mod geometry;
+mod ingest;
 pub mod histogram;
 pub mod layout;
 pub mod membership_column;
@@ -87,6 +88,7 @@ pub use config::{
 };
 pub use control::{GrownMembership, PublishedArtifacts};
 pub use engine::Engine;
+pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;
 pub use session::Session;
 pub use status::{GenerationStatus, PartitionStatus, ViewSegments};
@@ -192,7 +194,7 @@ pub use write::{
 // engine API types only (SA §3).
 pub use tessera_lifecycle::AttributeRequest;
 // `POST /control/values`' body as the executor takes it, re-exported on `AttributeRequest`'s rule.
-pub use tessera_lifecycle::{IncomingValues, ValuesRequest};
+pub use tessera_lifecycle::{IncomingValues, IngestRow, ValuesRequest};
 // The two vocabulary routes' bodies, and the two view declarations', on the same rule.
 pub use tessera_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupDeclaration};
 pub use tessera_lifecycle::{DeclaredValue, VocabularyRequest};

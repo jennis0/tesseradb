@@ -82,7 +82,6 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
 fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
     let descriptor = format!("novel-{i}").into_bytes();
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(format!("ext-{i}").into_bytes()),
         view: "s0".to_string(),
         join: None,
@@ -570,7 +569,6 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
 fn ingest_with(engine: &Engine, key: &[u8], descriptors: &[&[u8]], batch: &str) -> EntityId {
     let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(key.to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -932,7 +930,6 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
             .map(|j| {
                 let i = window * 4 + j;
                 UnallocatedRow {
-                    join_only: false,
                     external_id: Some(format!("mixed-{i}").into_bytes()),
                     view: if j % 2 == 0 { "s0" } else { "s1" }.to_string(),
                     join: None,
@@ -950,9 +947,17 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
                 }
             })
             .collect();
-        let allocated = engine
-            .accept_ingest(rows, format!("mixed-{window}"), [window as u8; 32])
-            .expect("the batch is accepted");
+        // A batch names one view, so each row is its own batch; sent in turn, their ids alternate
+        // between the two views.
+        let allocated: Vec<EntityId> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(j, row)| {
+                engine
+                    .accept_ingest(vec![row], format!("mixed-{window}-{j}"), [window as u8; 32])
+                    .expect("the batch is accepted")[0]
+            })
+            .collect();
         for (j, entity) in allocated.iter().enumerate() {
             if j % 2 == 0 { &mut s0 } else { &mut s1 }.push(entity.raw());
         }

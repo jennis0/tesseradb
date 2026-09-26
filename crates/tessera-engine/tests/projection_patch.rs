@@ -82,7 +82,6 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str) -> Engine
 
 fn ingest(engine: &Engine, external_id: &str, x: f64, y: f64) {
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,

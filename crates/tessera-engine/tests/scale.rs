@@ -390,7 +390,6 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
                 vec![b"0".to_vec(), novel]
             };
             rows.push(UnallocatedRow {
-                join_only: false,
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -1072,7 +1071,6 @@ fn ingest_rows(engine: &Engine, round: usize, batch: usize) {
             let (x, y) = position_of(round, i);
             let descriptors = vec![b"0".to_vec()];
             rows.push(UnallocatedRow {
-                join_only: false,
                 external_id: Some(format!("p{round}-i{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
@@ -1797,7 +1795,7 @@ fn p1_one_scale(base: u64) {
         .iter()
         .map(|&entity| {
             engine
-                .submit_change(entity, ChangeOp::Delete)
+                .submit_changes(vec![(entity, ChangeOp::Delete)])
                 .expect("the deny lane accepts a delete")
         })
         .collect();
@@ -1983,7 +1981,6 @@ fn ingest_returning_ids(engine: &Engine, round: usize, batch: usize, keep: usize
             let (x, y) = position_of(round, i);
             let descriptors = vec![b"0".to_vec()];
             rows.push(UnallocatedRow {
-                join_only: false,
                 external_id: Some(format!("p{round}-i{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,

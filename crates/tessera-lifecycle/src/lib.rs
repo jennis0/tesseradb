@@ -28,6 +28,7 @@ pub mod faults;
 pub mod membership;
 pub mod overlay;
 pub mod registry;
+pub mod resolve;
 pub mod roster;
 pub mod wal;
 pub mod window;
@@ -39,7 +40,7 @@ pub use alloc::{
 pub use buffer::{BufferedItem, DescriptorResolver, Fill, IngestBuffer, ScopedFill};
 pub use command::{
     AttributeRequest, BatchArtifacts, BatchEdge, BatchMembership, DeclaredValue, ExecError,
-    IncomingValues, MembershipGrown, StaleSubmission, SubmitError, UnallocatedRow, ValuesRequest,
+    IncomingValues, IngestRow, MembershipGrown, SubmitError, UnallocatedRow, ValuesRequest,
     VocabularyRequest,
 };
 pub use faults::WalMeter;
@@ -55,6 +56,7 @@ pub use registry::{
 pub use roster::{GroupFacts, RosterError, ViewRoster};
 pub use wal::{
     batch_identity, BatchIdentity, ChangeOp, ExecutorWal, MembershipGrowth, OverlaySnapshotEntry,
+    RowOutcome, RowReceipt,
     PublishedArtifact, Wal, WalError, WalRecord, WalRow, WalScalar,
 };
-pub use window::{ClosedEntry, CommitWindow, ResolvedMembership, WindowEntry};
+pub use window::{ClosedEntry, CommitWindow, ResolvedMembership, Slot, WindowClaims, WindowEntry};

@@ -268,7 +268,6 @@ fn ingest_corpus(engine: &Engine) {
             .map(|i| {
                 let descriptors: Vec<Vec<u8>> = terms_of(i).into_iter().map(label).collect();
                 UnallocatedRow {
-                    join_only: false,
                     external_id: Some(external_id(i)),
                     view: VIEW.to_string(),
                     join: None,

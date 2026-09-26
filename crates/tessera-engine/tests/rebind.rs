@@ -9,14 +9,13 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{AcceptError, Engine, EngineConfig};
-use tessera_lifecycle::{ChangeOp, ExecError, UnallocatedRow};
+use tessera_engine::{Engine, EngineConfig};
+use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 
 const WAIT: Duration = Duration::from_secs(10);
 
 fn row(engine: &Engine, external_id: &[u8]) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -155,41 +154,10 @@ fn open_engine(dir: &std::path::Path) -> Engine {
     engine
 }
 
-/// **A row admitted only as a join is refused if its item was deleted before the writer took it**,
-/// rather than landing as a new item without the columns it left out. The row is built as the
-/// ingest handler leaves one it resolved as a join, with the delete landing between the two; the
-/// same row unmarked becomes a new item, as a row naming a deleted holder always has.
+/// A suppressed item still holds its external id: the same row sent again names it and changes
+/// nothing, rather than creating a copy no deny reaches. The copy stays hidden.
 #[test]
-fn a_join_only_row_whose_item_was_deleted_is_refused() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let engine = open_engine(tmp.path());
-    let held = engine
-        .accept_ingest(vec![row(&engine, b"doc-3")], "held".to_string(), [5u8; 32])
-        .expect("ingest accepted")[0];
-    engine
-        .accept_change(held, ChangeOp::Delete)
-        .expect("delete accepted");
-    let joining = |join_only| UnallocatedRow {
-        join: Some(held),
-        join_only,
-        ..row(&engine, b"doc-3")
-    };
-
-    let err = engine
-        .accept_ingest(vec![joining(true)], "join-only".to_string(), [6u8; 32])
-        .expect_err("a row admitted only as a join cannot become a new item");
-    assert!(
-        matches!(err, AcceptError::Exec(ExecError::JoinRefused { .. })),
-        "{err:?}"
-    );
-    let fresh = engine
-        .accept_ingest(vec![joining(false)], "unmarked".to_string(), [7u8; 32])
-        .expect("an unmarked row becomes a new item")[0];
-    assert_ne!(fresh, held);
-}
-
-#[test]
-fn a_suppressed_holder_still_blocks_reingest() {
+fn a_suppressed_holder_is_named_by_a_reingest_and_no_copy_is_made() {
     let tmp = tempfile::TempDir::new().unwrap();
     let engine = open_engine(tmp.path());
 
@@ -200,13 +168,9 @@ fn a_suppressed_holder_still_blocks_reingest() {
         .accept_change(entity, ChangeOp::Suppress)
         .expect("suppress accepted");
 
-    // Suppression is temporary hiding, not deletion: re-ingesting a byte-identical copy past it
-    // would be the copy-no-deny-can-reach hole. The executor backstop must refuse.
-    let err = engine
+    let again = engine
         .accept_ingest(vec![row(&engine, b"doc-2")], "s-2".to_string(), [4u8; 32])
-        .expect_err("a suppressed holder still collides");
-    assert!(
-        format!("{err}").contains("duplicate") || format!("{err:?}").contains("Duplicate"),
-        "expected the duplicate refusal, got {err:?}"
-    );
+        .expect("a row naming a suppressed item is accepted");
+    assert_eq!(again, vec![entity], "the row names the suppressed item");
+    assert_eq!(engine.resolve_external_id(b"doc-2").unwrap(), Some(entity));
 }

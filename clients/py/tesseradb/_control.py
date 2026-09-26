@@ -203,7 +203,14 @@ class Control:
         return self._limits
 
     def ingest(self, body: bytes, batch: str, view: str | None = None) -> Answer:
-        """`POST /control/ingest`: add new items.
+        """`POST /control/ingest`: create items, or add items the database holds to a view.
+
+        A row names an item by its `tessera_id`, its `external_id` or a unique column's value. A
+        row naming none creates an item at its position; one naming an item with no row in the
+        view adds it there; one carrying what the item stores changes nothing. Any column may be
+        left out, keeping what the item stores, and a null clears it. A row that would change an
+        item is refused with `409`, since editing is not available yet. The answer counts the
+        rows `created`, `added` and `unchanged`, and gives each row's `tessera_id`.
 
         - `body`: the rows, as an Arrow IPC stream.
         - `batch`: the request's batch id. A retry sends the same id with the same bytes, and the

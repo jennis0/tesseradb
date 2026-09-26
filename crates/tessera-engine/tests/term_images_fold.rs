@@ -539,7 +539,6 @@ fn a_flush_before_the_fold_is_in_the_folds_images() {
     let mut rows = Vec::new();
     for i in 0..64u64 {
         rows.push(UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("flushed-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,

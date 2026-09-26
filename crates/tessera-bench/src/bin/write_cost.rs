@@ -225,7 +225,6 @@ fn synth_rows(
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
-                join_only: false,
                 external_id: Some(format!("write-cost-{n}").into_bytes()),
                 view: fx.view.clone(),
                 join: None,
@@ -516,10 +515,7 @@ fn experiment_b(
                 let count = DENY_WINDOW.min(target - depth);
                 let pending: Vec<_> = (0..count)
                     .map(|i| {
-                        engine.submit_change(
-                            EntityId::new((next + i as u64) * DENY_STRIDE),
-                            ChangeOp::Suppress,
-                        )
+                        engine.submit_changes(vec![(EntityId::new((next + i as u64) * DENY_STRIDE), ChangeOp::Suppress)])
                     })
                     .collect::<Result<_, _>>()?;
                 next += count as u64;
@@ -533,10 +529,7 @@ fn experiment_b(
                 let at = Instant::now();
                 let pending: Vec<_> = (0..size)
                     .map(|i| {
-                        engine.submit_change(
-                            EntityId::new((next + i as u64) * DENY_STRIDE),
-                            ChangeOp::Suppress,
-                        )
+                        engine.submit_changes(vec![(EntityId::new((next + i as u64) * DENY_STRIDE), ChangeOp::Suppress)])
                     })
                     .collect::<Result<_, _>>()?;
                 for p in pending {
@@ -973,10 +966,7 @@ fn experiment_e(
             let count = (*window).min(target - done);
             let pending: Vec<_> = (0..count)
                 .map(|i| {
-                    engine.submit_change(
-                        EntityId::new((done + i) as u64 * DENY_STRIDE),
-                        ChangeOp::Suppress,
-                    )
+                    engine.submit_changes(vec![(EntityId::new((done + i) as u64 * DENY_STRIDE), ChangeOp::Suppress)])
                 })
                 .collect::<Result<_, _>>()?;
             for p in pending {

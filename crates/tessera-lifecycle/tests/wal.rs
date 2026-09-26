@@ -22,10 +22,9 @@ fn sidecar(base: &Path, n: u64) -> std::path::PathBuf {
 }
 
 fn sample_record(tag: u8) -> WalRecord {
-    WalRecord::ChangeByEntity {
-        entity_id: tessera_types::EntityId::new(tag as u64),
-        op: ChangeOp::Delete,
-    }
+    WalRecord::ChangeBatch {
+            changes: vec![(tessera_types::EntityId::new(tag as u64), ChangeOp::Delete)],
+        }
 }
 
 /// Flips every bit of the byte at `offset`, in place, on disk.

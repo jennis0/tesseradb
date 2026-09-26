@@ -205,7 +205,6 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
         .iter()
         .enumerate()
         .map(|(i, (x, y))| UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("ingested-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,

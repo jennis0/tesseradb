@@ -428,7 +428,6 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
     let entity = engine
         .accept_ingest(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(b"ingested-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -493,7 +492,6 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
         let entity = engine
             .accept_ingest(
                 vec![UnallocatedRow {
-                    join_only: false,
                     external_id: Some(format!("merged-{batch}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
@@ -580,7 +578,6 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
     let ingested = engine
         .accept_ingest(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(b"folded-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -681,7 +678,6 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
     let ingested = engine
         .accept_ingest(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(b"ingested-read-path".to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -805,7 +801,6 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
             .into_iter()
             .enumerate()
             .map(|(i, ((x, y), score))| UnallocatedRow {
-                join_only: false,
                 external_id: Some(format!("{batch}-{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
@@ -1125,7 +1120,6 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
 /// (the ingest plane's shape); the flush narrows to the render columns before it writes.
 fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(b"non-prefix-flushed".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1559,7 +1553,6 @@ fn record_stack(root: &Path) -> tessera_filter::RecordStack {
 /// One ingest row for the record fixture: `band` code, blob-resident `note` and `revision`.
 fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,

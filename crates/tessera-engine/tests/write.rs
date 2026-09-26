@@ -71,7 +71,6 @@ fn engine_with_faults(tmp: &TempDir, queue_bound: usize) -> (Engine, Arc<FaultSw
 
 fn row(key: &str) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(key.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -237,6 +236,11 @@ fn per_command_assignment_is_signature_sorted_and_monotone() {
     let mut rows = Vec::new();
     for i in 0..6u64 {
         let mut r = row(&format!("sig-{i}"));
+        r.descriptors = vec![if i % 2 == 0 {
+            b"1".to_vec()
+        } else {
+            b"0".to_vec()
+        }];
         r.terms = if i % 2 == 0 {
             sig_high.clone()
         } else {
@@ -1202,44 +1206,22 @@ fn an_engine_without_an_executor_refuses_writes_and_still_reads() {
     assert_eq!(visible(&engine), N_ITEMS);
 }
 
-/// The backstop for the check-to-apply race the executor widened (security review C1): a second
-/// batch naming an already-established external id is **refused**, not silently applied over the
-/// top.
-///
-/// Left unclosed, the first item would stay visible, byte-identical to the second, and reachable by
-/// no external id at all — so no `suppress` could ever name it. The handler's own duplicate check
-/// cannot close this, because it reads a map that is now written a whole queue drain later; only a
-/// check on the thread that also performs the insert can.
+/// A second batch naming an established external id, under a different batch id as a client retry
+/// after a timeout sends it, names the item that holds it: sent as it was, it changes nothing and
+/// answers that item, and the key stays bound to it.
 #[test]
-fn a_duplicate_external_id_is_refused_on_the_executor() {
+fn a_row_naming_an_established_external_id_names_its_item() {
     let tmp = TempDir::new().unwrap();
     let (engine, _faults) = engine_with_faults(&tmp, 8);
 
     let first = engine
         .accept_ingest(vec![row("dup")], "b1".to_string(), [7u8; 32])
         .expect("the first batch is accepted")[0];
-
-    // A *different* batch id, as a client retry after a timeout produces — so the idempotency index
-    // does not catch it and only the external-id backstop can.
-    let err = engine
+    let again = engine
         .accept_ingest(vec![row("dup")], "b2".to_string(), [8u8; 32])
-        .expect_err("a duplicate external id must be refused on the executor");
-    assert!(
-        matches!(
-            err,
-            tessera_engine::AcceptError::Exec(
-                tessera_lifecycle::ExecError::DuplicateExternalId { count: 1 }
-            )
-        ),
-        "got: {err}"
-    );
-
-    assert_eq!(
-        engine.resolve_external_id(b"dup").unwrap(),
-        Some(first),
-        "the original must still own the key — an overwrite is what would make the first item \
-         unreachable by any deny"
-    );
+        .expect("the same row again changes nothing");
+    assert_eq!(again, vec![first]);
+    assert_eq!(engine.resolve_external_id(b"dup").unwrap(), Some(first));
 }
 
 // =================================================================================================
@@ -1379,7 +1361,14 @@ fn sig_rows(
 ) -> Vec<UnallocatedRow> {
     (0..n)
         .map(|i| {
+            // The label resolves to the signature `low` or `high` holds: callers pass the terms of
+            // `0` and `1`.
             let mut r = row(&format!("{prefix}-{i}"));
+            r.descriptors = vec![if i % 2 == 0 {
+                b"1".to_vec()
+            } else {
+                b"0".to_vec()
+            }];
             r.terms = if i % 2 == 0 {
                 high.to_vec()
             } else {
@@ -1649,17 +1638,12 @@ fn every_unacked_waiter_in_a_partially_acked_window_gets_receipt_lost() {
     assert_eq!(lost, N - 1, "and every remaining waiter is `ReceiptLost`");
 }
 
-/// The duplicate-external-id backstop **survives the window**, which is the one place a naive
-/// implementation re-opens it.
-///
-/// Both retries reach the executor while the window is open, so neither can see the other in the
-/// live map — that map is written at *apply*. Without the window's own conflict check they would
-/// both be admitted, both allocate, and the second `established.insert` would overwrite the first:
-/// the first item stays visible, byte-identical to the second, and reachable by **no external id at
-/// all**, so no deny could ever name it. The remedy is a forced close, after which the ordinary
-/// check answers.
+/// Two batches naming one new external id, admitted while one window is open, make **one item**,
+/// and both answer it. Neither handler saw the other's item, so both resolved their row as a
+/// create; the window closes before admitting the second, whose check then finds the first's
+/// binding, and the second is resolved again and names the item the first created.
 #[test]
-fn a_duplicate_external_id_across_one_window_is_still_refused() {
+fn a_duplicate_external_id_across_one_window_makes_one_item() {
     let tmp = TempDir::new().unwrap();
     let (engine, faults) = engine_with_faults(&tmp, 64);
     let engine = Arc::new(engine);
@@ -1667,44 +1651,39 @@ fn a_duplicate_external_id_across_one_window_is_still_refused() {
     let window = Window::park(Arc::clone(&engine), faults);
     let got = window.run(vec![
         ("first".to_string(), vec![row("same-key")]),
-        // A *fresh* batch id, as a client retry after a timeout produces — the idempotency index
-        // cannot catch it, so only the external-id backstop can.
+        // A fresh batch id, as a client retry after a timeout produces.
         ("retry".to_string(), vec![row("same-key")]),
     ]);
-
-    let accepted = got.iter().filter(|r| r.is_ok()).count();
-    assert_eq!(
-        accepted, 1,
-        "exactly one of two submissions naming one external id may be accepted, however they are \
-         batched: got {got:?}"
-    );
-    let refused = got
+    let ids: Vec<Vec<EntityId>> = got
         .iter()
-        .find(|r| r.is_err())
-        .unwrap()
-        .as_ref()
-        .unwrap_err();
-    assert!(
-        refused.contains("DuplicateExternalId"),
-        "and the refusal must be the duplicate, not something incidental: {refused}"
+        .map(|r| {
+            r.clone()
+                .unwrap_or_else(|e| panic!("both are accepted: {e}"))
+        })
+        .collect();
+    assert_eq!(ids[0], ids[1], "both name one item");
+    assert_eq!(
+        engine.resolve_external_id(b"same-key").unwrap(),
+        Some(ids[0][0])
     );
 
-    // A refused entry still occupied a queue slot, so it must be counted as completed. Otherwise
-    // `work_depth` — the operand of every ingest 429's `retry_after_s` — drifts upward by one per
-    // refusal and never comes back down.
+    // The retry was answered stale and, resolved again, changed nothing, so it was not sent
+    // again. A job answered stale still occupied a queue slot, so it is counted completed.
+    // Otherwise `work_depth`, the operand of every ingest 429's `retry_after_s`, drifts upward
+    // and never comes back down.
     let stats = engine.write_executor_stats();
     assert_eq!(
         (stats.work_submitted, stats.work_completed),
         (3, 3),
-        "every job taken off the work queue must be counted completed, refusals included: {stats:?}"
+        "every job taken off the work queue must be counted completed: {stats:?}"
     );
     assert_eq!(stats.work_depth, 0);
 }
 
 /// A job is counted completed before its caller is answered, so a caller that reads the stats
 /// straight after its reply sees its own job. Each job is parked one step before its answer, on
-/// each way a job is answered: a commit window, an ingest replay answered outside a window, and a
-/// command that is not an ingest.
+/// each way a job is answered: a commit window, and a command that is not an ingest. A replay is
+/// answered by its handler from the index of accepted batches and is no job.
 #[test]
 fn a_job_is_counted_completed_before_its_caller_is_answered() {
     let tmp = TempDir::new().unwrap();
@@ -1718,13 +1697,6 @@ fn a_job_is_counted_completed_before_its_caller_is_answered() {
             Box::new(|e| {
                 e.accept_ingest(vec![row("counted")], "counted".to_string(), [5; 32])
                     .expect("the ingest is accepted");
-            }),
-        ),
-        (
-            "a replay",
-            Box::new(|e| {
-                e.accept_ingest(vec![row("counted")], "counted".to_string(), [5; 32])
-                    .expect("the replay is answered");
             }),
         ),
         (
@@ -2350,7 +2322,7 @@ fn the_deny_window_closes_at_its_bound() {
     let pending: Vec<_> = (0..bound + 1)
         .map(|_| {
             engine
-                .submit_change(entity, ChangeOp::Suppress)
+                .submit_changes(vec![(entity, ChangeOp::Suppress)])
                 .expect("the deny lane is unbounded and never refuses for load")
         })
         .collect();
@@ -2409,9 +2381,9 @@ fn the_fragmentation_counters_are_fed_by_window_closes_and_move_with_the_window(
             .map(|i| {
                 let s = (i as u32 * 7) % 8;
                 let mut r = row(&format!("frag-{i:03}"));
-                r.terms = vec![
-                    tessera_types::TermId::new(s),
-                    tessera_types::TermId::new((s + 1) % 8),
+                r.descriptors = vec![
+                    format!("frag-term-{s}").into_bytes(),
+                    format!("frag-term-{}", (s + 1) % 8).into_bytes(),
                 ];
                 r
             })
@@ -2707,7 +2679,7 @@ fn park_on_a_new_deny_window(
 ) -> tessera_engine::PendingChange {
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let pending = engine
-        .submit_change(entity, ChangeOp::Suppress)
+        .submit_changes(vec![(entity, ChangeOp::Suppress)])
         .expect("the deny lane accepts");
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
     pending
@@ -2745,7 +2717,7 @@ fn drain_deny_windows(
     for i in 0..((windows - 1) * DENY_WINDOW_MAX_ENTRIES) {
         pending.push(
             engine
-                .submit_change(entities[i % entities.len()], ChangeOp::Suppress)
+                .submit_changes(vec![(entities[i % entities.len()], ChangeOp::Suppress)])
                 .expect("the deny lane accepts"),
         );
     }
