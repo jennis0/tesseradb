@@ -11,9 +11,9 @@
 //! Each of those rewrites is covered where it lives, and **nothing asserted that they agree**.
 //! That is the gap this file closes: a home added to the corpus and forgotten by the fold leaves
 //! every existing case passing while a deleted item's bytes stay in the bundle. [`Home`] is the
-//! enumeration, in one place; its `files` is an exhaustive match, so a variant added there does not
-//! compile until it has been given a file set, and each variant has its own block of assertions
-//! below carrying its name.
+//! enumeration, shared with `edit_carries_every_home.rs`; `files` here is an exhaustive match, so a
+//! variant added there does not compile until it has been given a file set, and each variant this
+//! fixture exercises has its own block of assertions below carrying its name.
 //!
 //! **Rule S and Rule F are both here and must not be conflated** (write-path §5.4 — conflating
 //! them is fail-open and has been caught in review twice). A suppression retires nothing and
@@ -24,6 +24,7 @@
 //! nothing.
 
 mod common;
+mod homes;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -43,6 +44,8 @@ use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
 use tessera_types::{AttrLocalId, EntityId, TermId};
+
+use homes::Home;
 
 // ---------------------------------------------------------------------------------------------
 // The fixture — a schema that puts one item in every home at once
@@ -326,61 +329,18 @@ fn segment_dirs(root: &Path) -> Vec<PathBuf> {
 // The homes
 // ---------------------------------------------------------------------------------------------
 
-/// **Every place one item's data lives.**
-///
-/// A home added to the corpus must be added *here* and given its own block of assertions in
-/// [`a_deletion_reaches_every_home`]. [`Home::files`] is an exhaustive match, so a variant added
-/// without a file set does not compile; the assertion blocks carry the variant's name so the other
-/// half is visible in review.
-///
-/// **A type rather than a comment**, because this set grows and every per-artefact case in the
-/// suite passes on a fold that forgot the newest member of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Home {
-    /// The item's row in row space, and the two directions between it and the entity.
-    Row,
-    /// A `render` column's value, in the hot row (records §3).
-    RenderColumn,
-    /// Which rows of a render column mean anything (decision 0064).
-    RenderPresence,
-    /// An `index` column's entity-space value column, with the presence bitmap beside it.
-    ValueColumn,
-    /// A public category's membership postings, rebuilt at the fold from the folded column.
-    CategoryPostings,
-    /// A keyword column's dictionary, where a key whose only carrier was deleted must vanish.
-    KeywordDictionary,
-    /// A text column's token index — the dictionary and the postings over it, which the fold
-    /// rebuilds by merging every layer and subtracting the deleted set.
-    TextIndex,
-    /// The per-entity record blob: every field with neither key set (records §3).
-    RecordBlob,
-    /// The external-id binding, whose survival past a fold 409s a lawful re-ingest of the same key
-    /// (decision 0047).
-    ExternalIdSidecar,
-    /// The access-control postings that decide whether the item is reachable at all.
-    TermPostings,
-}
-
-impl Home {
-    const ALL: [Home; 10] = [
-        Home::Row,
-        Home::RenderColumn,
-        Home::RenderPresence,
-        Home::ValueColumn,
-        Home::CategoryPostings,
-        Home::KeywordDictionary,
-        Home::TextIndex,
-        Home::RecordBlob,
-        Home::ExternalIdSidecar,
-        Home::TermPostings,
-    ];
-
+/// The files each home's data is in.
+trait Files {
     /// The files this home's data is in, under the prefix `CURRENT` names **now**.
     ///
     /// Resolved on each call rather than cached, so the same function serves the pre-fold prefix
     /// and the folded one. The two homes that own a whole directory are listed by walking it, so
     /// an artefact added inside one is covered here without this match being touched; the rest are
     /// named by the readers' own path constants.
+    fn files(self, root: &Path) -> Vec<PathBuf>;
+}
+
+impl Files for Home {
     fn files(self, root: &Path) -> Vec<PathBuf> {
         let partition = partition_dir(root);
         let attrs = partition.join("attrs");
@@ -421,6 +381,17 @@ impl Home {
             Home::RecordBlob => files_under(&attrs.join("record")),
             Home::ExternalIdSidecar => files_under(&partition.join("entities")),
             Home::TermPostings => vec![partition.join("terms/postings.arrow")],
+            // Homes this fixture does not exercise. `identity_model.rs` deletes, folds and
+            // restarts over a unique index, edited items and a generated content; no fixture yet
+            // folds a deletion out of a group-scoped family. A suppression is not a file; it is
+            // asserted below, on the suppressed survivor.
+            Home::UniqueIndex
+            | Home::EditedItems
+            | Home::Membership
+            | Home::GeneratingSet
+            | Home::Suppression
+            | Home::ScopedValue
+            | Home::ScopedProse => Vec::new(),
         }
     }
 }
@@ -688,9 +659,8 @@ fn a_deletion_reaches_every_home() {
         .expect("the sidecar reads")
         .expect("the deleted item's external id resolves before the fold");
     let by_tessera = engine
-        .resolve_tessera_ids(
-            &[engine.tessera_id_of(deleted).expect("a wire identifier")],
-        ).unwrap()[0]
+        .resolve_tessera_ids(&[engine.tessera_id_of(deleted).expect("a wire identifier")])
+        .unwrap()[0]
         .expect("the identifier names a live item");
     assert_eq!(by_external, deleted, "the external-id route names the item");
     assert_eq!(by_tessera, deleted, "and so does the tessera_id route");
