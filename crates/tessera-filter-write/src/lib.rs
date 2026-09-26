@@ -86,6 +86,7 @@ use tessera_authz::KeyedPostingsSpool;
 use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
 use tessera_filter::{Codes, ColumnKind, ValueColumn, ValueColumnWriter};
+use tessera_roaring::RankedRuns;
 
 pub use keyword::{coalesce_keyword_extents, fold_keyword_column, KeywordLayer};
 pub use record::{
@@ -111,46 +112,6 @@ const MERGE_CHUNK: usize = 1 << 20;
 /// cost of a smaller band is one more column scan — measured at ~280 ms per 10⁹ (filter-index
 /// §2.2), so seconds per column even at sixteen bands.
 pub const POSTINGS_BAND_ROWS: usize = 1 << 26;
-
-/// Runs read from a bitmap in bulk, `RUN_BUF` at a time.
-///
-/// **A deliberate duplicate of `tessera-filter`'s own run iterator**, and the duplication is the
-/// point of this crate: sharing it would mean exporting it, and every export is a reason for the
-/// scan's crate to hold code the scan does not run (see the module doc). It is twenty lines over
-/// croaring's public cursor.
-const RUN_BUF: usize = 64;
-
-pub(crate) struct Runs<'a> {
-    cursor: croaring::bitmap::BitmapCursor<'a>,
-    buf: [croaring::RangeInclusive<u32>; RUN_BUF],
-    filled: usize,
-    at: usize,
-}
-
-impl<'a> Runs<'a> {
-    pub(crate) fn new(bitmap: &'a Bitmap) -> Self {
-        Runs {
-            cursor: bitmap.cursor(),
-            buf: [croaring::RangeInclusive::<u32> { start: 0, last: 0 }; RUN_BUF],
-            filled: 0,
-            at: 0,
-        }
-    }
-
-    /// The next run as `(start, last)`, inclusive.
-    pub(crate) fn next(&mut self) -> Option<(u32, u32)> {
-        if self.at == self.filled {
-            self.filled = self.cursor.read_many_ranges(&mut self.buf);
-            self.at = 0;
-            if self.filled == 0 {
-                return None;
-            }
-        }
-        let r = self.buf[self.at];
-        self.at += 1;
-        Some((r.start, r.last))
-    }
-}
 
 /// The vocabulary code at `slot`, for the three widths a category is stored at.
 ///
@@ -301,9 +262,13 @@ pub(crate) fn write_merged(
     let kind = ColumnKind::of(layers[0].codes());
     let mut writer = ValueColumnWriter::create(values_path, presence_path, kind)?;
     let keeps: Vec<Bitmap> = order.iter().map(|(_, p)| p.andnot(tombstones)).collect();
-    let mut runs: Vec<Runs<'_>> = keeps.iter().map(Runs::new).collect();
+    let mut runs: Vec<RankedRuns<'_, '_>> = order
+        .iter()
+        .zip(&keeps)
+        .map(|((_, present), keep)| RankedRuns::new(present, keep))
+        .collect();
     // `(position in order, next run)` for every layer with runs left.
-    let mut live: Vec<(usize, (u32, u32))> = runs
+    let mut live: Vec<(usize, (u32, u32, u64))> = runs
         .iter_mut()
         .enumerate()
         .filter_map(|(at, r)| r.next().map(|run| (at, run)))
@@ -318,11 +283,11 @@ pub(crate) fn write_merged(
             .min()
             .unwrap_or(u32::MAX);
         let at = live[lowest].0;
-        let (layer, layer_present) = &order[at];
-        let codes = layers[*layer].codes();
+        let layer = order[at].0;
+        let codes = layers[layer].codes();
         let mut next = Some(live[lowest].1);
-        while let Some((start, last)) = next.filter(|(start, _)| *start < bound) {
-            let slot = (layer_present.rank(start) - 1) as usize;
+        while let Some((start, last, rank)) = next.filter(|(start, _, _)| *start < bound) {
+            let slot = rank as usize;
             let len = (last - start) as usize + 1;
             let mut done = 0;
             while done < len {
@@ -330,7 +295,7 @@ pub(crate) fn write_merged(
                 match remap {
                     None => writer.push(&slice_codes(codes, slot + done, take))?,
                     Some(tables) => {
-                        recolour(codes, slot + done, take, &tables[*layer], &mut recoloured)?;
+                        recolour(codes, slot + done, take, &tables[layer], &mut recoloured)?;
                         if recoloured.len() == MERGE_CHUNK {
                             let chunk = std::mem::take(&mut recoloured);
                             writer.push(&Codes::U32(ScalarBuffer::from(chunk)))?;
@@ -441,9 +406,9 @@ impl CategorySource for ValueColumn {
             }
         }
         let present = self.present();
-        let mut runs = Runs::new(&present);
-        while let Some((start, last)) = runs.next() {
-            let slot0 = (present.rank(start) - 1) as usize;
+        let mut runs = RankedRuns::new(&present, &present);
+        while let Some((start, last, rank)) = runs.next() {
+            let slot0 = rank as usize;
             for (k, entity) in (start..=last).enumerate() {
                 let code = code_at(self.codes(), slot0 + k)
                     .expect("the family was checked before the walk began");

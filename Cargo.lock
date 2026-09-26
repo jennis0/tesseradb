@@ -3007,6 +3007,7 @@ dependencies = [
  "tempfile",
  "tessera-authz",
  "tessera-filter",
+ "tessera-roaring",
  "tessera-types",
  "zstd",
 ]

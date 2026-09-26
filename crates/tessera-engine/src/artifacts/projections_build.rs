@@ -448,22 +448,19 @@ impl ArtifactProjections {
                 let mut labels =
                     vec![tessera_store::membership::ROW_COLUMN_HOLE; base_rows as usize];
                 if let Some(values) = source.values.base() {
-                    for entity in values.present().iter() {
+                    values.for_each_code_in(&values.present(), |entity, code| {
                         let Some(row) =
                             space.row_of(tessera_types::EntityId::new(u64::from(entity)))
                         else {
-                            continue;
+                            return;
                         };
                         if row.raw() >= base_rows {
-                            continue;
+                            return;
                         }
-                        if let Some(ordinal) = values
-                            .value_of(entity)
-                            .and_then(|code| ordinal_of_code.get(&code.raw()))
-                        {
+                        if let Some(ordinal) = ordinal_of_code.get(&code) {
                             labels[row.raw() as usize] = *ordinal;
                         }
-                    }
+                    });
                 }
                 let base = Arc::new(RowColumn::from_labels(ordinals, &labels));
                 self.columns_composed
@@ -483,24 +480,21 @@ impl ArtifactProjections {
         }
         let mut tail = vec![tessera_store::membership::ROW_COLUMN_HOLE; tail_rows as usize];
         for values in source.values.extents() {
-            for entity in values.present().iter() {
+            values.for_each_code_in(&values.present(), |entity, code| {
                 let Some(row) = space.row_of(tessera_types::EntityId::new(u64::from(entity)))
                 else {
-                    continue;
+                    return;
                 };
                 let Some(at) = row.raw().checked_sub(base_rows) else {
-                    continue;
+                    return;
                 };
                 if at as usize >= tail.len() {
-                    continue;
+                    return;
                 }
-                if let Some(ordinal) = values
-                    .value_of(entity)
-                    .and_then(|code| ordinal_of_code.get(&code.raw()))
-                {
+                if let Some(ordinal) = ordinal_of_code.get(&code) {
                     tail[at as usize] = *ordinal;
                 }
-            }
+            });
         }
         Some(Arc::new(base.with_tail(
             crate::row_column::TailLabels::new(base_rows, tail),

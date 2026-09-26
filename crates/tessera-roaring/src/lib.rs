@@ -11,8 +11,15 @@
 //! deserialises, and a stream it refuses is rebuilt by inserting the staged members, so a format
 //! error costs time and never members.
 //!
+//! [`Runs`] and [`RankedRuns`] read a bitmap as runs, the second with each run's rank in another
+//! bitmap, which is how a walk over rows addressed by rank avoids taking a rank per row.
+//!
 //! The crate sits below `tessera-filter` and `tessera-store` because both use it and neither may
 //! depend on the other.
+
+mod runs;
+
+pub use runs::{RankedRuns, Runs};
 
 use croaring::{Bitmap, Portable};
 

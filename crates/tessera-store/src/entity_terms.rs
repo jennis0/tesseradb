@@ -507,6 +507,11 @@ impl EntityTerms {
             return Ok(None);
         }
         let rank = (self.hasrow.rank(entity) - 1) as usize;
+        self.terms_at(rank).map(Some)
+    }
+
+    /// The list at `rank` in this layer's has-row order.
+    fn terms_at(&self, rank: usize) -> Result<Vec<u32>> {
         let start = self.absolute(rank);
         let end = self.absolute(rank + 1);
         // **The pair is checked here rather than at open** — see [`EntityTerms::open`] for why the
@@ -525,14 +530,64 @@ impl EntityTerms {
             });
         }
         let (start, end) = (start as usize, end as usize);
-        Ok(Some(
-            self.terms[start * 4..end * 4]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| u32::from_le_bytes(*b))
-                .collect(),
-        ))
+        Ok(self.terms[start * 4..end * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
+            .collect())
+    }
+}
+
+/// Every list the disjoint layers `inputs` hold, in ascending entity order across them.
+///
+/// Each layer's has-row bitmap is walked in order, so a list's rank is counted rather than taken:
+/// a rank per entity sums every container below it, which over a whole layer is quadratic.
+///
+/// A repeated entity is a **refusal**, not a resolution. Disjointness is a property of the
+/// writers, and a merge that picked one of two lists would answer one flush's labels for another's
+/// entity.
+fn for_each_list_in(
+    inputs: &[&EntityTerms],
+    f: &mut dyn FnMut(u32, Vec<u32>) -> Result<()>,
+) -> Result<()> {
+    let mut cursors: Vec<(std::iter::Peekable<croaring::bitmap::BitmapIterator<'_>>, usize)> =
+        inputs
+            .iter()
+            .map(|layer| (layer.hasrow.iter().peekable(), 0))
+            .collect();
+    loop {
+        // The least unconsumed entity across the inputs, and the layer holding it. `k` is a
+        // coalesce window — eight by default — so a scan per entity is cheaper than a heap and
+        // carries the duplicate check for nothing.
+        let mut least: Option<(usize, u32)> = None;
+        for (index, (cursor, _)) in cursors.iter_mut().enumerate() {
+            let Some(&entity) = cursor.peek() else {
+                continue;
+            };
+            match least {
+                Some((held, at)) if entity == at => {
+                    return Err(StoreError::InvalidEntityTerms {
+                        path: inputs[index].dir.clone(),
+                        detail: format!(
+                            "inputs {held} and {index} both hold a term list for one entity; the \
+                             layers of this family are disjoint (I9) and merging them would \
+                             publish one flush's labels under another's"
+                        ),
+                    });
+                }
+                Some((_, at)) if entity > at => {}
+                _ => least = Some((index, entity)),
+            }
+        }
+        let Some((index, entity)) = least else {
+            return Ok(());
+        };
+        let (cursor, rank) = &mut cursors[index];
+        cursor.next();
+        let terms = inputs[index].terms_at(*rank)?;
+        *rank += 1;
+        f(entity, terms)?;
     }
 }
 
@@ -570,50 +625,12 @@ pub fn coalesce_entity_terms_extents(
     }
     let mut writer =
         EntityTermsWriter::create_at(hasrow_path, offsets_path, terms_path, bases_path)?;
-    let mut cursors: Vec<std::iter::Peekable<croaring::bitmap::BitmapIterator<'_>>> = inputs
-        .iter()
-        .map(|layer| layer.hasrow.iter().peekable())
-        .collect();
     let mut written = 0u64;
-    loop {
-        // The least unconsumed entity across the inputs, and the layer holding it. `k` is a
-        // coalesce window — eight by default — so a scan per entity is cheaper than a heap and
-        // carries the duplicate check for nothing.
-        let mut least: Option<(usize, u32)> = None;
-        for (index, cursor) in cursors.iter_mut().enumerate() {
-            let Some(&entity) = cursor.peek() else {
-                continue;
-            };
-            match least {
-                Some((held, at)) if entity == at => {
-                    return Err(StoreError::InvalidEntityTerms {
-                        path: terms_path.to_path_buf(),
-                        detail: format!(
-                            "inputs {held} and {index} both hold a term list for one entity; the \
-                             layers of this family are disjoint (I9) and merging them would \
-                             publish one flush's labels under another's"
-                        ),
-                    });
-                }
-                Some((_, at)) if entity > at => {}
-                _ => least = Some((index, entity)),
-            }
-        }
-        let Some((index, entity)) = least else { break };
-        cursors[index].next();
-        let terms =
-            inputs[index]
-                .terms_of(entity)?
-                .ok_or_else(|| StoreError::InvalidEntityTerms {
-                    path: inputs[index].dir.clone(),
-                    detail: "the layer's own has-row bitmap names an entity its offsets do not \
-                         answer for — a merge input that disagrees with itself"
-                        .to_string(),
-                })?;
+    for_each_list_in(inputs, &mut |entity, terms| {
         writer.push(entity, &terms)?;
         written += 1;
-    }
-    drop(cursors);
+        Ok(())
+    })?;
     writer.finish()?;
     Ok(written)
 }
@@ -680,7 +697,14 @@ impl EntityTermsStack {
         Ok(None)
     }
 
-    /// Every entity any layer holds a list for, ascending: the fold's walk. The layers hold
+    /// Every list any layer holds, in ascending entity order: the fold's walk. A repeated entity
+    /// refuses, the layers being disjoint.
+    pub fn for_each_list(&self, f: &mut dyn FnMut(u32, Vec<u32>) -> Result<()>) -> Result<()> {
+        let layers: Vec<&EntityTerms> = self.layers.iter().map(|layer| &**layer).collect();
+        for_each_list_in(&layers, f)
+    }
+
+    /// Every entity any layer holds a list for, ascending. The layers hold
     /// disjoint entities whose ranges may interleave, so the union walks entities in order across
     /// every layer.
     /// Returned as a bitmap rather than an iterator so the caller iterates it in place: at 10⁹
