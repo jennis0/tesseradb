@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use memmap2::{Advice, Mmap};
 
-use super::{entries_per_page, file_len, Header, Key, RunPart, HEADER_LEN, PAGE_BODY, PAGE_SIZE};
+use super::page::{max_entries, Page, PageCursor};
+use super::{file_len, Header, Key, RunPart, HEADER_LEN, PAGE_BODY, PAGE_SIZE};
 use crate::error::{Result, StoreError};
 
 /// The most pages between two ranges a batched lookup needs that it prefetches with them.
@@ -30,42 +31,6 @@ pub struct KeyRun<K: Key> {
     /// One bit per entry page, set once the page has passed its checks.
     verified: Box<[AtomicU64]>,
     key: PhantomData<K>,
-}
-
-/// One checked entry page.
-struct Page<'a, K: Key> {
-    bytes: &'a [u8],
-    len: usize,
-    key: PhantomData<K>,
-}
-
-impl<K: Key> Page<'_, K> {
-    const ENTRY: usize = K::WIDTH + 4;
-
-    #[inline]
-    fn key(&self, i: usize) -> K {
-        K::read(&self.bytes[i * Self::ENTRY..])
-    }
-
-    #[inline]
-    fn entity(&self, i: usize) -> u32 {
-        let at = i * Self::ENTRY + K::WIDTH;
-        u32::from_le_bytes(self.bytes[at..at + 4].try_into().expect("four bytes"))
-    }
-
-    /// The first entry whose key is at or past `key`.
-    fn lower_bound(&self, key: K) -> usize {
-        let (mut lo, mut hi) = (0, self.len);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if self.key(mid) < key {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        lo
-    }
 }
 
 impl<K: Key> KeyRun<K> {
@@ -109,13 +74,13 @@ impl<K: Key> KeyRun<K> {
                 header.key_width
             )));
         }
-        let per_page = entries_per_page(width) as u64;
-        if header.pages != header.entries.div_ceil(per_page) {
+        let most = header.pages.saturating_mul(max_entries(width) as u64);
+        if header.pages > header.entries || header.entries > most {
             return Err(header_err(format!(
-                "{} entries need {} pages and the header says {}",
+                "{} entries do not fit {} pages; a page holds from one entry to {}",
                 header.entries,
-                header.entries.div_ceil(per_page),
-                header.pages
+                header.pages,
+                max_entries(width)
             )));
         }
         let key_limit = if width == 16 {
@@ -192,71 +157,86 @@ impl<K: Key> KeyRun<K> {
     }
 
     /// Entry page `p`'s bytes, unchecked.
-    fn raw_page(&self, p: u64) -> Page<'_, K> {
+    fn page_bytes(&self, p: u64) -> &[u8] {
         let at = (1 + p as usize) * PAGE_SIZE;
-        let per_page = entries_per_page(K::WIDTH) as u64;
-        Page {
-            bytes: &self.map[at..at + PAGE_SIZE],
-            len: (self.header.entries - p * per_page).min(per_page) as usize,
-            key: PhantomData,
-        }
+        &self.map[at..at + PAGE_SIZE]
     }
 
     /// Entry page `p`, checked if this is its first read.
     fn page(&self, p: u64) -> Result<Page<'_, K>> {
-        let page = self.raw_page(p);
-        if !self.is_verified(p) {
-            self.check_page(p, &page)?;
-            self.verified[(p / 64) as usize].fetch_or(1 << (p % 64), Ordering::Release);
+        let bytes = self.page_bytes(p);
+        if self.is_verified(p) {
+            return Page::parse(bytes)
+                .map_err(|detail| corrupt(&self.path, RunPart::Page(p), detail));
         }
+        let page = self.check_page(p, bytes)?;
+        self.verified[(p / 64) as usize].fetch_or(1 << (p % 64), Ordering::Release);
         Ok(page)
     }
 
-    /// A page's checksum, the order of its entries, its first and last keys against the page
-    /// index and the header, and the order of its first and last entries against those of a
-    /// neighbouring page already checked. Whichever of two neighbours is checked second compares
-    /// the two, so every pair of neighbouring pages a lookup has read is in order.
-    fn check_page(&self, p: u64, page: &Page<'_, K>) -> Result<()> {
+    /// A page's checksum, its count and gap width, that the bits and bytes it leaves unused are
+    /// zero, the order of its entries, its first and last
+    /// keys against the page index and the header, and the order of its first and last entries
+    /// against those of a neighbouring page already checked. Whichever of two neighbours is
+    /// checked second compares the two, so every pair of neighbouring pages a lookup has read is
+    /// in order.
+    fn check_page<'a>(&'a self, p: u64, bytes: &'a [u8]) -> Result<Page<'a, K>> {
         let fail = |detail: &str| corrupt(&self.path, RunPart::Page(p), detail);
-        let stored = u32::from_le_bytes(page.bytes[PAGE_BODY..].try_into().expect("four bytes"));
-        if crc32fast::hash(&page.bytes[..PAGE_BODY]) != stored {
+        let stored = u32::from_le_bytes(bytes[PAGE_BODY..].try_into().expect("four bytes"));
+        if crc32fast::hash(&bytes[..PAGE_BODY]) != stored {
             return Err(fail("the page checksum does not match its bytes"));
         }
-        let entry = |i: usize| (page.key(i), page.entity(i));
-        if (1..page.len).any(|i| entry(i - 1) >= entry(i)) {
+        let page = Page::<K>::parse(bytes).map_err(fail)?;
+        if page.gap_padding() != 0 || bytes[page.used()..PAGE_BODY].iter().any(|&b| b != 0) {
             return Err(fail(
-                "the page's entries are not in ascending (key, entity) order",
+                "the page's bits after its last gap or bytes after its last entity are not zero",
             ));
         }
-        if page.key(0) != self.index_key(p) {
+        let mut last: Option<(u128, u32)> = None;
+        for (i, key) in page.checked_keys().enumerate() {
+            let key =
+                key.ok_or_else(|| fail("the page's gaps carry a key past the largest key"))?;
+            let entry = (key, page.entity(i));
+            if last.is_some_and(|last| last >= entry) {
+                return Err(fail(
+                    "the page's entries are not in ascending (key, entity) order",
+                ));
+            }
+            last = Some(entry);
+        }
+        let (last_key, last_entity) = last.expect("a parsed page has an entry");
+        let last_key = K::narrow(last_key);
+        if page.first_key() != self.index_key(p) {
             return Err(fail("the page's first key disagrees with the page index"));
         }
-        let last = page.key(page.len - 1);
         if p + 1 < self.header.pages {
-            if last > self.index_key(p + 1) {
+            if last_key > self.index_key(p + 1) {
                 return Err(fail("the page's last key is past the next page's first"));
             }
-        } else if last.widen() != self.header.max_key {
+        } else if last_key.widen() != self.header.max_key {
             return Err(fail(
                 "the last page's last key is not the header's largest key",
             ));
         }
-        let first_of = |q: &Page<'_, K>| (q.key(0), q.entity(0));
-        let last_of = |q: &Page<'_, K>| (q.key(q.len - 1), q.entity(q.len - 1));
-        if p + 1 < self.header.pages
-            && self.is_verified(p + 1)
-            && last_of(page) >= first_of(&self.raw_page(p + 1))
-        {
-            return Err(fail(
-                "the page's last entry does not precede the next page's first",
-            ));
+        let neighbour =
+            |q: u64| Page::<K>::parse(self.page_bytes(q)).expect("a checked page parses");
+        if p + 1 < self.header.pages && self.is_verified(p + 1) {
+            let next = neighbour(p + 1);
+            if (last_key, last_entity) >= (next.first_key(), next.entity(0)) {
+                return Err(fail(
+                    "the page's last entry does not precede the next page's first",
+                ));
+            }
         }
-        if p > 0 && self.is_verified(p - 1) && last_of(&self.raw_page(p - 1)) >= first_of(page) {
+        if p > 0
+            && self.is_verified(p - 1)
+            && neighbour(p - 1).last() >= (page.first_key(), page.entity(0))
+        {
             return Err(fail(
                 "the page's first entry does not follow the previous page's last",
             ));
         }
-        Ok(())
+        Ok(page)
     }
 
     pub fn path(&self) -> &Path {
@@ -291,14 +271,14 @@ impl<K: Key> KeyRun<K> {
     pub fn get(&self, key: K) -> Result<Vec<u32>> {
         let mut out = Vec::new();
         if self.may_hold(key) {
-            self.scan(key, 0, |entity| out.push(entity))?;
+            self.scan(key, &mut None, |entity| out.push(entity))?;
         }
         Ok(out)
     }
 
     /// Every entity stored under each of `keys`, as `(position in keys, entity)` in the order of
     /// `keys`. `keys` must be in ascending order (repeats allowed); the run is walked once, front
-    /// to back.
+    /// to back, and each page it reads is decoded once.
     ///
     /// # Panics
     ///
@@ -309,11 +289,29 @@ impl<K: Key> KeyRun<K> {
             "lookup_sorted takes keys in ascending order"
         );
         self.prefetch(keys);
-        let mut out = Vec::new();
-        let mut from = 0;
+        let mut out: Vec<(usize, u32)> = Vec::new();
+        let mut at = None;
+        // Where the previous key's entities start in `out`, for a repeated key.
+        let mut previous: Option<(K, usize)> = None;
         for (i, &key) in keys.iter().enumerate() {
-            if self.may_hold(key) {
-                from = self.scan(key, from, |entity| out.push((i, entity)))?;
+            if !self.may_hold(key) {
+                continue;
+            }
+            match previous {
+                Some((k, from)) if k == key => {
+                    let end = out.len();
+                    out.extend_from_within(from..end);
+                    let copied = end - from;
+                    for entry in &mut out[end..end + copied] {
+                        entry.0 = i;
+                    }
+                    previous = Some((key, end));
+                }
+                _ => {
+                    let from = out.len();
+                    self.scan(key, &mut at, |entity| out.push((i, entity)))?;
+                    previous = Some((key, from));
+                }
             }
         }
         Ok(out)
@@ -385,74 +383,99 @@ impl<K: Key> KeyRun<K> {
         }
     }
 
-    /// Hand every entity under `key` to `found`, reading pages from `from` on, and return the page
-    /// the scan started at. No entry of `key` is before `from` when `from` is where the scan for
-    /// a key at or below `key` started.
-    fn scan(&self, key: K, from: u64, mut found: impl FnMut(u32)) -> Result<u64> {
+    /// Hand every entity under `key` to `found`, continuing from `at`, where a scan for a smaller
+    /// key left it, or from the start when `at` is `None`; `at` is left past the last entity
+    /// under `key`, or on the last entry of the page the scan ended in.
+    fn scan<'a>(
+        &'a self,
+        key: K,
+        at: &mut Option<(u64, PageCursor<'a, K>)>,
+        mut found: impl FnMut(u32),
+    ) -> Result<()> {
+        let from = at.as_ref().map_or(0, |&(p, _)| p);
         let start = self.start_page(key, from);
-        for p in start..self.header.pages {
-            if self.index_key(p) > key {
-                break;
-            }
-            let page = self.page(p)?;
-            let mut i = page.lower_bound(key);
-            while i < page.len && page.key(i) == key {
-                found(page.entity(i));
-                i += 1;
-            }
-            if i < page.len {
-                break;
-            }
+        if at.as_ref().is_none_or(|&(p, _)| p != start) {
+            *at = Some((start, PageCursor::new(self.page(start)?)));
         }
-        Ok(start)
+        let (p, cursor) = at.as_mut().expect("set above");
+        loop {
+            loop {
+                if cursor.key > key {
+                    return Ok(());
+                }
+                if cursor.key == key {
+                    found(cursor.entity());
+                }
+                if !cursor.step() {
+                    break;
+                }
+            }
+            let next = *p + 1;
+            if next >= self.header.pages || self.index_key(next) > key {
+                return Ok(());
+            }
+            *cursor = PageCursor::new(self.page(next)?);
+            *p = next;
+        }
     }
 
     /// Every entry in order, each page checked as it is reached.
     pub fn iter(&self) -> Entries<'_, K> {
         Entries {
             run: self,
-            page: None,
+            cursor: None,
             next_page: 0,
-            at: 0,
+            seen: 0,
         }
     }
 }
 
 /// The entries of a run in `(key, entity)` order; see [`KeyRun::iter`]. A page that fails its
-/// checks ends the iteration with that error.
+/// checks, or pages holding other than the header's entry count, end the iteration with that
+/// error.
 pub struct Entries<'a, K: Key> {
     run: &'a KeyRun<K>,
-    page: Option<Page<'a, K>>,
+    cursor: Option<PageCursor<'a, K>>,
     next_page: u64,
-    at: usize,
+    seen: u64,
 }
 
 impl<K: Key> Iterator for Entries<'_, K> {
     type Item = Result<(K, u32)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(page) = &self.page {
-                if self.at < page.len {
-                    let entry = (page.key(self.at), page.entity(self.at));
-                    self.at += 1;
-                    return Some(Ok(entry));
-                }
+        if let Some(cursor) = &mut self.cursor {
+            if cursor.step() {
+                self.seen += 1;
+                return Some(Ok((cursor.key, cursor.entity())));
             }
-            if self.next_page >= self.run.header.pages {
-                return None;
+        }
+        let run = self.run;
+        if self.next_page >= run.header.pages {
+            if self.cursor.take().is_some() && self.seen != run.header.entries {
+                return Some(Err(corrupt(
+                    &run.path,
+                    RunPart::Header,
+                    format!(
+                        "the pages hold {} entries and the header says {}",
+                        self.seen, run.header.entries
+                    ),
+                )));
             }
-            match self.run.page(self.next_page) {
-                Ok(page) => {
-                    self.page = Some(page);
-                    self.next_page += 1;
-                    self.at = 0;
-                }
-                Err(e) => {
-                    self.next_page = self.run.header.pages;
-                    self.page = None;
-                    return Some(Err(e));
-                }
+            return None;
+        }
+        match run.page(self.next_page) {
+            Ok(page) => {
+                let cursor = PageCursor::new(page);
+                self.next_page += 1;
+                self.seen += 1;
+                self.cursor = Some(cursor);
+                Some(Ok((cursor.key, cursor.entity())))
+            }
+            Err(e) => {
+                self.next_page = run.header.pages;
+                self.cursor = None;
+                Some(Err(e))
             }
         }
     }
@@ -523,16 +546,19 @@ fn verify_all<K: Key>(path: &Path) -> Result<RunCheck> {
         ));
     }
     // Reading the pages in order checks each against the one before it (see `check_page`).
+    let mut entries = 0u64;
     for p in 0..run.header.pages {
-        let page = run.page(p)?;
-        let used = page.len * (K::WIDTH + 4);
-        if page.bytes[used..PAGE_BODY].iter().any(|&b| b != 0) {
-            return Err(corrupt(
-                path,
-                RunPart::Page(p),
-                "the page's bytes after its last entry are not zero",
-            ));
-        }
+        entries += run.page(p)?.len() as u64;
+    }
+    if entries != run.header.entries {
+        return Err(corrupt(
+            path,
+            RunPart::Header,
+            format!(
+                "the pages hold {entries} entries and the header says {}",
+                run.header.entries
+            ),
+        ));
     }
     Ok(RunCheck {
         key_width: K::WIDTH,

@@ -1,7 +1,6 @@
-//! Sorted runs of fixed-width `(key, entity)` entries, and the lookups, writers, merge and
-//! verifier over them. One format serves every index that maps a value to entities: a unique
-//! field's values (keys from [`unsigned_key`], [`signed_key`] or [`keyword_key`]) and a map from
-//! one `u32` to another.
+//! Sorted runs of `(key, entity)` entries, and the lookups, writers, merge and verifier over them.
+//! One format serves every index that maps a value to entities: a unique field's values (keys from
+//! [`unsigned_key`], [`signed_key`] or [`keyword_key`]) and a map from one `u32` to another.
 //!
 //! # The run file
 //!
@@ -13,11 +12,30 @@
 //! | Offset | Bytes | Content |
 //! | --- | --- | --- |
 //! | 0 | 4096 | Header page: [`MAGIC`], [`FORMAT_VERSION`] (u32), key width (u32), entry count (u64), page count (u64), smallest key (u128), largest key (u128), then a CRC-32 of those 64 bytes; zeros to the end of the page |
-//! | 4096 × (1 + p) | 4096 | Entry page `p`: as many `key ‖ entity` entries as fit before the page's last four bytes, zeros after the last entry, and a CRC-32 of the page's first 4092 bytes in its last four |
+//! | 4096 × (1 + p) | 4096 | Entry page `p`, below |
 //! | 4096 × (1 + pages) | pages × width + 4 | Page index: the first key of every entry page, then a CRC-32 of those keys |
 //!
-//! An entry never straddles a page, so an entry page is read and checked on its own. The widths
-//! give 511, 341 and 204 entries a page.
+//! An entry page holds its entries' keys as the first key and the gaps from each key to the next,
+//! all packed at one bit width, the width of the page's widest gap; and its entities as they are.
+//!
+//! | Bytes | Content |
+//! | --- | --- |
+//! | 2 | Entry count `n`, at least 1 |
+//! | 1 | Gap width `b` in bits, from 0 to 8 × the key width |
+//! | key width | The first key |
+//! | ⌈(n − 1) × b / 8⌉ | The `n − 1` gaps, each `b` bits, least significant bit first, the first gap in the lowest bits; zero bits after the last |
+//! | 4 × n | The entities, in entry order |
+//! | to byte 4092 | Zeros |
+//! | 4 | CRC-32 of the page's first 4092 bytes |
+//!
+//! A writer fills a page with entries until the next would not fit at the gap width the page
+//! would then need, and an entry never straddles a page, so an entry page is read and checked on
+//! its own. Record numbers with a few holes pack at two to five bits a gap, about 4.5 bytes an
+//! entry. Keys spread across their whole width, as keyword hashes in a small run are, pack at the
+//! full key width: 511, 340 and 204 entries a page for 4-, 8- and 16-byte keys. A key held by
+//! several entities is a gap of zero.
+//!
+//! Finding a key decodes its page's gaps from the first entry up to the key.
 //!
 //! Opening a run reads the header and the page index and nothing else. An entry page's checksum,
 //! its order, its agreement with the page index and its order against any neighbouring page
@@ -44,6 +62,7 @@
 
 mod key;
 mod merge;
+mod page;
 mod run;
 mod spill;
 mod view;
@@ -65,7 +84,7 @@ pub use write::{KeyRunWriter, WrittenRun};
 pub const MAGIC: [u8; 8] = *b"TSKEYRUN";
 
 /// The run file's own format number. A file carrying another is refused at open.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The size of the header page, of every entry page, and of the unit a page checksum covers.
 pub const PAGE_SIZE: usize = 4096;
@@ -75,11 +94,6 @@ const HEADER_LEN: usize = 64;
 
 /// Bytes of an entry page before its checksum.
 const PAGE_BODY: usize = PAGE_SIZE - 4;
-
-/// Entries in one page for keys `width` bytes wide.
-pub const fn entries_per_page(width: usize) -> usize {
-    PAGE_BODY / (width + 4)
-}
 
 /// Which part of a run file a check failed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
