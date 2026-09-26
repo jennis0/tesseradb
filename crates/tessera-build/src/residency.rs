@@ -3587,8 +3587,6 @@ require_member_visibility = "none"
             limit: None,
             identity_key: tessera_types::IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f")
                 .unwrap(),
-            identity_key_hex: "000102030405060708090a0b0c0d0e0f".into(),
-            idset: 1,
             shard_id: 0,
             layers: parsed.layers.clone(),
             layer_inputs: parsed.layer_sources.clone(),

@@ -386,8 +386,7 @@ fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_ar
     assert_eq!(matched(&outside_withheld), visible(&outside_withheld));
 
     // Suppressed: the broad principal, who was served it, now gets the empty operand too.
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    let entity = engine.resolve_tessera_ids(&[id], idset).unwrap()[0].unwrap();
+    let entity = engine.resolve_tessera_ids(&[id])[0].unwrap();
     engine.accept_change(entity, ChangeOp::Suppress).unwrap();
     let suppressed = viewport(&engine, &full_coverage_credential(), Some(by_artifact(id)));
     let unknown_full = viewport(

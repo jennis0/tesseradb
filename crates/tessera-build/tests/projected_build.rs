@@ -424,8 +424,6 @@ fn build_bundle(
         out: out.clone(),
         limit: None,
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
-        identity_key_hex: KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),

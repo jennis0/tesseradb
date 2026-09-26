@@ -62,10 +62,6 @@ const DELETED_SOURCE: u64 = 9;
 /// satisfiable by a fold that simply emptied the artefacts.
 const SUPPRESSED_SOURCE: u64 = 11;
 
-/// The `idset` [`build_fixture_with_every_home`] mints under, which a `tessera_id`-addressed
-/// change must carry (contracts §3.1).
-const IDSET: u32 = 1;
-
 /// The schema is the point of the fixture: one column per home.
 ///
 /// - `band` is a `public` category, `render` **and** `index` — the only shape that owes membership
@@ -263,8 +259,6 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: IDSET,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -696,9 +690,7 @@ fn a_deletion_reaches_every_home() {
     let by_tessera = engine
         .resolve_tessera_ids(
             &[engine.tessera_id_of(deleted).expect("a wire identifier")],
-            IDSET,
-        )
-        .expect("the idset is the deployment's")[0]
+        )[0]
         .expect("the identifier names a live item");
     assert_eq!(by_external, deleted, "the external-id route names the item");
     assert_eq!(by_tessera, deleted, "and so does the tessera_id route");

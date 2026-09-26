@@ -106,9 +106,8 @@ impl TesseraId {
     }
 }
 
-/// The per-deployment 128-bit key for the `tessera_id` blinding permutation. Never
-/// implements `Debug`/`Display` in a form that prints key material — see the redacted
-/// `Debug` impl below. Must never leave the server (memo §3.2).
+/// The bundle's 128-bit key for the `tessera_id` blinding permutation, generated when the bundle
+/// is created and stored in its manifest. `Debug` is redacted. The key never leaves the server.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct IdentityKey {
     k0: u64,
@@ -153,6 +152,15 @@ impl IdentityKey {
         let k0 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         let k1 = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         Self::from_parts(k0, k1)
+    }
+
+    /// The canonical form [`IdentityKey::from_hex`] reads: 32 lowercase hexadecimal characters,
+    /// byte 0 first.
+    pub fn to_hex(&self) -> String {
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&self.k0.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.k1.to_le_bytes());
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Construct directly from the two little-endian `u64` halves, refusing degenerate
@@ -516,6 +524,12 @@ mod tests {
             .sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.raw().cmp(&b.raw())));
 
         assert_eq!(by_priority_then_raw, by_raw);
+    }
+
+    #[test]
+    fn the_hex_form_round_trips() {
+        let key = IdentityKey::from_hex(CANONICAL_KEY).unwrap();
+        assert_eq!(key.to_hex(), CANONICAL_KEY);
     }
 
     #[test]

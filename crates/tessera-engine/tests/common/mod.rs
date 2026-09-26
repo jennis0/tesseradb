@@ -198,8 +198,6 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -298,8 +296,6 @@ pub fn build_corpus_fixture(
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -357,8 +353,6 @@ pub fn build_corpus_fixture_with_layers(
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
@@ -407,8 +401,6 @@ pub fn build_with_layers(
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
@@ -545,8 +537,7 @@ pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
 
 /// The entity an artifact's served identifier names.
 pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
+    engine.resolve_tessera_ids(&[id])[0].expect("it names what was issued")
 }
 
 /// A one-row ingest at the fixture's centre, carrying `ALL_TERM` — the batch id and the external

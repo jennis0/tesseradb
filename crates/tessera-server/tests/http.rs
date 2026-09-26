@@ -333,11 +333,9 @@ async fn h_config_missing_disclosure_refuses_to_start() {
 
 // --- Authentication and disclosure regressions ---
 
-/// Contracts §2.2 r6: `GET /v1/meta` reports the idset as `idset` —
-/// and reports **only** the idset: the identity key appears in no API response on any plane.
-/// Nothing asserted either half before, which is what let S2's idset regression sit untested.
+/// `GET /v1/meta` never carries the bundle's identity key.
 #[tokio::test]
-async fn viewer_meta_reports_the_idset_and_never_the_key() {
+async fn viewer_meta_never_carries_the_identity_key() {
     let tmp = TempDir::new().unwrap();
     let server = serve_standard(&tmp).await;
 
@@ -352,86 +350,10 @@ async fn viewer_meta_reports_the_idset_and_never_the_key() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(
-        body["idset"], FIXTURE_IDSET,
-        "/v1/meta must report the bundle's idset: {body}"
-    );
     let raw = body.to_string();
     assert!(
         !raw.contains(TEST_KEY_HEX),
         "/v1/meta must never carry the identity key: {raw}"
-    );
-}
-
-/// Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}` accepts an optional `idset` and answers
-/// `409 conflict` — "stale idset; re-resolve by external_id" — when it does not match.
-/// The 409 had no test at any level, and the check is decided before inversion, so a matching
-/// idset must not alter the answer for the same id.
-#[tokio::test]
-async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve_standard(&tmp).await;
-
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-
-    // A real, visible id, so the 409 is not confusable with the 404 an unknown id would give.
-    let viewport = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(viewport.status(), 200);
-    let (_tiles, points) = decode_viewport(&viewport.bytes().await.unwrap());
-    let tessera_id = points[0].0;
-
-    // Baseline: no idset at all → 200.
-    let plain = post_item(&server, token, tessera_id).await;
-    assert_eq!(plain.status(), 200);
-
-    // A stale idset → 409, with the contract's own detail string.
-    let stale = server
-        .client
-        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "idset": FIXTURE_IDSET + 1 }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stale.status(), 409);
-    let body: serde_json::Value = stale.json().await.unwrap();
-    assert_eq!(body["error"], "conflict");
-
-    // The matching idset is a no-op: same 200, same body as the idset-less request.
-    let matching = server
-        .client
-        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "idset": FIXTURE_IDSET }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(matching.status(), 200);
-
-    // And a stale idset on an id naming nothing is still the 409, decided before inversion —
-    // identical for every identifier, so it opens no channel (Appendix C, C4).
-    let stale_unknown = server
-        .client
-        .post(server.viewer_url("/v1/items/0"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "idset": FIXTURE_IDSET + 1 }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        stale_unknown.status(),
-        409,
-        "the idset check must be entity-independent, not fall through to 404"
     );
 }
 

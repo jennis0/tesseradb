@@ -343,8 +343,6 @@ fn build_with_labels(
         out: dir.join("bundle"),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers,
         layer_inputs: config.layer_sources.clone(),
@@ -456,7 +454,7 @@ fn each_view_serves_its_own_copy_of_the_key() {
     // view is asked for the other's artifact by the id that view's own page handed out.
     for (view, other) in [(served[0].0, served[1].1), (served[1].0, served[0].1)] {
         let answer = engine
-            .artifact(&session, other, None, view, None)
+            .artifact(&session, other, view, None)
             .expect("the identifier route answers");
         assert!(
             answer.is_none(),

@@ -46,10 +46,9 @@ use tessera_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
-use tessera_types::{AttrLocalId, EntityId, TesseraId};
+use tessera_types::{AttrLocalId, EntityId, IdentityKey, TesseraId};
 
 const N: u64 = 2000;
-const IDSET: u32 = 1;
 const GEO: &str = "geo";
 const Q1: &str = "quarter:q1";
 const Q2: &str = "quarter:q2";
@@ -344,11 +343,11 @@ fn group(name: &str, keys: &[&str], visibility: Option<Vec<String>>) -> GroupDes
 /// `geo` over the even ones, a group `quarter` of two overlapping keys carrying `sentiment` and
 /// the text family `blurb`, and a group `secret`, gated on term "1", carrying `hush`.
 fn build_bundle(dir: &Path) -> PathBuf {
-    build_bundle_under(dir, IDSET)
+    build_bundle_under(dir, test_key())
 }
 
-/// [`build_bundle`] under `idset`, with the same identity key.
-fn build_bundle_under(dir: &Path, idset: u32) -> PathBuf {
+/// [`build_bundle`] with `key` as its identity key.
+fn build_bundle_under(dir: &Path, key: IdentityKey) -> PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, N);
     let world = dir.join("world.parquet");
@@ -413,9 +412,7 @@ fn build_bundle_under(dir: &Path, idset: u32) -> PathBuf {
         attribute_sources: tessera_build::config::AttributeSource::over(world.clone(), &schema),
         out: out.clone(),
         limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset,
+        identity_key: key,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -574,7 +571,6 @@ fn request<'a>(view: &'a str, fields: &'a [String]) -> ItemsRequest<'a> {
         page_rows: None,
         pages: None,
         cursor: None,
-        idset: None,
         limits: limits(),
         cancel: None,
     }
@@ -1161,7 +1157,7 @@ fn a_narrower_viewer_reads_only_what_they_see_and_counts_as_the_viewport_does() 
 
 /// **Every cursor presented outside the read it was issued for is refused alike**: altered, from
 /// a session with another credential, for another view, for a view dropped and created again, or
-/// for another order. Another idset is the item route's stale-idset refusal.
+/// for another order.
 #[test]
 fn every_foreign_cursor_is_refused_alike() {
     let fx = Fx::new();
@@ -1215,13 +1211,6 @@ fn every_foreign_cursor_is_refused_alike() {
             "a foreign cursor was answered {refusal:?}"
         );
     }
-
-    let mut stale = request("s0", &fields);
-    stale.idset = Some(IDSET + 1);
-    assert!(matches!(
-        respond(&fx.engine, &session, stale).map(|_| ()),
-        Err(EngineError::StaleIdSet)
-    ));
 }
 
 /// **A sparse filter under no time budget still finishes**: every response scans at least one
@@ -2209,7 +2198,7 @@ fn every_row_is_read_once_across_stretch_boundaries() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The narrower viewer and the idset
+// The narrower viewer and another bundle
 // ---------------------------------------------------------------------------------------------
 
 /// **A narrower viewer's rows, filtered and marked, are exactly theirs row by row, and a label
@@ -2255,12 +2244,12 @@ fn a_narrower_viewers_rows_and_labels_are_theirs_row_by_row() {
     }
 }
 
-/// **A cursor issued under another idset is the item route's stale-idset refusal**: the same
-/// identity key, view, incarnation and credential, and a deployment whose idset has moved.
+/// **A cursor issued by another bundle is refused**: the same view, incarnation and credential,
+/// and a bundle built from the same data under another identity key.
 #[test]
-fn a_cursor_issued_under_another_idset_is_stale() {
+fn a_cursor_issued_by_another_bundle_is_refused() {
     let issuing = tempfile::TempDir::new().unwrap();
-    let root = build_bundle_under(issuing.path(), IDSET);
+    let root = build_bundle_under(issuing.path(), test_key());
     let engine = engine_at(issuing.path(), &root, 3600);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let fields: Vec<String> = Vec::new();
@@ -2271,14 +2260,15 @@ fn a_cursor_issued_under_another_idset_is_stale() {
     let cursor = trailer.next.unwrap();
 
     let moved = tempfile::TempDir::new().unwrap();
-    let root = build_bundle_under(moved.path(), IDSET + 1);
+    let other_key = IdentityKey::from_hex("0f0e0d0c0b0a09080706050403020100").unwrap();
+    let root = build_bundle_under(moved.path(), other_key);
     let engine = engine_at(moved.path(), &root, 3600);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     req.cursor = Some(&cursor);
     req.pages = None;
     assert!(matches!(
         respond(&engine, &session, req).map(|_| ()),
-        Err(EngineError::StaleIdSet)
+        Err(EngineError::CursorRefused)
     ));
 }
 

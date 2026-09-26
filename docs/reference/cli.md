@@ -16,7 +16,7 @@ Build a bundle from the corpus declaration and the source files it names.
 
 `tessera build` needs no flags. It reads `tessera.toml` from the working directory, or from the nearest directory above it that has one. That file names the corpus declaration in `[build] schema` (default `schema.toml`) and the bundle directory in `[bundle] path`, each relative to the file's own directory. The declaration names the source files.
 
-The identity key comes from the environment variable that `[identity] env` in `tessera.toml` names, `TESSERA_IDENTITY_KEY` by default. A `.env` file beside `tessera.toml` may set it, and a value in the process environment takes precedence over the file. With no key, the build is refused before it reads any data; pass `--carry-id-key-from`, `--identity-file` or `--mint-id-key` to supply or create one.
+Every build creates a new bundle with a new key for its `tessera_id`s, so a `tessera_id` read from an earlier bundle does not name an item in this one. A copy of a bundle keeps its `tessera_id`s.
 
 The other flags override `tessera.toml` or tune the build.
 
@@ -29,16 +29,10 @@ The other flags override `tessera.toml` or tune the build.
 | `--file` | `NAME=PATH` |  | Read the source NAME in the declaration's `[sources]` from PATH instead. Repeatable. A relative PATH is read from the working directory, not from the declaration's directory. Every block that reads the source reads PATH. Refused when `[sources]` has no source called NAME (the message lists the names it has), and when NAME is given twice. The flag replaces a source's path and cannot add a source. |
 | `--mint-external-ids` |  |  | Write an external id for every item, made from its identity column's integer value. An identity column of strings or bytes writes external ids without this flag. Rows with no identity column get no external ids, with or without it. |
 | `--no-oracle-pairs` |  |  | Do not write `pairs.parquet`. The server does not read the file. The conformance suite and `tessera verify --deep` do, and `verify --deep` passes a bundle without one. |
-| `--batch-items` | `ITEMS` | derived | Assign internal ids in batches of this many items. Default: the largest batch the memory budget allows, which is the whole corpus when it fits. Refused when the batch does not fit the budget, or when it is less than half the size the budget allows. A build of more than one batch records the size in the bundle, and a different size assigns different internal ids. `--carry-id-key-from` reuses a recorded size and refuses a different one. When the carried bundle was built as one batch, a size given here is used, and the build prints a note saying the ids will differ. |
+| `--batch-items` | `ITEMS` | derived | Assign internal ids in batches of this many items. Default: the largest batch the memory budget allows, which is the whole corpus when it fits. Refused when the batch does not fit the budget, or when it is less than half the size the budget allows. A build of more than one batch records the size in the bundle. |
 | `--memory-budget` | `SIZE` | derived | Peak memory for the build's own structures, in bytes or with a `k`, `m` or `g` suffix, such as `24g`. Default: 80% of the available memory or of the process's cgroup limit, whichever is lower, kept between 2 GiB and 1 TiB, and 24 GiB where available memory cannot be read. Batch and band sizes follow from it. A build that would not fit is refused before it assigns internal ids, with the arithmetic in the message. |
 | `--stage-timings` |  |  | Print each build stage's wall time, row count and peak resident memory to stderr as the stage ends. Peak resident memory is the process's high-water mark when the stage ended, so it shows the stage in which the peak was reached. |
 | `--stage-timings-json` | `PATH` |  | Write the per-stage records to this file as JSON when the build ends, including one that fails partway. One object per stage, in order, with `stage`, `wall_s`, `rows`, `peak_rss_kib`, `started_at` and `ended_at`. It does not need `--stage-timings`. |
-| `--carry-id-key-from` | `BUNDLE` |  | Reuse the identity key, idset and batch size recorded in an existing bundle. This rebuilds a bundle while every `tessera_id` a client holds stays valid. Refused when the bundle's identity construction differs from this binary's, and when its key disagrees with another key source unless `--rotate-id-key` is given. |
-| `--identity-file` | `PATH` |  | Read the identity key from a TOML file with an `[identity]` table holding `key`, 32 lowercase hex digits, and an optional `idset`. A file can be made readable by its owner only, which an environment variable is not: another process of the same user can read it from `/proc`. Refused when `[identity]` has any other key or an idset of 0. |
-| `--mint-id-key` |  |  | Generate a new random identity key at idset 1 and print it. This starts a new identity: every `tessera_id` a client holds becomes invalid. Record the printed key, in the environment variable or a `.env` file beside `tessera.toml`, so later builds can reuse it. `--idset` and `--bump-idset` are ignored: the idset is 1. Refused when any other key source is given or set. |
-| `--rotate-id-key` |  |  | Accept a change of identity key when the key sources disagree. Without it, disagreeing sources are refused. The new key is the one from `--identity-file` if given, otherwise the one from the environment. Every `tessera_id` a client holds becomes invalid, every row is stored in a new order, and the idset returns to 1 unless `--idset` is given. |
-| `--bump-idset` |  |  | Add one to the idset and keep the key. The server publishes the idset at `/v1/meta`, and refuses a request that names any other idset. |
-| `--idset` | `N` | derived | Set the idset. Default: the idset in `--identity-file`, then the one recorded by `--carry-id-key-from`, then 1. Required when those two disagree. `--bump-idset` adds one to it. |
 
 ## `tessera check`
 
@@ -144,7 +138,6 @@ For example, `tessera items --server http://127.0.0.1:8080 --view papers --field
 | `--pages` | `N` |  | The most pages in one response. Responses are requested until the read is done. 0 is refused. |
 | `--cursor` | `CURSOR` |  | Start after the last page of an earlier read: the cursor a read cut short printed. |
 | `--compression` | `COMPRESSION` |  | `zstd` compresses the pages on their way from the server. The output is written uncompressed either way. |
-| `--idset` | `IDSET` |  | The id numbering the ids are read in, `/v1/meta`'s `idset`. A server holding another refuses the read. |
 | `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
 | `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`, and with neither the read is refused. |
 | `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |
@@ -177,7 +170,6 @@ For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --l
 | `--pages` | `N` |  | The most pages in one response. Responses are requested until the read is done. 0 is refused. |
 | `--cursor` | `CURSOR` |  | Start after the last page of an earlier read: the cursor a read cut short printed. |
 | `--compression` | `COMPRESSION` |  | `zstd` compresses the pages on their way from the server. The output is written uncompressed either way. |
-| `--idset` | `IDSET` |  | The id numbering the ids are read in, `/v1/meta`'s `idset`. A server holding another refuses the read. |
 | `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
 | `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`, and with neither the read is refused. |
 | `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |

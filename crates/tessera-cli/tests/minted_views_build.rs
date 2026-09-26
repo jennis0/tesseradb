@@ -134,9 +134,6 @@ schema = "corpus.toml"
 [plugin]
 module = "builtin:passthrough"
 
-[identity]
-env = "TESSERA_TEST_IDENTITY_KEY"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -160,8 +157,7 @@ fn fixture(corpus: &str) -> tempfile::TempDir {
 fn build_in(dir: &Path) -> std::process::Output {
     tessera()
         .current_dir(dir)
-        .args(["build", "--mint-id-key"])
-        .env("TESSERA_TEST_IDENTITY_KEY", "")
+        .arg("build")
         .output()
         .expect("the build runs")
 }

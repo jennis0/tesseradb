@@ -373,8 +373,6 @@ fn build_scan_fixture(dir: &Path, rows: u64) -> PathBuf {
             "07070707070707070707070707070707",
         )
         .expect("a well-formed key"),
-        identity_key_hex: "07070707070707070707070707070707".to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),

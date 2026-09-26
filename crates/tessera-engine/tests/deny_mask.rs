@@ -127,7 +127,7 @@ fn visible_in_entity_space(
         .tessera_id_of(entity)
         .expect("identity is computable");
     engine
-        .item(session, id, None)
+        .item(session, id)
         .expect("the drill-down succeeds")
         .is_some()
 }

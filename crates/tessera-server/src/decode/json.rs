@@ -262,7 +262,6 @@ fn fixed_column(
             }
             Arc::new(builder.finish())
         }
-        Fixed::IdSet => u32_column(body_name, rows, "idset")?,
     })
 }
 

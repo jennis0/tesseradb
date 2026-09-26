@@ -526,7 +526,6 @@ fn a_drill_down_agrees_with_the_viewport_under_either_layout() {
     ] {
         let fx = fixture();
         let engine = published(&fx, Some(layout), Some(ServingLayout::ArtifactMajor));
-        let idset = engine.generation().bundle.manifest.identity.idset;
         for credential in [full_coverage_credential(), subset_credential()] {
             let session = engine.authorise(&credential).unwrap();
             let response = engine
@@ -540,7 +539,7 @@ fn a_drill_down_agrees_with_the_viewport_under_either_layout() {
                 // ⊘ A cold drill-down on a row-major level pays the level's whole histogram; this
                 // is where that is exercised as well as asserted.
                 let alone = engine
-                    .artifact(&session, artifact.tessera_id, Some(idset), "s0", None)
+                    .artifact(&session, artifact.tessera_id, "s0", None)
                     .expect("the identifier resolves")
                     .expect("and the artifact is served to the viewer the viewport served it to");
                 assert_eq!(
@@ -711,7 +710,6 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
     // rather than read from the per-principal cache the viewport just filled: the two routes
     // share that cache by design, and comparing them inside one session compares one answer with
     // itself. A client following a saved link reaches this route cold.
-    let idset = reopened.generation().bundle.manifest.identity.idset;
     for credential in [full_coverage_credential(), subset_credential()] {
         let looking = reopened.authorise(&credential).unwrap();
         let response = reopened
@@ -728,7 +726,7 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         let cold = reopened.authorise(&credential).unwrap();
         for artifact in &response.artifacts {
             let alone = reopened
-                .artifact(&cold, artifact.tessera_id, Some(idset), "s0", None)
+                .artifact(&cold, artifact.tessera_id, "s0", None)
                 .expect("the identifier resolves")
                 .expect("and the artifact is served to the viewer the viewport served it to");
             assert_eq!(alone.masked_count, artifact.masked_count);
@@ -899,8 +897,7 @@ fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
         .find(|a| a.layer == FLAT && a.key.as_deref() == Some(key))
         .expect("the artifact is served")
         .tessera_id;
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
+    engine.resolve_tessera_ids(&[id])[0].expect("it names what was issued")
 }
 
 /// The row of each of `sources` in the served row space, for a column check.

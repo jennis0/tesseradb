@@ -155,7 +155,6 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
             shard_id: 0,
-            idset: 1,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {
@@ -201,7 +200,6 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
     let bundle = open_bundle(dir.path()).expect("open_bundle over a bundle these writers built");
     assert_eq!(bundle.manifest.bundle_format, tessera_types::BUNDLE_FORMAT);
     assert_eq!(bundle.manifest.entity_id_high_water, 64);
-    assert_eq!(bundle.manifest.identity.idset, 1);
 
     let partition = bundle.partitions.get("default").expect("default partition");
     let view = partition.views.get("main").expect("main view");

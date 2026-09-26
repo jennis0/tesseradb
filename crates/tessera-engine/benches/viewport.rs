@@ -91,8 +91,6 @@ fn ensure_bundle() -> PathBuf {
             out: bundle_root.clone(),
             limit: Some(ITEM_LIMIT),
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-            identity_key_hex: TEST_KEY_HEX.to_string(),
-            idset: 1,
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),

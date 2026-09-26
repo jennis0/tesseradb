@@ -207,8 +207,6 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
         out: bundle.clone(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -514,9 +512,8 @@ fn a_child_whose_parent_is_withheld_is_a_root() {
     // its children. Suppression is the same withholding by a different door, and it is the door a
     // test can drive.
     let fx = fixture(None);
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
     let alpha = id_of(&fx, &full_coverage_credential(), "alpha");
-    let entity = fx.engine.resolve_tessera_ids(&[alpha], idset).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[alpha])[0].unwrap();
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
         .unwrap();

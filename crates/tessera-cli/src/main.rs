@@ -7,8 +7,7 @@ mod records;
 
 use clap::{Parser, Subcommand};
 use tessera_spatial::Bounds;
-use tessera_store::manifest::identity_key_fingerprint;
-use tessera_types::{IdentityKey, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use tessera_types::IdentityKey;
 
 #[cfg(test)]
 mod reference;
@@ -28,8 +27,6 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-#[allow(clippy::large_enum_variant)] // `Build` carries the identity-key flags; the enum is
-                                     // parsed once per process invocation, never hot.
 enum Command {
     /// Build a bundle from the corpus declaration and the source files it names.
     ///
@@ -39,11 +36,9 @@ enum Command {
     /// directory in `[bundle] path`, each relative to the file's own directory. The declaration
     /// names the source files.
     ///
-    /// The identity key comes from the environment variable that `[identity] env` in
-    /// `tessera.toml` names, `TESSERA_IDENTITY_KEY` by default. A `.env` file beside
-    /// `tessera.toml` may set it, and a value in the process environment takes precedence over
-    /// the file. With no key, the build is refused before it reads any data; pass
-    /// `--carry-id-key-from`, `--identity-file` or `--mint-id-key` to supply or create one.
+    /// Every build creates a new bundle with a new key for its `tessera_id`s, so a `tessera_id`
+    /// read from an earlier bundle does not name an item in this one. A copy of a bundle keeps
+    /// its `tessera_id`s.
     ///
     /// The other flags override `tessera.toml` or tune the build.
     Build {
@@ -96,10 +91,7 @@ enum Command {
         /// Default: the largest batch the memory budget allows, which is the whole corpus when
         /// it fits. Refused when the batch does not fit the budget, or when it is less than half
         /// the size the budget allows. A build of more than one batch records the size in the
-        /// bundle, and a different size assigns different internal ids. `--carry-id-key-from`
-        /// reuses a recorded size and refuses a different one. When the carried bundle was built
-        /// as one batch, a size given here is used, and the build prints a note saying the ids
-        /// will differ.
+        /// bundle.
         #[arg(long, value_name = "ITEMS")]
         batch_items: Option<u64>,
         /// Peak memory for the build's own structures, in bytes or with a `k`, `m` or `g`
@@ -127,51 +119,6 @@ enum Command {
         /// `started_at` and `ended_at`. It does not need `--stage-timings`.
         #[arg(long, value_name = "PATH")]
         stage_timings_json: Option<PathBuf>,
-
-        /// Reuse the identity key, idset and batch size recorded in an existing bundle.
-        ///
-        /// This rebuilds a bundle while every `tessera_id` a client holds stays valid.
-        /// Refused when the bundle's identity construction differs from this binary's, and when
-        /// its key disagrees with another key source unless `--rotate-id-key` is given.
-        #[arg(long, value_name = "BUNDLE")]
-        carry_id_key_from: Option<PathBuf>,
-        /// Read the identity key from a TOML file with an `[identity]` table holding `key`, 32
-        /// lowercase hex digits, and an optional `idset`.
-        ///
-        /// A file can be made readable by its owner only, which an environment
-        /// variable is not: another process of the same user can read it from `/proc`. Refused
-        /// when `[identity]` has any other key or an idset of 0.
-        #[arg(long, value_name = "PATH")]
-        identity_file: Option<PathBuf>,
-        /// Generate a new random identity key at idset 1 and print it.
-        ///
-        /// This starts a new identity: every `tessera_id` a client holds becomes invalid. Record
-        /// the printed key, in the environment variable or a `.env` file beside `tessera.toml`,
-        /// so later builds can reuse it. `--idset` and `--bump-idset` are ignored: the idset is
-        /// 1. Refused when any other key source is given or set.
-        #[arg(long)]
-        mint_id_key: bool,
-        /// Accept a change of identity key when the key sources disagree.
-        ///
-        /// Without it, disagreeing sources are refused. The new key is the one from
-        /// `--identity-file` if given, otherwise the one from the environment. Every `tessera_id` a client holds becomes invalid,
-        /// every row is stored in a new order, and the idset returns to 1 unless `--idset` is
-        /// given.
-        #[arg(long)]
-        rotate_id_key: bool,
-        /// Add one to the idset and keep the key.
-        ///
-        /// The server publishes the idset at `/v1/meta`, and refuses a request that names any
-        /// other idset.
-        #[arg(long)]
-        bump_idset: bool,
-        /// Set the idset.
-        ///
-        /// Default: the idset in `--identity-file`, then the one recorded by
-        /// `--carry-id-key-from`, then 1. Required when those two disagree. `--bump-idset` adds
-        /// one to it.
-        #[arg(long, value_name = "N")]
-        idset: Option<u32>,
     },
     /// Check the declaration against the column schemas of the files it names, without reading
     /// a row.
@@ -589,240 +536,18 @@ fn parse_extent(raw: &str) -> Result<Bounds, String> {
     Ok(extent)
 }
 
-/// What [`resolve_identity`] decided: the parsed key, its canonical hex form (carried alongside
-/// the key rather than recovered from it — `IdentityKey` deliberately has no hex accessor, to
-/// preserve its redacted `Debug`), and the idset this build's MANIFEST should record.
-struct ResolvedIdentity {
-    key: IdentityKey,
-    hex: String,
-    idset: u32,
-    /// Set only by `--mint-id-key`, so the caller can print it prominently — the one and only
-    /// place a freshly minted key is ever surfaced.
-    minted: bool,
-}
-
-/// The N-1 refusal message (contracts §2.2, plan Critical N-1): named once so the CLI's refusal
-/// and every test asserting it read the same text.
-///
-/// `env_name` is whatever `tessera.toml`'s `[identity] env` names, because a message telling an
-/// operator to set `TESSERA_IDENTITY_KEY` when their own file named something else is worse than
-/// no message.
-fn no_key_decision_message(env_name: &str) -> String {
-    format!(
-        "no identity key decision: set ${env_name} (or put it in a .env beside tessera.toml) to \
-         this deployment's key, pass --carry-id-key-from <bundle> to keep its lineage from an \
-         existing bundle (the normal rebuild), pass --identity-file <path> to read it from a 0600 \
-         file, or pass --mint-id-key to start a new lineage — which invalidates every tessera_id \
-         any client holds."
-    )
-}
-
-/// The identity key as the environment supplies it: the process environment first, then a `.env`
-/// beside `tessera.toml`.
-///
-/// **The process environment wins.** A `.env` is a convenience for a working copy; an operator who
-/// exported a variable for one invocation has said something more specific than a file checked in
-/// beside the config, and a file quietly overriding them would be the wrong way round.
-///
-/// **The `.env` parse is written out here rather than taken as a dependency.** It is `KEY=VALUE`
-/// per line, `#` comments and blanks skipped, an optional `export ` prefix, and one layer of
-/// matching quotes stripped — which is the whole of what this file is for. A crate would bring
-/// variable interpolation, multi-line values and `.env.local` layering, none of which anything
-/// here reads, into the process that holds the identity key.
-fn identity_from_environment(env_name: &str, deployment: &Path) -> Option<(String, String)> {
-    if let Ok(value) = std::env::var(env_name) {
-        if !value.trim().is_empty() {
-            return Some((value.trim().to_string(), format!("${env_name}")));
-        }
-    }
-    let dotenv = deployment.parent().unwrap_or(Path::new("")).join(".env");
-    let text = std::fs::read_to_string(&dotenv).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != env_name {
-            continue;
-        }
-        let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-            .unwrap_or(value);
-        if value.is_empty() {
-            return None;
-        }
-        return Some((
-            value.to_string(),
-            format!("{} ({env_name})", dotenv.display()),
-        ));
-    }
-    None
-}
-
-/// Read `identity.key`, `identity.idset`, `identity.construction` and `identity.rounds`
-/// verbatim from `bundle_root`'s current `MANIFEST.json` (contracts §2.2's `--carry-id-key-from`
-/// behaviour). A direct JSON read rather than the full digest-verifying read protocol: carrying
-/// a key forward needs the manifest's own claims, not a re-verification of every segment file.
-fn read_carried_identity(bundle_root: &Path) -> Result<(String, u32, String, u32), String> {
-    let current_path = bundle_root.join("CURRENT");
-    let current_bytes = std::fs::read(&current_path)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", current_path.display()))?;
-    let current: tessera_store::manifest::CurrentPointer = serde_json::from_slice(&current_bytes)
-        .map_err(|e| {
-        format!(
-            "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
-            current_path.display()
-        )
-    })?;
-    let manifest_path = bundle_root.join(&current.prefix).join("MANIFEST.json");
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
-    let manifest: tessera_store::manifest::Manifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| {
-            format!(
-                "--carry-id-key-from {}: MANIFEST.json does not parse (does it predate the r6 \
-                 identity column?): {e}",
-                manifest_path.display()
-            )
-        })?;
-    Ok((
-        manifest.identity.key,
-        manifest.identity.idset,
-        manifest.identity.construction,
-        manifest.identity.rounds,
-    ))
-}
-
-/// Read `--identity-file`'s minimal TOML shape: `[identity]\nkey = "<32 lowercase hex>"`, plus an
-/// **optional** `idset = <u32>`.
-///
-/// **The idset belongs in this file** (contracts §2.2 designates a file as one home for the key
-/// bundle and leaves "the file's wider schema … not specified here", so extending it is
-/// legitimate). Without it, a deployment that advanced to idset 2 for a repartition and then
-/// rebuilt from its key file — the spec's own recommended rebuild path — republished idset 1, and
-/// a stale pre-repartition `tessera_id` then compared *equal* and was accepted: exactly the
-/// failure §2.2 says the idset exists to prevent. A key file that records no idset still means
-/// idset 1 (the lineage never advanced), and `--idset` overrides whatever the file says.
-///
-/// Unknown top-level sections are ignored (so a later phase's wider deployment config file can
-/// grow without breaking this binary); an unknown key *inside* `[identity]` is an error, so a
-/// misspelt `kye =` does not fall through to a refusal that reads "no key given". There is no
-/// default search path — the caller always names this path explicitly, which is the only reason
-/// this flag counts as an explicit decision under N-1.
-fn read_identity_file(path: &Path) -> Result<(String, Option<u32>), String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("--identity-file {}: {e}", path.display()))?;
-    let value: toml::Value = text
-        .parse()
-        .map_err(|e| format!("--identity-file {}: invalid TOML: {e}", path.display()))?;
-    let table = value
-        .as_table()
-        .ok_or_else(|| format!("--identity-file {}: not a TOML table", path.display()))?;
-    let identity = table.get("identity").ok_or_else(|| {
-        format!(
-            "--identity-file {}: missing [identity] section",
-            path.display()
-        )
-    })?;
-    let identity_table = identity.as_table().ok_or_else(|| {
-        format!(
-            "--identity-file {}: [identity] must be a table",
-            path.display()
-        )
-    })?;
-    for key_name in identity_table.keys() {
-        if key_name != "key" && key_name != "idset" {
-            return Err(format!(
-                "--identity-file {}: unknown key '{key_name}' in [identity] (expected 'key' or \
-                 'idset')",
-                path.display()
-            ));
-        }
-    }
-    let key = identity_table
-        .get("key")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            format!(
-                "--identity-file {}: [identity].key is missing or not a string",
-                path.display()
-            )
-        })?;
-    let idset = match identity_table.get("idset") {
-        None => None,
-        Some(value) => {
-            let raw = value.as_integer().ok_or_else(|| {
-                format!(
-                    "--identity-file {}: [identity].idset must be an integer",
-                    path.display()
-                )
-            })?;
-            // §2.2: conforming writers start at 1 and advance; 0 (or a value past `u32`) is a
-            // config error, and `IdentityDescriptor::validate` would refuse it at read time
-            // anyway — refuse it here, where the operator can still see which file said it.
-            let idset = u32::try_from(raw).map_err(|_| {
-                format!(
-                    "--identity-file {}: [identity].idset {raw} is out of range for a u32",
-                    path.display()
-                )
-            })?;
-            if idset == 0 {
-                return Err(format!(
-                    "--identity-file {}: [identity].idset is 0; conforming writers start at 1 and \
-                     advance (contracts §2.2)",
-                    path.display()
-                ));
-            }
-            Some(idset)
-        }
-    };
-    Ok((key.to_string(), idset))
-}
-
-/// Draw a fresh 16-byte key from the OS CSPRNG, retrying on a degenerate draw (`k1 == 0`,
-/// including the all-zero key — memo §1.3). The **only** place randomness enters the build.
-fn mint_identity_key() -> (IdentityKey, String) {
+/// A new key for the bundle a build creates, drawn from the operating system's random source.
+/// A draw that [`IdentityKey::from_hex`] refuses as degenerate (`k1 == 0`) is drawn again.
+fn generate_identity_key() -> IdentityKey {
     use rand::RngCore;
     loop {
         let mut bytes = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
         let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         if let Ok(key) = IdentityKey::from_hex(&hex) {
-            return (key, hex);
+            return key;
         }
-        // A degenerate draw is vanishingly rare (k1 == 0 out of a uniform 64-bit half) — retry.
     }
-}
-
-/// The carried bundle's recorded signature-batch size, if its build batched at all (absent
-/// key == one batch — pre-batching manifests never carry it).
-fn read_carried_batch_items(bundle_root: &Path) -> Result<Option<u64>, String> {
-    let current_path = bundle_root.join("CURRENT");
-    let current_bytes = std::fs::read(&current_path)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", current_path.display()))?;
-    let current: tessera_store::manifest::CurrentPointer = serde_json::from_slice(&current_bytes)
-        .map_err(|e| {
-        format!(
-            "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
-            current_path.display()
-        )
-    })?;
-    let manifest_path = bundle_root.join(&current.prefix).join("MANIFEST.json");
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
-    let manifest: tessera_store::manifest::Manifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
-    Ok(manifest
-        .provenance
-        .get("batch_items")
-        .and_then(|v| v.as_u64()))
 }
 
 /// `24g` / `512m` / `1073741824` — the human forms a budget is actually typed in.
@@ -841,182 +566,12 @@ fn parse_byte_size(value: &str) -> Result<u64, String> {
         .ok_or_else(|| "byte size overflows u64".to_string())
 }
 
-// Eight parameters, and they are eight *decisions*: three key sources, the variable's name for
-// the message, and the four flags that say what to do with what they produce. Grouping them into
-// a struct would hide which of them a given refusal is about, which is the one thing every message
-// in here has to say.
-/// Resolve the deployment identity key from its four sources — the environment (or a `.env`),
-/// `--identity-file`, `--carry-id-key-from`, and `--mint-id-key` — applying every refusal rule
-/// contracts §2.2/§2a specifies. Called, and must fail, **before any build work starts**: no
-/// output directory, no input read (plan Critical N-1).
-///
-/// **There is no flag that takes a key.** One on a command line reaches shell history, process
-/// listings and CI logs, so the ordinary route is a variable `tessera.toml` names and the
-/// alternative is a `0600` file, which an environment — readable from `/proc` — is not.
-#[allow(clippy::too_many_arguments)]
-fn resolve_identity(
-    carry_id_key_from: &Option<PathBuf>,
-    identity_file: &Option<PathBuf>,
-    from_environment: Option<(String, String)>,
-    env_name: &str,
-    mint_id_key: bool,
-    rotate_id_key: bool,
-    bump_idset: bool,
-    idset_flag: Option<u32>,
-) -> Result<ResolvedIdentity, String> {
-    let mut sources: Vec<(String, String)> = Vec::new();
-    let mut carried_idset: Option<u32> = None;
-    let mut file_idset: Option<u32> = None;
-
-    if let Some(root) = carry_id_key_from {
-        let (hex, idset, construction, rounds) = read_carried_identity(root)?;
-        if construction != IDENTITY_CONSTRUCTION || rounds != IDENTITY_ROUNDS {
-            return Err(format!(
-                "--carry-id-key-from {}: identity construction/rounds ({construction}, {rounds}) \
-                 differ from this binary's ({IDENTITY_CONSTRUCTION}, {IDENTITY_ROUNDS}); refusing \
-                 rather than silently deriving every identifier under a different construction \
-                 while the key looks unchanged",
-                root.display()
-            ));
-        }
-        sources.push(("--carry-id-key-from".to_string(), hex));
-        carried_idset = Some(idset);
-    }
-    if let Some(path) = identity_file {
-        let (hex, idset) = read_identity_file(path)?;
-        sources.push(("--identity-file".to_string(), hex));
-        file_idset = idset;
-    }
-    // The environment is a *source*, not a fallback: if it disagrees with a carried lineage the
-    // build refuses, exactly as two flags disagreeing would. A key that silently lost to another
-    // source would be the one shape of this flow that produces a bundle nobody chose.
-    let from_environment_hex = from_environment.as_ref().map(|(hex, _)| hex.clone());
-    if let Some((hex, label)) = from_environment {
-        sources.push((label, hex));
-    }
-
-    if sources.is_empty() && !mint_id_key {
-        return Err(no_key_decision_message(env_name));
-    }
-
-    if mint_id_key {
-        if !sources.is_empty() {
-            return Err(format!(
-                "--mint-id-key cannot be combined with --carry-id-key-from, --identity-file or a \
-                 key in ${env_name}: minting starts a NEW lineage, it does not restore one. Unset \
-                 the variable for this invocation if a fresh lineage is what is wanted"
-            ));
-        }
-        let (key, hex) = mint_identity_key();
-        return Ok(ResolvedIdentity {
-            key,
-            hex,
-            idset: 1,
-            minted: true,
-        });
-    }
-
-    // Validate every source's hex up front (typed errors naming the source), before comparing.
-    let mut parsed: Vec<(String, String)> = Vec::with_capacity(sources.len());
-    for (label, hex) in sources {
-        IdentityKey::from_hex(&hex).map_err(|e| format!("{label}: {e}"))?;
-        parsed.push((label, hex));
-    }
-
-    let first_hex = parsed[0].1.clone();
-    let disagreement = parsed.iter().any(|(_, hex)| *hex != first_hex);
-    if disagreement && !rotate_id_key {
-        // Fingerprints, never the keys themselves. A key printed in full reaches shell history,
-        // process listings and CI logs — which is exactly why there is no flag that takes one —
-        // and a refusal path that printed both disagreeing keys would put them there anyway. A
-        // fingerprint is enough to tell an operator which source is the odd one out, which is all
-        // the message needs to do.
-        let described = parsed
-            .iter()
-            .map(|(label, hex)| format!("{label}={}", identity_key_fingerprint(hex)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(format!(
-            "identity key sources disagree ({described}); pass --rotate-id-key to confirm the \
-             rotation — this invalidates every tessera_id any client holds and reorders every \
-             row, since the key is now part of the storage sort key"
-        ));
-    }
-
-    // On a confirmed rotation, `--identity-file` (the source a person typed a path for) wins if
-    // given, then the environment, then the sole remaining source. Agreement makes this moot.
-    let final_hex = if disagreement {
-        parsed
-            .iter()
-            .find(|(l, _)| l == "--identity-file")
-            .map(|(_, hex)| hex.clone())
-            .or(from_environment_hex)
-            .unwrap_or(first_hex)
-    } else {
-        first_hex
-    };
-    let final_key = IdentityKey::from_hex(&final_hex).map_err(|e| format!("identity key: {e}"))?;
-
-    // Idset resolution, most explicit source first: `--idset`, then the key file's own
-    // `[identity].idset`, then the idset carried out of an existing bundle, then 1.
-    //
-    // The order matters for the reason a key has a home outside the bundle at all (contracts
-    // §2.2): a normal rebuild from that home must not silently republish
-    // idset 1 after the deployment advanced to 2 for a repartition — a stale pre-repartition
-    // `tessera_id` would then compare equal and be accepted, which is precisely the failure the
-    // idset prevents. Two *recorded* idsets that disagree are refused rather than silently
-    // ranked: whichever we picked, the other could be the true one, and getting it wrong is
-    // fail-open. `--idset` is how the operator resolves that.
-    let mut idset = if disagreement {
-        // A rotation resets the idset (contracts §2.2), unless the operator also supplied an
-        // explicit --idset to accompany the new key.
-        idset_flag.unwrap_or(1)
-    } else {
-        if let (None, Some(carried), Some(from_file)) = (idset_flag, carried_idset, file_idset) {
-            if carried != from_file {
-                return Err(format!(
-                    "idset sources disagree (--carry-id-key-from={carried}, \
-                     --identity-file={from_file}); pass --idset <n> to state which idset this \
-                     build publishes — guessing risks republishing a superseded idset, under \
-                     which a stale pre-repartition tessera_id compares equal and is accepted"
-                ));
-            }
-        }
-        idset_flag.or(file_idset).or(carried_idset).unwrap_or(1)
-    };
-    if bump_idset {
-        idset += 1;
-    }
-
-    // NOT IMPLEMENTED, deliberately, and flagged rather than built: contracts §2.2 also requires
-    // a build whose **partitioning or sharding differs** from the bundle it carried the key from
-    // to advance the idset *or refuse*. Nothing here checks that, because nothing here can
-    // differ: this build emits exactly one partition (`default`) and shard 0, both hard-coded in
-    // `tessera_build` (`PHASH`, `shard_id`). The refusal becomes reachable — and required — the
-    // moment either becomes a build input; it belongs next to this idset resolution, comparing
-    // this build's partition/shard plan against `--carry-id-key-from`'s manifest and refusing
-    // unless `--bump-idset` (or an explicit `--idset`) accompanies the change.
-
-    Ok(ResolvedIdentity {
-        key: final_key,
-        hex: final_hex,
-        idset,
-        minted: false,
-    })
-}
-
-/// Find and read this deployment's `tessera.toml`, returning the path it was found at beside the
-/// configuration itself (`configuration.md` §3).
-///
-/// The path comes back because two things are relative to it and to nothing else: the `.env` that
-/// may carry the identity key, and the paths inside the file.
 /// Everything `tessera build` and `tessera check` both resolve, before either does its own work.
 ///
 /// **One resolution, not two.** The deployment file found by walking up, the declaration it names,
 /// the `--file` overrides against it — a second copy of that in the check verb would be a copy
 /// free to drift, and the whole value of a check is that it saw what the build will see.
 struct Declaration {
-    deployment_path: PathBuf,
     deployment: tessera_config::Config,
     config: tessera_build::config::Config,
 }
@@ -1028,17 +583,15 @@ fn resolve_declaration(
     strictness: tessera_build::config::Strictness,
 ) -> Result<Declaration, String> {
     // **The deployment file first, because everything else is read through it**: where the
-    // declaration is, where the bundle goes, and which environment variable carries the key. A
-    // missing one is a refusal naming what to create (configuration.md §3) — never a silent set of
-    // defaults, since every path in it is a decision.
+    // declaration is and where the bundle goes. A missing one is a refusal naming what to create
+    // (configuration.md §3) — never a silent set of defaults, since every path in it is a decision.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let (deployment_path, deployment) = tessera_config::open(deployment, &cwd)?;
+    let (_, deployment) = tessera_config::open(deployment, &cwd)?;
     let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
     let bindings = collect_bindings(file)?;
     let config = tessera_build::config::Config::parse_with(&schema_path, &bindings, strictness)
         .map_err(|e| e.to_string())?;
     Ok(Declaration {
-        deployment_path,
         deployment,
         config,
     })
@@ -1517,25 +1070,18 @@ fn main() -> ExitCode {
             memory_budget,
             stage_timings,
             stage_timings_json,
-            carry_id_key_from,
-            identity_file,
-            mint_id_key,
-            rotate_id_key,
-            bump_idset,
-            idset,
         } => {
             // **The deployment file first, because everything else is read through it**: where the
-            // declaration is, where the bundle goes, and which environment variable carries the
-            // key. A missing one is a refusal naming what to create (configuration.md §3) —
-            // never a silent set of defaults, since every path in it is a decision.
+            // declaration is and where the bundle goes. A missing one is a refusal naming what to
+            // create (configuration.md §3) — never a silent set of defaults, since every path in
+            // it is a decision.
             //
-            // Parsed and refused before any work, for the identity key's reason: a declaration
-            // refusal is an operator's typo, and discovering it after a multi-minute build has
-            // written a bundle prefix costs the whole build. Every rule in `tessera_build::config`
+            // Parsed and refused before any work: a declaration refusal is an operator's typo, and
+            // discovering it after a multi-minute build has written a bundle prefix costs the
+            // whole build. Every rule in `tessera_build::config`
             // fires here, against no data at all — which is also the whole of what `tessera check`
             // does, through this same function.
             let Declaration {
-                deployment_path,
                 deployment,
                 config,
             } = match resolve_declaration(
@@ -1551,33 +1097,6 @@ fn main() -> ExitCode {
                 }
             };
             let out = out.unwrap_or_else(|| deployment.bundle_path.clone());
-
-            // CRITICAL N-1: resolved and refused, if it refuses, before any work — before `df`,
-            // before reading input, before creating the output directory.
-            let identity = match resolve_identity(
-                &carry_id_key_from,
-                &identity_file,
-                identity_from_environment(&deployment.identity_env, &deployment_path),
-                &deployment.identity_env,
-                mint_id_key,
-                rotate_id_key,
-                bump_idset,
-                idset,
-            ) {
-                Ok(identity) => identity,
-                Err(detail) => {
-                    eprintln!("build refused: {detail}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            if identity.minted {
-                eprintln!(
-                    "minted a new identity key (idset 1): {} — starts a NEW identity lineage; \
-                     every tessera_id any client holds becomes wrong. Record this key (e.g. via \
-                     ${} in a .env beside tessera.toml) so future rebuilds can carry it forward.",
-                    identity.hex, deployment.identity_env
-                );
-            }
 
             // **A build materialises every declared view and every view of every group**
             // (`views.md` §7). `--view` is withdrawn with the refusal it went with: there is
@@ -1795,46 +1314,6 @@ fn main() -> ExitCode {
                 report_residency(&schema, limit);
             }
 
-            // The carried bundle's recorded batch size is identity-bearing exactly like its
-            // key: replayed when this rebuild names no size of its own, refused loudly when a
-            // conflicting size is given — a different batch size is a different permanent
-            // assignment under the same identity key, which is the one silent state this flow
-            // must never produce.
-            let batch_items = match (&carry_id_key_from, batch_items) {
-                (Some(root), passed) => {
-                    let carried = match read_carried_batch_items(root) {
-                        Ok(carried) => carried,
-                        Err(detail) => {
-                            eprintln!("build refused: {detail}");
-                            return ExitCode::FAILURE;
-                        }
-                    };
-                    match (carried, passed) {
-                        (Some(recorded), Some(given)) if recorded != given => {
-                            eprintln!(
-                                "build refused: --carry-id-key-from {}: that bundle was built \
-                                 with --batch-items {recorded}, but {given} was given; an \
-                                 identity-preserving rebuild must replay the recorded value \
-                                 (drop --batch-items to do so)",
-                                root.display()
-                            );
-                            return ExitCode::FAILURE;
-                        }
-                        (Some(recorded), _) => Some(recorded),
-                        (None, Some(given)) => {
-                            eprintln!(
-                                "note: the carried bundle was built as a single batch; \
-                                 --batch-items {given} makes this build a DIFFERENT permanent \
-                                 assignment under the same identity key"
-                            );
-                            Some(given)
-                        }
-                        (None, None) => None,
-                    }
-                }
-                (None, passed) => passed,
-            };
-
             let args = tessera_build::BuildArgs {
                 views: view_args,
                 anchor,
@@ -1843,9 +1322,7 @@ fn main() -> ExitCode {
                 attribute_sources: acquired.attribute_sources,
                 out: out.clone(),
                 limit,
-                identity_key: identity.key,
-                identity_key_hex: identity.hex,
-                idset: identity.idset,
+                identity_key: generate_identity_key(),
                 shard_id: 0,
                 mint_external_ids,
                 emit_oracle_pairs: !no_oracle_pairs,

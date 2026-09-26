@@ -518,13 +518,6 @@ async fn every_refusal_has_its_status() {
     // The cursor itself still opens, so the refusals above are about what was changed.
     items_ok(&f.server, &token, &json!({ "view": "s0", "fields": [], "cursor": cursor })).await;
 
-    let resp = post_items(
-        &f.server,
-        &token,
-        &json!({ "view": "s0", "fields": [], "idset": FIXTURE_IDSET + 1 }),
-    )
-    .await;
-    assert_eq!(refused(resp, 409).await, "conflict");
     let resp = post_items(&f.server, &token, &json!({ "view": "nowhere", "fields": [] })).await;
     assert_eq!(refused(resp, 404).await, "unknown");
     let resp = f

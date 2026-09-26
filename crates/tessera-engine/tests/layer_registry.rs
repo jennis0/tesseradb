@@ -60,8 +60,7 @@ fn reachable(engine: &Engine, credential: &[u8]) -> Vec<String> {
 /// identifier this deployment has ever issued. The symptom would not have looked like a range
 /// check: suppressing a layer would simply have answered *no such thing*.
 fn layer_entity(engine: &Engine, id: tessera_types::TesseraId) -> tessera_types::EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0]
+    engine.resolve_tessera_ids(&[id])[0]
         .expect("a layer identifier names the entity this deployment issued for it")
 }
 

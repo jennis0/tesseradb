@@ -867,7 +867,7 @@ async fn a_suppression_reaches_both_scoped_routes() {
 
     let resp = post_changes(
         &served,
-        &json!([{ "tessera_id": victim.to_string(), "idset": FIXTURE_IDSET, "op": "suppress" }]),
+        &json!([{ "tessera_id": victim.to_string(), "op": "suppress" }]),
     )
     .await;
     assert_eq!(

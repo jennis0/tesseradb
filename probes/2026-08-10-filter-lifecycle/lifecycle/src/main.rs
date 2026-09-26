@@ -728,8 +728,6 @@ fn main() {
         view_id: "s0".into(),
         limit: Some(a.limit),
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
-        identity_key_hex: KEY_HEX.into(),
-        idset: 1,
         shard_id: 0,
         mint_external_ids: true,
         emit_oracle_pairs: false,

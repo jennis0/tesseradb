@@ -457,7 +457,7 @@ fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment(
 
     let entity = entity_of_source(&root, 5);
     let id = engine.tessera_id_of(entity).unwrap();
-    assert!(engine.item(&session, id, None).unwrap().is_some());
+    assert!(engine.item(&session, id).unwrap().is_some());
 
     let before = engine.generation();
     clone_prefix_and_flip(&root, "v00000", "v00001");
@@ -474,7 +474,7 @@ fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment(
 
     assert_eq!(engine.fragment_cache_rebuilds(), 0);
     assert!(
-        engine.item(&session, id, None).unwrap().is_some(),
+        engine.item(&session, id).unwrap().is_some(),
         "the item is still there — the rotation preserved the data"
     );
     assert_eq!(

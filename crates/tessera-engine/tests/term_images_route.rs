@@ -257,8 +257,6 @@ fn build_fixture(out: &Path, points: &Path, pairs: &Path) {
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -711,7 +709,7 @@ fn every_route_agrees_across_a_delete_and_a_suppression() {
                 .expect("the identity is computable");
             assert!(
                 engine
-                    .item(&session, id, None)
+                    .item(&session, id)
                     .expect("the drill-down answers")
                     .is_none(),
                 "{entity:?} is still visible under {force:?}"

@@ -251,8 +251,6 @@ pub fn run_build(
                 out: out.clone(),
                 limit: Some(scale),
                 identity_key: IdentityKey::from_hex(TEST_KEY_HEX)?,
-                identity_key_hex: TEST_KEY_HEX.to_string(),
-                idset: 1,
                 shard_id: 0,
                 layers: Vec::new(),
                 layer_inputs: Vec::new(),

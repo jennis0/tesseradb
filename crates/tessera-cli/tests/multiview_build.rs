@@ -269,9 +269,6 @@ schema = "corpus.toml"
 [plugin]
 module = "builtin:passthrough"
 
-[identity]
-env = "TESSERA_TEST_IDENTITY_KEY"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -317,8 +314,7 @@ fn the_whole_declaration_builds_and_verifies() {
 
     let built = tessera()
         .current_dir(dir.path())
-        .args(["build", "--mint-id-key"])
-        .env("TESSERA_TEST_IDENTITY_KEY", "")
+        .arg("build")
         .output()
         .expect("the build runs");
     let stderr = String::from_utf8_lossy(&built.stderr).to_string();

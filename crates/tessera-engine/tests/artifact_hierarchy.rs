@@ -389,10 +389,8 @@ fn a_suppressed_parent_does_not_take_its_child_with_it() {
     // ordinal, none of which crosses the boundary.
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
-    let idset = engine.generation().bundle.manifest.identity.idset;
     let root_entity = engine
-        .resolve_tessera_ids(&[served[0].tessera_id], idset)
-        .unwrap()[0]
+        .resolve_tessera_ids(&[served[0].tessera_id])[0]
         .expect("it names what was issued");
     engine
         .accept_change(root_entity, tessera_lifecycle::wal::ChangeOp::Suppress)
@@ -446,10 +444,8 @@ fn a_deleted_parent_leaves_its_child_a_root() {
     let credential = full_coverage_credential();
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
-    let idset = engine.generation().bundle.manifest.identity.idset;
     let root_entity = engine
-        .resolve_tessera_ids(&[served[0].tessera_id], idset)
-        .unwrap()[0]
+        .resolve_tessera_ids(&[served[0].tessera_id])[0]
         .expect("it names what was issued");
 
     engine
