@@ -46,6 +46,14 @@ pub(crate) fn rebased(
         let terms = m.output.clone();
         replace_window(&mut next.entity_terms_extents, &m.consumed, terms, |e| &e.terms, all)?;
     }
+    for m in &completed.unique {
+        let index = next
+            .unique_indexes
+            .iter_mut()
+            .find(|index| index.attribute == m.consumed.attribute)?;
+        let at = contiguous(&index.live, &m.consumed.runs, |rel| rel)?;
+        index.live.splice(at, m.output.iter().cloned());
+    }
 
     for rel in completed.consumed_files() {
         next.files.remove(rel);
@@ -108,7 +116,12 @@ impl CompletedCoalesce {
         let records = self.record.iter().flat_map(|m| &m.consumed);
         let texts = self.texts.iter().flat_map(|m| &m.consumed.extents);
         let terms = self.terms.iter().flat_map(|m| &m.consumed);
+        let unique = self
+            .unique
+            .iter()
+            .flat_map(|m| m.consumed.runs.iter().map(String::as_str));
         tiers
+            .chain(unique)
             .chain(runs.flat_map(LocatorExtent::files))
             .chain(dicts.flat_map(DictExtent::files))
             .chain(attrs.flat_map(AttrExtent::files))

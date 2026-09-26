@@ -217,6 +217,7 @@ fn declare(engine: &Engine, name: &str, ty: &str, index: bool) {
             index,
             render: false,
             scope: LayerScope::Entity,
+            unique: false,
         })
         .unwrap_or_else(|e| panic!("column '{name}' declares: {e}"));
 }
@@ -474,6 +475,7 @@ fn every_family_fills_on_an_entity_that_predates_the_value_and_reads_back() {
             index: false,
             render: true,
             scope: LayerScope::Entity,
+            unique: false,
         })
         .expect_err("`render` is not declarable at a running service");
     assert!(matches!(

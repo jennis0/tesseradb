@@ -53,6 +53,7 @@ impl CompiledAttribute {
                 index: d.index,
                 render: d.render,
                 scope: LayerScope::Entity,
+                unique: d.unique,
             },
             CompiledAttribute::Scoped(f) => AttributeDeclaration {
                 name: f.name.clone(),
@@ -63,6 +64,7 @@ impl CompiledAttribute {
                 index: f.index,
                 render: f.render,
                 scope: LayerScope::Group(f.group.clone()),
+                unique: false,
             },
         }
     }
@@ -113,6 +115,9 @@ pub(crate) enum Resolution {
     /// A column of this name already carries exactly this identity: nothing to append.
     Existing,
     New(CompiledAttribute),
+    /// A column of this name differs from the request in `unique` alone, which is the one change
+    /// a declaration may make to a column that exists.
+    Unique { name: String, unique: bool },
 }
 
 /// Resolve a request against the served schema: refuse it, recognise it as a column already
@@ -134,6 +139,23 @@ pub(crate) fn resolve(
             "attribute '{name}': a layer already has that name"
         )));
     }
+    let compiled = compile(request, manifest).map_err(refused)?;
+
+    // Declaring a held column again is accepted if nothing differs. Type and placement are
+    // written into every row, so a difference is a conflict; `unique` is written into no row, so
+    // it may change.
+    if let Some(held) = held_by_name(manifest, name) {
+        return match (&held, &compiled) {
+            _ if held == compiled => Ok(Resolution::Existing),
+            (_, CompiledAttribute::Entity(asked)) if same_but_unique(&held, &compiled) => {
+                Ok(Resolution::Unique {
+                    name: name.to_string(),
+                    unique: asked.unique,
+                })
+            }
+            _ => Err(conflict(name)),
+        };
+    }
     // Not built: a rendered value lives in a row's hot column, and a column declared here has no
     // rows written for it yet.
     if request.render {
@@ -143,24 +165,29 @@ pub(crate) fn resolve(
         )));
     }
 
-    let compiled = compile(request, manifest).map_err(refused)?;
-
-    // Declaring a held column again is accepted if nothing differs. Type and placement are
-    // written into every row, so a difference is a conflict.
-    if let Some(held) = held_by_name(manifest, name) {
-        return if held == compiled {
-            Ok(Resolution::Existing)
-        } else {
-            Err(ExecError::AttributeConflict {
-                detail: format!(
-                    "attribute '{name}' is already declared with a different type, vocabulary, \
-                     analyser, flags or scope; declare the new column under another name"
-                ),
-            })
-        };
-    }
-
     Ok(Resolution::New(compiled))
+}
+
+fn conflict(name: &str) -> ExecError {
+    ExecError::AttributeConflict {
+        detail: format!(
+            "attribute '{name}' is already declared with a different type, vocabulary, \
+             analyser, flags or scope; declare the new column under another name"
+        ),
+    }
+}
+
+/// Whether two columns are the same but for `unique`.
+pub(crate) fn same_but_unique(held: &CompiledAttribute, asked: &CompiledAttribute) -> bool {
+    match (held, asked) {
+        (CompiledAttribute::Entity(held), CompiledAttribute::Entity(asked)) => {
+            DeclaredScalar {
+                unique: asked.unique,
+                ..held.clone()
+            } == *asked
+        }
+        _ => held == asked,
+    }
 }
 
 /// A replayed record's column, at the width it recorded. The door validated the declaration
@@ -176,6 +203,7 @@ pub(crate) fn compile_record(declaration: &AttributeDeclaration) -> Option<Compi
             analyser: declaration.analyser.clone(),
             index: declaration.index,
             render: declaration.render,
+            unique: declaration.unique,
         }),
         LayerScope::Group(group) => CompiledAttribute::Scoped(ScopedScalar {
             name: declaration.name.clone(),
@@ -224,6 +252,7 @@ fn compile(request: &AttributeRequest, manifest: &Manifest) -> Result<CompiledAt
             index: request.index,
             render: request.render,
             group_scoped: group.is_some(),
+            unique: request.unique,
         },
         |vocabulary| {
             manifest
@@ -241,6 +270,7 @@ fn compile(request: &AttributeRequest, manifest: &Manifest) -> Result<CompiledAt
             analyser: column.analyser,
             index: request.index,
             render: request.render,
+            unique: column.unique,
         }));
     };
     let descriptor = manifest

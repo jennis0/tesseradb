@@ -7,6 +7,7 @@ mod fold;
 mod manifest;
 mod memberships;
 mod publications;
+mod unique;
 mod values;
 mod wal;
 mod window;
@@ -14,6 +15,7 @@ mod window;
 pub(super) use background::Background;
 pub(crate) use background::outstanding;
 pub(super) use manifest::SideManifests;
+pub(in crate::write) use unique::UniqueDeclarations;
 pub(super) use wal::ExecutorLog;
 
 pub use commands::*;
@@ -24,7 +26,7 @@ use memberships::*;
 pub(in crate::write) use publications::*;
 use wal::*;
 use values::*;
-use window::mint_values_codes;
+use window::{mint_values_codes, IngestSubmission};
 
 
 /// How long after a failed cycle the next retry may come, so it does not retry on every wake.
@@ -56,6 +58,8 @@ pub(super) struct Executor {
     pub(super) suggest: Background<crate::suggest::CompletedSuggest>,
     /// Its in-flight flag is [`ExecutorHealth::flush_in_flight`], which status reads.
     pub(super) flush: Background<crate::flush::CompletedFlush>,
+    /// The `unique` declarations on existing columns being built, and those waiting to be.
+    pub(super) unique_declarations: UniqueDeclarations,
     /// When the last fold attempt started, as a unix second, so the interval can limit attempts.
     pub(super) last_fold_start_unix: Option<u64>,
     /// Held weakly, so a `Weak` answers if one is alive; moved to [`PendingReclaim`] at a fold.
@@ -97,7 +101,8 @@ impl Executor {
                 | self.publish_completed_coalesces()
                 | self.publish_completed_merges()
                 | self.publish_completed_folds()
-                | self.publish_completed_suggests();
+                | self.publish_completed_suggests()
+                | self.publish_completed_unique_rounds();
             self.tick_if_due();
             while self.run_deny_pass() {}
             // The prompt half only; a batch's memberships wait for the tick.
@@ -346,6 +351,7 @@ impl Executor {
                 g.postings = Arc::clone(&r.postings);
                 g.fragments = Arc::clone(&r.fragments);
                 g.external_index = Arc::clone(&r.external_index);
+                g.unique = Arc::clone(&r.unique);
             }
             g.delta_postings = delta_postings;
             g.overlay_version = overlay_version;

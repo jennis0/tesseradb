@@ -51,6 +51,7 @@ mod switches;
 mod test_hooks;
 pub mod tile_index;
 pub mod timing;
+mod unique;
 pub mod view_declarations;
 pub mod viewport;
 mod vocabularies;

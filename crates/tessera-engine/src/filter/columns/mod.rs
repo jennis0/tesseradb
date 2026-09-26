@@ -36,6 +36,8 @@ pub struct FilterColumns {
     /// The entity to term transpose's base plus every flush extent named, read by drill-down and
     /// the write path's join arm.
     pub(in crate::filter) entity_terms: Arc<tessera_store::EntityTermsStack>,
+    /// The unique columns and their types: `eq` and `in` on one are answered from its index.
+    pub(in crate::filter) unique: BTreeMap<String, tessera_spatial::tiler::ScalarType>,
 }
 
 // Hand-written since `RecordStack` carries no `Debug` of its own.
@@ -56,6 +58,7 @@ impl Default for FilterColumns {
             access: tessera_filter::Access::Read,
             records: Arc::new(empty_record_stack()),
             entity_terms: Arc::new(tessera_store::EntityTermsStack::empty()),
+            unique: BTreeMap::new(),
         }
     }
 }

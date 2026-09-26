@@ -35,6 +35,8 @@ pub(crate) struct FoldPlan {
     pub(crate) record_extents: Vec<RecordExtent>,
     pub(crate) entity_terms_extents: Vec<tessera_store::manifest::EntityTermsExtent>,
     pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
+    /// Every unique column's index runs at the snapshot, each folded into new base runs.
+    pub(crate) unique: Vec<tessera_store::manifest::UniqueIndexRuns>,
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity with a row in this partition at the snapshot.
     pub(crate) entity_bound: u64,
@@ -312,6 +314,7 @@ pub(crate) fn plan_fold(
         record_extents: manifest.record_extents.clone(),
         entity_terms_extents: manifest.entity_terms_extents.clone(),
         text_extents: manifest.text_extents.clone(),
+        unique: manifest.unique_indexes.clone(),
         tombstones,
         entity_bound,
         external_id_bound,

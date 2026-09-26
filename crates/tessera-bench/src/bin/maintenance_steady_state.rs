@@ -95,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             index,
             render: false,
             scope: LayerScope::Entity,
+            unique: false,
         })?;
     }
 

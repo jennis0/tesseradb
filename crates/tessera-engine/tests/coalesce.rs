@@ -804,6 +804,7 @@ fn declare(engine: &Engine, name: &str, ty: &str, index: bool) {
             index,
             render: false,
             scope: tessera_types::layer::LayerScope::Entity,
+            unique: false,
         })
         .unwrap_or_else(|e| panic!("column '{name}' declares: {e}"));
 }

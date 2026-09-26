@@ -63,9 +63,19 @@ pub fn tessera_id(value: Option<&Value>, field: &str) -> Result<TesseraId, ApiEr
 /// The column a leaf's spelling names, or the refusal. A pin naming no view gets the same 404 as
 /// a view the principal cannot reach, so the filter cannot enumerate views; the others are 422s.
 /// An attribute whose group the principal cannot reach resolves as an unknown column.
-fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<(String, Family), ApiError> {
+fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<Resolved, ApiError> {
     match column {
-        LeafColumn::Resolved { column, family } => Ok((column, family)),
+        LeafColumn::Resolved {
+            column,
+            family,
+            operands,
+            integer,
+        } => Ok(Resolved {
+            column,
+            family,
+            operands,
+            integer,
+        }),
         LeafColumn::Unknown => Err(bad(format!(
             "'{leaf}' is not a filterable column; name one that `/v1/meta`'s \
              `filter_operands` lists"
@@ -82,6 +92,14 @@ fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<(String, Family), ApiE
             leaf.split_once(tessera_engine::filter::PIN).map_or("", |(_, pin)| pin)
         ))),
     }
+}
+
+/// A leaf's column as the parse needs it.
+struct Resolved {
+    column: String,
+    family: Family,
+    operands: &'static [&'static str],
+    integer: bool,
 }
 
 fn bad(detail: impl Into<String>) -> ApiError {
@@ -133,11 +151,12 @@ pub fn parse(
         tessera_engine::filter::REGION_COLUMN => Ok(FilterExpr::Region(parse_region(body, region)?)),
         tessera_engine::filter::MEMBER_OF_COLUMN => Ok(FilterExpr::MemberOf(parse_member_of(body)?)),
         leaf => {
-            let (column, family) = resolve_leaf(leaf, column_of(leaf))?;
+            let resolved = resolve_leaf(leaf, column_of(leaf))?;
+            let operand = parse_operand(leaf, &resolved, body, resolve)?;
             Ok(FilterExpr::Leaf {
                 // The resolved column; refusals quote the caller's own spelling instead.
-                column,
-                operand: parse_operand(leaf, family, body, resolve)?,
+                column: resolved.column,
+                operand,
             })
         }
     }
@@ -324,10 +343,12 @@ fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiErro
 
 fn parse_operand(
     column: &str,
-    family: Family,
+    resolved: &Resolved,
     body: &Value,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
 ) -> Result<FilterOperand, ApiError> {
+    let family = resolved.family;
+    let integer = resolved.integer;
     let obj = body
         .as_object()
         .ok_or_else(|| bad(format!("column '{column}' needs an operator object")))?;
@@ -339,9 +360,9 @@ fn parse_operand(
     }
     let (op, value) = obj.iter().next().expect("length checked");
 
-    // An operator outside the column's family is refused: the family is published schema, the
-    // same for every principal, so naming it discloses nothing.
-    let applies = family.operands().contains(&op.as_str());
+    // An operator outside the column's operators is refused: they are published schema, the
+    // same for every principal, so naming them discloses nothing.
+    let applies = resolved.operands.contains(&op.as_str());
     if !applies {
         return Err(match op.as_str() {
             // Names the declaration that would give the caller word matching.
@@ -349,10 +370,15 @@ fn parse_operand(
                 "column '{column}': `match` needs a column declared `type = \"text\"`, which \
                  `/v1/meta` lists"
             )),
+            other if resolved.operands.len() < family.operands().len() => bad(format!(
+                "column '{column}' is unique and not indexed, so it takes {:?}; declare it with \
+                 `index = true` to filter it by '{other}'",
+                resolved.operands
+            )),
             other => bad(format!(
                 "column '{column}' is a {} column, which takes {:?}; it does not take '{other}'",
                 family.as_str(),
-                family.operands()
+                resolved.operands
             )),
         });
     }
@@ -448,18 +474,18 @@ fn parse_operand(
                 })?
                 .to_string(),
         }),
-        (Family::Numeric, "eq") => Ok(FilterOperand::NumEquals(numeric_value(column, value)?)),
+        (Family::Numeric, "eq") => Ok(FilterOperand::NumEquals(numeric_value(column, value, integer)?)),
         (Family::Numeric, "in") => {
             let arr = value
                 .as_array()
                 .ok_or_else(|| bad(format!("column '{column}': `in` takes an array")))?;
             Ok(FilterOperand::NumIn(
                 arr.iter()
-                    .map(|v| numeric_value(column, v))
+                    .map(|v| numeric_value(column, v, integer))
                     .collect::<Result<Vec<_>, _>>()?,
             ))
         }
-        (Family::Numeric, "range") => parse_range(column, value),
+        (Family::Numeric, "range") => parse_range(column, value, integer),
         // `applies` reads the table this match covers, so every accepted pair has an arm above.
         (family, op) => unreachable!("{} accepts '{op}' with no arm to build it", family.as_str()),
     }
@@ -467,7 +493,7 @@ fn parse_operand(
 
 /// A range's bounds: `gte`/`gt` below, `lte`/`lt` above, at least one of them. An empty range is
 /// refused rather than read as no constraint; a caller wanting none omits the leaf.
-fn parse_range(column: &str, value: &Value) -> Result<FilterOperand, ApiError> {
+fn parse_range(column: &str, value: &Value, integer: bool) -> Result<FilterOperand, ApiError> {
     let obj = value
         .as_object()
         .ok_or_else(|| bad(format!("column '{column}': `range` takes a bounds object")))?;
@@ -477,7 +503,7 @@ fn parse_range(column: &str, value: &Value) -> Result<FilterOperand, ApiError> {
     for (key, v) in obj {
         let endpoint = |inclusive: bool| -> Result<Endpoint, ApiError> {
             Ok(Endpoint {
-                value: numeric_value(column, v)?,
+                value: numeric_value(column, v, integer)?,
                 inclusive,
             })
         };
@@ -510,9 +536,17 @@ fn parse_range(column: &str, value: &Value) -> Result<FilterOperand, ApiError> {
 }
 
 /// A numeric comparand. An integer is carried exactly as `i128`; a fractional or out-of-range
-/// number becomes `f64`. A JSON boolean is accepted for a `bool` column, which stores as 0/1.
-fn numeric_value(column: &str, value: &Value) -> Result<Scalar, ApiError> {
+/// number becomes `f64`. A JSON boolean is accepted for a `bool` column, which stores as 0/1. On
+/// an integer or timestamp column a decimal string (`"-42"`) is an exact integer too, for a
+/// client whose numbers are doubles and cannot carry one past 2^53.
+fn numeric_value(column: &str, value: &Value, integer: bool) -> Result<Scalar, ApiError> {
     match value {
+        Value::String(text) if integer => decimal_integer(text).map(Scalar::Int).ok_or_else(|| {
+            bad(format!(
+                "column '{column}': '{text}' is not a decimal integer; send a number, or its \
+                 digits as a string, optionally after a '-'"
+            ))
+        }),
         Value::Bool(b) => Ok(Scalar::Int(i128::from(*b))),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -528,9 +562,19 @@ fn numeric_value(column: &str, value: &Value) -> Result<Scalar, ApiError> {
             }
         }
         _ => Err(bad(format!(
-            "column '{column}': a numeric comparand must be a number"
+            "column '{column}': a numeric comparand must be a number{}",
+            if integer { ", or a decimal integer as a string" } else { "" }
         ))),
     }
+}
+
+/// `^-?[0-9]+$` as an integer, or `None`; one past `i128` is `None` too.
+fn decimal_integer(text: &str) -> Option<i128> {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<i128>().ok()
 }
 
 /// A category value: its key (a string) or its code (an integer). An unknown key becomes
@@ -572,20 +616,32 @@ mod tests {
     /// keywords, `score` numeric, and `sentiment` scoped to group `quarter`, so it must be pinned.
     fn schema(name: &str) -> impl Fn(&str) -> LeafColumn + '_ {
         move |c: &str| {
-            let plain = |family| LeafColumn::Resolved {
+            let plain = |family: Family| LeafColumn::Resolved {
                 column: c.to_string(),
                 family,
+                operands: family.operands(),
+                integer: family == Family::Numeric,
             };
             match c.split_once(PIN) {
                 None if c == name => plain(Family::Category),
                 None if c == "title" || c == "submitter" => plain(Family::Keyword),
                 None if c == "score" => plain(Family::Numeric),
+                // A unique keyword with no index, and a unique integer.
+                None if c == "doi" => LeafColumn::Resolved {
+                    column: c.to_string(),
+                    family: Family::Keyword,
+                    operands: &["eq", "in"],
+                    integer: false,
+                },
+                None if c == "gid" => plain(Family::Numeric),
                 None if c == "sentiment" => LeafColumn::Unpinned {
                     group: "quarter".to_string(),
                 },
                 Some(("sentiment", "2026-Q3")) => LeafColumn::Resolved {
                     column: "sentiment@quarter:2026-Q3".to_string(),
                     family: Family::Numeric,
+                    operands: Family::Numeric.operands(),
+                    integer: false,
                 },
                 Some(("sentiment", pin)) => LeafColumn::UnknownPin {
                     group: "quarter".to_string(),
@@ -643,6 +699,39 @@ mod tests {
     fn parse_projected(text: &str) -> Result<FilterExpr, ApiError> {
         let v: Value = serde_json::from_str(text).unwrap();
         parse(&v, &schema("department"), &codes, &projected_ctx())
+    }
+
+    /// An integer comparand past 2^53 is exact as a decimal string, in `eq` and `in` alike.
+    #[test]
+    fn an_integer_column_takes_a_decimal_string_as_an_exact_integer() {
+        let big: i128 = (1 << 60) + 3;
+        assert_eq!(
+            parse_str(&format!(r#"{{"gid": {{"in": ["{big}", 5, "-7"]}}}}"#)).unwrap(),
+            FilterExpr::Leaf {
+                column: "gid".to_string(),
+                operand: FilterOperand::NumIn(vec![Scalar::Int(big), Scalar::Int(5), Scalar::Int(-7)]),
+            }
+        );
+        assert_eq!(
+            parse_str(&format!(r#"{{"gid": {{"eq": "{big}"}}}}"#)).unwrap(),
+            FilterExpr::Leaf {
+                column: "gid".to_string(),
+                operand: FilterOperand::NumEquals(Scalar::Int(big)),
+            }
+        );
+        for refused in [r#"{"gid": {"eq": "12x"}}"#, r#"{"gid": {"eq": ""}}"#, r#"{"gid": {"eq": "-"}}"#, r#"{"gid": {"eq": "1.5"}}"#] {
+            assert!(parse_str(refused).is_err(), "{refused}");
+        }
+    }
+
+    /// A unique column whose only filter home is its index takes `eq` and `in`, and refuses the
+    /// rest of its family's operators.
+    #[test]
+    fn a_unique_column_without_an_index_takes_eq_and_in_alone() {
+        assert!(parse_str(r#"{"doi": {"eq": "10.1/x"}}"#).is_ok());
+        assert!(parse_str(r#"{"doi": {"in": ["10.1/x", "10.2/y"]}}"#).is_ok());
+        assert!(parse_str(r#"{"doi": {"prefix": "10."}}"#).is_err());
+        assert!(parse_str(r#"{"doi": {"contains": "1"}}"#).is_err());
     }
 
     #[test]

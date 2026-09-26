@@ -398,3 +398,32 @@ pub(super) fn coalesce_entity_terms(
     open(&extent).map_err(failed("the coalesced entity-terms extent does not reopen"))?;
     Ok(extent)
 }
+
+/// One unique column's window of live runs merged into new runs, nothing dropped: an entry names
+/// a value and an entity, and a deleted entity's entry is dropped by the fold alone.
+pub(super) fn coalesce_unique_window(
+    window: &super::UniqueWindow,
+    ctx: &CoalesceContext,
+    files: &mut BTreeMap<String, FileDigest>,
+) -> Result<Vec<String>, MaintenanceFailed> {
+    let attribute = &window.attribute;
+    let inputs: Vec<PathBuf> = window.runs.iter().map(|rel| ctx.prefix_dir.join(rel)).collect();
+    let out_rel = format!("{}/unique/{attribute}", ctx.out_rel);
+    let written = tessera_store::unique::merge_unique_runs(
+        &inputs,
+        &croaring::Bitmap::new(),
+        &ctx.prefix_dir.join(&out_rel),
+        "merged",
+    )
+    .map_err(failed(format!("unique index runs for '{attribute}'")))?;
+    let paths: Vec<PathBuf> = written.iter().map(|run| run.path.clone()).collect();
+    tessera_store::fsync_written(&paths)
+        .map_err(failed(format!("unique index runs for '{attribute}'")))?;
+    let rels: Vec<String> = written
+        .iter()
+        .map(|run| tessera_store::unique::relative(&ctx.prefix_dir, &run.path))
+        .collect::<Result<_, _>>()
+        .map_err(failed(format!("unique index runs for '{attribute}'")))?;
+    digest_outputs(files, ctx, rels.iter().map(String::as_str))?;
+    Ok(rels)
+}

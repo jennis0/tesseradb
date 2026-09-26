@@ -78,7 +78,27 @@ impl FilterColumns {
             access: self.access,
             records: Arc::clone(&self.records),
             entity_terms: Arc::clone(&self.entity_terms),
+            unique: self.unique.clone(),
         }
+    }
+
+    /// This generation's columns with `scalar`'s `unique` flag as it now reads: its placement
+    /// taken again from the declaration, and its index route added or removed.
+    pub(crate) fn with_unique(
+        &self,
+        scalar: &tessera_store::manifest::DeclaredScalar,
+        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    ) -> FilterColumns {
+        let mut next = self.successor();
+        match Placement::of(scalar, vocabularies) {
+            Some(placement) => next.placements.insert(scalar.name.clone(), placement),
+            None => next.placements.remove(&scalar.name),
+        };
+        match scalar.unique {
+            true => next.unique.insert(scalar.name.clone(), scalar.arrow_type),
+            false => next.unique.remove(&scalar.name),
+        };
+        next
     }
 
     /// Add one flush's extent to the column it names, refusing a name this composition does not
@@ -124,6 +144,9 @@ impl FilterColumns {
         let mut next = self.successor();
         if let Some(placement) = Placement::of(scalar, vocabularies) {
             next.placements.insert(scalar.name.clone(), placement);
+        }
+        if scalar.unique {
+            next.unique.insert(scalar.name.clone(), scalar.arrow_type);
         }
         if let Some(column) = runtime_layers(scalar, declared_index, vocabularies)? {
             next.columns.insert(scalar.name.clone(), column);

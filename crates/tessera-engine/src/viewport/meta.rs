@@ -120,6 +120,11 @@ pub enum LeafColumn {
     Resolved {
         column: String,
         family: crate::filter::Family,
+        /// The operators a filter may apply to it ([`crate::filter::operands_of`]).
+        operands: &'static [&'static str],
+        /// Whether its values are exact integers (every integer width and `timestamp_us`), so a
+        /// comparand may be spelled as a decimal string past what a JSON number carries exactly.
+        integer: bool,
     },
     /// A group-scoped attribute named bare under a view that decides no column of its family.
     Unpinned { group: String },
@@ -153,6 +158,15 @@ pub(crate) enum Resolution<'a> {
     },
 }
 
+/// Every integer width, and `timestamp_us`, whose values are `i64` microseconds.
+fn is_integer(ty: tessera_spatial::tiler::ScalarType) -> bool {
+    use tessera_spatial::tiler::ScalarType as T;
+    matches!(
+        ty,
+        T::U8 | T::U16 | T::U32 | T::U64 | T::I8 | T::I16 | T::I32 | T::I64 | T::TimestampUs
+    )
+}
+
 impl Resolution<'_> {
     /// The outcome in the terms the filter surface and the value-list route answer in.
     pub(crate) fn leaf_column(self, meta: &EngineMeta) -> LeafColumn {
@@ -162,11 +176,15 @@ impl Resolution<'_> {
                 LeafColumn::Resolved {
                     column: declared.name.clone(),
                     family: crate::filter::Family::of(declared),
+                    operands: crate::filter::operands_of(declared),
+                    integer: declared.vocabulary.is_none() && is_integer(declared.arrow_type),
                 }
             }
             Resolution::Scoped { family, view } => LeafColumn::Resolved {
                 column: crate::filter::scoped_column_name(&family.name, &view),
                 family: crate::filter::Family::of_scoped(family),
+                operands: crate::filter::Family::of_scoped(family).operands(),
+                integer: family.vocabulary.is_none() && is_integer(family.arrow_type),
             },
             Resolution::Unknown => LeafColumn::Unknown,
             Resolution::Unpinned { group } => LeafColumn::Unpinned { group },

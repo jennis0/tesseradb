@@ -132,11 +132,13 @@ impl Placement {
         // column.
         let family = Family::of(scalar);
         let row = scalar.render && family.reaches_hot_column();
-        let entity = if family == Family::Text {
-            scalar.index
-        } else {
-            owes_value_column(scalar, vocabularies) && (scalar.index || row)
-        };
+        // A unique column's index answers `eq` and `in` in entity space whatever else it has.
+        let entity = scalar.unique
+            || if family == Family::Text {
+                scalar.index
+            } else {
+                owes_value_column(scalar, vocabularies) && (scalar.index || row)
+            };
         (row || entity).then_some(Placement {
             entity,
             row,
@@ -150,7 +152,21 @@ impl Placement {
 /// Render counts only for a family that reaches the hot column: `utf8`, `keyword` and `text` are
 /// fixed-width refusals at the schema, so a rendered one of those never reaches this check true.
 pub fn is_filterable(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
+    scalar.unique || filterable_by_value(scalar)
+}
+
+/// Filterable by its stored values rather than by a unique index alone.
+fn filterable_by_value(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
     scalar.index || (scalar.render && Family::of(scalar).reaches_hot_column())
+}
+
+/// The operators a filter may apply to a filterable column, in the order `/v1/meta` publishes
+/// them: its family's, or `eq` and `in` alone for a unique column with no other filter home.
+pub fn operands_of(scalar: &tessera_store::manifest::DeclaredScalar) -> &'static [&'static str] {
+    if scalar.unique && !filterable_by_value(scalar) {
+        return &["eq", "in"];
+    }
+    Family::of(scalar).operands()
 }
 
 /// The character a filter leaf pins a group-scoped attribute's view with: `sentiment@2026-Q3`.
@@ -354,6 +370,7 @@ mod tests {
             analyser: None,
             index: true,
             render: false,
+            unique: false,
         }
     }
 

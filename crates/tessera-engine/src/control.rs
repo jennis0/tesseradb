@@ -261,8 +261,38 @@ impl Engine {
                 });
             }
         }
-        self.write
-            .accept_ingest(rows, batch_id, body_hash, artifacts)
+        // Unique values are checked here, against the generation this thread holds, and re-checked
+        // on the executor against what was added since. Where the executor cannot re-check from
+        // memory, the batch is checked again here once.
+        // The copy a second attempt is sent from, held only where a unique column may make one
+        // owed; a declaration committing between the check and the executor makes one owed too,
+        // and that batch is answered stale.
+        let mut attempt = meta
+            .declared_scalars
+            .iter()
+            .any(|d| d.unique)
+            .then(|| (rows.clone(), batch_id.clone(), artifacts.clone()));
+        let mut submission = (rows, batch_id, artifacts);
+        loop {
+            let seq = crate::unique::check_rows(&self.generation(), &submission.0, &self.identity_key)?;
+            let (rows, batch_id, artifacts) = submission;
+            match self
+                .write
+                .accept_ingest(rows, batch_id, body_hash, artifacts, seq)
+            {
+                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::UniqueStale)) => {
+                    match attempt.take() {
+                        Some(again) => submission = again,
+                        None => {
+                            return Err(crate::write::AcceptError::Exec(
+                                tessera_lifecycle::ExecError::UniqueStale,
+                            ))
+                        }
+                    }
+                }
+                answered => return answered,
+            }
+        }
     }
 
     /// Submit one `/control/changes` entry and wait for its receipt. An `Err` does not mean

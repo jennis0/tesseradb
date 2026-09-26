@@ -1,0 +1,745 @@
+//! Unique fields at a running service: the index entries of values no run holds yet, and the one
+//! lookup every reader of a unique column goes through.
+//!
+//! A unique column's values reach its index in two steps. A row accepted into the ingest buffer
+//! (or a values fill) adds a live entry here at its window's close; the flush that writes the row
+//! writes a run holding the same entries, and its publication removes them from here. A lookup
+//! gathers the runs' entities and the live entries' and drops deleted entities, so a value is
+//! found from its acknowledgement onwards whichever of the two holds it.
+//!
+//! Every entry carries the sequence number it was added under. A handler that checked a batch
+//! against one generation sends that generation's number with it, and the executor re-checks the
+//! batch against the entries added since. That is complete only while every entry added since is
+//! still here: [`UniqueLive::stale_since`] answers when a flush has moved one into a run, or when
+//! the set of unique columns has changed, and the handler then checks the batch again.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
+use tessera_lifecycle::{IngestBuffer, WalScalar};
+use tessera_store::manifest::{DeclaredScalar, Manifest};
+use tessera_store::unique::{key_of, UniqueKey};
+use tessera_types::EntityId;
+
+use crate::Generation;
+
+/// One entity holding a key, and the sequence number the entry was added under.
+type Entry = (EntityId, u64);
+
+/// The index entries no run holds yet, per unique column.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UniqueLive {
+    /// Keyed by attribute name. An `Arc` per column, so a window adding to one column copies that
+    /// column's map and shares the rest.
+    columns: BTreeMap<String, Arc<FxHashMap<UniqueKey, Vec<Entry>>>>,
+    /// The number the last entry was added under.
+    seq: u64,
+    /// The highest number among the entries a flush has moved into a run.
+    flushed_through: u64,
+    /// The number current when the set of unique columns last changed.
+    columns_changed_at: u64,
+}
+
+impl UniqueLive {
+    /// The live entries of every unique column `manifest` declares, from the rows and fills
+    /// `buffer` holds: what a restart or a declaration starts from.
+    pub(crate) fn derive(manifest: &Manifest, buffer: &IngestBuffer) -> UniqueLive {
+        let mut live = UniqueLive::default();
+        for declared in manifest.declared_scalars.iter().filter(|d| d.unique) {
+            live.columns.insert(declared.name.clone(), Arc::default());
+        }
+        live.add_buffered(manifest, buffer, None);
+        live
+    }
+
+    /// Add the entries of every row and fill `buffer` holds, for `only` or every unique column.
+    fn add_buffered(&mut self, manifest: &Manifest, buffer: &IngestBuffer, only: Option<&str>) {
+        let mut entities: Vec<(EntityId, &[WalScalar])> = buffer
+            .iter()
+            .map(|(entity, item)| (*entity, item.scalars.as_slice()))
+            .chain(
+                buffer
+                    .fills()
+                    .map(|(entity, fill)| (*entity, fill.scalars.as_slice())),
+            )
+            .collect();
+        entities.sort_by_key(|(entity, _)| *entity);
+        for (entity, scalars) in entities {
+            for (at, declared) in manifest.declared_scalars.iter().enumerate() {
+                let wanted = match only {
+                    Some(name) => name == declared.name,
+                    None => declared.unique,
+                };
+                if !wanted {
+                    continue;
+                }
+                if let Some(key) = scalars.get(at).and_then(|v| key_of(declared.arrow_type, v)) {
+                    self.add(&declared.name, key, entity);
+                }
+            }
+        }
+    }
+
+    /// The sequence number of the last entry added: what a handler checked a batch at.
+    pub(crate) fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Whether an entry added after `seq` may be missing from here, or the unique columns have
+    /// changed since `seq`, so a batch checked at `seq` cannot be re-checked from memory.
+    pub(crate) fn stale_since(&self, seq: u64) -> bool {
+        self.flushed_through > seq || self.columns_changed_at > seq
+    }
+
+    /// Whether no column is unique, so nothing is ever added.
+    pub(crate) fn is_empty_schema(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    /// Record that `entity` holds `key` in `attribute`. Does nothing for a column that is not
+    /// unique.
+    pub(crate) fn add(&mut self, attribute: &str, key: UniqueKey, entity: EntityId) {
+        let Some(column) = self.columns.get_mut(attribute) else {
+            return;
+        };
+        self.seq += 1;
+        let entries = Arc::make_mut(column).entry(key).or_default();
+        if !entries.iter().any(|(held, _)| *held == entity) {
+            entries.push((entity, self.seq));
+        }
+    }
+
+    /// Add the entries of one row's or fill's entity-scoped scalars.
+    pub(crate) fn add_scalars(
+        &mut self,
+        declared: &[DeclaredScalar],
+        entity: EntityId,
+        scalars: &[WalScalar],
+    ) {
+        for (at, d) in declared.iter().enumerate() {
+            if !d.unique {
+                continue;
+            }
+            if let Some(key) = scalars.get(at).and_then(|v| key_of(d.arrow_type, v)) {
+                self.add(&d.name, key, entity);
+            }
+        }
+    }
+
+    /// Remove the entries a flush wrote into a run for `attribute`.
+    pub(crate) fn flushed(&mut self, attribute: &str, written: &[(UniqueKey, EntityId)]) {
+        let Some(column) = self.columns.get_mut(attribute) else {
+            return;
+        };
+        let column = Arc::make_mut(column);
+        for (key, entity) in written {
+            let Some(entries) = column.get_mut(key) else {
+                continue;
+            };
+            if let Some(i) = entries.iter().position(|(held, _)| held == entity) {
+                let (_, seq) = entries.swap_remove(i);
+                self.flushed_through = self.flushed_through.max(seq);
+            }
+            if entries.is_empty() {
+                column.remove(key);
+            }
+        }
+    }
+
+    /// Remove every entry of the deleted entities. A deleted entity names nothing, so this changes
+    /// no answer; it only returns the memory.
+    pub(crate) fn remove_entities(&mut self, deleted: &[EntityId]) {
+        if deleted.is_empty() {
+            return;
+        }
+        for column in self.columns.values_mut() {
+            if column.values().all(|entries| entries.iter().all(|(e, _)| !deleted.contains(e))) {
+                continue;
+            }
+            let column = Arc::make_mut(column);
+            column.retain(|_, entries| {
+                entries.retain(|(e, _)| !deleted.contains(e));
+                !entries.is_empty()
+            });
+        }
+    }
+
+    /// Make `attribute` unique, with the entries of every row and fill `buffer` holds, or stop it
+    /// being unique.
+    pub(crate) fn set_unique(
+        &mut self,
+        manifest: &Manifest,
+        buffer: &IngestBuffer,
+        attribute: &str,
+        unique: bool,
+    ) {
+        if unique {
+            self.columns.insert(attribute.to_string(), Arc::default());
+            self.add_buffered(manifest, buffer, Some(attribute));
+        } else {
+            self.columns.remove(attribute);
+        }
+        // Past every number a handler can have read, including one that saw no entry added.
+        self.seq += 1;
+        self.columns_changed_at = self.seq;
+    }
+
+    /// Every entity a live entry of `attribute` holds under each of `keys`, as `(position in keys,
+    /// entity)`. `after` keeps only the entries added after that number.
+    pub(crate) fn lookup(
+        &self,
+        attribute: &str,
+        keys: &[UniqueKey],
+        after: u64,
+    ) -> Vec<(usize, EntityId)> {
+        let Some(column) = self.columns.get(attribute) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            for (entity, seq) in column.get(key).into_iter().flatten() {
+                if *seq > after {
+                    out.push((i, *entity));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The entities of `generation` holding each of `keys` in unique column `attribute`, from its
+/// runs and its live entries, deleted entities dropped, as `(position in keys, entity)` ascending
+/// by position. A suppressed entity holds its value. Nothing here asks who may see a holder: a
+/// caller answering a viewer intersects with the viewer's visible set.
+pub(crate) fn holders(
+    generation: &Generation,
+    attribute: &str,
+    keys: &[UniqueKey],
+) -> Result<Vec<(usize, EntityId)>, tessera_store::StoreError> {
+    let mut out: Vec<(usize, EntityId)> = match generation.unique.get(attribute) {
+        Some(index) => index
+            .lookup(keys)?
+            .into_iter()
+            .map(|(i, entity)| (i, EntityId::new(u64::from(entity))))
+            .collect(),
+        None => Vec::new(),
+    };
+    out.extend(generation.unique_live.lookup(attribute, keys, 0));
+    out.retain(|(_, entity)| !generation.overlay.is_deleted(*entity));
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// The unique keys one row sets, as `(declared position, key)`, for a row that creates an item.
+pub(crate) fn row_keys(declared: &[DeclaredScalar], scalars: &[WalScalar]) -> Vec<(usize, UniqueKey)> {
+    declared
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.unique)
+        .filter_map(|(at, d)| {
+            scalars
+                .get(at)
+                .and_then(|v| key_of(d.arrow_type, v))
+                .map(|key| (at, key))
+        })
+        .collect()
+}
+
+/// A value as a refusal names it: a keyword quoted, a number as its digits.
+pub(crate) fn describe(value: &WalScalar) -> String {
+    match value {
+        WalScalar::Utf8(s) => format!("'{s}'"),
+        WalScalar::U8(v) => v.to_string(),
+        WalScalar::U16(v) => v.to_string(),
+        WalScalar::U32(v) => v.to_string(),
+        WalScalar::U64(v) => v.to_string(),
+        WalScalar::I8(v) => v.to_string(),
+        WalScalar::I16(v) => v.to_string(),
+        WalScalar::I32(v) => v.to_string(),
+        WalScalar::I64(v) | WalScalar::TimestampUs(v) => v.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// An item's `tessera_id` as a refusal names it.
+pub(crate) fn tessera_id_text(
+    key: &tessera_types::IdentityKey,
+    generation: &Generation,
+    entity: EntityId,
+) -> String {
+    key.forward(generation.bundle.manifest.identity.shard_id, entity)
+        .map(|id| id.raw().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Refuse a values batch whose fills would give an item a unique value another live or suppressed
+/// item holds, or give two items one value.
+pub(crate) fn refuse_taken_fills(
+    generation: &Generation,
+    fills: &[(EntityId, tessera_lifecycle::Fill)],
+    identity: &tessera_types::IdentityKey,
+) -> Result<(), tessera_lifecycle::ExecError> {
+    let declared = &generation.bundle.manifest.declared_scalars;
+    for (at, d) in declared.iter().enumerate().filter(|(_, d)| d.unique) {
+        let set: Vec<(EntityId, UniqueKey, &WalScalar)> = fills
+            .iter()
+            .filter_map(|(entity, fill)| {
+                let value = fill.scalars.get(at)?;
+                key_of(d.arrow_type, value).map(|key| (*entity, key, value))
+            })
+            .collect();
+        if set.is_empty() {
+            continue;
+        }
+        let mut seen: FxHashMap<UniqueKey, EntityId> = FxHashMap::default();
+        for (entity, key, value) in &set {
+            if seen.insert(*key, *entity).is_some_and(|other| other != *entity) {
+                return Err(tessera_lifecycle::ExecError::UniqueTaken {
+                    detail: format!(
+                        "two rows of this batch set '{}' = {}; a unique value is held by one \
+                         item, so send it for one of them",
+                        d.name,
+                        describe(value)
+                    ),
+                });
+            }
+        }
+        let keys: Vec<UniqueKey> = set.iter().map(|(_, key, _)| *key).collect();
+        let found = holders(generation, &d.name, &keys).map_err(|e| {
+            tracing::error!(error = %e, column = %d.name, "a unique index could not be read");
+            tessera_lifecycle::ExecError::ValuesRefused {
+                detail: format!(
+                    "the unique index of '{}' could not be read, so this batch was not applied; \
+                     send it again",
+                    d.name
+                ),
+            }
+        })?;
+        if let Some((i, holder)) = found.into_iter().find(|(i, holder)| *holder != set[*i].0) {
+            return Err(tessera_lifecycle::ExecError::UniqueTaken {
+                detail: format!(
+                    "'{}' = {} is held by item {}; a unique value is held by one item, so omit \
+                     it or delete that item first",
+                    d.name,
+                    describe(set[i].2),
+                    tessera_id_text(identity, generation, holder)
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+
+/// The unique values a batch's rows set, as a commit window holds them.
+pub(crate) fn window_keys(
+    declared: &[DeclaredScalar],
+    rows: &[tessera_lifecycle::UnallocatedRow],
+) -> Vec<(u16, u128)> {
+    rows.iter()
+        .filter(|row| row.join.is_none())
+        .flat_map(|row| row_keys(declared, &row.scalars))
+        .map(|(at, key)| (u16::try_from(at).unwrap_or(u16::MAX), key.widen()))
+        .collect()
+}
+
+/// One row's value for one unique column, and the item the row names, if it joins one.
+struct Setting<'a> {
+    row: usize,
+    target: Option<EntityId>,
+    key: UniqueKey,
+    value: &'a WalScalar,
+}
+
+fn settings<'a>(
+    at: usize,
+    d: &DeclaredScalar,
+    rows: &'a [tessera_lifecycle::UnallocatedRow],
+) -> Vec<Setting<'a>> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(row, r)| {
+            let value = r.scalars.get(at)?;
+            key_of(d.arrow_type, value).map(|key| Setting {
+                row,
+                target: r.join,
+                key,
+                value,
+            })
+        })
+        .collect()
+}
+
+fn taken(
+    d: &DeclaredScalar,
+    setting: &Setting<'_>,
+    holder: EntityId,
+    identity: &tessera_types::IdentityKey,
+    generation: &Generation,
+) -> tessera_lifecycle::ExecError {
+    let id = tessera_id_text(identity, generation, holder);
+    tessera_lifecycle::ExecError::UniqueTaken {
+        detail: format!(
+            "row {}: '{}' = {} is held by item {id}; a unique value is held by one item, so send \
+             another value, or delete item {id} first",
+            setting.row,
+            d.name,
+            describe(setting.value)
+        ),
+    }
+}
+
+/// Refuse a batch whose rows set one unique value twice, or a value an item other than the row's
+/// own holds, against `generation`'s runs and live entries. Answers the live entries' sequence
+/// number the check was made at, for the executor's re-check.
+pub(crate) fn check_rows(
+    generation: &Generation,
+    rows: &[tessera_lifecycle::UnallocatedRow],
+    identity: &tessera_types::IdentityKey,
+) -> Result<u64, crate::write::AcceptError> {
+    use crate::write::AcceptError;
+    let seq = generation.unique_live.seq();
+    let declared = &generation.bundle.manifest.declared_scalars;
+    for (at, d) in declared.iter().enumerate().filter(|(_, d)| d.unique) {
+        let set = settings(at, d, rows);
+        if set.is_empty() {
+            continue;
+        }
+        let mut seen: FxHashMap<UniqueKey, usize> = FxHashMap::default();
+        for (i, setting) in set.iter().enumerate() {
+            let Some(j) = seen.insert(setting.key, i) else {
+                continue;
+            };
+            let first = &set[j];
+            if first.target.is_none() || first.target != setting.target {
+                return Err(AcceptError::Exec(tessera_lifecycle::ExecError::UniqueTaken {
+                    detail: format!(
+                        "rows {} and {} both set '{}' = {}; a unique value is held by one item, \
+                         so send it in one row",
+                        first.row,
+                        setting.row,
+                        d.name,
+                        describe(setting.value)
+                    ),
+                }));
+            }
+        }
+        let keys: Vec<UniqueKey> = set.iter().map(|s| s.key).collect();
+        let found = holders(generation, &d.name, &keys)
+            .map_err(|e| AcceptError::UniqueIndexUnreadable(e.to_string()))?;
+        if let Some((i, holder)) = found
+            .into_iter()
+            .find(|(i, holder)| set[*i].target != Some(*holder))
+        {
+            return Err(AcceptError::Exec(taken(d, &set[i], holder, identity, generation)));
+        }
+    }
+    Ok(seq)
+}
+
+/// The executor's half of [`check_rows`]: the rows' unique values against the live entries added
+/// after `seq`, from memory. Stale where that set is not complete in memory.
+pub(crate) fn recheck_rows(
+    generation: &Generation,
+    rows: &[tessera_lifecycle::UnallocatedRow],
+    seq: u64,
+    identity: &tessera_types::IdentityKey,
+) -> Result<(), tessera_lifecycle::ExecError> {
+    let declared = &generation.bundle.manifest.declared_scalars;
+    if !declared.iter().any(|d| d.unique) {
+        return Ok(());
+    }
+    if generation.unique_live.stale_since(seq) {
+        return Err(tessera_lifecycle::ExecError::UniqueStale);
+    }
+    for (at, d) in declared.iter().enumerate().filter(|(_, d)| d.unique) {
+        let set = settings(at, d, rows);
+        if set.is_empty() {
+            continue;
+        }
+        let keys: Vec<UniqueKey> = set.iter().map(|s| s.key).collect();
+        let found = generation.unique_live.lookup(&d.name, &keys, seq);
+        if let Some((i, holder)) = found.into_iter().find(|(i, holder)| {
+            set[*i].target != Some(*holder) && !generation.overlay.is_deleted(*holder)
+        }) {
+            return Err(taken(d, &set[i], holder, identity, generation));
+        }
+    }
+    Ok(())
+}
+
+/// Every value `generation` has flushed for column `at` among `wanted`, to `visit`, deleted
+/// entities left out. A blob-resident column is read a block at a time; every other home is read
+/// entity by entity.
+pub(crate) fn for_each_flushed_value(
+    generation: &Generation,
+    at: usize,
+    wanted: &croaring::Bitmap,
+    visit: &mut dyn FnMut(u32, WalScalar) -> Result<(), String>,
+) -> Result<(), String> {
+    let manifest = &generation.bundle.manifest;
+    let declared = &manifest.declared_scalars[at];
+    let deleted = |entity: u32| generation.overlay.is_deleted(EntityId::new(u64::from(entity)));
+    if crate::filter::blob_resident(declared, &manifest.vocabularies) {
+        let mut failed: Option<String> = None;
+        generation
+            .filter_columns
+            .records()
+            .for_each_row_in(wanted, &mut |entity, fields| {
+                if failed.is_some() || deleted(entity) {
+                    return Ok(());
+                }
+                let value = fields
+                    .into_iter()
+                    .find(|field| field.tag as usize == at)
+                    .and_then(|field| crate::write::joined::stored_as_wal(field.value, declared));
+                if let Some(value) = value {
+                    if let Err(e) = visit(entity, value) {
+                        failed = Some(e);
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|e| format!("the record blob could not be read: {e}"))?;
+        return failed.map_or(Ok(()), Err);
+    }
+    let mut blob = crate::write::joined::BlobRow::default();
+    for entity in wanted.iter() {
+        if deleted(entity) {
+            continue;
+        }
+        if let Some(value) = crate::write::joined::flushed_scalar_of(
+            generation,
+            EntityId::new(u64::from(entity)),
+            at,
+            &mut blob,
+        ) {
+            visit(entity, value)?;
+        }
+    }
+    Ok(())
+}
+
+/// How many values one refusal names at most.
+pub(crate) const EXAMPLES: usize = 10;
+
+/// What one round of a declaration's build is given: the generation it reads, the flushed
+/// entities it reads the column's values for, the runs earlier rounds wrote, and where it writes.
+pub(crate) struct RoundInput {
+    pub(crate) generation: Arc<Generation>,
+    pub(crate) at: usize,
+    pub(crate) wanted: croaring::Bitmap,
+    pub(crate) prior: Vec<std::path::PathBuf>,
+    pub(crate) prefix_dir: std::path::PathBuf,
+    pub(crate) out_dir: std::path::PathBuf,
+    pub(crate) stem: String,
+    pub(crate) memory_budget: usize,
+}
+
+/// What a round wrote and found.
+pub(crate) struct RoundOutput {
+    pub(crate) runs: Vec<(tessera_store::unique::WrittenUniqueRun, tessera_store::manifest::FileDigest)>,
+    /// Keys more than one live or suppressed item holds, and up to [`EXAMPLES`] of their values.
+    pub(crate) duplicates: u64,
+    pub(crate) examples: Vec<String>,
+    /// The buffered `(entity, key)` pairs this round checked against every run.
+    pub(crate) checked: FxHashMap<EntityId, UniqueKey>,
+}
+
+/// One round of a unique declaration's build, off the executor: sort the flushed values of the
+/// wanted entities into runs, then find every key more than one item holds, among them, against
+/// the earlier rounds' runs, and among and against the buffered rows.
+pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
+    use tessera_store::unique::{KeyKind, UniqueIndex, UniqueSpill};
+    let generation = &input.generation;
+    let declared = &generation.bundle.manifest.declared_scalars[input.at];
+    let ty = declared.arrow_type;
+    let kind = KeyKind::of(ty).ok_or_else(|| format!("'{}' cannot be unique", declared.name))?;
+    let deleted = |entity: EntityId| generation.overlay.is_deleted(entity);
+
+    std::fs::create_dir_all(&input.out_dir).map_err(|e| e.to_string())?;
+    let mut spill = UniqueSpill::create(kind, &input.out_dir, input.memory_budget)
+        .map_err(|e| e.to_string())?;
+    for_each_flushed_value(generation, input.at, &input.wanted, &mut |entity, value| {
+        match key_of(ty, &value) {
+            Some(key) => spill.push(key, entity).map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
+    })?;
+    let mut duplicate_keys: Vec<UniqueKey> = Vec::new();
+    let mut duplicates = 0u64;
+    let written = spill
+        .finish(&input.out_dir, &input.stem, |d| {
+            duplicates += 1;
+            if duplicate_keys.len() < EXAMPLES {
+                duplicate_keys.push(d.key);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    let note = |key: UniqueKey, duplicates: &mut u64, keys: &mut Vec<UniqueKey>| {
+        if !keys.contains(&key) {
+            *duplicates += 1;
+            if keys.len() < EXAMPLES {
+                keys.push(key);
+            }
+        }
+    };
+
+    // Every run so far, this round's and the earlier ones', as one index to look up in.
+    let rel = |path: &std::path::Path| {
+        tessera_store::unique::relative(&input.prefix_dir, path).map_err(|e| e.to_string())
+    };
+    let this_round: Vec<String> = written
+        .iter()
+        .map(|run| rel(&run.path))
+        .collect::<Result<_, _>>()?;
+    let prior: Vec<String> = input
+        .prior
+        .iter()
+        .map(|path| rel(path))
+        .collect::<Result<_, _>>()?;
+    let lookup = |live: Vec<String>, keys: &[UniqueKey]| -> Result<Vec<(usize, EntityId)>, String> {
+        let runs = tessera_store::manifest::UniqueIndexRuns {
+            attribute: declared.name.clone(),
+            base: Vec::new(),
+            live,
+        };
+        let index = UniqueIndex::open(&runs, kind, &input.prefix_dir, None)
+            .map_err(|e| e.to_string())?;
+        Ok(index
+            .lookup(keys)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(i, entity)| (i, EntityId::new(u64::from(entity))))
+            .filter(|(_, entity)| !deleted(*entity))
+            .collect())
+    };
+
+    // This round's values against the earlier rounds' runs.
+    if !prior.is_empty() {
+        let mut entries: Vec<(UniqueKey, EntityId)> = Vec::new();
+        for run in &written {
+            tessera_store::unique::for_each_entry(kind, &run.path, |key, entity| {
+                entries.push((key, EntityId::new(u64::from(entity))));
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+        }
+        let keys: Vec<UniqueKey> = entries.iter().map(|(key, _)| *key).collect();
+        for (i, holder) in lookup(prior.clone(), &keys)? {
+            if holder != entries[i].1 {
+                note(entries[i].0, &mut duplicates, &mut duplicate_keys);
+            }
+        }
+    }
+
+    // The buffered values, among themselves and against every run.
+    let mut checked: FxHashMap<EntityId, UniqueKey> = FxHashMap::default();
+    let mut by_key: FxHashMap<UniqueKey, EntityId> = FxHashMap::default();
+    let mut texts: FxHashMap<UniqueKey, String> = FxHashMap::default();
+    for (entity, scalars) in buffered_scalars(&generation.buffer) {
+        if deleted(entity) {
+            continue;
+        }
+        let Some(value) = scalars.get(input.at) else {
+            continue;
+        };
+        let Some(key) = key_of(ty, value) else {
+            continue;
+        };
+        if let WalScalar::Utf8(text) = value {
+            texts.entry(key).or_insert_with(|| text.clone());
+        }
+        checked.insert(entity, key);
+        if by_key.insert(key, entity).is_some_and(|other| other != entity) {
+            note(key, &mut duplicates, &mut duplicate_keys);
+        }
+    }
+    let buffered: Vec<(EntityId, UniqueKey)> = checked.iter().map(|(e, k)| (*e, *k)).collect();
+    let keys: Vec<UniqueKey> = buffered.iter().map(|(_, key)| *key).collect();
+    let every_run: Vec<String> = prior.iter().chain(&this_round).cloned().collect();
+    if !keys.is_empty() && !every_run.is_empty() {
+        for (i, holder) in lookup(every_run, &keys)? {
+            if holder != buffered[i].0 {
+                note(buffered[i].1, &mut duplicates, &mut duplicate_keys);
+            }
+        }
+    }
+
+    let examples = if duplicates == 0 {
+        Vec::new()
+    } else {
+        describe_keys(generation, input.at, &input.wanted, &duplicate_keys, &texts)?
+    };
+    let mut runs = Vec::with_capacity(written.len());
+    let paths: Vec<std::path::PathBuf> = written.iter().map(|run| run.path.clone()).collect();
+    tessera_store::fsync_written(&paths).map_err(|e| e.to_string())?;
+    for run in written {
+        let digest = tessera_store::digest_of(&run.path).map_err(|e| e.to_string())?;
+        runs.push((run, digest));
+    }
+    Ok(RoundOutput {
+        runs,
+        duplicates,
+        examples,
+        checked,
+    })
+}
+
+/// Every buffered row's and fill's entity-scoped scalars, with the entity.
+pub(crate) fn buffered_scalars(buffer: &IngestBuffer) -> Vec<(EntityId, &[WalScalar])> {
+    buffer
+        .iter()
+        .map(|(entity, item)| (*entity, item.scalars.as_slice()))
+        .chain(
+            buffer
+                .fills()
+                .map(|(entity, fill)| (*entity, fill.scalars.as_slice())),
+        )
+        .collect()
+}
+
+/// The values of `keys` as a refusal names them. An integer key is its own value; a keyword key
+/// is a hash, so its text is found among the buffered values or read again from the flushed
+/// ones.
+fn describe_keys(
+    generation: &Generation,
+    at: usize,
+    wanted: &croaring::Bitmap,
+    keys: &[UniqueKey],
+    texts: &FxHashMap<UniqueKey, String>,
+) -> Result<Vec<String>, String> {
+    use tessera_store::unique::KeyKind;
+    let declared = &generation.bundle.manifest.declared_scalars[at];
+    let kind = KeyKind::of(declared.arrow_type);
+    let mut found: FxHashMap<UniqueKey, String> = FxHashMap::default();
+    let missing: Vec<UniqueKey> = keys
+        .iter()
+        .filter(|key| matches!(key, UniqueKey::Keyword(_)) && !texts.contains_key(key))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        for_each_flushed_value(generation, at, wanted, &mut |_, value| {
+            if let Some(key) = key_of(declared.arrow_type, &value) {
+                if missing.contains(&key) && !found.contains_key(&key) {
+                    found.insert(key, describe(&value));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(keys
+        .iter()
+        .map(|key| match (*key, kind) {
+            (UniqueKey::Int(k), Some(KeyKind::Unsigned)) => k.to_string(),
+            (UniqueKey::Int(k), _) => tessera_store::key_index::signed_value(k).to_string(),
+            (UniqueKey::Keyword(_), _) => texts
+                .get(key)
+                .map(|text| format!("'{text}'"))
+                .or_else(|| found.get(key).cloned())
+                .unwrap_or_else(|| "a value no longer held".to_string()),
+        })
+        .collect())
+}

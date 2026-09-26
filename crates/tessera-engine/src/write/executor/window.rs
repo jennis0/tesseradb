@@ -276,6 +276,15 @@ fn refuse_waiters(
     health.record_window_service(entries, started.elapsed().as_nanos() as u64);
 }
 
+/// One `/control/ingest` submission as the executor admits it.
+pub(super) struct IngestSubmission {
+    pub(super) rows: Vec<UnallocatedRow>,
+    pub(super) batch_id: String,
+    pub(super) body_hash: [u8; 32],
+    pub(super) artifacts: tessera_lifecycle::BatchArtifacts,
+    pub(super) unique_seq: u64,
+}
+
 /// What [`Executor::admit_ingest`] did with a submission, as far as the drain loop needs to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Admission {
@@ -343,10 +352,20 @@ impl Executor {
                 batch_id,
                 body_hash,
                 artifacts,
+                unique_seq,
                 reply,
             } = command
             else {
-                // Tolerable while a window is open: none of these touch the buffer or the swap.
+                // A values batch and a declaration read the unique values the window holds and has
+                // not yet applied, so the window closes first. Every other command is tolerable
+                // while a window is open: none of them touch the buffer or the swap.
+                if matches!(
+                    command,
+                    Command::Values { .. } | Command::DeclareAttribute { .. }
+                ) && !window.is_empty()
+                {
+                    window = self.close_and_reopen(window);
+                }
                 self.execute(command);
                 did_work = true;
                 continue;
@@ -354,8 +373,17 @@ impl Executor {
 
             let admitted;
             let m = StageMark::now();
-            (window, admitted) =
-                self.admit_ingest(window, rows, batch_id, body_hash, artifacts, reply);
+            (window, admitted) = self.admit_ingest(
+                window,
+                IngestSubmission {
+                    rows,
+                    batch_id,
+                    body_hash,
+                    artifacts,
+                    unique_seq,
+                },
+                reply,
+            );
             self.health.lap(WriteStage::AdmitWindow, m);
             did_work = true;
             if admitted == Admission::YieldedAfterClose {
@@ -388,12 +416,16 @@ impl Executor {
     pub(super) fn admit_ingest(
         &mut self,
         mut window: CommitWindow<Reply<Ingested>>,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        artifacts: tessera_lifecycle::BatchArtifacts,
+        submission: IngestSubmission,
         reply: Reply<Ingested>,
     ) -> (CommitWindow<Reply<Ingested>>, Admission) {
+        let IngestSubmission {
+            rows,
+            batch_id,
+            body_hash,
+            artifacts,
+            unique_seq,
+        } = submission;
         match BatchState::of(&self.live, &window, &batch_id) {
             BatchState::Accepted {
                 body_hash: prev_hash,
@@ -431,16 +463,24 @@ impl Executor {
             }
             BatchState::Unknown => {
                 let mut admission = Admission::Admitted;
-                // Only external ids reach here: a held batch id was answered above.
-                if window.holds_external_id_of(&rows) {
+                let unique_keys = {
+                    let generation = self.generation.load();
+                    crate::unique::window_keys(&generation.bundle.manifest.declared_scalars, &rows)
+                };
+                // Only external ids and unique values reach here: a held batch id was answered
+                // above. Either held by the open window is checked against state its close writes.
+                if window.holds_external_id_of(&rows) || window.holds_unique_key(&unique_keys) {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Some(entry) = self.admit(rows, batch_id, body_hash, artifacts, reply) {
+                if let Some(entry) =
+                    self.admit(rows, batch_id, body_hash, artifacts, unique_seq, reply)
+                {
                     if window.is_empty() {
                         // Armed at the first entry: an empty window is never closed.
                         self.health.mark_work_started(window.opened_at());
                     }
+                    window.hold_unique_keys(unique_keys);
                     window.push(entry);
                 }
                 (window, admission)
@@ -457,10 +497,19 @@ impl Executor {
         batch_id: String,
         body_hash: [u8; 32],
         artifacts: tessera_lifecycle::BatchArtifacts,
+        unique_seq: u64,
         reply: Reply<Ingested>,
     ) -> Option<WindowEntry<Reply<Ingested>>> {
         // From the same generation the apply below clones, so the exemption cannot race a delete.
         let generation = self.generation.load();
+        // The unique values against what was added since the handler checked them, from memory.
+        if let Err(e) =
+            crate::unique::recheck_rows(&generation, &rows, unique_seq, &self.deps.identity_key)
+        {
+            drop(generation);
+            reply.fail(e);
+            return None;
+        }
         let mut rows = rows;
         let collisions = self.live.established_collisions(
             &mut rows,
@@ -752,6 +801,9 @@ impl Executor {
         );
         let mut buffer = (*generation.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
+        let declared = &generation.bundle.manifest.declared_scalars;
+        let mut unique_live = (!generation.unique_live.is_empty_schema())
+            .then(|| (*generation.unique_live).clone());
 
         // What the buffered-row lists grow by: every entity this window buffered a row for.
         let mut inserted: Vec<EntityId> = Vec::new();
@@ -770,6 +822,11 @@ impl Executor {
                     m = self.health.lap(WriteStage::RowEstablishedInv, m);
                 }
                 buffer.insert_row_with_terms(row, row_terms);
+                if let Some(unique_live) = unique_live.as_mut() {
+                    if !row.join {
+                        unique_live.add_scalars(declared, row.entity_id, &row.scalars);
+                    }
+                }
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);
                 buffer.set_wal_pos(row.entity_id, &row.view, *wal_pos);
                 self.health.lap(WriteStage::RowWalPos, m);
@@ -789,6 +846,9 @@ impl Executor {
             g.overlay_version = generation.overlay_version + 1;
             g.vocabularies = Arc::new(vocabularies);
             g.suggest = suggest;
+            if let Some(unique_live) = unique_live {
+                g.unique_live = Arc::new(unique_live);
+            }
         });
         self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);

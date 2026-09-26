@@ -1739,6 +1739,7 @@ fn a_job_is_counted_completed_before_its_caller_is_answered() {
                     index: false,
                     render: false,
                     scope: tessera_types::layer::LayerScope::Entity,
+                    unique: false,
                 })
                 .expect("the attribute is declared");
             }),

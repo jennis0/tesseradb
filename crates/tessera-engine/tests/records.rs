@@ -305,6 +305,7 @@ fn scoped(
             value_set: None,
             index: true,
             render: false,
+            unique: false,
         },
         group: group.to_string(),
         views,

@@ -296,11 +296,21 @@ impl Executor {
                 batch_id,
                 body_hash,
                 artifacts,
+                unique_seq,
                 reply,
             } => {
                 let window = CommitWindow::new(self.next_window_seq());
-                let (window, _) =
-                    self.admit_ingest(window, rows, batch_id, body_hash, artifacts, reply);
+                let (window, _) = self.admit_ingest(
+                    window,
+                    IngestSubmission {
+                        rows,
+                        batch_id,
+                        body_hash,
+                        artifacts,
+                        unique_seq,
+                    },
+                    reply,
+                );
                 if !window.is_empty() {
                     self.close_window(window);
                 }
@@ -833,6 +843,12 @@ impl Executor {
                 return;
             }
         };
+        if let Err(e) =
+            crate::unique::refuse_taken_fills(&generation, &planned.fills, &self.deps.identity_key)
+        {
+            reply.fail(e);
+            return;
+        }
         // A layer column on a values row is a membership join, and mints what it names. A held
         // key joins the entity to the artifact; a key no artifact holds mints it here, on an
         // `open` layer, with the batch's rows as its first members and its lineage from a list
@@ -943,7 +959,10 @@ impl Executor {
         // family's entity-space extent and the record blob. The map is cloned with the buffer, on
         // the immutable-snapshot rule every generation is built by.
         let mut buffer = (*generation.buffer).clone();
+        let declared = &generation.bundle.manifest.declared_scalars;
+        let mut unique_live = (*generation.unique_live).clone();
         for (entity, fill) in planned.fills {
+            unique_live.add_scalars(declared, entity, &fill.scalars);
             buffer.fill(entity, fill, |value| matches!(value, WalScalar::Null));
             buffer.set_fill_wal_pos(entity, values_position);
         }
@@ -966,6 +985,7 @@ impl Executor {
         let next = generation.with_buffer(Arc::new(buffer), &[], |g| {
             g.vocabularies = Arc::new(minted.vocabularies);
             g.suggest = suggest;
+            g.unique_live = Arc::new(unique_live);
         });
         self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
@@ -1054,6 +1074,10 @@ impl Executor {
                 return;
             }
             Ok(crate::attributes::Resolution::New(compiled)) => compiled,
+            Ok(crate::attributes::Resolution::Unique { name, unique }) => {
+                self.begin_unique_declare(name, unique, reply);
+                return;
+            }
             Err(e) => {
                 reply.fail(e);
                 return;

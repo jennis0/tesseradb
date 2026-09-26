@@ -212,17 +212,23 @@ impl Executor {
 
         // A deleted entity's rows leave the buffer here, or they would pin the WAL: `plan_flush`
         // never consumes a deleted row.
-        let buffer = if !generation.buffer.holds_any(&deleted) {
-            Arc::clone(&generation.buffer)
+        let (buffer, unique_live) = if !generation.buffer.holds_any(&deleted) {
+            (
+                Arc::clone(&generation.buffer),
+                Arc::clone(&generation.unique_live),
+            )
         } else {
             let mut buffer = (*generation.buffer).clone();
-            for entity in deleted {
-                buffer.remove(entity);
+            for entity in &deleted {
+                buffer.remove(*entity);
             }
             self.health
                 .buffered_items
                 .store(buffer.len(), Ordering::SeqCst);
-            Arc::new(buffer)
+            // A deleted entity names nothing, so its live unique entries go with its rows.
+            let mut unique_live = (*generation.unique_live).clone();
+            unique_live.remove_entities(&deleted);
+            (Arc::new(buffer), Arc::new(unique_live))
         };
 
         // A window of deletes and suppressions only grows the mask; an unsuppress re-derives it,
@@ -232,10 +238,12 @@ impl Executor {
             generation.with_buffer(buffer, &[], |g| {
                 g.overlay_version = overlay_version;
                 g.overlay = Arc::new(overlay);
+                g.unique_live = unique_live;
             })
         } else {
             generation.with_denies(Arc::new(overlay), &newly_denied, buffer, |g| {
                 g.overlay_version = overlay_version;
+                g.unique_live = unique_live;
             })
         };
         self.publish(next, started)

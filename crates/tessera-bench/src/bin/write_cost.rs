@@ -751,6 +751,7 @@ fn declare_vocabulary_column(
         index: false,
         render: false,
         scope: Default::default(),
+        unique: false,
     })?;
     Ok(column)
 }

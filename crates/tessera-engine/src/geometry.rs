@@ -117,6 +117,9 @@ pub(crate) struct PrefixRotation {
     /// wrong to serve. It travels with the other three for the reason they travel together: a
     /// request must never see a geometry from one publication and an artefact from another.
     pub(crate) filter_columns: Arc<crate::filter::FilterColumns>,
+    /// The new prefix's unique indexes, opened over its own manifest for the filter columns'
+    /// reason.
+    pub(crate) unique: Arc<tessera_store::unique::UniqueIndexes>,
     /// The executed deletions leaving `deleted` in this swap — Rule F, and empty for a rotation
     /// that retires nothing. **The caller's obligation is compaction §5's rule**, restated at
     /// `tessera_lifecycle::Overlay::retire`: only entities whose row *and* postings this

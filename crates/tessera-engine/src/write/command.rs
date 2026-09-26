@@ -183,6 +183,9 @@ pub(crate) enum Command {
         /// that named none. Resolved and grown when the window closes, in the same commit as the
         /// rows, so there is no state in which a point is ingested and its membership is not.
         artifacts: BatchArtifacts,
+        /// The live unique entries' sequence number the handler checked this batch's unique values
+        /// at; the executor re-checks them against the entries added since.
+        unique_seq: u64,
         reply: Reply<Ingested>,
     },
     /// One accepted `/control/changes` entry. The only command on the deny lane
@@ -326,6 +329,7 @@ mod tests {
             batch_id: "b".into(),
             body_hash: [0u8; 32],
             artifacts: Default::default(),
+            unique_seq: 0,
             reply,
         };
         assert!(!ingest.is_never_shed());

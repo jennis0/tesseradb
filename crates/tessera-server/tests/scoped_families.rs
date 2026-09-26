@@ -321,6 +321,7 @@ fn category(name: &str) -> Attribute {
         value_set: Some(ValueSet::Closed),
         index: true,
         render: false,
+        unique: false,
     }
 }
 
@@ -387,6 +388,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                     value_set: Some(ValueSet::Closed),
                     index: false,
                     render: true,
+                    unique: false,
                 },
                 family_views.clone(),
                 None,
@@ -402,6 +404,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                     value_set: None,
                     index: true,
                     render: false,
+                    unique: false,
                 },
                 family_views.clone(),
                 None,
@@ -420,6 +423,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                     value_set: None,
                     index: true,
                     render: true,
+                    unique: false,
                 },
                 family_views.clone(),
                 Some(ScopedAttributeFile {

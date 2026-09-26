@@ -206,6 +206,7 @@ fn request(name: &str, ty: &str) -> AttributeRequest {
         index: false,
         render: false,
         scope: LayerScope::Entity,
+        unique: false,
     }
 }
 
@@ -1033,12 +1034,6 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
             render: true,
             ..request("tag", "category")
         },
-        // A column the build declared with `render` cannot be restated here either.
-        AttributeRequest {
-            index: true,
-            render: true,
-            ..request("score", "f32")
-        },
         AttributeRequest {
             scope: LayerScope::Group("nowhere".to_string()),
             ..request("scoped", "i32")
@@ -1046,6 +1041,14 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
     ] {
         refused(r);
     }
+    // A column the build declared with `render` is the one it is when restated as it stands.
+    assert!(engine
+        .declare_attribute(AttributeRequest {
+            index: true,
+            render: true,
+            ..request("score", "f32")
+        })
+        .expect("restating a held column answers it"));
     assert_eq!(
         declared_names(&engine),
         ["band", "score", "sentiment"],

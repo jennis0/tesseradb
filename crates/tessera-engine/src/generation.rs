@@ -65,6 +65,12 @@ pub struct GenerationParts {
     /// request pairing the new geometry with the pre-fold sidecar would resolve through files the
     /// old prefix holds and reclamation is about to delete. One pointer, one answer.
     pub(crate) external_index: Arc<crate::engine::ExternalIdIndex>,
+    /// Every unique column's index runs, as the partition manifest lists them. Replaced by every
+    /// publication that changes the list, sharing the runs it already opened.
+    pub(crate) unique: Arc<tessera_store::unique::UniqueIndexes>,
+    /// The unique index entries of the rows and fills the buffer holds, published with the
+    /// buffer.
+    pub(crate) unique_live: Arc<crate::unique::UniqueLive>,
     /// One sparse delta postings tier per flush segment, in publication order.
     ///
     /// A fragment build unions the base with every live tier over the session's satisfied terms
@@ -401,6 +407,8 @@ impl Generation {
                 [0u8; 32],
             )),
             external_index: Arc::new(external_index),
+            unique: Arc::default(),
+            unique_live: Arc::default(),
             delta_postings: Vec::new(),
             overlay_version: 0,
             overlay: Arc::new(overlay),

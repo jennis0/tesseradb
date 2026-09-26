@@ -640,6 +640,7 @@ pub(super) fn scoped_render_scalars(
             analyser: f.analyser.clone(),
             index: f.index,
             render: true,
+            unique: false,
         })
         .collect()
 }
