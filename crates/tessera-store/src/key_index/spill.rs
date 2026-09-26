@@ -1,11 +1,11 @@
 //! Sorting entries that arrive in any order into runs, under a memory budget.
 //!
 //! Entries are held in memory until they pass half the budget. Past that, they are routed to 256
-//! bucket files by the top eight bits of the key, and each bucket is then read back, sorted and
-//! written out in key order. A bucket too large to sort in the budget is routed again, by the
-//! eight bits below the bits every entry in it shares (its smallest and largest entries are
-//! tracked as it is written), so sequential and clustered keys cost one more pass and never more
-//! memory. A bucket holding one key is routed by entity in the same way.
+//! bucket files over the range of keys held so far, and each bucket is then read back, sorted and
+//! written out in key order. A bucket too large to sort in the budget is routed again over its own
+//! range (its smallest and largest entries are tracked as it is written), so clustered keys cost
+//! one more pass and never more memory. A bucket holding one key is routed by entity in the same
+//! way.
 
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -76,8 +76,7 @@ impl<K: Key> KeySpill<K> {
         }
         self.held.push((key, entity));
         if self.held.len() >= threshold {
-            let root = Split::Key(8 * K::WIDTH as u32 - 8);
-            let mut level = self.level(root)?;
+            let mut level = self.level(Split::root(&self.held))?;
             for &(key, entity) in &self.held {
                 level.push(key, entity)?;
             }
@@ -182,33 +181,63 @@ fn decode<K: Key>(record: &[u8]) -> (K, u32) {
     (K::read(record), entity)
 }
 
-/// Which eight bits of an entry pick its bucket: those at `shift` and up in the key, or in the
-/// entity.
+/// Which bucket an entry goes to: its key, or its entity, less `base` and shifted right by
+/// `shift`, with anything past the last bucket in the last. The bucket is monotone in the entry, so
+/// the bucket order is the entry order.
 #[derive(Debug, Clone, Copy)]
 enum Split {
-    Key(u32),
-    Entity(u32),
+    Key { base: u128, shift: u32 },
+    Entity { base: u32, shift: u32 },
 }
 
 impl Split {
     fn digit<K: Key>(self, key: K, entity: u32) -> usize {
-        match self {
-            Split::Key(shift) => ((key.widen() >> shift) & 0xFF) as usize,
-            Split::Entity(shift) => ((entity >> shift) & 0xFF) as usize,
+        let d = match self {
+            Split::Key { base, shift } => key.widen().saturating_sub(base) >> shift,
+            Split::Entity { base, shift } => u128::from(entity.saturating_sub(base) >> shift),
+        };
+        d.min(FANOUT as u128 - 1) as usize
+    }
+
+    /// The split for the first entries held, spread over their own range of keys rather than
+    /// the key type's: keys that are small integers share their top bits, and routing them by
+    /// those would put every entry in one bucket and write it all a second time. A later entry
+    /// outside the range goes to the first or last bucket, which is routed again if it grows too
+    /// large. So input that arrives sorted, whose first entries hold only the lowest keys, sends
+    /// nearly everything after them to the last bucket and pays that second pass; the spill is
+    /// for input in any order, and sorted input can go to a run writer directly.
+    fn root<K: Key>(held: &[(K, u32)]) -> Split {
+        let min = held.iter().map(|e| e.0).min();
+        let max = held.iter().map(|e| e.0).max();
+        match (min, max) {
+            (Some(min), Some(max)) if min != max => Split::keys(min, max),
+            _ => Split::Key {
+                base: 0,
+                shift: 8 * K::WIDTH as u32 - 8,
+            },
         }
     }
 
-    /// The split for entries between `min` and `max`: the eight bits from the highest bit in
-    /// which they differ down. Every entry between them shares the bits above it, so the bucket
-    /// order is the entry order and `min` and `max` land in different buckets. `None` when
-    /// `min == max`.
+    /// Keys from `min` to `max`, `min < max`, spread over the buckets.
+    fn keys<K: Key>(min: K, max: K) -> Split {
+        let span = max.widen() - min.widen();
+        Split::Key {
+            base: min.widen(),
+            shift: (128 - span.leading_zeros()).saturating_sub(8),
+        }
+    }
+
+    /// The split for entries between `min` and `max`: by key where the keys differ, else by
+    /// entity. `None` when `min == max`.
     fn between<K: Key>(min: (K, u32), max: (K, u32)) -> Option<Split> {
         if min.0 != max.0 {
-            let top = 128 - (min.0.widen() ^ max.0.widen()).leading_zeros();
-            Some(Split::Key(top.saturating_sub(8)))
+            Some(Split::keys(min.0, max.0))
         } else if min.1 != max.1 {
-            let top = 32 - (min.1 ^ max.1).leading_zeros();
-            Some(Split::Entity(top.saturating_sub(8)))
+            let span = max.1 - min.1;
+            Some(Split::Entity {
+                base: min.1,
+                shift: (32 - span.leading_zeros()).saturating_sub(8),
+            })
         } else {
             None
         }

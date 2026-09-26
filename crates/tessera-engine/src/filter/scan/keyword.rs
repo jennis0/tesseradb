@@ -260,7 +260,7 @@ fn contains_narrow(
     };
     let held = ordinals.len().min(candidate.cardinality() as usize);
     let mut wanted: Vec<u32> = Vec::with_capacity(held);
-    values.for_each_code_in(candidate, |ordinal| wanted.push(ordinal));
+    values.for_each_code_in(candidate, |_, ordinal| wanted.push(ordinal));
     wanted.sort_unstable();
     wanted.dedup();
 

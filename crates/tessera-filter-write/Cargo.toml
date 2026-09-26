@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 tessera-filter = { path = "../tessera-filter" }
+tessera-roaring = { path = "../tessera-roaring" }
 tessera-authz = { path = "../tessera-authz" }
 tessera-types = { path = "../tessera-types" }
 croaring = { workspace = true }

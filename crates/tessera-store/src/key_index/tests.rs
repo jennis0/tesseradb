@@ -382,10 +382,16 @@ fn a_spill_under_a_tiny_budget_equals_an_in_memory_sort() {
     random.shuffle(&mut rng);
     check_spill(&random, 64 << 10, 7000);
 
-    // Sequential keys share their top bits, so every entry lands in one first-level bucket.
+    // Sequential keys share their top bits, so they are spread over their own range.
     let mut sequential: Vec<(u64, u32)> = (0..50_000u64).map(|k| (k, k as u32)).collect();
     sequential.shuffle(&mut rng);
     check_spill(&sequential, 64 << 10, 9000);
+
+    // Keys past both ends of the range the first entries set, arriving after the first spill.
+    let mut outliers = sequential.clone();
+    outliers.extend([(0u64, 1u32), (u64::MAX, 2), (u64::MAX - 1, 3), (1 << 40, 4)]);
+    outliers.extend((0..3000u64).map(|k| ((1 << 50) + k, 60_000 + k as u32)));
+    check_spill(&outliers, 64 << 10, 9000);
 
     // One key held by many entities is split by entity.
     let mut one_key: Vec<(u32, u32)> = (0..5000).map(|e| (42, e * 13)).collect();

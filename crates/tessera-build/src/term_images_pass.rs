@@ -44,19 +44,13 @@ const MANIFEST_N: u64 = 0;
 ///
 /// Four. The pass holds one posting per worker in flight, and what that costs is the worker count
 /// times three bitmaps of a bitset container per 65,536 values: at 3.5×10⁹ rows a worker is about
-/// 1.3 GB, so an unbounded width forecasts past the memory budget a rung-6 build runs under.
-/// `crate::residency` charges this same width, and the forecast is what refuses a build.
-///
-/// Width buys little here: most terms hold too few entities to be projected at all, and a
-/// projection is short beside the serial read the window waits for. Stage 6 measures the stage at
-/// rung 6, where the terms are larger and the balance may differ.
+/// 1.3 GB. Width buys little here: most terms hold too few entities to be projected at all, and a
+/// projection is short beside the serial read the window waits for.
 const TERM_IMAGE_BUILD_THREADS: usize = 4;
 
-/// Workers this build's derivation runs across: the machine's width, capped at
-/// [`TERM_IMAGE_BUILD_THREADS`].
-///
-/// One function, called by the pass and by the residency model, so the forecast and the pass
-/// cannot disagree about how many terms are held at once.
+/// The most workers this build's derivation runs across: the machine's width, capped at
+/// [`TERM_IMAGE_BUILD_THREADS`]. The build's plan runs fewer where its memory budget holds fewer
+/// (`crate::residency`).
 pub(crate) fn derive_threads() -> usize {
     rayon::current_num_threads().clamp(1, TERM_IMAGE_BUILD_THREADS)
 }
@@ -117,6 +111,8 @@ pub struct ViewTermImages {
 /// `postings` is the prefix's `terms/postings.arrow`, opened once for the build: it is entity
 /// space and every view projects the same postings through its own permutation.
 ///
+/// `threads` is how many terms are projected at once, each holding a posting and its image.
+///
 /// A view with no rows and a dictionary with no terms both give `None`, and no file and no
 /// manifest entry. Neither has an image to hold: projection maps entities to rows, and a view that
 /// holds no row projects every posting to the empty set.
@@ -127,6 +123,7 @@ pub fn run(
     view: &str,
     rows_in_view: u32,
     index: &mut DerivedIndex,
+    threads: usize,
 ) -> Result<Option<ViewTermImages>> {
     let dict_len = postings.term_count();
     if rows_in_view == 0 || dict_len == 0 {
@@ -168,9 +165,7 @@ pub fn run(
         }
         Ok(())
     };
-    let options = DeriveOptions {
-        threads: derive_threads(),
-    };
+    let options = DeriveOptions { threads };
     let summary = derive_term_images(&space, dict_len, &walk, &stamp, &file.path, options)
         .map_err(|e| BuildError::io(&file.path, e))?;
     // The derivation syncs the file. The directory entry has to be durable too, or a crash leaves

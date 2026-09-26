@@ -481,21 +481,11 @@ pub(super) fn fold_entity_terms(
     let mut writer = tessera_store::EntityTermsWriter::create(&to_dir)
         .map_err(failed("pass 4c (entity terms: the rewrite)"))?;
     // Ascending, the order the writer requires.
-    let live = layers.entity_set();
-    for entity in live.iter() {
-        if plan.tombstones.contains(entity) {
-            continue;
-        }
-        let Some(terms) = layers
-            .terms_of(entity)
-            .map_err(failed("pass 4c (entity terms: a layer)"))?
-        else {
-            continue;
-        };
-        writer
-            .push(entity, &terms)
-            .map_err(failed("pass 4c (entity terms: the rewrite)"))?;
-    }
+    layers
+        .for_each_list(&plan.tombstones, &mut |entity, terms| {
+            writer.push(entity, &terms)
+        })
+        .map_err(failed("pass 4c (entity terms)"))?;
     for path in writer
         .finish()
         .map_err(failed("pass 4c (entity terms: the rewrite)"))?

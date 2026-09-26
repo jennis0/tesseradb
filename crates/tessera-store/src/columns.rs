@@ -62,16 +62,12 @@ const FILL_CHUNK: usize = 1 << 20;
 
 /// A run of the framing that is one byte repeated — **the validity bitmaps**. Every column of
 /// `columns.arrow` is non-nullable (contracts R4) and arrow writes a validity buffer for it all the
-/// same, `rows / 8` bytes of `0xFF` saying nothing
-/// (`docs/evidence/memos/2026-09-11-arrow-all-ones-validity-buffers.md`). At rung 6 that is 437 MB
-/// a column.
+/// same, `rows / 8` bytes of `0xFF` saying nothing. At rung 6 that is 437 MB a column.
 ///
-/// **A fill saves the file, not the process.** Held as three numbers, the bitmap costs the plan
-/// nothing to carry and the write nothing to emit. It is still allocated once, by arrow, inside
-/// [`ColumnsPlan::new`]: the IPC writer builds every buffer of the batch before it writes any of
-/// them, so one all-ones bitmap per column is alive together during the layout pass. The build's
-/// residency model charges them (`residency::entity_order_residency`, the assembly phase); this
-/// type does not get to pretend they are free.
+/// Held as three numbers, the bitmap costs the plan nothing to carry and the write nothing to
+/// emit. Arrow's writer would allocate one for every column of the batch at once; the layout pass
+/// hands it a null buffer over an untouched mapping instead, whose bytes are recorded as this fill
+/// and never read.
 struct Fill {
     at: u64,
     len: u64,
@@ -128,12 +124,36 @@ impl ColumnsPlan {
                     })?,
             );
         }
+        // And one per column for its validity bitmap, which arrow would otherwise fill with ones
+        // itself, a column at a time and all of them alive together.
+        let validity_bytes = rows.div_ceil(8);
+        let mut validity: Vec<memmap2::MmapMut> = Vec::with_capacity(widths.len());
+        for _ in &widths {
+            validity.push(
+                memmap2::MmapOptions::new()
+                    .len(validity_bytes.max(1))
+                    .map_anon()
+                    .map_err(|e| {
+                        io::Error::new(
+                            e.kind(),
+                            format!(
+                                "columns.arrow: reserving {validity_bytes} bytes to plan the \
+                                 layout: {e}"
+                            ),
+                        )
+                    })?,
+            );
+        }
         // The span is the buffer's own byte length, not the mapping's: two mappings can be
         // adjacent, and a span rounded up would claim a neighbour's first byte.
         let mut spans: Vec<(usize, usize)> = Vec::with_capacity(regions.len());
         for (index, region) in regions.iter().enumerate() {
             spans.push((region.as_ptr() as usize, buffer_bytes(widths[index], rows)?));
         }
+        let validity_spans: Vec<(usize, usize)> = validity
+            .iter()
+            .map(|region| (region.as_ptr() as usize, validity_bytes))
+            .collect();
 
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(widths.len());
         for (index, width) in widths.iter().enumerate() {
@@ -148,7 +168,24 @@ impl ColumnsPlan {
                     Arc::new(()),
                 )
             };
-            columns.push(array_of(schema.field(index).data_type(), buffer, rows)?);
+            // SAFETY: as above, over the column's validity mapping. The null count is stated as
+            // zero rather than counted, which would read every byte.
+            let nulls = unsafe {
+                arrow::buffer::NullBuffer::new_unchecked(
+                    BooleanBuffer::new(
+                        Buffer::from_custom_allocation(
+                            std::ptr::NonNull::new(validity[index].as_ptr() as *mut u8)
+                                .expect("a mapping's pointer is not null"),
+                            validity_bytes,
+                            Arc::new(()),
+                        ),
+                        0,
+                        rows,
+                    ),
+                    0,
+                )
+            };
+            columns.push(array_of(schema.field(index).data_type(), buffer, nulls, rows)?);
         }
         let batch = RecordBatch::try_new(schema.clone(), columns)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -156,6 +193,7 @@ impl ColumnsPlan {
         let mut sink = Recorder {
             at: 0,
             spans,
+            validity: validity_spans,
             framing: Vec::new(),
             fills: Vec::new(),
             values: vec![(0, 0); widths.len()],
@@ -173,6 +211,7 @@ impl ColumnsPlan {
         }
         drop(batch);
         drop(regions);
+        drop(validity);
         if let Some(message) = sink.failed {
             return Err(io::Error::new(io::ErrorKind::Unsupported, message));
         }
@@ -201,6 +240,9 @@ impl ColumnsPlan {
 struct Recorder {
     at: u64,
     spans: Vec<(usize, usize)>,
+    /// The validity mappings, whose bytes stand for `0xFF`: what arrow writes for a column with no
+    /// null buffer.
+    validity: Vec<(usize, usize)>,
     framing: Vec<(u64, Vec<u8>)>,
     fills: Vec<Fill>,
     values: Vec<(u64, u64)>,
@@ -214,8 +256,17 @@ impl Write for Recorder {
             .spans
             .iter()
             .position(|&(base, len)| len > 0 && start >= base && start + buf.len() <= base + len);
+        let validity = self
+            .validity
+            .iter()
+            .any(|&(base, len)| len > 0 && start >= base && start + buf.len() <= base + len);
         match owner {
             Some(column) => self.values[column] = (self.at, buf.len() as u64),
+            None if validity => self.fills.push(Fill {
+                at: self.at,
+                len: buf.len() as u64,
+                byte: 0xFF,
+            }),
             None if buf.len() <= MAX_FRAMING_WRITE => self.framing.push((self.at, buf.to_vec())),
             None if buf.iter().all(|byte| *byte == buf[0]) => self.fills.push(Fill {
                 at: self.at,
@@ -359,17 +410,25 @@ fn value_width(ty: ScalarType) -> io::Result<Option<usize>> {
 
 /// The null-free array the layout pass puts in front of Arrow's writer. Its buffer is never read;
 /// what it decides is the metadata's shape.
-fn array_of(ty: &DataType, buffer: Buffer, rows: usize) -> io::Result<ArrayRef> {
+fn array_of(
+    ty: &DataType,
+    buffer: Buffer,
+    nulls: arrow::buffer::NullBuffer,
+    rows: usize,
+) -> io::Result<ArrayRef> {
     macro_rules! flat {
         ($arr:ty, $native:ty) => {
             Arc::new(<$arr>::new(
                 ScalarBuffer::<$native>::new(buffer, 0, rows),
-                None,
+                Some(nulls),
             )) as ArrayRef
         };
     }
     Ok(match ty {
-        DataType::Boolean => Arc::new(BooleanArray::new(BooleanBuffer::new(buffer, 0, rows), None)),
+        DataType::Boolean => Arc::new(BooleanArray::new(
+            BooleanBuffer::new(buffer, 0, rows),
+            Some(nulls),
+        )),
         DataType::UInt8 => flat!(arrow::array::UInt8Array, u8),
         DataType::UInt16 => flat!(arrow::array::UInt16Array, u16),
         DataType::UInt32 => flat!(UInt32Array, u32),

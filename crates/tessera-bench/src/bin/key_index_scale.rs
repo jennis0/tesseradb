@@ -53,7 +53,7 @@ struct Args {
     /// The spill's memory budget in MiB.
     #[arg(long, default_value_t = 1024)]
     budget_mib: usize,
-    /// Run one spill arm, `random` or `sequential`, and nothing else.
+    /// Run one spill arm, `random`, `sequential` or `dense`, and nothing else.
     #[arg(long, hide = true)]
     spill_arm: Option<String>,
 }
@@ -167,10 +167,14 @@ fn cold_open(path: &Path) -> (KeyRun<u64>, Duration) {
 
 fn spill_arm(args: &Args, dir: &Path, arm: &str) {
     let n = args.entries;
-    let sequential = match arm {
-        "random" => false,
-        "sequential" => true,
-        other => panic!("--spill-arm is random or sequential, not {other}"),
+    // `dense` is the integer ids of a corpus in an order unrelated to them: n distinct keys below
+    // the next power of two, visited by an odd multiplier.
+    let span = n.next_power_of_two();
+    let key_of = |i: u64| match arm {
+        "random" => mix(i),
+        "sequential" => i,
+        "dense" => i.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(7) & (span - 1),
+        other => panic!("--spill-arm is random, sequential or dense, not {other}"),
     };
     let scratch = dir.join(format!("scratch-{arm}"));
     let out = dir.join(format!("spilled-{arm}"));
@@ -179,8 +183,7 @@ fn spill_arm(args: &Args, dir: &Path, arm: &str) {
     let t = Instant::now();
     let mut spill = KeySpill::<u64>::create(&scratch, args.budget_mib << 20).expect("spill");
     for i in 0..n {
-        let key = if sequential { i } else { mix(i) };
-        spill.push(key, i as u32).expect("push");
+        spill.push(key_of(i), i as u32).expect("push");
     }
     let pushed = t.elapsed();
     let anon_after_push = status_bytes("RssAnon:");
@@ -303,7 +306,7 @@ fn main() {
 
     if args.spill {
         let exe = std::env::current_exe().expect("this bench re-runs itself per spill arm");
-        for arm in ["random", "sequential"] {
+        for arm in ["random", "sequential", "dense"] {
             let status = std::process::Command::new(&exe)
                 .arg("--dir")
                 .arg(&dir)
