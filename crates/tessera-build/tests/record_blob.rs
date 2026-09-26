@@ -138,6 +138,7 @@ fn blob_schema() -> Schema {
         value_set: None,
         index: false,
         render: false,
+        unique: false,
     };
     Schema {
         attributes: vec![
@@ -154,6 +155,7 @@ fn blob_schema() -> Schema {
                 value_set: None,
                 index: false,
                 render: true,
+                unique: false,
             },
         ],
         vocabularies: HashMap::new(),

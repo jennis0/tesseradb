@@ -126,6 +126,9 @@ pub struct VerifyDeepReport {
     /// Leaf Morton cells confirmed to begin where `cuts.u32` says and to hold ascending
     /// identities ([`check_cut_index`]), across every segment of every view.
     pub cells: u64,
+    /// Unique index entries confirmed to agree with their column's values in both directions,
+    /// at most one live entity to a key ([`check_unique_indexes`]); 0 where no column is unique.
+    pub unique_entries: u64,
 }
 
 /// Deep-verify the bundle at `root`: the shallow [`crate::verify`] pass, then §11's structural
@@ -155,6 +158,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         record_rows: 0,
         scoped_render_lanes: 0,
         cells: 0,
+        unique_entries: 0,
     };
 
     // Sorted so two runs over the same defective bundle refuse with the same message.
@@ -185,9 +189,308 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         )?;
         check_scoped_render_lanes(&bundle.manifest, phash, partition, &mut report)?;
         check_cut_index(phash, partition, &mut report)?;
+        check_unique_indexes(
+            root,
+            &prefix_dir,
+            phash,
+            &bundle.manifest,
+            &partition.manifest,
+            &mut report,
+        )?;
     }
 
     Ok(report)
+}
+
+/// **Every unique index agrees with its column, and no key names two live entities.**
+///
+/// Each run is digested against the manifest, since the open-time sweep defers key runs to their
+/// pages' own checksums, and checked page by page ([`tessera_store::key_index::verify_run`]).
+/// The runs are then merged, the manifest's tombstoned entities dropped, into one sorted stream,
+/// and the column's values for every entity not tombstoned are sorted into another through the
+/// same spill; the two must be equal entry for entry, and no key may carry two entities.
+///
+/// Not built yet: a column whose only home is the row tail (`render` without `index`) is not
+/// read back here, so its index is checked for its own structure and not against its values.
+fn check_unique_indexes(
+    root: &Path,
+    prefix_dir: &Path,
+    phash: &str,
+    manifest: &Manifest,
+    partition_manifest: &SegmentsManifest,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    use tessera_store::unique::{key_of, KeyKind, UniqueKey, UniqueSpill};
+    if partition_manifest.unique_indexes.is_empty() {
+        return Ok(());
+    }
+    let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+    // The schema as served: the build's columns and those declared at a running service.
+    let served = manifest.with_attributes(&partition_manifest.attributes, &[]);
+    let tombstones = partition_manifest
+        .tombstones
+        .entities()
+        .cloned()
+        .ok_or_else(|| {
+            BuildError::Invalid(format!("partition {phash}: the tombstones do not decode"))
+        })?;
+    let bound = u32::try_from(partition_manifest.entity_id_high_water.max(manifest.entity_id_high_water))
+        .unwrap_or(u32::MAX);
+    for index in &partition_manifest.unique_indexes {
+        let attribute = &index.attribute;
+        let Some((at, declared)) = served
+            .declared_scalars
+            .iter()
+            .enumerate()
+            .find(|(_, d)| &d.name == attribute)
+        else {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: a unique index names attribute '{attribute}', which the \
+                 manifests do not declare"
+            )));
+        };
+        let kind = KeyKind::of(declared.arrow_type).ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "partition {phash}: attribute '{attribute}' has a unique index and a type that \
+                 cannot be unique"
+            ))
+        })?;
+        let mut inputs: Vec<PathBuf> = Vec::new();
+        for rel in index.files() {
+            let digest = partition_manifest
+                .files
+                .get(rel)
+                .or_else(|| manifest.files.get(rel))
+                .ok_or_else(|| {
+                    BuildError::Invalid(format!("{rel}: a unique index run no files map digests"))
+                })?;
+            let path = join_rel(prefix_dir, rel)?;
+            let actual = crate::digest_file(&path)?;
+            if actual.size != digest.size || actual.sha256 != digest.sha256 {
+                return Err(BuildError::Invalid(format!(
+                    "{rel}: bytes do not match the manifest digest"
+                )));
+            }
+            let checked = tessera_store::key_index::verify_run(&path)
+                .map_err(|e| BuildError::Invalid(format!("{rel}: {e}")))?;
+            let width = if kind == KeyKind::Keyword { 16 } else { 8 };
+            if checked.key_width != width {
+                return Err(BuildError::Invalid(format!(
+                    "{rel}: holds {}-byte keys and '{attribute}' takes {width}-byte keys",
+                    checked.key_width
+                )));
+            }
+            inputs.push(path);
+        }
+        let scratch = crate::VerifyTmp::create(root)?;
+        let index_side = tessera_store::unique::merge_unique_runs(
+            &inputs,
+            &tombstones,
+            &scratch.path().join("index"),
+            "index",
+        )
+        .map_err(store)?;
+
+        let homes_value = declared.index;
+        let blob = !declared.render && !declared.index;
+        if !homes_value && !blob {
+            // The row tail alone: its structure is checked above, its agreement is not.
+            let mut last: Option<(UniqueKey, u32)> = None;
+            for run in &index_side {
+                tessera_store::unique::for_each_entry(kind, &run.path, |key, entity| {
+                    if last.is_some_and(|(k, e)| k == key && e != entity) {
+                        return Err(tessera_store::StoreError::MalformedBundle {
+                            detail: format!(
+                                "unique index '{attribute}': one key names two live entities"
+                            ),
+                        });
+                    }
+                    last = Some((key, entity));
+                    report.unique_entries += 1;
+                    Ok(())
+                })
+                .map_err(store)?;
+            }
+            continue;
+        }
+
+        let mut spill = UniqueSpill::create(kind, scratch.path(), 64 << 20).map_err(store)?;
+        let mut push = |entity: u32, value: &tessera_spatial::ScalarValue| -> Result<()> {
+            if entity >= bound || tombstones.contains(entity) {
+                return Ok(());
+            }
+            if let Some(key) = key_of(declared.arrow_type, value) {
+                spill.push(key, entity).map_err(store)?;
+            }
+            Ok(())
+        };
+        if homes_value {
+            let dir = prefix_dir.join("partitions").join(phash).join("attrs").join(attribute);
+            let access = tessera_filter::Access::MappedSequential;
+            let mut layers: Vec<(tessera_filter::ValueColumn, Option<tessera_filter::SortedDict>)> =
+                Vec::new();
+            let base_rel = format!("partitions/{phash}/attrs/{attribute}/{}", tessera_filter::VALUES_FILE);
+            if manifest.files.contains_key(&base_rel) {
+                let values = tessera_filter::ValueColumn::open_dir(&dir, access)
+                    .map_err(|e| BuildError::io(&dir, e))?;
+                let dict = (declared.arrow_type == tessera_spatial::ScalarType::Keyword)
+                    .then(|| tessera_filter::SortedDict::open_dir(&dir, access))
+                    .transpose()
+                    .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))?;
+                layers.push((values, dict));
+            }
+            for extent in partition_manifest
+                .attr_extents
+                .iter()
+                .filter(|e| &e.column == attribute && e.view.is_none())
+            {
+                let values = tessera_filter::open_extent(
+                    &join_rel(prefix_dir, &extent.values)?,
+                    &join_rel(prefix_dir, &extent.presence)?,
+                    access,
+                )
+                .map_err(|e| BuildError::Invalid(format!("{}: {e}", extent.values)))?;
+                let dict = extent
+                    .dict
+                    .as_ref()
+                    .map(|rel| {
+                        join_rel(prefix_dir, rel).and_then(|path| {
+                            tessera_filter::SortedDict::open(&path, access)
+                                .map_err(|e| BuildError::Invalid(format!("{rel}: {e}")))
+                        })
+                    })
+                    .transpose()?;
+                layers.push((values, dict));
+            }
+            let mut scratch_bytes = Vec::new();
+            for (values, dict) in &layers {
+                for entity in values.present().iter() {
+                    let value = match dict {
+                        Some(dict) => {
+                            let Some(ordinal) = values.value_of(entity) else {
+                                continue;
+                            };
+                            let key = dict
+                                .key_of(ordinal.raw(), &mut scratch_bytes)
+                                .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))?;
+                            tessera_spatial::ScalarValue::Utf8(key.to_string())
+                        }
+                        None => match values.record_value_of(entity) {
+                            Some(value) => record_as_scalar(value),
+                            None => continue,
+                        },
+                    };
+                    push(entity, &value)?;
+                }
+            }
+        } else {
+            let record_dir = prefix_dir.join("partitions").join(phash).join("attrs").join("record");
+            let base_rel = format!("partitions/{phash}/attrs/record/{}", tessera_filter::RECORD_BLOCKS_FILE);
+            let base = manifest.files.contains_key(&base_rel).then_some(record_dir.as_path());
+            let extents: Vec<tessera_filter::RecordExtentPaths> = partition_manifest
+                .record_extents
+                .iter()
+                .map(|e| {
+                    Ok(tessera_filter::RecordExtentPaths {
+                        blocks: join_rel(prefix_dir, &e.blocks)?,
+                        hasrow: join_rel(prefix_dir, &e.hasrow)?,
+                        directory: join_rel(prefix_dir, &e.directory)?,
+                    })
+                })
+                .collect::<Result<_>>()?;
+            let stack = tessera_filter::RecordStack::open(
+                base,
+                &extents,
+                tessera_filter::Access::MappedSequential,
+            )
+            .map_err(|e| BuildError::Invalid(format!("the record blob: {e}")))?;
+            let mut wanted = croaring::Bitmap::new();
+            wanted.add_range(0..bound);
+            let mut failed: Option<BuildError> = None;
+            stack
+                .for_each_row_in(&wanted, &mut |entity, fields| {
+                    if failed.is_some() {
+                        return Ok(());
+                    }
+                    if let Some(field) = fields.into_iter().find(|f| f.tag as usize == at) {
+                        if let Err(e) = push(entity, &record_as_scalar(field.value)) {
+                            failed = Some(e);
+                        }
+                    }
+                    Ok(())
+                })
+                .map_err(|e| BuildError::Invalid(format!("the record blob: {e}")))?;
+            if let Some(e) = failed {
+                return Err(e);
+            }
+        }
+        let mut twice = 0u64;
+        let column_dir = scratch.path().join("column");
+        fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
+        let column_side = spill
+            .finish(&column_dir, "column", |_| twice += 1)
+            .map_err(store)?;
+        if twice > 0 {
+            return Err(BuildError::Invalid(format!(
+                "unique column '{attribute}' holds {twice} value(s) for more than one live item"
+            )));
+        }
+        let read_all = |runs: &[tessera_store::unique::WrittenUniqueRun]| -> Result<Vec<(UniqueKey, u32)>> {
+            let mut all = Vec::new();
+            for run in runs {
+                tessera_store::unique::for_each_entry(kind, &run.path, |key, entity| {
+                    all.push((key, entity));
+                    Ok(())
+                })
+                .map_err(store)?;
+            }
+            Ok(all)
+        };
+        let from_index = read_all(&index_side)?;
+        let from_column = read_all(&column_side)?;
+        if let Some(w) = from_index.windows(2).find(|w| w[0].0 == w[1].0) {
+            return Err(BuildError::Invalid(format!(
+                "unique index '{attribute}': key {:x} names entities {} and {}, both live",
+                w[0].0.widen(),
+                w[0].1,
+                w[1].1
+            )));
+        }
+        if from_index != from_column {
+            let first = from_index
+                .iter()
+                .zip(&from_column)
+                .position(|(a, b)| a != b)
+                .unwrap_or(from_index.len().min(from_column.len()));
+            return Err(BuildError::Invalid(format!(
+                "unique index '{attribute}' holds {} live entries and its column {} values; they \
+                 first differ at entry {first}",
+                from_index.len(),
+                from_column.len()
+            )));
+        }
+        report.unique_entries += from_index.len() as u64;
+    }
+    Ok(())
+}
+
+/// A stored value at the shape the unique key derivation takes.
+fn record_as_scalar(value: tessera_filter::RecordValue) -> tessera_spatial::ScalarValue {
+    use tessera_filter::RecordValue as RV;
+    use tessera_spatial::ScalarValue as SV;
+    match value {
+        RV::U8(x) => SV::U8(x),
+        RV::U16(x) => SV::U16(x),
+        RV::U32(x) => SV::U32(x),
+        RV::U64(x) => SV::U64(x),
+        RV::I8(x) => SV::I8(x),
+        RV::I16(x) => SV::I16(x),
+        RV::I32(x) => SV::I32(x),
+        RV::I64(x) => SV::I64(x),
+        RV::TimestampUs(x) => SV::TimestampUs(x),
+        RV::Utf8(s) => SV::Utf8(s),
+        _ => SV::Null,
+    }
 }
 
 /// **`cuts.u32` names exactly the rows at which a leaf Morton cell begins, and each cell's

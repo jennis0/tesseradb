@@ -238,9 +238,10 @@ enum Command {
         /// lists must be sorted, free of duplicates and in range; the external-id
         /// index and its locator must agree in both directions; dictionary records must not
         /// repeat; record blobs and Morton cells must agree with their indexes; each group-scoped
-        /// render column must be present in every segment; and `pairs.parquet`, when present,
-        /// must match the term lists it was written with. Run it on a bundle no running server
-        /// is writing to.
+        /// render column must be present in every segment; each unique column's index must be
+        /// hashed against the manifest, name at most one live item for a value and agree with the
+        /// column's values in both directions; and `pairs.parquet`, when present, must match the
+        /// term lists it was written with. Run it on a bundle no running server is writing to.
         #[arg(long)]
         deep: bool,
     },
@@ -1992,7 +1993,7 @@ fn main() -> ExitCode {
                         println!(
                             "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
                              record(s), {} external-id binding(s), {} record blob row(s), {} \
-                             scoped render lane(s), {} Morton cell(s)",
+                             scoped render lane(s), {} Morton cell(s), {} unique index entr(ies)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
@@ -2000,7 +2001,8 @@ fn main() -> ExitCode {
                             report.external_id_bindings,
                             report.record_rows,
                             report.scoped_render_lanes,
-                            report.cells
+                            report.cells,
+                            report.unique_entries
                         );
                         ExitCode::SUCCESS
                     }

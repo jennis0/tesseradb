@@ -2430,6 +2430,7 @@ mod tests {
                 value_set: vocabulary.map(|_| crate::config::ValueSet::Closed),
                 index: false,
                 render: false,
+                unique: false,
             }
         }
 

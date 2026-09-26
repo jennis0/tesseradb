@@ -955,6 +955,7 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
                 value_set: None,
                 index: false,
                 render: true,
+                unique: false,
             },
             group: "quarter".to_string(),
             views: vec![0, 1],

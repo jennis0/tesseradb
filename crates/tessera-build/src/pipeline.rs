@@ -1969,6 +1969,22 @@ fn build_bundle(
         .iter()
         .map(crate::extents::ExtentColumn::open)
         .collect::<Result<_>>()?;
+    // ---- 8c′. the unique indexes -------------------------------------------------------
+    // Here, where every column's values are still readable from the column or the extents the
+    // join spilled, and before the passes that release them. A value held twice refuses the
+    // build before any row space is written.
+    let unique = crate::unique_index::write_unique_indexes(
+        &args.out.join(PREFIX),
+        PHASH,
+        &args.schema,
+        |column| match open_extents.iter().find(|extents| extents.column == column) {
+            Some(extents) => crate::unique_index::UniqueSource::Extents(extents),
+            None => crate::unique_index::UniqueSource::Column(&attributes_by_entity[column]),
+        },
+        tmp.path(),
+        plan.budget,
+    )?;
+    timer.end(BuildStage::UniqueIndexes, n);
     let (filter_paths, text_index) = write_filter_postings(
         &partition_dir,
         &args.schema,
@@ -2296,6 +2312,7 @@ fn build_bundle(
             dict_records: term_count,
             external_ids_paths,
             other_paths,
+            unique,
         },
         &plugin,
         n,
@@ -6591,6 +6608,7 @@ mod tests {
             value_set: None,
             index,
             render,
+            unique: false,
         };
         let schema = |attribute| crate::config::Schema {
             attributes: vec![attribute],
@@ -6665,6 +6683,7 @@ mod tests {
             value_set: Some(crate::config::ValueSet::Closed),
             index: false,
             render: false,
+            unique: false,
         };
         let note = crate::config::Attribute {
             name: "note".to_string(),
@@ -6676,6 +6695,7 @@ mod tests {
             value_set: None,
             index: false,
             render: false,
+            unique: false,
         };
 
         // A `derived` visibility is what gives a category its entity-space floor.
@@ -6891,6 +6911,7 @@ mod tests {
             value_set: None,
             index: false,
             render: false,
+            unique: false,
         };
         let schema = crate::config::Schema {
             attributes: vec![
@@ -7311,6 +7332,7 @@ mod tests {
             value_set: None,
             index: true,
             render: false,
+            unique: false,
         }
     }
 
@@ -7575,6 +7597,7 @@ mod tests {
             value_set: None,
             index: true,
             render: false,
+            unique: false,
         }
     }
 

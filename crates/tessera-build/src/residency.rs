@@ -1805,6 +1805,22 @@ pub(crate) fn disk(
             Phases::BANDS.onwards(),
         );
     }
+    // A unique column's index: one fixed-width entry per value, an 8 B key for an integer and a
+    // 16 B hash for a keyword, each beside a 4 B entity. Charged over every item, a ceiling.
+    for attribute in args.schema.attributes.iter().filter(|a| a.unique) {
+        let entry = match attribute.ty {
+            ScalarType::Keyword => 20,
+            _ => 12,
+        };
+        push(
+            format!(
+                "the unique index of '{}', {entry} B/item of key and entity",
+                attribute.name
+            ),
+            entry * n,
+            Phases::BANDS.onwards(),
+        );
+    }
     // **The attribute join's value partitions**, one per fixed-width column it fills: `(entity,
     // value)` at four bytes of entity and the column's own width, standing from the join's first
     // chunk to the replay that writes each bucket into the column as a sequential run. Charged
@@ -2713,6 +2729,7 @@ mod tests {
                     value_set: None,
                     index: indexed,
                     render: false,
+                    unique: false,
                 })
                 .collect(),
             vocabularies: Default::default(),

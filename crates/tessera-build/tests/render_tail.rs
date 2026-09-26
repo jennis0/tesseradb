@@ -198,6 +198,7 @@ fn schema() -> Schema {
         value_set: None,
         index: false,
         render: true,
+        unique: false,
     };
     Schema {
         attributes: vec![

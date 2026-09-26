@@ -119,6 +119,7 @@ fn render(name: &str, ty: ScalarType) -> Attribute {
         value_set: None,
         index: false,
         render: true,
+        unique: false,
     }
 }
 
@@ -133,6 +134,7 @@ fn schema() -> Schema {
         value_set: Some(ValueSet::Closed),
         index: false,
         render: true,
+        unique: false,
     };
     Schema {
         attributes: vec![

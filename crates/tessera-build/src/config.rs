@@ -672,6 +672,14 @@ struct AttributeBlock {
     /// it.
     #[serde(default)]
     index: bool,
+    /// No two items may hold one value. The build refuses a source holding one value twice,
+    /// naming how many values and up to ten of them, and an ingest giving an item a value another
+    /// item holds is refused. `eq` and `in` filters on the column are answered from its index,
+    /// with or without `index = true`; without it, they are the only filters it takes. Applies to
+    /// `keyword`, integer and `timestamp_us` columns scoped to the entity. A null is no value, so
+    /// any number of items may hold one.
+    #[serde(default)]
+    unique: bool,
     /// `"entity"`: one value per item, the same under every view. `{ group = "<name>" }`: one value
     /// per item and view of that group, which must own its views rather than name `members`.
     ///
@@ -2480,6 +2488,8 @@ pub struct Attribute {
     /// tail would put a per-row string in the hot column by the back door, at 0.93 GiB per byte
     /// per row per 10⁹.
     pub render: bool,
+    /// Declared `unique`: the build writes the column's index and refuses a value held twice.
+    pub unique: bool,
 }
 
 /// Whether an unknown key is refused or minted — [`tessera_types::layer::ValueSet`], one type for
@@ -4770,6 +4780,7 @@ fn compile_attributes(
                 index: decl.index,
                 render: decl.render,
                 group_scoped: scopes.contains_key(name),
+                unique: decl.unique,
             },
             |vocabulary| vocabularies.get(vocabulary).map(|v| v.width),
         )
@@ -4788,6 +4799,7 @@ fn compile_attributes(
             vocabulary: column.vocabulary,
             index: decl.index,
             render: decl.render,
+            unique: column.unique,
         };
         // A group-scoped column is one column per view of its group, so it is kept apart from
         // the bundle-wide columns.
@@ -6479,6 +6491,7 @@ fn attribute_payload(
     );
     body.insert("index".to_string(), attribute.index.into());
     body.insert("render".to_string(), attribute.render.into());
+    body.insert("unique".to_string(), attribute.unique.into());
     body.insert(
         "scope".to_string(),
         serde_json::to_value(scope).unwrap_or_default(),
@@ -6892,6 +6905,7 @@ source = "members"
         // **Emitted although the route refuses it** (decision 0136's amendment): the emitter
         // states the declaration and the route decides.
         assert_eq!(attributes[0]["render"], true);
+        assert_eq!(attributes[0]["unique"], false);
         assert_eq!(attributes[0]["scope"], "entity");
 
         assert_eq!(attributes[1]["type"], "category");

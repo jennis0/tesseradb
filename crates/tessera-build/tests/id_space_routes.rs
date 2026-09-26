@@ -122,6 +122,7 @@ fn schema() -> Schema {
                 value_set: None,
                 index: true,
                 render: false,
+                unique: false,
             },
             Attribute {
                 field: None,
@@ -133,6 +134,7 @@ fn schema() -> Schema {
                 value_set: None,
                 index: false,
                 render: true,
+                unique: false,
             },
         ],
         vocabularies: Default::default(),

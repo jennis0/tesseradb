@@ -1022,6 +1022,7 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         value_set: None,
         index: true,
         render: false,
+        unique: false,
     };
     build(&BuildArgs {
         views: vec![
