@@ -150,11 +150,12 @@ impl Engine {
         Ok(labels)
     }
 
-    /// `POST /v1/items/{handle}`: invert `id` to its entity, test visibility in entity space, and
-    /// only then locate a row and read its scalars/external id. Returns `Ok(None)` both when `id`
+    /// `POST /v1/items/{handle}`: invert `id` to its number and the entity holding it, test
+    /// visibility in entity space, and only then locate a row and read its scalars/external id. Returns `Ok(None)` both when `id`
     /// names nothing in this bundle and when it names an item the principal may not see: one
     /// outcome from one code path.
-    /// The timing channel is closed, not narrowed. Inversion is a pure function. The visibility
+    /// The timing channel is kept small. Inversion is a pure function and the edited-items map is
+    /// probed for every identifier, edited or not. The visibility
     /// test that follows is an entity-space question — three constant-time probes — and is the
     /// same three probes for an identifier that names nothing and one that names an invisible
     /// item: no `RowProjection` is constructed or read, so there is no per-ID cost to correlate
@@ -170,10 +171,18 @@ impl Engine {
     ) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
 
-        let (shard, entity) = self.identity_key.invert(id);
+        let (shard, number) = self.identity_key.invert(id);
         if shard != generation.bundle.manifest.identity.shard_id {
             return Ok(None);
         }
+        // The item's current entity, the edited-items map probed whether or not it holds the
+        // number, so an edited item's card costs what any other's does. An entity the overlay has
+        // deleted is not an answer; visibility below decides the rest.
+        let Some(entity) = crate::edited::entities_of_numbers(&generation, &[number], |_| true)
+            .map_err(EngineError::Store)?[0]
+        else {
+            return Ok(None);
+        };
 
         // Brought forward before the visibility test: a fragment resolved per-entity would make
         // the cost depend on which entity was asked for. The served fragment, not the live one:

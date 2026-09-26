@@ -368,7 +368,7 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::UnknownView { view, .. } => {
             ApiError::Unknown(format!("unknown view '{view}'"))
         }
-        AcceptError::UniqueIndexUnreadable(detail) => {
+        AcceptError::Unreadable(detail) => {
             tracing::error!(%detail, "a unique index could not be read; answering fail-closed");
             ApiError::FailClosed(
                 "a unique column's index could not be read, so the batch was not applied"

@@ -690,7 +690,7 @@ fn a_deletion_reaches_every_home() {
     let by_tessera = engine
         .resolve_tessera_ids(
             &[engine.tessera_id_of(deleted).expect("a wire identifier")],
-        )[0]
+        ).unwrap()[0]
         .expect("the identifier names a live item");
     assert_eq!(by_external, deleted, "the external-id route names the item");
     assert_eq!(by_tessera, deleted, "and so does the tessera_id route");

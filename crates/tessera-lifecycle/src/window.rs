@@ -108,8 +108,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_types::{EntityId, TermId};
 
 use crate::alloc::{assign_sorted, AllocError, Allocator, PendingItem};
-use crate::command::UnallocatedRow;
-use crate::wal::{RowOutcome, RowReceipt, WalRecord, WalRow};
+use crate::command::{UnallocatedEdit, UnallocatedRow};
+use crate::wal::{RowOutcome, RowReceipt, WalEdit, WalRecord, WalRow};
 
 /// One admitted `/control/ingest` submission, held open until the window closes.
 ///
@@ -126,6 +126,8 @@ use crate::wal::{RowOutcome, RowReceipt, WalRecord, WalRow};
 pub struct WindowEntry<W> {
     /// The rows this batch writes.
     pub rows: Vec<UnallocatedRow>,
+    /// The items this batch moves to new entities.
+    pub edits: Vec<UnallocatedEdit>,
     /// One per row of the request, in request order: what the row became.
     pub slots: Vec<Slot>,
     /// The request rows creating an item whose label resolves to more terms than the plugin
@@ -148,15 +150,23 @@ pub struct WindowEntry<W> {
 /// What one row of an ingest request became, as the window's close answers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
-    /// The row writes the entry's row at this position: it creates an item or adds one to a view.
-    Written(u32),
+    /// The row writes the entry's row at this position: it creates an item, or adds the item
+    /// whose `tessera_id` it carries to a view.
+    Written { row: u32, tessera_id: Option<u64> },
     /// The row named this item and changed nothing, so it writes nothing.
-    Unchanged(EntityId),
+    Unchanged { entity: EntityId, tessera_id: u64 },
+    /// The row moves its item to a new entity as the entry's edit at this position. `added` is a
+    /// row whose one change was adding the item to a view, which the receipt counts as added.
+    Edited {
+        edit: u32,
+        added: bool,
+        tessera_id: u64,
+    },
 }
 
 /// What an entry's rows touch that a later entry's rows must not touch in the same window: the
-/// existing items its rows add to a view, and the unique values and external ids its new items
-/// take. Each is decided against state the close writes, so a later row touching one is admitted
+/// existing items its rows add to a view or edit, and the unique values and external ids its rows
+/// give items. Each is decided against state the close writes, so a later row touching one is admitted
 /// only after the window holding it has closed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowClaims {
@@ -168,13 +178,18 @@ pub struct WindowClaims {
 }
 
 impl WindowClaims {
-    /// The claims of `rows`, with `keys` the unique values the rows that create items set.
-    pub fn of(rows: &[UnallocatedRow], keys: Vec<(u16, u128)>) -> Self {
+    /// The claims of `rows` and `edits`, with `keys` the unique values the rows set.
+    pub fn of(rows: &[UnallocatedRow], edits: &[UnallocatedEdit], keys: Vec<(u16, u128)>) -> Self {
         WindowClaims {
-            entities: rows.iter().filter_map(|row| row.join).collect(),
+            entities: rows
+                .iter()
+                .filter_map(|row| row.join)
+                .chain(edits.iter().map(|edit| edit.old))
+                .collect(),
             keys,
             external_ids: rows
                 .iter()
+                .chain(edits.iter().filter_map(|edit| edit.rows.first()))
                 .filter_map(|row| row.external_id.as_deref())
                 .map(digest)
                 .collect(),
@@ -211,7 +226,7 @@ pub struct ResolvedMembership {
     /// the same one. So the key travels and the resolution is made once, on the executor, where
     /// nothing can interleave with it.
     pub ordinal: Option<u32>,
-    /// Indices into this entry's `rows`.
+    /// Indices into this entry's `rows`, then into its `edits` counted on from the rows' end.
     pub rows: Vec<u32>,
 }
 
@@ -224,7 +239,10 @@ pub struct ClosedEntry<W> {
     /// [`WalRow`] has no `terms` field: the WAL stores raw descriptors, since a term coined between
     /// builds has no durable ordinal.
     pub terms: Vec<Vec<TermId>>,
-    /// The assigned ids, in the entry's row order.
+    /// The resolved term set of each edit's first row, in the record's edit order.
+    pub edit_terms: Vec<Vec<TermId>>,
+    /// The assigned ids, in the entry's row order, then each edit's new entity in edit order: a
+    /// membership names an edit by the position after the rows.
     pub entity_ids: Vec<EntityId>,
     /// This entry's memberships, carried through the allocation unchanged: the ids the joins name
     /// are `entity_ids[row]`, which is why the two travel together.
@@ -244,6 +262,23 @@ impl<W> ClosedEntry<W> {
     pub fn rows(&self) -> &[WalRow] {
         match &self.record {
             WalRecord::IngestBatch { rows, .. } => rows,
+            _ => unreachable!("a ClosedEntry's record is always an IngestBatch"),
+        }
+    }
+
+    /// The record's edits, for the apply.
+    pub fn edits(&self) -> &[WalEdit] {
+        match &self.record {
+            WalRecord::IngestBatch { edits, .. } => edits,
+            _ => unreachable!("a ClosedEntry's record is always an IngestBatch"),
+        }
+    }
+
+    /// The record's rows and edits, mutably, before the append: a novel category key is resolved
+    /// to its code in place, and an edit is told whether its old entity is suppressed.
+    pub fn rows_and_edits_mut(&mut self) -> (&mut [WalRow], &mut [WalEdit]) {
+        match &mut self.record {
+            WalRecord::IngestBatch { rows, edits, .. } => (rows, edits),
             _ => unreachable!("a ClosedEntry's record is always an IngestBatch"),
         }
     }
@@ -641,7 +676,7 @@ impl<W> CommitWindow<W> {
         self.entities.extend(claims.entities);
         self.keys.extend(claims.keys);
         self.external_ids.extend(claims.external_ids);
-        self.rows += entry.rows.len();
+        self.rows += entry.rows.len() + entry.edits.iter().map(|e| e.rows.len()).sum::<usize>();
         self.entries.push(entry);
     }
 
@@ -670,7 +705,8 @@ impl<W> CommitWindow<W> {
     /// the numbers mean and what they do not. The error path returns none: a window that could not
     /// allocate made no assignment to measure, which is the same statement as "no effect at all".
     ///
-    /// `tessera_id_of` gives an entity's `tessera_id` for the receipt each record carries.
+    /// `tessera_id_of` gives a created item's `tessera_id` for the receipt each record carries; a
+    /// row naming an item carries its own.
     #[allow(clippy::type_complexity)]
     pub fn allocate(
         self,
@@ -679,10 +715,14 @@ impl<W> CommitWindow<W> {
     ) -> Result<(Vec<ClosedEntry<W>>, FragmentationTally), (AllocError, Vec<Vec<W>>)> {
         let mut entries = self.entries;
 
+        // An edit's first row takes the new entity; its other rows take the same one after.
         let mut pending: Vec<PendingItem> = Vec::with_capacity(self.rows);
         for entry in &mut entries {
             for row in &mut entry.rows {
                 pending.push(row.take_pending());
+            }
+            for edit in &mut entry.edits {
+                pending.push(edit.rows[0].take_pending());
             }
         }
 
@@ -710,27 +750,68 @@ impl<W> CommitWindow<W> {
                 wal_rows.push(wal_row);
                 terms.push(row_terms);
             }
+            let mut edits = Vec::with_capacity(entry.edits.len());
+            let mut edit_terms = Vec::with_capacity(entry.edits.len());
+            for edit in entry.edits {
+                let p = scattered
+                    .next()
+                    .expect("one PendingItem was gathered per edit, in this order");
+                let entity = p.entity_id;
+                let mut first = Some(p);
+                let mut rows = Vec::with_capacity(edit.rows.len());
+                for (at, mut row) in edit.rows.into_iter().enumerate() {
+                    let pending = first.take().unwrap_or_else(|| PendingItem {
+                        external_id: row.external_id.take(),
+                        terms: Vec::new(),
+                        entity_id: entity,
+                    });
+                    let (mut wal_row, row_terms) = row.into_wal_row_with(pending);
+                    wal_row.join = at > 0;
+                    if at == 0 {
+                        edit_terms.push(row_terms);
+                    }
+                    rows.push(wal_row);
+                }
+                entity_ids.push(entity.expect("assign_sorted assigns every item it is given"));
+                edits.push(WalEdit {
+                    old: edit.old,
+                    number: edit.number,
+                    suppressed: false,
+                    rows,
+                });
+            }
             let receipt = entry
                 .slots
                 .iter()
                 .enumerate()
                 .map(|(i, slot)| match *slot {
-                    Slot::Written(at) => {
-                        let row: &WalRow = &wal_rows[at as usize];
+                    Slot::Written { row, tessera_id } => {
+                        let row: &WalRow = &wal_rows[row as usize];
                         RowReceipt {
                             outcome: if row.join {
                                 RowOutcome::Added
                             } else {
                                 RowOutcome::Created
                             },
-                            tessera_id: tessera_id_of(row.entity_id),
+                            tessera_id: tessera_id.unwrap_or_else(|| tessera_id_of(row.entity_id)),
                             over_bound: entry.over_bound.contains(&(i as u32)),
                         }
                     }
-                    Slot::Unchanged(entity) => RowReceipt {
+                    Slot::Unchanged { tessera_id, .. } => RowReceipt {
                         outcome: RowOutcome::Unchanged,
-                        tessera_id: tessera_id_of(entity),
+                        tessera_id,
                         over_bound: false,
+                    },
+                    Slot::Edited {
+                        added, tessera_id, ..
+                    } => RowReceipt {
+                        outcome: if added {
+                            RowOutcome::Added
+                        } else {
+                            RowOutcome::Edited
+                        },
+                        tessera_id,
+                        over_bound: entry.over_bound.contains(&(i as u32)),
                     },
                 })
                 .collect();
@@ -739,9 +820,11 @@ impl<W> CommitWindow<W> {
                     batch_id: entry.batch_id,
                     body_hash: entry.body_hash,
                     rows: wal_rows,
+                    edits,
                     receipt,
                 },
                 terms,
+                edit_terms,
                 entity_ids,
                 memberships: entry.memberships,
                 edges: entry.edges,
@@ -767,12 +850,12 @@ mod tests {
 
     /// Admit `entry` claiming what its rows claim, with no unique values.
     fn push<W>(w: &mut CommitWindow<W>, entry: WindowEntry<W>) {
-        let claims = WindowClaims::of(&entry.rows, Vec::new());
+        let claims = WindowClaims::of(&entry.rows, &entry.edits, Vec::new());
         w.push(entry, claims);
     }
 
     fn claims(rows: &[UnallocatedRow]) -> WindowClaims {
-        WindowClaims::of(rows, Vec::new())
+        WindowClaims::of(rows, &[], Vec::new())
     }
 
     fn row(external_id: Option<&str>, terms: &[u32]) -> UnallocatedRow {
@@ -791,9 +874,15 @@ mod tests {
 
     fn entry(batch: &str, rows: Vec<UnallocatedRow>) -> WindowEntry<&'static str> {
         WindowEntry {
-            slots: (0..rows.len() as u32).map(Slot::Written).collect(),
+            slots: (0..rows.len() as u32)
+                .map(|row| Slot::Written {
+                    row,
+                    tessera_id: None,
+                })
+                .collect(),
             over_bound: Vec::new(),
             rows,
+            edits: Vec::new(),
             batch_id: batch.to_string(),
             body_hash: [0u8; 32],
             memberships: Vec::new(),
@@ -919,12 +1008,12 @@ mod tests {
         };
         let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
         let first = entry("b1", vec![joining.clone(), row(None, &[1])]);
-        let claims = WindowClaims::of(&first.rows, vec![(2, 99)]);
+        let claims = WindowClaims::of(&first.rows, &[], vec![(2, 99)]);
         w.push(first, claims);
 
-        assert!(w.conflicts(&WindowClaims::of(&[joining], Vec::new())));
-        assert!(w.conflicts(&WindowClaims::of(&[row(None, &[1])], vec![(2, 99)])));
-        assert!(!w.conflicts(&WindowClaims::of(&[row(None, &[1])], vec![(2, 98), (3, 99)])));
+        assert!(w.conflicts(&WindowClaims::of(&[joining], &[], Vec::new())));
+        assert!(w.conflicts(&WindowClaims::of(&[row(None, &[1])], &[], vec![(2, 99)])));
+        assert!(!w.conflicts(&WindowClaims::of(&[row(None, &[1])], &[], vec![(2, 98), (3, 99)])));
     }
 
     /// The `Held` lookup: the batch id, the window's own sequence number, and **the hash the
@@ -933,9 +1022,13 @@ mod tests {
     fn a_held_batch_id_is_found_with_the_hash_it_was_admitted_under() {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(7);
         push(&mut w, WindowEntry {
-            slots: vec![Slot::Written(0)],
+            slots: vec![Slot::Written {
+                row: 0,
+                tessera_id: None,
+            }],
             over_bound: Vec::new(),
             rows: vec![row(Some("k"), &[1])],
+            edits: Vec::new(),
             batch_id: "b1".to_string(),
             body_hash: [3u8; 32],
             memberships: Vec::new(),

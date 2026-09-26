@@ -167,6 +167,7 @@ fn flushed_bundle(root: &Path) {
     let rows = vec![
         FlushRow {
             entity_id: EntityId::new(n),
+            number: EntityId::new(n),
             external_id: Some(9_999u64.to_le_bytes().to_vec()),
             x: 10.0,
             y: 10.0,
@@ -174,6 +175,7 @@ fn flushed_bundle(root: &Path) {
         },
         FlushRow {
             entity_id: EntityId::new(n + 1),
+            number: EntityId::new(n + 1),
             external_id: Some(REBOUND_SOURCE.to_le_bytes().to_vec()),
             x: 990.0,
             y: 990.0,

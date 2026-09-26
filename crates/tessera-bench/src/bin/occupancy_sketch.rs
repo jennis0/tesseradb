@@ -262,6 +262,7 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
         let temp = TempDir::new().expect("a temp dir for the segment");
         write_segment(temp.path(), &items, &written, &[]).expect("write_segment");
         let data = SegmentData {
+            edited: Vec::new(),
             seg_id: format!("bench-{g}"),
             row_count: items.len() as u32,
             morton: MortonSlice::load(&temp.path().join("morton.u32")).expect("morton"),

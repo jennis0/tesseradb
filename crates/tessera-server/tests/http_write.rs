@@ -635,7 +635,7 @@ fn concurrent_ingest_and_change_both_survive() {
                 artifacts: Default::default(),
             })
             .expect("ingest should be accepted");
-        engine_b.resolve_tessera_ids(&receipt.tessera_ids)[0]
+        engine_b.resolve_tessera_ids(&receipt.tessera_ids).unwrap()[0]
             .expect("the item it created")
     });
 

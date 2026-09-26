@@ -42,7 +42,7 @@ pub trait Holdings {
     fn external_holders(&self, ids: &[&[u8]]) -> Result<Vec<Option<EntityId>>, Self::Error>;
 
     /// For each `tessera_id`, the item it names.
-    fn tessera_holders(&self, ids: &[TesseraId]) -> Vec<Option<EntityId>>;
+    fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, Self::Error>;
 }
 
 /// What identified an item in a refusal.
@@ -84,7 +84,7 @@ pub fn resolve<H: Holdings>(
         .filter_map(|(at, row)| row.tessera_id.map(|id| (at, id)))
         .collect();
     let ids: Vec<TesseraId> = tessera.iter().map(|(_, id)| *id).collect();
-    for ((at, _), holder) in tessera.iter().zip(holdings.tessera_holders(&ids)) {
+    for ((at, _), holder) in tessera.iter().zip(holdings.tessera_holders(&ids)?) {
         match holder {
             Some(entity) => named[*at].push((Identifier::TesseraId, entity)),
             None => return Ok(Err(Refusal::UnknownTesseraId { row: *at })),
@@ -195,8 +195,8 @@ mod tests {
         fn external_holders(&self, ids: &[&[u8]]) -> Result<Vec<Option<EntityId>>, ()> {
             Ok(ids.iter().map(|id| self.external.get(*id).copied()).collect())
         }
-        fn tessera_holders(&self, ids: &[TesseraId]) -> Vec<Option<EntityId>> {
-            ids.iter().map(|id| self.tessera.get(&id.raw()).copied()).collect()
+        fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, ()> {
+            Ok(ids.iter().map(|id| self.tessera.get(&id.raw()).copied()).collect())
         }
     }
 

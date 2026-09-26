@@ -29,6 +29,8 @@ pub(crate) struct SegmentCursor {
     pub(crate) columns: ColumnsRef,
     pub(crate) row: usize,
     pub(crate) rows: usize,
+    /// The rows whose entity is not their number ([`crate::edited`]).
+    edited: Vec<(u32, u32)>,
 }
 
 impl SegmentCursor {
@@ -55,13 +57,31 @@ impl SegmentCursor {
                 ),
             });
         }
+        let edited = crate::edited::read_edited_rows(dir)?;
         Ok(SegmentCursor {
             seg_id,
             morton,
             columns,
             row: 0,
             rows,
+            edited,
         })
+    }
+
+    /// The entity the current row belongs to.
+    pub(crate) fn entity(
+        &self,
+        key: &tessera_types::IdentityKey,
+        shard_id: u32,
+    ) -> Result<tessera_types::EntityId> {
+        crate::edited::entity_of_row(
+            &self.edited,
+            self.row as u32,
+            self.columns.tessera_id()[self.row],
+            key,
+            shard_id,
+            &self.seg_id,
+        )
     }
 
     /// This cursor's current `(morton, tessera_id)`, or `None` once it is spent.

@@ -224,8 +224,8 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
     let mut hw = 0u64;
     for rec in records {
         match rec {
-            WalRecord::IngestBatch { rows, .. } => {
-                for row in rows {
+            WalRecord::IngestBatch { rows, edits, .. } => {
+                for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
                     let candidate = row.entity_id.raw() + 1;
                     if candidate > hw {
                         hw = candidate;
@@ -263,18 +263,8 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             | WalRecord::ArtifactGrow { .. }
             | WalRecord::ViewCreate { .. }
             | WalRecord::ViewDrop { .. } => {}
-            // A values row names an entity that exists, so it raises the floor exactly as an
-            // overlay entry does: a weak bound, not the mechanism. The declarations allocate
-            // nothing: a column, a vocabulary and a group hold no entity, and a fill names an
-            // artifact that already has its ordinal and its entity.
-            WalRecord::ValuesBatch { rows, .. } => {
-                for row in rows {
-                    let candidate = row.entity_id.raw() + 1;
-                    if candidate > hw {
-                        hw = candidate;
-                    }
-                }
-            }
+            // The declarations allocate nothing: a column, a vocabulary and a group hold no
+            // entity, and a fill names an artifact that already has its ordinal and its entity.
             WalRecord::ArtifactFill { .. }
             | WalRecord::AttributeDeclare { .. }
             | WalRecord::UniqueDeclare { .. }
@@ -644,6 +634,7 @@ mod tests {
 
     fn row(entity_id: u64) -> WalRecord {
         WalRecord::IngestBatch {
+            edits: Vec::new(),
             receipt: Vec::new(),
             batch_id: "b".into(),
             body_hash: [0u8; 32],

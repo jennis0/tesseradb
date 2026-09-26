@@ -772,6 +772,15 @@ fn first_generation(
         .map_err(EngineError::Store)?,
         None => tessera_store::unique::UniqueIndexes::default(),
     };
+    let edited = match bundle.partitions.values().next() {
+        Some(partition) => tessera_store::edited::EditedIndex::open(
+            &partition.manifest.edited_items,
+            prefix_dir,
+            None,
+        )
+        .map_err(EngineError::Store)?,
+        None => tessera_store::edited::EditedIndex::default(),
+    };
 
     // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
     // cold start; only for the vocabularies a declared category column draws on.
@@ -811,6 +820,8 @@ fn first_generation(
             external_index: Arc::clone(&readers.external_index),
             unique: Arc::new(unique),
             unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
+            edited: Arc::new(edited),
+            edited_live: Arc::new(state.edited_live.clone()),
             delta_postings: readers.delta_postings.clone(),
             overlay_version: 0,
             overlay: Arc::new(overlay),
@@ -1258,6 +1269,15 @@ pub(crate) fn open_rotation(
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
     );
 
+    let edited = Arc::new(
+        tessera_store::edited::EditedIndex::open(
+            &partition.manifest.edited_items,
+            &prefix_dir,
+            None,
+        )
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+    );
+
     Ok((
         bundle,
         crate::geometry::PrefixRotation {
@@ -1266,6 +1286,7 @@ pub(crate) fn open_rotation(
             external_index,
             filter_columns,
             unique,
+            edited,
             retired,
         },
     ))

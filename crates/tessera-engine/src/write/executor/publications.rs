@@ -977,12 +977,36 @@ impl Executor {
                 }
             }
         };
+        let edited = if completed.edited.is_empty() {
+            Arc::clone(&live.edited)
+        } else {
+            let partition = next_bundle
+                .partitions
+                .get(&completed.partition)
+                .expect("the partition this publication just rebased");
+            match tessera_store::edited::EditedIndex::open(
+                &partition.manifest.edited_items,
+                &self.prefix_dir(&live),
+                Some(&live.edited),
+            ) {
+                Ok(edited) => Arc::new(edited),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a coalesce's manifest committed naming edited-item runs this \
+                         process could not open; a restart opens the committed manifest"
+                    );
+                    return;
+                }
+            }
+        };
         let next = live.with(|g| {
             // The live columns with each consumed window replaced by the layer that carries its
             // values, the same set of `(entity, value)` pairs in fewer files, so a request holding
             // the old and one holding the new agree on every answer.
             g.filter_columns = filter_columns;
             g.unique = unique;
+            g.edited = edited;
             g.bundle = next_bundle;
             // The sidecar rides the swap, rather than being stored beside it: a coalesce is
             // content-preserving, but a fold is not, since it drops the retired entities' keys and
@@ -1296,6 +1320,8 @@ impl Executor {
                     .filter(|(_, d)| d.unique)
                     .map(|(at, d)| (d.name.clone(), at, d.arrow_type))
                     .collect(),
+                edited: Arc::clone(&generation.edited),
+                edited_live: Arc::clone(&generation.edited_live),
             }
         };
         self.health
@@ -2112,6 +2138,17 @@ impl Executor {
             }
         }
         manifest.files.extend(completed.files);
+        let edited = &completed.edited_runs;
+        manifest
+            .edited_items
+            .by_number
+            .live
+            .extend(edited.by_number.iter().map(|run| run.path.clone()));
+        manifest
+            .edited_items
+            .by_entity
+            .live
+            .extend(edited.by_entity.iter().map(|run| run.path.clone()));
         for flushed in &completed.unique_runs {
             if let Some(index) = manifest
                 .unique_indexes
@@ -2290,16 +2327,6 @@ impl Executor {
             // entity outright would lose a row that is in no segment and no buffer.
             buffer.remove_in_view(*entity, &completed.view);
         }
-        // The fills this flush's plan consumed, on the same rule. Every fill it looked at, not
-        // only the ones it wrote: a fill a restart re-buffered after its own flush writes nothing
-        // and must still leave the buffer, or it pins the log at its `ValuesBatch` record
-        // indefinitely.
-        for entity in &completed.filled {
-            buffer.remove_fill(*entity);
-        }
-        for (entity, owner_view) in &completed.filled_scoped {
-            buffer.remove_scoped_fill(*entity, owner_view);
-        }
         // The gauge follows the buffer here too. A flush is the other place occupancy changes: if
         // it were not stated here, a node that flushed and then took no ingest would report a
         // backlog it had already written, and `/control/ingest`'s occupancy bound is measured
@@ -2397,6 +2424,34 @@ impl Executor {
             }
             _ => Arc::clone(&live.unique),
         };
+        // And the edited items' runs, whose pairs leave the live map.
+        let (edited, edited_live) = if completed.edited_runs.entities.is_empty() {
+            (Arc::clone(&live.edited), Arc::clone(&live.edited_live))
+        } else {
+            let Some(partition) = next_bundle.partitions.get(&completed.partition) else {
+                return false;
+            };
+            match tessera_store::edited::EditedIndex::open(
+                &partition.manifest.edited_items,
+                &self.prefix_dir(&live),
+                Some(&live.edited),
+            ) {
+                Ok(index) => {
+                    let mut edited_live = (*live.edited_live).clone();
+                    edited_live.remove(completed.edited_runs.entities.iter().copied());
+                    (Arc::new(index), Arc::new(edited_live))
+                }
+                Err(e) => {
+                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a flush's side-manifest was committed naming edited-item runs \
+                         this process could not open; a restart opens the committed manifest"
+                    );
+                    return false;
+                }
+            }
+        };
         let unique_live = if completed.unique_runs.is_empty() {
             Arc::clone(&live.unique_live)
         } else {
@@ -2438,8 +2493,7 @@ impl Executor {
             self.superseded_sidecars
                 .push(Arc::downgrade(&live.external_index));
         }
-        self.unique_declarations
-            .flushed(&completed.consumed, &completed.filled);
+        self.unique_declarations.flushed(&completed.consumed);
         let next = Arc::new(live.with(|g| {
             // The live columns with this flush's extents composed on: the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
@@ -2452,6 +2506,8 @@ impl Executor {
             g.buffer = Arc::new(buffer);
             g.unique = unique;
             g.unique_live = unique_live;
+            g.edited = edited;
+            g.edited_live = edited_live;
             g.external_index = external_index;
         }));
         // Armed before the swap, and that ordering is the mechanism. A request landing between
@@ -2549,9 +2605,6 @@ mod dispatch_rules_tests {
         };
         crate::flush::FlushPlan {
             items: vec![(EntityId::new(oldest), item)],
-            fills: Vec::new(),
-            consumed_fills: Vec::new(),
-            consumed_scoped_fills: Vec::new(),
             recorded_joins: Vec::new(),
         }
     }

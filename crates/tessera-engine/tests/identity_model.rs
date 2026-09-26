@@ -1,17 +1,20 @@
 //! **Random sequences of writes, checked against a model after every step.** Each case builds a
-//! small bundle with two views, then runs a random sequence of ingest batches, change batches,
-//! flushes, folds, restarts, resent batches and declarations of `unique` on and off one column.
-//! After every step it compares what the service serves with what a model of the items says it
-//! should: every view's points for two principals, `in` over every unique value, and every item's
-//! card.
+//! small bundle with two views and a label layer whose one artifact carries a content generated
+//! from two items, then runs a random sequence of ingest batches, change batches, flushes, folds,
+//! restarts, resent batches and declarations of `unique` on and off one column. After every step
+//! it compares what the service serves with what a model of the items says it should: every
+//! view's points for two principals, `in` over every unique value, every item's card, and the
+//! artifact's content.
 //!
 //! An ingest row names an item by its `tessera_id`, its external id or a unique value, and carries
 //! any of the item's fields, its label and a position in the batch's view. The model decides each
 //! row the way the service must: a row naming nothing creates an item, one naming an item it
 //! leaves unchanged is counted unchanged, one adding the item to a view it is not in is added, and
-//! one that would change the item is refused, since editing is not available yet. A batch naming
-//! two items in one row, one item in two rows, one value in two rows or a `tessera_id` nobody holds
-//! is refused whole.
+//! one that changes the item edits it. An edit keeps the item's `tessera_id` and its suppression,
+//! and hides the item in every view from its acknowledgement until a flush places it again; an
+//! item added to a view older than it moves the same way. A batch naming two items in one row,
+//! one item in two rows, one value in two rows or a `tessera_id` nobody holds is refused whole.
+//! A fold runs with whatever the buffer holds, so it can fall between an edit and its flush.
 //!
 //! Beside the unique columns, the items carry one column of each other family a row can compare:
 //! a float, a timestamp, a boolean, a category and a text. A float is compared bit for bit.
@@ -341,7 +344,8 @@ struct Item {
     /// Each view the item has a row in, with its position there.
     views: BTreeMap<String, (f64, f64)>,
     suppressed: bool,
-    /// Its place in creation order, which is the order of the engine's entity ids.
+    /// Its entity's place in creation order, which is the order of the engine's entity ids: an
+    /// edit gives the item a new one.
     made: u64,
 }
 
@@ -361,6 +365,10 @@ struct Model {
     floors: BTreeMap<String, u64>,
     /// Each view's `point_visibility.default`, the label of an item created without one.
     defaults: BTreeMap<String, Option<String>>,
+    /// The items the artifact's content was generated from.
+    content_from: BTreeSet<u64>,
+    /// A delete took one of them, which the fold may withdraw the content for.
+    content_lost: bool,
 }
 
 /// One row as the model reads it: what identifies an item, and what it carries. `None` is a
@@ -382,7 +390,10 @@ struct Row {
 enum Expect {
     Create,
     Unchanged(u64),
-    Added(u64),
+    /// The item joins the batch's view; `moved` where it is older than the view's newest rows
+    /// and so moves to a new entity.
+    Added { tid: u64, moved: bool },
+    Edited(u64),
 }
 
 impl Model {
@@ -502,22 +513,19 @@ impl Model {
                     .zip(&item.extras)
                     .any(|(sent, held)| sent.as_ref().is_some_and(|v| !same(v, held)))
                 || row.labels.as_ref().is_some_and(|l| *l != item.labels);
-            let mut joins = false;
+            let mut joins = None;
+            let mut moves = false;
             if let (Some(view), Some(position)) = (view, row.position) {
                 match item.views.get(view) {
                     Some(held) if *held == position => {}
-                    Some(_) => return None,
-                    None if item.made < self.floors[view] => return None,
-                    None => joins = true,
+                    Some(_) => moves = true,
+                    None => joins = Some(item.made < self.floors[view]),
                 }
             }
-            if differs {
-                return None;
-            }
-            expect.push(if joins {
-                Expect::Added(*tid)
-            } else {
-                Expect::Unchanged(*tid)
+            expect.push(match (differs || moves, joins) {
+                (true, _) => Expect::Edited(*tid),
+                (false, Some(moved)) => Expect::Added { tid: *tid, moved },
+                (false, None) => Expect::Unchanged(*tid),
             });
         }
         Some(expect)
@@ -553,16 +561,58 @@ impl Model {
                     self.items.insert(*tid, item);
                 }
                 Expect::Unchanged(named) => assert_eq!(tid, named),
-                Expect::Added(named) => {
-                    assert_eq!(tid, named);
+                Expect::Added { tid: named, moved } => {
+                    assert_eq!(tid, named, "a row adding an item answers its tessera_id");
                     let view = view.expect("a row adding an item names a view").to_string();
                     self.items
                         .get_mut(named)
                         .unwrap()
                         .views
                         .insert(view, row.position.unwrap());
+                    if *moved {
+                        self.moved(*named);
+                    }
+                }
+                Expect::Edited(named) => {
+                    assert_eq!(tid, named, "an edit never changes an item's tessera_id");
+                    let item = self.items.get_mut(named).unwrap();
+                    if let Some(labels) = &row.labels {
+                        item.labels = labels.clone();
+                    }
+                    if row.external_id.is_some() {
+                        item.external_id = row.external_id.clone();
+                    }
+                    if let Some(gid) = row.gid {
+                        item.gid = gid;
+                    }
+                    if let Some(doi) = &row.doi {
+                        item.doi = doi.clone();
+                    }
+                    if let Some(score) = row.score {
+                        item.score = score;
+                    }
+                    for (held, sent) in item.extras.iter_mut().zip(&row.extras) {
+                        if let Some(sent) = sent {
+                            *held = sent.clone();
+                        }
+                    }
+                    if let (Some(view), Some(position)) = (view, row.position) {
+                        item.views.insert(view.to_string(), position);
+                    }
+                    self.moved(*named);
                 }
             }
+        }
+    }
+
+    /// An item moved to a new entity: the newest, and in no view until a flush places it.
+    fn moved(&mut self, tid: u64) {
+        let made = self.made;
+        self.made += 1;
+        let item = self.items.get_mut(&tid).unwrap();
+        item.made = made;
+        for view in item.views.keys() {
+            self.flushed.remove(&(tid, view.clone()));
         }
     }
 
@@ -877,9 +927,16 @@ impl Run {
                  {expect:?}: {e}\nrows {rows:#?}"
             ),
             (Some(expect), Ok(receipt)) => {
+                if std::env::var_os("MODEL_TRACE").is_some() {
+                    eprintln!(
+                        "TRACE {batch_id} view {view:?} expect {expect:?} receipt {:?}",
+                        receipt.tessera_ids
+                    );
+                }
                 self.check_receipt(&expect, &receipt, &batch_id);
                 let ids: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.raw()).collect();
                 self.model.apply(view, &rows, &expect, &ids);
+                self.renumber(&expect, &ids);
                 self.sent.push(Sent {
                     batch_id,
                     view: view.map(str::to_string),
@@ -888,6 +945,28 @@ impl Run {
                     tessera_ids: ids,
                 });
             }
+        }
+    }
+
+    /// Give each item a batch created or moved the place its entity takes: a window assigns its
+    /// new entities in the order of their labels' terms, not the order of the rows.
+    fn renumber(&mut self, expect: &[Expect], tessera_ids: &[u64]) {
+        let moved: Vec<u64> = expect
+            .iter()
+            .zip(tessera_ids)
+            .filter(|(e, _)| {
+                matches!(
+                    e,
+                    Expect::Create | Expect::Edited(_) | Expect::Added { moved: true, .. }
+                )
+            })
+            .map(|(_, tid)| *tid)
+            .collect();
+        let ids: Vec<TesseraId> = moved.iter().map(|t| TesseraId::new(*t)).collect();
+        let entities = self.engine().resolve_tessera_ids(&ids).unwrap();
+        for (tid, entity) in moved.iter().zip(entities) {
+            let entity = entity.expect("an accepted row's item is named by its tessera_id");
+            self.model.items.get_mut(tid).unwrap().made = entity.raw();
         }
     }
 
@@ -902,7 +981,7 @@ impl Run {
         );
         assert_eq!(
             receipt.added,
-            count(|e| matches!(e, Expect::Added(_))),
+            count(|e| matches!(e, Expect::Added { .. })),
             "{batch_id}"
         );
         assert_eq!(
@@ -910,9 +989,16 @@ impl Run {
             count(|e| matches!(e, Expect::Unchanged(_))),
             "{batch_id}"
         );
-        assert_eq!(receipt.edited, 0, "{batch_id}");
+        assert_eq!(
+            receipt.edited,
+            count(|e| matches!(e, Expect::Edited(_))),
+            "{batch_id}"
+        );
         for (expect, tid) in expect.iter().zip(&receipt.tessera_ids) {
-            if let Expect::Unchanged(named) | Expect::Added(named) = expect {
+            if let Expect::Unchanged(named)
+            | Expect::Added { tid: named, .. }
+            | Expect::Edited(named) = expect
+            {
                 assert_eq!(
                     tid.raw(),
                     *named,
@@ -961,6 +1047,7 @@ impl Run {
                 let got: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.raw()).collect();
                 self.model
                     .apply(view.as_deref(), &model_rows, &expect, &got);
+                self.renumber(&expect, &got);
                 // The batch id now answers this acceptance.
                 self.sent[at].tessera_ids = got;
             }
@@ -981,13 +1068,16 @@ impl Run {
         for (target, op) in targets {
             let tid = live[*target as usize % live.len()];
             let op = [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress][*op as usize];
-            let entity = self.engine().resolve_tessera_ids(&[TesseraId::new(tid)])[0]
+            let entity = self.engine().resolve_tessera_ids(&[TesseraId::new(tid)]).unwrap()[0]
                 .expect("a live item's tessera_id names it");
             changes.push((entity, op));
             match op {
                 ChangeOp::Delete => {
                     if self.model.items.remove(&tid).is_some() {
                         self.model.deleted.insert(tid);
+                        if self.model.content_from.contains(&tid) {
+                            self.model.content_lost = true;
+                        }
                     }
                 }
                 ChangeOp::Suppress | ChangeOp::Unsuppress => {
@@ -1008,7 +1098,7 @@ impl Run {
             engine,
             "every buffered row flushes",
             Duration::from_secs(60),
-            || engine.buffered_items() == 0,
+            || engine.generation().buffer.is_empty(),
         );
         for item in self.model.items.values() {
             for view in item.views.keys() {
@@ -1100,11 +1190,25 @@ impl Run {
                     .filter(|i| model.visible_to(i, labels))
                     .map(|i| i.tid)
                     .collect();
-                assert_eq!(
-                    self.served(session, view, None),
-                    visible,
-                    "{view} for {labels:?}, after {after}"
-                );
+                let served = self.served(session, view, None);
+                if served != visible {
+                    let differ: Vec<(u64, Option<&Item>, bool)> = served
+                        .symmetric_difference(&visible)
+                        .map(|t| {
+                            (
+                                *t,
+                                model.items.get(t),
+                                model.flushed.contains(&(*t, view.to_string())),
+                            )
+                        })
+                        .collect();
+                    panic!(
+                        "{view} for {labels:?}, after {after}: served {served:?}, expected \
+                         {visible:?}; differing (tid, model item, flushed): {differ:#?}; \
+                         floors {:?}, made {}",
+                        model.floors, model.made
+                    );
+                }
                 let with_gid: BTreeSet<u64> = visible
                     .iter()
                     .filter(|t| model.items[t].gid.is_some())
@@ -1138,6 +1242,32 @@ impl Run {
             }
         }
         self.check_cards(&principals[0].0, after);
+        self.check_content(after);
+    }
+
+    /// The artifact serves its content to a principal who can see every item it was generated
+    /// from, wherever those items' entities have moved, until a delete takes one of them.
+    fn check_content(&self, after: &str) {
+        let model = &self.model;
+        let every_one_seen = model.content_from.iter().all(|tid| {
+            model.items.get(tid).is_some_and(|item| {
+                model.flushed.contains(&(*tid, VIEWS[0].to_string()))
+                    && model.visible_to(item, &["0"])
+            })
+        });
+        if model.content_lost || !every_one_seen {
+            return;
+        }
+        let served = artifacts_of(self.engine(), &full_coverage_credential())
+            .into_iter()
+            .find(|a| a.key.as_deref() == Some("t0"))
+            .map(|a| a.content.first().cloned().unwrap_or_default());
+        assert_eq!(
+            served.as_deref(),
+            Some(CONTENT),
+            "the content of an artifact generated from {:?}, after {after}",
+            model.content_from
+        );
     }
 
     /// Every item's card, for items whose every row a flush has placed: its fields and its
@@ -1231,12 +1361,14 @@ impl Run {
     }
 
     fn step(&mut self, op: &Op) {
+        if std::env::var_os("MODEL_TRACE").is_some() {
+            eprintln!("TRACE op {op:?}");
+        }
         match op {
             Op::Ingest { view, rows } => self.ingest(*view, rows),
             Op::Changes(targets) => self.changes(targets),
             Op::Flush => self.flush(),
             Op::Fold => {
-                self.flush();
                 let engine = self.engine();
                 let before = engine.write_executor_stats();
                 engine.request_fold();
@@ -1250,6 +1382,9 @@ impl Run {
                     );
                     now.folds > before.folds
                 });
+                // The tick a fold request brings flushes whatever the buffer held, beside the
+                // fold or during its flight.
+                self.flush();
             }
             Op::Restart => self.restart(),
             Op::Resend(which) => self.resend(*which),
@@ -1259,11 +1394,88 @@ impl Run {
     }
 }
 
+/// The label layer the artifact is published into.
+const LAYER: &str = "topics/a";
+
+/// The artifact's content, served only to a principal who can see every item it was generated
+/// from.
+const CONTENT: &str = "a label";
+
+/// The built items the content is generated from.
+const CONTENT_SOURCES: [u64; 2] = [3, 6];
+
+fn label_layer() -> tessera_types::layer::LayerDeclaration {
+    use tessera_types::layer::{
+        ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
+        MembershipSource, SuppliedContent, SuppliedRequirement,
+    };
+    LayerDeclaration {
+        scope: Default::default(),
+        name: LAYER.into(),
+        title: None,
+        views: vec![VIEWS[0].into()],
+        membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
+        visibility: None,
+        artifact_visibility: ArtifactVisibility::inherited(),
+        require_member_visibility: None,
+        hierarchy: Hierarchy {
+            kind: HierarchyKind::Flat,
+            prune_children: false,
+        },
+        content: ContentDeclaration {
+            computed: Vec::new(),
+            supplied: vec![SuppliedContent {
+                name: "label".into(),
+                ty: "text".into(),
+                require_member_visibility: SuppliedRequirement::All,
+            }],
+        },
+        depends_on: Vec::new(),
+        levels: Vec::new(),
+        layout: None,
+        shape: None,
+    }
+}
+
+/// Register the layer and publish its artifact over every built item, its content generated
+/// from [`CONTENT_SOURCES`], answering the content's items' `tessera_id`s.
+fn publish_content(engine: &Engine, root: &Path) -> BTreeSet<u64> {
+    use tessera_lifecycle::membership::IncomingContent;
+    use tessera_lifecycle::IncomingArtifact;
+    engine.register_layer(label_layer()).expect("the layer registers");
+    let map = source_to_new_map(root, "v00000");
+    let entity = |source: u64| EntityId::new(map[&source]);
+    engine
+        .publish_artifacts(
+            LAYER.into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("t0".into()),
+                (0..BUILT).map(entity).collect::<Vec<_>>(),
+                vec![IncomingContent::new(
+                    vec![CONTENT.to_string()],
+                    CONTENT_SOURCES.iter().map(|s| entity(*s)).collect::<Vec<_>>(),
+                )],
+            )],
+        )
+        .expect("the artifact publishes");
+    tick(engine);
+    CONTENT_SOURCES
+        .iter()
+        .map(|s| engine.tessera_id_of(entity(*s)).unwrap().raw())
+        .collect()
+}
+
 fn run(ops: &[Op]) {
+    if std::env::var_os("MODEL_TRACE").is_some() {
+        eprintln!("TRACE case");
+    }
     let fx = fixture();
     let engine = open(&fx);
     engine.set_merge_for_test(false);
-    let model = Model::built(&engine, &fx.root);
+    let mut model = Model::built(&engine, &fx.root);
+    model.content_from = publish_content(&engine, &fx.root);
     let mut run = Run {
         fx,
         engine: Some(engine),
@@ -1381,10 +1593,10 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
 }
 
 /// **An item is added to a view in place only when it is newer than the view's newest rows.** A
-/// flush places rows above those, so an older item would be moved, which is an edit and refused
-/// with nothing written; a newer one is added and flushes.
+/// flush places rows above those, so an older item moves to a new entity to join the view, keeping
+/// its `tessera_id` and its row in the view it was in; a newer one is added where it is.
 #[test]
-fn an_item_older_than_a_views_newest_rows_is_not_added_in_place() {
+fn an_item_older_than_a_views_newest_rows_moves_to_join_it() {
     let fx = fixture();
     let engine = open(&fx);
     engine.set_merge_for_test(false);
@@ -1411,24 +1623,47 @@ fn an_item_older_than_a_views_newest_rows_is_not_added_in_place() {
             &engine,
             "every buffered row flushes",
             Duration::from_secs(60),
-            || engine.buffered_items() == 0,
+            || engine.generation().buffer.is_empty(),
         )
     };
-    send("older", VIEWS[0], vec![row(b"older", (10.0, 10.0))]).expect("a new item is created");
+    let older = send("older", VIEWS[0], vec![row(b"older", (10.0, 10.0))])
+        .expect("a new item is created")
+        .tessera_ids[0];
     send("newer", VIEWS[1], vec![row(b"newer", (20.0, 20.0))]).expect("a new item is created");
     flush();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let card_views = |tid: TesseraId| -> BTreeSet<String> {
+        engine
+            .item(&session, tid)
+            .unwrap()
+            .map(|card| card.views.iter().map(|v| v.id.clone()).collect())
+            .unwrap_or_default()
+    };
 
-    let refused = send("add-older", VIEWS[1], vec![row(b"older", (30.0, 30.0))]);
-    assert!(
-        matches!(refused, Err(AcceptError::Conflict(_))),
-        "an item older than the view's newest rows is not added in place: {refused:?}"
+    let moved = send("add-older", VIEWS[1], vec![row(b"older", (30.0, 30.0))])
+        .expect("an item older than the view's newest rows is added by moving it");
+    assert_eq!((moved.added, moved.edited), (1, 0));
+    assert_eq!(moved.tessera_ids, vec![older], "the item keeps its tessera_id");
+    assert!(card_views(older).is_empty(), "the moved item is hidden until its flush");
+    flush();
+    assert_eq!(
+        card_views(older),
+        VIEWS.iter().map(|v| v.to_string()).collect(),
+        "the flush places it in the view it joined and the one it was in"
     );
-    assert_eq!(engine.buffered_items(), 0, "a refused batch writes nothing");
 
-    send("newest", VIEWS[0], vec![row(b"newest", (40.0, 40.0))]).expect("a new item is created");
+    let newest = send("newest", VIEWS[0], vec![row(b"newest", (40.0, 40.0))])
+        .expect("a new item is created")
+        .tessera_ids[0];
     flush();
     let added = send("add-newest", VIEWS[1], vec![row(b"newest", (50.0, 50.0))])
         .expect("an item newer than the view's newest rows is added");
     assert_eq!(added.added, 1);
+    assert_eq!(
+        card_views(newest),
+        BTreeSet::from([VIEWS[0].to_string()]),
+        "added in place, it stays in the view it was in while the join is buffered"
+    );
     flush();
+    assert_eq!(card_views(newest), VIEWS.iter().map(|v| v.to_string()).collect());
 }

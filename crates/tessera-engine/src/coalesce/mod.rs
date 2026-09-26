@@ -28,7 +28,7 @@ mod tests;
 
 use execute::{
     coalesce_attr_window, coalesce_dicts, coalesce_entity_terms, coalesce_records, coalesce_runs,
-    coalesce_text_window, coalesce_tiers, coalesce_unique_window,
+    coalesce_edited_window, coalesce_text_window, coalesce_tiers, coalesce_unique_window,
 };
 pub(crate) use plan::plan_coalesce;
 pub(crate) use rebase::rebased;
@@ -76,6 +76,17 @@ pub(crate) struct CoalescePlan {
     pub(crate) terms: Vec<EntityTermsExtent>,
     /// Per unique column, a window of its live index runs.
     pub(crate) unique: Vec<UniqueWindow>,
+    /// Per direction of the edited-items map, a window of its live runs.
+    pub(crate) edited: Vec<EditedWindow>,
+}
+
+/// A window of one direction's live edited-items runs, merged into one run set with nothing
+/// dropped.
+#[derive(Debug, Clone)]
+pub(crate) struct EditedWindow {
+    pub(crate) direction: tessera_store::edited::Direction,
+    /// Prefix-relative, in the direction's live order.
+    pub(crate) runs: Vec<String>,
 }
 
 /// A window of one unique column's live index runs, merged into one run set with nothing
@@ -154,7 +165,8 @@ impl CoalescePlan {
         (kinds.iter().filter(|&&k| k).count()
             + self.attrs.len()
             + self.texts.len()
-            + self.unique.len()) as u64
+            + self.unique.len()
+            + self.edited.len()) as u64
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -166,6 +178,7 @@ impl CoalescePlan {
             && self.texts.is_empty()
             && self.terms.is_empty()
             && self.unique.is_empty()
+            && self.edited.is_empty()
     }
 }
 
@@ -224,6 +237,7 @@ pub(crate) struct CompletedCoalesce {
     pub(crate) terms: Option<Merged<Vec<EntityTermsExtent>, EntityTermsExtent>>,
     /// Each merged window and the runs that replace it, prefix-relative.
     pub(crate) unique: Vec<Merged<UniqueWindow, Vec<String>>>,
+    pub(crate) edited: Vec<Merged<EditedWindow, Vec<String>>>,
     pub(crate) files: BTreeMap<String, FileDigest>,
     /// The windows whose merge failed. They stay in the manifest and are planned again.
     pub(crate) failures: Vec<MaintenanceFailed>,
@@ -242,7 +256,8 @@ impl CompletedCoalesce {
         (kinds.iter().filter(|&&k| k).count()
             + self.attrs.len()
             + self.texts.len()
-            + self.unique.len()) as u64
+            + self.unique.len()
+            + self.edited.len()) as u64
     }
 }
 
@@ -287,6 +302,11 @@ pub(crate) fn execute_coalesce(
         .into_iter()
         .filter_map(|w| attempt(w, f, e, |w, out| coalesce_unique_window(w, &ctx, out)))
         .collect();
+    let edited: Vec<_> = plan
+        .edited
+        .into_iter()
+        .filter_map(|w| attempt(w, f, e, |w, out| coalesce_edited_window(w, &ctx, out)))
+        .collect();
 
     let nothing = tier.is_none()
         && run.is_none()
@@ -295,7 +315,8 @@ pub(crate) fn execute_coalesce(
         && record.is_none()
         && texts.is_empty()
         && terms.is_none()
-        && unique.is_empty();
+        && unique.is_empty()
+        && edited.is_empty();
     if nothing {
         let reasons: Vec<String> = failures.iter().map(|e| e.0.clone()).collect();
         return Err(MaintenanceFailed(reasons.join("; ")));
@@ -311,6 +332,7 @@ pub(crate) fn execute_coalesce(
         texts,
         terms,
         unique,
+        edited,
         files,
         failures,
     })

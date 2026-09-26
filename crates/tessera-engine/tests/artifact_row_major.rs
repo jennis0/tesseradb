@@ -897,7 +897,7 @@ fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
         .find(|a| a.layer == FLAT && a.key.as_deref() == Some(key))
         .expect("the artifact is served")
         .tessera_id;
-    engine.resolve_tessera_ids(&[id])[0].expect("it names what was issued")
+    engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
 /// The row of each of `sources` in the served row space, for a column check.

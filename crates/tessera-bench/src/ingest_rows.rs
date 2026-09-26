@@ -43,7 +43,7 @@ impl IngestRows for Engine {
             artifacts: Default::default(),
         })?;
         Ok(self
-            .resolve_tessera_ids(&receipt.tessera_ids)
+            .resolve_tessera_ids(&receipt.tessera_ids).unwrap()
             .into_iter()
             .map(|entity| entity.expect("an accepted row names an item"))
             .collect())

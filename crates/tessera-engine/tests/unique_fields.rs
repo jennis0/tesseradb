@@ -1000,20 +1000,36 @@ fn removing_unique_keeps_the_values() {
     assert_eq!(matching(&engine, &session, number_in("gid", &[gid_of(5) as i128])).len(), 2);
 }
 
+/// Set one column's value on items that exist: an ingest batch naming no view, each row naming
+/// its item by `tessera_id` and carrying that column alone.
 fn fill(engine: &Engine, batch: &str, column: &str, rows: Vec<(EntityId, WalScalar)>) -> Result<(), AcceptError> {
+    let declared = engine.meta().declared_scalars;
+    let at = declared
+        .iter()
+        .position(|d| d.name == column)
+        .expect("a declared column");
+    let rows = rows
+        .into_iter()
+        .map(|(entity, value)| {
+            let mut scalars = vec![WalScalar::Null; declared.len()];
+            scalars[at] = value;
+            tessera_engine::IngestRow {
+                tessera_id: Some(engine.tessera_id_of(entity).unwrap()),
+                external_id: None,
+                labels: None,
+                position: None,
+                scalars,
+                scoped: Vec::new(),
+                omitted: (0..declared.len()).filter(|p| *p != at).collect(),
+            }
+        })
+        .collect();
     engine
-        .fill_values(tessera_lifecycle::ValuesRequest {
+        .ingest(tessera_engine::IngestRequest {
             batch_id: batch.to_string(),
             body_hash: hash_of(batch),
-            view: Some("s0".to_string()),
-            columns: vec![column.to_string()],
-            rows: rows
-                .into_iter()
-                .map(|(entity, value)| tessera_lifecycle::IncomingValues {
-                    entity,
-                    values: vec![value],
-                })
-                .collect(),
+            view: None,
+            rows,
             artifacts: Default::default(),
         })
         .map(|_| ())

@@ -196,9 +196,12 @@ pub struct GenerationStamp {
 // lacks both and is refused as malformed.
 // 24: a unique index's run files are key run format 2, which packs each page's keys as gaps from
 // its first key; a format 1 run is refused at open.
+// 25: a side-manifest carries `edited_items`, the runs mapping an edited item's number to its
+// entity and back, and a segment may carry `edited-rows.u32`. A 24 manifest lacks the field and is
+// refused as malformed.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 24;
+pub const BUNDLE_FORMAT: u32 = 25;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

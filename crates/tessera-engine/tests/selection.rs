@@ -80,6 +80,7 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
 
     let data = SegmentData {
+        edited: Vec::new(),
         seg_id: "seg0".to_string(),
         row_count: items.len() as u32,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),

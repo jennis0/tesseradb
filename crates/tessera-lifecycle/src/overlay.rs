@@ -339,8 +339,18 @@ pub fn replay<'a>(
 
     for record in records {
         match record {
-            WalRecord::IngestBatch { rows, .. } => {
-                for row in rows {
+            WalRecord::IngestBatch { rows, edits, .. } => {
+                // An edit deletes the entity its item leaves and gives the new one the old one's
+                // suppression, both in the record that creates the new one.
+                for edit in edits {
+                    overlay.apply(edit.old, ChangeOp::Delete);
+                    if let Some(first) = edit.rows.first() {
+                        if edit.suppressed {
+                            overlay.apply(first.entity_id, ChangeOp::Suppress);
+                        }
+                    }
+                }
+                for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
                     // Contracts §3.4 r6: no external id means no sidecar entry and nothing to
                     // establish here either — the item is addressable only by its `tessera_id`.
                     if let Some(external_id) = &row.external_id {
@@ -414,12 +424,8 @@ pub fn replay<'a>(
             | WalRecord::ArtifactGrow { .. }
             | WalRecord::ArtifactFill { .. }
             | WalRecord::ViewCreate { .. } => {}
-            // The ingest design's remaining records (`ingest.md` §7.1) are not applied by anything
-            // yet, and a replay that meets one refuses to open before reaching here
-            // (`crate::wal::unbuilt_track`). None of them names the deny lane: a values row fills
-            // cells, and a declaration names no entity.
-            WalRecord::ValuesBatch { .. }
-            | WalRecord::AttributeDeclare { .. }
+            // A declaration names no entity.
+            WalRecord::AttributeDeclare { .. }
             | WalRecord::UniqueDeclare { .. }
             | WalRecord::VocabularyDeclare { .. }
             | WalRecord::ViewGroupCreate { .. }
@@ -431,10 +437,10 @@ pub fn replay<'a>(
     (overlay, buffer, established, resolver)
 }
 
-/// Drop everything the buffer holds for an entity the overlay has deleted, its rows in every view
-/// and its fills — **the buffer never holds anything of a deleted entity** (write-path §4.2,
-/// decision 0047). A join carries no terms and so is absent from the entity-space walk, and a fill
-/// is not a row at all; both pin the log exactly as an own row does.
+/// Drop every row the buffer holds for an entity the overlay has deleted, in every view — **the
+/// buffer never holds anything of a deleted entity** (write-path §4.2, decision 0047). A join
+/// carries no terms and so is absent from the entity-space walk, and it pins the log exactly as an
+/// own row does.
 ///
 /// A deleted row acquires no geometry: `plan_flush` skips it, so a flush never consumes it and
 /// its entry would sit in the buffer for the process's lifetime. That is not merely untidy —
@@ -627,6 +633,7 @@ mod tests {
         let dict = Dict::load(&paths).unwrap();
 
         let records = vec![WalRecord::IngestBatch {
+            edits: Vec::new(),
             receipt: Vec::new(),
             batch_id: "b".to_string(),
             body_hash: [0u8; 32],

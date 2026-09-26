@@ -278,6 +278,10 @@ pub(super) fn fold_rebases(
         })
         // An index removed during the flight takes nothing; one still held must still list every
         // run the fold consumed.
+        && {
+            let listed: FxHashSet<&str> = live_manifest.edited_items.files().collect();
+            plan.edited.files().all(|rel| listed.contains(rel))
+        }
         && plan.unique.iter().all(|consumed| {
             live_manifest
                 .unique_indexes
@@ -330,6 +334,8 @@ pub(super) struct CarriedExtents<'a> {
     /// Every unique index the live manifest holds, less what the fold consumed: a folded
     /// column's base runs are the fold's own and are left out here.
     unique: Vec<tessera_store::manifest::UniqueIndexRuns>,
+    /// The edited-items live runs written during the fold's flight; the fold's own are its base.
+    edited: tessera_store::manifest::EditedItemsRuns,
     /// The dropped views whose segments were left behind, and how many segments that was.
     omitted_views: Vec<String>,
     omitted_segments: usize,
@@ -464,6 +470,24 @@ pub(super) fn carried_forward<'a>(
                 }
             })
             .collect(),
+        edited: {
+            let consumed: FxHashSet<&str> = plan.edited.files().collect();
+            let unconsumed = |runs: &tessera_store::manifest::KeyRuns| {
+                tessera_store::manifest::KeyRuns {
+                    base: Vec::new(),
+                    live: runs
+                        .live
+                        .iter()
+                        .filter(|rel| !consumed.contains(rel.as_str()))
+                        .cloned()
+                        .collect(),
+                }
+            };
+            tessera_store::manifest::EditedItemsRuns {
+                by_number: unconsumed(&live_manifest.edited_items.by_number),
+                by_entity: unconsumed(&live_manifest.edited_items.by_entity),
+            }
+        },
         omitted_views,
         omitted_segments,
     }
@@ -500,6 +524,10 @@ pub(super) fn carried_files(
                 .filter(|rel| rel.starts_with(&presence_prefix))
                 .cloned(),
         );
+        let edited_rows = format!("{segment_prefix}/{}", tessera_store::edited::EDITED_ROWS_FILE);
+        if live_manifest.files.contains_key(&edited_rows) {
+            rels.insert(edited_rows);
+        }
     }
     rels.extend(forward.runs.iter().cloned());
     rels.extend(forward.locators.iter().map(|e| e.path.clone()));
@@ -519,6 +547,7 @@ pub(super) fn carried_files(
     for index in &forward.unique {
         rels.extend(index.files().map(String::from));
     }
+    rels.extend(forward.edited.files().map(String::from));
     rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
     rels
 }
@@ -1169,6 +1198,16 @@ impl Executor {
                     index
                 })
                 .collect(),
+            edited_items: tessera_store::manifest::EditedItemsRuns {
+                by_number: tessera_store::manifest::KeyRuns {
+                    base: completed.edited.by_number.base.clone(),
+                    live: forward.edited.by_number.live.clone(),
+                },
+                by_entity: tessera_store::manifest::KeyRuns {
+                    base: completed.edited.by_entity.base.clone(),
+                    live: forward.edited.by_entity.live.clone(),
+                },
+            },
             ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);

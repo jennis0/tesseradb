@@ -128,6 +128,7 @@ impl Fixture {
             .iter()
             .map(|&e| tessera_store::FlushRow {
                 entity_id: EntityId::new(e.into()),
+                number: EntityId::new(e.into()),
                 external_id: (e % 10 != 2).then(|| format!("ext-{e}").into_bytes()),
                 x: 0.5,
                 y: 0.5,

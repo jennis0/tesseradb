@@ -451,7 +451,7 @@ impl LiveState {
     /// descriptor. Total for any id a flush plan can name: replay always re-interns a buffered
     /// item's descriptors before it re-enters the buffer, so `promote` may treat a miss as a
     /// failed flush rather than a dropped term.
-    pub(in crate::write) fn descriptors_of(&self, terms: &FxHashSet<TermId>) -> FxHashMap<TermId, Vec<u8>> {
+    pub(crate) fn descriptors_of(&self, terms: &FxHashSet<TermId>) -> FxHashMap<TermId, Vec<u8>> {
         let state = lock_recover(&self.resolver_state);
         state
             .0

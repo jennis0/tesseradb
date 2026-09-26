@@ -1371,6 +1371,7 @@ impl SegmentExtent {
         entity_hi: u64,
         row_base: u32,
         tessera_ids: &[u64],
+        edited: &[(u32, u32)],
         key: &tessera_types::IdentityKey,
         shard_id: u32,
     ) -> Result<Self> {
@@ -1388,16 +1389,11 @@ impl SegmentExtent {
 
         let mut rows = vec![ROW_ABSENT; span];
         for (local, &raw) in tessera_ids.iter().enumerate() {
-            let (shard, entity) = key.invert(tessera_types::TesseraId::new(raw));
             // A wrong shard means this segment was written under a different identity
             // configuration than the manifest declares — corruption, not a row to skip. Serving
             // past it would put a row under an entity id that names a different item.
-            if shard != shard_id {
-                return Err(malformed(format!(
-                    "segment '{seg_id}': row {local}'s tessera_id inverts to shard {shard}, but \
-                     the manifest declares shard {shard_id}"
-                )));
-            }
+            let entity =
+                crate::edited::entity_of_row(edited, local as u32, raw, key, shard_id, seg_id)?;
             let raw_entity = entity.raw();
             if raw_entity < entity_lo || raw_entity > entity_hi {
                 return Err(malformed(format!(

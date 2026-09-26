@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_plugin::Descriptor;
 use tessera_store::StoreError;
-use tessera_types::{EntityId, IdentityError, TermId, TesseraId};
+use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::engine::Engine;
 use crate::write::joined::flushed_terms_of;
@@ -36,36 +36,45 @@ impl Engine {
         self.generation.load().external_index.resolve(external_id)
     }
 
-    /// Invert `tessera_id`s to entity ids for the admin plane: `None` per position for an
-    /// identifier that names nothing. Points sit below the high-water mark; row-less entities
-    /// sit at or above the low-water mark, so testing only `entity < high_water` would refuse
-    /// every layer identifier ever issued.
-    pub fn resolve_tessera_ids(&self, ids: &[TesseraId]) -> Vec<Option<EntityId>> {
+    /// Resolve `tessera_id`s to the entities holding them for the admin plane: `None` per
+    /// position for an identifier that names nothing. Points sit below the high-water mark;
+    /// row-less entities sit at or above the low-water mark, so testing only `entity < high_water`
+    /// would refuse every layer identifier ever issued.
+    pub fn resolve_tessera_ids(
+        &self,
+        ids: &[TesseraId],
+    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
         self.tessera_ids_in(&self.generation.load_full(), ids)
     }
 
-    /// [`Self::resolve_tessera_ids`] against `generation`. An item is named while `generation`
-    /// holds it ([`holds_item`]): a fold that removes a deleted item also drops its deletion, so
-    /// the overlay alone no longer says it is gone.
+    /// [`Self::resolve_tessera_ids`] against `generation`. An identifier's number names the entity
+    /// the edited-items map holds for it, or the number itself where it has none
+    /// ([`crate::edited`]). An item is named while `generation` holds it ([`holds_item`]) and has
+    /// not deleted it: a fold that removes a deleted item also drops its deletion, so the overlay
+    /// alone no longer says it is gone.
     pub(crate) fn tessera_ids_in(
         &self,
         generation: &Generation,
         ids: &[TesseraId],
-    ) -> Vec<Option<EntityId>> {
+    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
         let shard = generation.bundle.manifest.identity.shard_id;
         let high_water = self.allocator_high_water();
         let low_water = self.allocator_low_water();
-        ids.iter()
-            .map(|id| {
-                let (id_shard, entity) = self.identity_key.invert(*id);
-                let named = if entity.raw() < high_water {
-                    holds_item(generation, entity)
-                } else {
-                    entity.raw() >= low_water
-                };
-                (id_shard == shard && named).then_some(entity)
-            })
-            .collect()
+        let inverted: Vec<(u32, EntityId)> =
+            ids.iter().map(|id| self.identity_key.invert(*id)).collect();
+        let numbers: Vec<EntityId> = inverted.iter().map(|(_, number)| *number).collect();
+        let held = crate::edited::entities_of_numbers(generation, &numbers, |entity| {
+            if entity.raw() < high_water {
+                holds_item(generation, entity) && !generation.overlay.is_deleted(entity)
+            } else {
+                entity.raw() >= low_water
+            }
+        })?;
+        Ok(inverted
+            .iter()
+            .zip(held)
+            .map(|((id_shard, _), entity)| entity.filter(|_| *id_shard == shard))
+            .collect())
     }
 
     /// Does `view` hold a row for `entity`? "In the view" is the view's permutation and the
@@ -169,13 +178,10 @@ impl Engine {
             .map(|(hash, _)| hash)
     }
 
-    /// Compute the wire `tessera_id` for `entity`, returned instead of the raw `EntityId`, which
-    /// never crosses the trust boundary. `IdentityKey::forward` refuses an entity at or above
-    /// `u32::MAX`: unreachable in practice, but a typed error rather than a panic.
-    pub fn tessera_id_of(&self, entity: EntityId) -> std::result::Result<TesseraId, IdentityError> {
-        let generation = self.generation.load_full();
-        self.identity_key
-            .forward(generation.bundle.manifest.identity.shard_id, entity)
+    /// The wire `tessera_id` of the item `entity` holds: the permutation of its number, returned
+    /// instead of the raw `EntityId`, which never crosses the trust boundary.
+    pub fn tessera_id_of(&self, entity: EntityId) -> std::result::Result<TesseraId, StoreError> {
+        self.tessera_id_in(&self.generation.load_full(), entity)
     }
 
     /// Request a flush. Accepted at any time and executed promptly: the flag pulls the tick's
@@ -301,33 +307,6 @@ impl Engine {
         request: tessera_lifecycle::AttributeRequest,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         self.write.declare_attribute(request)
-    }
-
-    /// Fill attribute values on entities that already exist. Nothing is allocated and no row is
-    /// created: every cell that is absent takes the supplied value, one that already holds it is
-    /// a no-op, and one that holds a different value refuses the whole batch.
-    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
-    pub fn fill_values(
-        &self,
-        request: tessera_lifecycle::ValuesRequest,
-    ) -> std::result::Result<crate::write::ValuesReceipt, crate::write::AcceptError> {
-        // Checked here, and re-checked on the executor against what was added since. Where the
-        // executor cannot re-check from memory, the request comes back and is checked here once
-        // more.
-        let mut request = Box::new(request);
-        for attempt in 0..2 {
-            let seq = crate::unique::check_fills(&self.generation(), &request, &self.identity_key)?;
-            #[cfg(feature = "fault-injection")]
-            self.switches.hold_write_check_if_wanted();
-            match self.write.fill_values(request, seq)? {
-                crate::write::ValuesOutcome::Filled(receipt) => return Ok(receipt),
-                crate::write::ValuesOutcome::Stale(back) if attempt == 0 => request = back,
-                crate::write::ValuesOutcome::Stale(_) => break,
-            }
-        }
-        Err(crate::write::AcceptError::Exec(
-            tessera_lifecycle::ExecError::Stale,
-        ))
     }
 
     /// Declare a vocabulary while the service runs. Answers `(existing, added, titles)`.

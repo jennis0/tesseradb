@@ -248,10 +248,9 @@ pub fn execute_merge(
     let mut extent_rows = vec![ROW_ABSENT; span];
 
     // The merged order, from a heap over one key per live cursor. `Reverse` because
-    // `BinaryHeap` is a max-heap and row order is ascending; the cursor index is the last
-    // component so the ordering is total even though `(morton, tessera_id)` already is —
-    // `tessera_id` is a bijection and each entity has one row, so no two cursors can offer the
-    // same pair.
+    // `BinaryHeap` is a max-heap and row order is ascending. Two rows share a `tessera_id` where
+    // an edit left the item's deleted entity beside its new one, so the cursor index breaks the
+    // tie: inputs ascend in entity order, so the older entity's row comes first.
     let mut heap: BinaryHeap<Reverse<(u32, u64, usize)>> = BinaryHeap::with_capacity(cursors.len());
     for (index, cursor) in cursors.iter().enumerate() {
         if let Some((morton, tessera_id)) = cursor.key() {
@@ -266,20 +265,14 @@ pub fn execute_merge(
     let mut new_row_of: Vec<Vec<u32>> = cursors.iter().map(|c| vec![0u32; c.rows]).collect();
 
     let mut row_count: usize = 0;
+    let mut edited: Vec<(u32, u32)> = Vec::new();
     while let Some(Reverse((morton, tessera_raw, index))) = heap.pop() {
         let cursor = &mut cursors[index];
         let row = cursor.row;
         let tessera_id = TesseraId::new(tessera_raw);
-        let (shard, entity) = spec.identity_key.invert(tessera_id);
-        if shard != spec.shard_id {
-            return Err(StoreError::MalformedBundle {
-                detail: format!(
-                    "execute_merge: segment '{}' row {row} inverts to shard {shard}, not this \
-                     bundle's {} — merging it would place another shard's entity in this \
-                     view's row space",
-                    cursor.seg_id, spec.shard_id
-                ),
-            });
+        let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
+        if spec.identity_key.invert(tessera_id).1 != entity {
+            edited.push((row_count as u32, entity.raw() as u32));
         }
         let scalars = gather_scalars(
             &cursor.columns,
@@ -309,6 +302,7 @@ pub fn execute_merge(
         }
     }
     writer.finish().map_err(io)?;
+    let edited_written = crate::edited::write_edited_rows(&out_dir, &edited)?;
 
     // ---- the render columns' presence, permuted (decision 0064) ------------------------------
     //
@@ -381,6 +375,10 @@ pub fn execute_merge(
         let name = format!("{RENDER_PRESENCE_DIR}/{column}.roaring");
         files.insert(rel(&name), digest_of(&out_dir.join(&name))?);
     }
+    if edited_written {
+        let name = crate::edited::EDITED_ROWS_FILE;
+        files.insert(rel(name), digest_of(&out_dir.join(name))?);
+    }
 
     Ok(MergeOutput {
         segment: SegmentDescriptor {
@@ -426,6 +424,7 @@ mod tests {
             .iter()
             .map(|(entity, x, score)| FlushRow {
                 entity_id: EntityId::new(*entity),
+                number: EntityId::new(*entity),
                 external_id: Some(format!("e-{entity}").into_bytes()),
                 x: *x,
                 y: 0.0,

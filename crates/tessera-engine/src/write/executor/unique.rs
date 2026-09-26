@@ -70,10 +70,10 @@ impl UniqueDeclarations {
         self.current.is_some() || !self.waiting.is_empty()
     }
 
-    /// Note the entities a published flush consumed or filled: the next round reads them.
-    pub(super) fn flushed(&mut self, consumed: &[EntityId], filled: &[EntityId]) {
+    /// Note the entities a published flush consumed: the next round reads them.
+    pub(super) fn flushed(&mut self, consumed: &[EntityId]) {
         if let Some(pending) = &mut self.current {
-            for entity in consumed.iter().chain(filled) {
+            for entity in consumed {
                 if let Ok(entity) = u32::try_from(entity.raw()) {
                     pending.flushed_since.add(entity);
                 }

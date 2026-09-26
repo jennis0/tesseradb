@@ -538,6 +538,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     {
         let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
             receipt: Vec::new(),
             batch_id: "b0".to_string(),
             body_hash: [0u8; 32],

@@ -146,6 +146,9 @@ pub struct FoldRowSpaceOutput {
     /// entity named by `tombstones` that has no row anywhere in `inputs` costs nothing (see the
     /// module doc and `a_tombstone_naming_no_row_is_harmless` in the test suite).
     pub row_count: u32,
+    /// Whether the segment carries [`crate::edited::EDITED_ROWS_FILE`], which the caller names
+    /// and digests.
+    pub edited_rows: bool,
 }
 
 /// Run the fold's row-space pass: merge every entry of `spec.inputs` into one new segment under
@@ -235,10 +238,9 @@ pub fn fold_row_space(
         .collect();
 
     // The merged order, from a heap over one key per live cursor — identical shape to
-    // `execute_merge`'s, and for the same reason: `tessera_id` is a bijection and each live
-    // entity has exactly one row across every live segment, so no two cursors can ever offer the
-    // same `(morton, tessera_id)` pair, and the `index` tiebreak exists only to give `BinaryHeap`
-    // a total order to work with.
+    // `execute_merge`'s. Two rows share a `tessera_id` only where an edit left an item's deleted
+    // entity beside its new one, and the deleted one is dropped below, so the `index` tiebreak
+    // gives `BinaryHeap` a total order and decides no surviving row's place.
     let mut heap: BinaryHeap<Reverse<(u32, u64, usize)>> = BinaryHeap::with_capacity(cursors.len());
     for (index, cursor) in cursors.iter().enumerate() {
         if let Some((morton, tessera_id)) = cursor.key() {
@@ -250,21 +252,12 @@ pub fn fold_row_space(
     // anything computed before this row's drop decision. This is what makes the shift a dropped
     // row causes to every later row automatic rather than something tracked.
     let mut row_count: u32 = 0;
+    let mut edited: Vec<(u32, u32)> = Vec::new();
     while let Some(Reverse((morton, tessera_raw, index))) = heap.pop() {
         let cursor = &mut cursors[index];
         let row = cursor.row;
         let tessera_id = TesseraId::new(tessera_raw);
-        let (shard, entity) = spec.identity_key.invert(tessera_id);
-        if shard != spec.shard_id {
-            return Err(StoreError::MalformedBundle {
-                detail: format!(
-                    "fold_row_space: segment '{}' row {row} inverts to shard {shard}, not this \
-                     bundle's {} — folding it would place another shard's entity in this view's \
-                     row space",
-                    cursor.seg_id, spec.shard_id
-                ),
-            });
-        }
+        let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
 
         // Advance the cursor and refill the heap before the drop decision below, so an early
         // `continue` (the tombstoned case) can never skip it and stall this cursor.
@@ -273,9 +266,7 @@ pub fn fold_row_space(
             heap.push(Reverse((next_morton, next_id, index)));
         }
 
-        // `entity.raw()` always fits `u32`: `IdentityKey::invert` builds it from the low half of
-        // a Feistel round, itself a `u32` (identity.rs), so this is not a truncating cast — and
-        // `croaring::Bitmap`'s domain is `u32` regardless.
+        // Entity ids are capped at `u32::MAX` (I9), and `croaring::Bitmap`'s domain is `u32`.
         let entity_u32 = entity.raw() as u32;
         if spec.tombstones.contains(entity_u32) {
             continue;
@@ -299,6 +290,9 @@ pub fn fold_row_space(
             .map_err(columns_io)?;
         permutation.set(entity, row_count).map_err(perm_io)?;
         row_entity.push(entity_u32);
+        if spec.identity_key.invert(tessera_id).1 != entity {
+            edited.push((row_count, entity_u32));
+        }
         for (column, absent_rows) in &mut absent {
             let (name, _) = &spec.scalar_schema[*column];
             let columns = &cursors[index].columns;
@@ -315,6 +309,7 @@ pub fn fold_row_space(
 
     let rows = writer.finish().map_err(columns_io)?;
     debug_assert_eq!(rows as u32, row_count);
+    let edited_rows = crate::edited::write_edited_rows(output_dir, &edited)?;
 
     // The present set is the complement of what this pass recorded, over the rows it actually
     // emitted. A column whose absent rows were all dropped by a tombstone has none left and gets
@@ -347,6 +342,7 @@ pub fn fold_row_space(
     Ok(FoldRowSpaceOutput {
         row_count,
         presence_columns,
+        edited_rows,
     })
 }
 
@@ -378,6 +374,7 @@ mod tests {
             .iter()
             .map(|(entity, x, score)| FlushRow {
                 entity_id: EntityId::new(*entity),
+                number: EntityId::new(*entity),
                 external_id: None,
                 x: *x,
                 y: 0.0,

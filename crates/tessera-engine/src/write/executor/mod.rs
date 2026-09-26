@@ -8,7 +8,6 @@ mod manifest;
 mod memberships;
 mod publications;
 mod unique;
-mod values;
 mod wal;
 mod window;
 
@@ -18,15 +17,13 @@ pub(super) use manifest::SideManifests;
 pub(in crate::write) use unique::UniqueDeclarations;
 pub(super) use wal::ExecutorLog;
 
-pub use commands::*;
+pub(in crate::write) use commands::*;
 pub use deny::*;
 pub(in crate::write) use fold::*;
 use manifest::*;
 use memberships::*;
 pub(in crate::write) use publications::*;
 use wal::*;
-use values::*;
-use window::mint_values_codes;
 
 
 /// How long after a failed cycle the next retry may come, so it does not retry on every wake.
@@ -73,6 +70,10 @@ pub(super) struct Executor {
     /// The view the last dispatched flush writes and the entity floor its segment leaves; read
     /// only while that flush is outstanding.
     pub(super) flush_flight: Option<(String, u64)>,
+    /// Each entity an edit this process committed moved an item away from, with the entity it
+    /// moved to, until a fold removes the old one. A deny resolved to the old entity before the
+    /// edit reaches the item where it is now ([`Executor::redirect_denies`]).
+    pub(super) superseded: FxHashMap<EntityId, EntityId>,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
@@ -328,6 +329,8 @@ impl Executor {
             Some(retired) if !retired.is_empty() => {
                 // The live external-id map loses the retired bindings first.
                 let forgotten = self.live.forget_established(retired);
+                self.superseded
+                    .retain(|old, _| !retired.contains(old.raw() as u32));
                 let mut overlay = (*previous.overlay).clone();
                 let count = overlay.retire(retired);
                 tracing::info!(
@@ -355,6 +358,7 @@ impl Executor {
                 g.fragments = Arc::clone(&r.fragments);
                 g.external_index = Arc::clone(&r.external_index);
                 g.unique = Arc::clone(&r.unique);
+                g.edited = Arc::clone(&r.edited);
             }
             g.delta_postings = delta_postings;
             g.overlay_version = overlay_version;

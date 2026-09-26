@@ -149,6 +149,9 @@ pub struct SegmentData {
     /// `morton`, which selection evaluates per cell instead of per row.
     pub cuts: CutIndex,
     pub columns: ColumnsRef,
+    /// The `(row, entity)` pairs of the rows whose entity is not their number
+    /// ([`crate::edited`]), ascending by row.
+    pub edited: Vec<(u32, u32)>,
 }
 
 impl SegmentData {
@@ -179,7 +182,28 @@ impl SegmentData {
                     source,
                 }
             })?,
+            edited: crate::edited::read_edited_rows(dir).map_err(|source| SegmentLoadError {
+                file: "edited rows",
+                source,
+            })?,
         })
+    }
+
+    /// The entity row `local` belongs to.
+    pub fn entity_of(
+        &self,
+        local: u32,
+        key: &tessera_types::IdentityKey,
+        shard_id: u32,
+    ) -> Result<tessera_types::EntityId> {
+        crate::edited::entity_of_row(
+            &self.edited,
+            local,
+            self.columns.tessera_id()[local as usize],
+            key,
+            shard_id,
+            &self.seg_id,
+        )
     }
 }
 
@@ -840,6 +864,23 @@ fn open_prefix(
                 }
             }
 
+            // The rows whose entity their `tessera_id` does not name, read by the segment's load
+            // and so held to the membership rule the files above are.
+            if seg_dir.join(crate::edited::EDITED_ROWS_FILE).exists() {
+                let rel = format!(
+                    "partitions/{}/{}/segments/{}/{}",
+                    partition_desc.phash,
+                    crate::view_rel(&seg_desc.view),
+                    seg_desc.seg_id,
+                    crate::edited::EDITED_ROWS_FILE
+                );
+                ensure_verified(
+                    &rel,
+                    &segments_manifest,
+                    &manifest.files,
+                    &seg_dir.join(crate::edited::EDITED_ROWS_FILE),
+                )?;
+            }
             let segment = SegmentData::load(&seg_dir, &seg_desc.seg_id, seg_desc.row_count)
                 .map_err(|e| e.source)?;
             let (morton, columns) = (&segment.morton, &segment.columns);
@@ -930,6 +971,7 @@ fn open_prefix(
                     seg_desc.entity_hi,
                     row_base,
                     columns.tessera_id(),
+                    &segment.edited,
                     &identity_key,
                     manifest.identity.shard_id,
                 )?;

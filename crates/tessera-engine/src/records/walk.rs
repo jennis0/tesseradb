@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use croaring::Bitmap;
 use tessera_store::read::SegmentData;
-use tessera_types::{EntityId, TesseraId};
+use tessera_types::EntityId;
 
 use super::cursor::{Key, Position};
 use super::{RecordsOrder, ResponseEndedBy};
@@ -80,9 +80,13 @@ impl<'a> PageCx<'a> {
         &self.open.served.segments
     }
 
-    fn entity_of(&self, tessera_id: u64) -> u32 {
-        let (_, entity) = self.engine.identity_key.invert(TesseraId::new(tessera_id));
-        u32::try_from(entity.raw()).expect("inversion yields a 32-bit entity")
+    /// The entity `segment`'s row `local` belongs to.
+    fn entity_of(&self, segment: &SegmentData, local: u32) -> u32 {
+        let shard = self.generation.bundle.manifest.identity.shard_id;
+        let entity = segment
+            .entity_of(local, &self.engine.identity_key, shard)
+            .expect("an opened segment's rows invert to its own shard");
+        u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9")
     }
 }
 
@@ -432,12 +436,11 @@ impl Walk {
                 let mut entities: Vec<u32> = Vec::new();
                 for (s, range) in &parts {
                     let (segment, base) = segments[*s];
-                    let ids = segment.columns.tessera_id();
                     let visible = cx.open.mask.rows_in_range(base + range.start..base + range.end);
                     entities.extend(
                         visible
                             .iter()
-                            .map(|row| cx.entity_of(ids[(row - base) as usize])),
+                            .map(|row| cx.entity_of(segment, row - base)),
                     );
                 }
                 entities.sort_unstable();
@@ -677,7 +680,7 @@ impl Take<'_> {
                     seg: run.seg,
                     local,
                     tessera_id,
-                    entity: cx.entity_of(tessera_id),
+                    entity: cx.entity_of(run.segment, local),
                     matched,
                 });
                 run.at += 1;

@@ -194,40 +194,17 @@ impl BatchArtifacts {
     }
 }
 
-/// One accepted `POST /control/values` batch as it reaches the executor (`ingest.md` §1.4).
-///
-/// **Columns are named, and a row's values are positional against that list.** A values batch
-/// carries whichever subset of the schema the caller has, in the caller's own order, so a
-/// positional tail against the whole declared order would make the wire depend on a schema the
-/// caller may not have read. The executor resolves each name once per batch — to a position in
-/// the declared scalar tail, or to one of the view's group-scoped families — and the log carries
-/// the same named form, so a replay resolves it the same way.
+/// An item a row edits, as the handler resolved it: the entity it leaves, its number, and the rows
+/// its new entity takes, awaiting that entity's id on the executor.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValuesRequest {
-    pub batch_id: String,
-    pub body_hash: [u8; 32],
-    /// The view this batch's fills belong to: the `x-tessera-view` header where one was given,
-    /// and the deployment's first view otherwise, which a batch filling only entity-scoped cells
-    /// may take since any view's pass writes those. It decides which flush pass writes the fills
-    /// and which view's column of a group-scoped family a scoped cell addresses. `None` on a batch
-    /// that fills no cell.
-    pub view: Option<String>,
-    /// The declared column names this batch carries, in the caller's order.
-    pub columns: Vec<String>,
-    /// One row per entity, values positional against `columns`.
-    pub rows: Vec<IncomingValues>,
-    /// The artifacts this batch's rows named in a column named for a layer (`ingest.md` §1.4): a
-    /// membership join for an entity that exists, resolved and grown in the same commit as the
-    /// cells, so there is no state in which a value is filled and its membership is not. Empty
-    /// for a batch that named none.
-    pub artifacts: BatchArtifacts,
-}
-
-/// One row of a [`ValuesRequest`]: the entity the values fill, already resolved, and its cells.
-#[derive(Debug, Clone, PartialEq)]
-pub struct IncomingValues {
-    pub entity: EntityId,
-    pub values: Vec<crate::wal::WalScalar>,
+pub struct UnallocatedEdit {
+    pub old: EntityId,
+    /// The entity the item was first given, which its `tessera_id` is taken from.
+    pub number: EntityId,
+    /// The first row carries the item's label and every declared value, and its `terms`; each
+    /// other row places the item in one more view and carries that view's position and
+    /// group-scoped values alone. Every `join` is `None`: all of them take the new entity.
+    pub rows: Vec<UnallocatedRow>,
 }
 
 /// Why a command did not come back with a receipt. Distinct from [`ExecError`], which is why an

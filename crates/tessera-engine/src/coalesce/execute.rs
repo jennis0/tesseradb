@@ -399,6 +399,34 @@ pub(super) fn coalesce_entity_terms(
     Ok(extent)
 }
 
+/// One direction's window of live edited-items runs merged into new runs, nothing dropped.
+pub(super) fn coalesce_edited_window(
+    window: &super::EditedWindow,
+    ctx: &CoalesceContext,
+    files: &mut BTreeMap<String, FileDigest>,
+) -> Result<Vec<String>, MaintenanceFailed> {
+    let what = format!("edited-item runs ({})", window.direction.name());
+    let inputs: Vec<PathBuf> = window.runs.iter().map(|rel| ctx.prefix_dir.join(rel)).collect();
+    let out_rel = format!("{}/edited/{}", ctx.out_rel, window.direction.name());
+    let written = tessera_store::edited::merge_edited_runs(
+        window.direction,
+        &inputs,
+        &croaring::Bitmap::new(),
+        &ctx.prefix_dir.join(&out_rel),
+        "merged",
+    )
+    .map_err(failed(&what))?;
+    let paths: Vec<PathBuf> = written.iter().map(|run| run.path.clone()).collect();
+    tessera_store::fsync_written(&paths).map_err(failed(&what))?;
+    let rels: Vec<String> = written
+        .iter()
+        .map(|run| tessera_store::unique::relative(&ctx.prefix_dir, &run.path))
+        .collect::<Result<_, _>>()
+        .map_err(failed(&what))?;
+    digest_outputs(files, ctx, rels.iter().map(String::as_str))?;
+    Ok(rels)
+}
+
 /// One unique column's window of live runs merged into new runs, nothing dropped: an entry names
 /// a value and an entity, and a deleted entity's entry is dropped by the fold alone.
 pub(super) fn coalesce_unique_window(

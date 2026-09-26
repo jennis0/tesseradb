@@ -68,9 +68,34 @@ impl Executor {
         if entries.is_empty() {
             return false;
         }
+        self.redirect_denies(&mut entries);
         self.cascade_dependents(&mut entries);
         self.commit_denies(entries);
         true
+    }
+
+    /// Carry each change naming an entity an edit has moved an item away from to the entity the
+    /// item holds now, in the same entry, so the record the log keeps names both. A handler
+    /// resolves a request's `tessera_id`s before it is queued, and an edit committed in between
+    /// has deleted the entity it resolved to: a suppression applied there alone would leave the
+    /// item visible under its acknowledgement.
+    pub(super) fn redirect_denies(&self, entries: &mut [DenyEntry]) {
+        if self.superseded.is_empty() {
+            return;
+        }
+        for entry in entries.iter_mut() {
+            let mut carried: Vec<(EntityId, ChangeOp)> = Vec::new();
+            for (entity, op) in &entry.changes {
+                let mut current = *entity;
+                while let Some(next) = self.superseded.get(&current) {
+                    current = *next;
+                }
+                if current != *entity {
+                    carried.push((current, *op));
+                }
+            }
+            entry.changes.extend(carried);
+        }
     }
 
     /// Add one entry deleting every artifact that depends on one this window deletes. Only
@@ -221,10 +246,11 @@ impl Executor {
 
         // A deleted entity's rows leave the buffer here, or they would pin the WAL: `plan_flush`
         // never consumes a deleted row.
-        let (buffer, unique_live) = if !generation.buffer.holds_any(&deleted) {
+        let (buffer, unique_live, edited_live) = if !generation.buffer.holds_any(&deleted) {
             (
                 Arc::clone(&generation.buffer),
                 Arc::clone(&generation.unique_live),
+                Arc::clone(&generation.edited_live),
             )
         } else {
             let mut buffer = (*generation.buffer).clone();
@@ -234,10 +260,13 @@ impl Executor {
             self.health
                 .buffered_items
                 .store(buffer.len(), Ordering::SeqCst);
-            // A deleted entity names nothing, so its live unique entries go with its rows.
+            // A deleted entity names nothing, so its live unique entries and edited-item pair go
+            // with its rows.
             let mut unique_live = (*generation.unique_live).clone();
             unique_live.remove_entities(&deleted.iter().filter_map(|e| u32::try_from(e.raw()).ok()).collect());
-            (Arc::new(buffer), Arc::new(unique_live))
+            let mut edited_live = (*generation.edited_live).clone();
+            edited_live.remove(deleted.iter().filter_map(|e| u32::try_from(e.raw()).ok()));
+            (Arc::new(buffer), Arc::new(unique_live), Arc::new(edited_live))
         };
 
         // A window of deletes and suppressions only grows the mask; an unsuppress re-derives it,
@@ -248,11 +277,13 @@ impl Executor {
                 g.overlay_version = overlay_version;
                 g.overlay = Arc::new(overlay);
                 g.unique_live = unique_live;
+                g.edited_live = edited_live;
             })
         } else {
-            generation.with_denies(Arc::new(overlay), &newly_denied, buffer, |g| {
+            generation.with_denies(Arc::new(overlay), &newly_denied, buffer, &[], |g| {
                 g.overlay_version = overlay_version;
                 g.unique_live = unique_live;
+                g.edited_live = edited_live;
             })
         };
         self.publish(next, started)

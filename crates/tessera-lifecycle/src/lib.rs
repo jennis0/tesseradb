@@ -37,11 +37,10 @@ pub use alloc::{
     allocator_ceiling, allocator_floor, assign_sorted, high_water_from, low_water_from, Allocator,
     PendingItem,
 };
-pub use buffer::{BufferedItem, DescriptorResolver, Fill, IngestBuffer, ScopedFill};
+pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{
     AttributeRequest, BatchArtifacts, BatchEdge, BatchMembership, DeclaredValue, ExecError,
-    IncomingValues, IngestRow, MembershipGrown, SubmitError, UnallocatedRow, ValuesRequest,
-    VocabularyRequest,
+    IngestRow, MembershipGrown, SubmitError, UnallocatedEdit, UnallocatedRow, VocabularyRequest,
 };
 pub use faults::WalMeter;
 pub use membership::{
@@ -56,7 +55,7 @@ pub use registry::{
 pub use roster::{GroupFacts, RosterError, ViewRoster};
 pub use wal::{
     batch_identity, BatchIdentity, ChangeOp, ExecutorWal, MembershipGrowth, OverlaySnapshotEntry,
-    RowOutcome, RowReceipt,
-    PublishedArtifact, Wal, WalError, WalRecord, WalRow, WalScalar,
+    PublishedArtifact, RowOutcome, RowReceipt, Wal, WalEdit, WalError, WalRecord, WalRow,
+    WalScalar,
 };
 pub use window::{ClosedEntry, CommitWindow, ResolvedMembership, Slot, WindowClaims, WindowEntry};

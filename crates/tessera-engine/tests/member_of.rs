@@ -364,7 +364,7 @@ fn an_artifact_that_is_not_served_is_an_empty_operand_and_refuses_nothing() {
     );
 
     // Suppressed: the broad principal, who was served it, now gets the empty operand too.
-    let entity = fx.engine.resolve_tessera_ids(&[fx.id])[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[fx.id]).unwrap()[0].unwrap();
     fx.engine.accept_change(entity, ChangeOp::Suppress).unwrap();
     let suppressed = viewport(&fx.engine, &full_coverage_credential(), Some(member_of(fx.id)));
     let never_broad = viewport(&fx.engine, &full_coverage_credential(), Some(member_of(unknown)));

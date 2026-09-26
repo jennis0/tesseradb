@@ -41,6 +41,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
         .iter()
         .map(|(entity, external_id)| FlushRow {
             entity_id: EntityId::new(*entity),
+            number: EntityId::new(*entity),
             external_id: Some(external_id.as_bytes().to_vec()),
             x: ((*entity % 97) as f64) / 97.0,
             y: ((*entity % 89) as f64) / 89.0,

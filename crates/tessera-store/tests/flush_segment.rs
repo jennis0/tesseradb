@@ -24,6 +24,7 @@ fn unit_quantisation() -> Quantisation {
 fn row(entity: u64, external_id: Option<&[u8]>, x: f64, y: f64) -> FlushRow {
     FlushRow {
         entity_id: EntityId::new(entity),
+        number: EntityId::new(entity),
         external_id: external_id.map(|id| id.to_vec()),
         x,
         y,

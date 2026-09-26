@@ -513,7 +513,7 @@ fn a_child_whose_parent_is_withheld_is_a_root() {
     // test can drive.
     let fx = fixture(None);
     let alpha = id_of(&fx, &full_coverage_credential(), "alpha");
-    let entity = fx.engine.resolve_tessera_ids(&[alpha])[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[alpha]).unwrap()[0].unwrap();
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
         .unwrap();

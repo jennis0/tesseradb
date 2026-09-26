@@ -195,12 +195,13 @@ pub enum AcceptError {
     /// Denies are not gated: a deny is entity-space state carried by WAL and manifest deny fields,
     /// threatens no segment, and must never be refused.
     SteppedDown,
-    /// A unique column's index could not be read while the batch's values were checked against
-    /// it. Nothing was submitted.
-    UniqueIndexUnreadable(String),
+    /// What the batch's items store could not be read while the batch was checked against it: a
+    /// unique column's index, the edited-items map, or an item's label, values or rows. Nothing
+    /// was submitted.
+    Unreadable(String),
     /// The batch conflicts with what is stored: a row names two items or a `tessera_id` nobody
-    /// holds, two rows name one item or set one value, or a row would change an item. The detail
-    /// names rows by position, values as sent and items by `tessera_id`. Nothing was submitted.
+    /// holds, or two rows name one item or set one value. The detail names rows by position,
+    /// values as sent and items by `tessera_id`. Nothing was submitted.
     Conflict(String),
     /// The batch cannot be taken as sent: a row creates an item with no position or no label, or
     /// carries coordinates in a batch naming no view. Nothing was submitted.
@@ -241,9 +242,9 @@ impl std::fmt::Display for AcceptError {
                 "ingest is refused while a partition serves a stepped-down side-manifest; repair \
                  or restore the damaged newest manifest's files, then retry"
             ),
-            AcceptError::UniqueIndexUnreadable(detail) => write!(
+            AcceptError::Unreadable(detail) => write!(
                 f,
-                "a unique column's index could not be read ({detail}); nothing was applied"
+                "what this batch's items store could not be read ({detail}); nothing was applied"
             ),
             AcceptError::Conflict(detail) | AcceptError::Contract(detail) => {
                 write!(f, "{detail}")
@@ -323,6 +324,8 @@ pub(crate) struct WritePathState {
     /// Every change to a column's `unique` flag the log holds, in log order: what the open applies
     /// to the partition manifest's unique indexes. Taken by the open; empty afterwards.
     pub(crate) unique_events: Vec<UniqueEvent>,
+    /// The edited-items pairs of the edits whose new entity's own row the replayed buffer holds.
+    pub(crate) edited_live: crate::edited::EditedLive,
 }
 
 /// One change to a column's `unique` flag replayed from the log: a declaration made at a running
@@ -529,6 +532,7 @@ impl WritePath {
                     last_tick: std::time::Instant::now(),
                     pending_forms: std::collections::BTreeMap::new(),
                     flush_flight: None,
+                    superseded: FxHashMap::default(),
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };
@@ -666,6 +670,7 @@ impl WritePath {
         let mark = StageMark::now();
         let crate::ingest::Planned {
             rows,
+            edits,
             slots,
             keys,
             artifacts,
@@ -673,6 +678,7 @@ impl WritePath {
         } = planned;
         let submission = command::IngestSubmission {
             rows,
+            edits,
             slots,
             keys,
             batch_id,
@@ -732,20 +738,6 @@ impl WritePath {
     ) -> Result<bool, AcceptError> {
         self.submit(|reply| Command::DeclareAttribute {
             request: Box::new(request),
-            reply,
-        })
-    }
-
-    /// Fill attribute values on entities that already exist (`POST /control/values`), and answer
-    /// what the batch did.
-    pub(crate) fn fill_values(
-        &self,
-        request: Box<tessera_lifecycle::ValuesRequest>,
-        unique_seq: u64,
-    ) -> Result<ValuesOutcome, AcceptError> {
-        self.submit(|reply| Command::Values {
-            request,
-            unique_seq,
             reply,
         })
     }

@@ -212,6 +212,7 @@ pub fn flush_segment(
             rows: (entity_lo..entity_lo + count)
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
+                    number: EntityId::new(e),
                     external_id: Some(format!("ext-{e}").into_bytes()),
                     x: ((e * 37) % 100) as f64 / 100.0,
                     y: ((e * 61) % 100) as f64 / 100.0,
@@ -240,6 +241,7 @@ pub fn flush_segment(
         .join("segments")
         .join(&seg_id);
     let segment = SegmentData {
+        edited: Vec::new(),
         seg_id,
         row_count: out.segment.row_count,
         morton: MortonSlice::load(&seg_dir.join("morton.u32")).expect("morton"),

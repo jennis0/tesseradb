@@ -1,4 +1,4 @@
-//! The control (admin) plane: ingest, values, changes, declarations, status, flush and compact.
+//! The control (admin) plane: ingest, changes, declarations, status, flush and compact.
 //! Every route requires the operator credential, checked once at the router by
 //! [`require_operator_credential`]; `/healthz` and `/readyz` are served on the viewer and session
 //! listeners, not here.
@@ -26,8 +26,7 @@ use tessera_types::view::ViewMetadataValue;
 use tessera_types::{EntityId, TesseraId};
 
 use crate::decode::{
-    labels_col, parse_ingest_batch, parse_values_batch, Address, BodyEncoding, DecodeError,
-    ParsedBatch, ParsedValues,
+    labels_col, parse_ingest_batch, Address, BodyEncoding, DecodeError, ParsedBatch,
 };
 use crate::error::{
     map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
@@ -107,13 +106,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     ));
     let changes_route =
         post(changes).layer(axum::extract::DefaultBodyLimit::max(CHANGES_MAX_BODY_BYTES));
-    // A values row costs what an ingest row does, so it takes the same cap.
-    let values_route = post(values).layer(axum::extract::DefaultBodyLimit::max(
-        state.limits.ingest_max_batch_bytes,
-    ));
     let router = Router::new()
         .route("/control/ingest", ingest_route)
-        .route("/control/values", values_route)
         .route("/control/changes", changes_route)
         .route("/control/status", get(status))
         .route("/control/flush", post(flush))
@@ -230,7 +224,7 @@ const CHANGES_MAX_ITEMS: usize = 10_000;
 /// `/control/status` can publish it.
 const DECLARATION_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
-/// What an over-cap `/control/ingest` or `/control/values` caller does next.
+/// What an over-cap `/control/ingest` caller does next.
 const INGEST_BODY_REMEDY: &str = " (ingest.ingest_max_batch_bytes); send fewer rows per batch";
 
 /// The content type that selects Arrow IPC on a record-bearing route.
@@ -298,187 +292,6 @@ fn view_header(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
             })
         })
         .transpose()
-}
-
-/// `POST /control/values`' acknowledgement.
-#[derive(serde::Serialize)]
-struct ValuesResp {
-    /// Rows this batch carried.
-    rows: u64,
-    /// Cells that were absent and now hold the supplied value.
-    filled: u64,
-    /// Cells that already held the identical value, which the fill rule accepts with no effect.
-    held: u64,
-    /// Memberships this batch's layer columns added: every row placed in an artifact the batch
-    /// created, and every row an artifact already held did not yet hold.
-    joined: u64,
-    /// Artifacts this batch created, for keys no artifact held on a layer whose value set is open.
-    minted: u64,
-    /// This batch id was already accepted with these bytes. A replay fills nothing (`filled` is 0
-    /// and `held` the row count); the flag tells it apart from a first submission whose cells
-    /// another writer had already filled identically.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    replayed: bool,
-    /// The cycle this batch's cells become visible in.
-    publication: u64,
-    /// `wait=visible` only: whether the counter reached `publication` inside
-    /// `serve.visible_wait_max_secs`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    visible: Option<bool>,
-}
-
-/// `POST /control/values`: fills attribute values on entities that already exist, creating no
-/// point; a layer column joins or mints artifacts as on ingest. Group-scoped columns and layers
-/// need `x-tessera-view` naming a view whose key their group owns.
-async fn values(
-    State(state): State<Arc<AppState>>,
-    ApiQuery(wait): ApiQuery<WaitQuery>,
-    headers: HeaderMap,
-    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
-) -> Result<Json<ValuesResp>, ApiError> {
-    let body = body.map_err(|rejection| {
-        body_refusal(
-            rejection.status(),
-            "values",
-            state.limits.ingest_max_batch_bytes,
-            INGEST_BODY_REMEDY,
-        )
-    })?;
-    let batch_id = batch_id_header(&headers)?;
-    let encoding = body_encoding(&headers)?;
-    let view = view_header(&headers)?;
-    let Some(permit) = state.ingest_admission.try_admit() else {
-        tracing::debug!("the ingest admission bound is saturated; answering 429 backpressure");
-        return Err(ApiError::Backpressure {
-            retry_after_s: crate::error::admission_retry_after_s(
-                &state.engine.write_executor_stats(),
-            ),
-            cause: crate::error::ShedCause::IngestAdmission,
-        });
-    };
-    let mut resp = state
-        .blocking(move |state| {
-            let _permit = permit;
-            run_values(state, encoding, &body, batch_id, view.as_deref())
-        })
-        .await?;
-    let ack = publication_ack(&state, &wait).await?;
-    resp.publication = ack.publication;
-    resp.visible = ack.visible;
-    Ok(Json(resp))
-}
-
-/// The blocking half of `POST /control/values`.
-fn run_values(
-    state: &AppState,
-    encoding: BodyEncoding,
-    body: &[u8],
-    batch_id: String,
-    view: Option<&str>,
-) -> Result<ValuesResp, ApiError> {
-    let body_hash: [u8; 32] = Sha256::digest(body).into();
-    let meta = state.engine.meta();
-    // The view whose flush pass writes the cells: the header's, or else the first view. A batch
-    // naming no view may name no group-scoped column or layer, so its cells are entity-scoped and
-    // any view's pass writes them.
-    let resolved = match view {
-        Some(_) => Some(resolve_view(view, &meta)?.id.clone()),
-        None => meta.views.first().map(|v| v.id.clone()),
-    };
-    // Scoped families and layers need the header: without it the batch has not said which key
-    // it writes.
-    let named = view.and(resolved.as_ref());
-    let scoped: Vec<ScopedScalar> = match named {
-        None => Vec::new(),
-        Some(resolved) => meta
-            .scoped_scalars
-            .iter()
-            .filter(|f| meta.owning_key(resolved, &f.group).is_some())
-            .cloned()
-            .collect(),
-    };
-    let view_in = |group: &str| meta.owning_key(named?, group).map(str::to_string);
-    let ParsedValues {
-        columns,
-        rows,
-        artifacts,
-    } = parse_values_batch(
-        encoding,
-        body,
-        &meta.declared_scalars,
-        &scoped,
-        &meta.vocabularies,
-        &|name| state.engine.registered_layer(name).map(|l| l.declaration),
-        &view_in,
-    )
-    .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
-    if resolved.is_none() && !columns.is_empty() {
-        return Err(ApiError::Contract(
-            "this deployment has no view to write the values under; create a view first".into(),
-        ));
-    }
-
-    // The row cap can only be checked after the whole body is decoded.
-    if rows.len() > state.limits.ingest_max_batch_rows {
-        return Err(ApiError::Contract(format!(
-            "values batch has {} rows, over the {}-row limit (ingest.ingest_max_batch_rows); \
-             send at most that many per batch",
-            rows.len(),
-            state.limits.ingest_max_batch_rows
-        )));
-    }
-
-    // Every address is resolved to an entity here, at the boundary; the executor sees entities
-    // only.
-    let entities = resolve_addresses(state, rows.iter().map(|row| &row.address))?;
-
-    let mut request_rows = Vec::with_capacity(rows.len());
-    for (index, (row, held)) in rows.into_iter().zip(entities).enumerate() {
-        // A subject that does not exist refuses the batch. The refusal names the row by its index
-        // in the batch, never by the id the caller sent, whichever address form the row used.
-        let Some(entity) = held else {
-            return Err(ApiError::Contract(format!(
-                "row {index} names an identifier this deployment does not hold; ingest the \
-                 point before writing its values"
-            )));
-        };
-        request_rows.push(tessera_engine::IncomingValues {
-            entity,
-            values: row.values,
-        });
-    }
-
-    let accepted = request_rows.len() as u64;
-    // Read before submitting: a byte-identical retry is a batch id already held under this hash.
-    let replayed = state
-        .engine
-        .accepted_batch(&batch_id)
-        .is_some_and(|held_hash| held_hash == body_hash);
-    let receipt = state
-        .engine
-        .fill_values(tessera_engine::ValuesRequest {
-            batch_id,
-            body_hash,
-            view: resolved,
-            columns,
-            rows: request_rows,
-            artifacts,
-        })
-        .map_err(|e| {
-            tracing::error!("a values batch was refused by the write executor");
-            map_accept_error(e)
-        })?;
-    Ok(ValuesResp {
-        rows: accepted,
-        filled: receipt.filled,
-        held: receipt.held,
-        joined: receipt.joined,
-        minted: receipt.minted,
-        replayed,
-        // Filled by the handler, which is where the wait can be awaited.
-        publication: 0,
-        visible: None,
-    })
 }
 
 /// The view a write batch names in `x-tessera-view`. With no header the deployment must have
@@ -897,7 +710,10 @@ fn resolve_addresses<'a>(
             Address::External(_) => None,
         })
         .collect();
-    let tessera = state.engine.resolve_tessera_ids(&ids);
+    let tessera = state
+        .engine
+        .resolve_tessera_ids(&ids)
+        .map_err(map_store_error)?;
     let keys: Vec<Vec<u8>> = addresses
         .iter()
         .filter_map(|address| match address {
@@ -1626,7 +1442,6 @@ async fn drop_view(
         .await?;
     let body = serde_json::json!({
         "deleted": dropped.deleted,
-        "fills_dropped": dropped.fills_dropped,
     });
     acknowledge(&state, &wait, StatusCode::OK, body).await
 }
@@ -1874,7 +1689,10 @@ fn resolve_member_addresses(
                         .map_err(|_| ApiError::Contract(format!("'{raw}' is not a tessera_id")))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            state.engine.resolve_tessera_ids(&ids)
+            state
+                .engine
+                .resolve_tessera_ids(&ids)
+                .map_err(map_store_error)?
         }
         Addressing::External => {
             let keys: Vec<Vec<u8>> = flat

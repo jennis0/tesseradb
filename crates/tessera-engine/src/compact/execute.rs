@@ -64,6 +64,8 @@ pub(crate) struct CompletedFold {
     pub(crate) external_id_run: Option<String>,
     /// Each unique column's new base runs, in key order with disjoint ranges.
     pub(crate) unique: Vec<(String, Vec<tessera_store::manifest::BaseKeyRun>)>,
+    /// The edited-items map's new base runs, each direction in key order with disjoint ranges.
+    pub(crate) edited: tessera_store::manifest::EditedItemsRuns,
     /// Written unchanged into the new `SEGMENTS-<n>.json`.
     pub(crate) term_images: Vec<FoldedTermImages>,
     pub(crate) cost: Vec<PassCost>,
@@ -140,6 +142,9 @@ pub(crate) fn execute(
     let unique = fold_unique_indexes(&plan, &ctx, &mut out)?;
     stairs.record("3b unique indexes");
 
+    let edited = fold_edited_items(&plan, &ctx, &mut out)?;
+    stairs.record("3c edited items");
+
     fold_text_columns(&plan, &ctx, &mut out)?;
     fold_value_columns(&plan, &ctx, &mut out)?;
     fold_record_blob(&plan, &ctx, &mut out)?;
@@ -160,6 +165,7 @@ pub(crate) fn execute(
         files,
         external_id_run,
         unique,
+        edited,
         term_images,
         cost: stairs.into_cost(),
         finished,
@@ -237,6 +243,10 @@ fn fold_row_spaces(
                 format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
                 tessera_store::render_presence::render_presence_path(&segment_dir, column),
             );
+        }
+        if out.edited_rows {
+            let name = tessera_store::edited::EDITED_ROWS_FILE;
+            output.push(format!("{segment_rel}/{name}"), segment_dir.join(name));
         }
         output.push(permutation_rel, permutation_path);
         output.push(row_entity_rel, row_entity_path);
@@ -456,6 +466,42 @@ fn fold_unique_indexes(
             base.push(listed);
         }
         folded.push((index.attribute.clone(), base));
+    }
+    Ok(folded)
+}
+
+/// Pass 3c: the edited-items runs of both directions, base and live, merged into new base runs
+/// with the entries of every tombstoned entity dropped: the entity an edit left is gone with its
+/// rows, and the one the item holds now keeps its number.
+fn fold_edited_items(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    out: &mut FoldOutput,
+) -> Result<tessera_store::manifest::EditedItemsRuns, MaintenanceFailed> {
+    use tessera_store::edited::Direction;
+    let mut folded = tessera_store::manifest::EditedItemsRuns::default();
+    for (direction, runs, into) in [
+        (Direction::ByNumber, &plan.edited.by_number, &mut folded.by_number),
+        (Direction::ByEntity, &plan.edited.by_entity, &mut folded.by_entity),
+    ] {
+        let inputs: Vec<PathBuf> = runs
+            .files()
+            .map(|rel| ctx.from_prefix_dir.join(rel))
+            .collect();
+        let written = tessera_store::edited::merge_edited_runs(
+            direction,
+            &inputs,
+            &plan.tombstones,
+            &ctx.to_prefix_dir.join(tessera_store::edited::runs_dir_rel(&plan.partition, direction)),
+            "base",
+        )
+        .map_err(failed("pass 3c (edited items)"))?;
+        for run in written {
+            let listed = tessera_store::edited::as_base(&ctx.to_prefix_dir, &run)
+                .map_err(failed("pass 3c (edited items)"))?;
+            out.push(listed.path.clone(), run.path);
+            into.base.push(listed);
+        }
     }
     Ok(folded)
 }

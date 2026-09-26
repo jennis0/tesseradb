@@ -85,7 +85,7 @@ mod ingest_rows {
                 artifacts,
             })?;
             let entities = self
-                .resolve_tessera_ids(&receipt.tessera_ids)
+                .resolve_tessera_ids(&receipt.tessera_ids).unwrap()
                 .into_iter()
                 .map(|entity| entity.expect("an accepted row names an item"))
                 .collect();
@@ -611,7 +611,7 @@ pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
 
 /// The entity an artifact's served identifier names.
 pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
-    engine.resolve_tessera_ids(&[id])[0].expect("it names what was issued")
+    engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
 /// A one-row ingest at the fixture's centre, carrying `ALL_TERM` — the batch id and the external
