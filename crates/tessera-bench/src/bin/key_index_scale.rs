@@ -3,6 +3,11 @@
 //! it, batched lookups, the full verification, and optionally the spill sort of the same number
 //! of entries arriving in random and in sequential key order.
 //!
+//! `--keys dense` puts the `i`th key at `2i` or `2i + 1`, half the integers in the range, as a
+//! sequence of record numbers with holes is. `--keys random` puts it uniformly in the lower half
+//! of the `i`th of `n` equal parts of the `u64` range, so gaps between keys are about as wide as
+//! between `n` sorted uniform keys. Entities are random in key order in both.
+//!
 //! "Cold" means the run was closed and its file's pages dropped from this machine's page cache
 //! with `posix_fadvise(POSIX_FADV_DONTNEED)` before the run was opened again, which needs no
 //! privilege. The binary prints how much of the file was resident after every drop. Under WSL2
@@ -13,7 +18,7 @@
 //! anonymous memory (`RssAnon`) are the spill's and not the lookups' mappings.
 //!
 //! ```text
-//! cargo run --release -p tessera-bench --bin key_index_scale -- --dir <scratch> [--entries N] [--spill]
+//! cargo run --release -p tessera-bench --bin key_index_scale -- --dir <scratch> [--entries N] [--keys dense|random] [--spill]
 //! ```
 
 use std::fs::File;
@@ -36,6 +41,9 @@ struct Args {
     dir: PathBuf,
     #[arg(long, default_value_t = 100_000_000)]
     entries: u64,
+    /// The keys: `dense` or `random` (see the module doc).
+    #[arg(long, default_value = "dense")]
+    keys: String,
     /// Single lookups timed in each of the cold and warm passes.
     #[arg(long, default_value_t = 2_000)]
     lookups: usize,
@@ -50,9 +58,38 @@ struct Args {
     spill_arm: Option<String>,
 }
 
-/// The `i`th key: ascending, in `[16i, 16i + 8)`, so `key_of(i) + 8` is never a key.
-fn key_of(i: u64) -> u64 {
-    i * 16 + (mix(i) % 8)
+/// The keys of a run of `n` entries: the `i`th key, and a key between it and the next that is
+/// never a key.
+#[derive(Clone, Copy)]
+enum Keys {
+    Dense,
+    Random { stride: u64 },
+}
+
+impl Keys {
+    fn new(name: &str, n: u64) -> Self {
+        match name {
+            "dense" => Keys::Dense,
+            "random" => Keys::Random {
+                stride: u64::MAX / n.max(1),
+            },
+            other => panic!("--keys is dense or random, not {other}"),
+        }
+    }
+
+    fn key(self, i: u64) -> u64 {
+        match self {
+            Keys::Dense => 2 * i + (mix(i) & 1),
+            Keys::Random { stride } => i * stride + mix(i) % (stride / 2),
+        }
+    }
+
+    fn absent(self, i: u64) -> u64 {
+        match self {
+            Keys::Dense => self.key(i) ^ 1,
+            Keys::Random { stride } => i * stride + stride / 2,
+        }
+    }
 }
 
 fn mix(mut x: u64) -> u64 {
@@ -179,14 +216,15 @@ fn main() {
         .join(format!("key-index-scale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create dir");
     let n = args.entries;
-    println!("entries: {n}");
+    let keys = Keys::new(&args.keys, n);
+    println!("entries: {n}, {} keys", args.keys);
 
     let started = Instant::now();
     let mut writer =
         KeyRunWriter::<u64>::create(&dir, "run", NonZeroU64::new(u64::MAX).expect("non-zero"));
     for i in 0..n {
         writer
-            .push(key_of(i), mix(i ^ 0xABCD) as u32)
+            .push(keys.key(i), mix(i ^ 0xABCD) as u32)
             .expect("push");
     }
     let runs = writer.finish().expect("finish");
@@ -207,9 +245,8 @@ fn main() {
     let (run, open) = cold_open(&path);
     println!("  open (cold): {open:.2?}");
     let mut rng = StdRng::seed_from_u64(42);
-    let probes: Vec<u64> = (0..args.lookups)
-        .map(|_| key_of(rng.gen_range(0..n)))
-        .collect();
+    let picks: Vec<u64> = (0..args.lookups).map(|_| rng.gen_range(0..n)).collect();
+    let probes: Vec<u64> = picks.iter().map(|&i| keys.key(i)).collect();
     let time_each = |keys: &[u64], present: bool| -> Vec<Duration> {
         keys.iter()
             .map(|&key| {
@@ -223,7 +260,7 @@ fn main() {
     };
     summary("  single lookup, entry page cold", time_each(&probes, true));
     summary("  single lookup, warm", time_each(&probes, true));
-    let absent: Vec<u64> = probes.iter().map(|&k| k + 8).collect();
+    let absent: Vec<u64> = picks.iter().map(|&i| keys.absent(i)).collect();
     summary(
         "  single lookup, absent key between two present, warm",
         time_each(&absent, false),
@@ -231,18 +268,18 @@ fn main() {
     drop(run);
 
     for batch in [1_000usize, 100_000] {
-        let mut keys: Vec<u64> = (0..batch).map(|_| key_of(rng.gen_range(0..n))).collect();
-        keys.sort_unstable();
+        let mut batch_keys: Vec<u64> = (0..batch).map(|_| keys.key(rng.gen_range(0..n))).collect();
+        batch_keys.sort_unstable();
         println!("batched lookup of {batch} sorted keys:");
         let (run, _) = cold_open(&path);
         let t = Instant::now();
-        let hits = run.lookup_sorted(&keys).expect("lookup");
+        let hits = run.lookup_sorted(&batch_keys).expect("lookup");
         let cold = t.elapsed();
         // The fastest of five, since a warm batch is short enough for other load to move it.
         let warm = (0..5)
             .map(|_| {
                 let t = Instant::now();
-                run.lookup_sorted(&keys).expect("lookup");
+                run.lookup_sorted(&batch_keys).expect("lookup");
                 t.elapsed()
             })
             .min()
