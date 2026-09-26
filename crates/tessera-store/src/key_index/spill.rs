@@ -7,6 +7,7 @@
 //! tracked as it is written), so sequential and clustered keys cost one more pass and never more
 //! memory. A bucket holding one key is routed by entity in the same way.
 
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -25,6 +26,16 @@ pub struct KeySpill<K: Key> {
     held: Vec<(K, u32)>,
     spilled: Option<Level<K>>,
     levels: u64,
+}
+
+/// A key held by more than one entity, as [`KeySpill::finish`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuplicateKey<K: Key> {
+    pub key: K,
+    /// The key's two smallest entities.
+    pub first: [u32; 2],
+    /// How many entities hold the key.
+    pub entities: u64,
 }
 
 /// The bytes one held entry costs.
@@ -59,8 +70,12 @@ impl<K: Key> KeySpill<K> {
         if let Some(level) = &mut self.spilled {
             return level.push(key, entity);
         }
+        let threshold = (self.budget / 2 / held_bytes::<K>()).max(1);
+        if self.held.capacity() == 0 {
+            self.held.reserve_exact(threshold);
+        }
         self.held.push((key, entity));
-        if self.held.len() >= (self.budget / 2 / held_bytes::<K>()).max(1) {
+        if self.held.len() >= threshold {
             let root = Split::Key(8 * K::WIDTH as u32 - 8);
             let mut level = self.level(root)?;
             for &(key, entity) in &self.held {
@@ -84,13 +99,13 @@ impl<K: Key> KeySpill<K> {
 
     /// Write every entry, sorted, as runs under `out_dir` (named and split as [`KeyRunWriter`]
     /// names and splits them), and call `on_duplicate` once for each key held by more than one
-    /// entity, with the number of entities.
+    /// entity.
     pub fn finish(
         mut self,
         out_dir: &Path,
         stem: &str,
-        max_entries: u64,
-        on_duplicate: impl FnMut(K, u64),
+        max_entries: NonZeroU64,
+        on_duplicate: impl FnMut(DuplicateKey<K>),
     ) -> Result<Vec<WrittenRun<K>>> {
         let mut sink = Sink {
             writer: KeyRunWriter::create(out_dir, stem, max_entries),
@@ -116,7 +131,7 @@ impl<K: Key> KeySpill<K> {
 
     /// Write out each bucket of one level in key order: sorted in memory when it fits the budget,
     /// routed into a finer level when it does not.
-    fn drain<F: FnMut(K, u64)>(
+    fn drain<F: FnMut(DuplicateKey<K>)>(
         &mut self,
         mut store: PartitionStore,
         bounds: Vec<Option<Bounds<K>>>,
@@ -252,24 +267,33 @@ impl<K: Key> Level<K> {
     }
 }
 
-/// The sorted stream's end: drops exact repeats, counts each key's entities, writes.
-struct Sink<K: Key, F: FnMut(K, u64)> {
+/// The sorted stream's end: drops exact repeats, gathers each key's entities, writes.
+struct Sink<K: Key, F: FnMut(DuplicateKey<K>)> {
     writer: KeyRunWriter<K>,
     last: Option<(K, u32)>,
-    group: Option<(K, u64)>,
+    group: Option<DuplicateKey<K>>,
     on_duplicate: F,
 }
 
-impl<K: Key, F: FnMut(K, u64)> Sink<K, F> {
+impl<K: Key, F: FnMut(DuplicateKey<K>)> Sink<K, F> {
     fn push(&mut self, key: K, entity: u32) -> Result<()> {
         if self.last == Some((key, entity)) {
             return Ok(());
         }
         match &mut self.group {
-            Some((k, n)) if *k == key => *n += 1,
+            Some(group) if group.key == key => {
+                if group.entities == 1 {
+                    group.first[1] = entity;
+                }
+                group.entities += 1;
+            }
             _ => {
                 self.close_group();
-                self.group = Some((key, 1));
+                self.group = Some(DuplicateKey {
+                    key,
+                    first: [entity, entity],
+                    entities: 1,
+                });
             }
         }
         self.writer.push(key, entity)?;
@@ -278,9 +302,9 @@ impl<K: Key, F: FnMut(K, u64)> Sink<K, F> {
     }
 
     fn close_group(&mut self) {
-        if let Some((key, n)) = self.group.take() {
-            if n > 1 {
-                (self.on_duplicate)(key, n);
+        if let Some(group) = self.group.take() {
+            if group.entities > 1 {
+                (self.on_duplicate)(group);
             }
         }
     }

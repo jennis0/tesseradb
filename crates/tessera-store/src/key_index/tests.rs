@@ -2,6 +2,7 @@
 //! what a damaged file does.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,11 +24,15 @@ fn write_sorted<K: Key>(
     let mut sorted = entries.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
-    let mut writer = KeyRunWriter::create(dir, stem, max);
+    let mut writer = KeyRunWriter::create(dir, stem, nz(max));
     for (k, e) in sorted {
         writer.push(k, e).unwrap();
     }
     writer.finish().unwrap()
+}
+
+fn nz(n: u64) -> NonZeroU64 {
+    NonZeroU64::new(n).unwrap()
 }
 
 fn open<K: Key>(path: &Path) -> KeyRun<K> {
@@ -150,14 +155,49 @@ fn a_writer_splits_at_a_key_change_so_runs_have_disjoint_ranges() {
 #[test]
 fn a_writer_refuses_entries_out_of_order_and_writes_nothing_for_no_entries() {
     let dir = tempfile::tempdir().unwrap();
-    let mut writer = KeyRunWriter::<u64>::create(dir.path(), "r", 10);
+    let mut writer = KeyRunWriter::<u64>::create(dir.path(), "r", nz(10));
     writer.push(5, 1).unwrap();
     assert!(writer.push(5, 1).is_err(), "a repeat");
     assert!(writer.push(4, 9).is_err(), "a smaller key");
-    assert!(KeyRunWriter::<u64>::create(dir.path(), "none", 10)
+    assert!(KeyRunWriter::<u64>::create(dir.path(), "none", nz(10))
         .finish()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn a_writer_never_overwrites_a_file_and_removes_what_it_wrote_when_dropped_unfinished() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("r-0.keys");
+    std::fs::write(&existing, b"not a run").unwrap();
+    let mut writer = KeyRunWriter::<u64>::create(dir.path(), "r", nz(10));
+    assert!(writer.push(1, 1).is_err());
+    drop(writer);
+    assert_eq!(std::fs::read(&existing).unwrap(), b"not a run");
+
+    let mut writer = KeyRunWriter::<u64>::create(dir.path(), "s", nz(10));
+    for k in 0..25u64 {
+        writer.push(k, 0).unwrap();
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 4);
+    drop(writer);
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "only the stranger's file"
+    );
+}
+
+#[test]
+fn a_one_entry_run_answers_its_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let runs = write_sorted(dir.path(), "r", &[(9u32, 4)], 10);
+    let run = open::<u32>(&runs[0].path);
+    assert_eq!(run.get(9).unwrap(), vec![4]);
+    assert!(run.get(8).unwrap().is_empty());
+    assert!(run.get(10).unwrap().is_empty());
+    assert_eq!(run.lookup_sorted(&[8, 9, 9]).unwrap(), vec![(1, 4), (2, 4)]);
+    assert_eq!(verify_run(&runs[0].path).unwrap().entries, 1);
 }
 
 #[test]
@@ -289,19 +329,27 @@ fn check_spill<K: Key>(entries: &[(K, u32)], budget: usize, max: u64) {
     }
     let mut reported = BTreeMap::new();
     let runs = spill
-        .finish(&out, "s", max, |k, n| {
-            assert!(reported.insert(k, n).is_none(), "a key is reported once");
+        .finish(&out, "s", nz(max), |d| {
+            let first = (d.first, d.entities);
+            assert!(
+                reported.insert(d.key, first).is_none(),
+                "a key is reported once"
+            );
         })
         .unwrap();
 
     let mut expected = entries.to_vec();
     expected.sort_unstable();
     expected.dedup();
-    let mut per_key: BTreeMap<K, u64> = BTreeMap::new();
-    for &(k, _) in &expected {
-        *per_key.entry(k).or_default() += 1;
+    let mut per_key: BTreeMap<K, ([u32; 2], u64)> = BTreeMap::new();
+    for &(k, e) in &expected {
+        let (first, n) = per_key.entry(k).or_insert(([e, e], 0));
+        if *n == 1 {
+            first[1] = e;
+        }
+        *n += 1;
     }
-    per_key.retain(|_, n| *n > 1);
+    per_key.retain(|_, (_, n)| *n > 1);
     assert_eq!(
         reported, per_key,
         "exactly the keys held by more than one entity"
@@ -372,7 +420,7 @@ fn a_merge_drops_exactly_the_retired_entities() {
     let mut model: BTreeSet<(u64, u32)> = a.iter().chain(&b).chain(&c).copied().collect();
     let out = dir.path().join("kept");
     std::fs::create_dir(&out).unwrap();
-    let kept = merge_runs::<u64>(&inputs, &Bitmap::new(), &out, "m", 1000).unwrap();
+    let kept = merge_runs::<u64>(&inputs, |_, _| false, &out, "m", nz(1000)).unwrap();
     let back: Vec<(u64, u32)> = kept
         .iter()
         .flat_map(|r| all(&open::<u64>(&r.path)))
@@ -384,12 +432,44 @@ fn a_merge_drops_exactly_the_retired_entities() {
     model.retain(|&(_, e)| !retired.contains(e));
     let out = dir.path().join("folded");
     std::fs::create_dir(&out).unwrap();
-    let folded = merge_runs::<u64>(&inputs, &retired, &out, "m", 1000).unwrap();
+    let folded =
+        merge_runs::<u64>(&inputs, |_, e| retired.contains(e), &out, "m", nz(1000)).unwrap();
     let back: Vec<(u64, u32)> = folded
         .iter()
         .flat_map(|r| all(&open::<u64>(&r.path)))
         .collect();
     assert_eq!(back, model.iter().copied().collect::<Vec<_>>());
+
+    let out = dir.path().join("none");
+    std::fs::create_dir(&out).unwrap();
+    assert!(merge_runs::<u64>(&inputs, |_, _| true, &out, "m", nz(1000))
+        .unwrap()
+        .is_empty());
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "no file");
+}
+
+/// An entity-to-number map is keyed by entity, so a fold drops its entries by key.
+#[test]
+fn a_merge_can_drop_entries_by_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let pairs: Vec<(u32, u32)> = (0..3000u32).map(|entity| (entity, entity / 2)).collect();
+    let input = write_sorted(dir.path(), "map", &pairs, 3000)[0]
+        .path
+        .clone();
+    let removed: Bitmap = (0..3000u32).filter(|e| e % 3 == 0).collect();
+    let out = dir.path().join("folded");
+    std::fs::create_dir(&out).unwrap();
+    let folded =
+        merge_runs::<u32>(&[input], |k, _| removed.contains(k), &out, "m", nz(1000)).unwrap();
+    let back: Vec<(u32, u32)> = folded
+        .iter()
+        .flat_map(|r| all(&open::<u32>(&r.path)))
+        .collect();
+    let want: Vec<(u32, u32)> = pairs
+        .into_iter()
+        .filter(|&(k, _)| !removed.contains(k))
+        .collect();
+    assert_eq!(back, want);
 }
 
 /// A run of 3000 `u64` keys: 9 entry pages of 341 entries.
@@ -446,19 +526,75 @@ fn a_flipped_byte_in_the_header_or_page_index_is_refused_at_open_and_by_the_veri
         assert_eq!(part_of(verify_run(&copy).unwrap_err()), part, "byte {at}");
     }
 
-    let copy = dir.path().join("short.keys");
     let bytes = std::fs::read(&path).unwrap();
-    std::fs::write(&copy, &bytes[..bytes.len() - 1]).unwrap();
-    assert_eq!(
-        part_of(KeyRun::<u64>::open(&copy).err().unwrap()),
-        RunPart::Header
-    );
+    for (name, len) in [
+        ("one-short", bytes.len() - 1),
+        ("under-a-page", 100),
+        ("empty", 0),
+    ] {
+        let copy = dir.path().join(name);
+        std::fs::write(&copy, &bytes[..len]).unwrap();
+        assert_eq!(
+            part_of(KeyRun::<u64>::open(&copy).err().unwrap()),
+            RunPart::Header,
+            "{name}"
+        );
+        assert_eq!(
+            part_of(verify_run(&copy).unwrap_err()),
+            RunPart::Header,
+            "{name}"
+        );
+    }
 }
 
-/// Page checksums catch damage; the verifier also catches a writer that put entries out of
-/// order, with correct checksums over them.
 #[test]
-fn the_verifier_refuses_entries_out_of_order_across_pages() {
+fn the_verifier_refuses_a_key_width_the_format_does_not_have() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("width.keys");
+    let header = Header {
+        key_width: 5,
+        entries: 0,
+        pages: 0,
+        min_key: 0,
+        max_key: 0,
+    };
+    let mut bytes = header.encode();
+    bytes.extend_from_slice(&crc32fast::hash(&[]).to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(part_of(verify_run(&path).unwrap_err()), RunPart::Header);
+}
+
+/// Bytes the format leaves unused are covered by no lookup; the verifier requires them zero.
+#[test]
+fn the_verifier_refuses_non_zero_unused_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    // 500 entries of 20 bytes: page 2 holds 92 entries and is unused after byte 1840.
+    let entries: Vec<(u128, u32)> = (0..500u128).map(|k| (k, 0)).collect();
+    let path = write_sorted(dir.path(), "r", &entries, 1000)[0]
+        .path
+        .clone();
+
+    let copy = dir.path().join("header.keys");
+    std::fs::copy(&path, &copy).unwrap();
+    flip(&copy, 1000);
+    assert_eq!(open::<u128>(&copy).get(3).unwrap(), vec![0]);
+    assert_eq!(part_of(verify_run(&copy).unwrap_err()), RunPart::Header);
+
+    let copy = dir.path().join("page.keys");
+    let mut bytes = std::fs::read(&path).unwrap();
+    let page = PAGE_SIZE * 3..PAGE_SIZE * 4;
+    bytes[page.start + 2000] = 1;
+    let crc = crc32fast::hash(&bytes[page.start..page.end - 4]);
+    bytes[page.end - 4..page.end].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&copy, &bytes).unwrap();
+    assert_eq!(open::<u128>(&copy).get(450).unwrap(), vec![0]);
+    assert_eq!(part_of(verify_run(&copy).unwrap_err()), RunPart::Page(2));
+}
+
+/// Page checksums catch damage; the order checks catch a writer that put entries out of order
+/// with correct checksums over them, once both neighbouring pages have been read.
+#[test]
+fn entries_out_of_order_across_pages_are_refused_by_lookups_and_the_verifier() {
     let dir = tempfile::tempdir().unwrap();
     let path = nine_pages(dir.path());
     let mut bytes = std::fs::read(&path).unwrap();
@@ -477,63 +613,130 @@ fn the_verifier_refuses_entries_out_of_order_across_pages() {
 
     let run = open::<u64>(&path);
     assert_eq!(run.get(0).unwrap(), vec![0]);
+    let page_2_key = 2 * per as u64 + 3;
+    assert_eq!(run.get(page_2_key).unwrap(), vec![page_2_key as u32]);
+    assert_eq!(
+        part_of(run.get(per as u64 + 3).unwrap_err()),
+        RunPart::Page(1)
+    );
     assert_eq!(part_of(verify_run(&path).unwrap_err()), RunPart::Page(2));
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
+/// Runs of `K` written from `runs`, looked up through a view of them as live runs, a view of
+/// their merge as base runs, and a view of both, answer as the set of pairs does; a batched lookup
+/// answers as the single lookups do in each.
+fn check_against_a_set_of_pairs<K: Key>(
+    key: impl Fn(u32) -> K,
+    runs: &[(Vec<(u32, u32)>, u64)],
+    retired: &[u32],
+    probes: &[u32],
+    merge_max: u64,
+) -> std::result::Result<(), TestCaseError> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut model: BTreeSet<(K, u32)> = BTreeSet::new();
+    let mut live = Vec::new();
+    let mut paths = Vec::new();
+    for (i, (entries, max)) in runs.iter().enumerate() {
+        let entries: Vec<(K, u32)> = entries.iter().map(|&(k, e)| (key(k), e)).collect();
+        model.extend(entries.iter().copied());
+        for w in write_sorted(dir.path(), &format!("in{i}"), &entries, *max) {
+            paths.push(w.path.clone());
+            live.push(Arc::new(open::<K>(&w.path)));
+        }
+    }
+    let retired: Bitmap = retired.iter().copied().collect();
+    let out = dir.path().join("merged");
+    std::fs::create_dir(&out).unwrap();
+    let merged =
+        merge_runs::<K>(&paths, |_, e| retired.contains(e), &out, "m", nz(merge_max)).unwrap();
+    let base: Vec<Arc<KeyRun<K>>> = merged.iter().map(|w| Arc::new(open(&w.path))).collect();
+    let kept: BTreeSet<(K, u32)> = model
+        .iter()
+        .copied()
+        .filter(|&(_, e)| !retired.contains(e))
+        .collect();
+    let back: Vec<(K, u32)> = base.iter().flat_map(|r| all(r)).collect();
+    prop_assert_eq!(&back, &kept.iter().copied().collect::<Vec<_>>());
 
-    /// Runs written from random entries, looked up through a view and merged with a random
-    /// retired set, answer as a set of `(key, entity)` pairs does.
-    #[test]
-    fn runs_views_and_merges_answer_as_a_set_of_pairs(
-        runs in prop::collection::vec(
-            (prop::collection::vec((0u64..400, 0u32..60), 0..900), 1u64..400),
-            1..5,
-        ),
-        retired in prop::collection::vec(0u32..60, 0..20),
-        probes in prop::collection::vec(0u64..420, 1..60),
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut model: BTreeSet<(u64, u32)> = BTreeSet::new();
-        let mut live = Vec::new();
-        let mut paths = Vec::new();
-        for (i, (entries, max)) in runs.iter().enumerate() {
-            model.extend(entries.iter().copied());
-            for w in write_sorted(dir.path(), &format!("in{i}"), entries, *max) {
-                paths.push(w.path.clone());
-                live.push(arc(&w.path));
-            }
-        }
-        let view = KeyIndexView::new(live, vec![]).unwrap();
-        let mut sorted = probes.clone();
-        sorted.sort_unstable();
-        let batched = view.lookup_sorted(&sorted).unwrap();
-        let mut from_batch: BTreeSet<(u64, u32)> = BTreeSet::new();
-        for &(i, found) in &batched {
-            from_batch.insert((sorted[i], found.entity));
-        }
-        for &key in &sorted {
-            let got: BTreeSet<u32> = view.get(key).unwrap().iter().map(|f| f.entity).collect();
-            let want: BTreeSet<u32> = model.range((key, 0)..=(key, u32::MAX)).map(|&(_, e)| e).collect();
-            prop_assert_eq!(&got, &want);
-            for e in want {
-                prop_assert!(from_batch.contains(&(key, e)));
-            }
-        }
-
-        let retired: Bitmap = retired.into_iter().collect();
-        let out = dir.path().join("merged");
-        std::fs::create_dir(&out).unwrap();
-        let merged = merge_runs::<u64>(&paths, &retired, &out, "m", 97).unwrap();
-        let base = KeyIndexView::new(vec![], merged.iter().map(|w| arc(&w.path)).collect()).unwrap();
-        let expected: Vec<(u64, u32)> = model.iter().copied().filter(|&(_, e)| !retired.contains(e)).collect();
-        let back: Vec<(u64, u32)> = merged.iter().flat_map(|w| all(&open::<u64>(&w.path))).collect();
-        prop_assert_eq!(&back, &expected);
-        for &key in &sorted {
-            let got: Vec<u32> = base.get(key).unwrap().iter().map(|f| f.entity).collect();
-            let want: Vec<u32> = expected.iter().filter(|&&(k, _)| k == key).map(|&(_, e)| e).collect();
+    let mut keys: Vec<K> = probes.iter().map(|&k| key(k)).collect();
+    keys.sort_unstable();
+    let views = [
+        (KeyIndexView::new(live.clone(), vec![]).unwrap(), &model),
+        (KeyIndexView::new(vec![], base.clone()).unwrap(), &kept),
+        (KeyIndexView::new(live, base).unwrap(), &model),
+    ];
+    for (view, want) in &views {
+        let single: Vec<(usize, Found)> = keys
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &k)| view.get(k).unwrap().into_iter().map(move |f| (i, f)))
+            .collect();
+        prop_assert_eq!(view.lookup_sorted(&keys).unwrap(), single);
+        for &k in &keys {
+            let got: BTreeSet<u32> = view.get(k).unwrap().iter().map(|f| f.entity).collect();
+            let want: BTreeSet<u32> = want
+                .range((k, 0)..=(k, u32::MAX))
+                .map(|&(_, e)| e)
+                .collect();
             prop_assert_eq!(got, want);
         }
+    }
+    Ok(())
+}
+
+fn runs_strategy() -> impl Strategy<Value = Vec<(Vec<(u32, u32)>, u64)>> {
+    // Few keys and many entities, so one key's entries span pages and runs.
+    prop::collection::vec(
+        (
+            prop::collection::vec((0u32..16, 0u32..3000), 0..1500),
+            50u64..2000,
+        ),
+        1..4,
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    #[test]
+    fn u32_runs_views_and_merges_answer_as_a_set_of_pairs(
+        runs in runs_strategy(),
+        retired in prop::collection::vec(0u32..3000, 0..400),
+        probes in prop::collection::vec(0u32..18, 1..40),
+        merge_max in 50u64..800,
+    ) {
+        check_against_a_set_of_pairs::<u32>(|k| k * 3, &runs, &retired, &probes, merge_max)?;
+    }
+
+    #[test]
+    fn u64_runs_views_and_merges_answer_as_a_set_of_pairs(
+        runs in runs_strategy(),
+        retired in prop::collection::vec(0u32..3000, 0..400),
+        probes in prop::collection::vec(0u32..18, 1..40),
+        merge_max in 50u64..800,
+    ) {
+        check_against_a_set_of_pairs::<u64>(
+            |k| signed_key(k as i64 - 20),
+            &runs,
+            &retired,
+            &probes,
+            merge_max,
+        )?;
+    }
+
+    #[test]
+    fn u128_runs_views_and_merges_answer_as_a_set_of_pairs(
+        runs in runs_strategy(),
+        retired in prop::collection::vec(0u32..3000, 0..400),
+        probes in prop::collection::vec(0u32..18, 1..40),
+        merge_max in 50u64..800,
+    ) {
+        check_against_a_set_of_pairs::<u128>(
+            |k| ((k as u128) << 100) | k as u128,
+            &runs,
+            &retired,
+            &probes,
+            merge_max,
+        )?;
     }
 }

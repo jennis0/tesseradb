@@ -1,6 +1,5 @@
 //! Lookups across a set of runs.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use super::{Key, KeyRun};
@@ -44,8 +43,8 @@ impl<K: Key> KeyIndexView<K> {
                 detail: format!(
                     "base key runs {} and {} overlap or are out of order; list base runs in \
                      ascending key order with disjoint ranges, and list any other run as live",
-                    display(base[w[0].2].path()),
-                    display(base[w[1].2].path()),
+                    base[w[0].2].path().display(),
+                    base[w[1].2].path().display(),
                 ),
             });
         }
@@ -138,8 +137,4 @@ impl<K: Key> KeyIndexView<K> {
         out.sort_by_key(|&(i, found)| (i, found.run));
         Ok(out)
     }
-}
-
-fn display(path: &Path) -> String {
-    path.display().to_string()
 }

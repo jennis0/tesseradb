@@ -1,7 +1,8 @@
 //! Writing sorted entries into run files.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use super::{entries_per_page, Header, Key, PAGE_BODY, PAGE_SIZE};
@@ -22,6 +23,9 @@ pub struct WrittenRun<K: Key> {
 /// A run is closed at the first key change once it holds `max_entries`, so a run exceeds that only
 /// by the entities of its last key, and the runs one writer emits have disjoint key ranges. A
 /// writer given no entries writes no file.
+///
+/// A file already at a run's name is an error, never overwritten. A writer dropped before
+/// [`KeyRunWriter::finish`] returns removes every file it created.
 pub struct KeyRunWriter<K: Key> {
     dir: PathBuf,
     stem: String,
@@ -32,12 +36,12 @@ pub struct KeyRunWriter<K: Key> {
 }
 
 impl<K: Key> KeyRunWriter<K> {
-    /// A writer into `dir`, which must exist. `max_entries` of 0 is taken as 1.
-    pub fn create(dir: &Path, stem: &str, max_entries: u64) -> Self {
+    /// A writer into `dir`, which must exist.
+    pub fn create(dir: &Path, stem: &str, max_entries: NonZeroU64) -> Self {
         KeyRunWriter {
             dir: dir.to_path_buf(),
             stem: stem.to_string(),
-            max_entries: max_entries.max(1),
+            max_entries: max_entries.get(),
             open: None,
             written: Vec::new(),
             last: None,
@@ -64,8 +68,7 @@ impl<K: Key> KeyRunWriter<K> {
                 .as_ref()
                 .is_some_and(|run| run.header.entries >= self.max_entries)
         {
-            let run = self.open.take().expect("checked above");
-            self.written.push(run.finish()?);
+            self.close()?;
         }
         if self.open.is_none() {
             let path = self
@@ -83,10 +86,32 @@ impl<K: Key> KeyRunWriter<K> {
 
     /// Close the last run and hand back every run written, in key order.
     pub fn finish(mut self) -> Result<Vec<WrittenRun<K>>> {
+        self.close()?;
+        Ok(std::mem::take(&mut self.written))
+    }
+
+    /// Finish the open run, if there is one; a run that fails to finish is removed.
+    fn close(&mut self) -> Result<()> {
         if let Some(run) = self.open.take() {
-            self.written.push(run.finish()?);
+            let path = run.path.clone();
+            match run.finish() {
+                Ok(written) => self.written.push(written),
+                Err(e) => {
+                    let _ = std::fs::remove_file(path);
+                    return Err(e);
+                }
+            }
         }
-        Ok(self.written)
+        Ok(())
+    }
+}
+
+impl<K: Key> Drop for KeyRunWriter<K> {
+    fn drop(&mut self) {
+        let open = self.open.take().map(|run| run.path);
+        for path in self.written.iter().map(|w| &w.path).chain(open.as_ref()) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -109,7 +134,11 @@ impl<K: Key> OpenRun<K> {
             path: path.clone(),
             source,
         };
-        let file = File::create(&path).map_err(io)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(io)?;
         let mut out = BufWriter::with_capacity(64 * PAGE_SIZE, file);
         out.write_all(&[0u8; PAGE_SIZE]).map_err(io)?;
         Ok(OpenRun {
@@ -186,7 +215,6 @@ impl<K: Key> OpenRun<K> {
         let mut file = self.out.into_inner().map_err(|e| io(e.into_error()))?;
         file.seek(SeekFrom::Start(0)).map_err(io)?;
         file.write_all(&header).map_err(io)?;
-        file.sync_all().map_err(io)?;
         Ok(WrittenRun {
             path: self.path,
             entries: self.header.entries,

@@ -2,27 +2,27 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-
-use croaring::Bitmap;
 
 use super::run::Entries;
 use super::{Key, KeyRun, KeyRunWriter, WrittenRun};
 use crate::error::Result;
 
 /// Merge the runs at `inputs` into new runs under `out_dir` (named as [`KeyRunWriter`] names
-/// them), dropping every entry whose entity is in `retired` and keeping every other entry once.
-/// An empty `retired` merges without dropping anything.
+/// them), dropping every entry for which `retired(key, entity)` is true and keeping every other
+/// entry once. A value-to-entity index tests the entity against the removed entities; an
+/// entity-to-value map tests the key. A merge that drops every entry writes no file.
 ///
 /// The output is split as [`KeyRunWriter`] splits, so the runs it returns have disjoint key ranges
 /// whatever the inputs' ranges were. Each input is read front to back once, every page checked as
 /// it is reached; memory is one page cursor per input.
 pub fn merge_runs<K: Key>(
     inputs: &[PathBuf],
-    retired: &Bitmap,
+    mut retired: impl FnMut(K, u32) -> bool,
     out_dir: &Path,
     stem: &str,
-    max_entries: u64,
+    max_entries: NonZeroU64,
 ) -> Result<Vec<WrittenRun<K>>> {
     let runs = inputs
         .iter()
@@ -44,7 +44,7 @@ pub fn merge_runs<K: Key>(
             let (next_key, next_entity) = entry?;
             heap.push(Reverse((next_key, next_entity, i)));
         }
-        if last == Some((key, entity)) || retired.contains(entity) {
+        if last == Some((key, entity)) || retired(key, entity) {
             continue;
         }
         writer.push(key, entity)?;

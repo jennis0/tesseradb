@@ -20,8 +20,9 @@
 //! give 511, 341 and 204 entries a page.
 //!
 //! Opening a run reads the header and the page index and nothing else. An entry page's checksum,
-//! its order and its agreement with the page index are checked the first time the page is read,
-//! and the run remembers which pages have passed. A page, header or page index that fails is a
+//! its order, its agreement with the page index and its order against any neighbouring page
+//! already read are checked the first time the page is read, and the run remembers which pages
+//! have passed. A page, header or page index that fails is a
 //! [`StoreError::InvalidKeyIndex`] naming the file and the part, never an empty answer.
 //! [`verify_run`] checks every page at once.
 //!
@@ -29,10 +30,13 @@
 //!
 //! [`KeyRunWriter`] writes sorted entries, starting a new run file at the first key change past a
 //! given entry count, so no run has a size limit and the runs one writer emits have disjoint key
-//! ranges. [`KeySpill`] takes entries in any order under a memory budget, sorts them through a
-//! scratch directory and writes them the same way, reporting every key held by more than one
-//! entity. [`merge_runs`] merges runs into new ones, dropping the entries of a given set of
-//! entities.
+//! ranges. The header page is written last, so a file cut short while it was written fails its
+//! header check. No writer here fsyncs: a caller publishing runs passes their paths to
+//! [`crate::fsync_written`] before the manifest that names them.
+//!
+//! [`KeySpill`] takes entries in any order under a memory budget, sorts them through a scratch
+//! directory and writes them the same way, reporting every key held by more than one entity.
+//! [`merge_runs`] merges runs into new ones, dropping the entries a caller's test picks out.
 //!
 //! [`KeyRun`] answers for one run; [`KeyIndexView`] answers for a newest-first list of runs any
 //! key may be in plus a list of runs with disjoint key ranges, of which a lookup reads only the one
@@ -53,7 +57,7 @@ use std::fmt;
 pub use key::{keyword_key, signed_key, signed_value, unsigned_key, Key};
 pub use merge::merge_runs;
 pub use run::{verify_run, Entries, KeyRun, RunCheck};
-pub use spill::KeySpill;
+pub use spill::{DuplicateKey, KeySpill};
 pub use view::{Found, KeyIndexView, RunRef};
 pub use write::{KeyRunWriter, WrittenRun};
 
@@ -130,12 +134,12 @@ impl Header {
                 bytes.len()
             ));
         }
+        if bytes[0..8] != MAGIC {
+            return Err("the file does not start with the key run magic".to_string());
+        }
         let stored = u32::from_le_bytes(bytes[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap());
         if crc32fast::hash(&bytes[..HEADER_LEN]) != stored {
             return Err("the header checksum does not match its bytes".to_string());
-        }
-        if bytes[0..8] != MAGIC {
-            return Err("the file does not start with the key run magic".to_string());
         }
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         if version != FORMAT_VERSION {

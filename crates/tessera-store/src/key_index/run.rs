@@ -82,6 +82,14 @@ impl<K: Key> KeyRun<K> {
             source,
         };
         let file = File::open(path).map_err(io)?;
+        let len = file.metadata().map_err(io)?.len();
+        if len < PAGE_SIZE as u64 {
+            return Err(corrupt(
+                path,
+                RunPart::Header,
+                format!("the file is {len} bytes, shorter than its {PAGE_SIZE}-byte header page"),
+            ));
+        }
         // SAFETY: a run file is written once and never modified or truncated after it is
         // published; the mapping is read-only.
         let map = unsafe { Mmap::map(&file) }.map_err(io)?;
@@ -180,17 +188,20 @@ impl<K: Key> KeyRun<K> {
         K::read(&self.map[self.index_offset() + p as usize * K::WIDTH..])
     }
 
+    /// Entry page `p`'s bytes, unchecked.
+    fn raw_page(&self, p: u64) -> Page<'_, K> {
+        let at = (1 + p as usize) * PAGE_SIZE;
+        let per_page = entries_per_page(K::WIDTH) as u64;
+        Page {
+            bytes: &self.map[at..at + PAGE_SIZE],
+            len: (self.header.entries - p * per_page).min(per_page) as usize,
+            key: PhantomData,
+        }
+    }
+
     /// Entry page `p`, checked if this is its first read.
     fn page(&self, p: u64) -> Result<Page<'_, K>> {
-        let at = (1 + p as usize) * PAGE_SIZE;
-        let bytes = &self.map[at..at + PAGE_SIZE];
-        let per_page = entries_per_page(K::WIDTH) as u64;
-        let len = (self.header.entries - p * per_page).min(per_page) as usize;
-        let page = Page {
-            bytes,
-            len,
-            key: PhantomData,
-        };
+        let page = self.raw_page(p);
         if !self.is_verified(p) {
             self.check_page(p, &page)?;
             self.verified[(p / 64) as usize].fetch_or(1 << (p % 64), Ordering::Release);
@@ -198,8 +209,10 @@ impl<K: Key> KeyRun<K> {
         Ok(page)
     }
 
-    /// A page's checksum, the order of its entries, and its first and last keys against the page
-    /// index and the header.
+    /// A page's checksum, the order of its entries, its first and last keys against the page
+    /// index and the header, and the order of its first and last entries against those of a
+    /// neighbouring page already checked. Whichever of two neighbours is checked second compares
+    /// the two, so every pair of neighbouring pages a lookup has read is in order.
     fn check_page(&self, p: u64, page: &Page<'_, K>) -> Result<()> {
         let fail = |detail: &str| corrupt(&self.path, RunPart::Page(p), detail);
         let stored = u32::from_le_bytes(page.bytes[PAGE_BODY..].try_into().expect("four bytes"));
@@ -223,6 +236,21 @@ impl<K: Key> KeyRun<K> {
         } else if last.widen() != self.header.max_key {
             return Err(fail(
                 "the last page's last key is not the header's largest key",
+            ));
+        }
+        let first_of = |q: &Page<'_, K>| (q.key(0), q.entity(0));
+        let last_of = |q: &Page<'_, K>| (q.key(q.len - 1), q.entity(q.len - 1));
+        if p + 1 < self.header.pages
+            && self.is_verified(p + 1)
+            && last_of(page) >= first_of(&self.raw_page(p + 1))
+        {
+            return Err(fail(
+                "the page's last entry does not precede the next page's first",
+            ));
+        }
+        if p > 0 && self.is_verified(p - 1) && last_of(&self.raw_page(p - 1)) >= first_of(page) {
+            return Err(fail(
+                "the page's first entry does not follow the previous page's last",
             ));
         }
         Ok(())
@@ -288,9 +316,9 @@ impl<K: Key> KeyRun<K> {
         Ok(out)
     }
 
-    /// Ask the kernel to read, in the background, the first page each of `keys` will read that
-    /// has not been read before. The entry pages are mapped for random access, so without this
-    /// a batch reads its pages one at a time, each waiting on the disk.
+    /// Ask the kernel to read, in the background, every page a lookup of `keys` will read. The
+    /// entry pages are mapped for random access, so without this a batch reads its pages one at
+    /// a time, each waiting on the disk.
     fn prefetch(&self, keys: &[K]) {
         let advise = |(first, end): (u64, u64)| {
             let _ = self.map.advise_range(
@@ -306,16 +334,24 @@ impl<K: Key> KeyRun<K> {
                 continue;
             }
             from = self.start_page(key, from);
-            if self.is_verified(from) {
-                continue;
+            // The pages after the start page whose first key is at or below `key`.
+            let (mut lo, mut hi) = (from + 1, self.header.pages);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if self.index_key(mid) <= key {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
             }
+            let end = lo;
             pending = match pending {
-                Some((first, end)) if from <= end => Some((first, end.max(from + 1))),
+                Some((first, last_end)) if from <= last_end => Some((first, last_end.max(end))),
                 other => {
                     if let Some(range) = other {
                         advise(range);
                     }
-                    Some((from, from + 1))
+                    Some((from, end))
                 }
             };
         }
@@ -436,12 +472,13 @@ pub fn verify_run(path: &Path) -> Result<RunCheck> {
         path: path.to_path_buf(),
         source,
     };
-    let mut first = vec![0u8; PAGE_SIZE];
+    let mut first = Vec::with_capacity(PAGE_SIZE);
     {
         use std::io::Read;
-        let mut file = File::open(path).map_err(io)?;
-        let read = file.read(&mut first).map_err(io)?;
-        first.truncate(read);
+        let file = File::open(path).map_err(io)?;
+        file.take(PAGE_SIZE as u64)
+            .read_to_end(&mut first)
+            .map_err(io)?;
     }
     let header = Header::decode(&first).map_err(|detail| corrupt(path, RunPart::Header, detail))?;
     match header.key_width {
@@ -465,21 +502,17 @@ fn verify_all<K: Key>(path: &Path) -> Result<RunCheck> {
             "the header page's unused bytes are not zero",
         ));
     }
-    let mut previous: Option<(K, u32)> = None;
+    // Reading the pages in order checks each against the one before it (see `check_page`).
     for p in 0..run.header.pages {
         let page = run.page(p)?;
-        let fail = |detail: &str| corrupt(path, RunPart::Page(p), detail);
         let used = page.len * (K::WIDTH + 4);
         if page.bytes[used..PAGE_BODY].iter().any(|&b| b != 0) {
-            return Err(fail("the page's bytes after its last entry are not zero"));
-        }
-        let first = (page.key(0), page.entity(0));
-        if previous.is_some_and(|prev| prev >= first) {
-            return Err(fail(
-                "the page's first entry does not follow the previous page's last",
+            return Err(corrupt(
+                path,
+                RunPart::Page(p),
+                "the page's bytes after its last entry are not zero",
             ));
         }
-        previous = Some((page.key(page.len - 1), page.entity(page.len - 1)));
     }
     Ok(RunCheck {
         key_width: K::WIDTH,

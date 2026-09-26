@@ -1,11 +1,10 @@
 //! Key widths, and the keys a field's values become.
 
 use std::fmt::Debug;
-use std::hash::Hash;
 
 /// An unsigned integer a run is keyed by: `u32`, `u64` or `u128`. Keys order as the integers do,
 /// and are stored little-endian in [`Key::WIDTH`] bytes.
-pub trait Key: Copy + Ord + Hash + Debug + Send + Sync + 'static + sealed::Sealed {
+pub trait Key: Copy + Ord + Debug + Send + Sync + 'static + sealed::Sealed {
     /// Bytes a key takes in a run: 4, 8 or 16.
     const WIDTH: usize;
 
@@ -106,13 +105,6 @@ mod tests {
         assert!(signed_key(-1) < signed_key(0));
         for v in values {
             assert_eq!(signed_value(signed_key(v)), v);
-        }
-    }
-
-    #[test]
-    fn unsigned_keys_are_the_values() {
-        for v in [0, 1, 255, u32::MAX as u64, u64::MAX] {
-            assert_eq!(unsigned_key(v), v);
         }
     }
 
