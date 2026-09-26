@@ -303,11 +303,19 @@ impl Executor {
                 }
             };
             let Command::Ingest { submission, reply } = command else {
-                // Every other command reads or replaces what the window holds back: a declaration
-                // reads the unique values it has not applied, a view drop prunes the buffer its
-                // rows go into, and a publication names entities its edits move. So the window
-                // closes first.
-                if !window.is_empty() {
+                // A declaration reads the unique values the window has not applied, and a change
+                // to the view roster changes the views the window's rows are going into, so the
+                // window closes first. Every other command is tolerable while a window is open: an
+                // edit's close carries the memberships and generating sets it finds then.
+                if matches!(
+                    command,
+                    Command::DeclareAttribute { .. }
+                        | Command::CreateView { .. }
+                        | Command::DropView { .. }
+                        | Command::CreateViewGroup { .. }
+                        | Command::CreatePlainView { .. }
+                ) && !window.is_empty()
+                {
                     window = self.close_and_reopen(window);
                 }
                 self.execute(command);
