@@ -540,7 +540,7 @@ pub(crate) fn for_each_flushed_value(
     let manifest = &generation.bundle.manifest;
     let declared = &manifest.declared_scalars[at];
     let mut wanted = wanted.clone();
-    wanted.andnot_inplace(&generation.overlay.deleted_set());
+    wanted.andnot_inplace(generation.overlay.deleted_set());
     let mut failed: Option<String> = None;
     let mut send = |entity: u32, value: WalScalar| {
         if failed.is_none() {
