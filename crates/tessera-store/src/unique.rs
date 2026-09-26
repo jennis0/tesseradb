@@ -32,7 +32,7 @@ use crate::key_index::{
 use crate::manifest::{BaseKeyRun, DeclaredScalar, Manifest, SegmentsManifest, UniqueIndexRuns};
 
 /// The most entries one run file holds before a writer starts the next, past the entities of its
-/// last key. At 12 bytes an entry an integer run is at most 768 MiB.
+/// last key. At most about 12 bytes an entry, an integer run is at most about 770 MiB.
 pub const RUN_MAX_ENTRIES: NonZeroU64 = match NonZeroU64::new(1 << 26) {
     Some(n) => n,
     None => unreachable!(),
