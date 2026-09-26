@@ -388,7 +388,6 @@ fn request<'a>(layer: &'a str, fields: &'a [String]) -> ArtifactsRequest<'a> {
         page_rows: None,
         pages: None,
         cursor: None,
-        idset: None,
         limits: limits(),
         cancel: None,
     }
@@ -928,7 +927,7 @@ fn a_read_continues_across_a_flush_a_fold_a_restart_and_a_publication() {
 // ---------------------------------------------------------------------------------------------
 
 /// **A cursor is refused under another credential, layer, level or route, and after its layer is
-/// dropped**; another idset is the item route's refusal.
+/// dropped.**
 #[test]
 fn a_cursor_is_refused_outside_its_read() {
     let fx = fixture();
@@ -968,7 +967,6 @@ fn a_cursor_is_refused_outside_its_read() {
             page_rows: Some(1),
             pages: Some(1),
             cursor: None,
-            idset: None,
             limits: limits(),
             cancel: None,
         };
@@ -994,7 +992,6 @@ fn a_cursor_is_refused_outside_its_read() {
         page_rows: None,
         pages: None,
         cursor: Some(&cursor),
-        idset: None,
         limits: limits(),
         cancel: None,
     };
@@ -1005,13 +1002,6 @@ fn a_cursor_is_refused_outside_its_read() {
             "a foreign cursor was answered {refusal:?}"
         );
     }
-
-    let mut stale = request(TREE, &fields);
-    stale.idset = Some(2);
-    assert!(matches!(
-        respond(engine, &full, stale).map(|_| ()),
-        Err(EngineError::StaleIdSet)
-    ));
 
     engine.drop_layer(FLOOR.into()).unwrap();
     let floor_cursor = cursor.clone();
@@ -1472,8 +1462,6 @@ fn authored() -> Authored {
         out: root.clone(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -1577,7 +1565,7 @@ fn an_authored_shape_names_no_other_view_on_the_drill_down() {
     let id = TesseraId::new(ids(&pages)[0]);
     let out = a
         .engine
-        .artifact(&session, id, None, "s0", None)
+        .artifact(&session, id, "s0", None)
         .unwrap()
         .expect("the artifact is served");
     a.assert_clean("the drill-down", &format!("{out:?}"));

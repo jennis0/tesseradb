@@ -1180,8 +1180,6 @@ fn built_fixture() -> Fixture {
         out: root.clone(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,

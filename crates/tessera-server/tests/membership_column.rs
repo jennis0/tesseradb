@@ -368,7 +368,7 @@ async fn suppress(server: &TestServer, tessera_id: &str, op: &str) {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "tessera_id": tessera_id, "idset": FIXTURE_IDSET, "op": op }]))
+        .json(&json!([{ "tessera_id": tessera_id, "op": op }]))
         .send()
         .await
         .unwrap();

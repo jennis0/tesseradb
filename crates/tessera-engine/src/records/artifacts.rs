@@ -79,7 +79,6 @@ pub struct ArtifactsRequest<'a> {
     pub page_rows: Option<u32>,
     pub pages: Option<u32>,
     pub cursor: Option<&'a str>,
-    pub idset: Option<u32>,
     pub limits: RecordsLimits,
     /// As [`super::ItemsRequest::cancel`].
     pub cancel: Option<CancelToken>,
@@ -178,7 +177,6 @@ struct ArtifactsPager<'r> {
     layer_entity: tessera_types::EntityId,
     properties: Vec<Property>,
     page_rows: u32,
-    idset: u32,
     binding: Binding<'r>,
     /// The last `(level, ordinal)` returned or passed over.
     scan: Option<(u32, u32)>,
@@ -360,7 +358,7 @@ impl Scope<'_> {
 
 impl Engine {
     /// Serve one `POST /v1/artifacts` response into `sink` and return its trailer. Every refusal
-    /// is decided before the head: the request's shape, the idset, the view, the layer and level,
+    /// is decided before the head: the request's shape, the view, the layer and level,
     /// the cursor (before any position in it is used), the properties, then the filter.
     pub fn artifacts_stream(
         &self,
@@ -385,10 +383,6 @@ impl Engine {
         }
         let generation = self.generation.load_full();
         let manifest = &generation.bundle.manifest;
-        let idset = manifest.identity.idset;
-        if req.idset.is_some_and(|presented| presented != idset) {
-            return Err(EngineError::StaleIdSet);
-        }
         let unknown_view = || EngineError::UnknownView(req.view.to_string());
         if !session.visible_views().contains_view(req.view) {
             return Err(unknown_view());
@@ -424,9 +418,6 @@ impl Engine {
                 &self.cursor_key.open(&binding, token)?,
             )?),
         };
-        if resumed.is_some_and(|cursor| cursor.idset != idset) {
-            return Err(EngineError::StaleIdSet);
-        }
         let mut properties: Vec<Property> = Vec::with_capacity(req.fields.len());
         for name in req.fields {
             let Some(property) = Property::parse(name) else {
@@ -460,7 +451,6 @@ impl Engine {
             layer_entity: layer.entity,
             properties,
             page_rows,
-            idset,
             binding,
             scan,
             origin: scan,
@@ -975,7 +965,6 @@ impl Pager for ArtifactsPager<'_> {
 
     fn cursor(&self, engine: &Engine) -> String {
         let cursor = ArtifactsCursor {
-            idset: self.idset,
             scan: self.scan,
         };
         engine.cursor_key.seal(&self.binding, &cursor.encode())

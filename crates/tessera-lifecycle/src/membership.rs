@@ -242,7 +242,7 @@ impl ArtifactShapes {
 ///
 /// **Members are entities, resolved at admission.** A caller names them by `tessera_id` and the
 /// control plane inverts them once, at the boundary, exactly as `/control/changes` does — so no
-/// blinded identifier reaches durable state, where a key rotation would silently redirect it (I10).
+/// blinded identifier reaches durable state (I10).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingArtifact {
     /// The caller's own name for this artifact. **Effectively mandatory for a layer another
@@ -482,7 +482,7 @@ impl IncomingArtifact {
 /// suppressed (`artifacts-from-points.md` §5).
 ///
 /// **Members are entities, resolved at admission**, on [`IncomingArtifact`]'s rule: no blinded
-/// identifier reaches durable state, where a key rotation would silently redirect it (I10).
+/// identifier reaches durable state (I10).
 ///
 /// **The fixed parts follow the fill rule** (`ingest.md` §1.1): a part the artifact does not hold
 /// is filled, a part it holds identically is accepted with no effect, and a part it holds

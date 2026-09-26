@@ -784,13 +784,10 @@ class Viewer:
         """
         return json.loads(self._request("GET", "/v1/meta", None))
 
-    def item(self, tessera_id: Any, idset: Optional[int] = None) -> dict:
+    def item(self, tessera_id: Any) -> dict:
         """One item's full record, if this reader may see it.
 
         - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
-        - `idset`: the id numbering the id came from, `meta()["idset"]`. Ids are renumbered when
-          the database is rebuilt with a new id key. Given this, an id from an older numbering is
-          refused; without it, such an id may name a different item.
 
         The record has `fields` (the item's values by column name, missing where it has none),
         `labels` (the item's access labels that this reader also holds), `views` (the views
@@ -799,8 +796,7 @@ class Viewer:
 
             v.item(sample.column("tessera_id")[0].as_py())
         """
-        body = {} if idset is None else {"idset": int(idset)}
-        record = json.loads(self._request("POST", f"/v1/items/{tessera_id}", body))
+        record = json.loads(self._request("POST", f"/v1/items/{tessera_id}", {}))
         if record.get("external_id") is not None:
             record["external_id"] = base64.b64decode(record["external_id"])
         return record
@@ -819,7 +815,6 @@ class Viewer:
         pages: Optional[int] = None,
         cursor: Optional[str] = None,
         compression: Optional[str] = None,
-        idset: Optional[int] = None,
         batches: bool = False,
     ):
         """Every item this reader may see in `view`, with the fields named, as a pyarrow table.
@@ -853,7 +848,6 @@ class Viewer:
         - `pages`: the most pages in one response.
         - `cursor`: start after the last page of an earlier read, from its `next`.
         - `compression`: `"zstd"` compresses the pages on their way from the server.
-        - `idset`: as for `item`.
 
         Each of these is sent only when given, so the server's own setting applies otherwise.
         `count` goes on the first request only, which is where the server takes it.
@@ -884,7 +878,6 @@ class Viewer:
             "pages": pages,
             "cursor": cursor,
             "compression": compression,
-            "idset": idset,
         }
         return self._bulk_read("items", request, given, batches)
 
@@ -904,7 +897,6 @@ class Viewer:
         pages: Optional[int] = None,
         cursor: Optional[str] = None,
         compression: Optional[str] = None,
-        idset: Optional[int] = None,
         batches: bool = False,
     ):
         """Every artifact of `layer` this reader is served, with the properties named, as a
@@ -928,7 +920,7 @@ class Viewer:
         - `keep_unmatched`: with `filters`, every artifact, those with no matching item included.
         - `count`: also count the artifacts served, `served`, and those that match, `matched`.
           The counts are in the head.
-        - `page_rows`, `pages`, `cursor`, `compression`, `idset`: as for `items`.
+        - `page_rows`, `pages`, `cursor`, `compression`: as for `items`.
 
         The rows are in order of level, and in the order they were published within a level.
 
@@ -946,7 +938,6 @@ class Viewer:
             "pages": pages,
             "cursor": cursor,
             "compression": compression,
-            "idset": idset,
         }
         return self._bulk_read("artifacts", request, given, batches)
 
@@ -1082,7 +1073,6 @@ class Viewer:
         self,
         tessera_id: Any,
         view: str,
-        idset: Optional[int] = None,
         zoom: Optional[int] = None,
     ) -> dict:
         """One annotation's record, if this reader may see it.
@@ -1090,7 +1080,6 @@ class Viewer:
         - `tessera_id`: the annotation's id, as `browse_artifacts` or a sample's `artifacts`
           table gives it.
         - `view`: the view to read it in.
-        - `idset`: as for `item`.
         - `zoom`: the zoom level to simplify its outline for. Without it the full outline comes
           back.
 
@@ -1101,8 +1090,6 @@ class Viewer:
             v.artifact(page["artifacts"][0]["tessera_id"], "papers")
         """
         request: dict = {"view": view}
-        if idset is not None:
-            request["idset"] = int(idset)
         if zoom is not None:
             request["zoom"] = int(zoom)
         return json.loads(self._request("POST", f"/v1/artifacts/{tessera_id}", request))

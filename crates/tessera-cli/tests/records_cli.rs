@@ -495,7 +495,6 @@ fn count_goes_on_the_first_request_and_every_other_argument_on_each() {
         "count": true,
         "page_rows": 300,
         "pages": 1,
-        "idset": 1,
     });
     let (whole, responses) = served.http_read("items", &body);
     assert!(responses > 2);
@@ -514,8 +513,6 @@ fn count_goes_on_the_first_request_and_every_other_argument_on_each() {
         "300",
         "--pages",
         "1",
-        "--idset",
-        "1",
         "--out",
         out.to_str().unwrap(),
     ];
@@ -533,13 +530,6 @@ fn count_goes_on_the_first_request_and_every_other_argument_on_each() {
     for later in &bodies[1..] {
         assert_eq!(later, &following(&body, &later["cursor"]));
     }
-
-    // Another id numbering is the server's refusal, and nothing is written.
-    let other = served.dir.path().join("other.parquet");
-    let mut args = args[..args.len() - 4].to_vec();
-    args.extend(["--idset", "2", "--out", other.to_str().unwrap()]);
-    assert!(!served.run(&args).status.success());
-    assert!(!other.exists());
 }
 
 #[test]

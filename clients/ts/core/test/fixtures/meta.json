@@ -1,6 +1,6 @@
 {
   "api_version": 1,
-  "bundle_format": 21,
+  "bundle_format": 22,
   "declared_scalars": [
     {
       "analyser": null,
@@ -356,7 +356,6 @@
     }
   ],
   "groups": [],
-  "idset": 1,
   "layers": [],
   "scoped_scalars": [],
   "selection": {

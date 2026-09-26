@@ -219,8 +219,6 @@ fn build_bundle(dir: &Path, name: &str, entities: u64) -> std::path::PathBuf {
         out: out.clone(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -342,7 +340,7 @@ fn served_ids(engine: &Engine, credential: &[u8]) -> BTreeSet<Vec<u8>> {
         .iter()
         .map(|id| {
             engine
-                .item(&session, TesseraId::new(*id), None)
+                .item(&session, TesseraId::new(*id))
                 .expect("the drill-down answers")
                 .expect("a served point is an item this principal may reach")
                 .external_id

@@ -60,8 +60,8 @@ cosmetic.
 
 | What changed | What it means for a held view |
 |---|---|
-| A different viewer authorises (a new token for a different viewer) | The replica, held artifacts, the selection and per-column state drop. Every `tessera_id` the client already holds stays valid, because the permutation is keyed per deployment, not per viewer. |
-| The deployment is rebuilt (a key rotation, or the id space advancing) | Every `tessera_id` the client holds is meaningless. Start over. |
+| A different viewer authorises (a new token for a different viewer) | The replica, held artifacts, the selection and per-column state drop. Every `tessera_id` the client already holds stays valid, because the permutation is keyed per bundle, not per viewer. |
+| The deployment is rebuilt | The new bundle has a new key, so every `tessera_id` the client holds is meaningless. Read the items again, by external id or afresh. |
 | The content behind the current identity (an item added, denied, or unsuppressed) | The client's counts and marks may be older than the corpus. Mark the view stale and offer refresh. |
 
 Segments merging and compaction moving rows never reach a client, because nothing it holds is

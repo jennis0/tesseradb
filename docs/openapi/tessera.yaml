@@ -489,7 +489,7 @@ paths:
               schema:
                 type: string
             x-tessera-identity-key:
-              description: The identity key, derived from the idset, the credential, its mask fragment and the view. A held band may be drawn only under the same key, so a client partitions its cache by it.
+              description: The identity key, derived from the credential, its mask fragment and the view. The mask fragment's identity is keyed by the bundle, so a rebuilt bundle, whose `tessera_id`s are all new, gives a new identity key. A held band may be drawn only under the same key, so a client partitions its cache by it.
               required: true
               schema:
                 type: string
@@ -625,11 +625,11 @@ paths:
         that found no row under a sparse filter. A response can run past its time budget by one
         evaluation of the filter over a stretch of rows and one chunk of a page's scan.
 
-        **Cursor.** Opaque, encrypted and authenticated under a key derived from the identity key,
-        and bound to the route, the view and its incarnation, the order, and the credential that
-        received it. A cursor that fails any of these is one `422` with one detail. A cursor
-        issued under another idset is the `409` below. A cursor survives flushes, merges,
-        compactions and restarts, and stops opening when the identity key is rotated.
+        **Cursor.** Opaque, encrypted and authenticated under a key derived from the bundle's
+        identity key, and bound to the route, the view and its incarnation, the order, and the
+        credential that received it. A cursor that fails any of these, or was issued by another
+        bundle, is one `422` with one detail. A cursor survives flushes, merges, compactions and
+        restarts.
 
         Runs under its own admission limit, `serve.bulk_admission`, so a long read takes no slot
         from the viewport and item routes. A read past the limit is refused at once with `429`.
@@ -680,12 +680,6 @@ paths:
           $ref: "#/components/responses/ExpiredToken"
         "404":
           description: Unknown `view`, or a pin naming no view of its field's group that this principal can reach.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "409":
-          description: "`idset` was sent and is not the deployment's, or the cursor was issued under another idset. Resolve the items again by external id."
           content:
             application/json:
               schema:
@@ -757,12 +751,6 @@ paths:
           $ref: "#/components/responses/ExpiredToken"
         "404":
           $ref: "#/components/responses/Unknown"
-        "409":
-          description: "`idset` was sent and is not the deployment's. Resolve the item again by external id. Decided before the identifier is inverted, and the same for every identifier."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
         "422":
           $ref: "#/components/responses/Contract"
         "429":
@@ -835,8 +823,7 @@ paths:
         **Cursor.** Bound to the route, the view and its incarnation, the layer as it was
         registered, the `level` named and the credential that received it. A layer dropped and
         registered again under the same name is another layer and refuses the cursor. A cursor that
-        fails any of these is one `422` with one detail; one issued under another idset is the
-        `409` below.
+        fails any of these, or was issued by another bundle, is one `422` with one detail.
 
         Runs under the bulk-read admission limit, `serve.bulk_admission`, with `POST /v1/items`. A
         read past the limit is refused at once with `429`.
@@ -887,12 +874,6 @@ paths:
           $ref: "#/components/responses/ExpiredToken"
         "404":
           description: Unknown `view`, or one this principal cannot reach.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "409":
-          description: "`idset` was sent and is not the deployment's, or the cursor was issued under another idset."
           content:
             application/json:
               schema:
@@ -1028,12 +1009,6 @@ paths:
           $ref: "#/components/responses/ExpiredToken"
         "404":
           description: "`404 unknown`: nothing this principal may see by that identifier. An unknown `view` gets the same answer."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "409":
-          description: A stale `idset`, as on `/v1/items/{tessera_id}`.
           content:
             application/json:
               schema:
@@ -1185,9 +1160,8 @@ paths:
       summary: Fill attribute values, and layer memberships, on items that already exist.
       description: |
         The body is encoded as `POST /control/ingest`'s is, and creates no item. A row names its
-        item by exactly one of `external_id`, and `tessera_id` with the `idset` it was minted
-        under. `tessera_id` is a string of decimal digits, `utf8` in Arrow, and `idset` an integer,
-        `uint32` in Arrow. A row naming an item the deployment does not hold is `422`, naming the
+        item by exactly one of `external_id` and `tessera_id`. `tessera_id` is a string of decimal
+        digits, `utf8` in Arrow. A row naming an item the deployment does not hold is `422`, naming the
         row by its index. The other columns are declared attributes, group-scoped attributes and enumerated
         layers, as on ingest, and a row may leave any of them out.
 
@@ -1241,7 +1215,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A cell holds a different value, the batch id was used for a different body, or `idset` is not the deployment's. The detail never names the held value. Nothing was written.
+          description: A cell holds a different value, or the batch id was used for a different body. The detail never names the held value. Nothing was written.
           content:
             application/json:
               schema:
@@ -1252,8 +1226,7 @@ paths:
 
             - The body is over the byte cap or cannot be read
             - `x-tessera-batch-id` is missing
-            - A row names no item, two, one the deployment does not hold, or a `tessera_id` without an `idset`
-            - Two idsets in one batch
+            - A row names no item, two, or one the deployment does not hold
             - A column is undeclared or of the wrong type
             - A scoped column or layer without a view of its group
             - The batch is over the row cap
@@ -1315,12 +1288,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "409":
-          description: "`idset` is not the deployment's. Nothing was applied."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
         "422":
           description: |
             Nothing was applied.
@@ -1328,8 +1295,6 @@ paths:
             - The body is not a JSON array of change items, is over 2 MiB or carries more than 10,000 items
             - An unknown `op`
             - An item naming neither or both of `external_id` and `tessera_id`
-            - `idset` with `external_id`, or none with `tessera_id`
-            - Two idsets in one request
             - An external id that is not base64
             - A `tessera_id` that is not a decimal string
           content:
@@ -2023,7 +1988,7 @@ paths:
         The body is JSON only; `application/vnd.apache.arrow.stream` is `422`. Each artifact names
         its members by `members`, or by `excluding`, the view's items it leaves out. Members are
         addressed as the batch's `addressing` says: base64 external ids, or `tessera_id` decimal
-        strings under the batch's `idset`. A member that names nothing is `404`, and a deleted one
+        strings. A member that names nothing is `404`, and a deleted one
         is `422`.
 
         An artifact whose `key` the level already holds is not created again: its members are
@@ -2076,7 +2041,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; or `idset` is not the deployment's. Nothing was written.
+          description: A held artifact holds a part with a different value, or a second `excluding` for a held key. Nothing was written.
           content:
             application/json:
               schema:
@@ -2089,7 +2054,6 @@ paths:
             - An artifact with neither `members` nor `excluding` that attaches to nothing, or with both
             - An exclusion list over its cap
             - `view` missing on a layer scoped to a group or present on another
-            - `idset` missing with `tessera` addressing or present with `external`
             - A member that is not base64 or not a decimal string
             - A deleted member, or one that names no item with a row
             - An external-id member where the deployment carries no external ids
@@ -2122,7 +2086,7 @@ paths:
         The body is JSON, or an Arrow IPC stream as `application/vnd.apache.arrow.stream`. The
         Arrow form carries one row per artifact: `key` as `utf8`, `members` as `list<utf8>` or
         `large_list<utf8>`, and optionally `view` as `utf8` and `access` in any form ingest's
-        `access` takes, with `addressing`, `level` and `idset` in the schema's metadata as strings.
+        `access` takes, with `addressing` and `level` in the schema's metadata as strings.
         It carries joining members and access labels only; every other part travels as JSON. Any
         other column or metadata key is `422`.
 
@@ -2164,7 +2128,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: An artifact holds a part with a different value, or `idset` is not the deployment's. Nothing was written.
+          description: An artifact holds a part with a different value. Nothing was written.
           content:
             application/json:
               schema:
@@ -2179,7 +2143,6 @@ paths:
             - A layer whose membership is not `enumerated`
             - `leaving` without a `rank`
             - `view` missing on a layer scoped to a group or present on another
-            - `idset` missing with `tessera` addressing or present with `external`
             - A member that is not base64 or not a decimal string
             - A deleted member, or one that names no item with a row
             - An external-id member where the deployment carries no external ids
@@ -2216,7 +2179,7 @@ components:
       name: tessera_id
       in: path
       required: true
-      description: The item's or artifact's opaque identifier, a `u64` in decimal. It is a keyed permutation of the internal identity that blinds it, stable across sessions and meaningless without the key. It is not encryption.
+      description: The item's or artifact's opaque identifier, a `u64` in decimal. It is a keyed permutation of the internal identity that blinds it, under a key generated when the bundle was built. It is stable across sessions and restarts, and a rebuilt bundle issues new ones. It is not encryption.
       schema:
         type: string
         pattern: "^[0-9]+$"
@@ -2439,17 +2402,13 @@ components:
     Meta:
       type: object
       additionalProperties: false
-      required: [api_version, bundle_format, idset, views, groups, declared_scalars, scoped_scalars, filter_operands, selection, layers]
+      required: [api_version, bundle_format, views, groups, declared_scalars, scoped_scalars, filter_operands, selection, layers]
       properties:
         api_version:
           type: integer
           const: 1
         bundle_format:
           type: integer
-        idset:
-          type: integer
-          minimum: 0
-          description: The identity set the `tessera_id`s were minted under. The identity key itself appears in no response on any plane.
         views:
           type: array
           description: The views this principal may reach, in serving order. A view whose own `visibility` label, or whose group's, the principal does not hold is absent, and naming it in a viewer request is the `404` a name nobody declared gets. The list is only shorter; nothing in it counts the views left out.
@@ -3356,10 +3315,6 @@ components:
           type: string
           enum: [zstd]
           description: Compress every records frame's Arrow buffers with zstd. Absent is uncompressed.
-        idset:
-          type: integer
-          minimum: 0
-          description: As on `POST /v1/items/{tessera_id}`; a mismatch is `409`.
 
     ArtifactsRequest:
       type: object
@@ -3415,10 +3370,6 @@ components:
           type: string
           enum: [zstd]
           description: Compress every records frame's Arrow buffers with zstd.
-        idset:
-          type: integer
-          minimum: 0
-          description: As on `POST /v1/items/{tessera_id}`; a mismatch is `409`.
 
     ArtifactsHead:
       type: object
@@ -3506,10 +3457,6 @@ components:
       properties:
         pin:
           $ref: "#/components/schemas/Pin"
-        idset:
-          type: integer
-          minimum: 0
-          description: The idset the caller's `tessera_id` was minted under. Sending it makes a `tessera_id` from an earlier idset a `409` rather than another item's record.
 
     ItemResponse:
       type: object
@@ -3567,9 +3514,6 @@ components:
         view:
           type: string
           description: The view whose rows the count is taken over. Required, unlike on `/v1/items/{tessera_id}`, since a masked count is taken in one view's rows.
-        idset:
-          type: integer
-          minimum: 0
         zoom:
           type: integer
           minimum: 0
@@ -3740,7 +3684,7 @@ components:
 
     ValuesRecord:
       type: object
-      description: One row of a JSON values batch. It names its item by exactly one of `external_id`, and `tessera_id` with `idset`. Any other key is a declared attribute, a group-scoped attribute of the view's group, or an enumerated layer's name, as on ingest.
+      description: One row of a JSON values batch. It names its item by exactly one of `external_id` and `tessera_id`. Any other key is a declared attribute, a group-scoped attribute of the view's group, or an enumerated layer's name, as on ingest.
       properties:
         external_id:
           type: [string, "null"]
@@ -3750,9 +3694,6 @@ components:
           type: [string, "null"]
           pattern: "^[0-9]+$"
           description: The item's `tessera_id`, as a string of decimal digits.
-        idset:
-          type: [integer, string, "null"]
-          description: The idset `tessera_id` was minted under, from `/v1/meta`. Required with `tessera_id` and refused with `external_id`.
         level:
           type: [integer, string, "null"]
           description: As on `IngestRecord`.
@@ -3800,7 +3741,7 @@ components:
       type: object
       additionalProperties: false
       required: [op]
-      description: One change. It names its item by exactly one of `external_id`, and `tessera_id` with `idset`.
+      description: One change. It names its item by exactly one of `external_id` and `tessera_id`.
       properties:
         op:
           type: string
@@ -3814,18 +3755,11 @@ components:
           type: string
           pattern: "^[0-9]+$"
           description: The item's `tessera_id`, as a string of decimal digits; a JSON number is `422`.
-        idset:
-          type: integer
-          minimum: 0
-          maximum: 4294967295
-          description: The idset `tessera_id` was minted under, from `/v1/meta`. Every item of one request carries the same one.
       oneOf:
         - required: [external_id]
           not:
-            anyOf:
-              - required: [tessera_id]
-              - required: [idset]
-        - required: [tessera_id, idset]
+            required: [tessera_id]
+        - required: [tessera_id]
           not:
             required: [external_id]
 
@@ -4415,11 +4349,6 @@ components:
           type: string
           enum: [external, tessera]
           description: How every member in the batch is written. `external` is a base64 external id; `tessera` is a `tessera_id` as a string of decimal digits.
-        idset:
-          type: integer
-          minimum: 0
-          maximum: 4294967295
-          description: The idset the `tessera_id`s were minted under. Required with `tessera` addressing and refused with `external`.
         default_space:
           type: string
           enum: [view, wgs84]
@@ -4626,7 +4555,7 @@ components:
       type: object
       additionalProperties: false
       required: [addressing, artifacts]
-      description: "`level`, `addressing`, `idset` and `default_space` are `PublishRequest`'s."
+      description: "`level`, `addressing` and `default_space` are `PublishRequest`'s."
       properties:
         level:
           type: integer
@@ -4635,10 +4564,6 @@ components:
         addressing:
           type: string
           enum: [external, tessera]
-        idset:
-          type: integer
-          minimum: 0
-          maximum: 4294967295
         default_space:
           type: string
           enum: [view, wgs84]

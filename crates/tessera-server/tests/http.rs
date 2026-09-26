@@ -137,6 +137,151 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
     );
 }
 
+/// **The identity coordinate belongs to one bundle.** Every build generates its own identity key
+/// and so gives every item a new `tessera_id`, and a client's held bands carry the old ones: two
+/// builds of the same data must give the same credential and view different coordinates. One
+/// bundle gives the same coordinate after a restart, so a restart drops nothing a client holds.
+#[tokio::test]
+async fn the_identity_coordinate_changes_with_the_bundle_and_survives_a_restart() {
+    let (first, second) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let first_bundle = build_under_key(first.path(), "000102030405060708090a0b0c0d0e0f");
+    let second_bundle = build_under_key(second.path(), "0f0e0d0c0b0a09080706050403020100");
+    let serve = |dir: &TempDir, bundle: &std::path::Path| {
+        let (bundle, cache, wal) =
+            (bundle.to_path_buf(), dir.path().join("cache"), dir.path().join("wal.log"));
+        async move { spawn_server(&bundle, &cache, &wal).await }
+    };
+
+    let server = serve(&first, &first_bundle).await;
+    let before_restart = identity_coordinate(&server).await;
+    server.shutdown().await;
+    let server = serve(&first, &first_bundle).await;
+    assert_eq!(
+        identity_coordinate(&server).await,
+        before_restart,
+        "a restart over the same bundle must keep the coordinate"
+    );
+    server.shutdown().await;
+
+    let other = serve(&second, &second_bundle).await;
+    assert_ne!(
+        identity_coordinate(&other).await,
+        before_restart,
+        "a bundle built under another key must not share a render partition"
+    );
+}
+
+/// **A `tessera_id` names an item only in the bundle that issued it.** The same data built under
+/// another key serves other identifiers: every one bundle A served is an unknown item to bundle B,
+/// and a delete naming them by `tessera_id` is refused with nothing deleted.
+#[tokio::test]
+async fn a_tessera_id_from_another_bundle_names_nothing() {
+    let (first, second) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let first_bundle = build_under_key(first.path(), "000102030405060708090a0b0c0d0e0f");
+    let second_bundle = build_under_key(second.path(), "0f0e0d0c0b0a09080706050403020100");
+
+    let a = spawn_server(
+        &first_bundle,
+        &first.path().join("cache"),
+        &first.path().join("wal.log"),
+    )
+    .await;
+    let token = token_for(&a, &["0"]).await;
+    let (_, points) = decode_viewport(&whole_map(&a, &token, N_ITEMS as usize).await);
+    let issued: Vec<u64> = points.iter().map(|(tessera_id, _)| *tessera_id).collect();
+    assert!(issued.len() > 100, "bundle A serves its items: {}", issued.len());
+    drop(a);
+
+    let b = spawn_server(
+        &second_bundle,
+        &second.path().join("cache"),
+        &second.path().join("wal.log"),
+    )
+    .await;
+    let token = token_for(&b, &["0"]).await;
+    let visible = |body: Vec<u8>| -> u64 {
+        let (tiles, _) = decode_viewport(&body);
+        tiles.iter().map(|(_, visible, _)| *visible).sum()
+    };
+    let before = visible(whole_map(&b, &token, 5).await);
+    for &tessera_id in &issued {
+        assert_eq!(
+            post_item(&b, &token, tessera_id).await.status(),
+            404,
+            "bundle B answered bundle A's tessera_id {tessera_id}"
+        );
+    }
+    let deletes: Vec<serde_json::Value> = issued
+        .iter()
+        .map(|id| serde_json::json!({ "tessera_id": id.to_string(), "op": "delete" }))
+        .collect();
+    let resp = b
+        .client
+        .post(b.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&deletes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "the delete names nothing bundle B issued");
+    assert_eq!(
+        visible(whole_map(&b, &token, 5).await),
+        before,
+        "nothing was deleted"
+    );
+}
+
+/// A whole-map viewport of `s0` at zoom 0 serving at most `k` points, as body bytes.
+async fn whole_map(server: &TestServer, token: &str, k: usize) -> Vec<u8> {
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": k
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.bytes().await.unwrap().to_vec()
+}
+
+/// The standard fixture's data, built into `dir/bundle` under `key`.
+fn build_under_key(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
+    let points = dir.join("points.parquet");
+    write_points_n(&points, N_ITEMS);
+    write_pairs_n(&dir.join("pairs.parquet"), N_ITEMS);
+    let view = view_args("s0", &points, AccessInput::relation(dir.join("pairs.parquet")));
+    let out = dir.join("bundle");
+    tessera_build::build(&tessera_build::BuildArgs {
+        identity_key: tessera_types::IdentityKey::from_hex(key).unwrap(),
+        ..build_args(&out, vec![view])
+    })
+    .expect("the build succeeds");
+    out
+}
+
+/// The identity coordinate of a whole-map viewport of `s0` for a session holding term `0`.
+async fn identity_coordinate(server: &TestServer) -> String {
+    let auth = authorise(server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.headers()["x-tessera-identity-key"]
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
 /// **A request names its tile set exactly once, by bbox or by list.**
 ///
 /// The list is how a client with a replica elides: a tile it can prove it holds is simply absent,
@@ -333,11 +478,9 @@ async fn h_config_missing_disclosure_refuses_to_start() {
 
 // --- Authentication and disclosure regressions ---
 
-/// Contracts §2.2 r6: `GET /v1/meta` reports the idset as `idset` —
-/// and reports **only** the idset: the identity key appears in no API response on any plane.
-/// Nothing asserted either half before, which is what let S2's idset regression sit untested.
+/// `GET /v1/meta` never carries the bundle's identity key.
 #[tokio::test]
-async fn viewer_meta_reports_the_idset_and_never_the_key() {
+async fn viewer_meta_never_carries_the_identity_key() {
     let tmp = TempDir::new().unwrap();
     let server = serve_standard(&tmp).await;
 
@@ -352,86 +495,10 @@ async fn viewer_meta_reports_the_idset_and_never_the_key() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(
-        body["idset"], FIXTURE_IDSET,
-        "/v1/meta must report the bundle's idset: {body}"
-    );
     let raw = body.to_string();
     assert!(
         !raw.contains(TEST_KEY_HEX),
         "/v1/meta must never carry the identity key: {raw}"
-    );
-}
-
-/// Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}` accepts an optional `idset` and answers
-/// `409 conflict` — "stale idset; re-resolve by external_id" — when it does not match.
-/// The 409 had no test at any level, and the check is decided before inversion, so a matching
-/// idset must not alter the answer for the same id.
-#[tokio::test]
-async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve_standard(&tmp).await;
-
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-
-    // A real, visible id, so the 409 is not confusable with the 404 an unknown id would give.
-    let viewport = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(viewport.status(), 200);
-    let (_tiles, points) = decode_viewport(&viewport.bytes().await.unwrap());
-    let tessera_id = points[0].0;
-
-    // Baseline: no idset at all → 200.
-    let plain = post_item(&server, token, tessera_id).await;
-    assert_eq!(plain.status(), 200);
-
-    // A stale idset → 409, with the contract's own detail string.
-    let stale = server
-        .client
-        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "idset": FIXTURE_IDSET + 1 }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stale.status(), 409);
-    let body: serde_json::Value = stale.json().await.unwrap();
-    assert_eq!(body["error"], "conflict");
-
-    // The matching idset is a no-op: same 200, same body as the idset-less request.
-    let matching = server
-        .client
-        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "idset": FIXTURE_IDSET }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(matching.status(), 200);
-
-    // And a stale idset on an id naming nothing is still the 409, decided before inversion —
-    // identical for every identifier, so it opens no channel (Appendix C, C4).
-    let stale_unknown = server
-        .client
-        .post(server.viewer_url("/v1/items/0"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "idset": FIXTURE_IDSET + 1 }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        stale_unknown.status(),
-        409,
-        "the idset check must be entity-independent, not fall through to 404"
     );
 }
 

@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 serde = { workspace = true, optional = true }
+# `IdentityKey::generate`: the operating system's random source, for the key every new bundle gets.
+getrandom = "0.2"
 
 # `src/process.rs`' two allocator calls, and nothing else in this crate. Declared per-target rather
 # than plainly so that off glibc *this* crate takes no edge at all and its module compiles to

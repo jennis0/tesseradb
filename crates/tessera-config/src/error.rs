@@ -9,9 +9,6 @@ pub enum ConfigError {
     NoDeploymentConfig {
         from: PathBuf,
     },
-    IdentityKeyInline,
-    UnknownIdentityKey(String),
-    IdentityNotATable,
     MissingDisclosureSection,
     MissingDisclosureKey(&'static str),
     MissingCredential(&'static str),
@@ -74,8 +71,6 @@ impl std::fmt::Display for ConfigError {
                  \x20   wal   = \".tessera/wal.log\"\n\n\
                  \x20   [build]\n\
                  \x20   schema = \"schema.toml\"\n\n\
-                 \x20   [identity]\n\
-                 \x20   env = \"TESSERA_IDENTITY_KEY\"\n\n\
                  \x20   [plugin]\n\
                  \x20   module = \"builtin:passthrough\"\n\n\
                  \x20   [disclosure]\n\
@@ -85,22 +80,6 @@ impl std::fmt::Display for ConfigError {
                  \x20   session = \"127.0.0.1:49303\"\n\
                  \x20   control = \"127.0.0.1:45721\"",
                 from.display()
-            ),
-            ConfigError::IdentityKeyInline => write!(
-                f,
-                "[identity] carries `key`, but the identity key never appears in this file; write \
-                 `env = \"TESSERA_IDENTITY_KEY\"` naming the variable that holds it, or pass the \
-                 key with --identity-file"
-            ),
-            ConfigError::UnknownIdentityKey(key) => write!(
-                f,
-                "[identity] has no key `{key}`; it takes `env`, the name of the variable that \
-                 holds the identity key"
-            ),
-            ConfigError::IdentityNotATable => write!(
-                f,
-                "`identity` is not a table; write `[identity]` with `env = \"TESSERA_IDENTITY_KEY\"` \
-                 under it"
             ),
             ConfigError::MissingDisclosureSection => write!(
                 f,

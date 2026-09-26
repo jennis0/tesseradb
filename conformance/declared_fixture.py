@@ -40,7 +40,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 
-from oracle.harness import CLI_BIN, OPERATOR_CREDENTIAL, REPO_ROOT, build_env, write_deployment
+from oracle.harness import CLI_BIN, OPERATOR_CREDENTIAL, REPO_ROOT, write_deployment
 from suite.battery import (
     ArtifactCard,
     Browse,
@@ -55,8 +55,6 @@ from suite.battery import (
 from suite.canonical import Streamed
 from suite.driver import SuiteHarness, poll
 from suite.verification import streams_table
-
-ID_KEY_HEX = "d0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
 
 #: Items in the corpus, and how many of them the live deployment's build holds. The rest reach it
 #: through `/control/ingest`, so both doors are exercised.
@@ -292,7 +290,6 @@ class Deployment:
                 "--mint-external-ids",
             ],
             cwd=REPO_ROOT,
-            env=build_env(ID_KEY_HEX),
             check=True,
             capture_output=True,
         )
@@ -473,7 +470,7 @@ def _observe_one(
     out: dict[str, object] = {}
     served_codes: dict[str, dict[str, int]] = {}
     meta = record_one(server, token, Meta()).payload
-    out["meta"] = normalise_meta(meta)
+    out["meta"] = meta
     keys_of = _code_maps(server, token, meta)
     drawn = _category_columns(meta)
 
@@ -566,13 +563,6 @@ def _observe_one(
                 card = record_one(server, token, ArtifactCard(tessera, view)).payload
                 out[f"artifact {layer} {key} on {view}"] = card
     return out, served_codes
-
-
-def normalise_meta(meta: dict) -> dict:
-    """`/v1/meta` with the one field that names a deployment's identifier space removed."""
-    meta = json.loads(json.dumps(meta))
-    meta.pop("idset", None)
-    return meta
 
 
 def _code_maps(server, token: str, meta: dict) -> dict[str, dict[int, str]]:

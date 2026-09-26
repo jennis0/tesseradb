@@ -68,7 +68,6 @@ def _stamped(bundle_root: Path, recipe: dict) -> None:
         ("ONE_TILE_DEPTH", 5),
         ("EXTENT", (0.0, 1024.0, 0.0, 1024.0)),
         ("VIEW_ID", "s9"),
-        ("CATALOGUE_ID_KEY_HEX", "0102030405060708090a0b0c0d0e0f10"),
         ("N_ITEMS", 1234),
         ("_LAYOUT", [("only", 10)]),
         ("POINTS_NAME", "other.parquet"),
@@ -89,8 +88,7 @@ def test_every_input_the_catalogue_is_a_function_of_changes_its_recipe(
     Each of these silently changes what a rebuild would produce. The two that motivated the whole
     receipt are `SEED` and `ONE_TILE_TX`: change either, and `verify()` still passes — it re-derives
     geometry from the *bundle* — while every planted `fx_key` and every geometric claim in the
-    suite is computed from the *new* corpus. `CATALOGUE_ID_KEY_HEX` is the one with the widest
-    blast radius, because `tessera_id` is §7.2's entire served order.
+    suite is computed from the *new* corpus.
     """
     bundle_root = work_dir / "bundle"
     before = cat.recipe(work_dir, bundle_root)
@@ -289,10 +287,9 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
     recipe — with `--out` and the binary path dropped, since neither is a property of the fixture
     and both differ per worktree.
 
-    The two flags in it are the two that broke this before: `--mint-id-key` (r6 refuses to build
-    without a lineage decision) and `--mint-external-ids` (every `/control/changes` test needs one
-    to address an item *by*). Under the old predicate, a bundle built before either flag existed
-    was reused and the failure surfaced as a `KeyError` deep inside the oracle.
+    `--mint-external-ids` is in it because every `/control/changes` test needs an external id to
+    address an item *by*; a bundle built without it, reused, fails as a `KeyError` deep inside the
+    oracle.
     """
     def recipe_for(*, limit: int | None, extent: str = "0,65536,0,65536") -> dict:
         return harness.fixture_recipe(
@@ -318,7 +315,6 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
         "points=p.parquet",
         "pairs=q.parquet",
         "250000",
-        "--mint-id-key",
         "--mint-external-ids",
     ):
         assert expected in recipe, f"{expected} is not in the recipe, so a change to it is silent"

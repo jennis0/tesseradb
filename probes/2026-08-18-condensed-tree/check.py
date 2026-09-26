@@ -134,7 +134,7 @@ subprocess.run(
         "--values", f"archive={SRC / 'archive.parquet'}",
         "--values", f"primary_category={SRC / 'primary_category.parquet'}",
         "--out", str(bundle), "--view", "s0",
-        "--extent", "0,65536,0,65536", "--mint-id-key",
+        "--extent", "0,65536,0,65536",
     ],
     check=True, capture_output=True,
 )

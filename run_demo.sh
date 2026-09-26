@@ -340,10 +340,9 @@ fi
 # names of the variables holding its credentials, and none of that is the demo's to overwrite.
 #
 # The secrets are read from a `.env` beside that file when the environment does not already carry
-# them. `tessera serve` reads credentials from the process environment alone (the `.env` route in
-# the binary is the *identity key*'s, and that key is the build's rather than the server's), so a
-# rung whose credentials live only in its `.env` would otherwise refuse to start with nothing said
-# about where its secret was.
+# them. `tessera serve` reads credentials from the process environment alone, so a rung whose
+# credentials live only in its `.env` would otherwise refuse to start with nothing said about where
+# its secret was.
 if [[ -n "$deployment_override" ]]; then
   [[ -n "$bundle_override" ]] && { echo "--deployment and --bundle name the same thing twice" >&2; exit 2; }
   [[ -f "$deployment_override" ]] || { echo "no such deployment: $deployment_override" >&2; exit 1; }
@@ -377,8 +376,7 @@ if [[ -n "$deployment_override" ]]; then
   [[ -d "$bundle_override" ]] || { echo "$deployment_override names a bundle that is not there: $bundle_override" >&2; exit 1; }
 
   # The credentials this deployment declares, taken from the environment first and from the `.env`
-  # beside the file second — the same precedence the binary gives the identity key, and for the
-  # same reason: an exported variable is more specific than a file.
+  # beside the file second: an exported variable is more specific than a file.
   for role in session operator; do
     var="$(toml_scalar serve "${role}_credential_env")"
     [[ -n "$var" ]] || continue
@@ -561,10 +559,6 @@ build_scale() {
   # files are all one corpus, so it takes no limit.
   local -a limit=(--limit "$(items_of "$scale")")
   [[ -n "$(notebook_dir_of "$scale")" ]] && limit=()
-  # `--mint-id-key` starts a throwaway identity lineage, which is right for a demo bundle and
-  # wrong for anything else — every `tessera_id` it mints is meaningless outside this directory,
-  # and in particular means nothing to the *other* scale's bundle. A real deployment puts its key
-  # in the environment (`TESSERA_IDENTITY_KEY`, or a `.env` beside `tessera.toml`) instead.
   # `TESSERA_BUILD_MEMORY_BUDGET` (e.g. `8g`) caps the build's own structures. Unset, the binary
   # sizes its batches from `MemAvailable` at the moment it starts — which is the right default on
   # a machine doing nothing else, and wrong on one where the page cache for a 51 GB points file
@@ -605,7 +599,7 @@ build_scale() {
     --deployment "$(deployment_of "$scale")" \
     "${limit[@]}" \
     ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
-    $mint_external --mint-id-key --no-oracle-pairs
+    $mint_external --no-oracle-pairs
   local peak
   peak=$(awk '/Maximum resident set size/ {printf "%.1f GiB", $NF / 1048576}' "$DEMO/build-$scale.time")
   printf 'built %s in %dm%02ds, peak %s, %s on disk\n' \

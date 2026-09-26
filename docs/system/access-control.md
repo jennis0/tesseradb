@@ -152,34 +152,24 @@ current has to re-authorise on its own schedule, bounded only by the token's con
 The signal that does exist on the wire is a `403 expired-token` refusal once a token has expired
 or been revoked; a corpus change on its own produces no such refusal.
 
-## Key rotation
+## The identity key
 
 The `tessera_id` a client holds for an item is derived from the item's
 [entity id](data-model.md#what-an-item-carries) by a keyed permutation
-([security](security.md#a-client-never-sees-an-entity-id) covers what that hides). Rotating the
-key changes what every `tessera_id` in the corpus resolves to. A rotation is a build-time
-operation, `tessera build --rotate-id-key`: it produces a new bundle and takes effect on the
-restart that loads it, not while a service keeps running against the old one.
-
-The service tracks which key produced the identifiers currently live as a single counter, the
-idset, published on the metadata a client can read. A client may present the idset an identifier
-was minted under alongside that identifier; if the two no longer match, the request is refused
-rather than resolved against an identifier that has since come to name a different item.
-Presenting the idset is optional: a caller who omits it accepts that a `tessera_id` from a past
-idset may now name a different item. The check is the same whichever item is named, so it cannot
-be used to learn how identifiers moved across a rotation.
-
-**Not built yet:** binding a token to the idset it was issued under. A rotation does not end a
-live session on its own. An operator ending or revoking every open session is what makes a
-rotation take effect for identifiers already handed out.
+([security](security.md#a-client-never-sees-an-entity-id) covers what that hides). The key is
+drawn at random by `tessera build` each time it creates a bundle and is stored in the bundle's
+manifest. Nobody configures, supplies or changes it. A rebuild creates a new bundle with a new key,
+so every `tessera_id` changes, and one from the old bundle does not name an item in the new one.
+The change takes effect on the restart that loads the new bundle. A client holding `tessera_id`s
+from the old bundle reads its items again, by external id or afresh.
 
 ## Where this is tested and where it lives
 
 The plugin trait and its one built-in implementation live in `tessera-plugin`. The term index,
 authorised-set construction, and the on-disk cache live in `tessera-authz`. Session composition
 against the overlay, the row-space projection it feeds, and the background refresh that keeps a
-resident projection current live in `tessera-engine`. The session plane's two verbs, and the idset
-check on identifier lookups, live in `tessera-server`.
+resident projection current live in `tessera-engine`. The session plane's two verbs live in
+`tessera-server`.
 
 ## Sources
 

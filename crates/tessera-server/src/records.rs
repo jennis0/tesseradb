@@ -57,8 +57,6 @@ pub(crate) struct ItemsReq {
     cursor: Option<String>,
     #[serde(default)]
     compression: Option<CompressionReq>,
-    #[serde(default)]
-    idset: Option<u32>,
 }
 
 /// The `POST /v1/artifacts` request body. Every field but `view`, `layer` and `fields` may be left
@@ -90,8 +88,6 @@ pub(crate) struct ArtifactsReq {
     cursor: Option<String>,
     #[serde(default)]
     compression: Option<CompressionReq>,
-    #[serde(default)]
-    idset: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -386,7 +382,6 @@ fn run_items(
         page_rows: req.page_rows,
         pages: req.pages,
         cursor: req.cursor.as_deref(),
-        idset: req.idset,
         limits: limits(state),
         cancel: Some(cancel),
     };
@@ -431,7 +426,6 @@ fn run_artifacts(
         page_rows: req.page_rows,
         pages: req.pages,
         cursor: req.cursor.as_deref(),
-        idset: req.idset,
         limits: limits(state),
         cancel: Some(cancel),
     };

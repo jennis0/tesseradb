@@ -29,7 +29,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use common::{extent, open_engine, test_key, TEST_KEY_HEX};
+use common::{extent, open_engine, test_key};
 use tessera_build::config::{AccessInput, AccessSource};
 use tessera_build::{build, BuildArgs};
 
@@ -121,8 +121,6 @@ fn args(points: &Path, out: &Path, default: Option<&str>) -> BuildArgs {
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),

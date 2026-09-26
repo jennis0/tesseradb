@@ -1223,8 +1223,6 @@ class Database:
                 "--deployment",
                 str(self.path / "tessera.toml"),
                 *self._id_arguments(),
-                "--identity-file",
-                str(self.path / ".tessera" / "identity.toml"),
             ]
         )
         report = CommitReport(
@@ -1429,11 +1427,10 @@ class Database:
         self._refuse_before_the_first_commit("meta")
         return self.viewer().meta()
 
-    def item(self, tessera_id, idset: int | None = None) -> dict:
+    def item(self, tessera_id) -> dict:
         """One item's full record.
 
         - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
-        - `idset`: as for `Viewer.item`.
 
         The record has `fields`, `labels` and `views` as `Viewer.item` describes, and
         `external_id`, the id the item was inserted with, as the type its id column had: an integer
@@ -1442,7 +1439,7 @@ class Database:
             db.item(db.view("papers").sample(k=1).column("tessera_id")[0].as_py())
         """
         self._refuse_before_the_first_commit("item")
-        record = self.viewer().item(tessera_id, idset)
+        record = self.viewer().item(tessera_id)
         if record.get("external_id") is not None:
             record["external_id"] = self._inserted_id(record["external_id"])
         return record
@@ -1641,14 +1638,12 @@ class Database:
 
         Where the rows were inserted with an id column, each is `{"external_id": ...}`: the bytes
         that column held, base64-encoded. A string is its UTF-8 and an integer its eight
-        little-endian bytes. Otherwise each is `{"tessera_id": ..., "idset": ...}`, the id with
-        the id numbering it belongs to.
+        little-endian bytes. Otherwise each is `{"tessera_id": ...}`.
         """
         insert = self._identity_insert()
         if insert is not None and insert.id_column is not None:
             return [{"external_id": addressed(one)} for one in ids]
-        idset = int(self.meta()["idset"])
-        return [{"tessera_id": str(one), "idset": idset} for one in ids]
+        return [{"tessera_id": str(one)} for one in ids]
 
     def _changes(self, ids: Iterable[Hashable], op: str) -> ChangeReport:
         self._refuse_before_the_first_commit(op)
@@ -1765,11 +1760,8 @@ class Database:
         """
         if self._child is not None:
             return self.listening
-        identity = (self.path / ".tessera" / "identity.key").read_text(encoding="utf-8").strip()
         binary, _ = _instance.find_binary()
-        self._child, self.listening = _instance.start(
-            binary, self.path / "tessera.toml", identity
-        )
+        self._child, self.listening = _instance.start(binary, self.path / "tessera.toml")
         return self.listening
 
     @property

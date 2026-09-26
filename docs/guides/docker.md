@@ -3,8 +3,8 @@
 This guide runs Tessera in a container managed by Docker Compose, with the database kept in a Docker
 volume. It suits a host where you already run services this way. You'll need Docker with the Compose
 plugin, sudo on the host, and a clone of the Tessera repository to build the image from. From the
-`~/ireland` directory of [the first tutorial](../start/first-map.md) you need `corpus.toml`,
-`points.parquet` and `.env`, which holds the identity key.
+`~/ireland` directory of [the first tutorial](../start/first-map.md) you need `corpus.toml` and
+`points.parquet`.
 
 Once the container is running, [Operate a deployment](operating.md) takes over. It applies to this
 install and to [the systemd one](systemd.md) alike.
@@ -139,9 +139,6 @@ reboots. It does not restart a container because it reports itself unhealthy. Fo
 the behaviour you want, for the reason [When a write to the log
 fails](operating.md#when-a-write-to-the-log-fails) gives.
 
-The identity key appears nowhere in this file. `tessera build` needs it and the server does not, so
-you pass it to the build alone.
-
 ## Create the credentials
 
 The server needs both credentials [Addresses and
@@ -175,17 +172,14 @@ tessera serve: refused to start: cannot read the session credential file /run/se
 ## Build the bundle
 
 A container starts from an empty volume, so build the bundle into it first. `docker compose run`
-starts a one-off container with the same mounts and runs the command you give it.
-`--env-from-file` hands that one container the identity key from the tutorial's `.env`:
+starts a one-off container with the same mounts and runs the command you give it:
 
 ```console
-$ docker compose run --rm --env-from-file ~/ireland/.env tessera build
+$ docker compose run --rm tessera build
 ...
 built /var/lib/tessera/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
   view ireland: 29935 row(s)
 ```
-
-The key is written into the bundle, and the serving container never sees `.env`.
 
 ## Start the server
 
@@ -267,10 +261,10 @@ section shows, then send again any changes made while the old bundle was served.
 
 ## Replace the bundle
 
-[Rebuild and replace the bundle](rebuild.md) explains which `tessera_id`s a rebuild keeps and why
-the old log goes aside with the old bundle. Under Compose, copy the changed sources into `config/`,
-here the Parquet file with Saint Patrick's Bridge corrected, and build into a new directory in the
-volume. `--carry-id-key-from` reads the key from the bundle, so `.env` isn't needed.
+[Rebuild and replace the bundle](rebuild.md) explains why a rebuild gives every item a new
+`tessera_id` and why the old log goes aside with the old bundle. Under Compose, copy the changed
+sources into `config/`, here the Parquet file with Saint Patrick's Bridge corrected, and build into
+a new directory in the volume.
 
 The image has no shell, so moving directories in the volume needs a short-lived container from
 another image. This uses Alpine Linux. Compose names the volume after the directory,
@@ -278,7 +272,7 @@ another image. This uses Alpine Linux. Compose names the volume after the direct
 
 ```console
 $ cp ~/ireland/points.parquet config/
-$ docker compose run --rm tessera build --carry-id-key-from /var/lib/tessera/bundle --bump-idset --out /var/lib/tessera/bundle.next 2>&1 | tail -2
+$ docker compose run --rm tessera build --out /var/lib/tessera/bundle.next 2>&1 | tail -2
 built /var/lib/tessera/bundle.next (v00000): 29935 items, 1 terms, 29935 pairs, 2181449 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
   view ireland: 29935 row(s)
 $ docker compose stop

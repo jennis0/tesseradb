@@ -457,7 +457,7 @@ pub(crate) fn parse_values_batch(
     view_in: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ParsedValues, DecodeError> {
     let body_name = "values body";
-    let fixed = [Fixed::ExternalId, Fixed::TesseraId, Fixed::IdSet];
+    let fixed = [Fixed::ExternalId, Fixed::TesseraId];
     let batches = record_batches(
         body_name,
         encoding,
@@ -515,18 +515,6 @@ pub(crate) fn parse_values_batch(
                     })?,
             ),
         };
-        let idset = match batch.column_by_name("idset") {
-            None => None,
-            Some(col) => Some(
-                col.as_any()
-                    .downcast_ref::<arrow::array::UInt32Array>()
-                    .ok_or_else(|| {
-                        DecodeError(
-                            "values body: column 'idset' is present but not uint32".to_string(),
-                        )
-                    })?,
-            ),
-        };
 
         let cells: Vec<Cells> = carried
             .iter()
@@ -560,19 +548,12 @@ pub(crate) fn parse_values_batch(
                 }
                 (None, None) => {
                     return Err(DecodeError(format!(
-                        "values body: row {} names no entity; send an external_id, or a \
-                         tessera_id with its idset",
+                        "values body: row {} names no entity; send an external_id or a \
+                         tessera_id",
                         rows.len()
                     )))
                 }
                 (Some(external), None) => {
-                    if idset.as_ref().is_some_and(|arr| !arr.is_null(i)) {
-                        return Err(DecodeError(format!(
-                            "values body: row {} names an external_id with an idset, which \
-                             accompanies a tessera_id only; remove the idset",
-                            rows.len()
-                        )));
-                    }
                     check_external_id(&external)?;
                     Address::External(external)
                 }
@@ -583,19 +564,7 @@ pub(crate) fn parse_values_batch(
                             rows.len()
                         ))
                     })?;
-                    // An idset is required beside a `tessera_id`, as on `/control/changes`: an
-                    // id names an entity only under the set it was minted in.
-                    let Some(set) = idset.as_ref().filter(|arr| !arr.is_null(i)) else {
-                        return Err(DecodeError(format!(
-                            "values body: row {} names a tessera_id with no idset; send the \
-                             idset from `/v1/meta` beside it",
-                            rows.len()
-                        )));
-                    };
-                    Address::Tessera {
-                        id: TesseraId::new(id),
-                        idset: set.value(i),
-                    }
+                    Address::Tessera(TesseraId::new(id))
                 }
             };
 

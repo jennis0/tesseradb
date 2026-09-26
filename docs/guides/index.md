@@ -6,7 +6,7 @@ Each guide covers one task for a user who has finished a tutorial.
 - [Run Tessera with Docker](docker.md), with the database in a volume and Compose to start it.
 - [Operate a deployment](operating.md): who reaches each address, memory, health, compaction and failed writes.
 - [Put Tessera behind TLS](tls.md) with nginx, and let a page on another origin use it.
-- [Rebuild and replace the bundle](rebuild.md), keeping the identity key and knowing which `tessera_id`s survive.
+- [Rebuild and replace the bundle](rebuild.md), and what happens to the `tessera_id`s a client holds.
 - Declaring a corpus: views, attributes, vocabularies and access labels. Not written yet.
 - Declaring several layouts over one corpus with views and view groups. Not written yet.
 - Deciding who may see what: terms, labels and the session plane. Not written yet.

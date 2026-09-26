@@ -124,8 +124,7 @@ async function register(declaration) {
 }
 
 async function publish(layer, artifactsToPublish) {
-  const idset = (await metaOf(await authorise(['0']))).idset;
-  return accepted(`publish into ${layer}`, await control.publish(layer, {level: 0, addressing: 'tessera', idset, artifacts: artifactsToPublish}));
+  return accepted(`publish into ${layer}`, await control.publish(layer, {level: 0, addressing: 'tessera', artifacts: artifactsToPublish}));
 }
 
 async function status() {
@@ -196,7 +195,7 @@ if (!before.has(`${labelLayer}::l-c0`)) {
 
 console.log('\n2. delete one of the three documents the label was written from');
 line('tessera_id', sources[0]);
-accepted('delete', await control.changes([{tessera_id: sources[0].toString(), idset: meta.idset, op: 'delete'}]));
+accepted('delete', await control.changes([{tessera_id: sources[0].toString(), op: 'delete'}]));
 
 const afterDelete = await artifacts(token, [clusterLayer, labelLayer]);
 line('cluster', describe(afterDelete.get(`${clusterLayer}::c0`)));

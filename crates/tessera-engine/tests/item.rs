@@ -51,7 +51,7 @@ fn item_lookup_resolves_a_row_far_from_the_segments_start() {
     let entity = EntityId::new(source_to_new[&last_source]);
     let id = test_key().forward(0, entity).unwrap();
 
-    let out = engine.item(&session, id, None).unwrap();
+    let out = engine.item(&session, id).unwrap();
     assert!(
         out.is_some(),
         "an item far from segment start must still resolve through the permutation"
@@ -60,55 +60,6 @@ fn item_lookup_resolves_a_row_far_from_the_segments_start() {
         out.unwrap().external_id,
         Some(last_source.to_le_bytes().to_vec())
     );
-}
-
-/// `Engine::item`'s `idset` argument is checked against the ONE generation this
-/// call loads, before inversion, and identically for every `id` — a real, visible id and one
-/// naming nothing both take the same `Err(StaleIdSet)` for the same mismatched idset
-/// (mirrors `item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing` in
-/// `tessera-server`'s `http.rs`, at the engine layer this fix moved the check into). A matching
-/// idset is a no-op, same as `None`.
-#[test]
-fn item_idset_check_is_entity_independent_and_decided_before_inversion() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    let source_to_new = source_to_new_map(&bundle_root, "v00000");
-    let entity = EntityId::new(source_to_new[&0]);
-    let visible_id = test_key().forward(0, entity).unwrap();
-    let unknown_id = test_key()
-        .forward(0, EntityId::new(N_ITEMS + 1_000_000))
-        .unwrap();
-
-    // Fixture's idset is 1 (see `build_fixture_n`). A matching idset changes nothing.
-    assert!(engine
-        .item(&session, visible_id, Some(1))
-        .unwrap()
-        .is_some());
-
-    // A stale idset is `Err(StaleIdSet)` for a real, visible id...
-    assert!(matches!(
-        engine.item(&session, visible_id, Some(2)),
-        Err(EngineError::StaleIdSet)
-    ));
-    // ...and identically for an id naming nothing — decided before inversion, so it cannot be
-    // used to learn whether an id exists.
-    assert!(matches!(
-        engine.item(&session, unknown_id, Some(2)),
-        Err(EngineError::StaleIdSet)
-    ));
 }
 
 /// A bundle built without minted external IDs (the spec-conformant default — contracts §2.4:
@@ -141,8 +92,6 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
         out: bundle_root.clone(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -165,12 +114,10 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
 
     // Any built entity: below the high-water, no locator anywhere. Drill-down must succeed
     // with no external id, for the first entity and the last alike.
-    // (`item`'s third argument is the fix-wave idset check, landed on this branch after main's
-    // version of this test was written; `None` preserves its original meaning.)
     for entity in [0, N_ITEMS - 1] {
         let id = test_key().forward(0, EntityId::new(entity)).unwrap();
         let out = engine
-            .item(&session, id, None)
+            .item(&session, id)
             .expect("a no-sidecar bundle must serve items, not error");
         let out = out.expect("a visible item must resolve");
         assert_eq!(
@@ -203,13 +150,13 @@ fn an_unknown_id_and_an_invisible_one_are_indistinguishable() {
     let unknown_id = test_key()
         .forward(0, EntityId::new(N_ITEMS + 1_000_000))
         .unwrap();
-    assert_eq!(engine.item(&session, unknown_id, None).unwrap(), None);
+    assert_eq!(engine.item(&session, unknown_id).unwrap(), None);
 
     // Known but invisible: a zero-term session sees nothing, so any real item is invisible.
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let entity = EntityId::new(source_to_new[&0]);
     let invisible_id = test_key().forward(0, entity).unwrap();
-    assert_eq!(engine.item(&session, invisible_id, None).unwrap(), None);
+    assert_eq!(engine.item(&session, invisible_id).unwrap(), None);
 }
 
 /// The timing channel is closed rather than narrowed: the entity-space visibility test never
@@ -239,7 +186,7 @@ fn the_item_path_never_constructs_a_row_projection() {
     );
 
     let unknown_id = test_key().forward(0, EntityId::new(N_ITEMS + 1)).unwrap();
-    engine.item(&session, unknown_id, None).unwrap();
+    engine.item(&session, unknown_id).unwrap();
     assert_eq!(
         engine.row_projection_cache_len(),
         0,
@@ -249,7 +196,7 @@ fn the_item_path_never_constructs_a_row_projection() {
     let source_to_new = source_to_new_map(&bundle_root, "v00000");
     let entity = EntityId::new(source_to_new[&0]);
     let visible_id = test_key().forward(0, entity).unwrap();
-    engine.item(&session, visible_id, None).unwrap();
+    engine.item(&session, visible_id).unwrap();
     assert_eq!(
         engine.row_projection_cache_len(),
         0,
@@ -281,7 +228,7 @@ fn drill_down_works_on_a_session_that_has_never_drawn_a_viewport() {
     let entity = EntityId::new(source_to_new[&0]);
     let id = test_key().forward(0, entity).unwrap();
 
-    let out = engine.item(&session, id, None).unwrap();
+    let out = engine.item(&session, id).unwrap();
     assert!(
         out.is_some(),
         "a visible item's first request against this session may be a drill-down"
@@ -332,7 +279,7 @@ fn a_sidecar_error_on_drill_down_is_an_error_not_a_missing_external_id() {
     bytes[last] ^= 0xFF;
     std::fs::write(&ext_path, bytes).unwrap();
 
-    let err = engine.item(&session, id, None).unwrap_err();
+    let err = engine.item(&session, id).unwrap_err();
     assert!(
         matches!(err, EngineError::Store(StoreError::InvalidSidecar { .. })),
         "a corrupt sidecar must be Err(EngineError::Store(InvalidSidecar)), never a fail-open \

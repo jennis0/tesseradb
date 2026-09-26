@@ -384,24 +384,14 @@ the name back to `population` and run `tessera check` once more to get `check OK
 
 ## Build the bundle
 
-The build needs one more thing first, which is a secret key. Inside the server, every place is
-identified by a number of Tessera's own. That number never leaves the server, because a viewer who
-collected a few of them could estimate how many places they aren't allowed to see. Browsers get a
-`tessera_id` for each place instead. It's the internal number scrambled with a secret called the
-identity key. The [security chapter](../system/security.md#a-client-never-sees-an-entity-id)
-explains what the scrambling hides and what it doesn't.
-
-The build reads the key from a file called `.env` beside `tessera.toml`. Create one holding a random
-key that only you can read.
-
-```bash
-echo "TESSERA_IDENTITY_KEY=$(openssl rand -hex 16)" > .env
-chmod 600 .env
-```
-
-Keep `.env` safe. If you rebuild with a different key, every place gets a different `tessera_id`,
-and any `tessera_id` a viewer had saved will no longer point at the same place. If there's no key at
-all, the build refuses to start and tells you the ways to supply one.
+Inside the server, every place is identified by a number of Tessera's own. That number never
+leaves the server, because a viewer who collected a few of them could estimate how many places
+they aren't allowed to see. Browsers get a `tessera_id` for each place instead. It's the internal
+number scrambled with a secret key, which the build makes up at random and keeps inside the bundle.
+There is nothing for you to set up. The [security
+chapter](../system/security.md#a-client-never-sees-an-entity-id) explains what the scrambling
+hides and what it doesn't. Each build makes a new key, so building again gives every place a new
+`tessera_id`, and any `tessera_id` a viewer had saved will no longer point at the same place.
 
 Now build the bundle. The build reads every row of `points.parquet` and works out where each place
 sits on the map. It stores neighbouring places next to each other on disc, so that the places in any
@@ -450,7 +440,8 @@ write over an existing bundle.
 
 ## Serve it
 
-The server needs the two secret files `tessera.toml` names. Create them the same way as the key.
+The server needs the two secret files `tessera.toml` names. Fill each with a random value that only
+you can read.
 
 ```bash
 openssl rand -hex 16 > session.secret
@@ -579,8 +570,8 @@ When you've finished, press Ctrl-C in each terminal to stop the page's server an
 ## What you built
 
 `~/ireland` now holds a working deployment. The data is in `points.parquet` and the declaration in
-`corpus.toml`. `tessera.toml` holds the deployment's settings, and `.env`, `session.secret` and
-`operator.secret` hold its three secrets. The `bundle` directory is what the build made from all of
+`corpus.toml`. `tessera.toml` holds the deployment's settings, and `session.secret` and
+`operator.secret` hold its two secrets. The `bundle` directory is what the build made from all of
 that. To bring the map back, start `tessera serve` in `~/ireland`, then run the three `export` lines
 and `node server.mjs` in the example's directory.
 

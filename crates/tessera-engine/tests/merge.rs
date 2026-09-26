@@ -24,7 +24,7 @@
 //! this file passes against that bug.
 //!
 //! So these cases assert on the served `tessera_id` set. `tessera_id` is a blinding permutation of
-//! the entity id under the deployment key (I10, decision 0014) — a function of the entity, never
+//! the entity id under the bundle's key (I10, decision 0014) — a function of the entity, never
 //! of the row — so it is stable across a merge by construction, and set equality across the swap
 //! is exactly the discrimination a count cannot make. `publish_merge` re-derives the mask over the
 //! new row space for this reason; these are the tests that hold it to it.
@@ -151,7 +151,7 @@ const ROWS_EACH: usize = 8;
 
 /// The served set as `tessera_id`s.
 ///
-/// `tessera_id` is a blinding permutation of the entity id under the deployment key (I10) — a
+/// `tessera_id` is a blinding permutation of the entity id under the bundle's key (I10) — a
 /// function of the entity, never of the row — so it is stable across a merge by construction, and
 /// set equality across the swap is the discrimination a count cannot make.
 fn served_ids(

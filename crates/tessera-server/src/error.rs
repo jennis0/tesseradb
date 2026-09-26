@@ -198,10 +198,6 @@ pub fn admission_retry_after_s(stats: &tessera_engine::ExecutorStats) -> u64 {
 pub fn map_engine_error(e: EngineError) -> ApiError {
     match e {
         EngineError::UnknownView(view) => ApiError::Unknown(format!("unknown view '{view}'")),
-        // The caller's `idset` is not the generation `Engine::item` validated it against.
-        EngineError::StaleIdSet => {
-            ApiError::Conflict("stale idset; re-resolve by external_id".to_string())
-        }
         // The caller can ask for less; the detail names only its numbers and the configured bounds.
         EngineError::UnderlayRefused(detail) => ApiError::Contract(detail),
         // The detail names columns and families, which `/v1/meta` publishes to every principal.
@@ -864,14 +860,6 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("1")
         );
-    }
-
-    /// `StaleIdSet` is a 409.
-    #[test]
-    fn map_engine_error_takes_stale_idset_to_409_conflict() {
-        let (status, code, _) = map_engine_error(EngineError::StaleIdSet).parts();
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(code, "conflict");
     }
 
     /// A refused underlay is a 422: the caller can ask for less.

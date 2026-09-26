@@ -477,16 +477,10 @@ impl Engine {
         &self,
         session: &Session,
         id: TesseraId,
-        idset: Option<u32>,
         view: &str,
         zoom: Option<u8>,
     ) -> Result<Option<ArtifactOut>> {
         let generation = self.generation.load_full();
-        if let Some(e) = idset {
-            if e != generation.bundle.manifest.identity.idset {
-                return Err(EngineError::StaleIdSet);
-            }
-        }
         let carriers = generation
             .bundle
             .partitions

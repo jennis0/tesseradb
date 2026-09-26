@@ -9,8 +9,8 @@ principal may see, computed from `term_of` and nothing served. A growth that dro
 count computed over anything but the union inside the mask, disagrees.
 
 Also pinned: the receipt is a `tessera_id` and the count that joined, with no ordinal and no
-membership size; re-sending a slice joins nothing and moves nothing; an unknown key refuses the
-whole batch; and a stale idset is a `409` with nothing applied.
+membership size; re-sending a slice joins nothing and moves nothing; and an unknown key refuses the
+whole batch with nothing applied.
 """
 
 from __future__ import annotations
@@ -94,7 +94,6 @@ def growth_server(tmp_path_factory):
 def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_mask(growth_server):
     server, points = growth_server
     token = server.authorise(["1", "2"])["token"]
-    idset = server.meta(token)["idset"]
     resp = server.viewport_request(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)
     assert resp.status_code == 200, resp.text
     table = decode_viewport_points(resp.content)
@@ -106,14 +105,14 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
     resp = server.register_layer(_layer())
     assert resp.status_code == 201, resp.text
     resp = server.publish_artifacts(
-        LAYER, addressing="tessera", idset=idset, artifacts=[{"key": "whole", "members": slices[0]}]
+        LAYER, addressing="tessera", artifacts=[{"key": "whole", "members": slices[0]}]
     )
     assert resp.status_code == 201, resp.text
     tessera_id = resp.json()["artifacts"][0]["tessera_id"]
 
     for joining in slices[1:]:
         resp = grow(
-            server, addressing="tessera", idset=idset, artifacts=[{"key": "whole", "members": joining}]
+            server, addressing="tessera", artifacts=[{"key": "whole", "members": joining}]
         )
         assert resp.status_code == 200, resp.text
         (row,) = resp.json()["artifacts"]
@@ -124,16 +123,15 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
         assert served_count(server, terms) == expected, terms
 
     # Re-sending a slice names the artifact and adds nothing.
-    resp = grow(server, addressing="tessera", idset=idset, artifacts=[{"key": "whole", "members": slices[1]}])
+    resp = grow(server, addressing="tessera", artifacts=[{"key": "whole", "members": slices[1]}])
     assert resp.status_code == 200, resp.text
     assert resp.json()["artifacts"][0]["joined"] == 0
     assert served_count(server, ["1", "2"]) == len(points)
 
 
-def test_an_unknown_key_and_a_stale_idset_each_refuse_the_batch_with_nothing_applied(growth_server):
+def test_an_unknown_key_refuses_the_batch_with_nothing_applied(growth_server):
     server, points = growth_server
     token = server.authorise(["1", "2"])["token"]
-    idset = server.meta(token)["idset"]
     before = served_count(server, ["1", "2"])
     assert before is not None, "the first test published the artifact"
     resp = server.viewport_request(token, VIEW_ID, 0, WHOLE_MAP, k=100_000)
@@ -142,7 +140,6 @@ def test_an_unknown_key_and_a_stale_idset_each_refuse_the_batch_with_nothing_app
     resp = grow(
         server,
         addressing="tessera",
-        idset=idset,
         artifacts=[
             {"key": "whole", "members": ids[:5]},
             {"key": "never-published", "members": ids[5:10]},
@@ -150,8 +147,5 @@ def test_an_unknown_key_and_a_stale_idset_each_refuse_the_batch_with_nothing_app
     )
     assert resp.status_code == 422, resp.text
     assert "never-published" in resp.text
-
-    resp = grow(server, addressing="tessera", idset=idset + 1, artifacts=[{"key": "whole", "members": ids[:5]}])
-    assert resp.status_code == 409, resp.text
 
     assert served_count(server, ["1", "2"]) == before

@@ -11,7 +11,8 @@
 //! `category` columns, its access list (`list<utf8>` against `large_list<large_utf8>`), the
 //! vocabulary file's `key` and `title`, the artifact table's `key` and its `contents`, and the
 //! member table's `key`. What is asserted is that `tessera check` prints the same report and the
-//! build writes the same bundle, byte for byte, past the manifest's wall-clock timestamp.
+//! build writes the same bundle, byte for byte, past the manifest's wall-clock timestamp and the
+//! identity key each build generates.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -27,8 +28,6 @@ use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-
-const KEY: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 64;
 
 /// Which offset width a fixture's string columns are written at.
@@ -334,7 +333,6 @@ fn run(cwd: &Path, args: &[&str]) -> Output {
     tessera()
         .args(args)
         .current_dir(cwd)
-        .env("TESSERA_IDENTITY_KEY", KEY)
         .output()
         .expect("failed to run tessera")
 }
@@ -412,23 +410,50 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
         "expected a full bundle, found {} files",
         a.len()
     );
+    // Each build generates its own identity key, so the manifests differ in the key and the
+    // columns differ in each row's `tessera_id`. Everything else is compared byte for byte, and a
+    // `tessera_id` column as the entity each row names under its own bundle's key.
+    let manifest_of = |files: &BTreeMap<String, Vec<u8>>| -> serde_json::Value {
+        let (_, bytes) = files
+            .iter()
+            .find(|(name, _)| name.ends_with("MANIFEST.json"))
+            .expect("a manifest");
+        serde_json::from_slice(bytes).unwrap()
+    };
+    let (manifest_a, manifest_b) = (manifest_of(&a), manifest_of(&b));
+    let key_of = |manifest: &serde_json::Value| {
+        tessera_types::IdentityKey::from_hex(manifest["identity"]["key"].as_str().unwrap()).unwrap()
+    };
+    let (key_a, key_b) = (key_of(&manifest_a), key_of(&manifest_b));
     for (name, left_bytes) in &a {
         let right_bytes = &b[name];
-        // The manifest carries a wall-clock `created_at`, and `CURRENT` is its digest.
         if name.ends_with("MANIFEST.json") {
-            let normalise = |bytes: &[u8]| {
-                let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let normalise = |mut value: serde_json::Value| {
                 value["created_at"] = serde_json::Value::Null;
+                value["identity"]["key"] = serde_json::Value::Null;
+                for (file, entry) in value["files"].as_object_mut().unwrap() {
+                    if file.ends_with("columns.arrow") {
+                        entry["sha256"] = serde_json::Value::Null;
+                    }
+                }
                 value
             };
             assert_eq!(
-                normalise(left_bytes),
-                normalise(right_bytes),
-                "MANIFEST.json differs (ignoring created_at)"
+                normalise(manifest_a.clone()),
+                normalise(manifest_b.clone()),
+                "MANIFEST.json differs (ignoring created_at and the key)"
             );
             continue;
         }
         if name == "CURRENT" {
+            continue;
+        }
+        if name.ends_with("columns.arrow") {
+            assert_eq!(
+                entity_columns(left_bytes, &key_a),
+                entity_columns(right_bytes, &key_b),
+                "{name} differs"
+            );
             continue;
         }
         assert_eq!(
@@ -439,4 +464,31 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
             right_bytes.len()
         );
     }
+}
+
+/// A `columns.arrow` file's batches, with its `tessera_id` column replaced by the entity id each
+/// row names under `key`.
+fn entity_columns(bytes: &[u8], key: &tessera_types::IdentityKey) -> Vec<RecordBatch> {
+    let reader =
+        arrow::ipc::reader::FileReader::try_new(std::io::Cursor::new(bytes.to_vec()), None)
+            .unwrap();
+    reader
+        .map(|batch| {
+            let batch = batch.unwrap();
+            let at = batch.schema().index_of("tessera_id").unwrap();
+            let ids = batch
+                .column(at)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let entities: UInt64Array = ids
+                .values()
+                .iter()
+                .map(|&id| key.invert(tessera_types::TesseraId::new(id)).1.raw())
+                .collect();
+            let mut columns = batch.columns().to_vec();
+            columns[at] = Arc::new(entities);
+            RecordBatch::try_new(batch.schema(), columns).unwrap()
+        })
+        .collect()
 }

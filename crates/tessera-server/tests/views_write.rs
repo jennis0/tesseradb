@@ -904,7 +904,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
 
     let change = |op: &str| {
         let body =
-            json!([{ "tessera_id": tessera_id.to_string(), "idset": FIXTURE_IDSET, "op": op }]);
+            json!([{ "tessera_id": tessera_id.to_string(), "op": op }]);
         served
             .server
             .client
@@ -2445,7 +2445,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
 
     // The holder is deleted, so the binding is dead bookkeeping: the re-ingest below allocates
     // rather than answering 409, and it is no longer a join.
-    let body = json!([{ "tessera_id": first.to_string(), "idset": FIXTURE_IDSET, "op": "delete" }]);
+    let body = json!([{ "tessera_id": first.to_string(), "op": "delete" }]);
     let resp = served
         .server
         .client
@@ -2499,7 +2499,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         let holder = ingested_ids(&seed.json::<Value>().await.unwrap())[0];
 
         let body =
-            json!([{ "tessera_id": holder.to_string(), "idset": FIXTURE_IDSET, "op": "delete" }]);
+            json!([{ "tessera_id": holder.to_string(), "op": "delete" }]);
         let batch_id = format!("demote-race-again-{round}");
         let rows = [(id, 800.0, 300.0, &["1"][..], Some(7))];
         let (deleted, again) = tokio::join!(

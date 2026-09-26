@@ -13,8 +13,8 @@
 #
 # Fixtures outlive the code that wrote them. A bundle built before a manifest field was added or
 # renamed still has its `CURRENT`, still looks complete, and fails to load with a bare serde
-# complaint — `missing field 'idset'` — from whichever tool next opens it, hours into a campaign
-# and nowhere near this script.
+# complaint about a missing field from whichever tool next opens it, hours into a campaign and
+# nowhere near this script.
 #
 # So "already built" is decided by asking the reader, not by looking for `CURRENT`: `tessera
 # verify` opens the bundle exactly as the engine and the bench harness do. A bundle it refuses is
@@ -53,7 +53,7 @@ Usage: ${BASH_SOURCE[0]##*/} [options]
 Each existing bundle is opened with \`tessera verify\` before being skipped. One the current
 reader refuses — a fixture older than a change to the bundle format — is reported as STALE and
 rebuilt. \`--list\` names them without rebuilding, so this doubles as the answer to a loader
-error like "missing field \`idset\`" from any tool that reads a fixture.
+error like "missing field" from any tool that reads a fixture.
 
 Examples:
   ${BASH_SOURCE[0]##*/} --scales 2422486 --label-sets categories-archive,hash-flat
@@ -90,13 +90,6 @@ IFS=',' read -r -a ALL_SETS <<< "$SETS_ARG"
 for s in "${SCALES[@]}"; do
   [[ "$s" =~ ^[0-9]+$ ]] || { echo "--scales: '$s' is not a number" >&2; exit 2; }
 done
-
-# The same fixed non-degenerate key the engine/build fixture tests use, so a bundle built here is
-# comparable with one built by the test suite. It reaches the build through the environment, which
-# is the only route there is — a key on a command line reaches shell history, process listings and
-# CI logs (contracts §2.2). A fixed one is fine for a throwaway benchmark fixture and never for a
-# deployment.
-export TESSERA_IDENTITY_KEY="000102030405060708090a0b0c0d0e0f"
 
 # Entity cap per label set; 0 means uncapped. A build past the cap would produce a corpus whose
 # tail carries NO terms at all — invisible to every principal — which is the silent hole
@@ -205,7 +198,7 @@ for scale in "${SCALES[@]}"; do
         --deployment "$DEPLOYMENT" \
         --file "labels=$pairs" --out "$out" \
         --limit "$scale" \
-        --mint-external-ids --idset 1 >"$log" 2>&1; then
+        --mint-external-ids >"$log" 2>&1; then
       elapsed=$(( $(date +%s) - started ))
       bytes=$(du -sb "$out" | cut -f1)
       echo "  ok  ${elapsed}s  $(numfmt --to=iec "$bytes")"

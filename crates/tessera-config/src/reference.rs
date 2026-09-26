@@ -38,18 +38,6 @@ module = \"builtin:passthrough\"
 token_max_lifetime = 3600
 ";
 
-/// `[identity]` is read by hand in `parse` against `IDENTITY_KEYS`, so no struct there describes
-/// its keys. This one does, for the page, and a test holds it to `IDENTITY_KEYS`.
-#[allow(dead_code)]
-struct RawIdentity {
-    /// The environment variable holding the identity key. `tessera build` also reads it from a
-    /// `.env` file beside `tessera.toml`, and the process environment takes precedence over the
-    /// file. An empty value, and a value that is not a string, take the default.
-    ///
-    /// Default: `"TESSERA_IDENTITY_KEY"`.
-    env: Option<String>,
-}
-
 /// One table of the file.
 struct Section {
     name: String,
@@ -65,14 +53,12 @@ fn crate_file(relative: &str) -> PathBuf {
 
 fn sections() -> (Doc, Vec<Section>) {
     let lib = Source::read(&crate_file("src/lib.rs"));
-    let own = Source::read(&crate_file("src/reference.rs"));
     let sections = lib
         .keys("RawConfig")
         .into_iter()
         .map(|field| {
             let keys = match field.type_name() {
                 Some((name, _)) if lib.has_struct(&name) => lib.keys(&name),
-                _ if field.name == "identity" => own.keys("RawIdentity"),
                 _ => panic!("RawConfig.{} is not a table this page knows", field.name),
             };
             Section {
@@ -188,15 +174,6 @@ fn the_reference_lists_the_keys_parse_accepts() {
         let probe = with_line(MINIMAL, &section.name, "nonesuch = 1");
         let mut keys: Vec<String> = section.keys.iter().map(|k| k.name.clone()).collect();
         keys.sort();
-        if section.name == "identity" {
-            // Read by hand, so the refusal names the key it does not know and lists nothing.
-            assert!(matches!(
-                parse(&probe),
-                Err(ConfigError::UnknownIdentityKey(_))
-            ));
-            assert_eq!(keys, IDENTITY_KEYS, "[identity]");
-            continue;
-        }
         let accepted = tessera_docgen::accepted_keys(&refusal(&probe));
         assert_eq!(accepted, Some(keys), "[{}]", section.name);
     }
@@ -289,13 +266,6 @@ fn each_default_stated_in_words_is_the_one_parse_applies() {
             .is_ok_and(|d| d.contains(&shape_cap)),
         "max_shape_vertices: a build caps a shape at {shape_cap} vertices"
     );
-    for env in ["\"\"", "5"] {
-        let config = parse(&with_line(MINIMAL, "identity", &format!("env = {env}"))).unwrap();
-        assert_eq!(
-            config.identity_env, DEFAULT_IDENTITY_ENV,
-            "[identity] env = {env}"
-        );
-    }
 }
 
 #[test]

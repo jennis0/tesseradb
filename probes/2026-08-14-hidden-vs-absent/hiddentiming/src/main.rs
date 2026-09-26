@@ -188,8 +188,7 @@ fn run(abstracts: &[String]) {
             "construction": "probe",
             "rounds": 1,
             "key": "000102030405060708090a0b0c0d0e0f",
-            "shard_id": 0,
-            "idset": 1
+            "shard_id": 0
         },
         "views": [],
         "groups": [],

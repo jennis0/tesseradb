@@ -1,13 +1,14 @@
 //! The cursor a page end carries: a position sealed to the read it belongs to.
 //!
-//! XChaCha20-Poly1305 under a key derived from the deployment's identity key, with a random
+//! XChaCha20-Poly1305 under a key derived from the bundle's identity key, with a random
 //! 24-byte nonce drawn for each cursor. The route, the format, the view, the view's incarnation,
 //! the session's authorisation-data hash and, on the artifacts route, the layer, its entity and
 //! the level named are the associated data, so a cursor presented under any other binding does not
 //! open, and every such failure is the one refusal
-//! [`EngineError::CursorRefused`]. The idset and the order are sealed inside: another idset has a
-//! refusal of its own, and a request that names no order takes the cursor's. A client can read
-//! nothing from a cursor and can build none, so no position in one is used before it has opened.
+//! [`EngineError::CursorRefused`]. A cursor issued by another bundle is sealed under another key
+//! and refused the same way. The order is sealed inside, and a request that names no order takes
+//! the cursor's. A client can read nothing from a cursor and can build none, so no position in one
+//! is used before it has opened.
 
 use base64::Engine as _;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -79,13 +80,13 @@ impl Binding<'_> {
     }
 }
 
-/// The sealing key, derived from the identity key when the engine opens, so a rotation of that
-/// key stops every cursor opening.
+/// The sealing key, derived from the bundle's identity key when the engine opens, so a cursor
+/// from another bundle does not open.
 #[derive(Clone, Copy)]
 pub(crate) struct CursorKey([u8; 32]);
 
 impl CursorKey {
-    /// The key for a deployment whose identity key the manifest spells `identity_key_hex`: 32
+    /// The key for a bundle whose identity key the manifest spells `identity_key_hex`: 32
     /// lowercase hex characters, which `IdentityKey::from_hex` has already held to that spelling,
     /// so the spelling is one-to-one with the key's bytes and is hashed as it stands.
     pub(crate) fn of(identity_key_hex: &str) -> CursorKey {
@@ -168,15 +169,14 @@ impl Position {
 /// An items cursor's sealed payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ItemsCursor {
-    pub(super) idset: u32,
     pub(super) position: Position,
     /// The rows the read's next stretch spans, so a resumed read continues at the size it had
     /// grown to.
     pub(super) stretch: u32,
 }
 
-/// `idset, order, has_scan, scan (u32, u64), stretch`, little-endian.
-const PAYLOAD_LEN: usize = 4 + 1 + 1 + 12 + 4;
+/// `order, has_scan, scan (u32, u64), stretch`, little-endian.
+const PAYLOAD_LEN: usize = 1 + 1 + 12 + 4;
 
 impl ItemsCursor {
     pub(super) fn encode(&self) -> Vec<u8> {
@@ -186,7 +186,6 @@ impl ItemsCursor {
             RecordsOrder::Stored => 1u8,
         };
         let mut out = Vec::with_capacity(PAYLOAD_LEN);
-        out.extend_from_slice(&self.idset.to_le_bytes());
         out.push(order);
         out.push(u8::from(scan.is_some()));
         let (a, b) = scan.unwrap_or((0, 0));
@@ -199,41 +198,37 @@ impl ItemsCursor {
     /// A payload that opened but does not parse is refused like one that did not open: it can
     /// only be a payload of another format.
     pub(super) fn decode(payload: &[u8]) -> Result<ItemsCursor> {
-        if payload.len() != PAYLOAD_LEN || payload[5] > 1 {
+        if payload.len() != PAYLOAD_LEN || payload[1] > 1 {
             return Err(EngineError::CursorRefused);
         }
         let u32_at = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().expect("4"));
         let u64_at = |at: usize| u64::from_le_bytes(payload[at..at + 8].try_into().expect("8"));
-        let idset = u32_at(0);
-        let scan = (payload[5] == 1).then(|| (u32_at(6), u64_at(10)));
-        let order = match payload[4] {
+        let scan = (payload[1] == 1).then(|| (u32_at(2), u64_at(6)));
+        let order = match payload[0] {
             0 => RecordsOrder::Map,
             1 => RecordsOrder::Stored,
             _ => return Err(EngineError::CursorRefused),
         };
         Ok(ItemsCursor {
-            idset,
             position: Position { order, scan },
-            stretch: u32_at(18),
+            stretch: u32_at(14),
         })
     }
 }
 
-/// An artifacts cursor's sealed payload: the idset, and the last `(level, ordinal)` the read has
-/// returned or passed over.
+/// An artifacts cursor's sealed payload: the last `(level, ordinal)` the read has returned or
+/// passed over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ArtifactsCursor {
-    pub(super) idset: u32,
     pub(super) scan: Option<(u32, u32)>,
 }
 
-/// `idset, has_scan, level, ordinal`, little-endian.
-const ARTIFACTS_PAYLOAD_LEN: usize = 4 + 1 + 4 + 4;
+/// `has_scan, level, ordinal`, little-endian.
+const ARTIFACTS_PAYLOAD_LEN: usize = 1 + 4 + 4;
 
 impl ArtifactsCursor {
     pub(super) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(ARTIFACTS_PAYLOAD_LEN);
-        out.extend_from_slice(&self.idset.to_le_bytes());
         out.push(u8::from(self.scan.is_some()));
         let (level, ordinal) = self.scan.unwrap_or((0, 0));
         out.extend_from_slice(&level.to_le_bytes());
@@ -243,13 +238,12 @@ impl ArtifactsCursor {
 
     /// As [`ItemsCursor::decode`], a payload that opened and does not parse is refused.
     pub(super) fn decode(payload: &[u8]) -> Result<ArtifactsCursor> {
-        if payload.len() != ARTIFACTS_PAYLOAD_LEN || payload[4] > 1 {
+        if payload.len() != ARTIFACTS_PAYLOAD_LEN || payload[0] > 1 {
             return Err(EngineError::CursorRefused);
         }
         let u32_at = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().expect("4"));
         Ok(ArtifactsCursor {
-            idset: u32_at(0),
-            scan: (payload[4] == 1).then(|| (u32_at(5), u32_at(9))),
+            scan: (payload[0] == 1).then(|| (u32_at(1), u32_at(5))),
         })
     }
 }
@@ -274,7 +268,6 @@ mod tests {
     fn a_cursor_opens_only_under_the_binding_it_was_sealed_with() {
         let key = CursorKey::of(KEY);
         let cursor = ItemsCursor {
-            idset: 7,
             position: Position {
                 order: RecordsOrder::Map,
                 scan: Some((4, u64::MAX)),
@@ -291,9 +284,9 @@ mod tests {
                 Err(EngineError::CursorRefused)
             ));
         }
-        let rotated = CursorKey::of("0f0e0d0c0b0a09080706050403020100");
+        let another_bundle = CursorKey::of("0f0e0d0c0b0a09080706050403020100");
         assert!(matches!(
-            rotated.open(&binding("s0", 0, 1), &token),
+            another_bundle.open(&binding("s0", 0, 1), &token),
             Err(EngineError::CursorRefused)
         ));
     }
@@ -315,7 +308,6 @@ mod tests {
             }),
         };
         let cursor = ArtifactsCursor {
-            idset: 3,
             scan: Some((1, 40)),
         };
         let token = key.seal(&artifacts("clusters/a", 9, Some(1)), &cursor.encode());
@@ -339,7 +331,6 @@ mod tests {
     fn two_cursors_for_one_position_share_no_text() {
         let key = CursorKey::of(KEY);
         let payload = ItemsCursor {
-            idset: 1,
             position: Position {
                 order: RecordsOrder::Stored,
                 scan: Some((12, 0)),

@@ -54,7 +54,7 @@ from .canonical import Canonical, Json, canonicalise_viewport
 
 @dataclass(frozen=True)
 class Meta:
-    """`GET /v1/meta` — the schema, operand list and idset. Absence from the battery would hide a
+    """`GET /v1/meta` — the schema and operand list. Absence from the battery would hide a
     producer that dropped a declared column from the manifest (§3)."""
 
 

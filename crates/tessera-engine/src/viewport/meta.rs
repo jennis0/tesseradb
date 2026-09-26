@@ -88,9 +88,6 @@ pub struct EngineMeta {
     /// resolves keys through this and never mints: two handlers racing one novel key would
     /// otherwise draw two codes for it and split its rows between them.
     pub vocabularies: Arc<Vocabularies>,
-    /// The idset. `GET /v1/meta` reports this verbatim; `POST /v1/items/{tessera_id}` compares a
-    /// caller-supplied idset against it. Never the identity key — that never leaves the server.
-    pub idset: u32,
 }
 
 /// The ownership rule: the key `view` holds in `group`'s roster, given the roster record `view`
@@ -480,6 +477,5 @@ pub(crate) fn meta_of(generation: &Generation) -> EngineMeta {
             .collect(),
         scoped_scalars: manifest.scoped_scalars(),
         vocabularies: Arc::clone(&generation.vocabularies),
-        idset: manifest.identity.idset,
     }
 }

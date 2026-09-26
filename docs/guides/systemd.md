@@ -3,8 +3,7 @@
 This guide turns the map you served from a terminal in [the first tutorial](../start/first-map.md)
 into a service on a Linux server, which starts at boot and comes back by itself if it crashes.
 You'll need sudo on the server and the `tessera` binary you built with cargo. From the tutorial's
-`~/ireland` directory you need `corpus.toml`, `points.parquet` and `.env`, which holds the identity
-key.
+`~/ireland` directory you need `corpus.toml` and `points.parquet`.
 
 Once the service is running, [Operate a deployment](operating.md) covers what you do with it, from
 who may reach each address to compaction. [Run Tessera with Docker](docker.md) does the same job as
@@ -17,7 +16,7 @@ this page in a container.
 ## Install the binary and make a user
 
 The service gets a user of its own. The bundle holds every item in the corpus, whatever its access
-label, and the identity key with them, so no other account on the machine should be able to read it.
+label, so no other account on the machine should be able to read it.
 
 ```bash
 sudo useradd --system --home-dir /srv/tessera --shell /usr/sbin/nologin tessera
@@ -35,7 +34,6 @@ user can open `secrets`.
 sudo install -d -o tessera -g tessera -m 0750 /srv/tessera /srv/tessera/corpus /srv/tessera/state /srv/tessera/state/wal
 sudo install -d -o tessera -g tessera -m 0700 /srv/tessera/secrets
 sudo install -o tessera -g tessera -m 0640 ~/ireland/corpus.toml ~/ireland/points.parquet /srv/tessera/corpus/
-sudo install -o tessera -g tessera -m 0600 ~/ireland/.env /srv/tessera/.env
 ```
 
 The server creates its cache directory when it first starts. It does not create the directory the
@@ -118,8 +116,7 @@ tessera$ openssl rand -hex 32 > secrets/operator.secret
 
 ## Build the bundle
 
-`tessera build` finds the identity key in the `.env` you copied beside `tessera.toml`, as it did in
-the tutorial. Run it as the `tessera` user, so the service owns the bundle and can write to it
+Run `tessera build` as the `tessera` user, so the service owns the bundle and can write to it
 later.
 
 ```console

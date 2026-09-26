@@ -34,7 +34,7 @@ import subprocess
 
 import pytest
 
-from oracle.harness import CLI_BIN, REPO_ROOT, build_env, spawn_server, stop_server, write_deployment
+from oracle.harness import CLI_BIN, REPO_ROOT, spawn_server, stop_server, write_deployment
 from oracle.wire import (
     FRAME_POINTS,
     decode_viewport,
@@ -45,7 +45,6 @@ from oracle.wire import (
 
 from test_region_leaf import gated_layer_toml
 from test_shape_membership import (
-    ID_KEY_HEX,
     PRINCIPALS,
     VIEW_ID,
     WHOLE_MAP,
@@ -104,7 +103,6 @@ def highlight_server(tmp_path_factory):
     subprocess.run(
         [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle), "--mint-external-ids"],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         check=True,
     )
     server, proc = spawn_server(
@@ -253,7 +251,6 @@ def test_highlighted_is_a_reserved_column_name(tmp_path):
     result = subprocess.run(
         [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(work / "bundle-reserved"), "--mint-external-ids"],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         capture_output=True,
         text=True,
     )
@@ -315,7 +312,6 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
     """
     server, _points = highlight_server
     token = server.authorise(["1", "2"])["token"]
-    idset = server.meta(token)["idset"]
     table = decode_viewport_points(body(server, token, 0, WHOLE_MAP))
     ids = table.column("tessera_id").to_pylist()
     keys = table.column("fx_key").to_pylist()
@@ -329,14 +325,12 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
     resp = server.publish_artifacts(
         CLUSTERS,
         addressing="tessera",
-        idset=idset,
         artifacts=[{"key": "c-hit", "members": inside}],
     )
     assert resp.status_code in (200, 201, 202), resp.text
     resp = server.publish_artifacts(
         LABELS,
         addressing="tessera",
-        idset=idset,
         artifacts=[
             {
                 "key": "label-hit",

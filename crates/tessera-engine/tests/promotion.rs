@@ -235,7 +235,7 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
     );
     let tessera_id = reopened.tessera_id_of(id).expect("identity is computable");
     assert!(
-        reopened.item(&after, tessera_id, None).unwrap().is_some(),
+        reopened.item(&after, tessera_id).unwrap().is_some(),
         "the flushed item is visible through the descriptor it was ingested under"
     );
 

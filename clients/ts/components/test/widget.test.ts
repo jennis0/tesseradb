@@ -44,7 +44,6 @@ function fakeModel(initial: Record<string, unknown>): WidgetModel & {sent: Sent[
 
 const META = {
   apiVersion: 1,
-  idset: 0,
   views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, roster: null}],
   // A one-view bundle declares no group; the explorer's pickers read this and draw nothing.
   groups: [],

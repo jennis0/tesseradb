@@ -232,23 +232,7 @@ control = "127.0.0.1:45721"
     return path
 
 
-#: The environment variable `tessera.toml` names by default, and the one every fixture build here
-#: passes its identity key through. A key on a command line reaches shell history, process
-#: listings and CI logs, so there is no flag that takes one.
-IDENTITY_ENV = "TESSERA_IDENTITY_KEY"
-
-
-def build_env(key_hex: str | None = None) -> dict:
-    """The environment a `tessera build` subprocess runs in: this process's, plus the identity key
-    where the caller has one to state. `--mint-id-key` builds pass `None`."""
-    env = dict(os.environ)
-    env.pop(IDENTITY_ENV, None)
-    if key_hex is not None:
-        env[IDENTITY_ENV] = key_hex
-    return env
-
-
-def run_build(args: list[str], *, key_hex: str | None = None) -> subprocess.CompletedProcess:
+def run_build(args: list[str]) -> subprocess.CompletedProcess:
     """Run `tessera build` and hand back the completed process, refusal or not.
 
     The fixture builders above and in `catalogue.py` run the CLI with `check=True`, because for
@@ -262,7 +246,6 @@ def run_build(args: list[str], *, key_hex: str | None = None) -> subprocess.Comp
     return subprocess.run(
         [str(CLI_BIN), "build", *args],
         cwd=REPO_ROOT,
-        env=build_env(key_hex),
         capture_output=True,
         text=True,
         check=False,
@@ -317,27 +300,15 @@ def ensure_fixture_bundle(
     `CURRENT` alone would hand every test a bundle the server will not open, and the failure
     surfaces as an opaque fixture-setup error rather than "your fixture is stale".
 
-    The build is given `--mint-id-key` explicitly. r6 requires a build to refuse unless one of
-    `--carry-id-key-from` / `--identity-file` / the environment / `--mint-id-key` is named,
-    precisely so
-    a human decides the key's lineage rather than a tool inventing one silently. A test fixture is
-    a genuinely new lineage each time it is built, so minting is the correct answer here — and
-    stating it satisfies the rule rather than circumventing it. Note that this makes the fixture's
-    `tessera_id`s differ between rebuilds, which is why nothing may persist them across runs.
+    Every build generates the bundle's identity key, so the fixture's `tessera_id`s differ between
+    rebuilds, which is why nothing may persist them across runs.
 
-    `--mint-external-ids` is passed for the same class of reason and was **missing**, which broke
-    six tests on any checkout that had to build the fixture fresh (three in `reference/tests`,
-    three in `conformance/`, all of them a `KeyError` out of `Bundle.external_id_of`). The flag
-    became opt-in on 2026-07-30 (memo §3.2 D1: contracts §2.4 forbids manufacturing an external ID
-    for an item whose caller supplied none, and the Phase 0 corpus supplies none) and this builder
-    was not updated with it; the suite went on passing only against a `/tmp` fixture built before
-    the flip, and began failing when `/tmp` was wiped. Every test that addresses an item over
-    `/control/changes` needs an external ID to address it *by*, so this fixture must carry them:
+    `--mint-external-ids` is passed because every test that addresses an item over
+    `/control/changes` needs an external id to address it by, so this fixture must carry them:
     opt-in in the product, mandatory here.
 
-    Both of those are the same defect twice, and it is the receipt above — not this docstring —
-    that closes the class: reuse is decided by comparing the full argument set against the stamp,
-    so the next flag added here cannot be forgotten by the reuse test.
+    The receipt above, not this docstring, keeps a flag from being forgotten: reuse is decided by
+    comparing the full argument set against the stamp.
     """
     args = _fixture_build_argv(
         bundle_root, points=points, pairs=pairs, limit=limit, extent=extent, view_id=view_id
@@ -360,7 +331,7 @@ def ensure_fixture_bundle(
         bundle=bundle_root,
         schema=_fixture_config_path(bundle_root),
     )
-    subprocess.run(args, cwd=REPO_ROOT, env=build_env(), check=True)
+    subprocess.run(args, cwd=REPO_ROOT, check=True)
     write_recipe(bundle_root, wanted)
 
 
@@ -432,7 +403,7 @@ def _fixture_build_argv(
     ]
     if limit is not None:
         args += ["--limit", str(limit)]
-    args += ["--mint-id-key", "--mint-external-ids"]
+    args += ["--mint-external-ids"]
     return args
 
 
@@ -480,10 +451,9 @@ def fixture_recipe(argv: list[str], *, declaration: str = "") -> dict:
     path and the `--deployment` path are dropped: none is a property of the fixture, and including
     them would force a rebuild per worktree. The binary itself is recorded by [`write_recipe`].
 
-    Note what the recipe cannot pin, and why that is correct: `--mint-id-key` mints a fresh
-    identity key per build, so two bundles from an identical recipe have different `tessera_id`s.
-    The recipe records the *lineage decision*, not the key. Nothing may persist a `tessera_id` from
-    this fixture across runs — the docstring above says so for the same reason.
+    The recipe cannot pin the identity key: every build generates its own, so two bundles from an
+    identical recipe have different `tessera_id`s. Nothing may persist a `tessera_id` from this
+    fixture across runs, as the docstring above says.
     """
     argv = argv[1:]
     for flag in ("--out", "--deployment"):

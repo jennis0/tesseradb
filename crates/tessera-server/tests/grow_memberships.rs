@@ -6,7 +6,7 @@
 //! two more serves the union of the three, masked per principal; an unknown key and a deleted
 //! member each refuse the whole batch with nothing applied; a suppressed member joins and stays
 //! outside every mask; a suppressed artifact grows and stays suppressed; the growth comes back from
-//! a restart and survives a fold; the same under `tessera` addressing, with a stale idset refused;
+//! a restart and survives a fold; the same under `tessera` addressing;
 //! and the body takes keys, members and the fixed parts and nothing else (the fills are
 //! `artifact_fill.rs`'s subject). The response carries a `tessera_id` and the count that joined,
 //! and never an ordinal or a membership size (C8).
@@ -287,7 +287,7 @@ async fn a_suppressed_artifact_grows_and_stays_suppressed() {
     let id = publish(&server, "a", members(0..10)).await;
     change(
         &server,
-        json!({ "tessera_id": id, "idset": FIXTURE_IDSET, "op": "suppress" }),
+        json!({ "tessera_id": id, "op": "suppress" }),
     )
     .await;
     assert!(
@@ -310,7 +310,7 @@ async fn a_suppressed_artifact_grows_and_stays_suppressed() {
 
     change(
         &server,
-        json!({ "tessera_id": id, "idset": FIXTURE_IDSET, "op": "unsuppress" }),
+        json!({ "tessera_id": id, "op": "unsuppress" }),
     )
     .await;
     assert_eq!(
@@ -363,10 +363,9 @@ async fn growth_survives_a_restart_and_a_fold() {
     assert_eq!(count(&server, &["0"]).await, 40);
 }
 
-/// `tessera` addressing: the identifiers a viewer holds, under the idset they were minted under.
-/// A stale idset is a `409` and nothing joins.
+/// `tessera` addressing: the identifiers a viewer holds.
 #[tokio::test]
-async fn tessera_addressing_grows_under_the_current_idset_and_refuses_a_stale_one() {
+async fn tessera_addressing_grows_by_the_identifiers_a_viewer_holds() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register(&server, flat_layer(LAYER)).await;
@@ -407,7 +406,6 @@ async fn tessera_addressing_grows_under_the_current_idset_and_refuses_a_stale_on
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
             "addressing": "tessera",
-            "idset": FIXTURE_IDSET,
             "artifacts": [{ "key": "a", "members": first }]
         }))
         .send()
@@ -425,7 +423,6 @@ async fn tessera_addressing_grows_under_the_current_idset_and_refuses_a_stale_on
         &server,
         json!({
             "addressing": "tessera",
-            "idset": FIXTURE_IDSET,
             "artifacts": [{ "key": "a", "members": second }]
         }),
     )
@@ -439,48 +436,12 @@ async fn tessera_addressing_grows_under_the_current_idset_and_refuses_a_stale_on
         &server,
         json!({
             "addressing": "tessera",
-            "idset": FIXTURE_IDSET,
             "artifacts": [{ "key": "a", "members": ids[..100].to_vec() }]
         }),
     )
     .await;
     assert_eq!(status, 200, "{body}");
     assert_receipt(&body["artifacts"][0], "a", &id, 0);
-
-    // A stale idset is refused before anything is inverted.
-    let (status, body) = grow_raw(
-        &server,
-        json!({
-            "addressing": "tessera",
-            "idset": FIXTURE_IDSET + 1,
-            "artifacts": [{ "key": "a", "members": ids[100..].to_vec() }]
-        }),
-    )
-    .await;
-    assert_eq!(status, 409, "{body}");
-    assert_eq!(count(&server, &["0"]).await, 100, "nothing joined");
-
-    // And identifiers without an idset, or an idset beside external ids, are the publication's
-    // two 422s.
-    let (status, body) = grow_raw(
-        &server,
-        json!({
-            "addressing": "tessera",
-            "artifacts": [{ "key": "a", "members": ids[100..].to_vec() }]
-        }),
-    )
-    .await;
-    assert_eq!(status, 422, "{body}");
-    let (status, body) = grow_raw(
-        &server,
-        json!({
-            "addressing": "external",
-            "idset": FIXTURE_IDSET,
-            "artifacts": [{ "key": "a", "members": members(100..110) }]
-        }),
-    )
-    .await;
-    assert_eq!(status, 422, "{body}");
 }
 
 /// The body is keys, the rank a row pages, the members joining and leaving, and the fixed parts

@@ -24,7 +24,6 @@ rows="${ROWS:-20000000}"
 repeats="${REPEATS:-1}"
 budget=(); [ -n "${BUDGET:-}" ] && budget=(--memory-budget "$BUDGET")
 shapes=("${@:-distinct many few}")
-export TESSERA_IDENTITY_KEY=0123456789abcdef0123456789abcdef
 
 mkdir -p "$work"
 cat > "$work/tessera.toml" <<'EOF'
@@ -35,9 +34,6 @@ wal   = ".tessera/wal.log"
 
 [build]
 schema = "corpus.toml"
-
-[identity]
-env = "TESSERA_IDENTITY_KEY"
 
 [plugin]
 module = "builtin:passthrough"

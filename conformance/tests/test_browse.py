@@ -29,13 +29,12 @@ import subprocess
 
 import pytest
 
-from oracle.harness import CLI_BIN, REPO_ROOT, build_env, spawn_server, stop_server, write_deployment
+from oracle.harness import CLI_BIN, REPO_ROOT, spawn_server, stop_server, write_deployment
 from oracle.wire import decode_viewport_artifacts
 
 from test_region_leaf import GATED, gated_layer_toml
 from test_shape_membership import (
     BOXES,
-    ID_KEY_HEX,
     PRINCIPALS,
     SHAPES,
     VIEW_ID,
@@ -59,7 +58,6 @@ def browse_server(tmp_path_factory):
     subprocess.run(
         [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle), "--mint-external-ids"],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         check=True,
     )
     server, proc = spawn_server(

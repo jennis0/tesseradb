@@ -36,11 +36,6 @@ struct RawConfig {
     /// What `tessera build` and `tessera check` read.
     #[serde(default)]
     build: RawBuild,
-    /// Where `tessera build` finds the identity key, which it needs to compute each item's
-    /// `tessera_id`. This file names only the variable; `key = "…"` is refused, so the key itself
-    /// cannot be written here. `tessera build --identity-file` reads the key from a file instead.
-    // Read by hand in `parse` against `IDENTITY_KEYS`, so that `key` gets a refusal of its own.
-    identity: Option<toml::Value>,
     /// The authorisation plugin, which turns an access label into the terms a viewer's token is
     /// checked against.
     plugin: RawPlugin,
@@ -500,8 +495,6 @@ pub struct Config {
     pub wal_path: PathBuf,
     /// The corpus declaration `tessera build` reads. The server reads its schema from the bundle.
     pub schema_path: PathBuf,
-    /// The name of the environment variable holding the identity key, never the key.
-    pub identity_env: String,
     pub token_max_lifetime_secs: u64,
     /// `None` when the file declares no `[serve]` addresses; `prepare` refuses to serve then.
     pub viewer_addr: Option<SocketAddr>,
@@ -628,12 +621,6 @@ fn or_off<T: Copy>(key: &'static str, raw: Option<&OrOff<T>>, default: T) -> Res
 
 pub const DEPLOYMENT_FILE: &str = "tessera.toml";
 
-/// The environment variable holding the identity key when `[identity]` names none.
-pub const DEFAULT_IDENTITY_ENV: &str = "TESSERA_IDENTITY_KEY";
-
-/// The keys `[identity]` takes. It is read by hand, so that `key` is refused with its own message.
-const IDENTITY_KEYS: [&str; 1] = ["env"];
-
 /// The corpus declaration when `[build]` names none.
 pub const DEFAULT_SCHEMA_FILE: &str = "schema.toml";
 
@@ -698,24 +685,6 @@ fn parse(text: &str) -> Result<Config> {
         .token_max_lifetime
         .ok_or(ConfigError::MissingDisclosureKey("token_max_lifetime"))?;
 
-    let identity_env = match &raw.identity {
-        None => DEFAULT_IDENTITY_ENV.to_string(),
-        Some(value) => {
-            let table = value.as_table().ok_or(ConfigError::IdentityNotATable)?;
-            for key in table.keys() {
-                if key == "key" {
-                    return Err(ConfigError::IdentityKeyInline);
-                }
-                if !IDENTITY_KEYS.contains(&key.as_str()) {
-                    return Err(ConfigError::UnknownIdentityKey(key.clone()));
-                }
-            }
-            match table.get("env").and_then(toml::Value::as_str) {
-                Some(name) if !name.trim().is_empty() => name.to_string(),
-                _ => DEFAULT_IDENTITY_ENV.to_string(),
-            }
-        }
-    };
     let schema_path = raw
         .build
         .schema
@@ -862,7 +831,6 @@ fn parse(text: &str) -> Result<Config> {
         cache_dir: raw.bundle.cache,
         wal_path: raw.bundle.wal,
         schema_path,
-        identity_env,
         token_max_lifetime_secs,
         viewer_addr,
         session_addr,
@@ -1253,36 +1221,19 @@ mod tests {
     }
 
     #[test]
-    fn the_build_half_defaults_to_schema_toml_and_the_named_variable() {
-        let config = parse(&valid_toml("")).expect("a config naming neither must load");
+    fn the_build_half_defaults_to_schema_toml() {
+        let config = parse(&valid_toml("")).expect("a config naming no schema must load");
         assert_eq!(config.schema_path, PathBuf::from(DEFAULT_SCHEMA_FILE));
-        assert_eq!(config.identity_env, DEFAULT_IDENTITY_ENV);
     }
 
     #[test]
     fn the_build_half_is_declarable() {
         let toml = format!(
-            "{}\n[build]\nschema = \"corpus/declaration.toml\"\n[identity]\nenv = \"ACME_KEY\"\n",
+            "{}\n[build]\nschema = \"corpus/declaration.toml\"\n",
             valid_toml("")
         );
-        let config = parse(&toml).expect("both sections must load");
+        let config = parse(&toml).expect("the section must load");
         assert_eq!(config.schema_path, PathBuf::from("corpus/declaration.toml"));
-        assert_eq!(config.identity_env, "ACME_KEY");
-    }
-
-    #[test]
-    fn a_key_written_into_the_deployment_file_is_refused() {
-        let toml = format!("{}\n[identity]\nkey = \"00\"\n", valid_toml(""));
-        assert!(matches!(
-            parse(&toml),
-            Err(ConfigError::IdentityKeyInline)
-        ));
-
-        let toml = format!("{}\n[identity]\nenvv = \"X\"\n", valid_toml(""));
-        assert!(matches!(
-            parse(&toml),
-            Err(ConfigError::UnknownIdentityKey(ref k)) if k == "envv"
-        ));
     }
 
     #[test]
