@@ -382,9 +382,9 @@ impl CodeSet {
 /// Bulk-read through the cursor rather than one value at a time: a contiguous candidate collapses
 /// to a handful of ranges, and the caller then walks a plain integer range instead of stepping a
 /// bitmap cursor per entity.
-/// Ranges per cursor read. Large enough that the call amortises, small enough to stay on the stack.
-const RUN_BUF: usize = 64;
-
+///
+/// Its own loop rather than [`tessera_roaring::Runs`]: this is every universal column's scan, and
+/// the shared iterator measured slower here.
 fn for_each_run(bitmap: &Bitmap, mut f: impl FnMut(u32, u32)) {
     let mut cursor = bitmap.cursor();
     let mut buf = [croaring::RangeInclusive::<u32> { start: 0, last: 0 }; RUN_BUF];
@@ -398,6 +398,9 @@ fn for_each_run(bitmap: &Bitmap, mut f: impl FnMut(u32, u32)) {
         }
     }
 }
+
+/// Ranges per cursor read. Large enough that the call amortises, small enough to stay on the stack.
+const RUN_BUF: usize = 64;
 
 /// The value column's file name within a column's directory.
 pub const VALUES_FILE: &str = "values.arrow";
@@ -748,9 +751,10 @@ impl ValueColumn {
             // arithmetic, at O(runs) — where stepping the bitmap a bit at a time would cost
             // O(present) however small the candidate was.
             Some(presence) => {
+                // Intersected first: croaring's `and` is cheaper than merging a scattered
+                // candidate's runs against the presence.
                 let live = candidate.and(presence);
-                let mut runs = tessera_roaring::RankedRuns::new(presence, &live);
-                while let Some((lo, hi, rank)) = runs.next() {
+                for (lo, hi, rank) in tessera_roaring::RankedRuns::new(presence, &live) {
                     let slot0 = rank as usize;
                     let count = (hi - lo) as usize + 1;
                     if slot0 < len {
@@ -1136,13 +1140,25 @@ impl ValueColumn {
 
     /// Every value the candidate's entities carry at its storage type, with the entity, ascending:
     /// [`Self::record_value_of`] over a set, reaching each value by walking runs rather than by a
-    /// rank per entity.
-    pub fn for_each_record_value_in(&self, candidate: &Bitmap, mut f: impl FnMut(u32, RecordValue)) {
+    /// rank per entity. The walk stops at the first error `f` returns, and returns it.
+    pub fn for_each_record_value_in<E>(
+        &self,
+        candidate: &Bitmap,
+        mut f: impl FnMut(u32, RecordValue) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut failed = None;
         self.walk_slot_runs(candidate, self.codes.len(), |slot0, count, entity0| {
+            if failed.is_some() {
+                return;
+            }
             for (entity, slot) in (entity0..).zip(slot0..slot0 + count) {
-                f(entity, self.codes.record_at(slot));
+                if let Err(e) = f(entity, self.codes.record_at(slot)) {
+                    failed = Some(e);
+                    return;
+                }
             }
         });
+        failed.map_or(Ok(()), Err)
     }
 
     /// The value an entity carries at its storage type, or `None` where it carries none — the
@@ -1956,9 +1972,12 @@ mod tests {
             assert_eq!(sparse.record_value_of(7), Some(want.clone()), "{label}: by rank");
             assert_eq!(sparse.record_value_of(4), None, "{label}: no value held");
             let mut walked = Vec::new();
-            sparse.for_each_record_value_in(&candidate(4..10), |entity, value| {
-                walked.push((entity, value))
-            });
+            sparse
+                .for_each_record_value_in(&candidate(4..10), |entity, value| {
+                    walked.push((entity, value));
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
             assert_eq!(walked, vec![(7, want)], "{label}: the walk reads what the rank does");
         }
     }

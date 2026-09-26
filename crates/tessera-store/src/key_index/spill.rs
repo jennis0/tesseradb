@@ -203,7 +203,9 @@ impl Split {
     /// the key type's: keys that are small integers share their top bits, and routing them by
     /// those would put every entry in one bucket and write it all a second time. A later entry
     /// outside the range goes to the first or last bucket, which is routed again if it grows too
-    /// large.
+    /// large. So input that arrives sorted, whose first entries hold only the lowest keys, sends
+    /// nearly everything after them to the last bucket and pays that second pass; the spill is
+    /// for input in any order, and sorted input can go to a run writer directly.
     fn root<K: Key>(held: &[(K, u32)]) -> Split {
         let min = held.iter().map(|e| e.0).min();
         let max = held.iter().map(|e| e.0).max();

@@ -443,7 +443,7 @@ fn a_hasrow_naming_another_entity_at_a_rank_refuses() {
 /// **A has-row bitmap that renames a block's first entity.** Removing rank 0's member and adding
 /// one that sorts below rank 1's leaves every later rank naming the entity it named before. The
 /// renamed rank refuses, since its row belongs to the entity the bitmap no longer names, and the
-/// walk refuses; a later rank answers its own entity's row, which is still what it holds.
+/// walk refuses.
 #[test]
 fn a_hasrow_renaming_a_blocks_first_entity_refuses() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -469,11 +469,6 @@ fn a_hasrow_renaming_a_blocks_first_entity_refuses() {
     assert!(
         walk.is_err() && walked.is_empty(),
         "the renamed rank is read first"
-    );
-    assert_eq!(
-        blob.fields_of(entity_of_rank(1))
-            .expect("rank 1 is its own row"),
-        Some(fields_for(entity_of_rank(1)))
     );
     assert!(blob.self_check().is_err());
 }

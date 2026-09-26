@@ -285,9 +285,10 @@ fn check_unique_indexes(
         let scratch = crate::VerifyTmp::create(root)?;
         let homes_value = declared.index;
         let blob = !declared.render && !declared.index;
-        // A gibibyte sorts each of the first routing's 256 buckets in memory up to about 5×10⁹
-        // entries, so a column that size is written to the scratch once.
-        let mut spill = UniqueSpill::create(kind, scratch.path(), 1 << 30).map_err(store)?;
+        // The spill a build under the machine's own budget would sort the column in.
+        let budget = crate::pipeline::detect_memory_budget();
+        let spill_bytes = crate::unique_index::spill_budget(budget, budget);
+        let mut spill = UniqueSpill::create(kind, scratch.path(), spill_bytes).map_err(store)?;
         let mut push = |entity: u32, value: &tessera_spatial::ScalarValue| -> Result<()> {
             if entity >= bound || tombstones.contains(entity) {
                 return Ok(());
@@ -341,38 +342,24 @@ fn check_unique_indexes(
                     .map(|key| tessera_spatial::ScalarValue::Utf8(key.to_string()))
                     .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))
             };
-            let mut failed: Option<BuildError> = None;
             for (values, dict) in &layers {
                 let present = values.present();
                 values.for_each_record_value_in(&present, |entity, value| {
-                    if failed.is_some() {
-                        return;
-                    }
                     use tessera_filter::RecordValue as RV;
                     let value = match (dict, value) {
-                        (None, value) => Ok(record_as_scalar(value)),
-                        (Some(dict), RV::U8(o)) => keyed(dict, u32::from(o)),
-                        (Some(dict), RV::U16(o)) => keyed(dict, u32::from(o)),
-                        (Some(dict), RV::U32(o)) => keyed(dict, o),
-                        (Some(_), other) => Err(BuildError::Invalid(format!(
-                            "{attribute}: a keyword column holds {other:?} where it stores \
-                             ordinals"
-                        ))),
-                    };
-                    let value = match value {
-                        Ok(value) => value,
-                        Err(e) => {
-                            failed = Some(e);
-                            return;
+                        (None, value) => record_as_scalar(value),
+                        (Some(dict), RV::U8(o)) => keyed(dict, u32::from(o))?,
+                        (Some(dict), RV::U16(o)) => keyed(dict, u32::from(o))?,
+                        (Some(dict), RV::U32(o)) => keyed(dict, o)?,
+                        (Some(_), other) => {
+                            return Err(BuildError::Invalid(format!(
+                                "{attribute}: a keyword column holds {other:?} where it stores \
+                                 ordinals"
+                            )))
                         }
                     };
-                    if let Err(e) = push(entity, &value) {
-                        failed = Some(e);
-                    }
-                });
-            }
-            if let Some(e) = failed {
-                return Err(e);
+                    push(entity, &value)
+                })?;
             }
         } else if !blob {
             // Rendered alone: every view's rows carry the value, so each entity is read from the
@@ -422,22 +409,20 @@ fn check_unique_indexes(
             let mut wanted = croaring::Bitmap::new();
             wanted.add_range(0..bound);
             let mut failed: Option<BuildError> = None;
-            stack
-                .for_each_row_in(&wanted, &mut |entity, fields| {
-                    if failed.is_some() {
-                        return Ok(());
+            let walked = stack.for_each_row_in(&wanted, &mut |entity, fields| {
+                if let Some(field) = fields.into_iter().find(|f| f.tag as usize == at) {
+                    if let Err(e) = push(entity, &record_as_scalar(field.value)) {
+                        failed = Some(e);
+                        // Ends the walk; the error returned is `failed`.
+                        return Err(tessera_filter::RecordError::Malformed(String::new()));
                     }
-                    if let Some(field) = fields.into_iter().find(|f| f.tag as usize == at) {
-                        if let Err(e) = push(entity, &record_as_scalar(field.value)) {
-                            failed = Some(e);
-                        }
-                    }
-                    Ok(())
-                })
-                .map_err(|e| BuildError::Invalid(format!("the record blob: {e}")))?;
+                }
+                Ok(())
+            });
             if let Some(e) = failed {
                 return Err(e);
             }
+            walked.map_err(|e| BuildError::Invalid(format!("the record blob: {e}")))?;
         }
         let mut twice = 0u64;
         let column_dir = scratch.path().join("column");

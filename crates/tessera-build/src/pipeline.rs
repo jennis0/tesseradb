@@ -705,15 +705,13 @@ fn plan_build(
     // **The route each string column takes, and the model it settles on.** A column with two
     // routes takes the arena while the entity-order stages have the disk for it and the extents
     // when they do not (`residency::plan_routes`, `build-column-extents.md` §2). The refusal below
-    // is not affected by the choice: every column's storage is a mapped term and `total()` counts
+    // is not affected by the choice: every column's storage is a mapped term and the refusal counts
     // the anonymous ones.
     let free = available_disk(&args.out);
-    let (routes, mut tail) = crate::residency::routes_for(args, n, ids, &payloads, free, route);
-    // **The supplied keys' arena is anonymous and has no spill route** (`crate::ids`), so it
-    // stands beside the entity-order terms and the refusal below counts it.
-    if let Some(arena) = crate::residency::supplied_key_arena(id_space) {
-        tail.terms.push(arena);
-    }
+    // **The supplied keys' arena is anonymous and has no spill route** (`crate::ids`), so the
+    // model charges it in every phase and sizes the stages around it.
+    let (routes, tail) =
+        crate::residency::routes_for(args, n, ids, &payloads, free, route, id_space);
     report_column_routes(args, &routes, &tail, free);
     let (phase, peak) = tail.memory_peak();
     if peak > budget {

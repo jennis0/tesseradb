@@ -233,8 +233,7 @@ fn live_ordinals(
             )));
         };
         let mut ordinals = Bitmap::new();
-        let mut runs = RankedRuns::new(&present, &keep);
-        while let Some((start, last, rank)) = runs.next() {
+        for (start, last, rank) in RankedRuns::new(&present, &keep) {
             let slot0 = rank as usize;
             for k in 0..=(last - start) as usize {
                 let ordinal = *src.get(slot0 + k).ok_or_else(|| {

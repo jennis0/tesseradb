@@ -539,7 +539,8 @@ impl EntityTerms {
     }
 }
 
-/// Every list the disjoint layers `inputs` hold, in ascending entity order across them.
+/// Every list the disjoint layers `inputs` hold, in ascending entity order across them, but for
+/// the entities in `skip`, whose lists are not decoded.
 ///
 /// Each layer's has-row bitmap is walked in order, so a list's rank is counted rather than taken:
 /// a rank per entity sums every container below it, which over a whole layer is quadratic.
@@ -549,6 +550,7 @@ impl EntityTerms {
 /// entity.
 fn for_each_list_in(
     inputs: &[&EntityTerms],
+    skip: Option<&Bitmap>,
     f: &mut dyn FnMut(u32, Vec<u32>) -> Result<()>,
 ) -> Result<()> {
     let mut cursors: Vec<(std::iter::Peekable<croaring::bitmap::BitmapIterator<'_>>, usize)> =
@@ -585,9 +587,12 @@ fn for_each_list_in(
         };
         let (cursor, rank) = &mut cursors[index];
         cursor.next();
-        let terms = inputs[index].terms_at(*rank)?;
+        let at = *rank;
         *rank += 1;
-        f(entity, terms)?;
+        if skip.is_some_and(|skip| skip.contains(entity)) {
+            continue;
+        }
+        f(entity, inputs[index].terms_at(at)?)?;
     }
 }
 
@@ -626,7 +631,7 @@ pub fn coalesce_entity_terms_extents(
     let mut writer =
         EntityTermsWriter::create_at(hasrow_path, offsets_path, terms_path, bases_path)?;
     let mut written = 0u64;
-    for_each_list_in(inputs, &mut |entity, terms| {
+    for_each_list_in(inputs, None, &mut |entity, terms| {
         writer.push(entity, &terms)?;
         written += 1;
         Ok(())
@@ -697,11 +702,16 @@ impl EntityTermsStack {
         Ok(None)
     }
 
-    /// Every list any layer holds, in ascending entity order: the fold's walk. A repeated entity
+    /// Every list any layer holds, in ascending entity order, but for the entities in `skip`,
+    /// whose lists are not read: the fold's walk, skipping what it deletes. A repeated entity
     /// refuses, the layers being disjoint.
-    pub fn for_each_list(&self, f: &mut dyn FnMut(u32, Vec<u32>) -> Result<()>) -> Result<()> {
+    pub fn for_each_list(
+        &self,
+        skip: &Bitmap,
+        f: &mut dyn FnMut(u32, Vec<u32>) -> Result<()>,
+    ) -> Result<()> {
         let layers: Vec<&EntityTerms> = self.layers.iter().map(|layer| &**layer).collect();
-        for_each_list_in(&layers, f)
+        for_each_list_in(&layers, Some(skip), f)
     }
 
     /// Every entity any layer holds a list for, ascending. The layers hold
@@ -906,6 +916,37 @@ mod tests {
             .with_extents(std::slice::from_ref(&paths))
             .unwrap();
         assert_eq!(grown.terms_of(7).unwrap(), Some(vec![4]));
+    }
+
+    /// **The fold's walk does not read the list of an entity it deletes**, so a damaged list
+    /// under a deletion does not stop the fold that removes it; the same list refuses a walk that
+    /// keeps its entity.
+    #[test]
+    fn a_walk_skipping_an_entity_does_not_read_its_list() {
+        let base = tempfile::tempdir().unwrap();
+        let mut writer = EntityTermsWriter::create(base.path()).unwrap();
+        writer.push(0, &[1]).unwrap();
+        writer.push(1, &[2, 3]).unwrap();
+        writer.push(2, &[4]).unwrap();
+        writer.finish().unwrap();
+        // Entity 1's list ends before it starts: rank 2's start offset, which is rank 1's end.
+        let offsets = base.path().join(ENTITY_TERMS_OFFSETS_FILE);
+        let mut bytes = std::fs::read(&offsets).unwrap();
+        bytes[8..12].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&offsets, bytes).unwrap();
+        let stack = EntityTermsStack::open(Some(base.path()), &[]).unwrap();
+
+        let mut walked = Vec::new();
+        stack
+            .for_each_list(&Bitmap::of(&[1]), &mut |entity, _| {
+                walked.push(entity);
+                Ok(())
+            })
+            .expect("the damaged list is not read");
+        assert_eq!(walked, vec![0, 2]);
+        assert!(stack
+            .for_each_list(&Bitmap::new(), &mut |_, _| Ok(()))
+            .is_err());
     }
 
     /// **A layer holding nothing must still open.** A flush that published only joining rows

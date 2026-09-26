@@ -94,9 +94,10 @@ pub(crate) fn spill_budget(budget: u64, room: u64) -> usize {
         .max(UNIQUE_BUDGET_MIN) as usize
 }
 
-/// Write the index of every unique column in `schema`, reading each through `source_of` and
-/// sorting it in `spill_bytes` of memory, and refuse a column holding one value for two entities. Returns each column's runs, in key order
-/// with disjoint ranges; a column with no values has none. The runs are fsynced.
+/// Write the index of every unique column in `schema`, reading each through `source_of` and sorting
+/// it in `spill_bytes` of memory, and refuse a column holding one value for two entities. Returns
+/// each column's runs, in key order with disjoint ranges; a column with no values has none. The
+/// runs are fsynced.
 pub(crate) fn write_unique_indexes<'a>(
     prefix_dir: &Path,
     partition: &str,

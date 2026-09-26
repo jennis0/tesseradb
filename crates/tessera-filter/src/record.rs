@@ -97,10 +97,10 @@
 //! caller resolved through the rank, or against the bitmap's next member in a walk, so a corrupt
 //! bitmap, a wrong first entity or a wrong rank inside the right block refuses at the first row
 //! read. A block's first entity is not looked up in the bitmap on its own: that is a select, which
-//! sums every container below the rank, and a walk would pay it once a block. Every row length is bounds-checked against its block
-//! as the walk reaches it, the walk must reach the block's end exactly at its last row, and any
-//! mismatch, short file or malformed directory is a typed [`RecordError`] — never a neighbour's
-//! row, never a silent absence.
+//! sums every container below the rank, and a walk would pay it once a block. Every row length is
+//! bounds-checked against its block as the walk reaches it, the walk must reach the block's end
+//! exactly at its last row, and any mismatch, short file or malformed directory is a typed
+//! [`RecordError`] — never a neighbour's row, never a silent absence.
 //!
 //! Entity ids in the block are an index internal and are never serialised to any client (**I10**
 //! as corrected by decision 0065: the blob is an index internal, not a gather artefact).
@@ -996,15 +996,15 @@ impl RecordBlob {
     /// entity set on the heap. Opened this way an extent costs its block directory and one block
     /// buffer, and nothing that rises with the column's rows.
     ///
-    /// **What this gives up, and what stands instead.** The bitmap is one side of two of the
-    /// blob's addressing checks: that the directory addresses exactly as many rows as the bitmap
-    /// holds, and that each row's entity from the block's first entity and gaps is the bitmap's
-    /// next member. Neither can be made here. Everything else does hold — the directory contiguous and exactly covering
-    /// `blocks.bin`, the first ranks agreeing with the per-block row counts, each block's header
-    /// agreeing with the directory about its row count and first rank, the rows tiling each block
-    /// exactly, every row decoding inside its bounds — so a short, truncated or mis-addressed
-    /// extent still refuses. The build makes the first of the two itself, against the same
-    /// has-row files it streams once to decide which extent's row for a repeated entity wins
+    /// **What this gives up, and what stands instead.** The bitmap is one side of two of the blob's
+    /// addressing checks: that the directory addresses exactly as many rows as the bitmap holds,
+    /// and that each row's entity from the block's first entity and gaps is the bitmap's next
+    /// member. Neither can be made here. Everything else does hold — the directory contiguous and
+    /// exactly covering `blocks.bin`, the first ranks agreeing with the per-block row counts, each
+    /// block's header agreeing with the directory about its row count and first rank, the rows
+    /// tiling each block exactly, every row decoding inside its bounds — so a short, truncated or
+    /// mis-addressed extent still refuses. The build makes the first of the two itself, against the
+    /// same has-row files it streams once to decide which extent's row for a repeated entity wins
     /// (`tessera-build`'s `extents::DuplicateMap`).
     ///
     /// [`Self::hasrow`], [`Self::has_row`], [`Self::fields_of`], [`Self::for_each_row_in`] and
@@ -1195,12 +1195,11 @@ impl RecordBlob {
         self.first_rank.partition_point(|&fr| fr <= rank) - 1
     }
 
-    /// A decompressed block's header, checked against what the directory says about the block —
-    /// its row count and first rank — and against the block's own bytes through the tiling walk
-    /// below. Its first entity is checked row by row, by the reader that resolves each row's
-    /// entity through the has-row bitmap. Past this, the
-    /// block and the files that address it are known to be describing the same rows, and every
-    /// row of the block is known to be reachable inside it.
+    /// A decompressed block's header, checked against what the directory says about the block — its
+    /// row count and first rank — and against the block's own bytes through the tiling walk below.
+    /// Its first entity is checked row by row, by the reader that resolves each row's entity
+    /// through the has-row bitmap. Past this, the block and the files that address it are known to
+    /// be describing the same rows, and every row of the block is known to be reachable inside it.
     fn header_of(&self, block: usize, bytes: &[u8]) -> Result<BlockHeader, RecordError> {
         let header = decode_block_header(bytes, block)?;
         let rows = self.rows_in_block(block)?;
@@ -1338,14 +1337,11 @@ impl RecordBlob {
         f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
         let hasrow = self.hasrow()?;
-        let mut present = wanted.clone();
-        present.and_inplace(hasrow);
         let mut loaded: Option<(usize, BlockHeader, BlockScan)> = None;
         let mut bytes: Vec<u8> = Vec::new();
         // Ranks are carried along runs of the has-row bitmap rather than taken per entity: a rank
         // sums every container below it, which over a whole blob is quadratic.
-        let mut runs = tessera_roaring::RankedRuns::new(hasrow, &present);
-        while let Some((lo, hi, first)) = runs.next() {
+        for (lo, hi, first) in tessera_roaring::RankedRuns::new(hasrow, wanted) {
             for (entity, rank) in (lo..=hi).zip(first..) {
                 let rank = rank as u32;
                 let held = loaded.as_ref().is_some_and(|(_, header, _)| {

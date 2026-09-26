@@ -72,8 +72,8 @@
 //!
 //! They are still modelled, and still printed, as **mapped** terms: an operator whose disk is the
 //! constraint has the same right to see the number as one whose memory is. What changed is that
-//! [`Residency::memory_peak`] — the figure `--memory-budget` is compared against — leaves them out. A
-//! model that kept charging them would refuse builds that now fit, which is the failure mode of
+//! [`Residency::memory_peak`] — the figure `--memory-budget` is compared against — leaves them out.
+//! A model that kept charging them would refuse builds that now fit, which is the failure mode of
 //! carrying a cost model past the thing it modelled.
 //!
 //! **[`disk`] is the other half, and the disk pre-flight is its reader.** It carries every mapped
@@ -270,7 +270,7 @@ pub(crate) struct Term {
 /// they are given rather than a fixed amount.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Sizing {
-    /// Member entries in one publication batch; zero where no layer declares members.
+    /// Member entries in one publication batch.
     pub publication_batch: u64,
     /// Bytes the unique index spill sorts in memory; zero where no column is unique.
     pub unique_spill: u64,
@@ -810,6 +810,7 @@ pub(crate) fn entity_order_residency(
     level_entries: u64,
     layer_entries: u64,
     memory_budget: u64,
+    supplied: Option<&Term>,
 ) -> Residency {
     let mut terms = vec![
         // **A file under `.build-tmp/` where there is one at all**, and so charged to the disk
@@ -1197,6 +1198,8 @@ pub(crate) fn entity_order_residency(
         phases: Phases::SPILL.onwards(),
         constant: true,
     });
+    // **The supplied keys' arena**, charged before the stages are sized so they leave room for it.
+    terms.extend(supplied.cloned());
     fit(
         Residency {
             terms,
@@ -1235,8 +1238,10 @@ fn fit(
         memory_budget.saturating_sub(residency.memory_at(phase))
     };
 
-    let publication_batch = match member_entries {
-        0 => 0,
+    // Sized even where no member table is declared: a layer's inline artifacts are published in
+    // batches too, and their entries are not known here.
+    let publication_batch = match level_entries {
+        0 => crate::layers::publication_batch_entries(room(&residency, Phase::Join)),
         _ => level_entries
             .min(crate::layers::publication_batch_entries(room(&residency, Phase::Join))),
     };
@@ -1457,6 +1462,7 @@ pub(crate) fn plan_routes(
     ids: IdShape,
     payloads: &[f64],
     free: Option<u64>,
+    id_space: &crate::ids::IdSpace,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let spilled = crate::pipeline::ColumnRoutes::every_available(&args.schema);
     let (columns, entries, level_entries, layer_entries) =
@@ -1473,6 +1479,7 @@ pub(crate) fn plan_routes(
         free,
         args.memory_budget
             .unwrap_or_else(crate::pipeline::detect_memory_budget),
+        supplied_key_arena(id_space).as_ref(),
     )
 }
 
@@ -1486,9 +1493,10 @@ pub(crate) fn routes_for(
     payloads: &[f64],
     free: Option<u64>,
     route: crate::ExtentRoute,
+    id_space: &crate::ids::IdSpace,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let forced = match route {
-        crate::ExtentRoute::Derived => return plan_routes(args, n, ids, payloads, free),
+        crate::ExtentRoute::Derived => return plan_routes(args, n, ids, payloads, free, id_space),
         crate::ExtentRoute::Arena => crate::pipeline::ColumnRoutes::forced_only(&args.schema),
         crate::ExtentRoute::Extents => crate::pipeline::ColumnRoutes::every_available(&args.schema),
     };
@@ -1505,6 +1513,7 @@ pub(crate) fn routes_for(
         level_entries,
         layer_entries,
         budget,
+        supplied_key_arena(id_space).as_ref(),
     );
     (forced, tail)
 }
@@ -1561,6 +1570,7 @@ fn choose_routes(
     layer_entries: u64,
     free: Option<u64>,
     memory_budget: u64,
+    supplied: Option<&Term>,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let mut routes = crate::pipeline::ColumnRoutes::every_available(schema);
     let ceiling = free.unwrap_or(0) / ROUTE_HEADROOM;
@@ -1579,6 +1589,7 @@ fn choose_routes(
             level_entries,
             layer_entries,
             memory_budget,
+            supplied,
         );
         // **The arena route carries its offset lane's 12 B an item** — the `(entity, at)` records
         // of the value partition the join replays the `at` words from (`crate::pipeline`'s
@@ -1601,6 +1612,7 @@ fn choose_routes(
         level_entries,
         layer_entries,
         memory_budget,
+        supplied,
     );
     (routes, tail)
 }
@@ -2446,6 +2458,7 @@ mod tests {
             entries,
             free,
             u64::MAX,
+            None,
         )
     }
 
@@ -2467,6 +2480,7 @@ mod tests {
             // As above: one layer, so the largest layer's entries are all of them.
             member_entries,
             u64::MAX,
+            None,
         )
     }
 
@@ -3015,6 +3029,7 @@ mod tests {
             3 * N,
             Some(459_000_000_000),
             BUDGET,
+            None,
         );
         let (phase, peak) = residency.memory_peak();
         assert!(
@@ -3249,7 +3264,14 @@ mod tests {
     fn fixture_disk(args: &crate::BuildArgs, n: u64) -> Residency {
         let payloads = payloads_per_item(args);
         let free = crate::pipeline::available_disk(&args.out);
-        let (_routes, tail) = plan_routes(args, n, IdShape::dense(n), &payloads, free);
+        let (_routes, tail) = plan_routes(
+            args,
+            n,
+            IdShape::dense(n),
+            &payloads,
+            free,
+            &crate::ids::IdSpace::Integer,
+        );
         disk(
             args,
             Corpus {
@@ -3807,8 +3829,33 @@ require_member_visibility = "none"
         (args, temp)
     }
 
-    /// The budget [`a_budget_that_holds_the_largest_phase_builds_within_it`] builds under.
-    const TIGHT_BUDGET: u64 = 90 << 20;
+    /// The model of the unique fixture at `budget`.
+    fn unique_model(args: &crate::BuildArgs, budget: u64) -> Residency {
+        let mut args = args.clone();
+        args.memory_budget = Some(budget);
+        plan_routes(
+            &args,
+            20_000,
+            IdShape::dense(20_000),
+            &payloads_per_item(&args),
+            None,
+            &crate::ids::IdSpace::Integer,
+        )
+        .1
+    }
+
+    /// The smallest whole-MiB budget its largest phase fits under while every term summed does
+    /// not: the budget [`a_budget_that_holds_the_largest_phase_builds_within_it`] builds under.
+    /// Searched for rather than fixed, since the term images' width follows the machine's.
+    fn tight_budget(args: &crate::BuildArgs) -> u64 {
+        (32u64..512)
+            .map(|mib| mib << 20)
+            .find(|&budget| {
+                let model = unique_model(args, budget);
+                model.memory_peak().1 <= budget && model.total() > budget
+            })
+            .expect("a budget between the largest phase and the sum")
+    }
 
     /// **A budget that holds the largest phase builds, and within it.** The unique index spill is
     /// sized to what the index phase leaves and charged there alone, so the spill no longer stands
@@ -3818,22 +3865,8 @@ require_member_visibility = "none"
     /// it too.
     #[test]
     fn a_budget_that_holds_the_largest_phase_builds_within_it() {
-        let (mut args, _temp) = unique_fixture(20_000);
-        args.memory_budget = Some(TIGHT_BUDGET);
-        let (_routes, model) = plan_routes(
-            &args,
-            20_000,
-            IdShape::dense(20_000),
-            &payloads_per_item(&args),
-            None,
-        );
-        assert!(
-            model.total() > TIGHT_BUDGET,
-            "every term together must be over the budget for this to test anything:{}",
-            model.describe()
-        );
-        assert!(model.memory_peak().1 <= TIGHT_BUDGET);
-
+        let (args, _temp) = unique_fixture(20_000);
+        let budget = tight_budget(&args);
         let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
             .args([
                 "--exact",
@@ -3848,7 +3881,7 @@ require_member_visibility = "none"
         assert!(
             output.status.success(),
             "the build under {} MiB failed:\n{stdout}\n{}",
-            TIGHT_BUDGET >> 20,
+            budget >> 20,
             String::from_utf8_lossy(&output.stderr)
         );
         let peak: u64 = stdout
@@ -3857,17 +3890,17 @@ require_member_visibility = "none"
             .and_then(|bytes| bytes.split_whitespace().next()?.parse().ok())
             .expect("the child prints its anonymous peak");
         assert!(
-            peak <= TIGHT_BUDGET,
+            peak <= budget,
             "the build held {} MiB of anonymous memory under a {} MiB budget",
             peak >> 20,
-            TIGHT_BUDGET >> 20
+            budget >> 20
         );
     }
 
     /// The build [`a_budget_that_holds_the_largest_phase_builds_within_it`] measures, run alone so
     /// the process's anonymous memory is the build's: `RssAnon` sampled every millisecond.
     #[test]
-    #[ignore = "run by a_budget_that_holds_the_largest_phase_builds_within_it in a process of its own"]
+    #[ignore = "run in a process of its own by the tight-budget build test"]
     fn build_under_the_tight_budget_and_print_its_anonymous_peak() {
         fn rss_anon() -> u64 {
             std::fs::read_to_string("/proc/self/status")
@@ -3882,7 +3915,7 @@ require_member_visibility = "none"
                 .map_or(0, |kib| kib << 10)
         }
         let (mut args, _temp) = unique_fixture(20_000);
-        args.memory_budget = Some(TIGHT_BUDGET);
+        args.memory_budget = Some(tight_budget(&args));
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sampler = {
             let done = done.clone();
@@ -3974,7 +4007,14 @@ require_member_visibility = "none"
         let (args, _temp) = fixture(N);
         let free = crate::pipeline::available_disk(&args.out);
         let (_routes, model) =
-            plan_routes(&args, N, IdShape::dense(N), &payloads_per_item(&args), free);
+            plan_routes(
+                &args,
+                N,
+                IdShape::dense(N),
+                &payloads_per_item(&args),
+                free,
+                &crate::ids::IdSpace::Integer,
+            );
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();
         println!(
@@ -4024,6 +4064,7 @@ require_member_visibility = "none"
                 3 * n,
                 // A budget no stage is sized down by, so every worker runs at every row count.
                 u64::MAX,
+                None,
             )
         };
         // **The one spilled column's duplicate map**: two whole-column Roaring bitmaps at n/8

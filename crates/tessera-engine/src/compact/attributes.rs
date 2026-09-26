@@ -482,10 +482,7 @@ pub(super) fn fold_entity_terms(
         .map_err(failed("pass 4c (entity terms: the rewrite)"))?;
     // Ascending, the order the writer requires.
     layers
-        .for_each_list(&mut |entity, terms| {
-            if plan.tombstones.contains(entity) {
-                return Ok(());
-            }
+        .for_each_list(&plan.tombstones, &mut |entity, terms| {
             writer.push(entity, &terms)
         })
         .map_err(failed("pass 4c (entity terms)"))?;

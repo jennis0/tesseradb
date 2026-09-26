@@ -406,9 +406,8 @@ impl CategorySource for ValueColumn {
             }
         }
         let present = self.present();
-        let mut runs = RankedRuns::new(&present, &present);
-        while let Some((start, last, rank)) = runs.next() {
-            let slot0 = rank as usize;
+        let mut slot0 = 0usize;
+        for (start, last) in tessera_roaring::Runs::new(&present) {
             for (k, entity) in (start..=last).enumerate() {
                 let code = code_at(self.codes(), slot0 + k)
                     .expect("the family was checked before the walk began");
@@ -417,6 +416,7 @@ impl CategorySource for ValueColumn {
                 }
                 f(entity, code)?;
             }
+            slot0 += (last - start) as usize + 1;
         }
         Ok(())
     }

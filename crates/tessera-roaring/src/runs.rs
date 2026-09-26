@@ -23,6 +23,7 @@ pub struct Runs<'a> {
 }
 
 impl<'a> Runs<'a> {
+    #[inline]
     pub fn new(bitmap: &'a Bitmap) -> Self {
         Runs {
             cursor: bitmap.cursor(),
@@ -32,9 +33,33 @@ impl<'a> Runs<'a> {
         }
     }
 
-    /// The next run as `(start, last)`, inclusive.
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Option<(u32, u32)> {
+    /// Whether a run is already read and waiting, so the next costs no cursor call.
+    #[inline]
+    fn buffered(&self) -> bool {
+        self.at < self.filled
+    }
+
+    /// Discard what is buffered and read on from the first member at or after `value`. A run
+    /// holding `value` is returned from `value`.
+    #[inline]
+    fn seek(&mut self, value: u32) {
+        self.cursor.reset_at_or_after(value);
+        self.refill();
+    }
+
+    #[inline]
+    fn refill(&mut self) {
+        self.filled = self.cursor.read_many_ranges(&mut self.buf);
+        self.at = 0;
+    }
+}
+
+impl Iterator for Runs<'_> {
+    /// A run as `(start, last)`, inclusive.
+    type Item = (u32, u32);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<(u32, u32)> {
         if self.at == self.filled {
             self.refill();
             if self.filled == 0 {
@@ -44,23 +69,6 @@ impl<'a> Runs<'a> {
         let r = self.buf[self.at];
         self.at += 1;
         Some((r.start, r.last))
-    }
-
-    /// Whether a run is already read and waiting, so [`Self::next`] costs no cursor call.
-    fn buffered(&self) -> bool {
-        self.at < self.filled
-    }
-
-    /// Discard what is buffered and read on from the first member at or after `value`. A run
-    /// holding `value` is returned from `value`.
-    fn seek(&mut self, value: u32) {
-        self.cursor.reset_at_or_after(value);
-        self.refill();
-    }
-
-    fn refill(&mut self) {
-        self.filled = self.cursor.read_many_ranges(&mut self.buf);
-        self.at = 0;
     }
 }
 
@@ -84,6 +92,7 @@ pub struct RankedRuns<'a, 'b> {
 }
 
 impl<'a, 'b> RankedRuns<'a, 'b> {
+    #[inline]
     pub fn new(set: &'a Bitmap, members: &'b Bitmap) -> Self {
         let mut members = Runs::new(members);
         let member = members.next();
@@ -97,10 +106,15 @@ impl<'a, 'b> RankedRuns<'a, 'b> {
             member,
         }
     }
+}
+
+impl Iterator for RankedRuns<'_, '_> {
+    /// A run of the intersection as `(start, last, rank)`.
+    type Item = (u32, u32, u64);
 
     /// The next run of the intersection, or `None` when either bitmap is exhausted.
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Option<(u32, u32, u64)> {
+    #[inline(always)]
+    fn next(&mut self) -> Option<(u32, u32, u64)> {
         loop {
             let (ls, ll) = self.member?;
             // Bring the run of `set` forward until it ends at or after `ls`.
@@ -151,12 +165,7 @@ mod tests {
     use super::*;
 
     fn ranked(set: &Bitmap, members: &Bitmap) -> Vec<(u32, u32, u64)> {
-        let mut out = Vec::new();
-        let mut runs = RankedRuns::new(set, members);
-        while let Some(run) = runs.next() {
-            out.push(run);
-        }
-        out
+        RankedRuns::new(set, members).collect()
     }
 
     /// Every member of the intersection, with its rank taken the slow way.
@@ -229,6 +238,47 @@ mod tests {
                 }
             }
             check(&sides[0], &sides[1]);
+        }
+    }
+
+    /// Sets spread over the whole `u32` space, thousands of containers apart, with sparse members
+    /// that make the walk seek across containers, the last value included, run-optimised or not.
+    #[test]
+    fn sparse_members_over_the_whole_space_rank_as_the_bitmap_does() {
+        let mut state: u64 = 7;
+        let mut below = |n: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) % n
+        };
+        const SPACE: u64 = 1 << 32;
+        for case in 0..60 {
+            let mut set = Bitmap::new();
+            for _ in 0..below(400) {
+                let at = below(SPACE) as u32;
+                set.add_range(at..at.saturating_add(below(200_000) as u32));
+            }
+            for _ in 0..below(2_000) {
+                set.add(below(SPACE) as u32);
+            }
+            let mut members = Bitmap::new();
+            for _ in 0..below(300) {
+                members.add(below(SPACE) as u32);
+            }
+            // Members inside the set's own runs as well as between them.
+            for value in set.iter().step_by(1 + below(50_000) as usize).take(200) {
+                members.add(value);
+            }
+            if case % 3 == 0 {
+                set.add(u32::MAX);
+                members.add(u32::MAX);
+            }
+            if case % 2 == 0 {
+                set.run_optimize();
+                members.run_optimize();
+            }
+            check(&set, &members);
         }
     }
 
