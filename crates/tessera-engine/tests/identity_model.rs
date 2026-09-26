@@ -13,9 +13,13 @@
 //! two items in one row, one item in two rows, one value in two rows or a `tessera_id` nobody holds
 //! is refused whole.
 //!
+//! Beside the unique columns, the items carry one column of each other family a row can compare:
+//! a float, a timestamp, a boolean, a category and a text. A float is compared bit for bit.
+//!
 //! A restart drops the engine with rows acknowledged and not yet flushed, and opens it again from
-//! the log. `PROPTEST_CASES` sets how many sequences run; a failing sequence is kept under
-//! `proptest-regressions/` and run first thereafter.
+//! the log. `PROPTEST_CASES` sets how many sequences run and `PROPTEST_RNG_SEED` which ones, a
+//! fixed seed otherwise; a failing sequence is kept in `identity_model.proptest-regressions`
+//! beside this file and run first thereafter.
 
 mod common;
 
@@ -25,7 +29,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{Float64Array, StringArray, UInt64Array};
+use arrow::array::{BooleanArray, Float32Array, Float64Array, Int64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -62,7 +66,95 @@ unique = true
 name   = "score"
 type   = "f64"
 render = true
+
+[[vocabulary]]
+name       = "kind"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  alpha = 1
+  beta  = 2
+  gamma = 3
+
+[[attribute]]
+name   = "weight"
+type   = "f32"
+render = true
+
+[[attribute]]
+name  = "when"
+type  = "timestamp_us"
+index = true
+
+[[attribute]]
+name = "flag"
+type = "bool"
+
+[[attribute]]
+name       = "kind"
+type       = "category"
+index      = true
+vocabulary = "kind"
+
+[[attribute]]
+name     = "note"
+type     = "text"
+index    = true
+analyser = "unicode"
 "#;
+
+/// The columns after `gid`, `doi` and `score`, in declared order.
+const EXTRAS: [&str; 5] = ["weight", "when", "flag", "kind", "note"];
+
+/// Column `EXTRAS[at]`'s value for `seed`. The float takes a NaN and a negative zero among its
+/// values, which compare bit for bit.
+fn extra(at: usize, seed: u64) -> WalScalar {
+    match at {
+        0 => WalScalar::F32(match seed % 6 {
+            4 => -0.0,
+            5 => f32::NAN,
+            n => n as f32 * 0.25,
+        }),
+        1 => WalScalar::TimestampUs(1_600_000_000_000_000 + (seed % 7) as i64 * 1_000),
+        2 => WalScalar::Bool(seed % 2 == 0),
+        3 => WalScalar::Utf8(["alpha", "beta", "gamma"][(seed % 3) as usize].to_string()),
+        _ => WalScalar::Utf8(format!("note {}", seed % 5)),
+    }
+}
+
+/// A built item's value in column `EXTRAS[at]`: never a NaN, which a build does not take.
+fn built_extra(at: usize, source: u64) -> WalScalar {
+    extra(at, source % 5)
+}
+
+/// Whether two held values are the same, a float bit for bit.
+fn same(a: &Option<WalScalar>, b: &Option<WalScalar>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.same_as(b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// A value as an item's card shows it.
+fn shown(value: &WalScalar) -> ScalarOut {
+    match value {
+        WalScalar::F32(x) => ScalarOut::F32(*x),
+        WalScalar::TimestampUs(x) => ScalarOut::TimestampUs(*x),
+        WalScalar::Bool(x) => ScalarOut::Bool(*x),
+        WalScalar::Utf8(x) => ScalarOut::Utf8(x.clone()),
+        other => panic!("no extra column holds {other:?}"),
+    }
+}
+
+/// Whether a card's field is the value expected, a float bit for bit.
+fn shows(field: &Option<ScalarOut>, value: &Option<WalScalar>) -> bool {
+    match (field, value.as_ref().map(shown)) {
+        (Some(ScalarOut::F32(a)), Some(ScalarOut::F32(b))) => a.to_bits() == b.to_bits(),
+        (field, expected) => *field == expected,
+    }
+}
 
 fn built_gid(source: u64) -> u64 {
     1_000 + source
@@ -81,6 +173,7 @@ fn built_position(source: u64) -> (f64, f64) {
 }
 
 fn write_points(path: &Path) {
+    let ids: Vec<u64> = (0..BUILT).collect();
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
@@ -88,8 +181,13 @@ fn write_points(path: &Path) {
         Field::new("gid", DataType::UInt64, false),
         Field::new("doi", DataType::Utf8, false),
         Field::new("score", DataType::Float64, false),
+        Field::new("weight", DataType::Float32, false),
+        Field::new("when", DataType::Int64, false),
+        Field::new("flag", DataType::Boolean, false),
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("note", DataType::Utf8, false),
     ]));
-    let ids: Vec<u64> = (0..BUILT).collect();
+    let extras = |at: usize| ids.iter().map(move |s| built_extra(at, *s));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -108,6 +206,46 @@ fn write_points(path: &Path) {
             )),
             Arc::new(Float64Array::from(
                 ids.iter().map(|s| built_score(*s)).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float32Array::from(
+                extras(0)
+                    .map(|v| match v {
+                        WalScalar::F32(x) => x,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                extras(1)
+                    .map(|v| match v {
+                        WalScalar::TimestampUs(x) => x,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(BooleanArray::from(
+                extras(2)
+                    .map(|v| match v {
+                        WalScalar::Bool(x) => x,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                extras(3)
+                    .map(|v| match v {
+                        WalScalar::Utf8(x) => x,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                extras(4)
+                    .map(|v| match v {
+                        WalScalar::Utf8(x) => x,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>(),
             )),
         ],
     )
@@ -198,6 +336,8 @@ struct Item {
     gid: Option<u64>,
     doi: Option<String>,
     score: Option<f64>,
+    /// The item's value in each of [`EXTRAS`].
+    extras: [Option<WalScalar>; 5],
     /// Each view the item has a row in, with its position there.
     views: BTreeMap<String, (f64, f64)>,
     suppressed: bool,
@@ -232,6 +372,7 @@ struct Row {
     gid: Option<Option<u64>>,
     doi: Option<Option<String>>,
     score: Option<Option<f64>>,
+    extras: [Option<Option<WalScalar>>; 5],
     labels: Option<BTreeSet<String>>,
     position: Option<(f64, f64)>,
 }
@@ -271,6 +412,7 @@ impl Model {
                     gid: Some(built_gid(source)),
                     doi: Some(built_doi(source)),
                     score: Some(built_score(source)),
+                    extras: std::array::from_fn(|at| Some(built_extra(at, source))),
                     views: VIEWS.iter().map(|v| (v.to_string(), position)).collect(),
                     suppressed: false,
                     made: entity,
@@ -354,6 +496,11 @@ impl Model {
                 || row.gid.is_some_and(|g| g != item.gid)
                 || row.doi.as_ref().is_some_and(|d| *d != item.doi)
                 || row.score.is_some_and(|s| s != item.score)
+                || row
+                    .extras
+                    .iter()
+                    .zip(&item.extras)
+                    .any(|(sent, held)| sent.as_ref().is_some_and(|v| !same(v, held)))
                 || row.labels.as_ref().is_some_and(|l| *l != item.labels);
             let mut joins = false;
             if let (Some(view), Some(position)) = (view, row.position) {
@@ -393,6 +540,7 @@ impl Model {
                         gid: row.gid.flatten(),
                         doi: row.doi.clone().flatten(),
                         score: row.score.flatten(),
+                        extras: row.extras.clone().map(Option::flatten),
                         views: BTreeMap::from([(view, row.position.unwrap())]),
                         suppressed: false,
                         made: self.made,
@@ -444,6 +592,10 @@ struct RowGen {
     differ: u8,
     /// Bits of carried fields sent as null.
     null: u8,
+    /// Bits of [`EXTRAS`] the row carries, those given another value, and those sent as null.
+    extra_carry: u8,
+    extra_differ: u8,
+    extra_null: u8,
     /// 0 none, 1 the item's own position in the view where it has one, 2 a new position.
     position: u8,
     seed: u16,
@@ -476,16 +628,26 @@ fn row_gen() -> impl Strategy<Value = RowGen> {
         prop_oneof![12 => Just(0u8), 1 => any::<u8>()],
         0u8..3,
         any::<u16>(),
+        any::<u8>(),
+        prop_oneof![6 => Just(0u8), 1 => any::<u8>()],
+        prop_oneof![8 => Just(0u8), 1 => any::<u8>()],
     )
-        .prop_map(|(about, by, carry, differ, null, position, seed)| RowGen {
-            about,
-            by,
-            carry,
-            differ,
-            null,
-            position,
-            seed,
-        })
+        .prop_map(
+            |(about, by, carry, differ, null, position, seed, extra_carry, extra_differ, extra_null)| {
+                RowGen {
+                    about,
+                    by,
+                    carry,
+                    differ,
+                    null,
+                    position,
+                    seed,
+                    extra_carry,
+                    extra_differ,
+                    extra_null,
+                }
+            },
+        )
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -561,6 +723,7 @@ impl Run {
             gid: None,
             doi: None,
             score: None,
+            extras: Default::default(),
             labels: None,
             position: None,
         };
@@ -599,6 +762,19 @@ impl Run {
                 (false, false) => subject.and_then(|i| i.score),
             });
         }
+        for at in 0..EXTRAS.len() {
+            let bit = 1u8 << at;
+            if gen.extra_carry & bit == 0 {
+                continue;
+            }
+            row.extras[at] = Some(if gen.extra_null & bit != 0 {
+                None
+            } else if gen.extra_differ & bit != 0 || subject.is_none() {
+                Some(extra(at, seed / 3 + at as u64))
+            } else {
+                subject.and_then(|i| i.extras[at].clone())
+            });
+        }
         if carry & 8 != 0 {
             row.labels = Some(match (subject, gen.differ & 8 != 0) {
                 (Some(item), false) => item.labels.clone(),
@@ -633,6 +809,11 @@ impl Run {
             row.score.map(|s| s.map_or(WalScalar::Null, WalScalar::F64)),
         ]
         .into_iter()
+        .chain(
+            row.extras
+                .iter()
+                .map(|v| v.clone().map(|v| v.unwrap_or(WalScalar::Null))),
+        )
         .enumerate()
         {
             match value {
@@ -663,7 +844,7 @@ impl Run {
         batch_id: &str,
         view: Option<&str>,
         rows: Vec<IngestRow>,
-    ) -> Result<IngestReceipt, String> {
+    ) -> Result<IngestReceipt, AcceptError> {
         self.engine()
             .ingest(IngestRequest {
                 batch_id: batch_id.to_string(),
@@ -672,7 +853,6 @@ impl Run {
                 rows,
                 artifacts: Default::default(),
             })
-            .map_err(|e| e.to_string())
     }
 
     fn ingest(&mut self, view: u8, gens: &[RowGen]) {
@@ -684,7 +864,10 @@ impl Run {
         let expected = self.model.decide(view, &rows);
         let answered = self.send(&batch_id, view, wire.clone());
         match (expected, answered) {
-            (None, Err(_)) => {}
+            (None, Err(e)) => assert!(
+                matches!(e, AcceptError::Conflict(_) | AcceptError::Contract(_)),
+                "batch {batch_id} is refused as the model refuses it: {e:?}"
+            ),
             (None, Ok(receipt)) => panic!(
                 "batch {batch_id} into {view:?} was accepted and the model refuses it:\n\
                  rows {rows:#?}\nreceipt {receipt:?}"
@@ -778,12 +961,13 @@ impl Run {
                 let got: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.raw()).collect();
                 self.model
                     .apply(view.as_deref(), &model_rows, &expect, &got);
-                // The batch id now answers this acceptance, if it wrote anything.
+                // The batch id now answers this acceptance.
                 self.sent[at].tessera_ids = got;
             }
             Err(e) => assert!(
-                expected.is_none(),
-                "{batch_id} sent again was refused and the model accepts it: {e}"
+                expected.is_none()
+                    && matches!(e, AcceptError::Conflict(_) | AcceptError::Contract(_)),
+                "{batch_id} sent again was refused and the model accepts it: {e:?}"
             ),
         }
     }
@@ -1006,6 +1190,15 @@ impl Run {
                 "score of {}, after {after}",
                 item.tid
             );
+            for (at, name) in EXTRAS.iter().enumerate() {
+                let value = field(name);
+                assert!(
+                    shows(&value, &item.extras[at]),
+                    "{name} of {} is {value:?}, expected {:?}, after {after}",
+                    item.tid,
+                    item.extras[at]
+                );
+            }
             let views: BTreeMap<String, (u32, u32)> = card
                 .views
                 .iter()
@@ -1089,9 +1282,17 @@ fn run(ops: &[Op]) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(6),
-        ..ProptestConfig::default()
+    #![proptest_config({
+        let config = ProptestConfig::default();
+        ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(6),
+            // The same sequences on every run unless `PROPTEST_RNG_SEED` names others.
+            rng_seed: match config.rng_seed {
+                proptest::test_runner::RngSeed::Random => proptest::test_runner::RngSeed::Fixed(7),
+                seed => seed,
+            },
+            ..config
+        }
     })]
 
     #[test]
@@ -1112,6 +1313,9 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
         null: 0,
         position,
         seed: i,
+        extra_carry: if carry == 31 { 31 } else { 0 },
+        extra_differ: 0,
+        extra_null: 0,
     };
     let fresh = |seed: u16| RowGen {
         about: None,
@@ -1121,6 +1325,9 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
         null: 0,
         position: 2,
         seed,
+        extra_carry: 31,
+        extra_differ: 0,
+        extra_null: 0,
     };
     let ops = vec![
         // Unchanged by each identifier, carrying every field as stored.

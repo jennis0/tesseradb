@@ -239,7 +239,7 @@ fn try_ingest(
     batch: &str,
     rows: Vec<UnallocatedRow>,
 ) -> Result<Vec<EntityId>, AcceptError> {
-    engine.accept_ingest(rows, batch.to_string(), hash_of(batch))
+    engine.ingest_rows(rows, batch.to_string(), hash_of(batch))
 }
 
 fn ingest(engine: &Engine, batch: &str, rows: Vec<UnallocatedRow>) -> Vec<EntityId> {
@@ -1059,6 +1059,32 @@ fn a_values_fill_setting_a_held_value_is_refused() {
     assert_eq!(
         matching(&engine, &session, text_in("doi", &["10.f/1".to_string()])),
         BTreeSet::from([id])
+    );
+}
+
+/// **A declaration landing between a batch's check and its admission is seen.** The batch was
+/// checked while the column was not unique; admitted after the declaration, it is checked again
+/// under it, and no second item holds the value.
+#[test]
+fn a_declaration_between_a_batchs_check_and_its_admission_is_checked_again() {
+    let fx = fixture_with(false);
+    let engine = Arc::new(engine_over(&fx));
+    let doi = doi_of(4);
+    let held = held_ingest(
+        &engine,
+        "late",
+        vec![row(&engine, "late", b"0", &doi, BIG + 40, 40_000)],
+    );
+    assert!(declare(&engine, "doi", true).expect("no two items hold one value yet"));
+    engine.release_write_check_for_test();
+    // Under the declaration the row names the item holding the value, and would change it.
+    let outcome = held.join().unwrap();
+    assert!(matches!(outcome, Err(AcceptError::Conflict(_))), "{outcome:?}");
+    assert_eq!(engine.buffered_items(), 0, "the refused batch wrote nothing");
+    assert_eq!(
+        matching(&engine, &full(&engine), text_in("doi", &[doi.clone()])).len(),
+        1,
+        "one item holds {doi}"
     );
 }
 

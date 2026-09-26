@@ -66,7 +66,7 @@ fn ingest_into_view(
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], batch.to_string(), hash)
+        .ingest_rows(vec![row], batch.to_string(), hash)
         .expect("the batch is accepted")[0]
 }
 

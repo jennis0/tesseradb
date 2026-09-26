@@ -271,17 +271,6 @@ fn refuse_waiters(
     health.record_window_service(entries, started.elapsed().as_nanos() as u64);
 }
 
-/// One `/control/ingest` submission as the executor admits it.
-pub(super) struct IngestSubmission {
-    pub(super) rows: Vec<UnallocatedRow>,
-    pub(super) slots: Vec<tessera_lifecycle::Slot>,
-    pub(super) keys: Vec<(u16, u128)>,
-    pub(super) batch_id: String,
-    pub(super) body_hash: [u8; 32],
-    pub(super) artifacts: tessera_lifecycle::BatchArtifacts,
-    pub(super) unique_seq: u64,
-}
-
 /// What [`Executor::admit_ingest`] did with a submission, as far as the drain loop needs to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Admission {
@@ -348,16 +337,7 @@ impl Executor {
                     continue;
                 }
             };
-            let Command::Ingest {
-                rows,
-                slots,
-                keys,
-                batch_id,
-                body_hash,
-                artifacts,
-                unique_seq,
-                reply,
-            } = command
+            let Command::Ingest { submission, reply } = command
             else {
                 // A values batch and a declaration read the unique values the window holds and has
                 // not yet applied, so the window closes first. Every other command is tolerable
@@ -376,19 +356,7 @@ impl Executor {
 
             let admitted;
             let m = StageMark::now();
-            (window, admitted) = self.admit_ingest(
-                window,
-                IngestSubmission {
-                    rows,
-                    slots,
-                    keys,
-                    batch_id,
-                    body_hash,
-                    artifacts,
-                    unique_seq,
-                },
-                reply,
-            );
+            (window, admitted) = self.admit_ingest(window, submission, reply);
             self.health.lap(WriteStage::AdmitWindow, m);
             did_work = true;
             if admitted == Admission::YieldedAfterClose {
@@ -500,9 +468,11 @@ impl Executor {
             body_hash,
             artifacts,
             unique_seq,
+            over_bound,
         } = submission;
         let generation = self.generation.load();
-        let stale = crate::unique::moved_since(&generation, &keys, unique_seq)
+        let creates = rows.iter().any(|row| row.join.is_none());
+        let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
             || slots.iter().any(|slot| {
                 matches!(slot, tessera_lifecycle::Slot::Unchanged(entity) if generation.overlay.is_deleted(*entity))
             })
@@ -545,6 +515,7 @@ impl Executor {
         Some(WindowEntry {
             rows,
             slots,
+            over_bound,
             batch_id,
             body_hash,
             memberships,

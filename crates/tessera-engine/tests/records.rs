@@ -526,7 +526,7 @@ fn ingest_sources(engine: &Engine, batch: &str, sources: &[u64]) -> Vec<EntityId
         })
         .collect();
     engine
-        .accept_ingest(rows, batch.to_string(), [0u8; 32])
+        .ingest_rows(rows, batch.to_string(), [0u8; 32])
         .expect("the ingest is accepted")
 }
 
@@ -1440,7 +1440,7 @@ fn a_viewport_point_is_null_where_its_item_has_no_rendered_value() {
     };
     let entity = fx
         .engine
-        .accept_ingest(vec![zero], "zero".to_string(), [0u8; 32])
+        .ingest_rows(vec![zero], "zero".to_string(), [0u8; 32])
         .expect("the ingest is accepted")[0];
     fx.entity.insert(ZERO, entity.raw());
     flush(&fx.engine);
@@ -1697,14 +1697,14 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
+            .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
             .expect("the ingest is accepted")[0]
     };
     // "anchor" holds the lower entity id, so the geographic view's plan is dispatched first.
     ingest_into("b-anchor", GEO, "anchor", 0.25, 0.25, scalars_of(3));
     let joiner = ingest_into("b-own", "s0", "joiner", 5.0, 5.0, scalars_of(3));
-    // A joining row omits the entity's attributes, which are one value per entity.
-    ingest_into("b-join", GEO, "joiner", 0.75, 0.75, vec![WalScalar::Null; 9]);
+    // A joining row carries the entity's attributes as it stores them, one value per entity.
+    ingest_into("b-join", GEO, "joiner", 0.75, 0.75, scalars_of(3));
     faults.arm_pause_after(PauseSite::BeforeManifestPublish, PauseAction::Stall, 1);
     engine.request_flush();
     faults.await_arrivals(PauseSite::BeforeManifestPublish, 2, Duration::from_secs(30));
@@ -2329,7 +2329,7 @@ fn thirty_thousand(batches: u64) -> (tempfile::TempDir, Engine) {
             })
             .collect();
         engine
-            .accept_ingest(rows, format!("batch-{batch}"), [0u8; 32])
+            .ingest_rows(rows, format!("batch-{batch}"), [0u8; 32])
             .expect("the ingest is accepted");
         flush(&engine);
     }
@@ -2666,7 +2666,7 @@ fn a_columns_first_null_is_counted_against_the_ceiling() {
             }
         })
         .collect();
-    fx.engine.accept_ingest(rows, "late".to_string(), [0u8; 32]).unwrap();
+    fx.engine.ingest_rows(rows, "late".to_string(), [0u8; 32]).unwrap();
     flush(&fx.engine);
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
     let fields = names(&["score"]);
@@ -2810,7 +2810,7 @@ fn a_cell_larger_than_a_stretch_is_read_whole() {
         })
         .collect();
     engine
-        .accept_ingest(rows, "crowd".to_string(), [0u8; 32])
+        .ingest_rows(rows, "crowd".to_string(), [0u8; 32])
         .expect("the ingest is accepted");
     flush(&engine);
     let session = engine.authorise(&full_coverage_credential()).unwrap();

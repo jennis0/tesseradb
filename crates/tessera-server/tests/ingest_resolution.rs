@@ -216,3 +216,33 @@ async fn a_resent_batch_answers_its_first_tessera_ids_across_a_restart() {
     assert_eq!(replayed["created"], 0, "{replayed}");
     assert_eq!(replayed["tessera_ids"], first["tessera_ids"]);
 }
+
+/// **A deleted item's `tessera_id` names nothing once a fold has removed its rows**: an ingest row
+/// naming it is `409`, and a change naming it is refused as naming nothing.
+#[tokio::test]
+async fn a_folded_away_items_tessera_id_names_nothing() {
+    let served = Served::build(fixture).await;
+    let (status, body) =
+        ingest(&served, "made", json!([{ "x": 5.0, "y": 5.0, "access": ["0"], "gid": 21 }])).await;
+    assert_eq!(status, 200, "{body}");
+    let made = body["tessera_ids"][0].as_str().unwrap().to_string();
+    tick(&served.server).await;
+
+    let change = |op: &str| json!([{ "tessera_id": made, "op": op }]);
+    let changes = |body: Value| {
+        served
+            .server
+            .client
+            .post(served.server.control_url("/control/changes"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+    };
+    assert_eq!(changes(change("delete")).await.unwrap().status(), 200);
+    fold(&served.server).await;
+
+    let (status, body) = ingest(&served, "named", json!([{ "tessera_id": made }])).await;
+    assert_eq!(status, 409, "{body}");
+    let resp = changes(change("suppress")).await.unwrap();
+    assert_eq!(resp.status(), 404, "a change naming it names nothing");
+}

@@ -19,6 +19,80 @@ mod wait;
 pub use lifecycle::*;
 #[allow(unused_imports)]
 pub use wait::*;
+pub use ingest_rows::IngestRows;
+
+mod ingest_rows {
+    use tessera_engine::{AcceptError, Engine, IngestRequest};
+    use tessera_lifecycle::{BatchArtifacts, IngestRow, UnallocatedRow};
+    use tessera_types::EntityId;
+
+    /// Ingest through [`Engine::ingest`] from rows shaped as the executor writes them: each row
+    /// names no item by `tessera_id`, carries its label and position, and carries every value it
+    /// holds, a null clearing one. Every row names the same view.
+    pub trait IngestRows {
+        /// Send `rows` as one batch, and answer the entity each row created or named.
+        fn ingest_rows(
+            &self,
+            rows: Vec<UnallocatedRow>,
+            batch_id: String,
+            body_hash: [u8; 32],
+        ) -> Result<Vec<EntityId>, AcceptError> {
+            self.ingest_rows_joining(rows, batch_id, body_hash, BatchArtifacts::default())
+                .map(|(entities, _)| entities)
+        }
+
+        /// [`Self::ingest_rows`], with the artifacts the rows name in a layer's column, answering
+        /// how many artifacts the batch minted beside the entities.
+        fn ingest_rows_joining(
+            &self,
+            rows: Vec<UnallocatedRow>,
+            batch_id: String,
+            body_hash: [u8; 32],
+            artifacts: BatchArtifacts,
+        ) -> Result<(Vec<EntityId>, u64), AcceptError>;
+    }
+
+    impl IngestRows for Engine {
+        fn ingest_rows_joining(
+            &self,
+            rows: Vec<UnallocatedRow>,
+            batch_id: String,
+            body_hash: [u8; 32],
+            artifacts: BatchArtifacts,
+        ) -> Result<(Vec<EntityId>, u64), AcceptError> {
+            let view = rows.first().map(|row| row.view.clone());
+            assert!(
+                rows.iter().all(|row| Some(&row.view) == view.as_ref()),
+                "a batch names one view"
+            );
+            let rows = rows
+                .into_iter()
+                .map(|row| IngestRow {
+                    tessera_id: None,
+                    external_id: row.external_id,
+                    labels: Some(row.descriptors),
+                    position: Some((row.x, row.y)),
+                    scalars: row.scalars,
+                    scoped: row.scoped,
+                    omitted: Vec::new(),
+                })
+                .collect();
+            let receipt = self.ingest(IngestRequest {
+                batch_id,
+                body_hash,
+                view,
+                rows,
+                artifacts,
+            })?;
+            let entities = self
+                .resolve_tessera_ids(&receipt.tessera_ids)
+                .into_iter()
+                .map(|entity| entity.expect("an accepted row names an item"))
+                .collect();
+            Ok((entities, receipt.minted))
+        }
+    }
+}
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -555,7 +629,7 @@ pub fn ingest(engine: &Engine, external_id: &str) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], external_id.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0]
 }
 

@@ -180,7 +180,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
         };
         out.push(
             engine
-                .accept_ingest(vec![row], external, [0u8; 32])
+                .ingest_rows(vec![row], external, [0u8; 32])
                 .expect("an ingest carrying prose is accepted")[0],
         );
     }
@@ -505,7 +505,7 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
             scoped: Vec::new(),
         };
         let id = engine
-            .accept_ingest(vec![row], external, [0u8; 32])
+            .ingest_rows(vec![row], external, [0u8; 32])
             .expect("the flight ingest is accepted")[0];
         engine.request_flush();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -578,7 +578,7 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], name.to_string(), [0u8; 32])
+            .ingest_rows(vec![row], name.to_string(), [0u8; 32])
             .expect("the ingest is accepted")[0]
     };
 

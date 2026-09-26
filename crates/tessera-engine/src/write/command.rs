@@ -165,24 +165,32 @@ pub struct ViewDropped {
 /// acknowledged onto one name. Items and members are addressed by entity, which the handler
 /// resolves at the boundary, because a `tessera_id` means nothing without its key. Large payloads
 /// are boxed so one variant does not set the size of every command in the queue.
+/// One `/control/ingest` batch as its handler resolved it.
+pub(crate) struct IngestSubmission {
+    /// The rows the batch writes: items it creates, and items it adds to its view.
+    pub(crate) rows: Vec<UnallocatedRow>,
+    /// One per row of the request: the written row it became, or the item it left unchanged.
+    pub(crate) slots: Vec<tessera_lifecycle::Slot>,
+    /// The unique values the created rows set, as `(declared position, key widened)`.
+    pub(crate) keys: Vec<(u16, u128)>,
+    pub(crate) batch_id: String,
+    pub(crate) body_hash: [u8; 32],
+    /// The artifacts the written rows name in a column named for a layer. Resolved and grown
+    /// when the window closes, in the same commit as the rows.
+    pub(crate) artifacts: BatchArtifacts,
+    /// The live unique entries' sequence number the handler resolved the batch at; the
+    /// executor re-checks the created rows' values against the entries added since.
+    pub(crate) unique_seq: u64,
+    /// The request rows creating an item whose label resolves to more terms than the plugin
+    /// declares an item carries.
+    pub(crate) over_bound: Vec<u32>,
+}
+
 pub(crate) enum Command {
     /// An accepted `/control/ingest` batch, resolved by its handler. `batch_id` and `body_hash`
     /// are the idempotency key. The answer is what each row of the request became.
     Ingest {
-        /// The rows the batch writes: items it creates, and items it adds to its view.
-        rows: Vec<UnallocatedRow>,
-        /// One per row of the request: the written row it became, or the item it left unchanged.
-        slots: Vec<tessera_lifecycle::Slot>,
-        /// The unique values the created rows set, as `(declared position, key widened)`.
-        keys: Vec<(u16, u128)>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        /// The artifacts the written rows name in a column named for a layer. Resolved and grown
-        /// when the window closes, in the same commit as the rows.
-        artifacts: BatchArtifacts,
-        /// The live unique entries' sequence number the handler resolved the batch at; the
-        /// executor re-checks the created rows' values against the entries added since.
-        unique_seq: u64,
+        submission: IngestSubmission,
         reply: Reply<Ingested>,
     },
     /// One accepted `/control/changes` request, applied whole. The only command on the deny lane
@@ -269,8 +277,16 @@ pub(crate) enum Command {
         request: Box<ValuesRequest>,
         /// The unique values' sequence number the handler checked them at.
         unique_seq: u64,
-        reply: Reply<ValuesReceipt>,
+        reply: Reply<ValuesOutcome>,
     },
+}
+
+/// What the executor did with a values batch.
+pub(crate) enum ValuesOutcome {
+    Filled(ValuesReceipt),
+    /// A value the handler checked may have been given since, and the executor cannot tell from
+    /// memory: the request comes back to be checked again.
+    Stale(Box<ValuesRequest>),
 }
 
 impl Command {
@@ -322,13 +338,16 @@ mod tests {
                 None,
             );
         let ingest = Command::Ingest {
-            rows: Vec::new(),
-            slots: Vec::new(),
-            keys: Vec::new(),
-            batch_id: "b".into(),
-            body_hash: [0u8; 32],
-            artifacts: Default::default(),
-            unique_seq: 0,
+            submission: IngestSubmission {
+                rows: Vec::new(),
+                slots: Vec::new(),
+                keys: Vec::new(),
+                batch_id: "b".into(),
+                body_hash: [0u8; 32],
+                artifacts: Default::default(),
+                unique_seq: 0,
+                over_bound: Vec::new(),
+            },
             reply,
         };
         assert!(!ingest.is_never_shed());

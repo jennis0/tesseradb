@@ -251,7 +251,7 @@ fn the_manifest_publish_site_parks_a_flush_with_its_segment_unreferenced() {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], "seam-batch-1".to_string(), [0u8; 32])
+        .ingest_rows(vec![row], "seam-batch-1".to_string(), [0u8; 32])
         .expect("ingest is accepted — the seam sits at publication, not on the ack path");
 
     let manifests_before = side_manifest_count(&root, "v00000");

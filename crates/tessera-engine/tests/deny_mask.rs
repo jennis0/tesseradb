@@ -79,7 +79,7 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], external_id.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0]
 }
 
@@ -397,7 +397,7 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
+            .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
             .expect("ingest is accepted")[0]
     };
     ingest_into("b-anchor", JOINED_VIEW, "anchor", vec![b"0".to_vec(), b"1".to_vec()]);
@@ -580,7 +580,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
                     scoped: Vec::new(),
                 };
                 engine
-                    .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
+                    .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
                     .expect("ingest is accepted")[0]
             };
         ingest_into(
@@ -648,7 +648,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
             };
             unrelated.extend(
                 engine
-                    .accept_ingest(vec![row], format!("b-unrelated-{n}"), [0u8; 32])
+                    .ingest_rows(vec![row], format!("b-unrelated-{n}"), [0u8; 32])
                     .expect("ingest is accepted"),
             );
         }

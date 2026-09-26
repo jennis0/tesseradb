@@ -45,7 +45,7 @@ use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
 use tessera_lifecycle::ChangeOp;
 use tessera_types::EntityId;
 
-use common::{build_fixture, full_coverage_credential, open_engine, source_id_key, tick, N_ITEMS};
+use common::{build_fixture, IngestRows, full_coverage_credential, open_engine, source_id_key, tick, N_ITEMS};
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -133,7 +133,7 @@ fn entity_of(engine: &Engine, source_id: u64) -> EntityId {
 /// executor must be free to assign a whole window's ids in one signature-sorted run. Whatever
 /// **The extent check guards the engine's own boundary, not one HTTP handler** (§6).
 ///
-/// This is the whole reason it moved. `Engine::accept_ingest` has more than one caller — the
+/// This is the whole reason it moved. `Engine::ingest` has more than one caller — the
 /// server, every bench arm, and these tests — and the invariant it establishes is *every buffered
 /// row has a cell*, which is a fact about the buffer. Guarding only the HTTP path left every other
 /// caller writing points the quantiser silently clamps onto the edge of the grid, with a clamped
@@ -152,7 +152,7 @@ fn an_out_of_extent_row_is_refused_at_the_engine_boundary_with_no_id_burned() {
     adrift.x = 5000.0; // the fixture's extent is 0..1000 on both axes
 
     let err = engine
-        .accept_ingest(vec![adrift], "batch-adrift".to_string(), [0u8; 32])
+        .ingest_rows(vec![adrift], "batch-adrift".to_string(), [0u8; 32])
         .expect_err("a coordinate with no cell is refused");
     assert!(matches!(
         err,
@@ -168,7 +168,7 @@ fn an_out_of_extent_row_is_refused_at_the_engine_boundary_with_no_id_burned() {
     let mut nan = row("nan");
     nan.y = f64::NAN;
     assert!(engine
-        .accept_ingest(vec![nan], "batch-nan".to_string(), [0u8; 32])
+        .ingest_rows(vec![nan], "batch-nan".to_string(), [0u8; 32])
         .is_err());
 
     // A point exactly at the maximum occupies the top of the grid and belongs there.
@@ -176,7 +176,7 @@ fn an_out_of_extent_row_is_refused_at_the_engine_boundary_with_no_id_burned() {
     edge.x = 1000.0;
     edge.y = 1000.0;
     engine
-        .accept_ingest(vec![edge], "batch-edge".to_string(), [0u8; 32])
+        .ingest_rows(vec![edge], "batch-edge".to_string(), [0u8; 32])
         .expect("the boundary is inside");
 }
 
@@ -188,7 +188,7 @@ fn the_executor_assigns_the_ids_and_the_live_map_answers_for_them() {
 
     let before = engine.allocator_high_water();
     let ids = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row("post-build-key")],
             "batch-1".to_string(),
             [0u8; 32],
@@ -250,7 +250,7 @@ fn per_command_assignment_is_signature_sorted_and_monotone() {
     }
 
     let ids = engine
-        .accept_ingest(rows, "sorted".to_string(), [1u8; 32])
+        .ingest_rows(rows, "sorted".to_string(), [1u8; 32])
         .expect("ingest is accepted");
 
     // Ids come back in the caller's row order, so the odd rows (the lower signature) must all hold
@@ -264,7 +264,7 @@ fn per_command_assignment_is_signature_sorted_and_monotone() {
     );
 
     let next = engine
-        .accept_ingest(vec![row("after")], "after".to_string(), [2u8; 32])
+        .ingest_rows(vec![row("after")], "after".to_string(), [2u8; 32])
         .unwrap()[0];
     assert!(
         next.raw() > *even.iter().max().unwrap(),
@@ -451,7 +451,7 @@ fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
         let started = Arc::clone(&started);
         workers.push(std::thread::spawn(move || {
             started.fetch_add(1, Ordering::SeqCst);
-            let _ = e.accept_ingest(
+            let _ = e.ingest_rows(
                 vec![row(&format!("w-{i}"))],
                 format!("w-{i}"),
                 [i as u8; 32],
@@ -511,7 +511,7 @@ fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
 /// **The same property on the third close path**, which the row bound does not reach.
 ///
 /// `run_work_pass` closes a window mid-drain when an entry names an external id the open window
-/// already holds (`CommitWindow::holds_external_id_of` — the mechanism that keeps the
+/// already claims (`CommitWindow::conflicts` — the mechanism that keeps the
 /// unreachable-duplicate hole closed). A close that *continued* draining would never trip the row
 /// bound on a conflict-heavy stream, because `window.rows()` resets with the replacement: a pass
 /// could perform an unbounded number of full `append → fsync → apply → swap` cycles without ever
@@ -549,7 +549,7 @@ fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
     faults.arm_pause(PauseSite::BeforeAck, PauseAction::Stall);
     let e = Arc::clone(&engine);
     let prime =
-        std::thread::spawn(move || e.accept_ingest(vec![row("prime")], "prime".into(), [0xEE; 32]));
+        std::thread::spawn(move || e.ingest_rows(vec![row("prime")], "prime".into(), [0xEE; 32]));
     faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
 
     // **Enqueued one at a time**, each wait on the executor's own `work_submitted` counter, so the
@@ -569,7 +569,7 @@ fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
                 // on `established_collisions` once the close has applied the first. (A shared
                 // *batch id* would force no close at all — the join answers it in place — which is
                 // why the workload is shaped this way.)
-                let _ = e.accept_ingest(
+                let _ = e.ingest_rows(
                     vec![row(&format!("c-{i}"))],
                     format!("pair-{i}-{half}"),
                     [(i as u8) * 2 + half; 32],
@@ -804,7 +804,7 @@ fn an_ingest_append_failure_applies_nothing() {
     let before_hw = engine.allocator_high_water();
     faults.fail_next_fsyncs(1);
     let err = engine
-        .accept_ingest(vec![row("never-lands")], "doomed".to_string(), [3u8; 32])
+        .ingest_rows(vec![row("never-lands")], "doomed".to_string(), [3u8; 32])
         .expect_err("an ingest whose append failed must be refused");
 
     assert!(
@@ -841,7 +841,7 @@ fn an_ingest_whose_durability_failed_stays_absent_across_a_reopen() {
 
     faults.fail_next_fsyncs(1);
     engine
-        .accept_ingest(vec![row("never-lands")], "doomed".to_string(), [3u8; 32])
+        .ingest_rows(vec![row("never-lands")], "doomed".to_string(), [3u8; 32])
         .expect_err("an ingest whose fsync failed must be refused");
     drop(engine);
 
@@ -963,7 +963,7 @@ fn a_torn_wal_stays_poisoned_and_still_applies_denies() {
 
     // An ingest after the poison is refused outright and applies nothing.
     assert!(engine
-        .accept_ingest(vec![row("after-poison")], "after".to_string(), [4u8; 32])
+        .ingest_rows(vec![row("after-poison")], "after".to_string(), [4u8; 32])
         .is_err());
     assert!(engine
         .resolve_external_id(b"after-poison")
@@ -1131,7 +1131,7 @@ fn an_executor_panic_is_reported_dead() {
 
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Panic);
     let in_flight = engine
-        .accept_ingest(vec![row("boom")], "boom".to_string(), [5u8; 32])
+        .ingest_rows(vec![row("boom")], "boom".to_string(), [5u8; 32])
         .expect_err("the executor panicked while holding this command, so no receipt can arrive");
     assert!(
         matches!(in_flight, AcceptError::Submit(SubmitError::ReceiptLost)),
@@ -1201,7 +1201,7 @@ fn an_engine_without_an_executor_refuses_writes_and_still_reads() {
 
     assert_eq!(engine.write_executor_posture(), ExecutorPosture::NotStarted);
     assert!(engine
-        .accept_ingest(vec![row("nope")], "nope".to_string(), [6u8; 32])
+        .ingest_rows(vec![row("nope")], "nope".to_string(), [6u8; 32])
         .is_err());
     assert_eq!(visible(&engine), N_ITEMS);
 }
@@ -1215,10 +1215,10 @@ fn a_row_naming_an_established_external_id_names_its_item() {
     let (engine, _faults) = engine_with_faults(&tmp, 8);
 
     let first = engine
-        .accept_ingest(vec![row("dup")], "b1".to_string(), [7u8; 32])
+        .ingest_rows(vec![row("dup")], "b1".to_string(), [7u8; 32])
         .expect("the first batch is accepted")[0];
     let again = engine
-        .accept_ingest(vec![row("dup")], "b2".to_string(), [8u8; 32])
+        .ingest_rows(vec![row("dup")], "b2".to_string(), [8u8; 32])
         .expect("the same row again changes nothing");
     assert_eq!(again, vec![first]);
     assert_eq!(engine.resolve_external_id(b"dup").unwrap(), Some(first));
@@ -1259,7 +1259,7 @@ impl Window {
         faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
         let e = Arc::clone(&engine);
         let prime = std::thread::spawn(move || {
-            e.accept_ingest(vec![row("prime")], "prime".to_string(), [0xEE; 32])
+            e.ingest_rows(vec![row("prime")], "prime".to_string(), [0xEE; 32])
         });
         faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
         let high_water_before = engine.allocator_high_water();
@@ -1296,7 +1296,7 @@ impl Window {
             handles.push(std::thread::spawn(move || {
                 let hash = [i as u8; 32];
                 let r = e
-                    .accept_ingest(rows, batch_id, hash)
+                    .ingest_rows(rows, batch_id, hash)
                     .map_err(|err| format!("{err:?}"));
                 out.lock().unwrap()[i] = Some(r);
             }));
@@ -1590,7 +1590,7 @@ fn every_unacked_waiter_in_a_partially_acked_window_gets_receipt_lost() {
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let e = Arc::clone(&engine);
     let prime = std::thread::spawn(move || {
-        e.accept_ingest(vec![row("prime")], "prime".to_string(), [0xEE; 32])
+        e.ingest_rows(vec![row("prime")], "prime".to_string(), [0xEE; 32])
     });
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
 
@@ -1598,7 +1598,7 @@ fn every_unacked_waiter_in_a_partially_acked_window_gets_receipt_lost() {
     for i in 0..N {
         let e = Arc::clone(&engine);
         handles.push(std::thread::spawn(move || {
-            e.accept_ingest(
+            e.ingest_rows(
                 vec![row(&format!("lost-{i}"))],
                 format!("lost-{i}"),
                 [i as u8; 32],
@@ -1667,14 +1667,14 @@ fn a_duplicate_external_id_across_one_window_makes_one_item() {
         Some(ids[0][0])
     );
 
-    // The retry was answered stale and, resolved again, changed nothing, so it was not sent
-    // again. A job answered stale still occupied a queue slot, so it is counted completed.
+    // The retry was answered stale and, resolved again, changed nothing, which is sent to record
+    // its batch id. A job answered stale still occupied a queue slot, so it is counted completed.
     // Otherwise `work_depth`, the operand of every ingest 429's `retry_after_s`, drifts upward
     // and never comes back down.
     let stats = engine.write_executor_stats();
     assert_eq!(
         (stats.work_submitted, stats.work_completed),
-        (3, 3),
+        (4, 4),
         "every job taken off the work queue must be counted completed: {stats:?}"
     );
     assert_eq!(stats.work_depth, 0);
@@ -1695,7 +1695,7 @@ fn a_job_is_counted_completed_before_its_caller_is_answered() {
         (
             "an ingest",
             Box::new(|e| {
-                e.accept_ingest(vec![row("counted")], "counted".to_string(), [5; 32])
+                e.ingest_rows(vec![row("counted")], "counted".to_string(), [5; 32])
                     .expect("the ingest is accepted");
             }),
         ),
@@ -1762,7 +1762,7 @@ fn a_geometry_publication_leaves_the_work_counts_alone() {
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let e = Arc::clone(&engine);
     let caller = std::thread::spawn(move || {
-        e.accept_ingest(vec![row("queued")], "queued".to_string(), [6; 32])
+        e.ingest_rows(vec![row("queued")], "queued".to_string(), [6; 32])
     });
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
 
@@ -1857,7 +1857,7 @@ fn enqueue(
 ) -> std::thread::JoinHandle<Result<Vec<EntityId>, AcceptError>> {
     let e = Arc::clone(engine);
     let id = batch_id.to_string();
-    let handle = std::thread::spawn(move || e.accept_ingest(rows, id, body_hash));
+    let handle = std::thread::spawn(move || e.ingest_rows(rows, id, body_hash));
     let deadline = std::time::Instant::now() + WAIT;
     while engine.write_executor_stats().work_submitted < want_submitted {
         assert!(
@@ -1996,7 +1996,7 @@ fn crash_child(dir: std::path::PathBuf) {
     let e = Arc::new(engine);
     let submitter = Arc::clone(&e);
     std::thread::spawn(move || {
-        let _ = submitter.accept_ingest(
+        let _ = submitter.ingest_rows(
             vec![row("crash-0"), row("crash-1")],
             CRASH_BATCH_ID.to_string(),
             CRASH_BODY_HASH,
@@ -2073,7 +2073,7 @@ fn crash_parent() {
     let high_water_after_replay = engine.allocator_high_water();
 
     let replayed = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row("crash-0"), row("crash-1")],
             CRASH_BATCH_ID.to_string(),
             CRASH_BODY_HASH,
@@ -2270,7 +2270,7 @@ fn a_windows_acks_follow_its_swap() {
     faults.arm_pause(PauseSite::BeforeAck, PauseAction::Stall);
     let e = Arc::clone(&engine);
     let submit = std::thread::spawn(move || {
-        e.accept_ingest(vec![row("in-force")], "in-force".to_string(), [3; 32])
+        e.ingest_rows(vec![row("in-force")], "in-force".to_string(), [3; 32])
     });
     faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
 
@@ -2315,7 +2315,7 @@ fn the_deny_window_closes_at_its_bound() {
     let engine = Arc::new(engine);
     let e = Arc::clone(&engine);
     let prime =
-        std::thread::spawn(move || e.accept_ingest(vec![row("prime")], "prime".into(), [0xEE; 32]));
+        std::thread::spawn(move || e.ingest_rows(vec![row("prime")], "prime".into(), [0xEE; 32]));
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
 
     let parked = engine.write_executor_stats();
@@ -2405,7 +2405,7 @@ fn the_fragmentation_counters_are_fed_by_window_closes_and_move_with_the_window(
     );
 
     engine_one
-        .accept_ingest(corpus(), "one".to_string(), [1u8; 32])
+        .ingest_rows(corpus(), "one".to_string(), [1u8; 32])
         .expect("the batch is accepted");
     let one = engine_one.write_executor_stats();
 
@@ -2415,7 +2415,7 @@ fn the_fragmentation_counters_are_fed_by_window_closes_and_move_with_the_window(
     engine_many.set_commit_window_max_rows(1);
     for (i, r) in corpus().into_iter().enumerate() {
         engine_many
-            .accept_ingest(vec![r], format!("many-{i}"), [i as u8; 32])
+            .ingest_rows(vec![r], format!("many-{i}"), [i as u8; 32])
             .expect("the batch is accepted");
     }
     let many = engine_many.write_executor_stats();

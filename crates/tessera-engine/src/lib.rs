@@ -164,7 +164,7 @@ pub use tessera_store::utf8;
 // can disconnect the queues and join the thread. No handler can hold one, and none of those four
 // types appears anywhere outside the `write` module.
 //
-// What a handler does hold is `Engine`, and it submits through `Engine::accept_ingest` /
+// What a handler does hold is `Engine`, and it submits through `Engine::ingest` /
 // `Engine::accept_change` — blocking calls, hence inside `spawn_blocking`. What it needs from here
 // is how to answer: `AcceptError` for the status mapping, and `ExecutorPosture`/`ExecutorStats`
 // for `readyz` and `/control/status`.

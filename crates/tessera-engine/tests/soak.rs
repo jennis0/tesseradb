@@ -123,7 +123,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
             scoped: Vec::new(),
         };
         let entity = engine
-            .accept_ingest(vec![row], external_id.clone(), [round as u8; 32])
+            .ingest_rows(vec![row], external_id.clone(), [round as u8; 32])
             .expect("ingest is accepted")[0];
         ingested.push((entity, external_id));
 
@@ -291,7 +291,7 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], external_id, [round as u8; 32])
+            .ingest_rows(vec![row], external_id, [round as u8; 32])
             .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();

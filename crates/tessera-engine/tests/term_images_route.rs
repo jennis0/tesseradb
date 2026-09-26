@@ -957,7 +957,7 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
     for n in 0..64u32 {
         let descriptors = vec![label(MOST), label(SCATTERED)];
         engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![UnallocatedRow {
                     external_id: Some(format!("runtime-{n}").into_bytes()),
                     view: runtime_view.to_string(),
@@ -1097,7 +1097,7 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
     for n in 0..512u32 {
         let descriptors = vec![label(MOST)];
         engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![UnallocatedRow {
                     external_id: Some(format!("runtime-{n}").into_bytes()),
                     view: runtime_view.to_string(),
@@ -1192,6 +1192,6 @@ fn ingest(engine: &Engine, external_id: &str, terms: &[u32], x: f64) {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], external_id.to_string(), [0u8; 32])
         .expect("the ingest is accepted");
 }

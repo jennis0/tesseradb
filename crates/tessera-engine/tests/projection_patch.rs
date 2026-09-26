@@ -93,7 +93,7 @@ fn ingest(engine: &Engine, external_id: &str, x: f64, y: f64) {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], external_id.to_string(), [0u8; 32])
         .expect("ingest is accepted");
 }
 

@@ -72,6 +72,7 @@ proptest! {
                 window.push(
                     WindowEntry {
                     slots: (0..rows.len() as u32).map(Slot::Written).collect(),
+                    over_bound: Vec::new(),
                     rows,
                     batch_id: format!("w{w}-e{e}"),
                     body_hash: [0u8; 32],
@@ -126,6 +127,7 @@ proptest! {
             chunked.push(
                 WindowEntry {
                 slots: (0..part.len() as u32).map(Slot::Written).collect(),
+                over_bound: Vec::new(),
                 rows: part.to_vec(),
                 batch_id: format!("c{c}"),
                 body_hash: [0u8; 32],
@@ -146,6 +148,7 @@ proptest! {
         whole.push(
             WindowEntry {
             slots: (0..rows.len() as u32).map(Slot::Written).collect(),
+            over_bound: Vec::new(),
             rows,
             batch_id: "one".into(),
             body_hash: [0u8; 32],
@@ -207,6 +210,7 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
             window.push(
                 WindowEntry {
                 slots: (0..group.len() as u32).map(Slot::Written).collect(),
+                over_bound: Vec::new(),
                 rows: group.to_vec(),
                 batch_id: "b".into(),
                 body_hash: [0u8; 32],
@@ -300,6 +304,7 @@ fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_cei
             window.push(
                 WindowEntry {
                 slots: (0..group.len() as u32).map(Slot::Written).collect(),
+                over_bound: Vec::new(),
                 rows: group.to_vec(),
                 batch_id: "b".into(),
                 body_hash: [0u8; 32],

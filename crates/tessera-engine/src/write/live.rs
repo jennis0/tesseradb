@@ -470,6 +470,16 @@ impl LiveState {
         ids
     }
 
+    /// The terms `descriptors` resolve to, interning none: `None` where one is novel, which no
+    /// stored label holds.
+    pub(crate) fn lookup_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Option<Vec<TermId>> {
+        let state = lock_recover(&self.resolver_state);
+        descriptors
+            .iter()
+            .map(|d| dict.lookup(d).or_else(|| state.0.get(d.as_slice()).copied()))
+            .collect()
+    }
+
     /// Drop every retired entity's external-id binding from the live map: the other half of a
     /// deletion's retirement (Rule F). Without it, retirement 409s a lawful re-ingest, since
     /// compaction drops the same keys from the folded run and either alone leaves the other path

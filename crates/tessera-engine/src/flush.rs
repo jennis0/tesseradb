@@ -7,7 +7,7 @@
 //! reveal. A deleted entity is not written. A delete accepted after the plan was taken leaves a
 //! row that only its overlay entry hides; the fold (compaction) removes such rows.
 //!
-//! Coordinates are not re-checked here. `Engine::accept_ingest` refuses an out-of-extent
+//! Coordinates are not re-checked here. `Engine::ingest` refuses an out-of-extent
 //! coordinate before a row is buffered.
 
 use std::collections::BTreeMap;

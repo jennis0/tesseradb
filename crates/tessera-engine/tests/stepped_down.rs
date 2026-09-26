@@ -116,7 +116,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
         scoped: Vec::new(),
     };
     let err = engine
-        .accept_ingest(vec![row], "refused-batch".to_string(), [2u8; 32])
+        .ingest_rows(vec![row], "refused-batch".to_string(), [2u8; 32])
         .expect_err("a stepped-down node must not accept ingest");
     assert!(
         matches!(err, AcceptError::SteppedDown),

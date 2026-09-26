@@ -213,7 +213,7 @@ fn ingest_into(engine: &Engine, batch: &str, external_id: &str, view: &str) -> E
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], batch.to_string(), hash)
+        .ingest_rows(vec![row], batch.to_string(), hash)
         .expect("the batch is accepted")[0]
 }
 

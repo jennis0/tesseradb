@@ -281,7 +281,7 @@ fn ingest_corpus(engine: &Engine) {
             })
             .collect();
         engine
-            .accept_ingest(rows, format!("batch-{start}"), [0u8; 32])
+            .ingest_rows(rows, format!("batch-{start}"), [0u8; 32])
             .expect("the batch is accepted");
     }
 }

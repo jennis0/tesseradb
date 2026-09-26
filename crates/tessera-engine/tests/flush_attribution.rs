@@ -37,7 +37,7 @@ fn ingest_rows(engine: &Engine, batch: &str, n: usize) {
     let mut key = [0u8; 32];
     key[..batch.len().min(32)].copy_from_slice(&batch.as_bytes()[..batch.len().min(32)]);
     engine
-        .accept_ingest(rows, batch.to_string(), key)
+        .ingest_rows(rows, batch.to_string(), key)
         .expect("the batch is accepted");
 }
 

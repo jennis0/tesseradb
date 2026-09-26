@@ -101,7 +101,7 @@ fn a_flush_publishes_above_a_side_manifest_a_second_writer_left() {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], "planted-batch".to_string(), [3u8; 32])
+        .ingest_rows(vec![row], "planted-batch".to_string(), [3u8; 32])
         .expect("the row is accepted");
     engine.request_flush();
 
@@ -195,7 +195,7 @@ fn an_executor_seeds_above_a_side_manifest_no_manifest_names() {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], "after-the-seed-batch".to_string(), [5u8; 32])
+        .ingest_rows(vec![row], "after-the-seed-batch".to_string(), [5u8; 32])
         .expect("the row is accepted");
     engine.request_flush();
 
@@ -268,7 +268,7 @@ fn a_refused_publication_re_plans_above_the_number_it_was_refused_at() {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], "refused-batch".to_string(), [9u8; 32])
+        .ingest_rows(vec![row], "refused-batch".to_string(), [9u8; 32])
         .expect("the row is accepted");
 
     // Parked with its segment written and its number taken: the next number on disc is the one it

@@ -226,7 +226,7 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<Vec<(EntityId, String)>> {
             items.push(external_id);
         }
         let entities = engine
-            .accept_ingest(rows, format!("batch-{s}"), [s as u8; 32])
+            .ingest_rows(rows, format!("batch-{s}"), [s as u8; 32])
             .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
@@ -832,7 +832,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
             })
             .collect();
         engine
-            .accept_ingest(batch, "batch-late".to_string(), [9u8; 32])
+            .ingest_rows(batch, "batch-late".to_string(), [9u8; 32])
             .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
@@ -1008,7 +1008,7 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
         });
     }
     let entities = engine
-        .accept_ingest(batch, format!("cfg-batch-{tag}"), [(101 + tag) as u8; 32])
+        .ingest_rows(batch, format!("cfg-batch-{tag}"), [(101 + tag) as u8; 32])
         .expect("ingest is accepted");
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
@@ -1301,7 +1301,7 @@ fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
         })
         .collect();
     let late = engine
-        .accept_ingest(late, "batch-late".to_string(), [9u8; 32])
+        .ingest_rows(late, "batch-late".to_string(), [9u8; 32])
         .expect("ingest is accepted");
     engine.request_flush();
     wait_until("the flush to hold on the pool", WAIT, || {

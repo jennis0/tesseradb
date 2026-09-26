@@ -167,7 +167,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path, tag: &str, prose: String) -> u
         scoped: Vec::new(),
     };
     let entity = engine
-        .accept_ingest(vec![row], tag.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], tag.to_string(), [0u8; 32])
         .expect("an ingest carrying prose is accepted")[0];
     // **Waited on the flush count, not on the extent count.** A coalesce fires between these
     // flushes and *reduces* the number of live text extents, which is the whole point of this

@@ -597,6 +597,9 @@ pub struct BatchIdentity<'a> {
 pub struct RowReceipt {
     pub outcome: RowOutcome,
     pub tessera_id: u64,
+    /// The row created an item whose label resolves to more terms than the plugin declares an
+    /// item carries. It is stored all the same.
+    pub over_bound: bool,
 }
 
 /// What an accepted ingest row did to the item it named.
@@ -1019,7 +1022,7 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// nothing (recovery reconstructs the buffer by the has-a-row predicate and rotation computes its
 /// own reclaim bound), and deleting them shifts every later discriminant, which is exactly what
 /// this version check exists to refuse. Version 5 deleted the `Change` variant, `ChangeOp`'s
-/// `Predicate` and the `descriptors` field of `ChangeByEntity` and `OverlaySnapshotEntry`
+/// `Predicate` and the `descriptors` field of the per-item change record and `OverlaySnapshotEntry`
 /// (decision 0048): `Change` was written by nothing — every accepted change is admitted against an
 /// entity — and the descriptors had no consumer once the evaluate store went. That shifts a variant
 /// index, drops an enum discriminant and drops a struct field, each of which postcard would decode
@@ -1082,6 +1085,8 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // **25**: every access label and declared word is stored trimmed. A log at 24 is refused.
 // **26**: `AttributeDeclaration` gained `unique`, and the variant table gained `UniqueDeclare`. A
 // log at 25 is refused.
+// **27**: `IngestBatch` gained `receipt`, what each request row became, and `ChangeBatch`, one
+// request's changes whole, replaced `ChangeByEntity`. A log at 26 is refused.
 const WAL_VERSION: u16 = 27;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already

@@ -1030,7 +1030,7 @@ async fn an_unknown_wait_value_on_the_flush_is_refused() {
 
 // ---- The replay answer ---------------------------------------------------------------------------
 
-/// **A replayed page accepts nothing and says so** (write-path §2.4). `created` is the effect
+/// **A replayed page accepts nothing and says so.** `created` is the effect
 /// this submission had, so a client summing it over its pages is not made to double-count every
 /// page it retried; `tessera_ids` is the full list either way, which is what a caller correlates
 /// its rows by.

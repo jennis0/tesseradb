@@ -132,7 +132,7 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])
+        .ingest_rows(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])
         .expect("the row is accepted");
     engine.request_flush();
     wait_until(
@@ -281,7 +281,7 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], format!("rows-trigger-batch-{i}"), [i; 32])
+            .ingest_rows(vec![row], format!("rows-trigger-batch-{i}"), [i; 32])
             .expect("the row is accepted");
     }
 

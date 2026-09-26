@@ -315,7 +315,7 @@ fn ingest_with_descriptors(
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
         .map(|ids| ids[0])
 }
 
@@ -2230,7 +2230,7 @@ fn term_ordinals_are_stable_across_a_fold() {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![novel_row], "promote-novel".to_string(), [0u8; 32])
+        .ingest_rows(vec![novel_row], "promote-novel".to_string(), [0u8; 32])
         .expect("the novel descriptor is accepted");
     let flushes_before = engine.write_executor_stats().flushes;
     engine.request_flush();
@@ -2932,7 +2932,7 @@ fn a_fold_lands_while_the_feed_runs(key: fn(u64, &str, u64) -> String) {
                         })
                         .collect();
                     engine
-                        .accept_ingest(rows, format!("feed-{round}-{view}"), [0u8; 32])
+                        .ingest_rows(rows, format!("feed-{round}-{view}"), [0u8; 32])
                         .expect("the feed's batch is accepted");
                 }
                 engine.request_flush();
@@ -3045,7 +3045,7 @@ fn a_flush_of_joins_binds_nothing_and_the_joined_key_resolves_both_ways() {
         scoped: Vec::new(),
     };
     let joined = engine
-        .accept_ingest(vec![join], "join".to_string(), [0u8; 32])
+        .ingest_rows(vec![join], "join".to_string(), [0u8; 32])
         .expect("the join is accepted");
     assert_eq!(joined, vec![entity], "a known external id joins its entity");
     flush(&engine);
@@ -3130,7 +3130,7 @@ fn interleaved_new_items_in_two_views_resolve_both_ways_from_the_sidecar() {
         .enumerate()
         .map(|(i, row)| {
             engine
-                .accept_ingest(vec![row], format!("mixed-{i}"), [0u8; 32])
+                .ingest_rows(vec![row], format!("mixed-{i}"), [0u8; 32])
                 .expect("the batch is accepted")[0]
         })
         .collect();
@@ -3191,10 +3191,10 @@ fn a_join_keeps_its_key_when_the_binding_view_is_dropped_before_it_flushes() {
         scoped: Vec::new(),
     };
     let entity = engine
-        .accept_ingest(vec![row("quarter:q2")], "own".to_string(), [0u8; 32])
+        .ingest_rows(vec![row("quarter:q2")], "own".to_string(), [0u8; 32])
         .expect("the item is accepted")[0];
     let joined = engine
-        .accept_ingest(vec![row("s0")], "join".to_string(), [0u8; 32])
+        .ingest_rows(vec![row("s0")], "join".to_string(), [0u8; 32])
         .expect("the join is accepted");
     assert_eq!(joined, vec![entity], "a known external id joins its entity");
     engine
@@ -3267,7 +3267,7 @@ fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
         scoped: Vec::new(),
     };
     let entity = engine
-        .accept_ingest(vec![row], "q2".to_string(), [0u8; 32])
+        .ingest_rows(vec![row], "q2".to_string(), [0u8; 32])
         .expect("the item is accepted")[0];
     wait_ticking(&engine, "the item to flush", || {
         engine.request_flush();

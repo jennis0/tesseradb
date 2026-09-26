@@ -1829,7 +1829,7 @@ fn ingest_edges(
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             batch.to_string(),
             hash,
@@ -2066,7 +2066,7 @@ fn ingest_levelled(
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             batch.to_string(),
             hash,

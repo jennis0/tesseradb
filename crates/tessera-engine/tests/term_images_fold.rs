@@ -551,7 +551,7 @@ fn a_flush_before_the_fold_is_in_the_folds_images() {
         });
     }
     let flushed: Vec<EntityId> = engine
-        .accept_ingest(rows, "flush-before-the-fold".to_string(), [0u8; 32])
+        .ingest_rows(rows, "flush-before-the-fold".to_string(), [0u8; 32])
         .expect("the ingest is accepted");
     assert_eq!(flushed.len(), 64);
     let flushes_before = engine.write_executor_stats().flushes;

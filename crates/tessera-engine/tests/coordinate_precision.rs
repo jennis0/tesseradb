@@ -217,7 +217,7 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
         })
         .collect();
     let ingested: Vec<EntityId> = engine
-        .accept_ingest(rows, "batch-1".to_string(), [7u8; 32])
+        .ingest_rows(rows, "batch-1".to_string(), [7u8; 32])
         .expect("the batch is accepted");
     assert_eq!(ingested.len(), points.len());
     flush(&engine);

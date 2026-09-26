@@ -159,7 +159,7 @@ fn park<'scope, 'env>(
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let gate = scope.spawn(move || {
         engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![row(engine, "gate", 1.0, 1.0)],
                 "gate".to_string(),
                 body_hash("gate"),
@@ -225,7 +225,7 @@ fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
 /// batch created.
 fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str, x: f64, y: f64) -> u64 {
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row(engine, batch, x, y)],
             batch.to_string(),
             body_hash(batch),
@@ -895,7 +895,7 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
 
         faults.fail_next_appends(1);
         let refused = engine
-            .accept_ingest_joining(
+            .ingest_rows_joining(
                 vec![row(&engine, "b1", 5.0, 5.0)],
                 "b1".to_string(),
                 body_hash("b1"),
@@ -1018,7 +1018,7 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
                 )
                 .expect("a growth against a served artifact");
             engine
-                .accept_ingest(
+                .ingest_rows(
                     vec![row(&engine, &format!("stress-{i}"), 5.0, 5.0)],
                     format!("stress-{i}"),
                     body_hash(&format!("stress-{i}")),
@@ -1302,7 +1302,7 @@ fn ingest_with_edges(
     x: f64,
 ) -> Result<u64, String> {
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row(engine, batch, x, x)],
             batch.to_string(),
             body_hash(batch),

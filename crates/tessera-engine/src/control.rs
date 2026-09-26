@@ -41,15 +41,29 @@ impl Engine {
     /// sit at or above the low-water mark, so testing only `entity < high_water` would refuse
     /// every layer identifier ever issued.
     pub fn resolve_tessera_ids(&self, ids: &[TesseraId]) -> Vec<Option<EntityId>> {
-        let generation = self.generation.load_full();
+        self.tessera_ids_in(&self.generation.load_full(), ids)
+    }
+
+    /// [`Self::resolve_tessera_ids`] against `generation`. An item is named while `generation`
+    /// holds it ([`holds_item`]): a fold that removes a deleted item also drops its deletion, so
+    /// the overlay alone no longer says it is gone.
+    pub(crate) fn tessera_ids_in(
+        &self,
+        generation: &Generation,
+        ids: &[TesseraId],
+    ) -> Vec<Option<EntityId>> {
         let shard = generation.bundle.manifest.identity.shard_id;
         let high_water = self.allocator_high_water();
         let low_water = self.allocator_low_water();
         ids.iter()
             .map(|id| {
                 let (id_shard, entity) = self.identity_key.invert(*id);
-                let issued = entity.raw() < high_water || entity.raw() >= low_water;
-                (id_shard == shard && issued).then_some(entity)
+                let named = if entity.raw() < high_water {
+                    holds_item(generation, entity)
+                } else {
+                    entity.raw() >= low_water
+                };
+                (id_shard == shard && named).then_some(entity)
             })
             .collect()
     }
@@ -87,6 +101,15 @@ impl Engine {
         &self,
         external_ids: &[Vec<u8>],
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
+        self.external_ids_in(&self.generation.load(), external_ids)
+    }
+
+    /// [`Self::resolve_external_ids`], reading the bound runs of `generation`.
+    pub(crate) fn external_ids_in(
+        &self,
+        generation: &Generation,
+        external_ids: &[Vec<u8>],
+    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
         let mut results: Vec<Option<EntityId>> = self.write.live().established_entities(external_ids);
 
         let residual_positions: Vec<usize> = results
@@ -101,11 +124,7 @@ impl Engine {
             .iter()
             .map(|&i| external_ids[i].clone())
             .collect();
-        let residual_results = self
-            .generation
-            .load()
-            .external_index
-            .resolve_many(&residual_keys)?;
+        let residual_results = generation.external_index.resolve_many(&residual_keys)?;
         for (pos, resolved) in residual_positions.into_iter().zip(residual_results) {
             results[pos] = resolved;
         }
@@ -293,19 +312,22 @@ impl Engine {
         request: tessera_lifecycle::ValuesRequest,
     ) -> std::result::Result<crate::write::ValuesReceipt, crate::write::AcceptError> {
         // Checked here, and re-checked on the executor against what was added since. Where the
-        // executor cannot re-check from memory, the batch is checked here once more.
-        let mut checks = 0;
-        loop {
+        // executor cannot re-check from memory, the request comes back and is checked here once
+        // more.
+        let mut request = Box::new(request);
+        for attempt in 0..2 {
             let seq = crate::unique::check_fills(&self.generation(), &request, &self.identity_key)?;
             #[cfg(feature = "fault-injection")]
             self.switches.hold_write_check_if_wanted();
-            checks += 1;
-            match self.write.fill_values(Box::new(request.clone()), seq) {
-                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::Stale))
-                    if checks < 2 => {}
-                answered => return answered,
+            match self.write.fill_values(request, seq)? {
+                crate::write::ValuesOutcome::Filled(receipt) => return Ok(receipt),
+                crate::write::ValuesOutcome::Stale(back) if attempt == 0 => request = back,
+                crate::write::ValuesOutcome::Stale(_) => break,
             }
         }
+        Err(crate::write::AcceptError::Exec(
+            tessera_lifecycle::ExecError::Stale,
+        ))
     }
 
     /// Declare a vocabulary while the service runs. Answers `(existing, added, titles)`.
@@ -600,4 +622,18 @@ pub struct PublishedArtifactAddress {
     pub level: u32,
     pub ordinal: u32,
     pub key: Option<String>,
+}
+
+/// Whether `generation` holds `entity` as an item: a buffered row, a row in some view, or the
+/// label a flush wrote, which an item whose views were all dropped still holds. A fold that
+/// removes a deleted item removes all three.
+pub(crate) fn holds_item(generation: &Generation, entity: EntityId) -> bool {
+    generation.buffer.contains(entity)
+        || generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .values()
+                .any(|view| view.row_space.row_of(entity).is_some())
+        })
+        || flushed_terms_of(generation, entity).is_some()
 }

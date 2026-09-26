@@ -11,6 +11,11 @@ use crate::Generation;
 pub(crate) struct BlobRow(Option<Option<Vec<tessera_filter::RecordField>>>);
 
 impl BlobRow {
+    /// A row already read: `None` where the blob holds no row for the entity.
+    pub(crate) fn of(fields: Option<Vec<tessera_filter::RecordField>>) -> BlobRow {
+        BlobRow(Some(fields))
+    }
+
     fn get(
         &mut self,
         generation: &Generation,
@@ -187,6 +192,27 @@ pub(crate) fn scalar_is_absent(
         // window's close; a key is never absence, since the empty string is refused upstream.
         _ => false,
     }
+}
+
+/// A value a batch carries at the shape it is stored in: a category's key as its code, where the
+/// vocabulary holds the key. A key it does not hold stays a key, which equals no stored code.
+pub(crate) fn supplied_as_stored(
+    generation: &Generation,
+    value: &tessera_lifecycle::WalScalar,
+    declared: &tessera_store::manifest::DeclaredScalar,
+) -> tessera_lifecycle::WalScalar {
+    if let (Some(vocabulary), tessera_lifecycle::WalScalar::Utf8(key)) =
+        (declared.vocabulary.as_deref(), value)
+    {
+        if let Some(code) = generation
+            .vocabularies
+            .get(vocabulary)
+            .and_then(|held| held.code_of(key))
+        {
+            return tessera_store::vocabulary::code_value(declared.arrow_type, code);
+        }
+    }
+    value.clone()
 }
 
 /// One stored value at the shape an ingest batch carries it in, so the join rule's attribute arm

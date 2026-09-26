@@ -270,7 +270,7 @@ fn ingest_point_into(
         *slot = *byte;
     }
     let ids = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),

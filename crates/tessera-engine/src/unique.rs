@@ -146,7 +146,12 @@ impl UniqueLive {
     /// Whether an entry added after `seq` may be missing from here, or the unique columns have
     /// changed since `seq`, so a batch checked at `seq` cannot be re-checked from memory.
     pub(crate) fn stale_since(&self, seq: u64) -> bool {
-        self.flushed_through > seq || self.columns_changed_at > seq
+        self.flushed_through > seq || self.columns_changed_since(seq)
+    }
+
+    /// Whether the unique columns have changed since `seq`.
+    pub(crate) fn columns_changed_since(&self, seq: u64) -> bool {
+        self.columns_changed_at > seq
     }
 
     /// Whether no column is unique, so nothing is ever added.
@@ -345,13 +350,22 @@ pub(crate) fn tessera_id_text(
 /// Whether a value in `keys`, each as `(declared position, key widened)`, may have been given a
 /// holder since the live entries' sequence number was `seq`: the executor's re-check of a batch
 /// its handler resolved at `seq`, from memory. Where an entry added since has already left
-/// memory, or the unique columns have changed, the answer is yes.
-pub(crate) fn moved_since(generation: &Generation, keys: &[(u16, u128)], seq: u64) -> bool {
+/// memory the answer is yes, and so it is for a batch that `creates` items once the unique
+/// columns have changed, since its keys were taken under the old ones.
+pub(crate) fn moved_since(
+    generation: &Generation,
+    keys: &[(u16, u128)],
+    seq: u64,
+    creates: bool,
+) -> bool {
     use tessera_store::unique::KeyKind;
+    let live = &generation.unique_live;
+    if creates && live.columns_changed_since(seq) {
+        return true;
+    }
     if keys.is_empty() {
         return false;
     }
-    let live = &generation.unique_live;
     if live.stale_since(seq) {
         return true;
     }

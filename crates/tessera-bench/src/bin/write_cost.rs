@@ -40,6 +40,9 @@
 //! The fixture is **copied** before it is opened: this binary writes into the copy and never into
 //! the bundle it was pointed at.
 
+#[path = "../ingest_rows.rs"]
+mod ingest_rows;
+use ingest_rows::IngestRows;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -58,7 +61,7 @@ const TERM_DENSITY: usize = 3;
 /// The probe window's size. Small and fixed, so what moves between depths is the per-window term.
 const PROBE_ROWS: usize = 100;
 
-/// The fill batch. One `accept_ingest` blocks on its receipt, so one call is one commit window.
+/// The fill batch. One ingest blocks on its receipt, so one call is one commit window.
 const FILL_ROWS: usize = 1_000;
 
 /// `DENY_WINDOW_MAX_ENTRIES`: the most entries one deny window holds.
@@ -375,14 +378,14 @@ fn experiment_a(
                 let count = FILL_ROWS.min(depth - buffered);
                 let rows = probe_rows(fx, count, next, &terms, unique);
                 next += count as u64;
-                engine.accept_ingest(rows, format!("fill-{round}-{next}"), [round as u8; 32])?;
+                engine.ingest_rows(rows, format!("fill-{round}-{next}"), [round as u8; 32])?;
                 buffered += count;
             }
             let rows = probe_rows(fx, PROBE_ROWS, next, &terms, unique);
             next += PROBE_ROWS as u64;
             let before = engine.write_executor_stats();
             let at = Instant::now();
-            engine.accept_ingest(rows, format!("probe-{round}-{next}"), [round as u8; 32])?;
+            engine.ingest_rows(rows, format!("probe-{round}-{next}"), [round as u8; 32])?;
             let wall = at.elapsed().as_nanos() as u64;
             let after = engine.write_executor_stats();
             buffered += PROBE_ROWS;
@@ -702,7 +705,7 @@ fn experiment_c(
             let rows = synth_rows(fx, PROBE_ROWS, base, &terms, &scalars);
             let before = engine.write_executor_stats();
             let at = Instant::now();
-            engine.accept_ingest(rows, format!("c-{round}-{cell}"), [round as u8; 32])?;
+            engine.ingest_rows(rows, format!("c-{round}-{cell}"), [round as u8; 32])?;
             let wall = at.elapsed().as_nanos() as u64;
             let window = Window::between(&before, &engine.write_executor_stats(), wall);
             best[cell] = Some(match best[cell] {

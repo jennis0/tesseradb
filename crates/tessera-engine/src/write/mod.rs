@@ -43,7 +43,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_authz::{DeltaTier, Dict, FragmentCache};
 use tessera_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
-use tessera_lifecycle::command::{ExecError, SubmitError, UnallocatedRow};
+use tessera_lifecycle::command::{ExecError, SubmitError};
 use tessera_lifecycle::faults::WalMeter;
 use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
 use tessera_lifecycle::overlay::replay;
@@ -669,9 +669,9 @@ impl WritePath {
             slots,
             keys,
             artifacts,
-            ..
+            over_bound,
         } = planned;
-        let answered = self.submit(|reply| Command::Ingest {
+        let submission = command::IngestSubmission {
             rows,
             slots,
             keys,
@@ -679,8 +679,9 @@ impl WritePath {
             body_hash,
             artifacts,
             unique_seq,
-            reply,
-        });
+            over_bound,
+        };
+        let answered = self.submit(|reply| Command::Ingest { submission, reply });
         self.health().lap(WriteStage::SubmitToReceipt, mark);
         answered
     }
@@ -741,7 +742,7 @@ impl WritePath {
         &self,
         request: Box<tessera_lifecycle::ValuesRequest>,
         unique_seq: u64,
-    ) -> Result<ValuesReceipt, AcceptError> {
+    ) -> Result<ValuesOutcome, AcceptError> {
         self.submit(|reply| Command::Values {
             request,
             unique_seq,

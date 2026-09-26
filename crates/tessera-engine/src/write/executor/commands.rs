@@ -291,28 +291,11 @@ impl Executor {
             // around it, so if this arm ever becomes reachable it still has idempotency rather
             // than becoming a second, unchecked ingest path. The window it is given is empty, so
             // `BatchState::Held` is unconstructible here and the answers are exactly `admit`'s.
-            Command::Ingest {
-                rows,
-                slots,
-                keys,
-                batch_id,
-                body_hash,
-                artifacts,
-                unique_seq,
-                reply,
-            } => {
+            Command::Ingest { submission, reply } => {
                 let window = CommitWindow::new(self.next_window_seq());
                 let (window, _) = self.admit_ingest(
                     window,
-                    IngestSubmission {
-                        rows,
-                        slots,
-                        keys,
-                        batch_id,
-                        body_hash,
-                        artifacts,
-                        unique_seq,
-                    },
+                    submission,
                     reply,
                 );
                 if !window.is_empty() {
@@ -801,7 +784,7 @@ impl Executor {
         &mut self,
         mut request: Box<tessera_lifecycle::ValuesRequest>,
         unique_seq: u64,
-        reply: Reply<ValuesReceipt>,
+        reply: Reply<ValuesOutcome>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
@@ -827,7 +810,7 @@ impl Executor {
                 return;
             }
             Err(crate::unique::Recheck::Stale) => {
-                reply.fail(ExecError::Stale);
+                reply.ack(ValuesOutcome::Stale(request));
                 return;
             }
         }
@@ -1036,12 +1019,12 @@ impl Executor {
                  open, so the artifacts were created"
             );
         }
-        reply.ack(ValuesReceipt {
+        reply.ack(ValuesOutcome::Filled(ValuesReceipt {
             filled: planned.filled,
             held: planned.held,
             joined,
             minted: minted_count,
-        });
+        }));
     }
 
     /// `PUT /control/attributes`: declare an attribute column while the service runs.

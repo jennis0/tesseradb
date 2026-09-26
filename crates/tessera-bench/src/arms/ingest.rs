@@ -30,7 +30,7 @@
 //!   `apply_window` copies the whole buffer per close, so a flush interval pays `B²/2W` item
 //!   copies and per-row cost is proportional to `B/W`. A sweep that holds the buffer shallow
 //!   cannot see the term that dominates a deployment.
-//! * **Concurrency.** `accept_ingest` blocks on its receipt, so a *serial* caller gives the window
+//! * **Concurrency.** `Engine::ingest` blocks on its receipt, so a *serial* caller gives the window
 //!   a queue of one: one close and one fsync per call, and `commit_window_max_items` does nothing
 //!   at all (a window also closes when the work queue is observed empty — decision 0034, no
 //!   linger). Only under concurrent load does the window gather, and gathering changes `W`, which
@@ -114,6 +114,7 @@
 //!   queue-front + fsync, and `/control/changes` is never refused for capacity because refusing a
 //!   security operation for load is fail-open).
 
+use crate::ingest_rows::IngestRows;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -533,7 +534,7 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                 let batch_id = format!("bench-{batch}-{rep}");
                 depths.push(rep as u64 * batch as u64);
                 let start = std::time::Instant::now();
-                engine.accept_ingest(rows, batch_id, [rep as u8; 32])?;
+                engine.ingest_rows(rows, batch_id, [rep as u8; 32])?;
                 samples.push(start.elapsed().as_nanos() as u64);
             }
 
@@ -688,7 +689,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 let rows = synth_rows(1, next_id, &terms, &descriptors);
                 next_id += 1;
                 let start = std::time::Instant::now();
-                engine.accept_ingest(rows, format!("c-{next_id}"), [0u8; 32])?;
+                engine.ingest_rows(rows, format!("c-{next_id}"), [0u8; 32])?;
                 let ack_ns = start.elapsed().as_nanos() as u64;
                 buffered += 1;
                 std::hint::black_box(ack_ns);
@@ -720,7 +721,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 next_id += 1;
                 buffered += 1;
                 let start = std::time::Instant::now();
-                engine.accept_ingest(rows, format!("c-probe-{next_id}"), [0u8; 32])?;
+                engine.ingest_rows(rows, format!("c-probe-{next_id}"), [0u8; 32])?;
                 start.elapsed().as_nanos() as u64
             };
 
@@ -817,7 +818,7 @@ fn varied_signature_rows(
 /// result dressed as a measurement. That is a property of the harness, not of the server — a real
 /// `/control/ingest` caller is one of `ingest_admission` concurrent handlers.
 ///
-/// So this arm spawns N threads each calling `Engine::accept_ingest`, which is exactly what N
+/// So this arm spawns N threads each calling `Engine::ingest`, which is exactly what N
 /// concurrent handlers do one layer up (`control.rs` runs `run_ingest` inside `spawn_blocking`).
 ///
 /// # What is reported, and what is exact
@@ -922,7 +923,7 @@ pub fn run_concurrent(
                             let rows = varied_signature_rows(batch, base, &terms, &descriptors);
                             let batch_id = format!("conc-{t}-{rep}");
                             engine
-                                .accept_ingest(rows, batch_id, [t as u8; 32])
+                                .ingest_rows(rows, batch_id, [t as u8; 32])
                                 .expect("the batch is accepted");
                         }
                     });
@@ -994,7 +995,7 @@ pub struct RateSweep<'a> {
     pub ratio: &'a [usize],
     /// Concurrent `/control/ingest` callers.
     pub submitters: &'a [usize],
-    /// Rows per `accept_ingest` call. `W` for a serial caller; a lower bound on it otherwise.
+    /// Rows per ingest batch. `W` for a serial caller; a lower bound on it otherwise.
     pub batch: usize,
     /// `ingest.commit_window_max_items`, the ceiling a gathering window closes at.
     pub window: usize,
@@ -1135,7 +1136,7 @@ fn drive_cycle(
                 let hash = [(seq % 251) as u8; 32];
                 let t = std::time::Instant::now();
                 engine
-                    .accept_ingest(rows, batch_id, hash)
+                    .ingest_rows(rows, batch_id, hash)
                     .expect("the batch is accepted");
                 acks.lock()
                     .unwrap()

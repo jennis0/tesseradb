@@ -535,7 +535,7 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
             .collect();
         entities.extend(
             engine
-                .accept_ingest(rows, format!("batch-{s}"), [s as u8; 32])
+                .ingest_rows(rows, format!("batch-{s}"), [s as u8; 32])
                 .expect("ingest is accepted"),
         );
         let flushes = engine.write_executor_stats().flushes;
@@ -564,7 +564,7 @@ fn flush_filler_segment(engine: &Engine, n: usize) {
         })
         .collect();
     engine
-        .accept_ingest(rows, format!("filler-{n}"), [(200 + n) as u8; 32])
+        .ingest_rows(rows, format!("filler-{n}"), [(200 + n) as u8; 32])
         .expect("ingest is accepted");
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();

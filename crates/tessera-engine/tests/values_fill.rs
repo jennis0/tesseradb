@@ -272,7 +272,7 @@ fn ingest(engine: &Engine, batch: &str, rows: Vec<UnallocatedRow>) -> Vec<Entity
     let mut hash = [0u8; 32];
     hash[..batch.len().min(32)].copy_from_slice(&batch.as_bytes()[..batch.len().min(32)]);
     engine
-        .accept_ingest(rows, batch.to_string(), hash)
+        .ingest_rows(rows, batch.to_string(), hash)
         .unwrap_or_else(|e| panic!("batch {batch} is accepted: {e}"))
 }
 

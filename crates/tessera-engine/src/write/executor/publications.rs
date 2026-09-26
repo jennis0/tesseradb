@@ -1098,7 +1098,7 @@ impl Executor {
             // This view's frame: the flush quantises against the extent the view's own positions
             // were placed in, and a bundle-wide frame would put a second view's rows on the
             // first's grid. A plan naming a view the manifest does not declare is dropped here
-            // rather than flushed against a guessed frame, the same refusal `accept_ingest` makes.
+            // rather than flushed against a guessed frame, the same refusal `Engine::ingest` makes.
             //
             // This view's incarnation is resolved on the same rule. The stamp goes on the segment,
             // every scoped column this flush writes, and every extent, so a key created again

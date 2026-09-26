@@ -722,7 +722,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row],
             String::from_utf8_lossy(external_id).into_owned(),
             key,

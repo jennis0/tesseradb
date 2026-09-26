@@ -93,7 +93,7 @@ fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], format!("batch-{i}"), [i as u8; 32])
+        .ingest_rows(vec![row], format!("batch-{i}"), [i as u8; 32])
         .expect("ingest is accepted")[0]
 }
 
@@ -580,7 +580,7 @@ fn ingest_with(engine: &Engine, key: &[u8], descriptors: &[&[u8]], batch: &str) 
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0]
 }
 
@@ -954,7 +954,7 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
             .enumerate()
             .map(|(j, row)| {
                 engine
-                    .accept_ingest(vec![row], format!("mixed-{window}-{j}"), [window as u8; 32])
+                    .ingest_rows(vec![row], format!("mixed-{window}-{j}"), [window as u8; 32])
                     .expect("the batch is accepted")[0]
             })
             .collect();

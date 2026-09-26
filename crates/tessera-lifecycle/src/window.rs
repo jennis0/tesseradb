@@ -128,6 +128,9 @@ pub struct WindowEntry<W> {
     pub rows: Vec<UnallocatedRow>,
     /// One per row of the request, in request order: what the row became.
     pub slots: Vec<Slot>,
+    /// The request rows creating an item whose label resolves to more terms than the plugin
+    /// declares an item carries.
+    pub over_bound: Vec<u32>,
     pub batch_id: String,
     pub body_hash: [u8; 32],
     /// The artifacts this batch's rows join, each with the **ordinal its key resolved to at
@@ -710,7 +713,8 @@ impl<W> CommitWindow<W> {
             let receipt = entry
                 .slots
                 .iter()
-                .map(|slot| match *slot {
+                .enumerate()
+                .map(|(i, slot)| match *slot {
                     Slot::Written(at) => {
                         let row: &WalRow = &wal_rows[at as usize];
                         RowReceipt {
@@ -720,11 +724,13 @@ impl<W> CommitWindow<W> {
                                 RowOutcome::Created
                             },
                             tessera_id: tessera_id_of(row.entity_id),
+                            over_bound: entry.over_bound.contains(&(i as u32)),
                         }
                     }
                     Slot::Unchanged(entity) => RowReceipt {
                         outcome: RowOutcome::Unchanged,
                         tessera_id: tessera_id_of(entity),
+                        over_bound: false,
                     },
                 })
                 .collect();
@@ -786,6 +792,7 @@ mod tests {
     fn entry(batch: &str, rows: Vec<UnallocatedRow>) -> WindowEntry<&'static str> {
         WindowEntry {
             slots: (0..rows.len() as u32).map(Slot::Written).collect(),
+            over_bound: Vec::new(),
             rows,
             batch_id: batch.to_string(),
             body_hash: [0u8; 32],
@@ -927,6 +934,7 @@ mod tests {
         let mut w: CommitWindow<&'static str> = CommitWindow::new(7);
         push(&mut w, WindowEntry {
             slots: vec![Slot::Written(0)],
+            over_bound: Vec::new(),
             rows: vec![row(Some("k"), &[1])],
             batch_id: "b1".to_string(),
             body_hash: [3u8; 32],

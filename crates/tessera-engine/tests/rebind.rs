@@ -9,8 +9,8 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::{ChangeOp, UnallocatedRow};
+use tessera_engine::{Engine, EngineConfig, IngestRequest};
+use tessera_lifecycle::{ChangeOp, IngestRow, UnallocatedRow};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -64,7 +64,7 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
 
     // First life: ingest doc-1, flush it so its binding reaches a sidecar run.
     let first = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row(&engine, b"doc-1")],
             "life-1".to_string(),
             [1u8; 32],
@@ -83,7 +83,7 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
     // Second life: same external id, accepted — the executor's own backstop check is the one
     // this exercises (no HTTP handler in front of it here).
     let second = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row(&engine, b"doc-1")],
             "life-2".to_string(),
             [2u8; 32],
@@ -162,15 +162,43 @@ fn a_suppressed_holder_is_named_by_a_reingest_and_no_copy_is_made() {
     let engine = open_engine(tmp.path());
 
     let entity = engine
-        .accept_ingest(vec![row(&engine, b"doc-2")], "s-1".to_string(), [3u8; 32])
+        .ingest_rows(vec![row(&engine, b"doc-2")], "s-1".to_string(), [3u8; 32])
         .expect("ingest accepted")[0];
     engine
         .accept_change(entity, ChangeOp::Suppress)
         .expect("suppress accepted");
 
     let again = engine
-        .accept_ingest(vec![row(&engine, b"doc-2")], "s-2".to_string(), [4u8; 32])
+        .ingest_rows(vec![row(&engine, b"doc-2")], "s-2".to_string(), [4u8; 32])
         .expect("a row naming a suppressed item is accepted");
     assert_eq!(again, vec![entity], "the row names the suppressed item");
     assert_eq!(engine.resolve_external_id(b"doc-2").unwrap(), Some(entity));
+}
+
+/// **An item created with no external id answers none once a flush has written it**, rather than
+/// failing the lookup.
+#[test]
+fn an_item_created_without_an_external_id_answers_none_after_its_flush() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let engine = open_engine(tmp.path());
+    let receipt = engine
+        .ingest(IngestRequest {
+            batch_id: "bare".to_string(),
+            body_hash: [1u8; 32],
+            view: Some("s0".to_string()),
+            rows: vec![IngestRow {
+                tessera_id: None,
+                external_id: None,
+                labels: Some(vec![b"0".to_vec()]),
+                position: Some((0.5, 0.5)),
+                scalars: Vec::new(),
+                scoped: Vec::new(),
+                omitted: Vec::new(),
+            }],
+            artifacts: Default::default(),
+        })
+        .expect("the batch is accepted");
+    let entity = engine.resolve_tessera_ids(&receipt.tessera_ids)[0].expect("the item it made");
+    flush(&engine);
+    assert_eq!(engine.external_id_of(entity).expect("the lookup answers"), None);
 }

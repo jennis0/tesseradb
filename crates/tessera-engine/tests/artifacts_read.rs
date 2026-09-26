@@ -1317,7 +1317,7 @@ fn ingest_at(engine: &Engine, batch: &str, places: &[(f64, f64)]) -> Vec<EntityI
         })
         .collect();
     engine
-        .accept_ingest(rows, batch.to_string(), [0u8; 32])
+        .ingest_rows(rows, batch.to_string(), [0u8; 32])
         .expect("the ingest is accepted")
 }
 

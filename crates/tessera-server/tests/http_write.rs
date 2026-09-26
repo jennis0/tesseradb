@@ -546,7 +546,7 @@ async fn changes_batch_validates_before_applying_anything() {
 /// Two concurrent acceptances (one `/control/ingest`, one `/control/changes`) must both survive.
 /// An unlocked apply+swap admits a lost-update race in which whichever `store()` wins silently
 /// discards the other's already-fsynced, already-acked change. Runs the engine's
-/// `accept_ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced to start
+/// `ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced to start
 /// together, so both race for the executor.
 ///
 /// **The race is structurally impossible today**, because exactly one thread can publish a
@@ -615,23 +615,28 @@ fn concurrent_ingest_and_change_both_survive() {
     let barrier_b = Arc::clone(&barrier);
     let ingest_thread = std::thread::spawn(move || {
         let new_external_id = external_id_of(N_ITEMS + 100);
-        // Unallocated: signature-sorted assignment happens on the executor, so a caller does not
-        // name the entity id at all.
-        let row = tessera_lifecycle::UnallocatedRow {
+        // A caller does not name the entity id at all: the executor assigns it.
+        let row = tessera_lifecycle::IngestRow {
+            tessera_id: None,
             external_id: Some(new_external_id.clone()),
-            view: "s0".to_string(),
-            join: None,
-            descriptors: vec![b"0".to_vec()],
-            x: 5.0,
-            y: 5.0,
+            labels: Some(vec![b"0".to_vec()]),
+            position: Some((5.0, 5.0)),
             scalars: Vec::new(),
-            terms: engine_b.resolve_terms(std::slice::from_ref(&b"0".to_vec())),
             scoped: Vec::new(),
+            omitted: Vec::new(),
         };
         barrier_b.wait();
-        engine_b
-            .accept_ingest(vec![row], "concurrent-batch".to_string(), [7u8; 32])
-            .expect("ingest should be accepted")[0]
+        let receipt = engine_b
+            .ingest(tessera_engine::IngestRequest {
+                batch_id: "concurrent-batch".to_string(),
+                body_hash: [7u8; 32],
+                view: Some("s0".to_string()),
+                rows: vec![row],
+                artifacts: Default::default(),
+            })
+            .expect("ingest should be accepted");
+        engine_b.resolve_tessera_ids(&receipt.tessera_ids)[0]
+            .expect("the item it created")
     });
 
     change_thread.join().unwrap();
