@@ -10,7 +10,6 @@ use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const KEY: &str = "000102030405060708090a0b0c0d0e0f";
 pub const SESSION_CREDENTIAL: &str = "session-credential";
 
 pub fn tessera() -> Command {
@@ -94,7 +93,6 @@ operator_credential_file = "operator.cred"
     let built = tessera()
         .args(["build", "--mint-external-ids"])
         .current_dir(dir)
-        .env("TESSERA_IDENTITY_KEY", KEY)
         .output()
         .unwrap();
     assert!(built.status.success(), "{built:?}");

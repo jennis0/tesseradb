@@ -242,7 +242,7 @@ describe('an answer', () => {
     vi.stubGlobal('fetch', async () => {
       throw new TypeError('fetch failed');
     });
-    const answer = await control.changes([{tessera_id: '5', idset: 1, op: 'delete'}]);
+    const answer = await control.changes([{tessera_id: '5', op: 'delete'}]);
     expect(answer).toMatchObject({status: UNANSWERED, ok: false, attempts: 1});
   });
 

@@ -614,10 +614,8 @@ fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
         .expect("the key is served");
     // Inverted through the admin plane's own resolver, the way `/control/changes` does — so the
     // suppression below exercises the misdirection guard rather than going round it.
-    let idset = engine.generation().bundle.manifest.identity.idset;
     engine
-        .resolve_tessera_ids(&[row.tessera_id], idset)
-        .unwrap()[0]
+        .resolve_tessera_ids(&[row.tessera_id])[0]
         .expect("an artifact identifier names the entity this deployment issued for it")
 }
 

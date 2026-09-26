@@ -102,8 +102,6 @@ pub struct ItemsRequest<'a> {
     pub pages: Option<u32>,
     /// A previous response's `next`, unchanged.
     pub cursor: Option<&'a str>,
-    /// The idset the caller holds `tessera_id`s under, checked as the item route checks it.
-    pub idset: Option<u32>,
     pub limits: RecordsLimits,
     /// Cancellation ends the response with a trailer whose `ended_by` is `deadline`, after a
     /// page holding whatever rows the page under way had reached. The walk honours it only once
@@ -376,13 +374,12 @@ struct Planned<'r> {
     req: ItemsRequest<'r>,
     plan: FieldPlan,
     page_rows: u32,
-    idset: u32,
     binding: Binding<'r>,
 }
 
 impl Engine {
     /// Serve one `POST /v1/items` response into `sink` and return its trailer. Every refusal is
-    /// decided before the head: the request's shape, the idset, the view, the cursor (before any
+    /// decided before the head: the request's shape, the view, the cursor (before any
     /// position in it is used), the fields, then the filter. An `Err` after the head leaves the
     /// response without a trailer, which a client reads as incomplete and resumes from the last
     /// page end.
@@ -398,7 +395,7 @@ impl Engine {
         self.serve_pages(&response, &mut pager, started, sink)
     }
 
-    /// The generation, the idset, the view, the cursor, the fields and the filter, in that order,
+    /// The generation, the view, the cursor, the fields and the filter, in that order,
     /// then the order, the page size and the counts.
     fn plan_items<'r>(
         &self,
@@ -407,10 +404,6 @@ impl Engine {
     ) -> Result<(Response<'r>, ItemsPager<'r>)> {
         let generation = self.generation.load_full();
         let manifest = &generation.bundle.manifest;
-        let idset = manifest.identity.idset;
-        if req.idset.is_some_and(|presented| presented != idset) {
-            return Err(EngineError::StaleIdSet);
-        }
         let unknown_view = || EngineError::UnknownView(req.view.to_string());
         if !session.visible_views().contains_view(req.view) {
             return Err(unknown_view());
@@ -427,9 +420,6 @@ impl Engine {
             Some(token) => Some(ItemsCursor::decode(&self.cursor_key.open(&binding, token)?)?),
         };
         if let Some(cursor) = &resumed {
-            if cursor.idset != idset {
-                return Err(EngineError::StaleIdSet);
-            }
             if req.order.is_some_and(|order| order != cursor.position.order) {
                 return Err(EngineError::CursorRefused);
             }
@@ -474,7 +464,6 @@ impl Engine {
                 req,
                 plan,
                 page_rows,
-                idset,
                 binding,
             },
             walk,
@@ -719,7 +708,6 @@ impl Pager for ItemsPager<'_> {
 
     fn cursor(&self, engine: &Engine) -> String {
         let cursor = ItemsCursor {
-            idset: self.planned.idset,
             position: self.walk.position,
             stretch: self.walk.target,
         };

@@ -266,19 +266,14 @@ impl Quantisation {
     }
 }
 
-/// A safe-to-print stand-in for a deployment identity key: `fp:` plus the first 8 hex characters
-/// of a domain-separated SHA-256 over the key's canonical hex form.
+/// A safe-to-print stand-in for a bundle's identity key: `fp:` plus the first 8 hex characters of
+/// a domain-separated SHA-256 over the key's canonical hex form.
 ///
-/// **Why this exists.** `IdentityKey` has a redacted `Debug` and no hex accessor, but the key's
-/// plaintext hex is deliberately carried alongside it (MANIFEST must record it), and that hex
-/// then sits in `Debug`-deriving carriers — `IdentityDescriptor`, and through it `Manifest` and
-/// `Bundle`. One `tracing::error!("{bundle:?}")` would print the deployment key. Operators still
-/// need to be able to say "these two keys differ" (a rotation refusal, a support ticket), so the
-/// answer is a fingerprint rather than nothing: it distinguishes keys without disclosing one.
-///
-/// Domain-separated so a fingerprint can never be confused with, or compared against, one of the
-/// bundle's file digests; truncated because 32 bits is ample to tell two keys apart and leaves
-/// nothing worth attacking.
+/// The manifest records the key's plaintext hex, and the manifest is reachable from `Debug`
+/// carriers such as `Bundle`, so a `{bundle:?}` in a log line would print the key. The fingerprint
+/// tells two keys apart without disclosing either. It is domain-separated so that it cannot be
+/// compared against one of the bundle's file digests, and truncated to 32 bits, which is enough to
+/// tell two keys apart.
 pub fn identity_key_fingerprint(key_hex: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -292,13 +287,12 @@ pub fn identity_key_fingerprint(key_hex: &str) -> String {
     out
 }
 
-/// `MANIFEST.json`'s `identity` object (contracts §2.2/§2.6 r6): the `tessera_id`
-/// permutation's construction, round count, per-deployment key and shard id. **Required** —
-/// no `#[serde(default)]` — because an absent object cannot invert a `tessera_id`, and a
-/// *defaulted* key would invert every identifier to the wrong entity, suppressing the wrong
-/// item on `/control/changes`.
+/// `MANIFEST.json`'s `identity` object: the `tessera_id` permutation's construction, round count,
+/// key and shard id. The key is generated when the bundle is created and is never configured or
+/// changed, so a copy of the bundle keeps its `tessera_id`s and a rebuild gives new ones. The
+/// object is required: without it no `tessera_id` can be inverted.
 ///
-/// `Debug` is hand-written and redacting — see the impl below.
+/// `Debug` is hand-written and prints the key's fingerprint.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct IdentityDescriptor {
     pub construction: String,
@@ -307,25 +301,10 @@ pub struct IdentityDescriptor {
     /// case-folding — contracts §2.6).
     pub key: String,
     pub shard_id: u32,
-    /// The idset — which set of `tessera_id` values this bundle's identifiers belong to
-    /// (contracts §2.2, §2.6 r6). Advanced whenever the partitioning or sharding changes,
-    /// carried forward verbatim by a normal rebuild, and reset to 1 by a key rotation.
-    ///
-    /// **Not `#[serde(default)]`, deliberately.** `tessera_id` is stable across rebuilds but
-    /// *not* across a repartition, and the churn is **partial** — so without this signal a
-    /// stale identifier does not fail, it silently names whichever entity now occupies that
-    /// permutation input. A defaulted idset would make every bundle claim idset 0 and defeat
-    /// the one mechanism that distinguishes "your identifier is old" from "your identifier
-    /// resolved". An absent `idset` is a typed reader error, exactly as an absent `identity`
-    /// object is.
-    pub idset: u32,
 }
 
-/// **Hand-written, not derived: `key` is the deployment's identity key in plaintext hex.**
-/// `IdentityKey`'s own `Debug` is redacted, but that redaction is worthless if the same bytes
-/// print from the `String` carried beside it — and this struct is reachable from `Manifest` and
-/// `Bundle`, both `Debug`, so a single `{:?}` on either would emit the key. `Serialize` is
-/// untouched: MANIFEST.json must still contain the key verbatim.
+/// Hand-written because `key` is the key in plaintext hex, and `Manifest` and `Bundle` reach this
+/// struct through derived `Debug`s. `Serialize` writes the key verbatim.
 impl std::fmt::Debug for IdentityDescriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IdentityDescriptor")
@@ -333,7 +312,6 @@ impl std::fmt::Debug for IdentityDescriptor {
             .field("rounds", &self.rounds)
             .field("key", &identity_key_fingerprint(&self.key))
             .field("shard_id", &self.shard_id)
-            .field("idset", &self.idset)
             .finish()
     }
 }
@@ -358,17 +336,6 @@ impl IdentityDescriptor {
                     "identity rounds {} does not match this reader's {IDENTITY_ROUNDS}",
                     self.rounds
                 ),
-            });
-        }
-        // Contracts §2.2: the idset is "reset to 1 by a key rotation" and advanced from there,
-        // so 0 is not a value any conforming writer produces. Refusing it here means a
-        // hand-edited or partially-written manifest fails closed rather than presenting an
-        // idset that no client can meaningfully compare against.
-        if self.idset == 0 {
-            return Err(StoreError::InvalidIdentity {
-                detail: "idset is 0; conforming writers start at 1 and advance \
-                         (contracts §2.2)"
-                    .to_string(),
             });
         }
         Ok(())
@@ -2403,7 +2370,6 @@ mod tests {
             rounds: IDENTITY_ROUNDS,
             key: KEY_HEX.to_string(),
             shard_id: 0,
-            idset: 1,
         }
     }
 
@@ -2473,9 +2439,9 @@ mod tests {
         );
     }
 
-    /// `IdentityKey`'s `Debug` is redacted, but the key's plaintext hex is deliberately carried
-    /// beside it, and `IdentityDescriptor` is reachable from `Manifest` and `Bundle` — both
-    /// `Debug`. One `tracing::error!("{bundle:?}")` would otherwise print the deployment key.
+    /// The manifest records the key's plaintext hex, and `IdentityDescriptor` is reachable from
+    /// `Manifest` and `Bundle`, both `Debug`. One `tracing::error!("{bundle:?}")` would otherwise
+    /// print the key.
     #[test]
     fn identity_descriptor_debug_does_not_print_the_key() {
         let printed = format!("{:?}", descriptor());

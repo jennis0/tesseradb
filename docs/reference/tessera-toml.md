@@ -26,14 +26,6 @@ What `tessera build` and `tessera check` read.
 | --- | --- | --- | --- |
 | `schema` | string (a path) | `"schema.toml"` | The corpus declaration. `--config` names another. |
 
-## `[identity]`
-
-Where `tessera build` finds the identity key, which it needs to compute each item's `tessera_id`. This file names only the variable; `key = "…"` is refused, so the key itself cannot be written here. `tessera build --identity-file` reads the key from a file instead.
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `env` | string | `"TESSERA_IDENTITY_KEY"` | The environment variable holding the identity key. `tessera build` also reads it from a `.env` file beside `tessera.toml`, and the process environment takes precedence over the file. An empty value, and a value that is not a string, take the default. |
-
 ## `[plugin]`
 
 The authorisation plugin, which turns an access label into the terms a viewer's token is checked against.

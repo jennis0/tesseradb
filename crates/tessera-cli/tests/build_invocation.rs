@@ -19,8 +19,6 @@ use arrow::array::{Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-
-const KEY: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 64;
 
 fn tessera() -> Command {
@@ -112,7 +110,6 @@ fn build_in(cwd: &Path, args: &[&str]) -> Output {
         .arg("build")
         .args(args)
         .current_dir(cwd)
-        .env("TESSERA_IDENTITY_KEY", KEY)
         .output()
         .expect("failed to run tessera")
 }
@@ -200,7 +197,6 @@ fn a_missing_deployment_config_names_what_to_create() {
     for expected in [
         "[bundle]",
         "[build]",
-        "[identity]",
         "[serve]",
         "--deployment",
     ] {
@@ -715,165 +711,6 @@ fn an_override_without_a_key_is_refused() {
         "{}",
         stderr(&output)
     );
-}
-
-// -------------------------------------------------------------------------------------------
-// The identity key
-// -------------------------------------------------------------------------------------------
-
-/// **There is no flag that takes a key.** One on a command line reaches shell history, process
-/// listings and CI logs, so `--id-key` is gone and is not aliased to anything.
-#[test]
-fn a_key_on_the_command_line_is_not_accepted() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    for flag in ["--id-key", "--id-key-file"] {
-        let output = build_in(tmp.path(), &[flag, KEY]);
-        assert!(!output.status.success(), "{flag} must not be accepted");
-        assert!(
-            stderr(&output).contains("unexpected argument"),
-            "{flag}: {}",
-            stderr(&output)
-        );
-    }
-}
-
-/// A `.env` beside `tessera.toml` supplies the variable, for the working copy that would rather
-/// not export one per shell.
-#[test]
-fn a_dot_env_beside_the_deployment_config_supplies_the_key() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    std::fs::write(
-        tmp.path().join(".env"),
-        format!("# this deployment's lineage\nTESSERA_IDENTITY_KEY=\"{KEY}\"\n"),
-    )
-    .unwrap();
-    let output = tessera()
-        .arg("build")
-        .current_dir(tmp.path())
-        .env_remove("TESSERA_IDENTITY_KEY")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", stderr(&output));
-}
-
-/// **The process environment wins over the `.env`.** An operator who exported a variable for one
-/// invocation has said something more specific than a file sitting beside the config.
-#[test]
-fn the_process_environment_wins_over_the_dot_env() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    std::fs::write(
-        tmp.path().join(".env"),
-        "TESSERA_IDENTITY_KEY=0f0e0d0c0b0a09080706050403020100\n",
-    )
-    .unwrap();
-    // Build once from the environment, then rebuild carrying the first bundle's key forward. The
-    // two agree only if the environment was the source; the `.env`'s different key would refuse.
-    assert!(build_in(tmp.path(), &[]).status.success());
-    let output = build_in(
-        tmp.path(),
-        &[
-            "--out",
-            tmp.path().join("second").to_str().unwrap(),
-            "--carry-id-key-from",
-            tmp.path().join("bundles/corpus").to_str().unwrap(),
-        ],
-    );
-    assert!(output.status.success(), "{}", stderr(&output));
-}
-
-/// With no key anywhere the build refuses **before any work**, naming the variable this
-/// deployment's own file asked for rather than a variable it did not.
-#[test]
-fn no_key_anywhere_refuses_naming_this_deployments_variable() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    let deployment = std::fs::read_to_string(tmp.path().join("tessera.toml")).unwrap();
-    std::fs::write(
-        tmp.path().join("tessera.toml"),
-        format!("{deployment}\n[identity]\nenv = \"ACME_TESSERA_KEY\"\n"),
-    )
-    .unwrap();
-    let output = tessera()
-        .arg("build")
-        .current_dir(tmp.path())
-        .env_remove("TESSERA_IDENTITY_KEY")
-        .env_remove("ACME_TESSERA_KEY")
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let stderr = stderr(&output);
-    assert!(stderr.contains("no identity key decision"), "{stderr}");
-    assert!(stderr.contains("$ACME_TESSERA_KEY"), "{stderr}");
-    assert!(stderr.contains("--identity-file"), "{stderr}");
-    assert!(
-        !tmp.path().join("bundles").exists(),
-        "N-1: the refusal must precede every scrap of work"
-    );
-}
-
-/// **The key itself never goes in `tessera.toml`**, which belongs in git. Refused with its own
-/// message, because the mistake is a reasonable one — `--identity-file` does spell it `key`.
-#[test]
-fn a_key_written_into_the_deployment_config_is_refused() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    let deployment = std::fs::read_to_string(tmp.path().join("tessera.toml")).unwrap();
-    std::fs::write(
-        tmp.path().join("tessera.toml"),
-        format!("{deployment}\n[identity]\nkey = \"{KEY}\"\n"),
-    )
-    .unwrap();
-    let stderr = refusal(tmp.path(), &[]);
-    assert!(stderr.contains("[identity] carries `key`"), "{stderr}");
-    assert!(stderr.contains("never appears in this file"), "{stderr}");
-    assert!(stderr.contains("--identity-file"), "{stderr}");
-}
-
-/// The environment is a *source*, not a fallback: a key that disagrees with a carried lineage
-/// refuses, exactly as two flags disagreeing would.
-#[test]
-fn an_environment_key_disagreeing_with_a_carried_one_refuses() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    assert!(build_in(tmp.path(), &[]).status.success());
-    let output = tessera()
-        .arg("build")
-        .args(["--out", tmp.path().join("second").to_str().unwrap()])
-        .args([
-            "--carry-id-key-from",
-            tmp.path().join("bundles/corpus").to_str().unwrap(),
-        ])
-        .current_dir(tmp.path())
-        .env("TESSERA_IDENTITY_KEY", "0f0e0d0c0b0a09080706050403020100")
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(
-        stderr(&output).contains("identity key sources disagree"),
-        "{}",
-        stderr(&output)
-    );
-}
-
-/// `--identity-file` is the `0600`-file route, for the deployment that would rather not have the
-/// key readable from `/proc`.
-#[test]
-fn an_identity_file_supplies_the_key() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    let key_file = tmp.path().join("identity.toml");
-    std::fs::write(&key_file, format!("[identity]\nkey = \"{KEY}\"\n")).unwrap();
-    let output = tessera()
-        .arg("build")
-        .args(["--identity-file", key_file.to_str().unwrap()])
-        .current_dir(tmp.path())
-        .env_remove("TESSERA_IDENTITY_KEY")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", stderr(&output));
 }
 
 /// The declaration's own path is where the schema comes from, and `--config` overrides it.

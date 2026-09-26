@@ -334,7 +334,6 @@ export function meta(over: Partial<Meta> = {}): Meta {
   return {
     apiVersion: 1,
     bundleFormat: 1,
-    idset: 0,
     views: [view('s0')],
     groups: [],
     declaredScalars: [],

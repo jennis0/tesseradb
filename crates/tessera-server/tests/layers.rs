@@ -751,39 +751,6 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
     );
 }
 
-/// An idset guards a keyed identifier and means nothing beside an external id, so accepting one
-/// there would imply a check that never ran.
-#[tokio::test]
-async fn an_idset_is_required_with_identifiers_and_refused_beside_external_ids() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve_standard(&tmp).await;
-    register(&server, declaration("clusters/a", None)).await;
-
-    let (status, body) = publish(
-        &server,
-        "clusters/a",
-        json!({
-            "addressing": "external",
-            "idset": 1,
-            "artifacts": [{ "key": "c0", "members": [member(0)] }]
-        }),
-    )
-    .await;
-    assert_eq!(status, 422, "{body}");
-
-    let (status, body) = publish(
-        &server,
-        "clusters/a",
-        json!({
-            "addressing": "tessera",
-            "artifacts": [{ "key": "c0", "members": ["12345"] }]
-        }),
-    )
-    .await;
-    assert_eq!(status, 422, "{body}");
-    assert_eq!(body["error"], "contract", "{body}");
-}
-
 /// **Derived geometry crosses the wire, and it moves with the principal.**
 ///
 /// The count obviously belongs to the viewer; a centroid looks like a property of the cluster,

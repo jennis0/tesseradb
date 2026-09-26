@@ -130,7 +130,6 @@ impl Engine {
     ) -> ViewCoordinates {
         let mut hasher = Sha256::new();
         hasher.update(b"tessera-identity-key-v1");
-        hasher.update(generation.bundle.manifest.identity.idset.to_le_bytes());
         hasher.update(geometry.auth_data_hash);
         hasher.update(geometry.fragment.identity);
         hasher.update((view.len() as u64).to_le_bytes());

@@ -309,12 +309,10 @@ fn the_drill_down_agrees_with_the_viewport_on_derived_content() {
 
     let session = engine.authorise(&subset_credential()).unwrap();
     let from_viewport = artifacts_of(&engine, &subset_credential());
-    let idset = engine.generation().bundle.manifest.identity.idset;
     let drilled = engine
         .artifact(
             &session,
             from_viewport[0].tessera_id,
-            Some(idset),
             "s0",
             None,
         )
@@ -775,10 +773,9 @@ fn every_artifact_keeps_its_own_content_when_the_level_is_read_from_the_blob() {
     // two routes must serve one string: a table that disagreed with the row it was built from
     // would show up here and nowhere else.
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let idset = engine.generation().bundle.manifest.identity.idset;
     for artifact in &served {
         let drilled = engine
-            .artifact(&session, artifact.tessera_id, Some(idset), "s0", None)
+            .artifact(&session, artifact.tessera_id, "s0", None)
             .unwrap()
             .expect("the identifier the viewport just issued");
         assert_eq!(drilled.content, artifact.content);

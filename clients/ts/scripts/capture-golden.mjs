@@ -8,6 +8,9 @@
 // is rewritten except `viewport-artifacts-pre-r40.bin`, and `wire-example/test/expected.json` with
 // them. Each capture checks the arrangement its tests rely on, and where the server did not
 // provide it the script stops and writes nothing.
+//
+// Each build generates its own identity key, so a recapture serves new `tessera_id`s and rewrites
+// every file that carries one.
 import {spawnSync} from 'node:child_process';
 import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -35,13 +38,6 @@ import {
 } from 'apache-arrow';
 import {base64} from '../core/src/control.ts';
 import {start} from '../core/test/served.ts';
-
-/**
- * The identity key both servers are built with. It and the wide declaration's pinned category
- * codes make a recapture over unchanged corpora serve the same ids and codes, so every file but
- * the trailers' timings is rewritten byte for byte.
- */
-const IDENTITY_KEY = '00112233445566778899aabbccddeeff';
 
 const FIXTURES = join(import.meta.dirname, '..', 'core', 'test', 'fixtures');
 const EXPECTED = join(import.meta.dirname, '..', 'wire-example', 'test', 'expected.json');
@@ -202,7 +198,7 @@ async function captureWide() {
   const directory = mkdtempSync(join(tmpdir(), 'tessera-goldens-'));
   try {
     writeParquet(wideTable(), join(directory, 'points.parquet'));
-    const served = await start({corpus: {directory, schema: WIDE_SCHEMA}, identityKey: IDENTITY_KEY});
+    const served = await start({corpus: {directory, schema: WIDE_SCHEMA}});
     if (typeof served === 'string') throw new Error(served);
     try {
       const golden = await session(served, ['golden']);
@@ -222,7 +218,7 @@ async function captureWide() {
         if (category === null) check(points.some((t) => t.getChild(name).nullCount > 0), `no served point is null in ${name}`);
       }
       // The worked decodes check a tessera_id survives past 2^53.
-      check(ids[0] > 2n ** 53n, 'the first served tessera_id is below 2^53; change IDENTITY_KEY');
+      check(ids[0] > 2n ** 53n, 'the first served tessera_id is below 2^53; run the capture again, which builds under a new key');
       captured.set('meta.json', JSON.stringify(meta, null, 2) + '\n');
       captured.set('viewport-plain.bin', plain);
       captured.set('viewport-underlay.bin', underlay);
@@ -248,7 +244,7 @@ const PRINCIPAL = [
  * browse pages, over the notebook corpus as `PRINCIPAL`.
  */
 async function captureNotebook() {
-  const served = await start({identityKey: IDENTITY_KEY});
+  const served = await start();
   if (typeof served === 'string') throw new Error(served);
   try {
     const reader = await session(served, PRINCIPAL);

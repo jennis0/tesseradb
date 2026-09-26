@@ -1096,7 +1096,7 @@ async fn items_match_the_description_with_every_refusal() {
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
     let (tessera_id, _) = decoded.points[0];
 
-    let body = json!({ "idset": FIXTURE_IDSET });
+    let body = json!({});
     assert_valid(&doc, "ItemRequest", &body);
     let post = |id: u64, body: Value, tok: &str| {
         f.server
@@ -1121,17 +1121,12 @@ async fn items_match_the_description_with_every_refusal() {
         "the fixture mints external ids"
     );
 
-    // Refusals: an item nobody with zero terms may see is a 404 (identical to nonexistence); a
-    // stale idset is a 409, decided before anything is looked up.
+    // Refusals: an item nobody with zero terms may see is a 404 (identical to nonexistence).
     let nobody = authorise_checked(&doc, &f.server, &[]).await;
     let resp = post(tessera_id, json!({}), nobody["token"].as_str().unwrap())
         .await
         .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
-    let resp = post(tessera_id, json!({ "idset": FIXTURE_IDSET + 1 }), token)
-        .await
-        .unwrap();
-    assert_refusal(&doc, resp, 409, "conflict").await;
     // The request schema refuses what the server refuses: an unknown field.
     assert_invalid(&doc, "ItemRequest", &json!({ "external_id": "x" }));
 }
@@ -1164,7 +1159,6 @@ async fn the_artifacts_read_matches_the_description_with_its_refusals() {
         "page_rows": 1,
         "pages": 1,
         "compression": "zstd",
-        "idset": FIXTURE_IDSET,
     });
     assert_valid(&doc, "ArtifactsRequest", &body);
     let resp = post(body, token).await.unwrap();
@@ -1216,13 +1210,6 @@ async fn the_artifacts_read_matches_the_description_with_its_refusals() {
         .await
         .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
-    let resp = post(
-        json!({ "view": "s0", "layer": LAYER, "fields": [], "idset": FIXTURE_IDSET + 1 }),
-        token,
-    )
-    .await
-    .unwrap();
-    assert_refusal(&doc, resp, 409, "conflict").await;
 
     for body in [
         json!({ "view": "s0", "layer": LAYER, "fields": [], "unknown": 1 }),
@@ -1263,7 +1250,6 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
         "page_rows": 10,
         "pages": 3,
         "compression": "zstd",
-        "idset": FIXTURE_IDSET,
     });
     assert_valid(&doc, "ItemsRequest", &body);
     let resp = post(body, token).await.unwrap();
@@ -1319,13 +1305,6 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
         .await
         .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
-    let resp = post(
-        json!({ "view": "s0", "fields": [], "idset": FIXTURE_IDSET + 1 }),
-        token,
-    )
-    .await
-    .unwrap();
-    assert_refusal(&doc, resp, 409, "conflict").await;
     let resp = post(json!({ "view": "s0", "fields": [] }), "not-a-token")
         .await
         .unwrap();
@@ -1386,7 +1365,7 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
         .await
         .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
-    // Same shape for a point's identifier, an unknown view, and a stale idset's 409.
+    // Same shape for a point's identifier and an unknown view.
     let resp = viewport(&f.server, token, &viewport_body(json!({}))).await;
     let (point_id, _) = decode_viewport_frames(&resp.bytes().await.unwrap()).points[0];
     let resp = post(&point_id.to_string(), body.clone(), token)
@@ -1397,14 +1376,6 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
         .await
         .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
-    let resp = post(
-        &f.artifacts[0],
-        json!({ "view": "s0", "idset": FIXTURE_IDSET + 1 }),
-        token,
-    )
-    .await
-    .unwrap();
-    assert_refusal(&doc, resp, 409, "conflict").await;
     // `view` is required by the schema, as by the server.
     assert_invalid(&doc, "ArtifactRequest", &json!({}));
 }
@@ -1981,8 +1952,7 @@ async fn ingest_and_values_match_the_description() {
     let replay = assert_answer(&doc, &post, resp, 200).await;
     assert_eq!(replay["replayed"], true);
 
-    // Refusals: a cell holding another value, an item the deployment does not hold, a
-    // `tessera_id` with no idset, and a stale idset.
+    // Refusals: a cell holding another value and an item the deployment does not hold.
     let resp = values("openapi-values-differ")
         .json(&json!([{ "external_id": member(3), "rating": 5.5 }]))
         .send()
@@ -1995,19 +1965,6 @@ async fn ingest_and_values_match_the_description() {
         .await
         .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
-    let tessera_id = answer_id(&f.server).await;
-    let resp = values("openapi-values-no-idset")
-        .json(&json!([{ "tessera_id": tessera_id, "rating": 1.0 }]))
-        .send()
-        .await
-        .unwrap();
-    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
-    let resp = values("openapi-values-stale")
-        .json(&json!([{ "tessera_id": tessera_id, "idset": FIXTURE_IDSET + 1, "rating": 1.0 }]))
-        .send()
-        .await
-        .unwrap();
-    assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
 }
 
 /// A built item's `tessera_id`, as a string: the first point a viewport serves.
@@ -2034,7 +1991,7 @@ async fn changes_match_the_description() {
     let tessera_id = answer_id(&f.server).await;
     let body = json!([
         { "external_id": member(5), "op": "suppress" },
-        { "tessera_id": tessera_id, "idset": FIXTURE_IDSET, "op": "suppress" },
+        { "tessera_id": tessera_id, "op": "suppress" },
     ]);
     for item in body.as_array().unwrap() {
         assert_valid(&doc, "ChangeItem", item);
@@ -2055,20 +2012,10 @@ async fn changes_match_the_description() {
         .await
         .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 404, "unknown").await;
-    let resp = changes(
-        &json!([{ "tessera_id": tessera_id, "idset": FIXTURE_IDSET + 1,
-                                 "op": "suppress" }]),
-    )
-    .await
-    .unwrap();
-    assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
     for item in [
         json!({ "external_id": member(5), "op": "predicate" }),
-        json!({ "external_id": member(5), "tessera_id": tessera_id, "idset": FIXTURE_IDSET,
-                "op": "suppress" }),
-        json!({ "tessera_id": tessera_id, "op": "suppress" }),
-        json!({ "tessera_id": 12345, "idset": FIXTURE_IDSET, "op": "suppress" }),
-        json!({ "external_id": member(5), "idset": FIXTURE_IDSET, "op": "suppress" }),
+        json!({ "external_id": member(5), "tessera_id": tessera_id, "op": "suppress" }),
+        json!({ "tessera_id": 12345, "op": "suppress" }),
         json!({ "external_id": member(5), "op": "suppress", "unknown": 1 }),
     ] {
         assert_invalid(&doc, "ChangeItem", &item);
@@ -2470,7 +2417,7 @@ async fn layers_and_artifacts_match_the_description() {
     assert_eq!(again["created"], 0);
     assert_eq!(again["artifacts"], published["artifacts"]);
 
-    // Refusals: a member that names nothing, a stale idset, Arrow, and no artifacts.
+    // Refusals: a member that names nothing, Arrow, and no artifacts.
     let resp = control(&f.server, &put, &artifacts)
         .json(&json!({ "addressing": "external",
                        "artifacts": [{ "key": "k1", "members": [b64(b"nobody")] }] }))
@@ -2478,16 +2425,6 @@ async fn layers_and_artifacts_match_the_description() {
         .await
         .unwrap();
     assert_refusal_to(&doc, Some(&put), resp, 404, "unknown").await;
-    let tessera_id = answer_id(&f.server).await;
-    let resp = control(&f.server, &put, &artifacts)
-        .json(
-            &json!({ "addressing": "tessera", "idset": FIXTURE_IDSET + 1,
-                       "artifacts": [{ "key": "k1", "members": [tessera_id] }] }),
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_refusal_to(&doc, Some(&put), resp, 409, "conflict").await;
     let resp = control(&f.server, &put, &artifacts)
         .header("content-type", ARROW)
         .body(grow_arrow("k0", &members(4..6)))

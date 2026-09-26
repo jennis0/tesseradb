@@ -33,7 +33,6 @@ from oracle.wire import decode_frames  # noqa: E402
 CLI = REPO_ROOT / "target" / "release" / "tessera"
 SESSION_CREDENTIAL = "campaign-session-credential"
 OPERATOR_CREDENTIAL = "campaign-operator-credential"
-IDENTITY_KEY = "000102030405060708090a0b0c0d0e0f"
 
 #: The generator's quantisation extent — `GRID_EXTENT`, the cell grid's own coordinates. Every
 #: viewport below is expressed in it, so a bbox here and a census tile there mean the same region.
@@ -59,7 +58,6 @@ def run(argv: list[str], cwd: Path | None = None, env: dict | None = None) -> st
     """A checked subprocess whose failure carries its own output — a silent non-zero here would
     otherwise surface as a confusing decode error two steps later."""
     full = os.environ.copy()
-    full["TESSERA_IDENTITY_KEY"] = IDENTITY_KEY
     if env:
         full.update(env)
     proc = subprocess.run(argv, cwd=cwd, env=full, capture_output=True, text=True)
@@ -127,9 +125,6 @@ wal   = "{wal}"
 
 [build]
 schema = "{schema}"
-
-[identity]
-env = "TESSERA_IDENTITY_KEY"
 
 [plugin]
 module = "builtin:passthrough"
@@ -223,7 +218,6 @@ class Server:
 
     def spawn(self, timeout: float = 600.0) -> None:
         env = os.environ.copy()
-        env["TESSERA_IDENTITY_KEY"] = IDENTITY_KEY
         env["TESSERA_CAMPAIGN_SESSION_CRED"] = SESSION_CREDENTIAL
         env["TESSERA_CAMPAIGN_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
         self.log = self.work / "server.log"

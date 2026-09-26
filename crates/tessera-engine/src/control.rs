@@ -9,7 +9,6 @@ use tessera_store::StoreError;
 use tessera_types::{EntityId, IdentityError, TermId, TesseraId};
 
 use crate::engine::Engine;
-use crate::error::{EngineError, Result};
 use crate::write::joined::flushed_terms_of;
 use crate::Generation;
 
@@ -38,32 +37,22 @@ impl Engine {
         self.generation.load().external_index.resolve(external_id)
     }
 
-    /// Invert `tessera_id`s to entity ids for the admin plane, all-or-nothing. The idset is
-    /// checked against the same generation the inversions use, so a swap mid-call
-    /// cannot invert under a different snapshot than it validated against; a mismatch is
-    /// [`EngineError::StaleIdSet`]. `None` per position for an identifier that names nothing.
-    /// Points sit below the high-water mark; row-less entities sit at or above the low-water
-    /// mark — testing only `entity < high_water` would refuse every layer identifier ever issued.
-    pub fn resolve_tessera_ids(
-        &self,
-        ids: &[TesseraId],
-        idset: u32,
-    ) -> Result<Vec<Option<EntityId>>> {
+    /// Invert `tessera_id`s to entity ids for the admin plane: `None` per position for an
+    /// identifier that names nothing. Points sit below the high-water mark; row-less entities
+    /// sit at or above the low-water mark, so testing only `entity < high_water` would refuse
+    /// every layer identifier ever issued.
+    pub fn resolve_tessera_ids(&self, ids: &[TesseraId]) -> Vec<Option<EntityId>> {
         let generation = self.generation.load_full();
-        if idset != generation.bundle.manifest.identity.idset {
-            return Err(EngineError::StaleIdSet);
-        }
         let shard = generation.bundle.manifest.identity.shard_id;
         let high_water = self.allocator_high_water();
         let low_water = self.allocator_low_water();
-        Ok(ids
-            .iter()
+        ids.iter()
             .map(|id| {
                 let (id_shard, entity) = self.identity_key.invert(*id);
                 let issued = entity.raw() < high_water || entity.raw() >= low_water;
                 (id_shard == shard && issued).then_some(entity)
             })
-            .collect())
+            .collect()
     }
 
     /// Does `view` hold a row for `entity`? "In the view" is the view's permutation and the

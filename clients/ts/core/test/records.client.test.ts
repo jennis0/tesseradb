@@ -183,8 +183,7 @@ describe('TesseraClient.items and artifacts', () => {
       order: 'stored',
       pageRows: 10,
       pages: 2,
-      compression: 'zstd',
-      idset: 4
+      compression: 'zstd'
     };
     await drain(await client.items('tok', items));
     await drain(await client.items('tok', {view: 's0', fields: [], cursor: 'c9'}));
@@ -200,8 +199,7 @@ describe('TesseraClient.items and artifacts', () => {
       order: 'stored',
       page_rows: 10,
       pages: 2,
-      compression: 'zstd',
-      idset: 4
+      compression: 'zstd'
     });
     expect(sent[1]!.body).toEqual({view: 's0', fields: [], cursor: 'c9'});
     expect(sent[2]!.body).toEqual({view: 's0', layer: 'clusters', fields: ['key', 'parents'], parent: '9223372036854775813', level: 1, q: 'ab'});
@@ -240,12 +238,12 @@ describe('TesseraClient.items and artifacts', () => {
 
   it('follows each response’s cursor until it is null, sending the caller’s request with only the cursor changed and no count', async () => {
     const {client, sent} = clientFor(byCursor(TWO));
-    const request: ItemsRequest = {...REQUEST, systemFields: ['labels'], filters: {archive: {in: ['cs']}}, count: true, pageRows: 3, pages: 2, order: 'map', idset: 4};
+    const request: ItemsRequest = {...REQUEST, systemFields: ['labels'], filters: {archive: {in: ['cs']}}, count: true, pageRows: 3, pages: 2, order: 'map'};
     const read = await client.items('tok', request);
     const pages = await drain(read);
     expect(pages.map((p) => p.rows)).toEqual(PAGES.map(rowsOf));
     expect(pages.map((p) => p.next)).toEqual(['c1', 'c2', null]);
-    const first = {view: 's0', fields: ['archive', 'title', 'score'], system_fields: ['labels'], filters: {archive: {in: ['cs']}}, page_rows: 3, pages: 2, order: 'map', idset: 4};
+    const first = {view: 's0', fields: ['archive', 'title', 'score'], system_fields: ['labels'], filters: {archive: {in: ['cs']}}, page_rows: 3, pages: 2, order: 'map'};
     expect(sent.map((s) => s.body)).toEqual([{...first, count: true}, {...first, cursor: 't2'}]);
     // The first response's head, and the last response's trailer.
     expect(read.head).toEqual<ItemsHead>({order: 'map', pageRows: 3, visible: 8, matched: 8});
@@ -254,7 +252,7 @@ describe('TesseraClient.items and artifacts', () => {
   });
 
   it('throws a refused follow-up’s TesseraError after the pages that arrived, its cursor past the last page end', async () => {
-    for (const [status, code] of [[409, 'stale-idset'], [429, 'backpressure']] as const) {
+    for (const [status, code] of [[422, 'contract'], [429, 'backpressure']] as const) {
       const {client, sent} = clientFor(byCursor({'': TWO[''], t2: () => refusal(status, code)}));
       const read = await client.items('tok', REQUEST);
       const got: Table[] = [];

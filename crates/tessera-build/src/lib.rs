@@ -74,7 +74,7 @@ use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
 use tessera_spatial::{split32, Bounds};
 use tessera_store::manifest::{
-    identity_key_fingerprint, CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
+    CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
     IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
     SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
@@ -290,20 +290,10 @@ pub struct BuildArgs {
     pub out: PathBuf,
     /// Prefix filter on the *source* entity ID: keep rows with `entity_id < limit`.
     pub limit: Option<u64>,
-    /// The deployment's identity key (contracts §2.2). **Not** per bundle: it must be carried
-    /// across rebuilds or every `tessera_id` any client holds silently breaks. Resolved by the
-    /// CLI from the environment / `--identity-file` / `--carry-id-key-from` / `--mint-id-key`, and
-    /// passed here already decided so that both build paths see the same bytes.
+    /// The key of the `tessera_id` permutation, recorded in the manifest. The CLI generates one
+    /// for every bundle it creates; a caller that needs two builds to agree byte for byte passes
+    /// the same key to both.
     pub identity_key: IdentityKey,
-    /// `identity_key`'s canonical 32-lowercase-hex-character form, exactly as MANIFEST records
-    /// it. Carried alongside the parsed key rather than recovered from it: `IdentityKey`
-    /// deliberately has no hex accessor, to preserve its redacted `Debug` (a hex accessor would
-    /// undo the redaction).
-    pub identity_key_hex: String,
-    /// MANIFEST `identity.idset` (contracts §2.2/§2a): advanced by the CLI when the operator
-    /// passes `--bump-idset` or rotates the key, carried forward verbatim on a normal
-    /// rebuild, reset to 1 by `--mint-id-key`.
-    pub idset: u32,
     /// The §13.3 row-range shard this build produces. Always 0: there is no sharding.
     pub shard_id: u32,
     /// Mint an external ID for every item from its source entity id (8 bytes LE), and write
@@ -377,11 +367,6 @@ pub struct BuildArgs {
     pub schema: crate::config::Schema,
 }
 
-/// **Hand-written, not derived: `identity_key_hex` is the deployment key in plaintext.**
-/// `IdentityKey`'s `Debug` is redacted and it has no hex accessor, but a derived `Debug` here
-/// would print the hex carried beside it — so one `tracing::error!("{args:?}")` on a build
-/// failure would put the deployment key in a log. The redaction is only worth as much as its
-/// weakest carrier.
 impl std::fmt::Debug for BuildArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuildArgs")
@@ -393,11 +378,6 @@ impl std::fmt::Debug for BuildArgs {
             .field("out", &self.out)
             .field("limit", &self.limit)
             .field("identity_key", &self.identity_key)
-            .field(
-                "identity_key_hex",
-                &identity_key_fingerprint(&self.identity_key_hex),
-            )
-            .field("idset", &self.idset)
             .field("shard_id", &self.shard_id)
             .field("mint_external_ids", &self.mint_external_ids)
             .field("emit_oracle_pairs", &self.emit_oracle_pairs)
@@ -2115,9 +2095,8 @@ fn write_manifests(
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
             rounds: IDENTITY_ROUNDS,
-            key: args.identity_key_hex.clone(),
+            key: args.identity_key.to_hex(),
             shard_id: args.shard_id,
-            idset: args.idset,
         },
         // **One entry per view, each carrying its own frame** (decision 0040): two views of one
         // bundle may quantise differently, and an embedding and a map cannot share a frame
@@ -2291,7 +2270,7 @@ fn verified_open(
 ) -> Result<(tessera_store::read::Bundle, VerifyReport)> {
     let bundle = tessera_store::read::open_bundle(root)?;
     // The key is parsed here, not by `open_bundle`: `IdentityDescriptor::validate` (run at
-    // open) checks `construction`/`rounds`/`idset` but never parses `key`'s hex, since
+    // open) checks `construction` and `rounds` but never parses `key`'s hex, since
     // `tessera-store` has no need to hold a live `IdentityKey` at all — only `tessera verify`
     // and the build do.
     let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
@@ -2520,7 +2499,7 @@ fn scratch_name(view_id: &str) -> String {
 ///
 /// **What the identity half actually covers is the base's rows.** An extent has no stored mapping:
 /// `SegmentExtent::rebuild` recovers one at open by inverting each row's `tessera_id` under the
-/// deployment key (contracts §2.1). Comparing that `tessera_id` back against what the key derives
+/// bundle's key (contracts §2.1). Comparing that `tessera_id` back against what the key derives
 /// for the entity the inversion produced is therefore a tautology over an extent's rows — it
 /// restates the inversion. Over the base's rows, whose mapping is `permutation.bin`, the comparison
 /// is between two artefacts and is the check contracts §2.6 r6 describes. The extent rows are still
@@ -3170,55 +3149,6 @@ mod tests {
             cells: 10_000,
         };
         assert!(big.warning("s0").is_some());
-    }
-
-    /// `BuildArgs` carries the deployment key's plaintext hex beside the redacted `IdentityKey`.
-    /// A derived `Debug` would undo the redaction on the first `tracing::error!("{args:?}")`.
-    #[test]
-    fn build_args_debug_does_not_print_the_identity_key() {
-        const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
-        let args = BuildArgs {
-            views: vec![crate::ViewArgs {
-                visibility: None,
-                view_id: "s0".to_string(),
-                projection: tessera_spatial::Projection::None,
-                extent: Bounds {
-                    x_min: 0.0,
-                    x_max: 1.0,
-                    y_min: 0.0,
-                    y_max: 1.0,
-                },
-                points: PathBuf::from("points.parquet"),
-                point_fields: Default::default(),
-                select: None,
-                access: crate::config::AccessInput::relation(PathBuf::from("pairs.parquet")),
-            }],
-            anchor: 0,
-            groups: Vec::new(),
-            scoped_attributes: Vec::new(),
-            attribute_sources: Vec::new(),
-            out: PathBuf::from("out"),
-            limit: None,
-            identity_key: tessera_types::IdentityKey::from_hex(KEY_HEX).unwrap(),
-            identity_key_hex: KEY_HEX.to_string(),
-            idset: 1,
-            shard_id: 0,
-            layers: Vec::new(),
-            layer_inputs: Vec::new(),
-            scoped_layers: Default::default(),
-            mint_external_ids: true,
-            emit_oracle_pairs: true,
-            batch_items: None,
-            memory_budget: None,
-            band_rows: None,
-            schema: Default::default(),
-        };
-        let printed = format!("{args:?}");
-        assert!(
-            !printed.contains(KEY_HEX),
-            "Debug must not print key material, got: {printed}"
-        );
-        assert!(printed.contains("fp:"), "got: {printed}");
     }
 
     #[test]

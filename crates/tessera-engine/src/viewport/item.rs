@@ -150,37 +150,25 @@ impl Engine {
         Ok(labels)
     }
 
-    /// `POST /v1/items/{handle}`: validate `idset` if the caller sent one, invert `id` to its
-    /// entity, test visibility in entity space, and only then locate a row and read its
-    /// scalars/external id.
-    /// `idset` is checked against the same generation this call loads for the lookup below, never
-    /// a separate `Engine::meta()` call: a generation swap between two separate calls could
-    /// validate the idset against one generation and serve the lookup from another. Returns
-    /// `Ok(None)` both when `id` names nothing in this bundle and when it names an item the
-    /// principal may not see: one outcome from one code path.
-    /// The timing channel is closed, not narrowed. The idset check is entity-independent and does
-    /// not read `id`. Inversion is a pure function. The visibility test that follows is an
-    /// entity-space question — three constant-time probes — and is the same three probes for an
-    /// identifier that names nothing and one that names an invisible item: no `RowProjection` is
-    /// constructed or read, so there is no per-ID cost to correlate against. A row is located only
-    /// after the answer is already visible, and the sidecar is read only after that. Returns `Err`
-    /// rather than a fail-open `None`: a digest mismatch, an out-of-order extent or a short
-    /// locator is a `500`, never an item served with `external_id: null`. This does not reopen the
-    /// timing channel, since the sidecar is touched only for an item already established visible.
+    /// `POST /v1/items/{handle}`: invert `id` to its entity, test visibility in entity space, and
+    /// only then locate a row and read its scalars/external id. Returns `Ok(None)` both when `id`
+    /// names nothing in this bundle and when it names an item the principal may not see: one
+    /// outcome from one code path.
+    /// The timing channel is closed, not narrowed. Inversion is a pure function. The visibility
+    /// test that follows is an entity-space question — three constant-time probes — and is the
+    /// same three probes for an identifier that names nothing and one that names an invisible
+    /// item: no `RowProjection` is constructed or read, so there is no per-ID cost to correlate
+    /// against. A row is located only after the answer is already visible, and the sidecar is
+    /// read only after that. Returns `Err` rather than a fail-open `None`: a digest mismatch, an
+    /// out-of-order extent or a short locator is a `500`, never an item served with
+    /// `external_id: null`. This does not reopen the timing channel, since the sidecar is touched
+    /// only for an item already established visible.
     pub fn item(
         &self,
         session: &Session,
         id: TesseraId,
-        idset: Option<u32>,
     ) -> Result<Option<ItemOut>> {
         let generation = self.generation.load_full();
-
-        // Checked against the generation this call already loaded above; see this method's doc.
-        if let Some(e) = idset {
-            if e != generation.bundle.manifest.identity.idset {
-                return Err(EngineError::StaleIdSet);
-            }
-        }
 
         let (shard, entity) = self.identity_key.invert(id);
         if shard != generation.bundle.manifest.identity.shard_id {

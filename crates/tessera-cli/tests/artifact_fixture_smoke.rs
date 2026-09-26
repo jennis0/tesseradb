@@ -14,8 +14,6 @@ use std::process::{Command, Output};
 
 use tessera_corpus::Corpus;
 use tessera_spatial::Bounds;
-
-const KEY: &str = "000102030405060708090a0b0c0d0e0f";
 /// ~10⁵ items — large enough that the fixture's counts are not a handful of coincidental small
 /// numbers, small enough that the whole smoke runs in the ordinary test pass.
 const N: u64 = 100_000;
@@ -43,9 +41,6 @@ wal   = ".tessera/wal.log"
 
 [build]
 schema = "{schema_name}"
-
-[identity]
-env = "TESSERA_IDENTITY_KEY"
 
 [plugin]
 module = "builtin:passthrough"
@@ -111,7 +106,6 @@ fn a_generator_corpus_with_every_artifact_arm_builds() {
     let output: Output = tessera()
         .arg("build")
         .current_dir(dir.path())
-        .env("TESSERA_IDENTITY_KEY", KEY)
         .output()
         .expect("failed to run tessera build");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

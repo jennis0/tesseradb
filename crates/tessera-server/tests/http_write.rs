@@ -676,7 +676,7 @@ fn concurrent_ingest_and_change_both_survive() {
 }
 
 /// An item ingested with no external id is accepted, and the `tessera_id` the answer gives it is
-/// its only address. Inverting that id with the deployment's key yields the fixture's shard and a
+/// its only address. Inverting that id with the bundle's key yields the fixture's shard and a
 /// freshly allocated entity, and once the row is published the viewer serves it under that id.
 #[tokio::test]
 async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_id() {

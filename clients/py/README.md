@@ -269,9 +269,9 @@ shrink.
 
 The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
 directory, release before debug; `create()` names the one it found. The database directory keeps
-its own session credential, operator credential and identity key under `.tessera/`, each file
-owner-only. `commit()` starts `tessera serve` as a child process on loopback at port 0 and reads
-the three bound addresses from the JSON line the child prints once all three planes are listening;
+its own session credential and operator credential under `.tessera/`, each file owner-only.
+`commit()` starts `tessera serve` as a child process on loopback at port 0 and reads the three
+bound addresses from the JSON line the child prints once all three planes are listening;
 `db.viewer_url`, `db.session_url` and `db.session_credential` are what a token is minted against.
 The child is killed by its pid at `close()` and at interpreter exit. A database `create()` made
 with no path is removed at both, after its child has stopped; a directory the user named, through
@@ -387,8 +387,8 @@ holds the page size and order the server used, and with `count=True` the numbers
 
 `order="map"` returns the items by their place on the map and `order="stored"` in the order the
 server stores records, which is faster for a column that is neither rendered nor indexed. Without
-it the server chooses. `page_rows`, `pages`, `cursor`, `compression="zstd"` and `idset` are the
-route's own fields. Each keyword is sent only when given, so the server's own setting applies
+it the server chooses. `page_rows`, `pages`, `cursor` and `compression="zstd"` are the route's
+own fields. Each keyword is sent only when given, so the server's own setting applies
 otherwise.
 
 With `batches=True` the call returns a `Batches`: an iterator of `pyarrow.RecordBatch`, one per

@@ -185,10 +185,7 @@ new label. A deleted item's binding does not block that re-ingest (Admission, st
 ### Accepting a deny
 
 A change names its item by an external id, resolved against the current map of live items, or by
-a `tessera_id` presented together with the idset it was minted under. The idset is checked first,
-before the `tessera_id` is inverted, because the inversion is keyed: a list gathered before a key
-rotation would invert to different, live items under the new key. A stale idset is refused
-outright.
+a `tessera_id`, inverted under the bundle's identity key.
 
 The whole batch is validated and every address resolved before anything is accepted. If any one
 address fails to resolve, the whole batch is refused and nothing is queued. An address that
@@ -197,8 +194,7 @@ time has no further effect, so a retried batch is safe to resend.
 
 Only the entity id is written to the WAL, never a `tessera_id`. The address is resolved once, when
 the request is accepted, into the entity it names, and that entity id is stable for the item's
-life. A `tessera_id` is a keyed permutation of it: writing it to the WAL instead would mean a
-replay after a key rotation could resolve it to a different item.
+life.
 
 Denies are gathered into a window before any of them is written to the WAL, the same shape ingest
 uses: append every record, then one fsync for the whole window, then one swap, then every waiter
@@ -283,7 +279,6 @@ failure carries.
 |---|---|---|
 | 200 | The disposition is durable, and every request from now on, including the caller's own next one, already reflects it | Not needed |
 | 404 | The address did not resolve to a live item. Nothing in the batch took effect. An item whose ingest is still in an open commit window also reads as unknown | After confirming the item exists |
-| 409 | A stale idset | After re-resolving by external id |
 | 422 | The batch failed validation. Nothing took effect | After fixing the request |
 | 500 | Durability could not be confirmed. A delete or suppress in the failed window is already in force on this node despite the error. An unsuppress in it was not applied | Always safe |
 | 503 | The executor is not running. Nothing was taken | Later |

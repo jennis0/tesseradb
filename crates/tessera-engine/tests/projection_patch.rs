@@ -333,7 +333,7 @@ fn a_refresh_two_publications_late_still_patches_the_session() {
         .expect("the first flush's item resolves");
     let id = engine.tessera_id_of(first).unwrap();
     assert!(
-        engine.item(&session, id, None).unwrap().is_some(),
+        engine.item(&session, id).unwrap().is_some(),
         "the drill-down answers from no entry staler than the viewport's rung 2"
     );
 

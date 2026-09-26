@@ -117,10 +117,6 @@ struct Paging {
     /// uncompressed either way.
     #[arg(long, value_enum)]
     compression: Option<Compression>,
-    /// The id numbering the ids are read in, `/v1/meta`'s `idset`. A server holding another
-    /// refuses the read.
-    #[arg(long)]
-    idset: Option<u32>,
 }
 
 #[derive(clap::Args)]
@@ -240,9 +236,6 @@ fn request(
     }
     if let Some(compression) = paging.compression {
         request.insert("compression".into(), wire_name(compression));
-    }
-    if let Some(idset) = paging.idset {
-        request.insert("idset".into(), idset.into());
     }
     Ok(request)
 }

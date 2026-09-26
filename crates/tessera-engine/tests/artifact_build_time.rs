@@ -216,8 +216,6 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         out: root.clone(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
@@ -296,7 +294,7 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
     let cluster_id = of_layer(&served, CLUSTERS)[0].tessera_id;
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(engine
-        .artifact(&session, label_id, None, "s0", None)
+        .artifact(&session, label_id, "s0", None)
         .unwrap()
         .is_some());
 
@@ -310,7 +308,7 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
         "the label goes with its cluster"
     );
     assert!(engine
-        .artifact(&session, label_id, None, "s0", None)
+        .artifact(&session, label_id, "s0", None)
         .unwrap()
         .is_none());
 }
@@ -358,7 +356,7 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
     assert_eq!(built.masked_count, MEMBERS.count() as u64);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(engine
-        .artifact(&session, published_id, None, "s0", None)
+        .artifact(&session, published_id, "s0", None)
         .unwrap()
         .is_some());
 }

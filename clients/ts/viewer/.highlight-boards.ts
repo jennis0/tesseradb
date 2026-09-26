@@ -9,7 +9,7 @@ const layer = (name: string, kind: string, computedContent: string[], title: str
     shape: computedContent.includes('hull') ? 'derived' : null, suppliedContent: ['name'], depsOn: [], version: 1}) as never;
 
 const meta = {
-  apiVersion: 1, idset: 0,
+  apiVersion: 1,
   views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
   groups: [], declaredScalars: [],
   layers: [layer('clusters/kmeans', 'flat', ['centroid', 'box', 'hull'], 'k-means clusters'),

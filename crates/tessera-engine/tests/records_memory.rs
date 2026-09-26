@@ -123,7 +123,6 @@ fn read(
         page_rows,
         pages: None,
         cursor: None,
-        idset: None,
         limits: RecordsLimits {
             max_page_rows: 1 << 20,
             max_page_bytes,
@@ -197,8 +196,6 @@ fn bundle(dir: &Path, n: u64, note_of: impl Fn(u64) -> usize) -> Engine {
         out: out.clone(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),

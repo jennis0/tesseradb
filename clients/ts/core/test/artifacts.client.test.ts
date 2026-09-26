@@ -114,7 +114,6 @@ describe('/v1/meta', () => {
   const body = {
     api_version: 1,
     bundle_format: 9,
-    idset: 7,
     views: [{id: 's0', display_name: 'S0', quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536}, projection: 'none', world_aspect: null, tile_scheme: null, tile: null, group: null, key: null, metadata: null}],
     groups: [{name: 'quarter', title: null, members_of: null, views: []}],
     declared_scalars: [{name: 'abstract', arrow_type: 'text', category: null, analyser: 'unicode/1', render: false, index: true, unique: false, homes: ['record']}],
@@ -148,7 +147,6 @@ describe('/v1/meta', () => {
     expect(await client().meta('tok')).toEqual({
       apiVersion: 1,
       bundleFormat: 9,
-      idset: 7,
       views: [{id: 's0', displayName: 'S0', quantisation: {xMin: 0, xMax: 65536, yMin: 0, yMax: 65536}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
       groups: [{name: 'quarter', title: null, membersOf: null, views: []}],
       declaredScalars: [{name: 'abstract', arrowType: 'text', category: null, analyser: 'unicode/1', render: false, index: true, unique: false, homes: ['record']}],

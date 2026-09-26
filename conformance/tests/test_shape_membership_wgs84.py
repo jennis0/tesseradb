@@ -41,7 +41,6 @@ import pytest
 from oracle.harness import (
     CLI_BIN,
     REPO_ROOT,
-    build_env,
     ensure_cli_built,
     spawn_server,
     stop_server,
@@ -52,7 +51,6 @@ from oracle.wire import decode_viewport_artifacts, decode_viewport_points
 VIEW_ID = "s0"
 SCALE = 4294967296.0
 SEED = 20260830
-ID_KEY_HEX = "0f0e0d0c0b0a09080706050403020100"
 LAYER = "regions/wgs84"
 
 #: Web Mercator's domain cut, and the whole-world frame it makes square (`projections.md` §5.1).
@@ -319,7 +317,6 @@ def build_bundle(work: Path, points) -> Path:
             "--mint-external-ids",
         ],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         check=True,
     )
     return bundle

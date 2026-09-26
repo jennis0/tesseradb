@@ -18,10 +18,6 @@ import pytest
 
 from oracle.harness import run_build, write_deployment
 
-# Fixed, like the catalogue's: a refusal test has no served order to care about, but minting
-# would make the control build's receipt-free artefacts differ per run for no reason.
-ID_KEY_HEX = "0f0e0d0c0b0a09080706050403020100"
-
 N = 8
 
 
@@ -83,7 +79,7 @@ def _build(corpus_dir: Path, schema_text: str, out: Path):
     deployment = write_deployment(
         corpus_dir / f"{out.name}.tessera.toml", bundle=out, schema=schema_path
     )
-    return run_build(["--deployment", str(deployment)], key_hex=ID_KEY_HEX)
+    return run_build(["--deployment", str(deployment)])
 
 
 # (case name, schema). Each schema is the control's with one line added or changed.

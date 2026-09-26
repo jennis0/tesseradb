@@ -119,7 +119,6 @@ from .bundle import Bundle
 from .harness import (
     CLI_BIN,
     REPO_ROOT,
-    build_env,
     ensure_cli_built,
     fixture_dir,
     recipe_matches,
@@ -171,11 +170,6 @@ ALL_VIEW_IDS = (*VIEW_IDS, *SEALED_VIEW_IDS)
 SEED = 20260831
 _FX_SEED = SEED + 1
 _GEOMETRY_SEED = SEED + 2
-
-#: The identity key, fixed rather than minted. `tessera_id` is both the storage sort key and
-#: §7.2's selection order, so a minted key would draw a different sample from the same corpus at
-#: every rebuild — `catalogue.py` records the same trap at greater length.
-MULTIVIEW_ID_KEY_HEX = "1f1e1d1c1b1a19181716151413121110"
 
 POINTS_NAME = "multiview-world.parquet"
 SCHEMA_NAME = "multiview-config.toml"
@@ -659,7 +653,6 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "seed": SEED,
         "fx_seed": _FX_SEED,
         "geometry_seed": _GEOMETRY_SEED,
-        "id_key": MULTIVIEW_ID_KEY_HEX,
         # The declaration's *content*, since the extents, the roster and both attributes live in
         # it and an edit under an unchanged filename would otherwise reuse a stale bundle.
         "schema": SCHEMA_TOML,
@@ -694,7 +687,6 @@ def build_multiview_bundle(work_dir: Path | None = None) -> Path:
     subprocess.run(
         _build_argv(work_dir, bundle_root),
         cwd=REPO_ROOT,
-        env=build_env(MULTIVIEW_ID_KEY_HEX),
         check=True,
     )
     write_recipe(bundle_root, wanted)

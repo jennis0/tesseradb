@@ -141,8 +141,6 @@ fn fixture() -> Fixture {
         out: root.clone(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -317,7 +315,7 @@ fn session_of(engine: &Engine) -> Session {
 fn fields_of(engine: &Engine, session: &Session, entity: EntityId) -> BTreeMap<String, ScalarOut> {
     let id = engine.tessera_id_of(entity).unwrap();
     engine
-        .item(session, id, None)
+        .item(session, id)
         .unwrap()
         .expect("the item is visible to a full principal")
         .fields

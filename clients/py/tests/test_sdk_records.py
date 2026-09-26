@@ -338,7 +338,6 @@ def test_every_request_is_the_arguments_given(db, sent):
         "page_rows": 2,
         "pages": 1,
         "compression": "zstd",
-        "idset": db.meta()["idset"],
     }
     sent.bodies.clear()
     db.items(**asked)

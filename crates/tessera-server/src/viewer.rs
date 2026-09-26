@@ -137,9 +137,6 @@ async fn meta(
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
-        // The idset `POST /v1/items` checks against. The identity key itself never appears in a
-        // response, log line or metric label.
-        "idset": meta.idset,
         // The views this principal may reach, in creation order and carrying no position, so a
         // shorter list reveals nothing about what was withheld. A null `tile_scheme` means draw
         // no basemap.
@@ -1307,10 +1304,6 @@ struct ItemReq {
     #[allow(dead_code)]
     #[serde(default)]
     pin: Option<PinDto>,
-    /// Optional: the durable identifier is `external_id`. A caller that omits it accepts that a
-    /// `tessera_id` from a past idset may name a different item after repartitioning.
-    #[serde(default)]
-    idset: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1347,16 +1340,14 @@ struct ItemViewDto {
 /// The blocking part of `/v1/items/{tessera_id}`: the engine lookup and the shaping after it.
 /// "No such id" and "not visible to you" are one 404 from one site, with no logging on either, so
 /// a viewer cannot tell them apart. The engine tests visibility before any file read, so a store
-/// failure (a 500) can arise only for an item the viewer can already see. The idset check (a 409)
-/// is the same work for every id.
+/// failure (a 500) can arise only for an item the viewer can already see.
 fn run_item(
     state: &AppState,
     session: &tessera_engine::Session,
     raw: u64,
-    idset: Option<u32>,
 ) -> Result<ItemResp, ApiError> {
-    let item = match state.engine.item(session, TesseraId::new(raw), idset) {
-        // A stale idset is a 409; a store or IO failure is a 500, never a missing field.
+    let item = match state.engine.item(session, TesseraId::new(raw)) {
+        // A store or IO failure is a 500, never a missing field.
         Err(e) => return Err(map_engine_error(e)),
         // The one 404, for no such id and for not visible alike.
         Ok(None) => return Err(ApiError::Unknown("unknown".to_string())),
@@ -1427,9 +1418,6 @@ struct ArtifactReq {
     /// The view whose row space the count is taken in. Required, since a masked count is per view
     /// while a record is not.
     view: String,
-    /// Optional, on [`ItemReq::idset`]'s argument.
-    #[serde(default)]
-    idset: Option<u32>,
     /// The depth the caller draws at: a predicate or authored shape then omits vertices that move
     /// an edge by under a pixel. Absent serves the whole presimplified shape; a hull ignores it.
     #[serde(default)]
@@ -1653,7 +1641,6 @@ async fn artifact(
                 .artifact(
                     &session,
                     TesseraId::new(raw),
-                    req.idset,
                     &view,
                     req.zoom,
                 )
@@ -1679,12 +1666,10 @@ async fn item(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
     AxumPath(raw): AxumPath<u64>,
-    ApiJson(req): ApiJson<ItemReq>,
+    ApiJson(_): ApiJson<ItemReq>,
 ) -> Result<Json<ItemResp>, ApiError> {
-    // `Engine::item` checks the idset against the one generation it loads, so a stale-idset
-    // request holds a gate permit rather than being refused before admission.
     let resp = state
-        .gated(move |state| run_item(state, &session, raw, req.idset))
+        .gated(move |state| run_item(state, &session, raw))
         .await?;
 
     Ok(Json(resp))

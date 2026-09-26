@@ -560,12 +560,11 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let by_viewport = served(&fx.engine, grant, BANDS, 0, WHOLE_MAP);
     let (key, count) = by_viewport.iter().next().expect("something is served");
     let id = served_entity(&fx.engine, grant, BANDS, key);
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
 
     let session = fx.engine.authorise(&grant_credential(grant)).unwrap();
     let row = fx
         .engine
-        .artifact(&session, id, Some(idset), "s0", None)
+        .artifact(&session, id, "s0", None)
         .expect("the identifier route answers")
         .expect("the artifact the viewport just served is reachable by its identifier");
     assert_eq!(row.key.as_deref(), Some(key.as_str()));
@@ -578,7 +577,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let blind = fx.engine.authorise(b"{\"terms\": []}").unwrap();
     assert_eq!(
         fx.engine
-            .artifact(&blind, id, Some(idset), "s0", None)
+            .artifact(&blind, id, "s0", None)
             .expect("the identifier route answers")
             .map(|row| row.masked_count),
         Some(0)
@@ -592,12 +591,11 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
         .cloned()
         .expect("something clears a bar of one");
     let id = served_entity(&gated.engine, grant, BANDS, &key);
-    let idset = gated.engine.generation().bundle.manifest.identity.idset;
     let blind = gated.engine.authorise(b"{\"terms\": []}").unwrap();
     assert!(
         gated
             .engine
-            .artifact(&blind, id, Some(idset), "s0", None)
+            .artifact(&blind, id, "s0", None)
             .expect("the identifier route answers")
             .is_none(),
         "a band below its own bar is reachable by identifier"
@@ -622,8 +620,7 @@ fn a_label_attached_to_a_predicate_artifact_follows_its_target() {
 
     // Suppress the band; the label goes with it, without anything being said about the label.
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
-    let entity = fx.engine.resolve_tessera_ids(&[id], idset).unwrap()[0]
+    let entity = fx.engine.resolve_tessera_ids(&[id])[0]
         .expect("a served artifact's identifier names an entity");
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
@@ -651,8 +648,7 @@ fn a_suppressed_values_key_never_mints_again() {
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
-    let entity = fx.engine.resolve_tessera_ids(&[id], idset).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[id])[0].unwrap();
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is accepted");
@@ -691,9 +687,8 @@ fn a_deleted_values_key_returns_as_a_new_artifact() {
     let fx = own_fixture("\"none\"");
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
     let before_id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[before_id], idset).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[before_id])[0].unwrap();
 
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)

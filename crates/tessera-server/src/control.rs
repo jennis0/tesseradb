@@ -899,10 +899,6 @@ struct ChangeItem {
     /// A decimal string, since a JSON number loses `u64` precision past 2^53 in JavaScript.
     #[serde(default)]
     tessera_id: Option<String>,
-    /// The identifier set from `/v1/meta`; required with `tessera_id` and refused without it,
-    /// because a `tessera_id` gathered before a key rotation names a different item after it.
-    #[serde(default)]
-    idset: Option<u32>,
     op: String,
 }
 
@@ -945,21 +941,13 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
         };
 
         let address = match (&item.external_id, &item.tessera_id) {
-            (Some(external_id), None) => {
-                if item.idset.is_some() {
-                    return Err(ApiError::Contract(
-                        "idset accompanies tessera_id, never external_id; remove the idset"
-                            .to_string(),
-                    ));
-                }
-                Address::External(
-                    base64::engine::general_purpose::STANDARD
-                        .decode(external_id)
-                        .map_err(|e| {
-                            ApiError::Contract(format!("external_id is not valid base64: {e}"))
-                        })?,
-                )
-            }
+            (Some(external_id), None) => Address::External(
+                base64::engine::general_purpose::STANDARD
+                    .decode(external_id)
+                    .map_err(|e| {
+                        ApiError::Contract(format!("external_id is not valid base64: {e}"))
+                    })?,
+            ),
             (None, Some(tessera_id)) => {
                 let id: u64 = tessera_id.parse().map_err(|_| {
                     ApiError::Contract(
@@ -968,17 +956,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
                             .to_string(),
                     )
                 })?;
-                let idset = item.idset.ok_or_else(|| {
-                    ApiError::Contract(
-                        "a tessera_id-addressed change must carry the idset it was minted under, \
-                         as `GET /v1/meta` gives it"
-                            .to_string(),
-                    )
-                })?;
-                Address::Tessera {
-                    id: TesseraId::new(id),
-                    idset,
-                }
+                Address::Tessera(TesseraId::new(id))
             }
             (Some(_), Some(_)) => {
                 return Err(ApiError::Contract(
@@ -1004,7 +982,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
     if let Some(index) = decoded
         .iter()
         .zip(&resolved)
-        .position(|(d, entity)| matches!(d.address, Address::Tessera { .. }) && entity.is_none())
+        .position(|(d, entity)| matches!(d.address, Address::Tessera(_)) && entity.is_none())
     {
         return Err(ApiError::Unknown(format!(
             "the tessera_id of item {index} names nothing this deployment issued"
@@ -1023,45 +1001,25 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
 }
 
 /// Resolves each address to its entity, in order, `None` where it names nothing. Each form is one
-/// batched call; the tessera half checks the idset once for the whole list (409 if stale) and
-/// inverts every id under that same generation.
+/// batched call.
 fn resolve_addresses<'a>(
     state: &AppState,
     addresses: impl IntoIterator<Item = &'a Address>,
 ) -> Result<Vec<Option<EntityId>>, ApiError> {
     let addresses: Vec<&Address> = addresses.into_iter().collect();
-    let mut idsets = addresses.iter().filter_map(|address| match address {
-        Address::Tessera { idset, .. } => Some(*idset),
-        Address::External(_) => None,
-    });
-    let tessera = match idsets.next() {
-        None => Vec::new(),
-        Some(idset) => {
-            if idsets.any(|other| other != idset) {
-                return Err(ApiError::Contract(
-                    "one request carries two different idsets; send every tessera_id under the \
-                     same idset"
-                        .to_string(),
-                ));
-            }
-            let ids: Vec<TesseraId> = addresses
-                .iter()
-                .filter_map(|address| match address {
-                    Address::Tessera { id, .. } => Some(*id),
-                    Address::External(_) => None,
-                })
-                .collect();
-            state
-                .engine
-                .resolve_tessera_ids(&ids, idset)
-                .map_err(crate::error::map_engine_error)?
-        }
-    };
+    let ids: Vec<TesseraId> = addresses
+        .iter()
+        .filter_map(|address| match address {
+            Address::Tessera(id) => Some(*id),
+            Address::External(_) => None,
+        })
+        .collect();
+    let tessera = state.engine.resolve_tessera_ids(&ids);
     let keys: Vec<Vec<u8>> = addresses
         .iter()
         .filter_map(|address| match address {
             Address::External(key) => Some(key.clone()),
-            Address::Tessera { .. } => None,
+            Address::Tessera(_) => None,
         })
         .collect();
     let external = state
@@ -1072,7 +1030,7 @@ fn resolve_addresses<'a>(
     Ok(addresses
         .iter()
         .map(|address| match address {
-            Address::Tessera { .. } => tessera.next().flatten(),
+            Address::Tessera(_) => tessera.next().flatten(),
             Address::External(_) => external.next().flatten(),
         })
         .collect())
@@ -1879,7 +1837,7 @@ fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Res
 
 /// `PATCH /control/layers/{name}/artifacts`'s Arrow form: one row per artifact, `key: utf8` and
 /// `members: list<utf8>` or `large_list<utf8>`, with `view` and `access` optional, and
-/// `addressing`, `level` and `idset` in the schema metadata. Decoded into the JSON form's body, so
+/// `addressing` and `level` in the schema metadata. Decoded into the JSON form's body, so
 /// the handler has one path.
 fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     use arrow::array::{LargeListArray, ListArray, StringArray};
@@ -1901,10 +1859,10 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
         }
     }
     for name in metadata.keys() {
-        if !matches!(name.as_str(), "addressing" | "level" | "idset") {
+        if !matches!(name.as_str(), "addressing" | "level") {
             return Err(ApiError::Contract(format!(
                 "growth body: schema metadata `{name}` is not one this route takes; the envelope \
-                 is `addressing`, `level` and `idset`"
+                 is `addressing` and `level`"
             )));
         }
     }
@@ -1920,7 +1878,7 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
             }
             None => return Err(ApiError::Contract(
                 "growth body: the IPC schema's metadata carries no `addressing`; the Arrow form \
-                 carries `addressing`, `level` and `idset` there"
+                 carries `addressing` and `level` there"
                     .to_string(),
             )),
         };
@@ -1931,14 +1889,6 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                 "growth body: schema metadata `level` is '{text}'; it is a level number"
             ))
         })?,
-    };
-    let idset = match metadata.get("idset") {
-        None => None,
-        Some(text) => Some(text.parse::<u32>().map_err(|_| {
-            ApiError::Contract(format!(
-                "growth body: schema metadata `idset` is '{text}'; it is the idset number"
-            ))
-        })?),
     };
     let mut artifacts = Vec::new();
     for batch in reader {
@@ -2072,32 +2022,23 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     Ok(GrowBody {
         level,
         addressing,
-        idset,
         default_space: None,
         artifacts,
     })
 }
 
-/// Resolves every member address of a batch to an entity at the boundary, since a stored
-/// `tessera_id` would name different entities after a key rotation. `flat` holds every address
-/// and `widths` each artifact's share. An unresolvable member refuses the batch, never dropped.
+/// Resolves every member address of a batch to an entity at the boundary. `flat` holds every
+/// address and `widths` each artifact's share. An unresolvable member refuses the batch, never
+/// dropped.
 fn resolve_member_addresses(
     state: &AppState,
     addressing: Addressing,
-    idset: Option<u32>,
     flat: &[&String],
     widths: &[usize],
     layout: &str,
 ) -> Result<Vec<tessera_types::EntityId>, ApiError> {
     let resolved: Vec<Option<tessera_types::EntityId>> = match addressing {
         Addressing::Tessera => {
-            let idset = idset.ok_or_else(|| {
-                ApiError::Contract(
-                    "tessera-addressed members must carry the idset they were minted under; add \
-                     `idset`"
-                        .to_string(),
-                )
-            })?;
             let ids = flat
                 .iter()
                 .map(|raw| {
@@ -2106,19 +2047,9 @@ fn resolve_member_addresses(
                         .map_err(|_| ApiError::Contract(format!("'{raw}' is not a tessera_id")))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            // A stale idset is refused before anything is inverted.
-            state
-                .engine
-                .resolve_tessera_ids(&ids, idset)
-                .map_err(crate::error::map_engine_error)?
+            state.engine.resolve_tessera_ids(&ids)
         }
         Addressing::External => {
-            if idset.is_some() {
-                return Err(ApiError::Contract(
-                    "idset accompanies tessera_id, never external_id; remove the idset"
-                        .to_string(),
-                ));
-            }
             let keys: Vec<Vec<u8>> = flat
                 .iter()
                 .map(|s| {
@@ -2178,9 +2109,6 @@ struct PublishBody {
     #[serde(default)]
     level: u32,
     addressing: Addressing,
-    /// Required for `tessera` addressing and refused otherwise.
-    #[serde(default)]
-    idset: Option<u32>,
     /// The space of a row's shape and authored shape content where the row names none: `"view"`
     /// (the default) or `"wgs84"`, projected by the view's own transform. A view with projection
     /// `none` refuses `wgs84`.
@@ -2604,7 +2532,6 @@ async fn publish_artifacts(
     let PublishBody {
         level,
         addressing,
-        idset,
         default_space,
         mut artifacts,
     } = artifact_json(&body, "publication")?;
@@ -2735,7 +2662,6 @@ async fn publish_artifacts(
             let resolved = resolve_member_addresses(
                 state,
                 addressing,
-                idset,
                 &flat,
                 &widths,
                 "its members first, then each content's generating set",
@@ -2829,7 +2755,7 @@ async fn publish_artifacts(
     acknowledge(&state, &wait, declared(batch.created == 0), body).await
 }
 
-/// `PATCH /control/layers/{name}/artifacts`'s body. Addressing, `idset` and `default_space` are
+/// `PATCH /control/layers/{name}/artifacts`'s body. Addressing and `default_space` are
 /// as on [`PublishBody`].
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2838,8 +2764,6 @@ struct GrowBody {
     #[serde(default)]
     level: u32,
     addressing: Addressing,
-    #[serde(default)]
-    idset: Option<u32>,
     #[serde(default)]
     default_space: Option<String>,
     artifacts: Vec<GrowingArtifactBody>,
@@ -2925,7 +2849,6 @@ async fn grow_memberships(
     let GrowBody {
         level,
         addressing,
-        idset,
         default_space,
         mut artifacts,
     } = match body_encoding(&headers)? {
@@ -2983,7 +2906,7 @@ async fn grow_memberships(
                 .flat_map(|a| a.members.iter().chain(a.leaving.iter()))
                 .collect();
             let resolved =
-                resolve_member_addresses(state, addressing, idset, &flat, &widths, "its members")?;
+                resolve_member_addresses(state, addressing, &flat, &widths, "its members")?;
 
             let mut entities = resolved.into_iter();
             let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts

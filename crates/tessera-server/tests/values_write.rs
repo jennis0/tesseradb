@@ -460,11 +460,9 @@ async fn the_two_encodings_land_identical_values() {
     assert_eq!(answer["held"], 1, "{answer}");
 }
 
-/// **A row may name its entity by `tessera_id` and its identifier set** (`ingest.md` §1.4), on
-/// `/control/changes`' rule, and one without the set is refused: an identifier's meaning depends
-/// on the key it was minted under.
+/// **A row may name its entity by `tessera_id`** (`ingest.md` §1.4), on `/control/changes`' rule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_row_addressed_by_tessera_id_carries_its_idset() {
+async fn a_row_may_name_its_entity_by_tessera_id() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", "subject").await;
     tick(&served.server).await;
@@ -473,35 +471,23 @@ async fn a_row_addressed_by_tessera_id_carries_its_idset() {
         &served,
         "values-1",
         Some("s0"),
-        json!([{"tessera_id": id.to_string(), "idset": FIXTURE_IDSET, "tag": "alpha"}]),
+        json!([{"tessera_id": id.to_string(), "tag": "alpha"}]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");
     assert_eq!(answer["filled"], 1);
-
-    let (status, answer) = values(
-        &served,
-        "values-2",
-        Some("s0"),
-        json!([{"tessera_id": id.to_string(), "tag": "beta"}]),
-    )
-    .await;
-    assert_eq!(status, 422, "a tessera_id with no idset is refused: {answer}");
-    assert_eq!(answer["error"], "contract", "{answer}");
 }
 
-/// One Arrow values batch naming its entity by `tessera_id` and identifier set.
-fn arrow_values_by_tessera_id(id: u64, idset: u32, tag: &str) -> Vec<u8> {
+/// One Arrow values batch naming its entity by `tessera_id`.
+fn arrow_values_by_tessera_id(id: u64, tag: &str) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("tessera_id", DataType::Utf8, true),
-        Field::new("idset", DataType::UInt32, true),
         Field::new("tag", DataType::Utf8, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(StringArray::from_iter([Some(id.to_string())])),
-            Arc::new(arrow::array::UInt32Array::from(vec![idset])),
             Arc::new(StringArray::from_iter([Some(tag)])),
         ],
     )
@@ -511,7 +497,7 @@ fn arrow_values_by_tessera_id(id: u64, idset: u32, tag: &str) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-/// An Arrow row names its entity by `tessera_id` and identifier set as a JSON row does.
+/// An Arrow row names its entity by `tessera_id` as a JSON row does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
     let served = serve().await;
@@ -526,7 +512,7 @@ async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
         .header("x-tessera-batch-id", "values-arrow")
         .header("x-tessera-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(arrow_values_by_tessera_id(id, FIXTURE_IDSET, "alpha"))
+        .body(arrow_values_by_tessera_id(id, "alpha"))
         .send()
         .await
         .unwrap();
@@ -538,8 +524,8 @@ async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
     assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
 }
 
-/// A row names its entity by exactly one form: both, neither, and an identifier set beside an
-/// `external_id` are each refused, and the batch has no effect.
+/// A row names its entity by exactly one form: both and neither are each refused, and the batch
+/// has no effect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_row_naming_its_entity_by_both_forms_or_neither_is_refused() {
     let served = serve().await;
@@ -548,9 +534,8 @@ async fn a_row_naming_its_entity_by_both_forms_or_neither_is_refused() {
 
     let rows = [
         json!({"external_id": base64_of("subject"), "tessera_id": id.to_string(),
-               "idset": FIXTURE_IDSET, "tag": "alpha"}),
+               "tag": "alpha"}),
         json!({"tag": "alpha"}),
-        json!({"external_id": base64_of("subject"), "idset": FIXTURE_IDSET, "tag": "alpha"}),
     ];
     for (i, row) in rows.into_iter().enumerate() {
         let (status, answer) =

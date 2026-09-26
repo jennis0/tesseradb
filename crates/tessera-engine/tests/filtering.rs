@@ -276,8 +276,6 @@ fn fixture() -> Fixture {
         out: bundle.clone(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: "000102030405060708090a0b0c0d0e0f".to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -4389,7 +4387,7 @@ fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: Filte
     );
     assert!(
         engine
-            .item(&session, id, None)
+            .item(&session, id)
             .expect("the drill-down succeeds")
             .is_none(),
         "{family}: a suppressed entity still answers drill-down"

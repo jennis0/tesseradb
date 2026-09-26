@@ -16,8 +16,6 @@ use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-
-const KEY: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 32;
 
 fn tessera() -> Command {
@@ -235,7 +233,6 @@ fn run(cwd: &Path, args: &[&str]) -> Output {
     tessera()
         .args(args)
         .current_dir(cwd)
-        .env("TESSERA_IDENTITY_KEY", KEY)
         .output()
         .expect("failed to run tessera")
 }

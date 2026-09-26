@@ -39,10 +39,6 @@ pub const OPERATOR_CREDENTIAL: &str = "operator-secret";
 /// The identity key `tessera-build`'s own test fixtures use. It guards nothing.
 pub const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
-/// The fixture bundle's idset, which `/v1/meta` reports and `/v1/items` compares a request's
-/// `idset` against.
-pub const FIXTURE_IDSET: u32 = 1;
-
 pub fn test_key() -> IdentityKey {
     IdentityKey::from_hex(TEST_KEY_HEX).unwrap()
 }
@@ -328,8 +324,6 @@ pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -1378,7 +1372,7 @@ pub fn ingested_ids(answer: &serde_json::Value) -> Vec<u64> {
         .collect()
 }
 
-/// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).
+/// `POST /v1/items/{tessera_id}` with no body fields set.
 pub async fn post_item(server: &TestServer, token: &str, tessera_id: u64) -> reqwest::Response {
     server
         .client

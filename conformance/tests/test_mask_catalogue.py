@@ -24,7 +24,7 @@ from oracle.bundle import Bundle
 from oracle.wire import decode_viewport_points
 
 
-def test_the_catalogue_bundle_identity_column_is_the_key_the_fixture_supplied(
+def test_the_catalogue_bundle_identity_column_is_the_manifest_keys_permutation(
     catalogue_bundle: Bundle,
 ):
     """The one artefact the §7.2 oracle shares with the engine, checked rather than trusted.
@@ -35,20 +35,13 @@ def test_the_catalogue_bundle_identity_column_is_the_key_the_fixture_supplied(
     term-signature order, the r21 disclosure the negative control's docstring invokes — would be
     agreed with rather than caught, because both sides would read the same wrong values.
 
-    Three checks close it, and the fixture supplies the key, so nothing is left on trust:
+    Two checks close it, against the key the bundle's manifest records:
 
     1. the stored column **is** `forward(key, shard_id, entity_id)` for a sample of rows, where the
        entity id comes from the permutation (key-independent) and the identity from the column;
     2. the rows are **stored in the order that key implies** — re-derived from `(x, y)` and the
        permutation, never from the stored `morton`/`tessera_id` columns — so `derive_row_order` is
-       the identity permutation;
-    3. MANIFEST's identity key is the one `oracle/catalogue.py` put in the build's environment,
-       not one the build minted for itself. Without this, 1 and 2 would hold against *any* self-consistent
-       key, including one the fixture never chose.
-
-    `verify_identity_cross_check` and `derive_row_order` already existed but ran only against the
-    250k `--mint-id-key` fixture, whose key is a build output rather than a fixture input — so the
-    catalogue, which is the corpus every §7.2 assertion is made over, was never covered.
+       the identity permutation.
     """
     catalogue_bundle.verify_identity_cross_check(cat.VIEW_ID)
 
@@ -56,15 +49,6 @@ def test_the_catalogue_bundle_identity_column_is_the_key_the_fixture_supplied(
     assert np.array_equal(order, np.arange(len(order))), (
         "the catalogue's rows are not stored in (morton, tessera_id) order re-derived from "
         "geometry and the identity key — so the stored order is not the order §7.2 selects in"
-    )
-
-    declared = catalogue_bundle.manifest["identity"]["key"]
-    assert declared.lower() == cat.CATALOGUE_ID_KEY_HEX.lower(), (
-        f"MANIFEST's identity key is {declared!r}, not the {cat.CATALOGUE_ID_KEY_HEX!r} the "
-        "fixture states through the environment. The bundle was built by something other than "
-        "`build_catalogue_bundle`, or the build ignored the variable and minted its own key — "
-        "either "
-        "way every tessera_id in it is a value nobody chose."
     )
 
 

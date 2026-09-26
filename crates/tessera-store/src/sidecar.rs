@@ -20,7 +20,7 @@
 //! Two directions, neither on the viewport path: `external_id → entity` for
 //! `/control/changes` past WAL retention and `/control/ingest`'s duplicate check, and
 //! `entity → external_id` (through `ext-locator.u32`) for the `/v1/items` drill-down. There is
-//! **no `tessera_id → entity` direction** — inversion is a pure function of the deployment key
+//! **no `tessera_id → entity` direction** — inversion is a pure function of the bundle's key
 //! and touches no file at all.
 //!
 //! Nothing is mapped, scanned or verified until the first resolution, and then only the one

@@ -42,7 +42,6 @@ import pytest
 from oracle.harness import (
     CLI_BIN,
     REPO_ROOT,
-    build_env,
     ensure_cli_built,
     spawn_server,
     stop_server,
@@ -54,7 +53,6 @@ VIEW_ID = "s0"
 EXTENT_MAX = 65536.0
 SCALE = 4294967296.0
 SEED = 20260829
-ID_KEY_HEX = "0f0e0d0c0b0a09080706050403020100"
 
 LATTICE_STEP = 1024
 N_RANDOM = 1500
@@ -307,7 +305,6 @@ def build_bundle(work: Path, points) -> Path:
     subprocess.run(
         [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle), "--mint-external-ids"],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         check=True,
     )
     return bundle

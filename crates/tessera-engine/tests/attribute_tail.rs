@@ -186,8 +186,6 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -383,8 +381,6 @@ fn both_build_implementations_write_the_same_tail() {
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -1111,8 +1107,6 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -1313,7 +1307,7 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let expect_item = |id, audit: i64, band_key: &str, score: f32, label: &str| {
         let served = engine
-            .item(&session, id, None)
+            .item(&session, id)
             .expect("drill-down succeeds")
             .unwrap_or_else(|| panic!("{label} is visible to full coverage"));
         let names: Vec<&str> = served.fields.iter().map(|f| f.name.as_str()).collect();
@@ -1523,8 +1517,6 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -1626,7 +1618,7 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let flushed_id = engine.tessera_id_of(entity).unwrap();
     let served = engine
-        .item(&session, flushed_id, None)
+        .item(&session, flushed_id)
         .expect("drill-down on a flushed entity")
         .expect("the flushed entity is visible");
     let note = served

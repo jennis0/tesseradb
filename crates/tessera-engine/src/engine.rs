@@ -140,9 +140,8 @@ pub struct Engine {
     /// The write path: the WAL, the entity-id allocator, the live external-id maps, the resolver's
     /// extension state and the idempotency index.
     pub(crate) write: WritePath,
-    /// The `tessera_id` blinding permutation's per-deployment key, held for the process lifetime.
-    /// Never leaves the server; `IdentityKey`'s `Debug` is redacted and it has no hex accessor, so
-    /// this field cannot be logged.
+    /// The `tessera_id` blinding permutation's key, read from the bundle's manifest and held for
+    /// the process lifetime. It never leaves the server; `IdentityKey`'s `Debug` is redacted.
     pub(crate) identity_key: IdentityKey,
     /// The key records cursors are sealed under, derived from the identity key at open.
     pub(crate) cursor_key: crate::records::CursorKey,

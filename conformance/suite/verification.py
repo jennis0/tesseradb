@@ -100,7 +100,7 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 
 from oracle import morton
-from oracle.harness import CLI_BIN, REPO_ROOT, build_env, ensure_cli_built, write_deployment
+from oracle.harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
 
 from .battery import Categories, Item, Meta, Recorded, Viewport
 from .canonical import Json, Streamed
@@ -110,11 +110,6 @@ from .canonical import Json, Streamed
 #: declaration, which states it as the view's `extent`; this is the oracle's copy, used to derive
 #: expected geometry.
 GRID_EXTENT = (0.0, 65536.0, 0.0, 65536.0)
-
-#: A fixed identity key for the fixture bundle: the lineage decision is "a test fixture, minted
-#: deterministically", stated per the build's own rule rather than circumvented. Nothing may
-#: persist a `tessera_id` across builds regardless — the ids are a keyed permutation.
-FIXTURE_ID_KEY_HEX = "000102030405060708090a0b0c0d0e0f"
 
 #: Where the materialiser shim lives: in this checkout's target directory, where it is compiled,
 #: since its manifest names this checkout's crates. The corpus *files* are per run.
@@ -284,7 +279,6 @@ def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
             "--mint-external-ids",
         ],
         cwd=REPO_ROOT,
-        env=build_env(FIXTURE_ID_KEY_HEX),
         check=True,
         capture_output=True,
     )
@@ -841,7 +835,6 @@ __all__ = [
     "CorpusFiles",
     "Declaration",
     "Expected",
-    "FIXTURE_ID_KEY_HEX",
     "GRID_EXTENT",
     "TotalVerificationFailure",
     "build_bundle",

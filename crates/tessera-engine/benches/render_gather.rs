@@ -131,8 +131,6 @@ fn bundle(dir: &Path, absent_every: Option<u64>) -> Engine {
         out: out.clone(),
         limit: None,
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
-        identity_key_hex: KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),

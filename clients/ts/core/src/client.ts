@@ -295,7 +295,6 @@ export class TesseraClient {
     return {
       apiVersion: m.api_version,
       bundleFormat: m.bundle_format,
-      idset: m.idset,
       views: m.views.map((s) => ({
         id: s.id,
         displayName: s.display_name,
@@ -815,21 +814,18 @@ export class TesseraClient {
    * no such property.
    *
    * @param opts.view - The view to count and place the artifact in.
-   * @param opts.idset - The `idset` the id was issued under; refused with `409` where it differs
-   *   from the deployment's.
    * @param opts.zoom - The depth to simplify the shape for, floored and clamped to 0 to 16. Left
    *   out, the whole stored shape is served.
    * @throws {@link TesseraError} when the server refuses: one `404` alike for an id naming nothing,
    *   a point, an artifact of a layer this principal cannot reach, a suppressed artifact and one
-   *   below its layer's existence criterion; `409` for a stale `idset`.
+   *   below its layer's existence criterion.
    */
   async artifact(
     token: string,
     tesseraId: bigint,
-    opts: {view: string; idset?: number; zoom?: number; signal?: AbortSignal}
+    opts: {view: string; zoom?: number; signal?: AbortSignal}
   ): Promise<ArtifactDetail> {
     const body: Record<string, unknown> = {view: opts.view};
-    if (opts.idset !== undefined) body.idset = opts.idset;
     // The depth the shape is drawn at, which the server simplifies it to. Left out, the whole
     // stored shape is served.
     if (opts.zoom !== undefined) body.zoom = Math.max(0, Math.min(16, Math.floor(opts.zoom)));
@@ -911,9 +907,8 @@ export class TesseraClient {
    * request.
    *
    * @throws {@link TesseraError} when the server refuses the first request: `404` for an unknown
-   *   view, `409` for a stale `idset` or a cursor from another idset, `422` for a request
-   *   {@link ItemsRequest} says is refused or a malformed filter, and `429` past the bulk-read
-   *   admission limit.
+   *   view, `422` for a request {@link ItemsRequest} says is refused or a malformed filter, and
+   *   `429` past the bulk-read admission limit.
    */
   items(token: string, req: ItemsRequest, signal?: AbortSignal): Promise<RecordsRead<ItemsHead>> {
     return this.bulkRead('items', token, req, signal, (raw) => {
@@ -928,9 +923,8 @@ export class TesseraClient {
    * {@link items} reads items.
    *
    * @throws {@link TesseraError} when the server refuses the first request: `404` for an unknown
-   *   view, `409` for a stale `idset` or a cursor from another idset, `422` for a request
-   *   {@link ArtifactsRequest} says is refused or a malformed filter, and `429` past the bulk-read
-   *   admission limit.
+   *   view, `422` for a request {@link ArtifactsRequest} says is refused or a malformed filter, and
+   *   `429` past the bulk-read admission limit.
    */
   artifacts(token: string, req: ArtifactsRequest, signal?: AbortSignal): Promise<RecordsRead<ArtifactsHead>> {
     return this.bulkRead('artifacts', token, req, signal, (raw) => {
@@ -1012,7 +1006,7 @@ const SCOPED_FIELDS = ['name', 'arrow_type', 'scope', 'category', 'analyser', 'r
 const OPERAND_FIELDS = ['column', 'family', 'operands'];
 const LAYER_FIELDS = ['name', 'title', 'views', 'membership', 'hierarchy', 'levels', 'computed_content', 'shape', 'supplied_content', 'depends_on', 'version'];
 const LEVEL_FIELDS = ['level', 'title', 'zoom'];
-const META_FIELDS = ['api_version', 'bundle_format', 'idset', 'views', 'groups', 'declared_scalars', 'scoped_scalars', 'filter_operands', 'selection', 'layers'] as const;
+const META_FIELDS = ['api_version', 'bundle_format', 'views', 'groups', 'declared_scalars', 'scoped_scalars', 'filter_operands', 'selection', 'layers'] as const;
 const SELECTION_FIELDS = [
   'k_min',
   'k_max_marks',
@@ -1046,7 +1040,6 @@ type RawCategory = {vocabulary: string; kind: 'declared' | 'discovered'; visibil
 type RawMeta = {
   api_version: number;
   bundle_format: number;
-  idset: number;
   views: {
     id: string;
     display_name: string;

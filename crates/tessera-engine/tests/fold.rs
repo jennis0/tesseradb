@@ -130,8 +130,6 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
         schema: Default::default(),
         limit: None,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -2019,9 +2017,9 @@ fn item_lookup_answers_exactly_m_auth_across_a_fold() {
 
     // Before the fold: the ordinary masking rule, and confirmation the fixture set the case up as
     // intended (a delete on an item nobody could resurrect from proves nothing).
-    assert!(engine.item(&full, restricted_id, None).unwrap().is_some());
-    assert!(engine.item(&subset, restricted_id, None).unwrap().is_none());
-    assert!(engine.item(&full, deleted_id, None).unwrap().is_some());
+    assert!(engine.item(&full, restricted_id).unwrap().is_some());
+    assert!(engine.item(&subset, restricted_id).unwrap().is_none());
+    assert!(engine.item(&full, deleted_id).unwrap().is_some());
 
     engine
         .accept_change(deleted, ChangeOp::Delete)
@@ -2034,16 +2032,16 @@ fn item_lookup_answers_exactly_m_auth_across_a_fold() {
     // (`RowProjectionCache::freshest_fragment`'s prefix filter) — so this is a real post-fold
     // answer, not a stale one.
     assert!(
-        engine.item(&full, restricted_id, None).unwrap().is_some(),
+        engine.item(&full, restricted_id).unwrap().is_some(),
         "still visible to the principal authorised for it — the fold's unmasked read did not \
          change the answer"
     );
     assert!(
-        engine.item(&subset, restricted_id, None).unwrap().is_none(),
+        engine.item(&subset, restricted_id).unwrap().is_none(),
         "still invisible to the principal that never was"
     );
     assert!(
-        engine.item(&full, deleted_id, None).unwrap().is_none(),
+        engine.item(&full, deleted_id).unwrap().is_none(),
         "the folded-away entity answers nothing even to the principal that could see \
          everything else — its row and postings are both gone, so the identifier names \
          nothing rather than resurrecting it"
@@ -2108,11 +2106,11 @@ fn a_session_from_before_a_fold_is_never_served_the_entity_the_fold_retired() {
         "the count moved by exactly the retired entity"
     );
     assert!(
-        engine.item(&session, doomed_id, None).unwrap().is_none(),
+        engine.item(&session, doomed_id).unwrap().is_none(),
         "and the drill-down answers nothing for it"
     );
     assert!(
-        engine.item(&session, survivor_id, None).unwrap().is_some(),
+        engine.item(&session, survivor_id).unwrap().is_some(),
         "while the entity the fold kept still answers"
     );
 }
@@ -2166,7 +2164,7 @@ fn an_items_labels_survive_a_fold_and_a_folded_away_entitys_list_goes_with_it() 
     let kept_id: TesseraId = engine.tessera_id_of(kept).unwrap();
     let deleted_id: TesseraId = engine.tessera_id_of(deleted).unwrap();
 
-    let before = engine.item(&full, kept_id, None).unwrap().unwrap().labels;
+    let before = engine.item(&full, kept_id).unwrap().unwrap().labels;
     assert!(
         !before.is_empty(),
         "the fixture must label this item, or the assertion below holds vacuously"
@@ -2179,12 +2177,12 @@ fn an_items_labels_survive_a_fold_and_a_folded_away_entitys_list_goes_with_it() 
     assert_eq!(engine.generation().prefix, "v00001");
 
     assert_eq!(
-        engine.item(&full, kept_id, None).unwrap().unwrap().labels,
+        engine.item(&full, kept_id).unwrap().unwrap().labels,
         before,
         "the folded base carries the same ordinals against the same dictionary"
     );
     assert!(
-        engine.item(&full, deleted_id, None).unwrap().is_none(),
+        engine.item(&full, deleted_id).unwrap().is_none(),
         "and the folded-away entity answers nothing at all, list included"
     );
 }

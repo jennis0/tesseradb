@@ -92,11 +92,6 @@ pub enum EngineError {
     ThreadPoolBuild(String),
     /// The `EngineConfig` handed to `Engine::open` switches off something a viewer relies on.
     ConfigRefused(String),
-    /// `POST /v1/items/{tessera_id}`: the caller-supplied `idset` does not match the idset of the
-    /// generation [`crate::viewport::Engine::item`] loaded for this call. Checked inside `item`
-    /// against the same load the lookup already needs, so a generation swap landing between two
-    /// separate loads cannot check one snapshot and serve another. Maps to HTTP 409 `conflict`.
-    StaleIdSet,
     /// A `POST /v1/items` request the caller can correct: a field or system field it named, or
     /// one of its paging arguments. Every arm names only what the caller sent and published
     /// schema.
@@ -170,7 +165,6 @@ impl std::fmt::Display for EngineError {
                 write!(f, "failed to build the shared compute pool: {detail}")
             }
             EngineError::ConfigRefused(detail) => write!(f, "engine config refused: {detail}"),
-            EngineError::StaleIdSet => write!(f, "stale idset"),
             EngineError::RecordsRefused(why) => write!(f, "{why}"),
             EngineError::CursorRefused => write!(
                 f,

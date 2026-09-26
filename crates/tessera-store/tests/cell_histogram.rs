@@ -143,7 +143,6 @@ fn build_bundle(root: &Path) {
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
             shard_id: 0,
-            idset: 1,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {

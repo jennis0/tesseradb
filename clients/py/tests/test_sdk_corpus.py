@@ -379,7 +379,6 @@ def build_committed(tessera: str, declaration: Path, directory: Path) -> Path:
             "--deployment",
             str(directory / "tessera.toml"),
             "--mint-external-ids",
-            "--mint-id-key",
         ],
         capture_output=True,
         text=True,

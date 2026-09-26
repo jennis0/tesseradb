@@ -474,12 +474,6 @@ export type Meta = {
   /** The bundle format version the server opened. */
   bundleFormat: number;
   /**
-   * The identity set this deployment's `tessera_id`s were minted under. Passing it on a
-   * drill-down makes an id from another identity set a `409`; without it, such an id may name a
-   * different item.
-   */
-  idset: number;
-  /**
    * The views this principal may reach: the plain views, then each group's in creation order.
    * A view this principal cannot reach is absent, and naming it gets the `404` an unknown view
    * gets.
@@ -1338,8 +1332,6 @@ export type ItemsRequest = {
   cursor?: string;
   /** Compress each page's Arrow buffers with zstd. The client decodes either form. */
   compression?: 'zstd';
-  /** The idset the `tessera_id`s are read in, as `/v1/meta` publishes it. A server holding another answers `409`. */
-  idset?: number;
 };
 
 /**
@@ -1388,8 +1380,6 @@ export type ArtifactsRequest = {
   cursor?: string;
   /** As {@link ItemsRequest.compression}. */
   compression?: 'zstd';
-  /** As {@link ItemsRequest.idset}. */
-  idset?: number;
 };
 
 /**

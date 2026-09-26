@@ -26,7 +26,6 @@ pub(crate) enum Fixed<'a> {
     Access,
     NodeId,
     TesseraId,
-    IdSet,
 }
 
 impl Fixed<'_> {
@@ -37,7 +36,6 @@ impl Fixed<'_> {
             Fixed::Access => "access",
             Fixed::NodeId => "node_id",
             Fixed::TesseraId => "tessera_id",
-            Fixed::IdSet => "idset",
         }
     }
 }
@@ -45,7 +43,7 @@ impl Fixed<'_> {
 /// How one item names its entity: the two address forms, already shape-validated.
 pub(crate) enum Address {
     External(Vec<u8>),
-    Tessera { id: TesseraId, idset: u32 },
+    Tessera(TesseraId),
 }
 
 /// The two encodings a record-bearing route takes; both decode to one row form.

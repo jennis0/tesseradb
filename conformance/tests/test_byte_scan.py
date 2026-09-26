@@ -11,7 +11,7 @@ only re-subdivide tiles already covered by shallower ones).
 The server's response for every request, `/v1/items/{tessera_id}` for a sample of tessera ids, AND
 the full RUST_LOG=info log the server process wrote across the whole run (server spawned with its
 stdout/stderr redirected to a file, so nothing is lost to an unread pipe) must contain no encoding
-of any admitted or denied entity id, no encoding of the deployment identity key, and no caller
+of any admitted or denied entity id, no encoding of the bundle's identity key, and no caller
 external id anywhere except the one designed exception — within the scan scope described below.
 
 **Which corpus, and what changing it cost.** This scan ran against a 250,000-item prefix of the
@@ -43,7 +43,7 @@ previously scanned for is retired from the viewer plane (design r21, Appendix C'
 wire now carries `tessera_id: u64`, a keyed Feistel permutation of `(shard_id, entity_id)` that is
 stable across sessions by design (C17) and inverted only inside the trust boundary. This rewrite
 (Task 13) re-derives the scan against that column instead of `handle`, and adds two sweeps the
-old design had no column for: the deployment identity key (never leaves the server) and caller
+old design had no column for: the bundle's identity key (never leaves the server) and caller
 external ids (admin-plane identifiers, SA D14, legitimate in exactly one viewer-plane place: the
 `/v1/items` drill-down response, D4).
 
@@ -129,7 +129,7 @@ its job changes completely, because its old job no longer exists.
   leaked id. Handles are gone from the wire; this job has nothing left to do.
 - *New job:* protect the **decimal-text** scans (the server log, and `/v1/items` JSON bodies)
   against **legitimate small integers this harness actually emits** — ports (ephemeral range, at
-  most `65535`), `k` (`<= 500`), zoom (`<= 6`), the idset (`1`), the shard id (small), and
+  most `65535`), `k` (`<= 500`), zoom (`<= 6`), the shard id (small), and
   HTTP status codes (`< 600`). None of these exceeds `65535`; `SAFE_ID_FLOOR = 100_000` clears all
   of them with headroom and is kept at its old numeric value because nothing about the new design
   makes a smaller floor either necessary or safer. (Process ids are the one source of legitimate
@@ -323,7 +323,7 @@ K = 20
 UNDERLAY_OFFSET = 2
 # See module doc's "SAFE_ID_FLOOR, re-derived rather than inherited" section: this now protects
 # only the decimal-text scans (log, /v1/items) against legitimate small integers this harness
-# emits (ports <= 65535, k <= 500, zoom <= 6, idset, shard id, HTTP status). The binary,
+# emits (ports <= 65535, k <= 500, zoom <= 6, shard id, HTTP status). The binary,
 # per-element-aligned entity-id scan of `tessera_id` needs no floor at all (see the same section).
 SAFE_ID_FLOOR = 100_000
 ITEM_SAMPLE_SIZE = 25  # tessera ids sampled for the /v1/items/{tessera_id} textual scan
@@ -1228,7 +1228,6 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         )
 
     # --- POST /v1/artifacts: a layer published over the catalogue, read whole, every frame swept -
-    idset = server.meta(token)["idset"]
     shard = oracle_bundle.manifest["identity"].get("shard_id", 0)
     # Each group holds admitted and denied items alike, so every count is a partial one.
     seen, unseen = sorted(admitted_high), sorted(denied_high)
@@ -1268,7 +1267,7 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
             }
         )
     resp = server.publish_artifacts(
-        ARTIFACTS_LAYER, addressing="tessera", idset=idset, artifacts=planted_artifacts
+        ARTIFACTS_LAYER, addressing="tessera", artifacts=planted_artifacts
     )
     assert resp.status_code == 201, resp.text
     # A publication's memberships are served from the tick that publishes them, which a flush

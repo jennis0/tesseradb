@@ -22,8 +22,8 @@ changes, an open token keeps its old terms until the viewer re-authorises; the o
 long that can take is the deployment's configured token lifetime, or an explicit
 `POST /session/revoke`.
 
-A bundle holder holds the built artifact on disk: the manifest, the per-deployment key, the full
-term index and the geometry. Nothing here defends against this party.
+A bundle holder holds the built artifact on disk: the manifest with the bundle's identity key, the
+full term index and the geometry. Nothing here defends against this party.
 
 An operator drives the control plane: ingest, deletion, suppression and compaction. The design
 treats this party as trusted, and every route on the control plane, without exception, requires
@@ -127,12 +127,15 @@ group by access. A bulk read in stored order discloses the second of these, as
 first property.
 
 The `tessera_id` a client receives is a keyed permutation of the entity id, so two of them reveal
-nothing about whether their items are adjacent. No request accepts an entity id, so a client cannot
-enumerate them by trying values. A bulk read's cursor holds internal positions only inside its
-encryption, and a cursor the server did not issue for that read does not open. The permutation is
-not cryptographic, and it should not be assumed to resist a viewer who has obtained known pairs of
-an entity id and its `tessera_id`; no route on the viewer plane yields one, so what the
-permutation hides does not depend on cryptographic strength.
+nothing about whether their items are adjacent. The key is drawn from the operating system's random
+source each time `tessera build` creates a bundle, and is stored in that bundle's manifest. Nobody
+configures or supplies it, and no response or log line carries it. A copy of a bundle keeps its
+`tessera_id`s. A rebuild creates a new bundle with a new key, so every `tessera_id` changes. No
+request accepts an entity id, so a client cannot enumerate them by trying values. A bulk read's
+cursor holds internal positions only inside its encryption, and a cursor the server did not issue
+for that read does not open. The permutation is not cryptographic, and it should not be assumed to
+resist a viewer who has obtained known pairs of an entity id and its `tessera_id`; no route on the
+viewer plane yields one, so what the permutation hides does not depend on cryptographic strength.
 
 ## An incomplete answer is refused
 
@@ -175,16 +178,16 @@ ask for it, and a viewer held to map order would lose speed and no data.
 
 **The cursor is sealed to one read.** A cursor carries internal positions: a map cell and a
 `tessera_id` in map order, an entity id in stored order, and an artifact's level and publication
-ordinal on the artifacts route. It also carries the idset, the order and the size of the next
-stretch the filter is evaluated over. It is sealed with XChaCha20-Poly1305, an authenticated
-cipher, under a key derived from the identity key, with a random nonce drawn for each cursor, so a
+ordinal on the artifacts route. It also carries the order and the size of the next stretch the
+filter is evaluated over. It is sealed with XChaCha20-Poly1305, an authenticated cipher, under a
+key derived from the bundle's identity key, with a random nonce drawn for each cursor, so a
 viewer can read nothing from a cursor, and two cursors for one position differ and cannot be
 matched. Authenticated with it are the route, the view and its incarnation, a SHA-256 of the
 authorisation data the session was opened with, and on the artifacts route the layer's name, its
 own internal identity and the level named. A cursor therefore opens only in the read it was issued
 for, and only in a session opened with byte-identical authorisation data. A viewer cannot use one
 to name a position they were not served. Every such failure is one refusal, decided before any
-position in the cursor is used, and a rotation of the identity key stops every cursor opening.
+position in the cursor is used, and a cursor issued by another bundle does not open.
 
 **No stored block is sent as it is.** A compressed block of the record store, like a stored
 column, holds the values of items the viewer may not see beside those they may. Every page is
@@ -200,7 +203,7 @@ reason given, and one, the per-tile timing channel, remains open.
 | What a viewer can learn | How | Severity | Why | Specification rows |
 |---|---|---|---|---|
 | Roughly how much of the corpus lies outside their own set; that a token, keyword or category value they can name exists somewhere in the corpus, and coarsely how widely; and that the corpus is being written to | Response time for a viewport, a filter, a category listing or a bulk read in either order grows with the work a request does over rows and terms the viewer cannot see, not only their own. A changed content key on a response says the corpus has changed since the viewer's last request | Low | Only the per-tile timing component of this row is open and unquantified: correlating cost with the viewer's own visible count leaves a residual nobody has bounded. A response's cost also varies with how many artifacts in view were withheld by their own label or their membership requirement, since each is found before it is tested, and the identifier route does more work for a withheld artifact than for an identifier naming nothing; a viewer needs an artifact's `tessera_id` to probe the second, and is never served one for an artifact withheld from them. Every other component (the category, text and suggestion timing variants, and the content key itself) is bounded to a quantity the viewer already possesses or is about to receive, and is accepted on that basis. A finer per-term version of the content key, and a timing channel over how many partitions a token reaches, are specified but not built: a deployment holds one partition today and nothing finer than the coarse content key reaches the wire | C4, C14, C15, C19, C21, C24, C25, C26, C31 |
-| When an item they once saw was deleted or suppressed; and, by comparing `tessera_id`s out of band, that two viewers are looking at the same item | A `tessera_id` is stable for the item's life, so a held one stops resolving on the viewer's next request after the change. Two viewers who compare `tessera_id`s for items they can each see can tell they name the same item. An operator's external ids carry whatever structure the operator put in them | Medium | The price of a `tessera_id` a client can bookmark and share. Probing across a key rotation is closed: nothing lets a client vary the key | C6, C17 |
+| When an item they once saw was deleted or suppressed; and, by comparing `tessera_id`s out of band, that two viewers are looking at the same item | A `tessera_id` is stable for the item's life in one bundle, so a held one stops resolving on the viewer's next request after the change. Two viewers who compare `tessera_id`s for items they can each see can tell they name the same item. An operator's external ids carry whatever structure the operator put in them | Medium | The price of a `tessera_id` a client can bookmark and share. Nothing lets a client vary the key | C6, C17 |
 | A lower bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count from below | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
 | That their visible items in a region group together, a fact about structure that includes unseen items | A minimum-visible-count threshold a layer declares bounds how finely a grouping's presence is exposed against the viewer's own visible set, and filtering cannot deepen it | Low | The threshold decides whether a grouping's existence is announced, not whether its count is protected: a viewport and the density layer already serve exact masked counts over any region a viewer can name, whatever threshold a layer declares | C1 |
 | That an item they were never entitled to see has been deleted, when a permissive annotation layer's membership set loses it | Under a layer declared permissive, content generated from a deleted item keeps serving until compaction removes the deleted member from the generating set. At that point the content stops serving for every viewer who satisfies the surviving members, including one who never satisfied the original generating set, telling them an item they were never entitled to see has been deleted | Medium | Bounded by the caller's own declaration: strict is the default and never shrinks, so an undeclared layer never signals this. Permissive is a caller's choice for a set where losing one member changes nothing the content asserts | C7 |

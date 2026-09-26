@@ -93,7 +93,7 @@ async fn an_item_ingested_without_an_external_id_is_suppressible_by_tessera_id()
     let resp = post_changes(
         &server,
         &serde_json::json!([
-            { "tessera_id": tessera_id.to_string(), "idset": FIXTURE_IDSET, "op": "suppress" },
+            { "tessera_id": tessera_id.to_string(), "op": "suppress" },
         ]),
     )
     .await;
@@ -112,7 +112,7 @@ async fn an_item_ingested_without_an_external_id_is_suppressible_by_tessera_id()
     let resp = post_changes(
         &server,
         &serde_json::json!([
-            { "tessera_id": tessera_id.to_string(), "idset": FIXTURE_IDSET, "op": "unsuppress" },
+            { "tessera_id": tessera_id.to_string(), "op": "unsuppress" },
         ]),
     )
     .await;
@@ -136,7 +136,7 @@ async fn a_mixed_bulk_batch_applies_both_address_forms() {
         &server,
         &serde_json::json!([
             { "external_id": by_external, "op": "suppress" },
-            { "tessera_id": by_tessera.to_string(), "idset": FIXTURE_IDSET, "op": "suppress" },
+            { "tessera_id": by_tessera.to_string(), "op": "suppress" },
         ]),
     )
     .await;
@@ -163,8 +163,8 @@ async fn an_out_of_range_tessera_id_refuses_the_whole_batch() {
     let resp = post_changes(
         &server,
         &serde_json::json!([
-            { "tessera_id": good.to_string(), "idset": FIXTURE_IDSET, "op": "suppress" },
-            { "tessera_id": u64::MAX.to_string(), "idset": FIXTURE_IDSET, "op": "suppress" },
+            { "tessera_id": good.to_string(), "op": "suppress" },
+            { "tessera_id": u64::MAX.to_string(), "op": "suppress" },
         ]),
     )
     .await;
@@ -176,31 +176,7 @@ async fn an_out_of_range_tessera_id_refuses_the_whole_batch() {
     );
 }
 
-/// A list gathered before a key rotation must not be reinterpreted under the new key. The stale
-/// idset is refused **before any inversion**, so no identifier is ever resolved under a key it was
-/// not minted under (decision 0025).
-#[tokio::test]
-async fn a_stale_idset_is_refused_before_inversion() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-    let token = token_for(&server, &["0"]).await;
-
-    let id = ingest_anonymous(&server, "anon-1").await;
-    let before = visible(&server, &token).await;
-
-    let resp = post_changes(
-        &server,
-        &serde_json::json!([
-            { "tessera_id": id.to_string(), "idset": FIXTURE_IDSET + 1, "op": "suppress" },
-        ]),
-    )
-    .await;
-    assert_eq!(resp.status(), 409);
-    assert_eq!(visible(&server, &token).await, before);
-}
-
-/// Exactly one address form, and a tessera address carries the idset it was minted under. Every
-/// shape below is a wholesale refusal before anything is enqueued.
+/// Exactly one address form. Every shape below is a wholesale refusal before anything is enqueued.
 #[tokio::test]
 async fn an_element_names_exactly_one_address_form() {
     let tmp = TempDir::new().unwrap();
@@ -221,16 +197,8 @@ async fn an_element_names_exactly_one_address_form() {
             serde_json::json!([{ "op": "suppress" }]),
         ),
         (
-            "an idset without a tessera_id guards nothing",
-            serde_json::json!([{ "external_id": external, "idset": FIXTURE_IDSET, "op": "suppress" }]),
-        ),
-        (
-            "a tessera address must carry its idset",
-            serde_json::json!([{ "tessera_id": id.to_string(), "op": "suppress" }]),
-        ),
-        (
             "a bare number is what loses u64s past 2^53 in a browser",
-            serde_json::json!([{ "tessera_id": id, "idset": FIXTURE_IDSET, "op": "suppress" }]),
+            serde_json::json!([{ "tessera_id": id, "op": "suppress" }]),
         ),
     ] {
         assert_eq!(
@@ -265,7 +233,7 @@ async fn a_tessera_addressed_deny_replays_to_the_same_entity() {
         let resp = post_changes(
             &server,
             &serde_json::json!([
-                { "tessera_id": id.to_string(), "idset": FIXTURE_IDSET, "op": "suppress" },
+                { "tessera_id": id.to_string(), "op": "suppress" },
             ]),
         )
         .await;
