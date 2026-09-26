@@ -493,21 +493,6 @@ pub enum ExecError {
     /// is one the caller cannot have under another identity, since a column's width and
     /// placement are baked into every row (`per-point-attributes.md` §2.2).
     AttributeConflict { detail: String },
-    /// A values row supplied a cell this deployment already holds a different value for
-    /// (`ingest.md` §1.1, §1.4) → **409**, the batch without effect.
-    ///
-    /// Evaluated on the serial writer: the sources it reads are the commit-window buffer and the
-    /// flushed homes, and only the executor moves either.
-    ///
-    /// **A rendered string, and it reaches the caller** — a row index and a column name, and for
-    /// a group-scoped column the key the cell is addressed by. It names **no held value**
-    /// (`ingest.md` §1.4), no entity id and no external id (**I10**).
-    ValueConflict { detail: String },
-    /// A values row named a subject that does not exist, or one this batch cannot fill →
-    /// **422**, the batch without effect. Separate from [`Self::ValueConflict`] because the
-    /// remedy differs: a conflicting cell is one the caller may not have, and an unresolved id is
-    /// one the caller ingests first (`ingest.md` §1.6).
-    ValuesRefused { detail: String },
     /// A vocabulary of this name exists with a different identity, or a value of this key is held
     /// with a different property → HTTP **409**, no effect (`ingest.md` §1.1: a part present and
     /// different). Separate from [`Self::VocabularyRefused`] on
@@ -521,8 +506,9 @@ pub enum ExecError {
     /// id.
     UniqueTaken { detail: String },
     /// What the handler resolved a batch against has changed since: an item a row names was
-    /// deleted or joined to the row's view, or a value a row carries has a new holder. Nothing
-    /// took effect, and the handler resolves the batch again.
+    /// deleted or joined to the row's view, or a value a row carries has a new holder, or an edit
+    /// moved an item a command names while a fold retired entities. Nothing took effect, and the
+    /// names are resolved again.
     Stale,
 }
 
@@ -545,8 +531,6 @@ impl std::fmt::Display for ExecError {
             | ExecError::AttributeRefused { detail }
             | ExecError::AttributeConflict { detail }
             | ExecError::ViewUnknown { detail }
-            | ExecError::ValueConflict { detail }
-            | ExecError::ValuesRefused { detail }
             | ExecError::UniqueTaken { detail } => write!(f, "{detail}"),
             ExecError::Stale => write!(
                 f,
@@ -630,5 +614,4 @@ mod tests {
             "and the resolved terms come back too"
         );
     }
-
 }

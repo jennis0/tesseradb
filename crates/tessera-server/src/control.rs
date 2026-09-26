@@ -179,7 +179,10 @@ async fn require_operator_credential(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
-    state.check_bearer(crate::state::bearer_token(request.headers()), &state.operator_credential)?;
+    state.check_bearer(
+        crate::state::bearer_token(request.headers()),
+        &state.operator_credential,
+    )?;
     Ok(next.run(request).await)
 }
 
@@ -383,10 +386,12 @@ fn run_ingest(
         None => None,
     };
     let extent = view.map(crate::filter_dto::view_extent);
-    let frame = view.zip(extent.as_ref()).map(|(view, extent)| crate::decode::Frame {
-        projection: view.projection,
-        extent,
-    });
+    let frame = view
+        .zip(extent.as_ref())
+        .map(|(view, extent)| crate::decode::Frame {
+            projection: view.projection,
+            extent,
+        });
     let view_id = view.map(|view| view.id.clone());
 
     // The group-scoped families this batch may carry: those whose group owns this view's key,
@@ -605,12 +610,6 @@ struct DecodedChange {
     op: ChangeOp,
 }
 
-/// A change item resolved to its entity and ready to apply.
-struct ValidatedChange {
-    entity: EntityId,
-    op: ChangeOp,
-}
-
 /// The blocking body of `/control/changes`, run on the deny lane. Every item is validated and
 /// resolved before any is enqueued, so an invalid request applies nothing; a WAL failure during
 /// the apply cannot be rolled back.
@@ -623,8 +622,8 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             // Kept so the refusal names the edit flow instead of answering "unknown op".
             "predicate" => {
                 return Err(ApiError::Contract(
-                    "there is no predicate op; to change an item's access labels, delete it and \
-                     re-ingest it under the same external_id with the new labels"
+                    "there is no predicate op; to change an item's access labels, send an ingest \
+                     row naming the item with the new labels"
                         .to_string(),
                 ));
             }
@@ -672,8 +671,30 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
         decoded.push(DecodedChange { address, op });
     }
 
-    // Resolved before anything is enqueued. An unissued `tessera_id` is answered ahead of an
-    // unknown external id, wherever each sits in the request.
+    // An item an edit moved while the request waited, and whose old entity a fold then retired,
+    // is found by resolving the request's names again.
+    let ops: Vec<ChangeOp> = decoded.iter().map(|d| d.op).collect();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let changes = resolve_changes(state, &decoded)?;
+        match state.engine.accept_changes(changes) {
+            Err(tessera_engine::AcceptError::Exec(tessera_lifecycle::ExecError::Stale))
+                if attempts < 3 =>
+            {
+                continue
+            }
+            answered => return answered.map_err(|e| map_change_batch_error(&ops, e)),
+        }
+    }
+}
+
+/// Every change's entity, in order. Resolved before anything is enqueued: an unissued
+/// `tessera_id` is answered ahead of an unknown external id, wherever each sits in the request.
+fn resolve_changes(
+    state: &AppState,
+    decoded: &[DecodedChange],
+) -> Result<Vec<(EntityId, ChangeOp)>, ApiError> {
     let resolved = resolve_addresses(state, decoded.iter().map(|d| &d.address))?;
     if let Some(index) = decoded
         .iter()
@@ -684,16 +705,15 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             "the tessera_id of item {index} names nothing this deployment issued"
         )));
     }
-    let validated = decoded
-        .into_iter()
+    decoded
+        .iter()
         .zip(resolved)
         .map(|(d, entity)| {
             let entity =
                 entity.ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
-            Ok(ValidatedChange { entity, op: d.op })
+            Ok((entity, d.op))
         })
-        .collect::<Result<Vec<_>, ApiError>>()?;
-    apply_validated(state, validated)
+        .collect()
 }
 
 /// Resolves each address to its entity, in order, `None` where it names nothing. Each form is one
@@ -733,18 +753,6 @@ fn resolve_addresses<'a>(
             Address::External(_) => external.next().flatten(),
         })
         .collect())
-}
-
-/// Applies a validated request as one command: the apply half of [`run_changes`]. The request
-/// is one log record, durable whole or not at all.
-fn apply_validated(state: &AppState, validated: Vec<ValidatedChange>) -> Result<(), ApiError> {
-    let changes: Vec<(EntityId, ChangeOp)> =
-        validated.iter().map(|change| (change.entity, change.op)).collect();
-    let ops: Vec<ChangeOp> = changes.iter().map(|(_, op)| *op).collect();
-    state
-        .engine
-        .accept_changes(changes)
-        .map_err(|e| map_change_batch_error(&ops, e))
 }
 
 /// `POST /control/changes`: deletions, suppressions and unsuppressions. Never answers 429, and has
@@ -868,8 +876,9 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
 /// Holds until the counter reaches `publication` or `serve.visible_wait_max_secs` passes; a
 /// ceiling too large to add to the clock waits without one.
 async fn await_publication(state: &AppState, publication: u64) -> PublicationAck {
-    let deadline = std::time::Instant::now()
-        .checked_add(std::time::Duration::from_secs(state.limits.visible_wait_max_secs));
+    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_secs(
+        state.limits.visible_wait_max_secs,
+    ));
     loop {
         if state.engine.publication() >= publication {
             return PublicationAck {
@@ -973,7 +982,11 @@ async fn register_layer(
                  key of it; name {} or a view of {}, or drop the scope",
                 outside.view,
                 outside.sharing.join(" or "),
-                if outside.sharing.len() == 1 { "it" } else { "them" }
+                if outside.sharing.len() == 1 {
+                    "it"
+                } else {
+                    "them"
+                }
             ))
         })?;
     }
@@ -1548,12 +1561,14 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
         // The view each artifact belongs to, on a group-scoped layer. A null cell names none.
         let views = match batch.column_by_name("view") {
             None => None,
-            Some(column) => Some(column.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                ApiError::Contract(
-                    "growth body: column 'view' is not utf8; it names each artifact's view key"
-                        .to_string(),
-                )
-            })?),
+            Some(column) => Some(column.as_any().downcast_ref::<StringArray>().ok_or_else(
+                || {
+                    ApiError::Contract(
+                        "growth body: column 'view' is not utf8; it names each artifact's view key"
+                            .to_string(),
+                    )
+                },
+            )?),
         };
         let access = labels_col("growth body", &batch, "access")
             .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
@@ -1971,8 +1986,7 @@ fn canonical_row_shape(
     let Some(kind) = declaration.shape.map(|s| s.kind) else {
         if !carried.is_empty() {
             return Err(refuse(
-                "carries a shape, and this layer declares no `shape`; remove the shape"
-                    .to_string(),
+                "carries a shape, and this layer declares no `shape`; remove the shape".to_string(),
             ));
         }
         return Ok(None);
@@ -2336,14 +2350,13 @@ async fn publish_artifacts(
                             tessera_lifecycle::membership::IncomingContent::new(v.values, set)
                         })
                         .collect();
-                    let attached_to =
-                        artifact
-                            .attached_to
-                            .map(|a| tessera_lifecycle::membership::IncomingAttachment {
-                                layer: a.layer,
-                                level: a.level,
-                                key: a.key,
-                            });
+                    let attached_to = artifact.attached_to.map(|a| {
+                        tessera_lifecycle::membership::IncomingAttachment {
+                            layer: a.layer,
+                            level: a.level,
+                            key: a.key,
+                        }
+                    });
                     let mut incoming = match attached_to {
                         None => tessera_lifecycle::IncomingArtifact::with_content(
                             artifact.key,
@@ -2520,8 +2533,7 @@ async fn grow_memberships(
         return Err(ApiError::Contract(format!(
             "the growth names {} members, over the {}-member limit \
              (ingest.max_members_per_request); send fewer members per request",
-            members,
-            state.limits.max_members_per_request
+            members, state.limits.max_members_per_request
         )));
     }
 

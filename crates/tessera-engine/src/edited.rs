@@ -157,6 +157,132 @@ pub(crate) fn entities_of_numbers(
         .collect())
 }
 
+/// Whether `generation` holds a row of `entity`, flushed or buffered.
+pub(crate) fn holds(generation: &Generation, entity: EntityId) -> bool {
+    generation.buffer.contains(entity)
+        || generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .values()
+                .any(|data| data.row_space.row_of(entity).is_some())
+        })
+}
+
+/// The entity holding the item `entity` held, where an edit has moved the item since; `None`
+/// where it has not moved or its item is gone.
+pub(crate) fn moved_to(
+    generation: &Generation,
+    entity: EntityId,
+) -> Result<Option<EntityId>, StoreError> {
+    let number = numbers_of(generation, &[entity])?[0];
+    let now = entities_of_numbers(generation, &[number], |e| holds(generation, e))?[0];
+    Ok(now.filter(|now| *now != entity))
+}
+
+/// Each member of `set` an edit has moved, replaced by the entity its item holds now. Only a
+/// member the overlay deletes can have moved: an edit deletes the entity it moves away from.
+pub(crate) fn follow_moves(
+    generation: &Generation,
+    set: &mut croaring::Bitmap,
+) -> Result<(), StoreError> {
+    let deleted = set.and(generation.overlay.deleted_set());
+    for old in deleted.iter() {
+        if let Some(now) = moved_to(generation, EntityId::new(u64::from(old)))? {
+            set.remove(old);
+            set.add(narrow(now));
+        }
+    }
+    Ok(())
+}
+
+/// `changes` with each change naming an entity an edit has moved an item away from also applied
+/// to the entity the item holds now. The change to the old entity stays, so the log names both.
+pub(crate) fn follow_changes(
+    generation: &Generation,
+    changes: &mut Vec<(EntityId, tessera_lifecycle::ChangeOp)>,
+) -> Result<(), StoreError> {
+    let mut followed = Vec::new();
+    for &(entity, op) in changes.iter() {
+        if !generation.overlay.is_deleted(entity) && holds(generation, entity) {
+            continue;
+        }
+        if let Some(now) = moved_to(generation, entity)? {
+            followed.push((now, op));
+        }
+    }
+    changes.extend(followed);
+    Ok(())
+}
+
+/// Every entity set of `artifacts`, members and generating sets, following moves.
+pub(crate) fn follow_artifacts(
+    generation: &Generation,
+    artifacts: &mut [tessera_lifecycle::IncomingArtifact],
+) -> Result<(), StoreError> {
+    for artifact in artifacts {
+        follow_moves(generation, &mut artifact.members)?;
+        if let Some(excluding) = artifact.excluding.as_mut() {
+            follow_moves(generation, excluding)?;
+        }
+        for content in &mut artifact.contents {
+            follow_moves(generation, &mut content.generated_from)?;
+        }
+    }
+    Ok(())
+}
+
+/// Every entity set of `joins`, following moves.
+pub(crate) fn follow_growth(
+    generation: &Generation,
+    joins: &mut [tessera_lifecycle::IncomingGrowth],
+) -> Result<(), StoreError> {
+    for join in joins {
+        follow_moves(generation, &mut join.joining)?;
+        follow_moves(generation, &mut join.leaving)?;
+    }
+    Ok(())
+}
+
+/// The epochs a command's entities were resolved at: a later generation that committed an edit
+/// may have moved one, and one that also retired entities in a fold may have dropped the map
+/// entry that says where to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Stamp {
+    edits: u64,
+    folds: u64,
+}
+
+/// What has happened to a command's entities since its [`Stamp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Since {
+    /// No edit committed: every entity is where it was.
+    Still,
+    /// An edit committed: [`follow_moves`] finds where each moved entity's item is now.
+    Edited,
+    /// An edit committed and a fold retired entities: the names must be resolved again.
+    Folded,
+}
+
+impl Stamp {
+    pub(crate) fn of(generation: &Generation) -> Stamp {
+        Stamp {
+            edits: generation.edit_epoch,
+            folds: generation.fold_epoch,
+        }
+    }
+
+    pub(crate) fn since(self, generation: &Generation) -> Since {
+        match (
+            generation.edit_epoch == self.edits,
+            generation.fold_epoch == self.folds,
+        ) {
+            (true, _) => Since::Still,
+            (false, true) => Since::Edited,
+            (false, false) => Since::Folded,
+        }
+    }
+}
+
 impl crate::Engine {
     /// The `tessera_id` of each of `entities`, against `generation`: its number's permutation.
     pub(crate) fn tessera_ids_of_in(

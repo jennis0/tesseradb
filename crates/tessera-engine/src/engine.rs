@@ -11,13 +11,12 @@ use rustc_hash::FxHashMap;
 use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_lifecycle::Overlay;
 use tessera_plugin::Plugin;
-use tessera_store::{Bundle, StoreError};
 use tessera_store::manifest::{CurrentPointer, Declarations};
 use tessera_store::read::open_bundle;
 use tessera_store::vocabulary::Vocabularies;
+use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, IdentityKey};
 
-use crate::{Generation, GenerationHandle};
 use crate::cache::RowProjectionCache;
 use crate::config::{coalesce_policy, merge_policy, EngineConfig};
 use crate::error::{EngineError, Result};
@@ -25,6 +24,7 @@ use crate::geometry::GeometryPublication;
 use crate::status::ServeCounters;
 use crate::switches::TestSwitches;
 use crate::write::{PublishGeometryError, WritePath};
+use crate::{Generation, GenerationHandle};
 
 /// Builds the shared compute pool with a panic handler. `install`, `join` and `scope` propagate a
 /// worker panic to their caller and never reach this handler; `spawn`, used by the write path's
@@ -822,6 +822,8 @@ fn first_generation(
             unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
             edited: Arc::new(edited),
             edited_live: Arc::new(state.edited_live.clone()),
+            edit_epoch: 0,
+            fold_epoch: 0,
             delta_postings: readers.delta_postings.clone(),
             overlay_version: 0,
             overlay: Arc::new(overlay),
@@ -1056,7 +1058,11 @@ impl Engine {
         // The rows the log held and no flush wrote, which the occupancy bound and the row trigger
         // count from the first request, not from the first write.
         let buffered = engine.generation().buffer.len();
-        engine.write.health().buffered_items.store(buffered, Ordering::SeqCst);
+        engine
+            .write
+            .health()
+            .buffered_items
+            .store(buffered, Ordering::SeqCst);
         Ok(engine)
     }
 
@@ -1342,7 +1348,10 @@ impl ExternalIdIndex {
     /// Fallible: a corrupt extent, a digest mismatch or a shuffled extent list propagates as
     /// `Err(StoreError::InvalidSidecar)` through `Engine::resolve_external_id` to the handler
     /// rather than panicking, still fail-closed in effect.
-    pub(crate) fn resolve(&self, external_id: &[u8]) -> std::result::Result<Option<EntityId>, StoreError> {
+    pub(crate) fn resolve(
+        &self,
+        external_id: &[u8],
+    ) -> std::result::Result<Option<EntityId>, StoreError> {
         self.0.resolve(external_id)
     }
 

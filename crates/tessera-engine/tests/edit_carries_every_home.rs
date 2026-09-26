@@ -935,3 +935,119 @@ fn a_view_dropped_behind_an_edit_in_one_window_keeps_the_item() {
         flush(&engine);
     }
 }
+
+/// **A growth and a publication naming an item, queued behind an edit of it**, reach the item
+/// where the edit moved it: the item joins the artifact grown, and a content generated from it
+/// is served, before and after the fold that retires the entity they named.
+#[test]
+fn a_growth_and_a_publication_queued_behind_an_edit_follow_the_item() {
+    use tessera_lifecycle::membership::IncomingContent;
+    use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_fixture(tmp.path());
+    let engine = open(tmp.path(), &root);
+    let map = source_to_new_map(&root, "v00000");
+    let entity = |s: u64| EntityId::new(map[&s]);
+    let tid = engine.tessera_id_of(entity(X)).unwrap();
+    let mut grown = label_layer();
+    grown.name = "topics/b".into();
+    engine.register_layer(grown).unwrap();
+    engine
+        .publish_artifacts(
+            "topics/b".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("g0".into()),
+                [entity(Y)],
+                vec![IncomingContent::new(vec!["grown".to_string()], [entity(Y)])],
+            )],
+        )
+        .unwrap();
+    tick(&engine);
+
+    engine.set_work_pass_paused_for_test(true);
+    let enqueued = engine.work_enqueued_for_test();
+    std::thread::scope(|scope| {
+        let edited = scope.spawn(|| {
+            edit(
+                &engine,
+                "score",
+                "s0",
+                naming(tid, |row| {
+                    row.scalars[SCORE_AT] = WalScalar::I32(555);
+                    row.omitted.retain(|at| *at != SCORE_AT);
+                }),
+            )
+        });
+        wait_until(
+            "the edit is queued",
+            std::time::Duration::from_secs(30),
+            || engine.work_enqueued_for_test() > enqueued,
+        );
+        let growth = scope.spawn(|| {
+            engine
+                .grow_memberships(
+                    "topics/b".into(),
+                    0,
+                    vec![IncomingGrowth::from_entities("g0".into(), [entity(X)])],
+                )
+                .expect("the growth is accepted")
+        });
+        let publication = scope.spawn(|| {
+            engine
+                .publish_artifacts(
+                    "topics/b".into(),
+                    0,
+                    vec![IncomingArtifact::with_content(
+                        Some("g1".into()),
+                        [entity(X), entity(Y)],
+                        vec![IncomingContent::new(
+                            vec!["published".to_string()],
+                            [entity(X)],
+                        )],
+                    )],
+                )
+                .expect("the publication is accepted")
+        });
+        wait_until(
+            "both are queued",
+            std::time::Duration::from_secs(30),
+            || engine.work_enqueued_for_test() > enqueued + 2,
+        );
+        engine.set_work_pass_paused_for_test(false);
+        edited.join().unwrap();
+        growth.join().unwrap();
+        publication.join().unwrap();
+    });
+    flush(&engine);
+    assert_ne!(
+        engine.resolve_tessera_ids(&[tid]).unwrap()[0],
+        Some(entity(X)),
+        "the edit moved the item"
+    );
+    for after in ["the flush", "the fold"] {
+        let served = artifacts_of(&engine, &full_coverage_credential());
+        let artifact = |key: &str| {
+            served
+                .iter()
+                .find(|a| a.key.as_deref() == Some(key))
+                .unwrap_or_else(|| panic!("{key} is served after {after}"))
+        };
+        assert_eq!(
+            artifact("g0").masked_count,
+            2,
+            "the grown artifact holds the item after {after}"
+        );
+        assert_eq!(
+            artifact("g1").masked_count,
+            2,
+            "the published artifact holds it after {after}"
+        );
+        assert_eq!(
+            artifact("g1").content,
+            vec!["published".to_string()],
+            "the content generated from the item is served after {after}"
+        );
+        fold(&engine);
+    }
+}

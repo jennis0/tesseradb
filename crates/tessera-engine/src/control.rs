@@ -215,7 +215,7 @@ impl Engine {
         entity: EntityId,
         op: ChangeOp,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.accept_changes(vec![(entity, op)])
+        self.accept_changes(vec![(entity, op)])
     }
 
     /// Apply one `/control/changes` request and wait for its receipt. The request is one log
@@ -226,7 +226,7 @@ impl Engine {
         &self,
         changes: Vec<(EntityId, ChangeOp)>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.accept_changes(changes)
+        self.submit_changes(changes)?.wait()
     }
 
     /// Enqueue one `/control/changes` request without waiting, so requests from several callers
@@ -236,7 +236,13 @@ impl Engine {
         &self,
         changes: Vec<(EntityId, ChangeOp)>,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
-        self.write.submit_changes(changes)
+        // A change resolved before an edit moved its item reaches the item where it is now.
+        let mut changes = changes;
+        let generation = self.generation();
+        crate::edited::follow_changes(&generation, &mut changes)
+            .map_err(|e| crate::write::AcceptError::Unreadable(e.to_string()))?;
+        self.write
+            .submit_changes(changes, crate::edited::Stamp::of(&generation))
     }
 
     /// One registered layer's declaration, by name, with no gate. Answers what a declaration
@@ -414,6 +420,12 @@ impl Engine {
         level: u32,
         artifacts: Vec<tessera_lifecycle::IncomingArtifact>,
     ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
+        // A member resolved before an edit moved its item is the item where it is now.
+        let mut artifacts = artifacts;
+        let generation = self.generation();
+        crate::edited::follow_artifacts(&generation, &mut artifacts)
+            .map_err(|e| crate::write::AcceptError::Unreadable(e.to_string()))?;
+        let stamp = crate::edited::Stamp::of(&generation);
         self.refuse_rowless(artifacts.iter().map(|a| &a.members))?;
 
         // A declared member that is deleted refuses the batch; a suppressed one is accepted, being
@@ -421,7 +433,6 @@ impl Engine {
         // position, never an entity id. A membership spelled by exclusion carries no members here:
         // the complement is taken on the executor, so this and the row-less check pass over the
         // empty set the record carries.
-        let generation = self.generation();
         let mut deleted = 0u64;
         let mut first_artifact = None;
         for (index, artifact) in artifacts.iter().enumerate() {
@@ -454,7 +465,9 @@ impl Engine {
             ));
         }
 
-        let batch = self.write.publish_artifacts(layer, level, artifacts)?;
+        let batch = self
+            .write
+            .publish_artifacts(layer, level, artifacts, stamp)?;
         let shard = generation.bundle.manifest.identity.shard_id;
         let tessera_ids = batch
             .entities
@@ -496,11 +509,15 @@ impl Engine {
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
     ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
+        let mut joins = joins;
+        let generation = self.generation();
+        crate::edited::follow_growth(&generation, &mut joins)
+            .map_err(|e| crate::write::AcceptError::Unreadable(e.to_string()))?;
+        let stamp = crate::edited::Stamp::of(&generation);
         self.refuse_rowless(joins.iter().map(|j| &j.joining))?;
 
         // A count and the key of the first join naming one, never an entity id: the detail is the
         // caller's 422 body.
-        let generation = self.generation();
         let mut deleted = 0u64;
         let mut first_key = None;
         for join in &joins {
@@ -526,7 +543,7 @@ impl Engine {
             ));
         }
 
-        let grown = self.write.grow_memberships(layer, level, joins)?;
+        let grown = self.write.grow_memberships(layer, level, joins, stamp)?;
         let shard = generation.bundle.manifest.identity.shard_id;
         grown
             .into_iter()

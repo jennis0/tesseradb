@@ -49,7 +49,12 @@ impl Executor {
             let Ok(command) = self.queues.deny.try_recv() else {
                 break;
             };
-            let Command::Changes { changes, reply } = command else {
+            let Command::Changes {
+                mut changes,
+                stamp,
+                reply,
+            } = command
+            else {
                 // Any other command applies immediately, so the window gathered so far is
                 // committed first to keep append order equal to apply order.
                 if !entries.is_empty() {
@@ -58,6 +63,12 @@ impl Executor {
                 self.execute(command);
                 return true;
             };
+            if !self.follow_since(stamp, |generation| {
+                crate::edited::follow_changes(generation, &mut changes)
+            }) {
+                reply.fail(ExecError::Stale);
+                continue;
+            }
             held += changes.len();
             entries.push(DenyEntry {
                 changes,
@@ -68,33 +79,25 @@ impl Executor {
         if entries.is_empty() {
             return false;
         }
-        self.redirect_denies(&mut entries);
         self.cascade_dependents(&mut entries);
         self.commit_denies(entries);
         true
     }
 
-    /// Carry each change naming an entity an edit has moved an item away from to the entity the
-    /// item holds now, in the same entry, so the record the log keeps names both. A handler
-    /// resolves a request's `tessera_id`s before it is queued, and an edit committed in between
-    /// has deleted the entity it resolved to: a suppression applied there alone would leave the
-    /// item visible under its acknowledgement.
-    pub(super) fn redirect_denies(&self, entries: &mut [DenyEntry]) {
-        if self.superseded.is_empty() {
-            return;
-        }
-        for entry in entries.iter_mut() {
-            let mut carried: Vec<(EntityId, ChangeOp)> = Vec::new();
-            for (entity, op) in &entry.changes {
-                let mut current = *entity;
-                while let Some(next) = self.superseded.get(&current) {
-                    current = *next;
-                }
-                if current != *entity {
-                    carried.push((current, *op));
-                }
-            }
-            entry.changes.extend(carried);
+    /// Whether a command resolved at `stamp` names its entities where their items are now,
+    /// `follow` having moved each that an edit committed since moved. `false` where a fold has
+    /// also retired entities since, which can drop the entry saying where an item went, or the
+    /// edited items cannot be read: the caller resolves the command's names again.
+    pub(super) fn follow_since(
+        &self,
+        stamp: crate::edited::Stamp,
+        follow: impl FnOnce(&crate::Generation) -> Result<(), tessera_store::StoreError>,
+    ) -> bool {
+        let generation = self.generation.load();
+        match stamp.since(&generation) {
+            crate::edited::Since::Still => true,
+            crate::edited::Since::Edited => follow(&generation).is_ok(),
+            crate::edited::Since::Folded => false,
         }
     }
 
@@ -263,10 +266,19 @@ impl Executor {
             // A deleted entity names nothing, so its live unique entries and edited-item pair go
             // with its rows.
             let mut unique_live = (*generation.unique_live).clone();
-            unique_live.remove_entities(&deleted.iter().filter_map(|e| u32::try_from(e.raw()).ok()).collect());
+            unique_live.remove_entities(
+                &deleted
+                    .iter()
+                    .filter_map(|e| u32::try_from(e.raw()).ok())
+                    .collect(),
+            );
             let mut edited_live = (*generation.edited_live).clone();
             edited_live.remove(deleted.iter().filter_map(|e| u32::try_from(e.raw()).ok()));
-            (Arc::new(buffer), Arc::new(unique_live), Arc::new(edited_live))
+            (
+                Arc::new(buffer),
+                Arc::new(unique_live),
+                Arc::new(edited_live),
+            )
         };
 
         // A window of deletes and suppressions only grows the mask; an unsuppress re-derives it,

@@ -277,18 +277,24 @@ impl Executor {
             // `BatchState::Held` is unconstructible here and the answers are exactly `admit`'s.
             Command::Ingest { submission, reply } => {
                 let window = CommitWindow::new(self.next_window_seq());
-                let (window, _) = self.admit_ingest(
-                    window,
-                    submission,
-                    reply,
-                );
+                let (window, _) = self.admit_ingest(window, submission, reply);
                 if !window.is_empty() {
                     self.close_window(window);
                 }
             }
             // A window of one entry is exactly the per-command semantics, which is why there is
             // no second deny implementation to keep in step with the first.
-            Command::Changes { changes, reply } => {
+            Command::Changes {
+                mut changes,
+                stamp,
+                reply,
+            } => {
+                if !self.follow_since(stamp, |generation| {
+                    crate::edited::follow_changes(generation, &mut changes)
+                }) {
+                    reply.fail(ExecError::Stale);
+                    return;
+                }
                 let mut entries = vec![DenyEntry {
                     changes,
                     reply: Some(reply),
@@ -342,15 +348,33 @@ impl Executor {
             Command::PublishArtifacts {
                 layer,
                 level,
-                artifacts,
+                mut artifacts,
+                stamp,
                 reply,
-            } => self.commit_artifacts(layer, level, artifacts, reply),
+            } => {
+                if !self.follow_since(stamp, |generation| {
+                    crate::edited::follow_artifacts(generation, &mut artifacts)
+                }) {
+                    reply.fail(ExecError::Stale);
+                    return;
+                }
+                self.commit_artifacts(layer, level, artifacts, reply)
+            }
             Command::GrowMemberships {
                 layer,
                 level,
-                joins,
+                mut joins,
+                stamp,
                 reply,
-            } => self.commit_growth(layer, level, joins, reply),
+            } => {
+                if !self.follow_since(stamp, |generation| {
+                    crate::edited::follow_growth(generation, &mut joins)
+                }) {
+                    reply.fail(ExecError::Stale);
+                    return;
+                }
+                self.commit_growth(layer, level, joins, reply)
+            }
         }
     }
 
@@ -764,11 +788,9 @@ impl Executor {
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let resolved = crate::attributes::resolve(
-            &request,
-            &generation.bundle.manifest,
-            |name| self.live.registered_layer(name).is_some(),
-        );
+        let resolved = crate::attributes::resolve(&request, &generation.bundle.manifest, |name| {
+            self.live.registered_layer(name).is_some()
+        });
         let compiled = match resolved {
             Ok(crate::attributes::Resolution::Existing) => {
                 reply.ack(true);
@@ -1353,5 +1375,4 @@ impl Executor {
         });
         self.publish(next, started);
     }
-
 }

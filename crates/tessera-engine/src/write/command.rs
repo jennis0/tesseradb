@@ -205,6 +205,7 @@ pub(crate) enum Command {
     /// ([`Command::is_never_shed`]).
     Changes {
         changes: Vec<(EntityId, ChangeOp)>,
+        stamp: crate::edited::Stamp,
         reply: Reply<()>,
     },
     /// Register an annotation layer. The answer is the layer's own entity, which the handler turns
@@ -268,6 +269,7 @@ pub(crate) enum Command {
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
+        stamp: crate::edited::Stamp,
         reply: Reply<PublishedBatch>,
     },
     /// Add entities to the memberships of artifacts that exist, each named by its key. The whole
@@ -277,6 +279,7 @@ pub(crate) enum Command {
         layer: String,
         level: u32,
         joins: Vec<IncomingGrowth>,
+        stamp: crate::edited::Stamp,
         reply: Reply<Vec<MembershipGrown>>,
     },
 }
@@ -320,15 +323,16 @@ mod tests {
             );
             let cmd = Command::Changes {
                 changes: vec![(EntityId::new(1), op)],
+                stamp: Default::default(),
                 reply,
             };
             assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
         }
         let (reply, _pending) = Reply::channel(
-                None,
-                #[cfg(feature = "fault-injection")]
-                None,
-            );
+            None,
+            #[cfg(feature = "fault-injection")]
+            None,
+        );
         let ingest = Command::Ingest {
             submission: IngestSubmission {
                 rows: Vec::new(),

@@ -75,6 +75,11 @@ pub struct GenerationParts {
     pub(crate) edited: Arc<tessera_store::edited::EditedIndex>,
     /// The edited-items pairs no run holds yet, published with the buffer.
     pub(crate) edited_live: Arc<crate::edited::EditedLive>,
+    /// How many commit windows have committed an edit, and how many folds have retired entities,
+    /// since the process started: what a command resolved against an earlier generation compares
+    /// to learn whether an entity it names has moved ([`crate::edited::Stamp`]).
+    pub(crate) edit_epoch: u64,
+    pub(crate) fold_epoch: u64,
     /// One sparse delta postings tier per flush segment, in publication order.
     ///
     /// A fragment build unions the base with every live tier over the session's satisfied terms
@@ -122,7 +127,6 @@ pub struct GenerationParts {
     /// [`Generation::vocabularies`] does and travels with it.
     pub suggest: Arc<crate::suggest::SuggestIndexes>,
 }
-
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
 ///
@@ -415,6 +419,8 @@ impl Generation {
             unique_live: Arc::default(),
             edited: Arc::default(),
             edited_live: Arc::default(),
+            edit_epoch: 0,
+            fold_epoch: 0,
             delta_postings: Vec::new(),
             overlay_version: 0,
             overlay: Arc::new(overlay),

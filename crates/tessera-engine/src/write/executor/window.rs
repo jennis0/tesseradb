@@ -741,9 +741,6 @@ impl Executor {
             Publish::AtTick,
         );
 
-        for (old, new) in moved {
-            self.superseded.insert(old, new);
-        }
         self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
         log_minted_artifacts(&minted_per_entry, &mint_records);
         closing.ack(&self.health, minted_per_entry);
@@ -895,6 +892,7 @@ impl Executor {
             }
             if let Some(edited_live) = edited_live {
                 g.edited_live = Arc::new(edited_live);
+                g.edit_epoch = generation.edit_epoch + 1;
             }
         };
         let next = match overlay {

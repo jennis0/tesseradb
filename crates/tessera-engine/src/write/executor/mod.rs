@@ -11,8 +11,8 @@ mod unique;
 mod wal;
 mod window;
 
-pub(super) use background::Background;
 pub(crate) use background::outstanding;
+pub(super) use background::Background;
 pub(super) use manifest::SideManifests;
 pub(in crate::write) use unique::UniqueDeclarations;
 pub(super) use wal::ExecutorLog;
@@ -24,7 +24,6 @@ use manifest::*;
 use memberships::*;
 pub(in crate::write) use publications::*;
 use wal::*;
-
 
 /// How long after a failed cycle the next retry may come, so it does not retry on every wake.
 pub(super) const FAILED_CYCLE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -66,14 +65,11 @@ pub(super) struct Executor {
     /// So the first tick lands one period after construction, not immediately.
     pub(super) last_tick: std::time::Instant,
     /// What every accepted write since the last tick did to each level's row forms.
-    pub(super) pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
+    pub(super) pending_forms:
+        std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
     /// The view the last dispatched flush writes and the entity floor its segment leaves; read
     /// only while that flush is outstanding.
     pub(super) flush_flight: Option<(String, u64)>,
-    /// Each entity an edit this process committed moved an item away from, with the entity it
-    /// moved to, until a fold removes the old one. A deny resolved to the old entity before the
-    /// edit reaches the item where it is now ([`Executor::redirect_denies`]).
-    pub(super) superseded: FxHashMap<EntityId, EntityId>,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
@@ -88,7 +84,8 @@ impl Executor {
     /// Drop the region decompositions of generations older than the retention depth.
     pub(super) fn prune_region_cache(&self, segments_version: u64) {
         let floor = segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS);
-        self.deps.region_cache
+        self.deps
+            .region_cache
             .retain_keys(|key| key.segments_version >= floor);
     }
 
@@ -329,8 +326,6 @@ impl Executor {
             Some(retired) if !retired.is_empty() => {
                 // The live external-id map loses the retired bindings first.
                 let forgotten = self.live.forget_established(retired);
-                self.superseded
-                    .retain(|old, _| !retired.contains(old.raw() as u32));
                 let mut overlay = (*previous.overlay).clone();
                 let count = overlay.retire(retired);
                 tracing::info!(
@@ -343,7 +338,6 @@ impl Executor {
             }
             _ => (Arc::clone(&previous.overlay), previous.overlay_version),
         };
-
 
         let next = previous.with(|g| {
             g.prefix = prefix;
@@ -361,6 +355,9 @@ impl Executor {
                 g.edited = Arc::clone(&r.edited);
             }
             g.delta_postings = delta_postings;
+            if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
+                g.fold_epoch = previous.fold_epoch + 1;
+            }
             g.overlay_version = overlay_version;
             g.overlay = overlay;
         });

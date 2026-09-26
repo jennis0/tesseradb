@@ -291,7 +291,10 @@ pub(crate) fn retire_dead_view_artifacts(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Vec<(String, u32)> {
     store.retire_dead_views(|layer, key, incarnation| {
-        match registry.get(layer).and_then(|held| held.declaration.scope.group()) {
+        match registry
+            .get(layer)
+            .and_then(|held| held.declaration.scope.group())
+        {
             Some(group) => manifest.incarnation_of_key(group, key) == Some(incarnation),
             None => true,
         }
@@ -532,7 +535,6 @@ impl WritePath {
                     last_tick: std::time::Instant::now(),
                     pending_forms: std::collections::BTreeMap::new(),
                     flush_flight: None,
-                    superseded: FxHashMap::default(),
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };
@@ -814,11 +816,13 @@ impl WritePath {
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
+        stamp: crate::edited::Stamp,
     ) -> Result<PublishedBatch, AcceptError> {
         self.submit(|reply| Command::PublishArtifacts {
             layer,
             level,
             artifacts,
+            stamp,
             reply,
         })
     }
@@ -830,26 +834,15 @@ impl WritePath {
         layer: String,
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
+        stamp: crate::edited::Stamp,
     ) -> Result<Vec<tessera_lifecycle::MembershipGrown>, AcceptError> {
         self.submit(|reply| Command::GrowMemberships {
             layer,
             level,
             joins,
+            stamp,
             reply,
         })
-    }
-
-    /// Submit one `/control/changes` request and wait for its receipt. The request is one
-    /// record, durable whole or not at all.
-    ///
-    /// If the append or fsync fails, every `Delete` and `Suppress` in the request is still
-    /// applied, the items hidden, before this returns `Err`: a refusal must never leave a deny
-    /// unapplied. So an `Err` here does not mean nothing happened; see [`ExecError::Wal`].
-    pub(crate) fn accept_changes(
-        &self,
-        changes: Vec<(EntityId, ChangeOp)>,
-    ) -> Result<(), AcceptError> {
-        self.submit_changes(changes)?.wait()
     }
 
     /// Enqueue one `/control/changes` request without waiting for its receipt, so that several
@@ -858,14 +851,18 @@ impl WritePath {
     pub(crate) fn submit_changes(
         &self,
         changes: Vec<(EntityId, ChangeOp)>,
+        stamp: crate::edited::Stamp,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(
             None,
             #[cfg(feature = "fault-injection")]
             self.faults.clone(),
         );
-        self.handle()?
-            .enqueue(Command::Changes { changes, reply })?;
+        self.handle()?.enqueue(Command::Changes {
+            changes,
+            stamp,
+            reply,
+        })?;
         Ok(PendingChange(pending))
     }
 }

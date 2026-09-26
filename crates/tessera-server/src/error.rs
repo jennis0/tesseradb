@@ -34,7 +34,10 @@ pub enum ApiError {
     FailClosed(String),
     /// 429: a bound shed the whole request. `Retry-After` and the body's `retry_after_s` carry the
     /// same number, chosen per [`ShedCause`].
-    Backpressure { retry_after_s: u64, cause: ShedCause },
+    Backpressure {
+        retry_after_s: u64,
+        cause: ShedCause,
+    },
     /// 503: the write executor was never started, or stopped before it was handed the command, so
     /// this node took nothing. A receipt lost after the executor took the command is a 500 instead,
     /// because the command may be in force. The detail is fixed and there is no `Retry-After`: the
@@ -76,12 +79,12 @@ impl ShedCause {
             ShedCause::BulkGate => {
                 "the server is at its bulk-read admission bound; retry shortly".to_string()
             }
-            ShedCause::WriteQueue => format!(
-                "the write queue is full; retry after {retry_after_s}s"
-            ),
-            ShedCause::IngestAdmission => format!(
-                "the server is at its ingest-admission bound; retry after {retry_after_s}s"
-            ),
+            ShedCause::WriteQueue => {
+                format!("the write queue is full; retry after {retry_after_s}s")
+            }
+            ShedCause::IngestAdmission => {
+                format!("the server is at its ingest-admission bound; retry after {retry_after_s}s")
+            }
             ShedCause::SingleFlight => "a concurrent request is already building this session's \
                  row projection or mask fragment; retry shortly"
                 .to_string(),
@@ -226,9 +229,9 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         },
         // Unreachable in practice, since cancellation fires only when the handler future is
         // dropped. A 500 with a fixed detail in case it ever arrives on a live connection.
-        EngineError::Cancelled => ApiError::FailClosed(
-            "the request was cancelled before it completed".to_string(),
-        ),
+        EngineError::Cancelled => {
+            ApiError::FailClosed("the request was cancelled before it completed".to_string())
+        }
         // A 500, not an empty 200: an empty value set is a real answer for a principal who may see
         // none of the values, and must stay distinct from one that could not be read. The detail
         // can carry a store failure's text, so only the column is sent.
@@ -259,18 +262,14 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
 /// fixed string.
 pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
     tracing::error!(detail = %e, "bundle/sidecar read failed; answering fail-closed");
-    ApiError::FailClosed(
-        "could not read this bundle's stored data".to_string(),
-    )
+    ApiError::FailClosed("could not read this bundle's stored data".to_string())
 }
 
 /// Maps a WAL append or fsync failure to a fail-closed 500. The OS error's text can name a path,
 /// so it is logged and never sent.
 pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
     tracing::error!(detail = %e, "wal append/fsync failed; answering fail-closed");
-    ApiError::FailClosed(
-        "a durability write failed".to_string(),
-    )
+    ApiError::FailClosed("a durability write failed".to_string())
 }
 
 /// Maps one write-executor outcome to its answer; every variant is named. A WAL failure's 500
@@ -327,9 +326,7 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         }
         // Forwarded: the detail names a vocabulary and its declared width. Widening the code space
         // instead would recolour every coded row.
-        AcceptError::Exec(ExecError::VocabularyRefused { detail }) => {
-            ApiError::Contract(detail)
-        }
+        AcceptError::Exec(ExecError::VocabularyRefused { detail }) => ApiError::Contract(detail),
         // The detail names the caller's declaration against the published rules. Refused before any
         // allocation or WAL append, so nothing took effect.
         AcceptError::Exec(ExecError::LayerRefused { detail }) => ApiError::Contract(detail),
@@ -343,20 +340,12 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::ViewUnknown { detail }) => ApiError::Unknown(detail),
         // A refused declaration is corrected and resent. A name held under another identity cannot
         // be had, since a column's width is baked into every row. Neither took effect.
-        AcceptError::Exec(ExecError::AttributeRefused { detail }) => {
-            ApiError::Contract(detail)
-        }
-        AcceptError::Exec(ExecError::AttributeConflict { detail }) => {
-            ApiError::Conflict(detail)
-        }
+        AcceptError::Exec(ExecError::AttributeRefused { detail }) => ApiError::Contract(detail),
+        AcceptError::Exec(ExecError::AttributeConflict { detail }) => ApiError::Conflict(detail),
         // A cell held differently is a 409 whose detail never names the held value. A row naming a
         // missing subject or layer key is a 422 the caller fixes and resends. Neither took effect.
-        AcceptError::Exec(ExecError::ValueConflict { detail }) => ApiError::Conflict(detail),
-        AcceptError::Exec(ExecError::ValuesRefused { detail }) => ApiError::Contract(detail),
         // A vocabulary, or a value's title, held under another identity; as for attributes above.
-        AcceptError::Exec(ExecError::VocabularyConflict { detail }) => {
-            ApiError::Conflict(detail)
-        }
+        AcceptError::Exec(ExecError::VocabularyConflict { detail }) => ApiError::Conflict(detail),
         // The detail names the values and the holders' `tessera_id`s, never an entity id.
         AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
         // Reached only where the handler's one re-check was stale too.
@@ -439,9 +428,7 @@ fn change_request_in_force(
 /// never sent.
 pub fn map_join_error(e: tokio::task::JoinError) -> ApiError {
     tracing::error!(detail = %e, "spawn_blocking closure panicked; answering fail-closed");
-    ApiError::FailClosed(
-        "an internal error occurred while handling this request".to_string(),
-    )
+    ApiError::FailClosed("an internal error occurred while handling this request".to_string())
 }
 
 #[cfg(test)]
@@ -538,7 +525,10 @@ mod tests {
     /// refusal, which the deny lane cannot produce, is not a 429.
     #[test]
     fn a_change_request_that_reached_nothing_is_503_never_429() {
-        for e in [SubmitError::ExecutorDead, SubmitError::QueueFull { retry_after_s: 1 }] {
+        for e in [
+            SubmitError::ExecutorDead,
+            SubmitError::QueueFull { retry_after_s: 1 },
+        ] {
             let (status, code, _) =
                 map_change_batch_error(&[ChangeOp::Suppress], AcceptError::Submit(e)).parts();
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -551,7 +541,10 @@ mod tests {
     #[test]
     fn a_change_request_that_may_be_in_force_is_500() {
         let lost = AcceptError::Submit(SubmitError::ReceiptLost);
-        assert_eq!(change_request_in_force(&[ChangeOp::Unsuppress], &lost), Some(true));
+        assert_eq!(
+            change_request_in_force(&[ChangeOp::Unsuppress], &lost),
+            Some(true)
+        );
         let both = [ChangeOp::Unsuppress, ChangeOp::Delete];
         assert_eq!(change_request_in_force(&both, &wal_failure()), Some(true));
         assert_eq!(
@@ -641,7 +634,13 @@ mod tests {
 
     fn assert_single_flight_429(e: ApiError) {
         assert!(
-            matches!(e, ApiError::Backpressure { cause: ShedCause::SingleFlight, .. }),
+            matches!(
+                e,
+                ApiError::Backpressure {
+                    cause: ShedCause::SingleFlight,
+                    ..
+                }
+            ),
             "a single-flight shed must not be reported as the compute gate's, got {e:?}"
         );
         let response = e.into_response();
@@ -731,7 +730,10 @@ mod tests {
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(code, "fail-closed");
             for fragment in ["/srv", "seg-0007", "records.blob", "144999"] {
-                assert!(!detail.contains(fragment), "{detail:?} carries {fragment:?}");
+                assert!(
+                    !detail.contains(fragment),
+                    "{detail:?} carries {fragment:?}"
+                );
             }
         }
     }
