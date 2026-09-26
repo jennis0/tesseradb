@@ -361,7 +361,8 @@ pub(crate) fn parse_ingest_batch(
                     .find(|name| has_column(name))
                 {
                     return Err(DecodeError(format!(
-                        "ingest body: column '{name}' is a coordinate and this batch names no                          view to place it in; name the view in x-tessera-view"
+                        "ingest body: column '{name}' is a coordinate and this batch names no \
+                         view to place it in; name the view in x-tessera-view"
                     )));
                 }
                 (None, None)
@@ -370,7 +371,8 @@ pub(crate) fn parse_ingest_batch(
                 if let Some((wrong, right)) = coordinates::misnamed_axis(frame.projection, has_column)
                 {
                     return Err(DecodeError(format!(
-                        "ingest body: {}, so its coordinate columns are '{x_name}' and                          '{y_name}'; rename '{wrong}' to '{right}'",
+                        "ingest body: {}, so its coordinate columns are '{x_name}' and \
+                         '{y_name}'; rename '{wrong}' to '{right}'",
                         match frame.projection {
                             Projection::None =>
                                 "this view declares no projection, so it has no longitude"
@@ -392,7 +394,8 @@ pub(crate) fn parse_ingest_batch(
                 (y_name, x_name)
             };
             return Err(DecodeError(format!(
-                "ingest body: the batch carries '{carried}' and not '{missing}'; send both                  coordinates or neither"
+                "ingest body: the batch carries '{carried}' and not '{missing}'; send both \
+                 coordinates or neither"
             )));
         }
         let access_column = batch.column_by_name("access");
@@ -425,7 +428,8 @@ pub(crate) fn parse_ingest_batch(
                 (None | Some(None), None | Some(None)) => None,
                 _ => {
                     return Err(DecodeError(format!(
-                        "ingest body: row {} carries one coordinate and not the other; send both                          or neither",
+                        "ingest body: row {} carries one coordinate and not the other; send both \
+                         or neither",
                         offset + i
                     )))
                 }
