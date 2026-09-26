@@ -962,9 +962,7 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
             if j % 2 == 0 { &mut s0 } else { &mut s1 }.push(entity.raw());
         }
         entities.extend(allocated);
-        tick_until(&engine, "both views to flush", WAIT, || {
-            engine.generation().buffer.is_empty()
-        });
+        publish_buffered(&engine);
     }
     assert!(
         s0.iter().min() < s1.iter().max() && s1.iter().min() < s0.iter().max(),
