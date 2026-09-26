@@ -489,7 +489,7 @@ paths:
               schema:
                 type: string
             x-tessera-identity-key:
-              description: The identity key, derived from the credential, its mask fragment and the view. A held band may be drawn only under the same key, so a client partitions its cache by it.
+              description: The identity key, derived from the credential, its mask fragment and the view. The mask fragment's identity is keyed by the bundle, so a rebuilt bundle, whose `tessera_id`s are all new, gives a new identity key. A held band may be drawn only under the same key, so a client partitions its cache by it.
               required: true
               schema:
                 type: string
@@ -2041,7 +2041,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: A held artifact holds a part with a different value, or or a second `excluding` for a held key. Nothing was written.
+          description: A held artifact holds a part with a different value, or a second `excluding` for a held key. Nothing was written.
           content:
             application/json:
               schema:

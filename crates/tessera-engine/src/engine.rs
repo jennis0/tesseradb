@@ -145,9 +145,6 @@ pub struct Engine {
     pub(crate) identity_key: IdentityKey,
     /// The key records cursors are sealed under, derived from the identity key at open.
     pub(crate) cursor_key: crate::records::CursorKey,
-    /// The identity key's fingerprint, folded into every view's identity coordinate so that a
-    /// client's held bands, whose `tessera_id`s are this bundle's, are not drawn over another's.
-    pub(crate) key_fingerprint: String,
     /// A per-process random value folded into every content key. Without it a content key could
     /// collide across a restart, since `overlay_version` restarts at zero, and a client's held
     /// declaration would be honoured against a visible set it was never computed for.
@@ -414,7 +411,6 @@ pub(crate) struct PrefixReaders {
     pub(crate) identity_key: IdentityKey,
     /// The key records cursors are sealed under, derived from the same identity key.
     pub(crate) cursor_key: crate::records::CursorKey,
-    pub(crate) key_fingerprint: String,
 }
 
 impl PrefixReaders {
@@ -477,8 +473,6 @@ impl PrefixReaders {
         let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
             .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
         let cursor_key = crate::records::CursorKey::of(&bundle.manifest.identity.key);
-        let key_fingerprint =
-            tessera_store::manifest::identity_key_fingerprint(&bundle.manifest.identity.key);
 
         Ok(PrefixReaders {
             prefix,
@@ -492,7 +486,6 @@ impl PrefixReaders {
             external_index,
             identity_key,
             cursor_key,
-            key_fingerprint,
         })
     }
 }
@@ -937,7 +930,6 @@ impl Engine {
             write: WritePath::new(state),
             identity_key: readers.identity_key,
             cursor_key: readers.cursor_key,
-            key_fingerprint: readers.key_fingerprint,
             boot_nonce: OsRng.next_u64(),
             switches,
             counters,
