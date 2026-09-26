@@ -333,8 +333,9 @@ def attribute_block(
     analyser: str | None,
     scope: Any,
     title: str | None,
+    unique: bool | None = None,
 ) -> dict:
-    """One `[[attribute]]`: a type and its two flags, and nothing else.
+    """One `[[attribute]]`: a type, its flags, and nothing else.
 
     It is filled by an `insert(name, table, id=, value=)`, or by name from a frame inserted into
     the allocation view.
@@ -354,6 +355,8 @@ def attribute_block(
         block["render"] = render
     if index is not None:
         block["index"] = index
+    if unique is not None:
+        block["unique"] = unique
     return block
 
 

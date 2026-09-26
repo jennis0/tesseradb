@@ -296,11 +296,21 @@ impl Executor {
                 batch_id,
                 body_hash,
                 artifacts,
+                unique_seq,
                 reply,
             } => {
                 let window = CommitWindow::new(self.next_window_seq());
-                let (window, _) =
-                    self.admit_ingest(window, rows, batch_id, body_hash, artifacts, reply);
+                let (window, _) = self.admit_ingest(
+                    window,
+                    IngestSubmission {
+                        rows,
+                        batch_id,
+                        body_hash,
+                        artifacts,
+                        unique_seq,
+                    },
+                    reply,
+                );
                 if !window.is_empty() {
                     self.close_window(window);
                 }
@@ -350,7 +360,11 @@ impl Executor {
             Command::DeclareAttribute { request, reply } => {
                 self.commit_attribute_declare(*request, reply)
             }
-            Command::Values { request, reply } => self.commit_values(*request, reply),
+            Command::Values {
+                request,
+                unique_seq,
+                reply,
+            } => self.commit_values(request, unique_seq, reply),
             Command::DeclareVocabulary { request, reply } => {
                 self.commit_vocabulary_declare(*request, reply)
             }
@@ -787,7 +801,8 @@ impl Executor {
     /// so there is no state in which a cell is filled and its code or membership is not.
     pub(super) fn commit_values(
         &mut self,
-        mut request: tessera_lifecycle::ValuesRequest,
+        mut request: Box<tessera_lifecycle::ValuesRequest>,
+        unique_seq: u64,
         reply: Reply<ValuesReceipt>,
     ) {
         let started = std::time::Instant::now();
@@ -806,6 +821,20 @@ impl Executor {
             }
         }
 
+        // The unique values against what was added since the handler checked them, from memory.
+        match crate::unique::recheck_fills(&generation, &request, unique_seq, &self.deps.identity_key) {
+            Ok(()) => {}
+            Err(crate::unique::Recheck::Refused(e)) => {
+                reply.fail(e);
+                return;
+            }
+            Err(crate::unique::Recheck::Stale) => {
+                reply.fail(ExecError::UniqueStale(Box::new(
+                    tessera_lifecycle::StaleSubmission::Values(request),
+                )));
+                return;
+            }
+        }
         let columns = match values_columns(&generation.bundle.manifest, &request) {
             Ok(columns) => columns,
             Err(e) => {
@@ -943,6 +972,15 @@ impl Executor {
         // family's entity-space extent and the record blob. The map is cloned with the buffer, on
         // the immutable-snapshot rule every generation is built by.
         let mut buffer = (*generation.buffer).clone();
+        let declared = &generation.bundle.manifest.declared_scalars;
+        let mut unique_live = (*generation.unique_live).clone();
+        unique_live.add(
+            declared,
+            planned
+                .fills
+                .iter()
+                .map(|(entity, fill)| (*entity, fill.scalars.as_slice())),
+        );
         for (entity, fill) in planned.fills {
             buffer.fill(entity, fill, |value| matches!(value, WalScalar::Null));
             buffer.set_fill_wal_pos(entity, values_position);
@@ -966,6 +1004,7 @@ impl Executor {
         let next = generation.with_buffer(Arc::new(buffer), &[], |g| {
             g.vocabularies = Arc::new(minted.vocabularies);
             g.suggest = suggest;
+            g.unique_live = Arc::new(unique_live);
         });
         self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
@@ -1054,6 +1093,10 @@ impl Executor {
                 return;
             }
             Ok(crate::attributes::Resolution::New(compiled)) => compiled,
+            Ok(crate::attributes::Resolution::Unique { name, unique }) => {
+                self.begin_unique_declare(name, unique, reply);
+                return;
+            }
             Err(e) => {
                 reply.fail(e);
                 return;
@@ -1130,6 +1173,12 @@ impl Executor {
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
         self.side_manifests.behind_live = true;
+        // A new unique column holds no value, so its index starts empty.
+        if let crate::attributes::CompiledAttribute::Entity(d) = &compiled {
+            if d.unique {
+                self.publish_new_unique_index(&d.name, started);
+            }
+        }
         reply.ack(false);
     }
 

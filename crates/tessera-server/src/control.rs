@@ -1086,6 +1086,7 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
         AcceptError::OutsideExtent { .. }
         | AcceptError::UnknownView { .. }
         | AcceptError::ScalarArity { .. }
+        | AcceptError::UniqueIndexUnreadable(_)
         | AcceptError::SteppedDown => false,
     };
     if in_force {
@@ -1388,11 +1389,17 @@ struct AttributeBody {
     /// `"entity"`, or `{"group": "<view_group>"}`, spelled as the block spells it.
     #[serde(default)]
     scope: tessera_types::layer::LayerScope,
+    /// No two items may hold one value. On a column that exists, the one change accepted: the
+    /// answer waits while the column's index is built, and a column already holding a value twice
+    /// is refused, naming the values.
+    #[serde(default)]
+    unique: bool,
 }
 
 /// `PUT /control/attributes`: declares one attribute column, synchronously, so a batch sent after
-/// the answer may carry it. 201 when new, 200 when the name already has this identity, 409 when it
-/// has another, 422 for a rule broken. The engine refuses `render = true` on this route.
+/// the answer may carry it. 201 when new, 200 when the name already has this identity or differed
+/// from it in `unique` alone, 409 when it has another or holds a value twice, 422 for a rule
+/// broken. The engine refuses `render = true` on this route.
 async fn declare_attribute(
     State(state): State<Arc<AppState>>,
     ApiQuery(wait): ApiQuery<WaitQuery>,
@@ -1409,6 +1416,7 @@ async fn declare_attribute(
         index: body.index,
         render: body.render,
         scope: body.scope,
+        unique: body.unique,
     };
     let existing = state
         .write(move |state| state.engine.declare_attribute(request))

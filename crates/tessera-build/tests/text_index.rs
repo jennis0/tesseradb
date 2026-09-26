@@ -104,6 +104,7 @@ fn text_schema(index: bool) -> Schema {
             value_set: None,
             index,
             render: false,
+            unique: false,
         }],
         vocabularies: HashMap::new(),
     }

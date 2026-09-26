@@ -315,10 +315,17 @@ pub type RegionResolver<'a> =
 /// artifact this principal would not be served is the empty bitmap, never an error.
 pub type MemberResolver<'a> = dyn Fn(&MemberOfLeaf) -> Result<Bitmap, FilterError> + 'a;
 
-/// The two row-space leaves' resolvers, and whether this principal reaches a layer a `member_of`
-/// names, which is refused before either resolver runs.
+/// The entities holding each of a unique column's keys, from the column's index and the live
+/// entries beside it, deleted entities dropped. Visibility is the evaluator's: it intersects the
+/// answer with its candidate.
+pub type UniqueResolver<'a> =
+    dyn Fn(&str, &[tessera_store::unique::UniqueKey]) -> Result<Vec<u32>, FilterError> + 'a;
+
+/// The two row-space leaves' resolvers, whether this principal reaches a layer a `member_of`
+/// names, which is refused before either resolver runs, and the unique columns' lookup.
 pub struct RowLeafResolvers<'a> {
     pub regions: &'a RegionResolver<'a>,
     pub members: &'a MemberResolver<'a>,
     pub layers: &'a dyn Fn(&str) -> bool,
+    pub unique: &'a UniqueResolver<'a>,
 }

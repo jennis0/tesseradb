@@ -603,6 +603,8 @@ pub(crate) struct FlushContext {
     pub(crate) prefix: String,
     /// The view's spatial levels as held when planned; the new segment's rows are resolved against these on the pool.
     pub(crate) shapes: Vec<Arc<crate::shapes::ShapeLevel>>,
+    /// The unique columns when planned, each with its position in a buffered row and its type.
+    pub(crate) unique_schema: Vec<(String, usize, ScalarType)>,
 }
 
 /// A flush whose files are durable, awaiting manifest assembly and the swap on the executor. The side-manifest is
@@ -641,6 +643,19 @@ pub(crate) struct CompletedFlush {
     /// `Some(len)` if this flush wrote a dictionary extent; `None` if it promoted nothing. Read by the publication guard.
     pub(crate) promoted_from_dict_len: Option<u32>,
     pub(crate) prefix: String,
+    /// The unique columns this flush was planned under; one published under another set would
+    /// leave some rows' values in no index.
+    pub(crate) unique_columns: Vec<String>,
+    /// One entry per unique column: the runs this flush wrote for it and the entries in them.
+    pub(crate) unique_runs: Vec<FlushedUnique>,
+}
+
+/// The runs one flush wrote into one unique column's index, and the live entries they replace.
+pub(crate) struct FlushedUnique {
+    pub(crate) attribute: String,
+    /// Prefix-relative; already digested into [`CompletedFlush::files`].
+    pub(crate) runs: Vec<String>,
+    pub(crate) written: Vec<(tessera_store::unique::UniqueKey, EntityId)>,
 }
 
 /// The half of a completed flush that exists only where the plan gave rows geometry.
@@ -810,6 +825,10 @@ fn execute_flush_stages(
             to_digest.push(rel.clone());
         }
     }
+    let unique_runs = write_unique_runs(&plan, &ctx)?;
+    for flushed in &unique_runs {
+        to_digest.extend(flushed.runs.iter().cloned());
+    }
     *mark = laps.lap(FlushStage::FilterExtents, *mark);
 
     // ---- the entity-to-term transpose extent: written from the promotion, so its ordinals match the tier's.
@@ -954,6 +973,8 @@ fn execute_flush_stages(
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,
         prefix: ctx.prefix,
+        unique_columns: ctx.unique_schema.iter().map(|(name, _, _)| name.clone()).collect(),
+        unique_runs,
     };
     // Freed under a stage rather than at the return, so this O(rows) allocator work is attributed.
     drop(plan);
@@ -1149,6 +1170,57 @@ fn write_filter_extents(
             None,
             &column,
         )?);
+    }
+    Ok(out)
+}
+
+/// Write a run per unique column from the values this flush writes, fsynced: an entity's own row
+/// and its fills, never a join, which carries no entity-scoped value.
+fn write_unique_runs(
+    plan: &FlushPlan,
+    ctx: &FlushContext,
+) -> Result<Vec<FlushedUnique>, MaintenanceFailed> {
+    let mut out = Vec::with_capacity(ctx.unique_schema.len());
+    for (attribute, at, ty) in &ctx.unique_schema {
+        let Some(kind) = tessera_store::unique::KeyKind::of(*ty) else {
+            continue;
+        };
+        let mut entries: Vec<(tessera_store::unique::UniqueKey, u32)> = Vec::new();
+        for (entity, item) in plan.value_rows() {
+            if let Some(key) = item
+                .scalars
+                .get(*at)
+                .and_then(|v| tessera_store::unique::key_of(*ty, v))
+            {
+                entries.push((key, narrow_entity(*entity)?));
+            }
+        }
+        entries.sort_unstable();
+        entries.dedup();
+        let dir_rel = tessera_store::unique::index_dir_rel(&ctx.partition, attribute);
+        let written = tessera_store::unique::write_sorted_runs(
+            kind,
+            &ctx.prefix_dir.join(&dir_rel),
+            &ctx.seg_id,
+            &entries,
+        )
+        .map_err(failed(format!("unique index run for '{attribute}'")))?;
+        let paths: Vec<PathBuf> = written.iter().map(|run| run.path.clone()).collect();
+        tessera_store::fsync_written(&paths)
+            .map_err(failed(format!("unique index run for '{attribute}'")))?;
+        let runs = written
+            .iter()
+            .map(|run| tessera_store::unique::relative(&ctx.prefix_dir, &run.path))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failed(format!("unique index run for '{attribute}'")))?;
+        out.push(FlushedUnique {
+            attribute: attribute.clone(),
+            runs,
+            written: entries
+                .into_iter()
+                .map(|(key, entity)| (key, EntityId::new(u64::from(entity))))
+                .collect(),
+        });
     }
     Ok(out)
 }

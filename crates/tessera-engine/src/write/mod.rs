@@ -196,6 +196,9 @@ pub enum AcceptError {
     /// Denies are not gated: a deny is entity-space state carried by WAL and manifest deny fields,
     /// threatens no segment, and must never be refused.
     SteppedDown,
+    /// A unique column's index could not be read while the batch's values were checked against
+    /// it. Nothing was submitted.
+    UniqueIndexUnreadable(String),
 }
 
 impl std::fmt::Display for AcceptError {
@@ -231,6 +234,10 @@ impl std::fmt::Display for AcceptError {
                 f,
                 "ingest is refused while a partition serves a stepped-down side-manifest; repair \
                  or restore the damaged newest manifest's files, then retry"
+            ),
+            AcceptError::UniqueIndexUnreadable(detail) => write!(
+                f,
+                "a unique column's index could not be read ({detail}); nothing was applied"
             ),
         }
     }
@@ -304,6 +311,19 @@ pub(crate) struct WritePathState {
     /// The view groups and plain views declared at a running service and not yet folded, rebuilt
     /// as the vocabularies beside them are.
     pub(crate) view_declarations: crate::view_declarations::RuntimeViewDeclarations,
+    /// Every change to a column's `unique` flag the log holds, in log order: what the open applies
+    /// to the partition manifest's unique indexes. Taken by the open; empty afterwards.
+    pub(crate) unique_events: Vec<UniqueEvent>,
+}
+
+/// One change to a column's `unique` flag replayed from the log: a declaration made at a running
+/// service with the runs it adopted, or a removal.
+#[derive(Debug, Clone)]
+pub(crate) struct UniqueEvent {
+    pub(crate) attribute: String,
+    pub(crate) unique: bool,
+    pub(crate) base: Vec<tessera_lifecycle::wal::DeclaredRun>,
+    pub(crate) live: Vec<tessera_lifecycle::wal::DeclaredRun>,
 }
 
 impl WritePath {
@@ -488,6 +508,7 @@ impl WritePath {
                         Arc::clone(&health.fold_completed_pending),
                     ),
                     suggest: executor::Background::new(worker_bell.clone()),
+                    unique_declarations: executor::UniqueDeclarations::new(worker_bell.clone()),
                     flush: executor::Background::sharing(
                         worker_bell,
                         Arc::clone(&health.flush_in_flight),
@@ -615,6 +636,8 @@ impl WritePath {
         // A reply built here counts its job completed, which is right only for the work lane.
         debug_assert!(!command.is_never_shed());
         self.handle()?.enqueue(command)?;
+        #[cfg(feature = "fault-injection")]
+        self.health.work_enqueued.fetch_add(1, Ordering::SeqCst);
         pending.accept()
     }
 
@@ -630,6 +653,7 @@ impl WritePath {
         batch_id: String,
         body_hash: [u8; 32],
         artifacts: tessera_lifecycle::BatchArtifacts,
+        unique_seq: u64,
     ) -> Result<(Vec<EntityId>, u64), AcceptError> {
         let mark = StageMark::now();
         let answered = self.submit(|reply| Command::Ingest {
@@ -637,6 +661,7 @@ impl WritePath {
             batch_id,
             body_hash,
             artifacts,
+            unique_seq,
             reply,
         });
         self.health().lap(WriteStage::SubmitToReceipt, mark);
@@ -697,10 +722,12 @@ impl WritePath {
     /// what the batch did.
     pub(crate) fn fill_values(
         &self,
-        request: tessera_lifecycle::ValuesRequest,
+        request: Box<tessera_lifecycle::ValuesRequest>,
+        unique_seq: u64,
     ) -> Result<ValuesReceipt, AcceptError> {
         self.submit(|reply| Command::Values {
-            request: Box::new(request),
+            request,
+            unique_seq,
             reply,
         })
     }

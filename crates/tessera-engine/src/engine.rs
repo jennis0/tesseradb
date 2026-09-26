@@ -611,6 +611,74 @@ fn reconstruct_writes(
     })
 }
 
+/// Apply the log's changes to `unique` onto every partition manifest's unique indexes. The last
+/// change to a column is the one in force, and the manifest is newer than a declaration it
+/// already carries an index for, so a declaration adopts its runs only where the manifest has no
+/// index for the column; each run adopted is checked against the digest the log recorded.
+fn apply_unique_events(
+    bundle: &mut Bundle,
+    events: Vec<crate::write::UniqueEvent>,
+    prefix_dir: &Path,
+) -> Result<()> {
+    let mut last: std::collections::BTreeMap<String, crate::write::UniqueEvent> =
+        std::collections::BTreeMap::new();
+    for event in events {
+        last.insert(event.attribute.clone(), event);
+    }
+    for partition in bundle.partitions.values_mut() {
+        let manifest = &mut partition.manifest;
+        for event in last.values() {
+            let held = manifest
+                .unique_indexes
+                .iter()
+                .position(|runs| runs.attribute == event.attribute);
+            match (event.unique, held) {
+                (false, Some(at)) => {
+                    manifest.unique_indexes.remove(at);
+                }
+                (true, None) => {
+                    for run in event.base.iter().chain(&event.live) {
+                        let digest = tessera_store::digest_of(&prefix_dir.join(&run.path))
+                            .map_err(EngineError::Store)?;
+                        if digest.size != run.size || digest.sha256 != run.sha256 {
+                            return Err(EngineError::Malformed(format!(
+                                "the WAL declares '{}' unique over index run '{}', whose \
+                                 bytes do not match the digest the log recorded; restore the \
+                                 run or the bundle it was written into",
+                                event.attribute, run.path
+                            )));
+                        }
+                        manifest.files.insert(run.path.clone(), digest);
+                    }
+                    manifest
+                        .unique_indexes
+                        .push(tessera_store::manifest::UniqueIndexRuns {
+                            attribute: event.attribute.clone(),
+                            base: event
+                                .base
+                                .iter()
+                                .map(|run| tessera_store::manifest::BaseKeyRun {
+                                    path: run.path.clone(),
+                                    first_key: run.first_key.clone(),
+                                    last_key: run.last_key.clone(),
+                                })
+                                .collect(),
+                            live: event.live.iter().map(|run| run.path.clone()).collect(),
+                        });
+                }
+                // The manifest's index is the declaration's own, or, where the side-manifests of
+                // a removal and of this declaration were not written, the one from before the
+                // removal. That one indexes the same flushed values, since every flush writes a
+                // side-manifest and none came after it; the values buffered since are live
+                // entries again after the replay.
+                (true, Some(_)) => {}
+                (false, None) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The bundle as the log leaves it: the vocabularies, columns, groups and plain views the log
 /// holds past the last publication, and the roster — the views a build declared, plus every view
 /// created while the service ran, minus every key dropped. Applied before the first generation is
@@ -642,6 +710,10 @@ fn served_bundle(
         dead_incarnations: &dead_incarnations,
         scoped_columns: &scoped_columns,
     });
+    let manifest = match bundle.partitions.values().next() {
+        Some(partition) => tessera_store::unique::with_unique_flags(&manifest, &partition.manifest),
+        None => manifest,
+    };
     // A log that declared nothing, or vocabularies alone, keeps the bundle `open_bundle` built
     // rather than rebuilding every partition's view map to the same thing.
     if created_views.is_empty()
@@ -690,6 +762,17 @@ fn first_generation(
         )
     };
 
+    let unique = match bundle.partitions.values().next() {
+        Some(partition) => tessera_store::unique::UniqueIndexes::open(
+            &bundle.manifest,
+            &partition.manifest,
+            prefix_dir,
+            None,
+        )
+        .map_err(EngineError::Store)?,
+        None => tessera_store::unique::UniqueIndexes::default(),
+    };
+
     // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
     // cold start; only for the vocabularies a declared category column draws on.
     // Stale by construction; leaving a previous run's indexes would accumulate a directory
@@ -726,6 +809,8 @@ fn first_generation(
             postings: Arc::clone(&readers.postings),
             fragments,
             external_index: Arc::clone(&readers.external_index),
+            unique: Arc::new(unique),
+            unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
             delta_postings: readers.delta_postings.clone(),
             overlay_version: 0,
             overlay: Arc::new(overlay),
@@ -866,6 +951,11 @@ impl Engine {
                 .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?,
         );
 
+        apply_unique_events(
+            &mut bundle,
+            std::mem::take(&mut state.unique_events),
+            &readers.prefix_dir,
+        )?;
         let bundle = served_bundle(bundle, &state, &vocabularies);
         crate::write::retire_dead_view_artifacts(
             &state.registry,
@@ -1120,6 +1210,10 @@ pub(crate) fn open_rotation(
         scoped_attributes: &side_scoped_attributes,
         ..Declarations::default()
     });
+    if let Some(partition) = bundle.partitions.values().next() {
+        bundle.manifest =
+            tessera_store::unique::with_unique_flags(&bundle.manifest, &partition.manifest);
+    }
     let bundle = Arc::new(bundle);
     let (phash, partition) = bundle
         .partitions
@@ -1150,6 +1244,15 @@ pub(crate) fn open_rotation(
         open_filter_columns(&prefix_dir, &bundle, &unfolded_attributes)
             .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
     );
+    let unique = Arc::new(
+        tessera_store::unique::UniqueIndexes::open(
+            &bundle.manifest,
+            &partition.manifest,
+            &prefix_dir,
+            None,
+        )
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+    );
 
     Ok((
         bundle,
@@ -1158,6 +1261,7 @@ pub(crate) fn open_rotation(
             fragments,
             external_index,
             filter_columns,
+            unique,
             retired,
         },
     ))

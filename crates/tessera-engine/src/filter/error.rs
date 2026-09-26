@@ -189,6 +189,12 @@ pub enum FilterError {
     /// The `member_of` resolver could not answer for this generation. Fail-closed, for
     /// [`FilterError::RegionUnavailable`]'s reason.
     MemberOfUnavailable(String),
+    /// An operator other than `eq` or `in` on a unique column whose only filter home is its
+    /// index.
+    UniqueOnly { column: String, operator: String },
+    /// A unique column's index could not be read. Fail-closed, on
+    /// [`FilterError::PostingsUnreadable`]'s argument.
+    UniqueUnreadable { column: String, detail: String },
 }
 
 impl std::fmt::Display for FilterError {
@@ -259,6 +265,15 @@ impl std::fmt::Display for FilterError {
                 f,
                 "the 'member_of' leaf could not be resolved against this generation ({detail})"
             ),
+            FilterError::UniqueOnly { column, operator } => write!(
+                f,
+                "column '{column}' is filtered through its unique index alone, which answers `eq` \
+                 and `in`, not '{operator}'; declare it with `index = true` to filter it otherwise"
+            ),
+            FilterError::UniqueUnreadable { column, detail } => write!(
+                f,
+                "the unique index of column '{column}' could not be read ({detail})"
+            ),
         }
     }
 }
@@ -292,6 +307,7 @@ impl FilterError {
             | FilterError::TooDeep { .. }
             | FilterError::NegationSpansColumns { .. }
             | FilterError::NegationWithoutPresence { .. }
+            | FilterError::UniqueOnly { .. }
             | FilterError::UnknownLayer(_) => true,
             FilterError::PostingsUnreadable { .. }
             | FilterError::DictionaryUnreadable { .. }
@@ -299,7 +315,8 @@ impl FilterError {
             | FilterError::RegionInEntitySpace
             | FilterError::RegionUnavailable(_)
             | FilterError::MemberOfInEntitySpace
-            | FilterError::MemberOfUnavailable(_) => false,
+            | FilterError::MemberOfUnavailable(_)
+            | FilterError::UniqueUnreadable { .. } => false,
         }
     }
 }

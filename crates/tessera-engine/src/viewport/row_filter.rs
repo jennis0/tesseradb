@@ -1068,10 +1068,19 @@ impl Engine {
             Ok(rows)
         };
         let layers = |layer: &str| self.reaches_layer(served.session, layer);
+        let unique = |column: &str, keys: &[tessera_store::unique::UniqueKey]| {
+            crate::unique::holders(served.generation, column, keys)
+                .map(|found| found.into_iter().map(|(_, entity)| entity.raw() as u32).collect())
+                .map_err(|e| crate::filter::FilterError::UniqueUnreadable {
+                    column: column.to_string(),
+                    detail: e.to_string(),
+                })
+        };
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
             members: &members,
             layers: &layers,
+            unique: &unique,
         };
         body(&|expr: &crate::filter::FilterExpr, prefer_row: bool| {
             served

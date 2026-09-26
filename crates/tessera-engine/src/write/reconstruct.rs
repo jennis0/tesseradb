@@ -255,9 +255,27 @@ impl WritePath {
         // Same ordering rule again. A record naming a column the served schema already holds
         // identically applies as nothing; one holding a different identity under a held name
         // disagrees with the manifests about what every row stores, and refuses the open.
+        // `unique` is not compared: it is the one flag a later declaration may change, and the
+        // unique events below decide it.
         let mut attributes = seed.attributes;
         let mut served = seed.manifest.clone();
+        let mut unique_events: Vec<crate::write::UniqueEvent> = Vec::new();
         for record in &records {
+            if let WalRecord::UniqueDeclare {
+                attribute,
+                unique,
+                base,
+                live,
+            } = record
+            {
+                unique_events.push(crate::write::UniqueEvent {
+                    attribute: attribute.clone(),
+                    unique: *unique,
+                    base: base.clone(),
+                    live: live.clone(),
+                });
+                continue;
+            }
             let WalRecord::AttributeDeclare { declaration } = record else {
                 continue;
             };
@@ -269,7 +287,7 @@ impl WritePath {
                 )));
             };
             match crate::attributes::held_by_name(&served, &declaration.name) {
-                Some(held) if held == compiled => continue,
+                Some(held) if crate::attributes::same_but_unique(&held, &compiled) => continue,
                 Some(_) => {
                     return Err(EngineError::Malformed(format!(
                         "the WAL declares attribute '{}' with a type or scope the manifests do not \
@@ -286,6 +304,14 @@ impl WritePath {
                 crate::attributes::CompiledAttribute::Scoped(f) => {
                     served = served.with_attributes(&[], std::slice::from_ref(f));
                 }
+            }
+            if declaration.unique {
+                unique_events.push(crate::write::UniqueEvent {
+                    attribute: declaration.name.clone(),
+                    unique: true,
+                    base: Vec::new(),
+                    live: Vec::new(),
+                });
             }
             attributes.push(compiled);
         }
@@ -595,6 +621,7 @@ impl WritePath {
                 attributes,
                 vocabularies: runtime_vocabularies,
                 view_declarations,
+                unique_events,
             },
         ))
     }

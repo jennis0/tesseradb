@@ -67,6 +67,7 @@ pub(crate) fn scoped_as_declared(family: &ScopedScalar) -> DeclaredScalar {
         analyser: family.analyser.clone(),
         index: family.index,
         render: family.render,
+        unique: false,
     }
 }
 

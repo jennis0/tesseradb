@@ -316,6 +316,7 @@ fn a_deleted_entitys_values_fill_is_not_rebuilt_at_a_restart() {
                 index: true,
                 render: false,
                 scope: tessera_types::layer::LayerScope::Entity,
+                unique: false,
             })
             .expect("the column is declared");
         let id = ingest_into(&engine, "b1", "ext-1", "s0");

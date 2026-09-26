@@ -177,6 +177,9 @@ pub struct ExecutorHealth {
     pub(crate) flush_holding: AtomicBool,
     /// A fold has finished its passes and is holding at the test hook. Always `false` outside tests.
     pub(crate) fold_holding: AtomicBool,
+    /// How many commands have been put on the work queue, for a test to wait on.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) work_enqueued: AtomicU64,
     /// Nanoseconds spent in the whole apply step (clone, inserts, generation, swap), summed over
     /// both lanes. An ingest apply clones the buffer and dominates it; a deny apply clones only the
     /// overlay. It estimates how long a deny waits behind the work item in flight.
@@ -604,6 +607,8 @@ impl ExecutorHealth {
             last_fold_passes: Mutex::new(Vec::new()),
             last_fold_report: Mutex::new(Vec::new()),
             flush_holding: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            work_enqueued: AtomicU64::new(0),
             fold_holding: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             stage_nanos: Default::default(),

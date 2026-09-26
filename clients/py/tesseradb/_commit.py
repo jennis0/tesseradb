@@ -217,6 +217,11 @@ class Planner:
         #: answers as an identical redeclaration.
         columns = list(meta.get("declared_scalars", [])) + list(meta.get("scoped_scalars", []))
         self.held_attributes = {str(column.get("name")) for column in columns}
+        #: The held columns the database serves as unique, so a declaration that differs from it in
+        #: `unique` alone is sent again as the change.
+        self.unique_attributes = {
+            str(column.get("name")) for column in columns if column.get("unique")
+        }
         self.held_vocabularies = {
             str((column.get("category") or {}).get("vocabulary"))
             for column in columns
@@ -320,6 +325,16 @@ class Planner:
         for body in payloads.get("attributes", []):
             name = body["name"]
             if name in self.held_attributes:
+                unique = bool(body.get("unique"))
+                if unique != (name in self.unique_attributes):
+                    self.pages.append(
+                        Page(
+                            kind="attribute",
+                            name=name,
+                            line=f"declare attribute '{name}' {'unique' if unique else 'not unique'}",
+                            body=body,
+                        )
+                    )
                 continue
             self.pages.append(
                 Page(
@@ -465,6 +480,8 @@ class Planner:
                 return True
         for block in document.get("attribute", []):
             if block["name"] not in self.held_attributes:
+                return True
+            if bool(block.get("unique")) != (block["name"] in self.unique_attributes):
                 return True
         return False
 

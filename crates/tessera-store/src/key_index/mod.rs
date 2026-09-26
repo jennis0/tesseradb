@@ -55,8 +55,8 @@ mod tests;
 use std::fmt;
 
 pub use key::{keyword_key, signed_key, signed_value, unsigned_key, Key};
-pub use merge::merge_runs;
-pub use run::{verify_run, Entries, KeyRun, RunCheck};
+pub use merge::{for_each_merged, merge_runs};
+pub use run::{run_key_width, verify_run, Entries, KeyRun, RunCheck};
 pub use spill::{DuplicateKey, KeySpill};
 pub use view::{Found, KeyIndexView, RunRef};
 pub use write::{KeyRunWriter, WrittenRun};

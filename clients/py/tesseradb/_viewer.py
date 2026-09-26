@@ -881,6 +881,18 @@ class Viewer:
         }
         return self._bulk_read("items", request, given, batches)
 
+    def lookup(self, view: str, field: str, values: Sequence[Any], fields: Sequence[str] = ()):
+        """The items in `view` this reader may see that hold `values` in the unique column
+        `field`, as a pyarrow table with `tessera_id`, `field` and `fields`.
+
+        A read of `items` filtered with `in`, which the column's unique index answers. A value no
+        visible item holds has no row, whether nobody holds it or the holder is hidden from this
+        reader. An integer past 2^53 is sent exactly.
+
+            v.lookup("papers", "doi", ["10.1/a", "10.2/b"], fields=["title"])
+        """
+        return self.items(view, [field, *fields], filters={field: {"in": list(values)}})
+
     def artifacts(
         self,
         view: str,

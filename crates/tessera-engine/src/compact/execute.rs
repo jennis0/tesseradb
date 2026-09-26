@@ -62,6 +62,8 @@ pub(crate) struct CompletedFold {
     pub(crate) files: BTreeMap<String, FileDigest>,
     /// Run 0's path, or `None` when the deployment holds no external ids.
     pub(crate) external_id_run: Option<String>,
+    /// Each unique column's new base runs, in key order with disjoint ranges.
+    pub(crate) unique: Vec<(String, Vec<tessera_store::manifest::BaseKeyRun>)>,
     /// Written unchanged into the new `SEGMENTS-<n>.json`.
     pub(crate) term_images: Vec<FoldedTermImages>,
     pub(crate) cost: Vec<PassCost>,
@@ -135,6 +137,9 @@ pub(crate) fn execute(
     let external_id_run = fold_external_ids(&plan, &ctx, &entities_dir, &mut out)?;
     stairs.record("3 external ids");
 
+    let unique = fold_unique_indexes(&plan, &ctx, &mut out)?;
+    stairs.record("3b unique indexes");
+
     fold_text_columns(&plan, &ctx, &mut out)?;
     fold_value_columns(&plan, &ctx, &mut out)?;
     fold_record_blob(&plan, &ctx, &mut out)?;
@@ -154,6 +159,7 @@ pub(crate) fn execute(
         segments,
         files,
         external_id_run,
+        unique,
         term_images,
         cost: stairs.into_cost(),
         finished,
@@ -417,6 +423,41 @@ fn fold_external_ids(
     };
 
     Ok(external_id_run)
+}
+
+/// Pass 3b: each unique column's runs, base and live, merged into new base runs with the
+/// entries of every tombstoned entity dropped: a deleted item holds no value once its rows are
+/// gone.
+fn fold_unique_indexes(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    out: &mut FoldOutput,
+) -> Result<Vec<(String, Vec<tessera_store::manifest::BaseKeyRun>)>, MaintenanceFailed> {
+    let mut folded = Vec::with_capacity(plan.unique.len());
+    for index in &plan.unique {
+        let inputs: Vec<PathBuf> = index
+            .files()
+            .map(|rel| ctx.from_prefix_dir.join(rel))
+            .collect();
+        let out_rel = tessera_store::unique::index_dir_rel(&plan.partition, &index.attribute);
+        let written = tessera_store::unique::merge_unique_runs(
+            &inputs,
+            &plan.tombstones,
+            &ctx.to_prefix_dir.join(&out_rel),
+            "base",
+        )
+        .map_err(failed(format!("pass 3b (unique index '{}')", index.attribute)))?;
+        let mut base = Vec::with_capacity(written.len());
+        for run in written {
+            let listed = run
+                .as_base(&ctx.to_prefix_dir)
+                .map_err(failed(format!("pass 3b (unique index '{}')", index.attribute)))?;
+            out.push(listed.path.clone(), run.path);
+            base.push(listed);
+        }
+        folded.push((index.attribute.clone(), base));
+    }
+    Ok(folded)
 }
 
 /// Pass 5: digests each file in `out.written` by reading it back, since the writers cannot hash as

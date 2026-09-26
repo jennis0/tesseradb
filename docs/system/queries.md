@@ -149,6 +149,20 @@ refused. A value is different: a filter naming a value the viewer is not permitt
 exactly as one naming a value that does not exist at all, matching nothing either way, with no
 difference in the response that would let a viewer tell "hidden" apart from "absent."
 
+An integer or timestamp comparand may be sent as its decimal digits in a string, with an optional
+leading `-`. A JSON number is read as a 64-bit float by most parsers, which is exact only up to
+2^53; the string form is exact across the whole 64-bit range. This holds on every integer and
+timestamp field.
+
+A field declared unique ([data model](data-model.md#unique-fields)) answers `eq` and `in` from its
+unique index. The server looks up each named value, takes the items holding them, drops deleted
+items, and intersects the result with the viewer's visible set before any other clause reads it.
+An `in` naming a thousand values costs a thousand lookups in the index, and reads none of the
+field's other values. A holder the viewer may not see matches exactly as a value nobody holds. A unique field with
+neither `render` nor `index` has no other filter structure, so it takes `eq` and `in` alone, and any
+other operator on it is refused as an operator outside its family would be. `/v1/meta` lists the two
+operators as that field's `operands`.
+
 A text search carries no relevance score and no ranking by how well an item matches, only a plain
 match or no match. A relevance ranking is ordinarily computed from how common each word is across
 a whole corpus, and a viewer's own results would then shift depending on documents that viewer

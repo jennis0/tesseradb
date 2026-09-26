@@ -323,6 +323,7 @@ export class TesseraClient {
         category: category(s.category),
         render: s.render,
         index: s.index,
+        unique: s.unique,
         analyser: s.analyser,
         homes: s.homes
       })),
@@ -427,7 +428,7 @@ export class TesseraClient {
     const response = await this.send(`${this.opts.viewerUrl}/v1/viewport`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: JSON.stringify(body),
+      body: jsonBody(body),
       signal
     });
     if (!response.ok) await fail(response);
@@ -831,7 +832,7 @@ export class TesseraClient {
     const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/${tesseraId.toString()}`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: JSON.stringify(body),
+      body: jsonBody(body),
       signal: opts.signal
     });
     if (!response.ok) await fail(response);
@@ -882,7 +883,7 @@ export class TesseraClient {
     const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/browse`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: JSON.stringify(body),
+      body: jsonBody(body),
       signal
     });
     if (!response.ok) await fail(response);
@@ -951,7 +952,7 @@ export class TesseraClient {
       const response = await this.send(`${this.opts.viewerUrl}/v1/${route}`, {
         method: 'POST',
         headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-        body: JSON.stringify(body),
+        body: jsonBody(body),
         signal
       });
       if (!response.ok) await fail(response);
@@ -992,7 +993,15 @@ function browseRow(r: RawBrowseRow): BrowseRow {
 /** The fields `/v1/meta` must carry, and those each of its blocks and list elements must. */
 const VIEW_FIELDS = ['id', 'display_name', 'quantisation', 'projection', 'world_aspect', 'tile_scheme', 'tile', 'group', 'key', 'metadata'];
 const GROUP_FIELDS = ['name', 'title', 'members_of', 'views'];
-const DECLARED_FIELDS = ['name', 'arrow_type', 'category', 'analyser', 'render', 'index', 'homes'];
+/**
+ * A request body as JSON, a `bigint` written as its decimal digits in a string: a filter
+ * comparand past 2^53, which a JSON number read as a double would round, is sent that way.
+ */
+function jsonBody(body: unknown): string {
+  return JSON.stringify(body, (_, value) => (typeof value === 'bigint' ? value.toString() : value));
+}
+
+const DECLARED_FIELDS = ['name', 'arrow_type', 'category', 'analyser', 'render', 'index', 'unique', 'homes'];
 const SCOPED_FIELDS = ['name', 'arrow_type', 'scope', 'category', 'analyser', 'render', 'index', 'views'];
 const OPERAND_FIELDS = ['column', 'family', 'operands'];
 const LAYER_FIELDS = ['name', 'title', 'views', 'membership', 'hierarchy', 'levels', 'computed_content', 'shape', 'supplied_content', 'depends_on', 'version'];
@@ -1052,6 +1061,7 @@ type RawMeta = {
     analyser: string | null;
     render: boolean;
     index: boolean;
+    unique: boolean;
     homes: ('rendered' | 'value_column' | 'record')[];
   }[];
   scoped_scalars: {

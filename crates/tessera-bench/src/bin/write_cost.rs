@@ -15,7 +15,9 @@
 //!   The same sweep answers whether the **four per-row laps** inside `ApplyRows`
 //!   (`RowEstablished`, `RowEstablishedInv`, `RowBufferInsert`, `RowWalPos`) are a material share
 //!   of the per-row cost: their sum against `ApplyRows` is printed here, and the residual against
-//!   a build with those four laps removed is a second run of this same binary.
+//!   a build with those four laps removed is a second run of this same binary. `--unique`
+//!   declares a unique keyword column first and gives every row a value of its own, so the
+//!   window also carries the unique check and the live index entries.
 //! - **B** — `Executor::apply_changes` deep-copies the whole [`Overlay`] once per deny window, and
 //!   the overlay shrinks only at a fold. Priced at four depths, at a window of one change and a
 //!   window of a thousand, beside a direct clone of an overlay of the same depth.
@@ -32,7 +34,7 @@
 //!
 //! ```text
 //! cargo run --release -p tessera-bench --bin write_cost -- \
-//!     --fixture target/tmp/arxiv/bundle [--repeat 5] [--only a]
+//!     --fixture target/tmp/arxiv/bundle [--repeat 5] [--only a] [--unique]
 //! ```
 //!
 //! The fixture is **copied** before it is opened: this binary writes into the copy and never into
@@ -321,31 +323,63 @@ fn ms(nanos: u64) -> f64 {
 // A: the commit window against buffer depth
 // =================================================================================================
 
+/// The column `--unique` declares: a keyword every row sets to a value of its own.
+const UNIQUE_COLUMN: &str = "write_cost_uid";
+
+/// `count` rows from `start`, each setting [`UNIQUE_COLUMN`] where `unique` is set.
+fn probe_rows(fx: &Fixture, count: usize, start: u64, terms: &[TermId], unique: bool) -> Vec<UnallocatedRow> {
+    let mut rows = synth_rows(fx, count, start, terms, &[]);
+    if unique {
+        for (i, row) in rows.iter_mut().enumerate() {
+            row.scalars = vec![WalScalar::Null; fx.declared];
+            row.scalars.push(WalScalar::Utf8(format!("uid-{}", start + i as u64)));
+        }
+    }
+    rows
+}
+
 fn experiment_a(
     fx: &Fixture,
     scratch: &Path,
     depths: &[usize],
     rounds: usize,
+    unique: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("== A: one {PROBE_ROWS}-row commit window, against buffer depth ==");
     println!("(min of {rounds} rounds; a fresh engine per round, filled in {FILL_ROWS}-row windows)");
+    if unique {
+        println!("(every row sets a unique keyword column declared before the first row)");
+    }
 
     let mut best: Vec<Option<Window>> = vec![None; depths.len()];
     let mut buffered_at_end = 0usize;
     for round in 0..rounds {
         let engine = open_engine(fx, scratch, &format!("a{round}"))?;
+        if unique {
+            engine.declare_attribute(tessera_engine::AttributeRequest {
+                name: UNIQUE_COLUMN.to_string(),
+                title: None,
+                ty: "keyword".to_string(),
+                vocabulary: None,
+                analyser: None,
+                index: false,
+                render: false,
+                scope: tessera_types::layer::LayerScope::Entity,
+                unique: true,
+            })?;
+        }
         let terms = engine.resolve_terms(&fx.descriptors);
         let mut next = fx.high_water + (round as u64 + 1) * 10_000_000;
         let mut buffered = 0usize;
         for (cell, depth) in depths.iter().enumerate() {
             while buffered < *depth {
                 let count = FILL_ROWS.min(depth - buffered);
-                let rows = synth_rows(fx, count, next, &terms, &[]);
+                let rows = probe_rows(fx, count, next, &terms, unique);
                 next += count as u64;
                 engine.accept_ingest(rows, format!("fill-{round}-{next}"), [round as u8; 32])?;
                 buffered += count;
             }
-            let rows = synth_rows(fx, PROBE_ROWS, next, &terms, &[]);
+            let rows = probe_rows(fx, PROBE_ROWS, next, &terms, unique);
             next += PROBE_ROWS as u64;
             let before = engine.write_executor_stats();
             let at = Instant::now();
@@ -751,6 +785,7 @@ fn declare_vocabulary_column(
         index: false,
         render: false,
         scope: Default::default(),
+        unique: false,
     })?;
     Ok(column)
 }
@@ -984,6 +1019,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fixture: Option<PathBuf> = None;
     let mut rounds = 5usize;
     let mut only: Option<String> = None;
+    let mut unique = false;
     let mut max_buffer = 1_000_000usize;
     let mut max_overlay = 5_000_000usize;
     let mut e_cells: Vec<(usize, usize)> = vec![(100_000, 1), (100_000, 1_000), (1_000_000, 1_000)];
@@ -993,6 +1029,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--fixture" => fixture = args.next().map(PathBuf::from),
             "--repeat" => rounds = args.next().and_then(|v| v.parse().ok()).unwrap_or(rounds),
             "--only" => only = args.next(),
+            "--unique" => unique = true,
             "--max-buffer" => {
                 max_buffer = args.next().and_then(|v| v.parse().ok()).unwrap_or(max_buffer)
             }
@@ -1058,7 +1095,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let wanted = |letter: &str| only.as_deref().is_none_or(|o| o.contains(letter));
     if wanted("a") {
-        experiment_a(&fx, &scratch, &buffer_depths, rounds)?;
+        experiment_a(&fx, &scratch, &buffer_depths, rounds, unique)?;
     }
     if wanted("b") {
         experiment_b(&fx, &scratch, &overlay_depths, &clone_depths, rounds)?;

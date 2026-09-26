@@ -79,6 +79,7 @@ describe('TesseraClient against a live server', () => {
       category: {vocabulary: 'archive', kind: 'declared', visibility: 'public'},
       render: true,
       index: true,
+      unique: false,
       analyser: null,
       homes: expect.arrayContaining(['rendered'])
     });

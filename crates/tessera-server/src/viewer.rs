@@ -190,6 +190,8 @@ async fn meta(
                 // structure; neither: stored and returned on drill-down, but not filterable.
                 "render": s.render,
                 "index": s.index,
+                // No two items hold one value; `eq` and `in` answer from the column's index.
+                "unique": s.unique,
                 // Where `POST /v1/items` reads the value from; a field whose only home is
                 // `record` reads fastest in stored order.
                 "homes": meta.homes[index].names(),
@@ -225,7 +227,8 @@ async fn meta(
             serde_json::json!({
                 "column": d.name,
                 "family": family.as_str(),
-                "operands": family.operands(),
+                // A unique column with no other filter home takes `eq` and `in` alone.
+                "operands": tessera_engine::filter::operands_of(d),
             })
         }).chain(
             meta.scoped_scalars.iter().filter(|f| tessera_engine::filter::scoped_is_filterable(f) && visible.contains_group(&f.group)).map(|f| {
@@ -427,6 +430,7 @@ fn resolve_category_column(
         tessera_engine::LeafColumn::Resolved {
             column: resolved,
             family: tessera_engine::filter::Family::Category,
+            ..
         } => Ok(resolved),
         tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
             "'{column}' is scoped to view group '{group}' and this request names no view of \

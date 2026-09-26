@@ -420,6 +420,7 @@ pub fn replay<'a>(
             // cells, and a declaration names no entity.
             WalRecord::ValuesBatch { .. }
             | WalRecord::AttributeDeclare { .. }
+            | WalRecord::UniqueDeclare { .. }
             | WalRecord::VocabularyDeclare { .. }
             | WalRecord::ViewGroupCreate { .. }
             | WalRecord::PlainViewCreate { .. } => {}

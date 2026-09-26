@@ -450,6 +450,11 @@ impl FilterColumns {
             access: request_access(mmap),
             records: Arc::new(records),
             entity_terms: Arc::new(entity_terms),
+            unique: declared
+                .iter()
+                .filter(|d| d.unique)
+                .map(|d| (d.name.clone(), d.arrow_type))
+                .collect(),
         };
         for extent in extents.attrs {
             // A key created again shares `(column, view)` with its predecessor, whose extents

@@ -363,9 +363,20 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::VocabularyConflict { detail }) => {
             ApiError::Conflict(detail)
         }
+        // The detail names the values and the holders' `tessera_id`s, never an entity id.
+        AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
+        // Reached only where the handler's one re-check was stale too.
+        AcceptError::Exec(e @ ExecError::UniqueStale(_)) => ApiError::Conflict(e.to_string()),
         // 404, as an unknown view is on every plane.
         AcceptError::UnknownView { view, .. } => {
             ApiError::Unknown(format!("unknown view '{view}'"))
+        }
+        AcceptError::UniqueIndexUnreadable(detail) => {
+            tracing::error!(%detail, "a unique index could not be read; answering fail-closed");
+            ApiError::FailClosed(
+                "a unique column's index could not be read, so the batch was not applied"
+                    .to_string(),
+            )
         }
         // The detail names the caller's row and the declared extent or arity, so it is sent.
         e @ (AcceptError::OutsideExtent { .. } | AcceptError::ScalarArity { .. }) => {
@@ -451,6 +462,7 @@ fn classify_change_failure(
         AcceptError::OutsideExtent { .. }
         | AcceptError::UnknownView { .. }
         | AcceptError::ScalarArity { .. }
+        | AcceptError::UniqueIndexUnreadable(_)
         | AcceptError::SteppedDown => ChangeFailure::BeforeExecutor,
     }
 }
@@ -507,6 +519,7 @@ fn exec_failure_may_be_in_force(
         ExecError::AttributeRefused { .. }
         | ExecError::AttributeConflict { .. }
         | ExecError::VocabularyConflict { .. } => false,
+        ExecError::UniqueTaken { .. } | ExecError::UniqueStale(_) => false,
         ExecError::Alloc(_) => false,
     }
 }

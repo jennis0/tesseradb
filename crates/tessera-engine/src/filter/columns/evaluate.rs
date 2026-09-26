@@ -6,9 +6,10 @@ use super::{ColumnLayers, FilterColumns, Route, TextLayer};
 use crate::filter::declared::Placement;
 use crate::filter::error::FilterError;
 use crate::filter::expr::{
-    FilterExpr, FilterOperand, RoutedFilter, RowExpr, RowLeafResolvers, MEMBER_OF_COLUMN,
-    REGION_COLUMN,
+    FilterExpr, FilterOperand, RoutedFilter, RowExpr, RowLeafResolvers, UniqueResolver,
+    MEMBER_OF_COLUMN, REGION_COLUMN,
 };
+use tessera_store::unique::{key_of_integer, UniqueKey};
 use crate::filter::scan::text::{contains_phrase, text_match};
 use crate::filter::scan::{scan, scan_layer};
 
@@ -116,7 +117,64 @@ impl FilterColumns {
     /// disjunction evaluates each branch under the original candidate and unions.
     pub fn evaluate(&self, expr: &FilterExpr, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
         expr.check()?;
-        self.eval(expr, candidate)
+        let no_index = |column: &str, _: &[UniqueKey]| {
+            Err(FilterError::UniqueUnreadable {
+                column: column.to_string(),
+                detail: "this evaluation holds no unique index".to_string(),
+            })
+        };
+        self.eval(expr, candidate, &no_index)
+    }
+
+    /// The keys a leaf names where its column's unique index answers it: `eq` or `in` on a unique
+    /// column. A number the column's type cannot hold names no key, so it matches nothing.
+    fn unique_keys(&self, column: &str, operand: &FilterOperand) -> Option<Vec<UniqueKey>> {
+        let ty = *self.unique.get(column)?;
+        let number = |value: &crate::filter::Scalar| match *value {
+            crate::filter::Scalar::Int(i) => key_of_integer(ty, i),
+            crate::filter::Scalar::Float(f) if f.is_finite() && f.fract() == 0.0 => {
+                key_of_integer(ty, f as i128)
+            }
+            crate::filter::Scalar::Float(_) => None,
+        };
+        Some(match operand {
+            FilterOperand::NumEquals(value) => number(value).into_iter().collect(),
+            FilterOperand::NumIn(values) => values.iter().filter_map(number).collect(),
+            FilterOperand::TextEquals(value) => vec![UniqueKey::keyword(value)],
+            FilterOperand::TextIn(values) => values.iter().map(|v| UniqueKey::keyword(v)).collect(),
+            _ => return None,
+        })
+    }
+
+    /// Whether `column` has a filterable value column or text index beside any unique index.
+    fn has_value_route(&self, column: &str) -> bool {
+        self.columns.get(column).is_some_and(|held| held.filterable)
+    }
+
+    /// One leaf in entity space: from the unique index where it answers the operand, from the
+    /// value layers otherwise.
+    fn eval_leaf(
+        &self,
+        column: &str,
+        operand: &FilterOperand,
+        candidate: &Bitmap,
+        unique: &UniqueResolver<'_>,
+    ) -> Result<Bitmap, FilterError> {
+        if let Some(keys) = self.unique_keys(column, operand) {
+            let mut out = Bitmap::new();
+            if !keys.is_empty() {
+                out.add_many(&unique(column, &keys)?);
+            }
+            out.and_inplace(candidate);
+            return Ok(out);
+        }
+        if self.unique.contains_key(column) && !self.has_value_route(column) {
+            return Err(FilterError::UniqueOnly {
+                column: column.to_string(),
+                operator: operator_name(operand).to_string(),
+            });
+        }
+        self.resolve(column, operand, candidate)
     }
 
     /// Evaluate a filter expression's entity-space part and route the rest.
@@ -136,7 +194,11 @@ impl FilterColumns {
         resolvers: &RowLeafResolvers<'_>,
     ) -> Result<RoutedFilter, FilterError> {
         if self.admitted_space(expr, prefer_row, resolvers.layers)? == Space::Entity {
-            return Ok(RoutedFilter::Entity(self.eval(expr, candidate)?));
+            return Ok(RoutedFilter::Entity(self.eval(
+                expr,
+                candidate,
+                resolvers.unique,
+            )?));
         }
         Ok(RoutedFilter::Row(
             self.route(expr, candidate, prefer_row, resolvers)?,
@@ -181,18 +243,32 @@ impl FilterColumns {
         Ok(space)
     }
 
-    /// One column's routed space, the single transcription of the leaf-routing rule.
-    fn leaf_space(&self, column: &str, prefer_row: bool) -> Result<Space, FilterError> {
+    /// One column's routed space, the single transcription of the leaf-routing rule. `operand` is
+    /// the leaf's, or `None` for a negation's presence half: a unique index answers `eq` and `in`
+    /// in entity space, and nothing else.
+    fn leaf_space(
+        &self,
+        column: &str,
+        operand: Option<&FilterOperand>,
+        prefer_row: bool,
+    ) -> Result<Space, FilterError> {
         if column == REGION_COLUMN || column == MEMBER_OF_COLUMN {
             return Ok(Space::Row);
         }
         let placement = self.placement_of(column)?;
-        Ok(match (placement.entity, placement.row) {
+        if operand.is_some_and(|operand| self.unique_keys(column, operand).is_some()) {
+            return Ok(Space::Entity);
+        }
+        let entity = placement.entity
+            && (!self.unique.contains_key(column) || self.has_value_route(column));
+        Ok(match (entity, placement.row) {
             (true, false) => Space::Entity,
             (false, true) => Space::Row,
             (true, true) if prefer_row => Space::Row,
             (true, true) => Space::Entity,
-            (false, false) => unreachable!("a placement affords at least one space"),
+            // A unique column with no value route, asked for an operator its index cannot answer;
+            // the evaluation refuses it naming the operator.
+            (false, false) => Space::Entity,
         })
     }
 
@@ -211,7 +287,9 @@ impl FilterColumns {
     /// entity space is refused here where its column has no presence to subtract from.
     fn space_of(&self, expr: &FilterExpr, prefer_row: bool) -> Result<Space, FilterError> {
         match expr {
-            FilterExpr::Leaf { column, .. } => self.leaf_space(column, prefer_row),
+            FilterExpr::Leaf { column, operand } => {
+                self.leaf_space(column, Some(operand), prefer_row)
+            }
             FilterExpr::Region(_) | FilterExpr::MemberOf(_) => Ok(Space::Row),
             FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) => {
                 let mut all_entity = true;
@@ -228,7 +306,7 @@ impl FilterColumns {
             }
             FilterExpr::NoneOf(kids) => {
                 let column = FilterExpr::negated_column(kids);
-                let space = self.leaf_space(column, prefer_row)?;
+                let space = self.leaf_space(column, None, prefer_row)?;
                 if space == Space::Entity {
                     self.presence_layers(column)?;
                 }
@@ -247,7 +325,7 @@ impl FilterColumns {
         resolvers: &RowLeafResolvers<'_>,
     ) -> Result<RowExpr, FilterError> {
         if self.space_of(expr, prefer_row)? == Space::Entity {
-            return Ok(RowExpr::Entity(self.eval(expr, candidate)?));
+            return Ok(RowExpr::Entity(self.eval(expr, candidate, resolvers.unique)?));
         }
         match expr {
             FilterExpr::Leaf { column, operand } => Ok(RowExpr::Leaf {
@@ -371,15 +449,22 @@ impl FilterColumns {
         Ok(layers)
     }
 
-    fn eval(&self, expr: &FilterExpr, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
+    fn eval(
+        &self,
+        expr: &FilterExpr,
+        candidate: &Bitmap,
+        unique: &UniqueResolver<'_>,
+    ) -> Result<Bitmap, FilterError> {
         match expr {
-            FilterExpr::Leaf { column, operand } => self.resolve(column, operand, candidate),
+            FilterExpr::Leaf { column, operand } => {
+                self.eval_leaf(column, operand, candidate, unique)
+            }
             FilterExpr::Region(_) => Err(FilterError::RegionInEntitySpace),
             FilterExpr::MemberOf(_) => Err(FilterError::MemberOfInEntitySpace),
             FilterExpr::AllOf(kids) => {
                 let mut live = candidate.clone();
                 for kid in kids {
-                    live = self.eval(kid, &live)?;
+                    live = self.eval(kid, &live, unique)?;
                     if live.is_empty() {
                         break;
                     }
@@ -389,7 +474,7 @@ impl FilterColumns {
             FilterExpr::AnyOf(kids) => {
                 let mut out = Bitmap::new();
                 for kid in kids {
-                    out |= self.eval(kid, candidate)?;
+                    out |= self.eval(kid, candidate, unique)?;
                 }
                 Ok(out)
             }
@@ -400,7 +485,7 @@ impl FilterColumns {
                 let mut out = self.present_in(column, candidate)?;
                 for kid in kids {
                     // Under `out`, not `candidate`, the same narrowing `AllOf` does.
-                    out.andnot_inplace(&self.eval(kid, &out)?);
+                    out.andnot_inplace(&self.eval(kid, &out, unique)?);
                     if out.is_empty() {
                         break;
                     }
@@ -408,6 +493,21 @@ impl FilterColumns {
                 Ok(out)
             }
         }
+    }
+}
+
+/// An operand's operator, as a filter spells it.
+fn operator_name(operand: &FilterOperand) -> &'static str {
+    match operand {
+        FilterOperand::Equals(_) | FilterOperand::TextEquals(_) | FilterOperand::NumEquals(_) => {
+            "eq"
+        }
+        FilterOperand::In(_) | FilterOperand::TextIn(_) | FilterOperand::NumIn(_) => "in",
+        FilterOperand::TextPrefix(_) => "prefix",
+        FilterOperand::TextContains(_) => "contains",
+        FilterOperand::Match { .. } => "match",
+        FilterOperand::Phrase { .. } => "phrase",
+        FilterOperand::Range { .. } => "range",
     }
 }
 

@@ -373,6 +373,9 @@ pub(crate) struct ColumnCost {
     /// record blob, and a column that is neither has met its last reader when the filter postings
     /// end (`pipeline::write_filter_postings`).
     pub phases: Phases,
+    /// Whether the column is declared `unique`, which sorts its values through a spill of its own
+    /// ([`crate::unique_index`]).
+    pub unique: bool,
 }
 
 /// Whether a column's values are characters rather than a fixed width — which is what makes them a
@@ -798,6 +801,16 @@ pub(crate) fn entity_order_residency(
             constant: false,
         },
     ];
+    // The unique indexes are sorted one column at a time, each through a spill of this size.
+    if columns.iter().any(|column| column.unique) {
+        terms.push(Term {
+            what: "the unique index spill, one column at a time".into(),
+            bytes: crate::unique_index::spill_budget(memory_budget) as u64,
+            mapped: false,
+            phases: Phases::INDEX,
+            constant: true,
+        });
+    }
     for (index, column) in columns.iter().enumerate() {
         let width = fixed_width(column.ty);
         let presence = n.div_ceil(8);
@@ -1283,6 +1296,7 @@ fn model_inputs(
             } else {
                 Phases::JOIN.and(Phases::INDEX)
             },
+            unique: attribute.unique,
         })
         .collect();
     // **Three denominators over the same member sources**, because a member entry is held in
@@ -1802,6 +1816,22 @@ pub(crate) fn disk(
                 payload
             ),
             4 * (n + 1) + (8 + payload) * n + n.div_ceil(4),
+            Phases::BANDS.onwards(),
+        );
+    }
+    // A unique column's index: one fixed-width entry per value, an 8 B key for an integer and a
+    // 16 B hash for a keyword, each beside a 4 B entity. Charged over every item, a ceiling.
+    for attribute in args.schema.attributes.iter().filter(|a| a.unique) {
+        let entry = match attribute.ty {
+            ScalarType::Keyword => 20,
+            _ => 12,
+        };
+        push(
+            format!(
+                "the unique index of '{}', {entry} B/item of key and entity",
+                attribute.name
+            ),
+            entry * n,
             Phases::BANDS.onwards(),
         );
     }
@@ -2374,6 +2404,7 @@ mod tests {
             text_index: false,
             render: false,
             phases: Phases::JOIN.and(Phases::INDEX).and(Phases::BLOB),
+            unique: false,
         }
     }
 
@@ -2713,6 +2744,7 @@ mod tests {
                     value_set: None,
                     index: indexed,
                     render: false,
+                    unique: false,
                 })
                 .collect(),
             vocabularies: Default::default(),
@@ -3080,6 +3112,24 @@ mod tests {
             ids,
             "before the assignment the map does not exist"
         );
+    }
+
+    /// **The unique indexes' spill is charged to memory once**, however many columns are unique,
+    /// since they are sorted one at a time.
+    #[test]
+    fn a_unique_column_charges_its_spill_to_memory_once() {
+        let n = 10_000_000;
+        let plain = column(ScalarType::U64, 0);
+        let unique = ColumnCost {
+            unique: true,
+            ..plain
+        };
+        let none = entity_order_residency(n, IdShape::dense(n), &[plain, plain], 0, 0);
+        let one = entity_order_residency(n, IdShape::dense(n), &[unique, plain], 0, 0);
+        let two = entity_order_residency(n, IdShape::dense(n), &[unique, unique], 0, 0);
+        assert!(one.total() > none.total());
+        assert_eq!(one.total(), two.total());
+        assert_eq!(one.at(Phase::Index), none.at(Phase::Index), "memory, not disk");
     }
 
     /// **A column is charged to its last reader's phase.** A render column is read by the segment

@@ -276,6 +276,7 @@ mod segment_schema_tests {
                     analyser: None,
                     index: true,
                     render: true,
+                    unique: false,
                 },
                 DeclaredScalar {
                     name: "title".to_string(),
@@ -284,6 +285,7 @@ mod segment_schema_tests {
                     analyser: None,
                     index: true,
                     render: false,
+                    unique: false,
                 },
             ],
         };

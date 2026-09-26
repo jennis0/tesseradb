@@ -158,6 +158,7 @@ pub(crate) fn declared_of_scoped(
         analyser: family.analyser.clone(),
         index: family.index,
         render: family.render,
+        unique: false,
     }
 }
 
@@ -198,7 +199,7 @@ pub(crate) fn scalar_is_absent(
 ///
 /// `None` where the stored value cannot be read at the declared type, a malformed bundle rather
 /// than a caller's error.
-fn stored_as_wal(
+pub(crate) fn stored_as_wal(
     value: tessera_filter::RecordValue,
     declared: &tessera_store::manifest::DeclaredScalar,
 ) -> Option<tessera_lifecycle::WalScalar> {

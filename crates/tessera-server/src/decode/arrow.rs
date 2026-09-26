@@ -666,6 +666,7 @@ mod category_wire {
                 analyser: None,
                 index: false,
                 render: true,
+                unique: false,
             },
             DeclaredScalar {
                 name: "score".to_string(),
@@ -674,6 +675,7 @@ mod category_wire {
                 analyser: None,
                 index: false,
                 render: true,
+                unique: false,
             },
         ]
     }

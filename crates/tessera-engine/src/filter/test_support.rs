@@ -107,5 +107,6 @@ pub(super) fn keyword_column(
         access: tessera_filter::Access::Read,
         records: Arc::new(empty_record_stack()),
         entity_terms: Arc::new(tessera_store::EntityTermsStack::empty()),
+        unique: BTreeMap::new(),
     }
 }

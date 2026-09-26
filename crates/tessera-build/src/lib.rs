@@ -37,6 +37,7 @@ mod residency;
 pub mod shapes;
 pub(crate) mod spill;
 pub mod term_images_pass;
+mod unique_index;
 pub mod unique_key;
 pub use tessera_store::utf8;
 
@@ -1459,6 +1460,22 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         report_attribute_coverage(&attribute_coverage);
     }
 
+    // ---- 6b′. the unique indexes ------------------------------------------------------
+    // Before `sort_batch`, while `tiler_items` is still in entity order.
+    let unique = {
+        let scratch = crate::spill::TmpDir::create(&args.out)?;
+        let written = crate::unique_index::write_unique_indexes(
+            &args.out.join(PREFIX),
+            PHASH,
+            &args.schema,
+            |column| crate::unique_index::UniqueSource::Items(&tiler_items, column),
+            scratch.path(),
+            args.memory_budget.unwrap_or_else(pipeline::detect_memory_budget),
+        )?;
+        scratch.close()?;
+        written
+    };
+
     // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
     // Before `sort_batch`, which permutes `tiler_items` into row order: entity id is a staged
     // item's *position*, so the values are entity-major exactly here and nowhere after.
@@ -1823,6 +1840,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             dict_records,
             external_ids_paths,
             other_paths,
+            unique,
         },
         &plugin,
         n,
@@ -1885,6 +1903,8 @@ struct BundleFiles {
     dict_records: u64,
     external_ids_paths: Vec<PathBuf>,
     other_paths: Vec<PathBuf>,
+    /// Each unique column's base runs, by attribute, in declaration order.
+    unique: Vec<(String, Vec<tessera_store::unique::WrittenUniqueRun>)>,
 }
 
 /// Write `SEGMENTS-0.json`, `MANIFEST.json` and `CURRENT` over the files a build produced.
@@ -1934,7 +1954,23 @@ fn write_manifests(
         .iter()
         .chain(&files.external_ids_paths)
         .chain(&files.other_paths)
+        .chain(files.unique.iter().flat_map(|(_, runs)| runs.iter().map(|run| &run.path)))
         .collect();
+    let unique_indexes = files
+        .unique
+        .iter()
+        .map(|(attribute, runs)| {
+            Ok(tessera_store::manifest::UniqueIndexRuns {
+                attribute: attribute.clone(),
+                base: runs
+                    .iter()
+                    .map(|run| run.as_base(&prefix_dir))
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(|e| BuildError::Invalid(e.to_string()))?,
+                live: Vec::new(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let manifest_files: BTreeMap<String, FileDigest> = all_paths
         .into_par_iter()
         .map(|path| Ok((relative_to(&prefix_dir, path)?, digest_file(path)?)))
@@ -1980,6 +2016,7 @@ fn write_manifests(
             .collect(),
         dict_extents,
         external_id_runs,
+        unique_indexes,
         ..SegmentsManifest::empty()
     };
     let segments_path = partition_dir.join("SEGMENTS-0.json");
@@ -2011,6 +2048,7 @@ fn write_manifests(
                 analyser: a.analyser.clone(),
                 index: a.index,
                 render: a.render,
+                unique: a.unique,
             })
             .collect(),
         // Sorted by name, unlike the columns: nothing indexes a vocabulary positionally, and a

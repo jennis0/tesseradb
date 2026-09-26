@@ -406,4 +406,57 @@ impl Engine {
                 .collect()
         })
     }
+
+    /// Hold the next ingest or values batch whose handler's check passes, before it reaches the
+    /// executor, so a test can change what it was checked against. [`Self::release_write_check_for_test`] lets
+    /// it go.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn hold_next_write_check_for_test(&self) {
+        self.switches.write_check_held.store(true, Ordering::SeqCst);
+        self.switches.write_check_hold_wanted.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a batch is waiting at [`Self::hold_next_write_check_for_test`]'s hold.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn write_check_is_holding_for_test(&self) -> bool {
+        self.switches.write_check_holding.load(Ordering::SeqCst)
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn release_write_check_for_test(&self) {
+        self.switches.write_check_held.store(false, Ordering::SeqCst);
+    }
+
+    /// Hold the executor before it drains its work queue into a commit window, so work submitted
+    /// meanwhile lands in one window.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_work_pass_paused_for_test(&self, paused: bool) {
+        self.switches.work_pass_paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// How many commands have been put on the executor's work queue.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn work_enqueued_for_test(&self) -> u64 {
+        self.write.health().work_enqueued.load(Ordering::SeqCst)
+    }
+
+    /// Hold each round of a unique declaration's build once it has finished, before the executor
+    /// takes its result, so a test can land a write or a flush inside the build.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_unique_round_paused_for_test(&self, paused: bool) {
+        self.switches.unique_round_paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// Whether a round is holding at [`Self::set_unique_round_paused_for_test`]'s hold.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn unique_round_is_holding_for_test(&self) -> bool {
+        self.switches.unique_round_holding.load(Ordering::SeqCst)
+    }
 }

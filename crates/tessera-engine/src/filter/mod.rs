@@ -77,14 +77,15 @@ pub(crate) use declared::{
     scoped_visibility_of,
 };
 pub use declared::{
-    extent_column_name, is_filterable, scoped_column_name, scoped_has_value_column, FieldHomes,
-    scoped_is_filterable, Family, Placement, PIN,
+    extent_column_name, is_filterable, operands_of, scoped_column_name, scoped_has_value_column,
+    unique_only,
+    FieldHomes, scoped_is_filterable, Family, Placement, PIN,
 };
 pub use error::{ComposeError, FilterError};
 pub use expr::{
     FilterExpr, FilterOperand, MemberOfLeaf, MemberResolver, RegionLeaf, RegionResolver,
-    RoutedFilter, RowExpr, RowLeafResolvers, MAX_FILTER_DEPTH, MEMBER_OF_COLUMN, REGION_COLUMN,
-    UNRESOLVABLE_VALUE,
+    RoutedFilter, RowExpr, RowLeafResolvers, UniqueResolver, MAX_FILTER_DEPTH, MEMBER_OF_COLUMN,
+    REGION_COLUMN, UNRESOLVABLE_VALUE,
 };
 pub use membership::CategoryMembership;
 

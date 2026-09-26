@@ -91,6 +91,8 @@ pub struct AttributeDisclosure {
     pub placement: &'static str,
     /// The value set this column draws on, for a category.
     pub vocabulary: Option<String>,
+    /// No two items hold one value, and the build writes the column's unique index.
+    pub unique: bool,
     /// The group whose views this column is one value per (`views.md` §5); `None` is the
     /// entity-scoped default, one value per entity under every view.
     ///
@@ -233,6 +235,7 @@ impl Disclosure {
                     (false, false) => "blob",
                 },
                 vocabulary: attribute.vocabulary.clone(),
+                unique: attribute.unique,
                 scope,
             }
         };

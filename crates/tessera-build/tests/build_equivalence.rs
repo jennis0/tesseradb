@@ -221,10 +221,13 @@ name     = "score"
 type     = "f64"
 render = true
 
+# Unique, which puts the two builds' unique index runs under the byte comparison too; its nulls
+# hold no entry and never collide.
 [[attribute]]
 name     = "submitted_at"
 type     = "timestamp_us"
 render = true
+unique = true
 
 [[attribute]]
 name     = "active"

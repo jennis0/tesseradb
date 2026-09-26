@@ -276,6 +276,15 @@ fn refuse_waiters(
     health.record_window_service(entries, started.elapsed().as_nanos() as u64);
 }
 
+/// One `/control/ingest` submission as the executor admits it.
+pub(super) struct IngestSubmission {
+    pub(super) rows: Vec<UnallocatedRow>,
+    pub(super) batch_id: String,
+    pub(super) body_hash: [u8; 32],
+    pub(super) artifacts: tessera_lifecycle::BatchArtifacts,
+    pub(super) unique_seq: u64,
+}
+
 /// What [`Executor::admit_ingest`] did with a submission, as far as the drain loop needs to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Admission {
@@ -292,6 +301,8 @@ impl Executor {
     /// done. Closes at `commit_window_max_rows`, an empty queue, or a conflicting external id.
     pub(super) fn run_work_pass(&mut self) -> bool {
         let max_rows = self.health.commit_window_max_rows();
+        #[cfg(feature = "fault-injection")]
+        self.deps.switches.hold_work_pass_if_paused();
         let mut window: CommitWindow<Reply<Ingested>> = CommitWindow::new(self.next_window_seq());
         let mut did_work = false;
 
@@ -343,10 +354,20 @@ impl Executor {
                 batch_id,
                 body_hash,
                 artifacts,
+                unique_seq,
                 reply,
             } = command
             else {
-                // Tolerable while a window is open: none of these touch the buffer or the swap.
+                // A values batch and a declaration read the unique values the window holds and has
+                // not yet applied, so the window closes first. Every other command is tolerable
+                // while a window is open: none of them touch the buffer or the swap.
+                if matches!(
+                    command,
+                    Command::Values { .. } | Command::DeclareAttribute { .. }
+                ) && !window.is_empty()
+                {
+                    window = self.close_and_reopen(window);
+                }
                 self.execute(command);
                 did_work = true;
                 continue;
@@ -354,8 +375,17 @@ impl Executor {
 
             let admitted;
             let m = StageMark::now();
-            (window, admitted) =
-                self.admit_ingest(window, rows, batch_id, body_hash, artifacts, reply);
+            (window, admitted) = self.admit_ingest(
+                window,
+                IngestSubmission {
+                    rows,
+                    batch_id,
+                    body_hash,
+                    artifacts,
+                    unique_seq,
+                },
+                reply,
+            );
             self.health.lap(WriteStage::AdmitWindow, m);
             did_work = true;
             if admitted == Admission::YieldedAfterClose {
@@ -388,12 +418,16 @@ impl Executor {
     pub(super) fn admit_ingest(
         &mut self,
         mut window: CommitWindow<Reply<Ingested>>,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        artifacts: tessera_lifecycle::BatchArtifacts,
+        submission: IngestSubmission,
         reply: Reply<Ingested>,
     ) -> (CommitWindow<Reply<Ingested>>, Admission) {
+        let IngestSubmission {
+            rows,
+            batch_id,
+            body_hash,
+            artifacts,
+            unique_seq,
+        } = submission;
         match BatchState::of(&self.live, &window, &batch_id) {
             BatchState::Accepted {
                 body_hash: prev_hash,
@@ -431,16 +465,39 @@ impl Executor {
             }
             BatchState::Unknown => {
                 let mut admission = Admission::Admitted;
-                // Only external ids reach here: a held batch id was answered above.
+                // An external id the open window holds is bound at its close, and the joins below
+                // read the bindings.
                 if window.holds_external_id_of(&rows) {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Some(entry) = self.admit(rows, batch_id, body_hash, artifacts, reply) {
+                let rows = match self.resolve_joins(rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        reply.fail(e);
+                        // A close above still owes the pass its yield to a deny.
+                        return (window, admission);
+                    }
+                };
+                // Over the rows as they will be applied: a join may have become a create above,
+                // or a create a join. A value the open window holds is added at its close, and
+                // the re-check below reads the added values.
+                let unique_keys = {
+                    let generation = self.generation.load();
+                    crate::unique::window_keys(&generation.bundle.manifest.declared_scalars, &rows)
+                };
+                if window.holds_unique_key(&unique_keys) {
+                    window = self.close_and_reopen(window);
+                    admission = Admission::YieldedAfterClose;
+                }
+                if let Some(entry) =
+                    self.admit(rows, batch_id, body_hash, artifacts, unique_seq, reply)
+                {
                     if window.is_empty() {
                         // Armed at the first entry: an empty window is never closed.
                         self.health.mark_work_started(window.opened_at());
                     }
+                    window.hold_unique_keys(unique_keys);
                     window.push(entry);
                 }
                 (window, admission)
@@ -448,20 +505,15 @@ impl Executor {
         }
     }
 
-    /// The external-id admission check. `None` means the caller has already been answered. This
-    /// reads state written at apply, which is why an entry naming an id the open window holds must
-    /// close it first.
-    pub(super) fn admit(
+    /// The external-id admission check: whether each row joins the item its external id is bound
+    /// to or creates one, against state written at apply, which is why an entry naming an id the
+    /// open window holds must close it first.
+    fn resolve_joins(
         &mut self,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        artifacts: tessera_lifecycle::BatchArtifacts,
-        reply: Reply<Ingested>,
-    ) -> Option<WindowEntry<Reply<Ingested>>> {
-        // From the same generation the apply below clones, so the exemption cannot race a delete.
+        mut rows: Vec<UnallocatedRow>,
+    ) -> std::result::Result<Vec<UnallocatedRow>, ExecError> {
+        // From one generation, so the exemption cannot race a delete.
         let generation = self.generation.load();
-        let mut rows = rows;
         let collisions = self.live.established_collisions(
             &mut rows,
             |e| generation.overlay.is_deleted(e),
@@ -475,29 +527,52 @@ impl Executor {
             },
         );
         if let Some(index) = rows.iter().position(|row| row.join_only && row.join.is_none()) {
-            drop(generation);
-            reply.fail(ExecError::JoinRefused {
+            return Err(ExecError::JoinRefused {
                 detail: format!(
                     "row {index} joins an item deleted since the batch was checked; send the \
                      batch again"
                 ),
             });
-            return None;
         }
-        if collisions == 0 {
-            if let Err(detail) = settle_joins(&generation, &mut rows) {
-                drop(generation);
-                reply.fail(ExecError::JoinRefused { detail });
+        if collisions > 0 {
+            return Err(ExecError::DuplicateExternalId { count: collisions });
+        }
+        settle_joins(&generation, &mut rows).map_err(|detail| ExecError::JoinRefused { detail })?;
+        Ok(rows)
+    }
+
+    /// The unique values against what was added since the handler checked them, from memory, and
+    /// the artifacts the batch names. `None` means the caller has already been answered.
+    pub(super) fn admit(
+        &mut self,
+        rows: Vec<UnallocatedRow>,
+        batch_id: String,
+        body_hash: [u8; 32],
+        artifacts: tessera_lifecycle::BatchArtifacts,
+        unique_seq: u64,
+        reply: Reply<Ingested>,
+    ) -> Option<WindowEntry<Reply<Ingested>>> {
+        let generation = self.generation.load();
+        let rechecked =
+            crate::unique::recheck_rows(&generation, &rows, unique_seq, &self.deps.identity_key);
+        drop(generation);
+        match rechecked {
+            Ok(()) => {}
+            Err(crate::unique::Recheck::Refused(e)) => {
+                reply.fail(e);
+                return None;
+            }
+            Err(crate::unique::Recheck::Stale) => {
+                reply.fail(ExecError::UniqueStale(Box::new(
+                    tessera_lifecycle::StaleSubmission::Ingest {
+                        rows,
+                        batch_id,
+                        artifacts,
+                    },
+                )));
                 return None;
             }
         }
-        drop(generation);
-        if collisions > 0 {
-            reply.fail(ExecError::DuplicateExternalId { count: collisions },
-            );
-            return None;
-        }
-
         let (memberships, edges) = match self.resolve_memberships(&artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {
@@ -752,6 +827,8 @@ impl Executor {
         );
         let mut buffer = (*generation.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
+        let declared = &generation.bundle.manifest.declared_scalars;
+        let unique = !generation.unique_live.is_empty_schema();
 
         // What the buffered-row lists grow by: every entity this window buffered a row for.
         let mut inserted: Vec<EntityId> = Vec::new();
@@ -778,6 +855,19 @@ impl Executor {
         }
         drop(established);
         drop(established_inverse);
+        // A joining row's values are its item's, whose entries are held already.
+        let unique_live = unique.then(|| {
+            let mut unique_live = (*generation.unique_live).clone();
+            unique_live.add(
+                declared,
+                closed
+                    .iter()
+                    .flat_map(|entry| entry.rows())
+                    .filter(|row| !row.join)
+                    .map(|row| (row.entity_id, row.scalars.as_slice())),
+            );
+            unique_live
+        });
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
         // Published here, and everywhere else buffer occupancy changes.
@@ -789,6 +879,9 @@ impl Executor {
             g.overlay_version = generation.overlay_version + 1;
             g.vocabularies = Arc::new(vocabularies);
             g.suggest = suggest;
+            if let Some(unique_live) = unique_live {
+                g.unique_live = Arc::new(unique_live);
+            }
         });
         self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);

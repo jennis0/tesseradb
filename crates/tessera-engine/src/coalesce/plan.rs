@@ -100,6 +100,19 @@ pub(crate) fn plan_coalesce(
         }
     }
 
+    // A lookup reads every live run of a unique column, so they coalesce on the external-id
+    // runs' policy.
+    for index in &manifest.unique_indexes {
+        if let Some(window) =
+            select_window(&index.live, policy.run_width, runs_policy, |rel| size_of(rel))
+        {
+            plan.unique.push(super::UniqueWindow {
+                attribute: index.attribute.clone(),
+                runs: index.live[window].to_vec(),
+            });
+        }
+    }
+
     (!plan.is_empty()).then_some(plan)
 }
 

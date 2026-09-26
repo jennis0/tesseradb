@@ -952,11 +952,37 @@ impl Executor {
             delta_postings.push(tier);
         }
 
+        // The merged unique runs hold the same entries as the runs they replace.
+        let unique = if completed.unique.is_empty() {
+            Arc::clone(&live.unique)
+        } else {
+            let partition = next_bundle
+                .partitions
+                .get(&completed.partition)
+                .expect("the partition this publication just rebased");
+            match tessera_store::unique::UniqueIndexes::open(
+                &next_bundle.manifest,
+                &partition.manifest,
+                &self.prefix_dir(&live),
+                Some(&live.unique),
+            ) {
+                Ok(unique) => Arc::new(unique),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a coalesce's manifest committed naming unique index runs this \
+                         process could not open; a restart opens the committed manifest"
+                    );
+                    return;
+                }
+            }
+        };
         let next = live.with(|g| {
             // The live columns with each consumed window replaced by the layer that carries its
             // values, the same set of `(entity, value)` pairs in fewer files, so a request holding
             // the old and one holding the new agree on every answer.
             g.filter_columns = filter_columns;
+            g.unique = unique;
             g.bundle = next_bundle;
             // The sidecar rides the swap, rather than being stored beside it: a coalesce is
             // content-preserving, but a fold is not, since it drops the retired entities' keys and
@@ -1259,6 +1285,13 @@ impl Executor {
                 max_distinct_terms: self.deps.max_distinct_terms,
                 prefix: generation.prefix.clone(),
                 shapes: self.deps.shapes.levels_of_view(&view),
+                unique_schema: manifest
+                    .declared_scalars
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, d)| d.unique)
+                    .map(|(at, d)| (d.name.clone(), at, d.arrow_type))
+                    .collect(),
             }
         };
         self.health
@@ -1859,6 +1892,23 @@ impl Executor {
             );
             return false;
         }
+        // A column that became unique during the flight has live entries for these rows and no
+        // run from this flush; one that stopped being unique has no index to take a run.
+        let unique_now: Vec<&str> = live
+            .bundle
+            .manifest
+            .declared_scalars
+            .iter()
+            .filter(|d| d.unique)
+            .map(|d| d.name.as_str())
+            .collect();
+        if !completed.unique_columns.iter().map(String::as_str).eq(unique_now) {
+            tracing::warn!(
+                "discarding a completed flush planned before a unique declaration changed; the \
+                 next tick re-plans it"
+            );
+            return false;
+        }
 
         // A promoting flush's ordinals are positions, assigned as `dict.len() + i` against the
         // dictionary it planned against; `Dict::load` reproduces them only if its extent lands
@@ -2058,6 +2108,15 @@ impl Executor {
             }
         }
         manifest.files.extend(completed.files);
+        for flushed in &completed.unique_runs {
+            if let Some(index) = manifest
+                .unique_indexes
+                .iter_mut()
+                .find(|runs| runs.attribute == flushed.attribute)
+            {
+                index.live.extend(flushed.runs.iter().cloned());
+            }
+        }
         if let Some(extent) = completed.dict_extent {
             manifest.dict_extents.push(extent);
         }
@@ -2305,6 +2364,45 @@ impl Executor {
             .health
             .flush_lap(crate::flush::FlushStage::Artifacts, *mark);
 
+        // The runs this flush wrote join the index, and the live entries they hold leave.
+        let unique = match next_bundle.partitions.get(&completed.partition) {
+            Some(partition) if !completed.unique_runs.is_empty() => {
+                match tessera_store::unique::UniqueIndexes::open(
+                    &next_bundle.manifest,
+                    &partition.manifest,
+                    &self.prefix_dir(&live),
+                    Some(&live.unique),
+                ) {
+                    Ok(unique) => Arc::new(unique),
+                    Err(e) => {
+                        // The manifest is committed; a restart opens it.
+                        self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(
+                            error = %e,
+                            "ALARM: a flush's side-manifest was committed naming unique index \
+                             runs this process could not open; a restart opens the committed \
+                             manifest"
+                        );
+                        return false;
+                    }
+                }
+            }
+            _ => Arc::clone(&live.unique),
+        };
+        let unique_live = if completed.unique_runs.is_empty() {
+            Arc::clone(&live.unique_live)
+        } else {
+            let mut unique_live = (*live.unique_live).clone();
+            unique_live.flushed(
+                completed
+                    .unique_runs
+                    .iter()
+                    .map(|f| (f.attribute.as_str(), f.written.as_slice())),
+            );
+            Arc::new(unique_live)
+        };
+        self.unique_declarations
+            .flushed(&completed.consumed, &completed.filled);
         let next = Arc::new(live.with(|g| {
             // The live columns with this flush's extents composed on: the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
@@ -2315,6 +2413,8 @@ impl Executor {
             g.dict = completed.dict;
             g.delta_postings = delta_postings;
             g.buffer = Arc::new(buffer);
+            g.unique = unique;
+            g.unique_live = unique_live;
         }));
         // Armed before the swap, and that ordering is the mechanism. A request landing between
         // the swap and the pool task's first insert must find the flag set, or it takes the cost

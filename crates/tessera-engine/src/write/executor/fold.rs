@@ -276,6 +276,18 @@ pub(super) fn fold_rebases(
                 .iter()
                 .any(|extent| extent.terms == consumed.terms)
         })
+        // An index removed during the flight takes nothing; one still held must still list every
+        // run the fold consumed.
+        && plan.unique.iter().all(|consumed| {
+            live_manifest
+                .unique_indexes
+                .iter()
+                .find(|index| index.attribute == consumed.attribute)
+                .is_none_or(|index| {
+                    let listed: FxHashSet<&str> = index.files().collect();
+                    consumed.files().all(|rel| listed.contains(rel))
+                })
+        })
 }
 
 /// What [`Executor::fold_still_applies`] found: what the fold carries forward from the live
@@ -315,6 +327,9 @@ pub(super) struct CarriedExtents<'a> {
     records: Vec<tessera_store::manifest::RecordExtent>,
     texts: Vec<tessera_store::manifest::TextExtent>,
     entity_terms: Vec<tessera_store::manifest::EntityTermsExtent>,
+    /// Every unique index the live manifest holds, less what the fold consumed: a folded
+    /// column's base runs are the fold's own and are left out here.
+    unique: Vec<tessera_store::manifest::UniqueIndexRuns>,
     /// The dropped views whose segments were left behind, and how many segments that was.
     omitted_views: Vec<String>,
     omitted_segments: usize,
@@ -427,6 +442,28 @@ pub(super) fn carried_forward<'a>(
                 .collect(),
             |extent| extent.terms.as_str(),
         ),
+        unique: live_manifest
+            .unique_indexes
+            .iter()
+            .map(|index| {
+                match plan.unique.iter().find(|folded| folded.attribute == index.attribute) {
+                    None => index.clone(),
+                    Some(folded) => {
+                        let consumed: FxHashSet<&str> = folded.files().collect();
+                        tessera_store::manifest::UniqueIndexRuns {
+                            attribute: index.attribute.clone(),
+                            base: Vec::new(),
+                            live: index
+                                .live
+                                .iter()
+                                .filter(|rel| !consumed.contains(rel.as_str()))
+                                .cloned()
+                                .collect(),
+                        }
+                    }
+                }
+            })
+            .collect(),
         omitted_views,
         omitted_segments,
     }
@@ -478,6 +515,9 @@ pub(super) fn carried_files(
     }
     for extent in &forward.entity_terms {
         rels.extend(extent.files().map(String::from));
+    }
+    for index in &forward.unique {
+        rels.extend(index.files().map(String::from));
     }
     rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
     rels
@@ -579,6 +619,10 @@ impl Executor {
         // would be orphaned by the flip and their inputs are the fold's, so starting now would
         // mean re-reading the corpus to discard it at the rebase check.
         if self.merge_outstanding() || self.coalesce_outstanding() {
+            return;
+        }
+        // A unique declaration's rounds read the layers and runs a fold rewrites.
+        if self.unique_declarations.busy() {
             return;
         }
 
@@ -1110,6 +1154,21 @@ impl Executor {
             entity_terms_extents: forward.entity_terms.clone(),
             external_id_runs,
             locator_extents: forward.locators.clone(),
+            unique_indexes: forward
+                .unique
+                .iter()
+                .map(|carried| {
+                    let mut index = carried.clone();
+                    if let Some((_, base)) = completed
+                        .unique
+                        .iter()
+                        .find(|(attribute, _)| *attribute == carried.attribute)
+                    {
+                        index.base = base.clone();
+                    }
+                    index
+                })
+                .collect(),
             ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);

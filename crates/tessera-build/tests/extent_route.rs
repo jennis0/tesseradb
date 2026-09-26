@@ -135,6 +135,7 @@ fn route_schema() -> Schema {
         value_set: None,
         index,
         render: false,
+        unique: false,
     };
     Schema {
         attributes: vec![
@@ -151,6 +152,7 @@ fn route_schema() -> Schema {
                 value_set: None,
                 index: false,
                 render: true,
+                unique: false,
             },
         ],
         vocabularies: Default::default(),

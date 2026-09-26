@@ -117,6 +117,13 @@ pub enum LeafColumn {
     Resolved {
         column: String,
         family: crate::filter::Family,
+        /// The operators a filter may apply to it ([`crate::filter::operands_of`]).
+        operands: &'static [&'static str],
+        /// Whether its values are exact integers (every integer width and `timestamp_us`), so a
+        /// comparand may be spelled as a decimal string past what a JSON number carries exactly.
+        integer: bool,
+        /// Whether its unique index is its only filter home ([`crate::filter::unique_only`]).
+        unique_only: bool,
     },
     /// A group-scoped attribute named bare under a view that decides no column of its family.
     Unpinned { group: String },
@@ -150,6 +157,12 @@ pub(crate) enum Resolution<'a> {
     },
 }
 
+/// Every integer width, and `timestamp_us`, whose values are `i64` microseconds.
+fn is_integer(ty: tessera_spatial::tiler::ScalarType) -> bool {
+    use tessera_store::unique::KeyKind;
+    matches!(KeyKind::of(ty), Some(KeyKind::Unsigned | KeyKind::Signed))
+}
+
 impl Resolution<'_> {
     /// The outcome in the terms the filter surface and the value-list route answer in.
     pub(crate) fn leaf_column(self, meta: &EngineMeta) -> LeafColumn {
@@ -159,11 +172,17 @@ impl Resolution<'_> {
                 LeafColumn::Resolved {
                     column: declared.name.clone(),
                     family: crate::filter::Family::of(declared),
+                    operands: crate::filter::operands_of(declared),
+                    integer: declared.vocabulary.is_none() && is_integer(declared.arrow_type),
+                    unique_only: crate::filter::unique_only(declared),
                 }
             }
             Resolution::Scoped { family, view } => LeafColumn::Resolved {
                 column: crate::filter::scoped_column_name(&family.name, &view),
                 family: crate::filter::Family::of_scoped(family),
+                operands: crate::filter::Family::of_scoped(family).operands(),
+                integer: family.vocabulary.is_none() && is_integer(family.arrow_type),
+                unique_only: false,
             },
             Resolution::Unknown => LeafColumn::Unknown,
             Resolution::Unpinned { group } => LeafColumn::Unpinned { group },

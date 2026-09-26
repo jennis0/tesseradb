@@ -16,6 +16,10 @@ Declaring says what a database holds: its views, columns, vocabularies and annot
     options:
       heading_level: 3
 
+::: tesseradb._database.Database.declare_unique
+    options:
+      heading_level: 3
+
 ::: tesseradb._database.Database.declare_vocabulary
     options:
       heading_level: 3
