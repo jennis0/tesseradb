@@ -67,12 +67,10 @@ from it.
 
 ## Two served shapes the expectations must meet half-way
 
-- **A rendered number's absence is served as the type's zero** — the hot column cannot express
-  absence and decision 0064's wire half is deferred — so the expected side maps an absent render
-  number to 0 on both the points tail and the drill-down. A category's absence is its reserved
-  code 0 on the tail and an omitted field at drill-down, which the declaration's own key→code
-  table decides ([`Declaration`], parsed from the materialised `config.toml` rather than restated
-  here).
+- **An absent value is null on the points tail and an omitted field at drill-down**, except a
+  category's on the tail, which is its reserved code 0. The declaration's own key→code table
+  decides a category's code ([`Declaration`], parsed from the materialised `config.toml` rather
+  than restated here).
 - **The points tail is read positionally, not by name.** The tail's buffers are the render columns
   in manifest order, but the wire currently labels them with the first *k* names of the **full**
   declaration — the engine hands the serialiser the whole compiled schema while the gather narrows
@@ -598,7 +596,7 @@ def check_points(
             if col.values is not None:
                 want = col.values[value] if value is not None else 0
             else:
-                want = value if value is not None else 0
+                want = value
             if served != want:
                 reasons.append(
                     f"{label}: row {i} (fx {fx:#x}, item {item.e}) serves {col.name!r} = "
@@ -636,11 +634,7 @@ def check_item(
     body = canon.payload["body"]
     fields = body["fields"]
     for col in declaration.columns:
-        value = item.fields[col.name]
-        if col.render and col.values is None and value is None:
-            want = 0  # a rendered number's absence is the stored zero (module doc)
-        else:
-            want = value
+        want = item.fields[col.name]
         served = fields.get(col.name)
         if served != want:
             reasons.append(
