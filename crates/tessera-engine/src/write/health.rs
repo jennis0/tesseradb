@@ -686,9 +686,11 @@ impl ExecutorHealth {
     /// after it, `completed + 2`. A tick that finds a flush on the pool opens no cycle and consumes
     /// no flag.
     pub(crate) fn request_flush(&self) -> u64 {
-        let cycle = lock_recover(&self.publication);
+        let mut cycle = lock_recover(&self.publication);
         self.flush_requested.store(true, Ordering::SeqCst);
-        cycle.target()
+        let target = cycle.target();
+        cycle.requested = cycle.requested.max(target);
+        target
     }
 
     /// The number of the cycle work buffered by now becomes visible in, asking for no tick.
@@ -715,17 +717,26 @@ impl ExecutorHealth {
     /// one, so reaching the number and reading the work are one event. A cycle that deferred a
     /// second view's plan is not closed here: its caller asked for its buffered rows to be
     /// published and one of its views still holds some ([`Self::deferred_plans`]).
-    pub(crate) fn close_publication_cycle(&self) {
+    ///
+    /// A request answered with a later number than this cycle's is armed again, since this
+    /// cycle's tick consumed its flag. Returns whether one was: the caller runs the next cycle
+    /// without waiting for the period.
+    pub(crate) fn close_publication_cycle(&self) -> bool {
         if self.deferred_plans.load(Ordering::SeqCst) {
-            return;
+            return false;
         }
         let mut cycle = lock_recover(&self.publication);
         if cycle.open {
             cycle.completed += 1;
             cycle.open = false;
         }
+        let owed = cycle.requested > cycle.completed;
+        if owed {
+            self.flush_requested.store(true, Ordering::SeqCst);
+        }
         self.failed_cycle_nanos.store(0, Ordering::Relaxed);
         self.refusal_logged_nanos.store(0, Ordering::Relaxed);
+        owed
     }
 
     /// The cycle published nothing it was asked to (gates shut, a failed flush, a discarded
@@ -1245,6 +1256,8 @@ pub(crate) struct PublicationCycle {
     pub(crate) completed: u64,
     /// A tick is executing, or a flush it dispatched has not been applied.
     pub(crate) open: bool,
+    /// The highest number a flush request has been answered with.
+    pub(crate) requested: u64,
 }
 
 impl PublicationCycle {

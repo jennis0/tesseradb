@@ -291,3 +291,71 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
         || engine.generation().segments_version > 0,
     );
 }
+
+/// **A request made while a cycle is open and not yet planned is honoured by a prompt cycle.** A
+/// tick dispatches one view's flush per cycle, so a cycle holding rows in two views is still open
+/// when its first flush runs. A request made then is answered with the cycle after it; the open
+/// cycle's next tick consumes the request's flag, so that later cycle comes only because closing
+/// the open one arms it again. The period here is an hour, so the number arriving at all is the
+/// re-armed request's doing.
+#[test]
+fn a_request_made_before_an_open_cycle_plans_is_honoured_without_the_period() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+    for (i, view) in ["s0", "s1"].into_iter().enumerate() {
+        let row = tessera_lifecycle::UnallocatedRow {
+            external_id: Some(format!("open-cycle-{view}").into_bytes()),
+            view: view.to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        };
+        engine
+            .ingest_rows(vec![row], format!("open-cycle-{view}"), [i as u8 + 1; 32])
+            .expect("the row is accepted");
+    }
+
+    // The first view's flush is held, so the cycle is open and its second view unplanned.
+    engine.set_flush_paused_for_test(true);
+    let first = engine.request_flush_publication();
+    wait_until("the first view's flush is held", WAIT, || {
+        engine.flush_is_holding_for_test()
+    });
+    let second = engine.request_flush_publication();
+    assert_eq!(second, first + 1, "a request during an open cycle names the cycle after it");
+
+    engine.set_flush_paused_for_test(false);
+    wait_until("the open cycle publishes both views", WAIT, || {
+        engine.publication() >= first
+    });
+    wait_until(
+        "the cycle the second request was answered with publishes, well inside the period",
+        WAIT,
+        || engine.publication() >= second,
+    );
+}
