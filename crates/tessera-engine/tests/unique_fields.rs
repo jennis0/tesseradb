@@ -806,6 +806,56 @@ fn a_join_row_carrying_its_own_value_is_accepted() {
     assert_eq!(holders_of(&engine, doi), 1);
 }
 
+/// **A join keeps its item's unique value when the view holding the item's own row is dropped
+/// before that row flushes.** The drop discards the own row, so the join's row is the only record
+/// of the value; after a flush and a restart past the log the value still finds the item.
+#[test]
+fn a_join_keeps_its_value_when_the_view_holding_its_own_row_is_dropped_before_it_flushes() {
+    let fx = fixture();
+    let engine = engine_over(&fx);
+    engine
+        .create_view_group(tessera_lifecycle::wal::ViewGroupDeclaration {
+            name: "quarter".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+            members: None,
+            metadata: Vec::new(),
+        })
+        .expect("the group is declared");
+    engine
+        .create_view("quarter".into(), "q2".into(), None, Default::default())
+        .expect("the view is created");
+
+    let doi = "10.dropped/binding";
+    let item = ingest(&engine, "own", vec![row_into(&engine, "quarter:q2", "d", doi, None)])[0];
+    let joined = ingest(&engine, "join", vec![row_into(&engine, "s0", "d", doi, Some(item))]);
+    assert_eq!(joined, vec![item], "the row joins the item");
+    engine
+        .drop_view("quarter".into(), "q2".into())
+        .expect("the view drops");
+    publish_buffered(&engine);
+
+    let engine = restart(&fx, engine);
+    assert!(
+        engine.accepted_batch("join").is_none(),
+        "the log rotated past the batches, so nothing but the stored value answers"
+    );
+    assert_eq!(
+        engine.resolve_unique_values("doi", &[doi.to_string()]).unwrap(),
+        vec![Some(item)],
+        "the value names its item"
+    );
+    assert_eq!(holders(&engine, doi), 1);
+}
+
 /// Declare one of the fixture's columns again, as the build declared it, with `unique` as given.
 fn declare(engine: &Engine, name: &str, unique: bool) -> Result<bool, AcceptError> {
     let (ty, index, render) = match name {
