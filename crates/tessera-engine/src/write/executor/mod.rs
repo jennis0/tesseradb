@@ -60,6 +60,10 @@ pub(super) struct Executor {
     pub(super) last_fold_start_unix: Option<u64>,
     /// Deleted once nothing holds its generation; a dead node leaves it to the sweep.
     pub(super) pending_reclaim: Vec<PendingReclaim>,
+    /// Every generation replaced since the last fold's publication, held weakly. A reader holding
+    /// one may open a file under its prefix for the first time, a unique index's run among them,
+    /// so the next fold's reclamation waits for each to be released. Taken by that fold.
+    pub(super) superseded: std::sync::Mutex<Vec<std::sync::Weak<Generation>>>,
     /// So the first tick lands one period after construction, not immediately.
     pub(super) last_tick: std::time::Instant,
     /// What every accepted write since the last tick did to each level's row forms.
@@ -405,7 +409,11 @@ impl Executor {
 
     /// Like [`Self::publish`] but takes an `Arc` directly, for the caller to reuse afterwards.
     pub(super) fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) {
-        self.generation.store(next);
+        let replaced = self.generation.swap(next);
+        let mut superseded = self.superseded.lock().unwrap_or_else(|e| e.into_inner());
+        superseded.retain(|held| held.strong_count() > 0);
+        superseded.push(Arc::downgrade(&replaced));
+        drop(superseded);
         self.health
             .record_apply(started.elapsed().as_nanos() as u64);
         #[cfg(feature = "fault-injection")]

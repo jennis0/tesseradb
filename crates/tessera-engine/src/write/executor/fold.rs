@@ -1451,8 +1451,13 @@ impl Executor {
             omitted_segments,
             ..
         } = forward;
+        let mut generations = std::mem::take(
+            &mut *self.superseded.lock().unwrap_or_else(|e| e.into_inner()),
+        );
+        generations.push(Arc::downgrade(&live));
+        drop(live);
         self.pending_reclaim.push(PendingReclaim {
-            generation: live,
+            generations,
             prefix_dir: from_prefix_dir,
         });
         self.reclaim_superseded_prefixes();
@@ -1615,8 +1620,8 @@ impl Executor {
 
     /// Delete every superseded prefix nothing is reading any more.
     ///
-    /// Waits for a strong-count of one on the generation before unlinking: the generation pointer
-    /// has already moved, so no new holder can appear.
+    /// Waits for every generation published over the prefix to be released before unlinking: the
+    /// generation pointer has already moved, so no new holder can appear.
     ///
     /// A failure alarms once and drops the entry rather than retrying every tick; the tree stands
     /// as an orphan.
@@ -1626,15 +1631,11 @@ impl Executor {
         }
         let mut still_read = Vec::new();
         for pending in std::mem::take(&mut self.pending_reclaim) {
-            if Arc::strong_count(&pending.generation) > 1 {
+            if pending.generations.iter().any(|held| held.strong_count() > 0) {
                 still_read.push(pending);
                 continue;
             }
-            let PendingReclaim {
-                generation,
-                prefix_dir,
-            } = pending;
-            drop(generation);
+            let prefix_dir = pending.prefix_dir;
             match tessera_store::reclaim_prefix(&prefix_dir) {
                 Ok(()) => tracing::info!(
                     prefix = %prefix_dir.display(),
@@ -2522,10 +2523,10 @@ pub(super) fn fold_segments(
     out
 }
 
-/// One superseded prefix awaiting reclamation, and the two `Arc`s whose release says no thread can
-/// still resolve a path inside it. See [`Executor::pending_reclaim`].
+/// One superseded prefix awaiting reclamation, and the generations published over it, whose
+/// release says no thread can still resolve a path inside it. See [`Executor::superseded`].
 pub(in crate::write) struct PendingReclaim {
-    generation: Arc<Generation>,
+    generations: Vec<std::sync::Weak<Generation>>,
     prefix_dir: PathBuf,
 }
 

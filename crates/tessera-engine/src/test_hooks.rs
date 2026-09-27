@@ -466,4 +466,17 @@ impl Engine {
     pub fn unique_round_is_holding_for_test(&self) -> bool {
         self.switches.unique_round_holding.load(Ordering::SeqCst)
     }
+
+    /// [`Engine::resolve_unique_values`] against `generation` rather than the live one, as a
+    /// reader that took a generation before later publications answers.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn resolve_unique_values_under_for_test(
+        &self,
+        generation: &crate::Generation,
+        field: &str,
+        values: &[String],
+    ) -> Result<Vec<Option<EntityId>>> {
+        crate::control::resolve_unique_values_in(generation, field, values)
+    }
 }

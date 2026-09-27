@@ -524,6 +524,7 @@ impl WritePath {
                     ),
                     last_fold_start_unix: None,
                     pending_reclaim: Vec::new(),
+                    superseded: std::sync::Mutex::new(Vec::new()),
                     last_tick: std::time::Instant::now(),
                     pending_forms: std::collections::BTreeMap::new(),
                     #[cfg(feature = "fault-injection")]

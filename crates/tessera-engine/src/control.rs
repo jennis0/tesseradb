@@ -32,50 +32,60 @@ impl Engine {
         field: &str,
         values: &[String],
     ) -> std::result::Result<Vec<Option<EntityId>>, crate::EngineError> {
-        let generation = self.generation.load();
-        let declared = generation
-            .bundle
-            .manifest
-            .declared_scalars
-            .iter()
-            .find(|d| d.name == field)
-            .filter(|_| generation.unique.get(field).is_some());
-        let Some(declared) = declared else {
-            return Err(crate::EngineError::AddressMalformed(format!(
-                "'{field}' is not a unique field. Address an item by its tessera_id, or by a \
-                 field declared unique"
-            )));
-        };
-        let keyword = declared.arrow_type == tessera_spatial::tiler::ScalarType::Keyword;
-        let mut keys = Vec::with_capacity(values.len());
-        let mut from = Vec::with_capacity(values.len());
-        for (at, value) in values.iter().enumerate() {
-            let key = match keyword {
-                true => Some(tessera_store::unique::UniqueKey::keyword(value)),
-                false => {
-                    let integer: i128 = value.parse().map_err(|_| {
-                        crate::EngineError::AddressMalformed(format!(
-                            "'{value}' is not a value of '{field}', which holds integers. Write \
-                             it in decimal digits"
-                        ))
-                    })?;
-                    tessera_store::unique::key_of_integer(declared.arrow_type, integer)
-                }
-            };
-            if let Some(key) = key {
-                keys.push(key);
-                from.push(at);
-            }
-        }
-        let mut named = vec![None; values.len()];
-        for (at, entity) in crate::unique::holders(&generation, field, &keys)
-            .map_err(crate::EngineError::Store)?
-        {
-            named[from[at]] = Some(entity);
-        }
-        Ok(named)
+        resolve_unique_values_in(&self.generation.load(), field, values)
     }
+}
 
+/// [`Engine::resolve_unique_values`] against `generation`.
+pub(crate) fn resolve_unique_values_in(
+    generation: &Generation,
+    field: &str,
+    values: &[String],
+) -> std::result::Result<Vec<Option<EntityId>>, crate::EngineError> {
+    let declared = generation
+        .bundle
+        .manifest
+        .declared_scalars
+        .iter()
+        .find(|d| d.name == field)
+        .filter(|_| generation.unique.get(field).is_some());
+    let Some(declared) = declared else {
+        return Err(crate::EngineError::AddressMalformed(format!(
+            "'{field}' is not a unique field. Address an item by its tessera_id, or by a \
+             field declared unique"
+        )));
+    };
+    let keyword = declared.arrow_type == tessera_spatial::tiler::ScalarType::Keyword;
+    let mut keys = Vec::with_capacity(values.len());
+    let mut from = Vec::with_capacity(values.len());
+    for (at, value) in values.iter().enumerate() {
+        let key = match keyword {
+            true => Some(tessera_store::unique::UniqueKey::keyword(value)),
+            false => {
+                let integer: i128 = value.parse().map_err(|_| {
+                    crate::EngineError::AddressMalformed(format!(
+                        "'{value}' is not a value of '{field}', which holds integers. Write \
+                         it in decimal digits"
+                    ))
+                })?;
+                tessera_store::unique::key_of_integer(declared.arrow_type, integer)
+            }
+        };
+        if let Some(key) = key {
+            keys.push(key);
+            from.push(at);
+        }
+    }
+    let mut named = vec![None; values.len()];
+    for (at, entity) in crate::unique::holders(generation, field, &keys)
+        .map_err(crate::EngineError::Store)?
+    {
+        named[from[at]] = Some(entity);
+    }
+    Ok(named)
+}
+
+impl Engine {
     /// Resolve `tessera_id`s to the entities holding them for the admin plane: `None` per
     /// position for an identifier that names nothing. Points sit below the high-water mark;
     /// row-less entities sit at or above the low-water mark, so testing only `entity < high_water`

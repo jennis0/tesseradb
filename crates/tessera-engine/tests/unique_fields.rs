@@ -487,6 +487,52 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
     check_lookups(&engine, &expected, "after the restart's flush");
 }
 
+/// **A generation taken before a coalesce and a fold still answers from its runs.** The fold
+/// deletes the superseded prefix once nothing reads it, and a run the coalesce replaced is named
+/// only by generations from before the coalesce. One of those opening the run for the first time
+/// after the fold must still find it; once it is released, the prefix is deleted.
+#[test]
+fn a_generation_from_before_a_coalesce_and_a_fold_still_answers_from_its_runs() {
+    let fx = fixture();
+    let engine = engine_with(
+        &fx,
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
+            coalesce_width: Some(2),
+            ..config_uncapped()
+        },
+    );
+    engine.set_merge_for_test(false);
+    engine.set_coalesce_for_test(false);
+    let a = ingest(&engine, "held-a", vec![row(&engine, "a", b"0", "10.held/a", BIG * 3, -3)]);
+    publish_buffered(&engine);
+    let b = ingest(&engine, "held-b", vec![row(&engine, "b", b"0", "10.held/b", BIG * 3 + 1, -4)]);
+    publish_buffered(&engine);
+    // Nothing has read the run the second flush wrote.
+    let held = engine.generation();
+
+    let before = engine.write_executor_stats();
+    engine.set_coalesce_for_test(true);
+    tick_until(&engine, "a coalesce", Duration::from_secs(60), || {
+        engine.write_executor_stats().coalesces > before.coalesces
+    });
+    engine.set_coalesce_for_test(false);
+    fold(&engine);
+
+    let values = ["10.held/a".to_string(), "10.held/b".to_string()];
+    let found = engine
+        .resolve_unique_values_under_for_test(&held, "doi", &values)
+        .expect("the held generation reads its runs");
+    assert_eq!(found, vec![Some(a[0]), Some(b[0])]);
+
+    let superseded = fx.root.join(&held.prefix);
+    drop(held);
+    tick_until(&engine, "the superseded prefix is deleted", Duration::from_secs(60), || {
+        !superseded.exists()
+    });
+}
+
 /// **A holder the viewer cannot see answers exactly as absent.** The restricted principal holds
 /// only the subset term; an item carrying the other term alone is invisible to it, and asking for
 /// that item's value answers what asking for a value nobody holds answers.
