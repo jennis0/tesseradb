@@ -6,8 +6,8 @@ import {SECTIONS, type Context, type Section, type Specimen} from './specimens.j
  * The gallery page. Every choice is in the query string, so a screenshot script can address any
  * combination: `scheme` (light, dark), `theme` (default, editorial, console), `width` (natural,
  * 280, 420, wide) and `el` (all, or one element's name without `tessera-`); `shoot` unsticks the
- * header for a screenshot script. A change reloads the
- * page, so every element starts from its own store again.
+ * header for a screenshot script. A change reloads the page, so every element starts from its own
+ * store again.
  */
 
 const CHOICES = {

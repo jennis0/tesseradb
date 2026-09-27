@@ -286,8 +286,8 @@ export const SECTIONS: Section[] = [
           ),
         ready: async (el) => {
           await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
-          const input = shadow(el, 'input[part="entry"]') as HTMLInputElement | null;
-          if (!input) return;
+          await until(() => !!shadow(el, 'input[part="entry"]'), 'the typeahead input');
+          const input = shadow(el, 'input[part="entry"]') as HTMLInputElement;
           input.value = 'learn';
           input.dispatchEvent(new Event('input'));
           await until(() => !!shadow(el, '[part="tick"] mark'), 'marked suggestions');
@@ -601,7 +601,9 @@ function explorerSpecimens(): Specimen[] {
       build: (ctx) => explorer(full(ctx), {layout: 'docked'}),
       ready: async (el) => {
         await ready(el);
+        await until(() => !!shadow(el, '[role="tab"][data-sheet="filters"]'), 'the filters tab');
         shadow(el, '[role="tab"][data-sheet="filters"]')?.click();
+        await until(() => !!shadow(el, '[part="sheet"]'), 'the filters sheet');
         await settle(el.parentElement!);
       }
     },

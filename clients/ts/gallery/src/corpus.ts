@@ -1,12 +1,12 @@
-import {GRID32, NO_COUNT, WORLD_SIZE, composeFilters, type Artifact, type ArtifactsProjection, type Band, type BrowseRow, type CategoryValue, type ColumnDraft, type FilterDraft, type FiltersProjection, type ItemDetail, type Layer, type LegendProjection, type MarksProjection, type Meta, type PaletteScheme, type Rgba, type SuggestValue, type TilesProjection, type ViewInfo, type ViewProjection} from '@tesseradb/client';
+import {GRID32, WORLD_SIZE, composeFilters, type Artifact, type ArtifactsProjection, type Band, type BrowseRow, type CategoryValue, type ColumnDraft, type FilterDraft, type FiltersProjection, type ItemDetail, type Layer, type LegendProjection, type MarksProjection, type Meta, type PaletteScheme, type Rgba, type SuggestValue, type TilesProjection, type ViewInfo, type ViewProjection} from '@tesseradb/client';
 import {SessionArtifactTable, artifactColours, compose, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
 import {meta as baseMeta, scalar} from '../../components/test/fake-store.js';
 
 /**
  * A made-up corpus of research papers, shaped as the store's projections: a category field, a year,
  * citation counts, titles, authors and abstracts, a two-level topic hierarchy with labels, a filter
- * layer of venues, and several thousand marks in clusters. Every figure is invented; the point is
- * content long enough and numbers large enough to judge the elements by.
+ * layer of venues, and several thousand marks in clusters. Every figure is invented; the titles are
+ * long and the counts large so the elements can be judged by them.
  */
 
 /** A deterministic generator, so every load of the page draws the same marks. */
@@ -126,7 +126,7 @@ const DECADES = [
   {key: '2020s', label: '2020 – 2026, including the preprints posted since the last snapshot'}
 ];
 
-export const VIEWS: ViewInfo[] = [
+const VIEWS: ViewInfo[] = [
   view('umap', 'UMAP of abstracts'),
   view('tsne', 't-SNE of the citation graph'),
   view('specter', 'SPECTER2 embeddings, projected with PaCMAP at perplexity 30 and a fixed seed'),
@@ -251,13 +251,11 @@ function generateMarks(): Mark[] {
 const MARKS = generateMarks();
 
 /** The depth the frame is composed at: 8 × 8 tiles of 64 world units. */
-export const DEPTH = 3;
+const DEPTH = 3;
 
 export type MapOptions = {
   /** Points that satisfy the highlight, which sets each band's highlight bits. */
   highlight?: (m: {field: number; cluster: number}) => boolean;
-  /** Keep only these points, as a filter narrows what is served. */
-  keep?: (m: {field: number; cluster: number}) => boolean;
   scheme?: PaletteScheme;
 };
 
@@ -288,7 +286,7 @@ export function mapState(opts: MapOptions = {}): {marks: MarksProjection; tiles:
     const tx = Math.floor(k / dim);
     const ty = k % dim;
     const visible = all.length;
-    const list = (opts.keep ? all.filter(opts.keep) : all).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const list = [...all].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const n = list.length;
     if (n === 0) continue;
     const lit = opts.highlight ? list.filter(opts.highlight).length : n;
@@ -474,4 +472,3 @@ export const VENUES = {
   ] satisfies BrowseRow[]
 };
 
-export {NO_COUNT};
