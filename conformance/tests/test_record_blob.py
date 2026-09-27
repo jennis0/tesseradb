@@ -84,7 +84,7 @@ def test_the_blob_addressing_is_self_consistent(catalogue_bundle_root, catalogue
 
 
 def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_root, catalogue_bundle):
-    """Records §3's "a target, not a cap", on the artefact: the planted > 256 KiB note must land
+    """Records §3's "a target, not a cap", on the artefact: the planted 320,000-byte note must land
     in a block above the target holding exactly that one row — never split across blocks — and
     the corpus must cut enough ordinary blocks that the first/last-of-block drill-down cases
     (records §10's catalogue) are non-degenerate when they land."""

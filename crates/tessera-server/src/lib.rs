@@ -156,7 +156,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
 
     // The server knows no memory cap to hold bulk reads against, so their figure is logged for
     // the operator to compare with the cap the deployment runs under: each read builds a page in
-    // about four page sizes and holds three encoded pages, two queued for the body and one being
+    // about three page sizes and holds three encoded pages, two queued for the body and one being
     // written.
     tracing::info!(
         bulk_admission = config.bulk_admission,

@@ -1,0 +1,10 @@
+2950880    05:48:56 05:53:11 /home/joe/code/tessera/.claude/worktrees/identity-gbif/target/release/tessera verify --deep bundle
+rchar: 311250696364
+wchar: 51163670059
+syscr: 296966
+syscw: 180682
+read_bytes: 424173850624
+write_bytes: 51173584896
+cancelled_write_bytes: 0
+VmHWM:	31390260 kB
+RssAnon:	  370640 kB

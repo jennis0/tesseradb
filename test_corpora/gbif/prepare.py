@@ -2,7 +2,7 @@
 
 One pass over the 8,369 staged parts to a corpus `tessera build` consumes: **one `geo` view** on
 Web Mercator, a **three-level tiered taxonomy** over family → genus → species, four attributes —
-one per type — and `countrycode` as the compartment.
+one per type — plus GBIF's own key `gbifid` declared unique, and `countrycode` as the compartment.
 
     python3 -m test_corpora.gbif.prepare --parts 64      # a prefix, for a run that finishes
     python3 -m test_corpora.gbif.prepare --parts 64 --spread   # …evenly spaced instead
@@ -93,7 +93,7 @@ READ_AHEAD = 16
 FOLD_EVERY = 32
 
 #: What `points.parquet` carries: identity, the publisher's coordinates in degrees, the access
-#: column and the four attributes. Fixed rather than inferred, because it is written a batch at a
+#: column and the five attributes. Fixed rather than inferred, because it is written a batch at a
 #: time and a batch whose `kingdom` column happened to be all-null would otherwise change it.
 POINTS_SCHEMA = pa.schema(
     [
@@ -105,8 +105,21 @@ POINTS_SCHEMA = pa.schema(
         pa.field("specieskey", pa.string()),
         pa.field("year", pa.uint16()),
         pa.field("scientificname", pa.string()),
+        pa.field("gbifid", pa.uint64()),
     ]
 )
+
+#: The publisher's own identifier, carried only under `--occurrenceid`.
+OCCURRENCE_ID = pa.field("occurrenceid", pa.string())
+
+#: The declaration `--occurrenceid` appends: a keyword read from the record store, not unique,
+#: because GBIF does not require a publisher's identifier to be unique.
+OCCURRENCE_ID_TOML = """
+[[attribute]]
+name  = "occurrenceid"
+title = "Occurrence ID"
+type  = "keyword"
+"""
 
 #: The taxonomy layer's member file: one row per occurrence, `key` a three-entry list whose
 #: positions are the declared levels.
@@ -128,7 +141,7 @@ def true_count(mask) -> int:
 # --------------------------------------------------------------------------------- the inputs
 
 
-def read_parts(paths: list[Path], workers: int):
+def read_parts(paths: list[Path], workers: int, columns: list[str] = sources.COLUMNS):
     """`(path, table)` per part, **in order**, with the next `READ_AHEAD` parts already reading.
 
     The share is SMB at ~67 MB/s and a single-threaded read of one part leaves it idle between
@@ -139,14 +152,58 @@ def read_parts(paths: list[Path], workers: int):
     with cf.ThreadPoolExecutor(max_workers=workers) as pool:
         remaining = iter(paths)
         pending: deque = deque(
-            (p, pool.submit(pq.read_table, p, columns=sources.COLUMNS))
+            (p, pool.submit(pq.read_table, p, columns=columns))
             for p in itertools.islice(remaining, READ_AHEAD)
         )
         while pending:
             path, future = pending.popleft()
             for nxt in itertools.islice(remaining, 1):
-                pending.append((nxt, pool.submit(pq.read_table, nxt, columns=sources.COLUMNS)))
+                pending.append((nxt, pool.submit(pq.read_table, nxt, columns=columns)))
             yield path, future.result()
+
+
+def placed(
+    table: pa.Table, want_unplaced: bool
+) -> tuple[pa.Table | None, pa.Table | None, int, int]:
+    """The part's rows with a coordinate inside ±90/±180, the rows without one (`None` unless
+    `want_unplaced`), and how many rows had no finite coordinate and how many had one out of
+    range."""
+    lat = table.column("decimallatitude").combine_chunks().cast(pa.float64())
+    lon = table.column("decimallongitude").combine_chunks().cast(pa.float64())
+    finite = pc.fill_null(pc.and_(pc.is_finite(lat), pc.is_finite(lon)), False)
+    # Filled rather than left null: `filter` drops a null selection and the two counts read the
+    # mask, so a three-valued mask would have them disagree with the file.
+    inside = pc.fill_null(
+        pc.and_(
+            finite,
+            pc.and_(pc.less_equal(pc.abs(lat), 90.0), pc.less_equal(pc.abs(lon), 180.0)),
+        ),
+        False,
+    )
+    kept = true_count(inside)
+    finite_rows = true_count(finite)
+    return (
+        table.filter(inside) if kept else None,
+        table.filter(pc.invert(inside)) if want_unplaced and kept < table.num_rows else None,
+        table.num_rows - finite_rows,
+        finite_rows - kept,
+    )
+
+
+def country_terms(column) -> tuple[pa.Array, int, int]:
+    """The access column, with how many rows carried no country and how many spelled
+    `UNRECORDED` themselves.
+
+    Filled here rather than left to the view's `default` so that a principal holding no term sees
+    nothing. Trimmed for the reason the build trims a label: ` GB` and `GB` are one term rather
+    than two that no credential spells the same way.
+    """
+    country = pc.fill_null(
+        pc.utf8_trim_whitespace(column.combine_chunks().cast(pa.string())), ""
+    )
+    collisions = true_count(pc.equal(country, UNRECORDED))
+    blank = pc.equal(country, "")
+    return pc.if_else(blank, UNRECORDED, country), true_count(blank), collisions
 
 
 class Census:
@@ -204,6 +261,100 @@ class Census:
 
 
 # --------------------------------------------------------------------------------- the outputs
+
+
+def point_rows(batch: pa.Table, schema: pa.Schema) -> tuple[pa.Table, dict]:
+    """A batch's `points.parquet` columns, every one but `entity_id`, and what was counted while
+    they were made."""
+    m = batch.num_rows
+    lat = batch.column("decimallatitude").combine_chunks().cast(pa.float64())
+    lon = batch.column("decimallongitude").combine_chunks().cast(pa.float64())
+    country, blank, collided = country_terms(batch.column("countrycode"))
+
+    # `year` is `int32` on the share and `u16` in the declaration. A value outside the code space
+    # is nulled and counted rather than wrapped: a wrapped year would place an observation in a
+    # range filter it does not belong to.
+    year = batch.column("year").combine_chunks().cast(pa.int32())
+    sane = pc.fill_null(pc.and_(pc.greater_equal(year, 1), pc.less_equal(year, 65_535)), False)
+    year_out_of_range = (m - year.null_count) - true_count(sane)
+    year = pc.if_else(sane, year, pa.nulls(m, pa.int32())).cast(pa.uint16())
+
+    scientific = batch.column("scientificname").combine_chunks().cast(pa.string())
+    # `gbifid` is a string on the share. One that is not an unsigned integer raises here.
+    gbifid = batch.column("gbifid").combine_chunks().cast(pa.string()).cast(pa.uint64())
+    columns = {
+        "lon": lon,
+        "lat": lat,
+        "countrycode": country,
+        "kingdom": batch.column("kingdom").combine_chunks().cast(pa.string()),
+        "specieskey": batch.column("specieskey").combine_chunks().cast(pa.string()),
+        "year": year,
+        "scientificname": scientific,
+        "gbifid": gbifid,
+    }
+    if OCCURRENCE_ID.name in schema.names:
+        columns[OCCURRENCE_ID.name] = (
+            batch.column(OCCURRENCE_ID.name).combine_chunks().cast(pa.string())
+        )
+    counts = {
+        "beyond_mercator": true_count(pc.greater(pc.abs(lat), MAX_LATITUDE)),
+        "year_out_of_range": year_out_of_range,
+        "unrecorded_country": blank,
+        "country_collisions": collided,
+        "named": m - scientific.null_count,
+        "gbifid_null": gbifid.null_count,
+    }
+    return pa.table(columns, schema=pa.schema([f for f in schema if f.name != "entity_id"])), counts
+
+
+class HeldRows:
+    """Rows kept aside for an ingest to send after the build.
+
+    **Hold-out:** every `holdout_every`-th row that has no coordinate, up to `holdout` of them,
+    given the coordinate of a placed row of the same part. Its identifiers are the publisher's
+    and appear nowhere in the build, since the build keeps placed rows only. **Duplicates:** every
+    `duplicates_every`-th placed row, up to `duplicates`, copied, so each sets a `gbifid` that an
+    item already holds. Both are chosen by position in the part sequence, so a rerun chooses the
+    same rows.
+    """
+
+    def __init__(self, args):
+        self.holdout, self.holdout_every = args.holdout, args.holdout_every
+        self.duplicates, self.duplicates_every = args.duplicates, args.duplicates_every
+        self.unplaced_seen = self.placed_seen = 0
+        self.held: list[pa.Table] = []
+        self.copied: list[pa.Table] = []
+
+    def take(self, kept: pa.Table | None, unkept: pa.Table | None) -> None:
+        room = self.holdout - sum(t.num_rows for t in self.held)
+        if unkept is not None:
+            at = np.arange(self.unplaced_seen, self.unplaced_seen + unkept.num_rows)
+            pick = np.flatnonzero((at + 1) % self.holdout_every == 0)[: max(room, 0)]
+            if pick.size and kept is not None:
+                rows = unkept.take(pick)
+                donor = kept.take(pa.array(pick % kept.num_rows))
+                for name in ("decimallatitude", "decimallongitude"):
+                    i = rows.schema.get_field_index(name)
+                    rows = rows.set_column(i, rows.field(i), donor.column(name))
+                self.held.append(rows)
+            self.unplaced_seen += unkept.num_rows
+        if kept is not None:
+            room = self.duplicates - sum(t.num_rows for t in self.copied)
+            at = np.arange(self.placed_seen, self.placed_seen + kept.num_rows)
+            pick = np.flatnonzero(at % self.duplicates_every == self.duplicates_every // 2)
+            if room > 0 and pick.size:
+                self.copied.append(kept.take(pick[:room]))
+            self.placed_seen += kept.num_rows
+
+    def write(self, out: Path, schema: pa.Schema) -> dict:
+        written = {}
+        rows_schema = pa.schema([f for f in schema if f.name != "entity_id"])
+        for name, tables in (("holdout", self.held), ("duplicates", self.copied)):
+            with pq.ParquetWriter(out / f"{name}.parquet", rows_schema, compression="zstd") as w:
+                for table in tables:
+                    w.write_table(point_rows(table, schema)[0])
+            written[name] = sum(t.num_rows for t in tables)
+        return written
 
 
 def taxonomy_keys(table: pa.Table) -> tuple[pa.Array, list[pa.Array]]:
@@ -393,6 +544,32 @@ dev_cors_origins = ["http://localhost:PORT", "http://127.0.0.1:PORT"]
 # ------------------------------------------------------------------------------------- the run
 
 
+def reusable_manifest(out: Path, parts_read: int, selection: str) -> dict:
+    """The manifest of the run that wrote the member file and the kingdom vocabulary in `out`,
+    refused unless it read the same dataset and the same parts in the same order.
+
+    The member file's `entity` is a row's position in the part sequence, so any other selection
+    would join every row after the first difference to another row's taxon. The placed row count
+    is checked after the pass.
+    """
+    for name in ("manifest.json", "members-taxonomy.parquet", "vocab-kingdom.parquet"):
+        if not (out / name).exists():
+            raise SystemExit(f"--reuse-taxonomy: no {name} in {out}; run without the flag")
+    kept = json.loads((out / "manifest.json").read_text())
+    wanted = {
+        "dataset": f"{sources.DATASET}/{sources.VINTAGE}",
+        "parts_read": parts_read,
+        "part_selection": selection,
+    }
+    differs = {k: (kept.get(k), v) for k, v in wanted.items() if kept.get(k) != v}
+    if differs or "taxonomy" not in kept:
+        raise SystemExit(
+            f"--reuse-taxonomy: the kept files in {out} were written by another selection "
+            f"(kept, this run: {differs or 'no taxonomy block'}); run without the flag"
+        )
+    return kept
+
+
 def select_parts(every: list[Path], take: int, spread: bool) -> list[Path]:
     """Which parts this run reads.
 
@@ -424,6 +601,25 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None,
                     help=f"default $TESSERA_LADDER/{RUNG}, or $TESSERA_LADDER/{RUNG}-<n>p for a "
                          f"run that reads part of the corpus")
+    ap.add_argument("--occurrenceid", action="store_true",
+                    help="also carry the publisher's occurrenceid, declared as a keyword; about "
+                         "42 bytes a row")
+    ap.add_argument("--reuse-taxonomy", action="store_true",
+                    help="keep the member file and the kingdom vocabulary already in the output "
+                         "directory rather than writing them; refused unless the manifest beside "
+                         "them names the same dataset and parts and the same rows are placed")
+    ap.add_argument("--holdout", type=int, default=0,
+                    help="rows without a coordinate to write to holdout.parquet, each given a "
+                         "placed row's coordinate, for an ingest to send after the build")
+    ap.add_argument("--holdout-every", type=int, default=158,
+                    help="take every this-many-th row without a coordinate; 158 spreads 10^6 "
+                         "across the whole corpus")
+    ap.add_argument("--duplicates", type=int, default=0,
+                    help="placed rows to copy to duplicates.parquet, each setting a gbifid an "
+                         "item holds")
+    ap.add_argument("--duplicates-every", type=int, default=349_000,
+                    help="copy every this-many-th placed row; 349,000 spreads 10^4 across the "
+                         "whole corpus")
     args = ap.parse_args()
 
     every = sources.parts()
@@ -439,10 +635,17 @@ def main() -> None:
 
     out = args.out or ladder(RUNG if whole else f"{RUNG}-{len(chosen)}p")
     out.mkdir(parents=True, exist_ok=True)
-    steps = Steps()
+    selection = "whole" if whole else ("spread" if args.spread else "prefix")
     print(f"parts  {len(chosen):,} of {len(every):,} "
           f"({'the whole corpus' if whole else 'evenly spaced' if args.spread else 'a prefix'})\n"
           f"output {out}", flush=True)
+    steps = Steps()
+    schema = POINTS_SCHEMA.append(OCCURRENCE_ID) if args.occurrenceid else POINTS_SCHEMA
+    columns = sources.COLUMNS + ([OCCURRENCE_ID.name] if args.occurrenceid else [])
+    kept_manifest = reusable_manifest(out, len(chosen), selection) if args.reuse_taxonomy else None
+    if kept_manifest is not None:
+        columns = [c for c in columns if c not in sources.RANKS]
+    held = HeldRows(args)
 
     kingdom_census = Census()
     country_census = Census()
@@ -454,102 +657,67 @@ def main() -> None:
     rows_placed = 0
     no_coordinate = 0
     out_of_range = 0
-    beyond_mercator = 0
-    year_out_of_range = 0
-    unrecorded_country = 0
-    country_collisions = 0
-    named = 0
+    counted = dict.fromkeys(
+        ["beyond_mercator", "year_out_of_range", "unrecorded_country", "country_collisions",
+         "named", "gbifid_null"], 0)
+    gbifid_bounds = [2**64, -1]
     rank_collisions: dict[str, set] = {rank: set() for rank in sources.RANKS}
     lon_bounds = [float("inf"), float("-inf")]
     lat_bounds = [float("inf"), float("-inf")]
 
     points = pq.ParquetWriter(
-        out / "points.parquet", POINTS_SCHEMA, compression="zstd",
+        out / "points.parquet", schema, compression="zstd",
         use_dictionary=["countrycode", "kingdom", "specieskey", "scientificname"],
     )
-    members = pq.ParquetWriter(out / "members-taxonomy.parquet", MEMBER_SCHEMA,
-                               compression="zstd")
+    members = None if kept_manifest is not None else pq.ParquetWriter(
+        out / "members-taxonomy.parquet", MEMBER_SCHEMA, compression="zstd")
 
     def flush(batch: pa.Table) -> None:
         """One row group of `points.parquet` and one of the member file, from a batch of parts."""
-        nonlocal rows_placed, beyond_mercator, year_out_of_range, unrecorded_country, named
-        nonlocal country_collisions
+        nonlocal rows_placed
         m = batch.num_rows
         entity = np.arange(rows_placed, rows_placed + m, dtype=np.uint64)
+        rows, counts = point_rows(batch, schema)
+        for key, n in counts.items():
+            counted[key] += n
 
-        lat = batch.column("decimallatitude").combine_chunks().cast(pa.float64())
-        lon = batch.column("decimallongitude").combine_chunks().cast(pa.float64())
-        beyond_mercator += true_count(pc.greater(pc.abs(lat), MAX_LATITUDE))
+        lat, lon, gbifid = rows.column("lat"), rows.column("lon"), rows.column("gbifid")
         lon_bounds[0] = min(lon_bounds[0], float(pc.min(lon).as_py()))
         lon_bounds[1] = max(lon_bounds[1], float(pc.max(lon).as_py()))
         lat_bounds[0] = min(lat_bounds[0], float(pc.min(lat).as_py()))
         lat_bounds[1] = max(lat_bounds[1], float(pc.max(lat).as_py()))
+        if gbifid.null_count < m:
+            low, high = pc.min_max(gbifid).values()
+            gbifid_bounds[0] = min(gbifid_bounds[0], low.as_py())
+            gbifid_bounds[1] = max(gbifid_bounds[1], high.as_py())
 
-        # The access column, filled here rather than left to the view's `default` so that a
-        # principal holding no term sees nothing. Trimmed for the reason the build trims a label:
-        # ` GB` and `GB` are one term rather than two that no credential spells the same way.
-        country = pc.fill_null(
-            pc.utf8_trim_whitespace(batch.column("countrycode").combine_chunks().cast(pa.string())),
-            "",
-        )
-        country_collisions += true_count(pc.equal(country, UNRECORDED))
-        blank = pc.equal(country, "")
-        unrecorded_country += true_count(blank)
-        country = pc.if_else(blank, UNRECORDED, country)
+        kingdom_census.add(rows.column("kingdom"))
+        country_census.add(rows.column("countrycode"))
+        species_key_census.add(rows.column("specieskey"))
+        year_census.add(rows.column("year"))
 
-        # The taxonomy markers must not collide with a name the source wrote. Checked over the
-        # batch's distinct values rather than its rows: 10⁶ rows hold ~10⁴ family names.
-        for rank in sources.RANKS:
-            uniq = pc.unique(batch.column(rank).combine_chunks().cast(pa.string()))
-            bad = pc.fill_null(
-                pc.or_(pc.equal(uniq, NOT_RECORDED), pc.match_substring(uniq, SEPARATOR)), False
+        if members is not None:
+            # The taxonomy markers must not collide with a name the source wrote. Checked over
+            # the batch's distinct values rather than its rows: 10⁶ rows hold ~10⁴ family names.
+            for rank in sources.RANKS:
+                uniq = pc.unique(batch.column(rank).combine_chunks().cast(pa.string()))
+                bad = pc.fill_null(
+                    pc.or_(pc.equal(uniq, NOT_RECORDED), pc.match_substring(uniq, SEPARATOR)),
+                    False,
+                )
+                if true_count(bad):
+                    rank_collisions[rank].update(uniq.filter(bad).to_pylist())
+            listed, keys = taxonomy_keys(batch)
+            for census, key in zip(level_census, keys):
+                census.add(key)
+            members.write_table(
+                pa.table({"entity": pa.array(entity, pa.uint64()), "key": listed},
+                         schema=MEMBER_SCHEMA),
+                row_group_size=ROW_GROUP,
             )
-            if true_count(bad):
-                rank_collisions[rank].update(uniq.filter(bad).to_pylist())
-
-        # `year` is `int32` on the share and `u16` in the declaration. A value outside the code
-        # space is nulled and counted rather than wrapped: a wrapped year would place an
-        # observation in a range filter it does not belong to.
-        year = batch.column("year").combine_chunks().cast(pa.int32())
-        sane = pc.fill_null(
-            pc.and_(pc.greater_equal(year, 1), pc.less_equal(year, 65_535)), False
-        )
-        year_out_of_range += (m - year.null_count) - true_count(sane)
-        year = pc.if_else(sane, year, pa.nulls(m, pa.int32())).cast(pa.uint16())
-
-        kingdom = batch.column("kingdom").combine_chunks().cast(pa.string())
-        species_key = batch.column("specieskey").combine_chunks().cast(pa.string())
-        scientific = batch.column("scientificname").combine_chunks().cast(pa.string())
-        named += m - scientific.null_count
-
-        kingdom_census.add(kingdom)
-        country_census.add(country)
-        species_key_census.add(species_key)
-        year_census.add(year)
-
-        listed, keys = taxonomy_keys(batch)
-        for census, key in zip(level_census, keys):
-            census.add(key)
-        members.write_table(
-            pa.table({"entity": pa.array(entity, pa.uint64()), "key": listed},
-                     schema=MEMBER_SCHEMA),
-            row_group_size=ROW_GROUP,
-        )
 
         points.write_table(
-            pa.table(
-                {
-                    "entity_id": pa.array(entity, pa.uint64()),
-                    "lon": lon,
-                    "lat": lat,
-                    "countrycode": country,
-                    "kingdom": kingdom,
-                    "specieskey": species_key,
-                    "year": year,
-                    "scientificname": scientific,
-                },
-                schema=POINTS_SCHEMA,
-            ),
+            pa.Table.from_arrays([pa.array(entity, pa.uint64()), *rows.columns], schema=schema),
             row_group_size=ROW_GROUP,
         )
         rows_placed += m
@@ -557,28 +725,17 @@ def main() -> None:
     with steps.step("read, place and write"):
         buffer: list[pa.Table] = []
         buffered = 0
-        for at, (_path, table) in enumerate(read_parts(chosen, args.workers)):
+        for at, (_path, table) in enumerate(read_parts(chosen, args.workers, columns)):
             rows_read += table.num_rows
-            lat = table.column("decimallatitude").combine_chunks().cast(pa.float64())
-            lon = table.column("decimallongitude").combine_chunks().cast(pa.float64())
-            finite = pc.fill_null(pc.and_(pc.is_finite(lat), pc.is_finite(lon)), False)
-            # Filled rather than left null: `filter` drops a null selection and the two counters
-            # below read the mask, so a three-valued mask would have them disagree with the file.
-            inside = pc.fill_null(
-                pc.and_(
-                    finite,
-                    pc.and_(pc.less_equal(pc.abs(lat), 90.0), pc.less_equal(pc.abs(lon), 180.0)),
-                ),
-                False,
-            )
-            placed = true_count(inside)
-            no_coordinate += table.num_rows - true_count(finite)
-            out_of_range += true_count(finite) - placed
-            if placed:
-                kept = table.filter(inside)
+            kept, unkept, unplaced, outside = placed(table, held.holdout > 0)
+            no_coordinate += unplaced
+            out_of_range += outside
+            if held.holdout or held.duplicates:
+                held.take(kept, unkept)
+            if kept is not None:
                 buffer.append(kept)
-                buffered += placed
-            del table
+                buffered += kept.num_rows
+            del table, kept, unkept
             if buffered >= ROW_GROUP:
                 flush(pa.concat_tables(buffer))
                 buffer, buffered = [], 0
@@ -589,7 +746,14 @@ def main() -> None:
             flush(pa.concat_tables(buffer))
         buffer = []
     points.close()
-    members.close()
+    if members is not None:
+        members.close()
+    with steps.step("held rows"):
+        held_rows = held.write(out, schema)
+    print(f"held out {held_rows['holdout']:,} rows without a coordinate, copied "
+          f"{held_rows['duplicates']:,} placed rows as duplicates", flush=True)
+    beyond_mercator = counted["beyond_mercator"]
+    country_collisions = counted["country_collisions"]
 
     assert rows_read == rows_placed + no_coordinate + out_of_range, (
         f"{rows_read:,} read against {rows_placed:,} placed, {no_coordinate:,} with no coordinate "
@@ -624,7 +788,22 @@ def main() -> None:
 
     with steps.step("vocabulary"):
         kingdoms = sorted(k for k, _ in kingdom_census.ranked())
-        vocab_size = write_vocabulary(out, "kingdom", kingdoms)
+        if kept_manifest is not None:
+            kept_keys = pq.read_table(out / "vocab-kingdom.parquet").column("key").to_pylist()
+            assert set(kingdoms) <= set(kept_keys), (
+                f"--reuse-taxonomy: kingdoms {sorted(set(kingdoms) - set(kept_keys))} are not in "
+                f"the vocabulary kept in {out}; run without the flag"
+            )
+            vocab_size = len(kept_keys)
+            member_rows = pq.ParquetFile(out / "members-taxonomy.parquet").metadata.num_rows
+            for what, kept_rows in (("member file", member_rows),
+                                    ("manifest", kept_manifest["rows_placed"])):
+                assert kept_rows == rows_placed, (
+                    f"--reuse-taxonomy: the {what} kept in {out} has {kept_rows:,} placed rows "
+                    f"and this run placed {rows_placed:,}; run without the flag"
+                )
+        else:
+            vocab_size = write_vocabulary(out, "kingdom", kingdoms)
     print(f"kingdom vocabulary: {vocab_size} keys, {kingdom_census.nulls:,} rows carry none "
           f"({kingdom_census.nulls / max(rows_placed, 1):.2%})", flush=True)
 
@@ -633,9 +812,12 @@ def main() -> None:
         write_demo_terms(out, country_ranks)
 
     write_declaration(out, size=vocab_size, rows=rows_placed)
+    if args.occurrenceid:
+        with (out / "corpus.toml").open("a") as declaration:
+            declaration.write(OCCURRENCE_ID_TOML)
     write_deployment(out)
 
-    levels = [
+    levels = [] if kept_manifest is not None else [
         {
             "level": j,
             "title": ["Family", "Genus", "Species"][j],
@@ -659,7 +841,7 @@ def main() -> None:
         "dataset": f"{sources.DATASET}/{sources.VINTAGE}",
         "parts_read": len(chosen),
         "parts_total": len(every),
-        "part_selection": "whole" if whole else ("spread" if args.spread else "prefix"),
+        "part_selection": selection,
         "rows_read": rows_read,
         "rows_placed": rows_placed,
         "placed_share": round(rows_placed / rows_read, 6) if rows_read else None,
@@ -669,7 +851,7 @@ def main() -> None:
         "bounds": {"lon": lon_bounds, "lat": lat_bounds},
         "countrycode": {
             "terms": len(country_ranks),
-            "unrecorded": unrecorded_country,
+            "unrecorded": counted["unrecorded_country"],
             "top": [{"term": t, "pairs": n} for t, n in country_ranks[:5]],
         },
         "kingdom": {"keys": vocab_size, "null_rows": kingdom_census.nulls},
@@ -680,10 +862,12 @@ def main() -> None:
         "year": {
             "distinct": year_census.distinct,
             "null_rows": year_census.nulls,
-            "out_of_range": year_out_of_range,
+            "out_of_range": counted["year_out_of_range"],
         },
-        "scientificname": {"present": named},
-        "taxonomy": {
+        "scientificname": {"present": counted["named"]},
+        "gbifid": {"null_rows": counted["gbifid_null"], "bounds": gbifid_bounds},
+        "held_rows": held_rows,
+        "taxonomy": kept_manifest["taxonomy"] if kept_manifest is not None else {
             "member_rows": rows_placed,
             "membership_entries": sum(rows_placed - lv["rows_in_no_artifact"] for lv in levels),
             "levels": levels,

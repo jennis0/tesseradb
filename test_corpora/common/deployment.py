@@ -264,6 +264,8 @@ module = "{source.get('plugin', {}).get('module', 'builtin:passthrough')}"
                     except ProcessLookupError:
                         pass
         self.proc = None
+        self.pid = None
+        self.cgroup = None
 
     def clear_scratch(self) -> None:
         """Drop the cache and WAL, so the next boot is a fresh deployment over the same bundle."""
