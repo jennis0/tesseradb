@@ -473,8 +473,8 @@ class Publication:
         """One growth of roster row `i`, naming its view on a group-scoped layer."""
         return (
             b'{"level":' + str(level).encode() + b',"field":' + json.dumps(self.field).encode()
-            + b',"artifacts":[{"key":' + json.dumps(self.rows[i]["key"]).encode() + self._view(i) + b',"members":'
-            + json_list(members) + b"}]}"
+            + b',"artifacts":[{"key":' + json.dumps(self.rows[i]["key"]).encode() + self._view(i)
+            + b',"members":' + json_list(members) + b"}]}"
         )
 
     def _grow_slices(self, level: int, i: int, members: np.ndarray):

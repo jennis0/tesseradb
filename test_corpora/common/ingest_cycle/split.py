@@ -51,7 +51,8 @@ def join_field(rung: Path) -> dict:
     if attribute is None or attribute.get("type") not in INTEGER_TYPES:
         raise ValueError(
             f"{path}: the join field `{name}` is not a declared integer attribute, and the ingest "
-            f"cycle holds every entity id as an integer. Name an integer attribute as the join field"
+            f"cycle holds every entity id as an integer. Name an integer attribute as the join "
+            f"field"
         )
     return {
         "name": name,
@@ -210,8 +211,9 @@ def declared_views(rung: Path) -> list[dict]:
     a group's view as `group:key`, the id the server gives it. `points` is the file its rows are
     read from, `select` the `(column, key)` picking them out of a file a group's views share, and
     `fields` each canonical column name (`entity_id`, the join field's column; the coordinate
-    pair; `view`) as that file spells it. `record` is a group view's roster record under canonical names, on the group that
-    owns the keys, and `metadata` the names that group declares."""
+    pair; `view`) as that file spells it. `record` is a group view's roster record under
+    canonical names, on the group that owns the keys, and `metadata` the names that group
+    declares."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
     defaults = declared.get("defaults", {})

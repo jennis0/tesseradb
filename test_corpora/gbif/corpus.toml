@@ -126,8 +126,9 @@ type  = "keyword"
 
 # `gbifid` is GBIF's key for a record, one a row, and it is declared `unique`: the build refuses a
 # corpus in which two items hold one value, and an ingest a row setting a value another item
-# holds. It is `[defaults].join_field`, so the member file names each occurrence by it too. Neither rendered nor indexed, so its unique index is its only filter structure and it
-# answers `eq` and `in` alone; the value itself is read from the record store.
+# holds. It is `[defaults].join_field`, so the member file names each occurrence by it too.
+# Neither rendered nor indexed, so its unique index is its only filter structure and it answers
+# `eq` and `in` alone; the value itself is read from the record store.
 
 [[attribute]]
 name   = "gbifid"

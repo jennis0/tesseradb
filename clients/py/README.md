@@ -170,10 +170,10 @@ insert it as a frame.
 ## How a row is named
 
 An item is named by its `tessera_id`, which the server hands back, or by its value of a unique
-attribute: one declared `unique=True`, a keyword or an integer, whose each value one item holds at
-most. `declare_join_field(name)` makes one of them the **join field**, `[defaults].join_field` in
-the declaration, and every table inserted with `id=` names its rows by it: `id=` is the column
-holding each row's value of the join field. The allocation view's `id=` column fills the join
+attribute: one declared `unique=True`, a keyword, an integer or a timestamp, each of whose values
+at most one item holds. `declare_join_field(name)` makes a keyword or integer one the **join
+field**, `[defaults].join_field` in the declaration, and every table inserted with `id=` names its
+rows by it: `id=` is the column holding each row's value of the join field. The allocation view's `id=` column fills the join
 attribute itself. A view group's rows fill no attribute at the first commit, so a database whose
 views are all in groups inserts the join field's values as a table of their own,
 `db.insert("paper", ids, id="paper", value="paper")`; the check refuses the declaration until it

@@ -93,8 +93,9 @@ READ_AHEAD = 16
 FOLD_EVERY = 32
 
 #: What `points.parquet` carries: the publisher's coordinates in degrees, the access column and
-#: the five attributes, `gbifid` among them, which every file of the corpus names its item by. Fixed rather than inferred, because it is written a batch at a
-#: time and a batch whose `kingdom` column happened to be all-null would otherwise change it.
+#: the five attributes, `gbifid` among them, which every file of the corpus names its item by.
+#: Fixed rather than inferred, because it is written a batch at a time and a batch whose
+#: `kingdom` column happened to be all-null would otherwise change it.
 POINTS_SCHEMA = pa.schema(
     [
         pa.field("lon", pa.float64()),
@@ -565,6 +566,12 @@ def reusable_manifest(out: Path, parts_read: int, selection: str) -> dict:
         "members_keyed_by": MEMBERS_KEYED_BY,
     }
     differs = {k: (kept.get(k), v) for k, v in wanted.items() if kept.get(k) != v}
+    if "members_keyed_by" in differs:
+        raise SystemExit(
+            f"--reuse-taxonomy: the member file in {out} names each occurrence by "
+            f"{kept.get('members_keyed_by') or 'its position'}, not by {MEMBERS_KEYED_BY}; run "
+            f"without the flag"
+        )
     if differs or "taxonomy" not in kept:
         raise SystemExit(
             f"--reuse-taxonomy: the kept files in {out} were written by another selection "
@@ -577,9 +584,9 @@ def select_parts(every: list[Path], take: int, spread: bool) -> list[Path]:
     """Which parts this run reads.
 
     A **prefix** is the default: its rows are then a prefix of the whole corpus's, so a fraction
-    run and the whole run hold the same rows as far as the fraction reaches. ⊘ A prefix is not a uniform sample — the
-    part order is the publisher's export order, not ours — so a figure extrapolated from one
-    carries that. `--spread` takes the same number evenly spaced across all 8,369 instead, which
+    run and the whole run hold the same rows as far as the fraction reaches. ⊘ A prefix is not a
+    uniform sample — the part order is the publisher's export order, not ours — so a figure
+    extrapolated from one carries that. `--spread` takes the same number evenly spaced across all 8,369 instead, which
     is what a coverage fraction should be read off.
     """
     if take <= 0 or take >= len(every):

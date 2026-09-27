@@ -153,7 +153,7 @@ class Cycle:
         self.session_cred = ""
         self.all_terms: list[str] = []
         #: The rung's join field, which every row, change and membership names its item by.
-        self.join: dict = {}
+        self.join = join_field(self.rung)
 
     @property
     def view_names(self) -> list[str]:
@@ -453,7 +453,6 @@ class Cycle:
 
     def _run(self) -> None:
         args = self.args
-        self.join = join_field(self.rung)
         base_dir = self.build_base()
         if self.result.get("blocked"):
             self.log("BLOCKED at the base build; the refusal is in the result")
@@ -1080,10 +1079,10 @@ class Cycle:
     def do_write_cycle(self, control, hold) -> dict:
         """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, 1,000 edits, a fold, and the count
         again in every view, each item named by its join field value, which a deleted holder never
-        blocks a re-ingest of. A re-ingest sends the item's rows in every view it was in, the anchor's
-        first, and each view must end at its count less the suppressed items it holds. An edit
-        sends a live item's anchor row once as it is, which changes nothing, and once moved, which
-        edits it: both answer the item's own tessera_id, and no count moves."""
+        blocks a re-ingest of. A re-ingest sends the item's rows in every view it was in, the
+        anchor's first, and each view must end at its count less the suppressed items it holds. An
+        edit sends a live item's anchor row once as it is, which changes nothing, and once moved,
+        which edits it: both answer the item's own tessera_id, and no count moves."""
         if hold.head is None or hold.head.num_rows < 2:
             return {"skipped": "hold-out too small for a write cycle"}
         entities = hold.head.column("entity_id").to_numpy()

@@ -32,8 +32,8 @@ join_field      = "id"
 # **Required, this declaration carrying more than one view** (decision 0112): within a signature
 # group, entity ids are ordered by the item's Morton code in the *anchor* view, then by join
 # value. Written explicitly so that reordering the view blocks below cannot silently re-key a
-# rebuild — the ids are permanent (I9). `knn` is the anchor because it is the layout the clusterings are
-# computed over; what matters is that it is named rather than inferred.
+# rebuild — the ids are permanent (I9). `knn` is the anchor because it is the layout the
+# clusterings are computed over; what matters is that it is named rather than inferred.
 allocation_view = "knn"
 
 # ---------------------------------------------------------------------------------------------
