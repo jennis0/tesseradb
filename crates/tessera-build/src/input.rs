@@ -1822,7 +1822,8 @@ pub(crate) fn id_values(path: &Path, column: &dyn Array, name: &str) -> Result<U
         BuildError::Schema {
             path: path.to_path_buf(),
             detail: format!(
-                "column '{name}' is {}; write it as {shape}uint64, uint32, int64 or int32",
+                "column '{name}' is {}; write it as {shape}an integer: uint8 to uint64 or int8 \
+                 to int64",
                 column.data_type()
             ),
         }

@@ -87,8 +87,8 @@ impl SuppliedIds {
         self.keys.is_empty()
     }
 
-    /// The mean key length in bytes, which is what the pre-flight charges the arena and the
-    /// sidecar at (module doc). Zero over no keys.
+    /// The mean key length in bytes, which is what the pre-flight charges the arena at (module
+    /// doc). Zero over no keys.
     pub fn mean_key_len(&self) -> u64 {
         if self.keys.is_empty() {
             return 0;

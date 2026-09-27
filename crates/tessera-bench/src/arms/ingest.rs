@@ -168,7 +168,6 @@ impl BuildObserver for StageCollector {
 /// | **`signature_sort`** | 0.1 | 2.8 (15%) | **53.4 (45%)** |
 /// | `assignment` | 2.4 (14%) | 2.7 (15%) | 3.6 (3%) |
 /// | `postings_write` | 0.0 | 0.4 (2%) | 4.9 (4%) |
-/// | **`external_ids`** | 0.2 (1%) | 2.3 (12%) | **24.0 (20%)** |
 /// | `geometry_scan` | 2.5 (14%) | 3.8 (21%) | 15.1 (13%) |
 /// | `tiler_sort` | 0.0 | 0.1 | 2.9 (2%) |
 /// | `segment_write` | 0.0 | 0.2 (1%) | 2.0 (2%) |
@@ -177,7 +176,8 @@ impl BuildObserver for StageCollector {
 ///
 /// † The 250k row ran first, against a cold page cache, so its `source_ids` includes a cold read
 /// of the 6.6 GB `geometry.parquet`. Later builds hit the cache. Compare 2.42M against 25M; treat
-/// the 250k column as contaminated.
+/// the 250k column as contaminated. The totals include 0.2, 2.3 and 24.0 s for a stage writing
+/// external ids, which the build no longer has.
 ///
 /// **`signature_sort` is the stage that bends.** 2.8 s → 53.4 s for 10x the items — 19x, clearly
 /// superlinear — and 45% of the 25M build. It is also the one stage that cannot be skipped or
