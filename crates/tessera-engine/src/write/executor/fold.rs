@@ -1402,6 +1402,12 @@ impl Executor {
             self.diverge_from_current(&completed.prefix, &reason);
             return;
         }
+        // Taken here, while every generation in it is over the prefix this fold supersedes: one
+        // published after the swap is over the new prefix, and the next fold waits for it.
+        let mut generations = std::mem::take(
+            &mut *self.superseded.lock().unwrap_or_else(|e| e.into_inner()),
+        );
+        generations.push(Arc::downgrade(&live));
         stairs.record("13 open");
 
         self.live.with_artifacts(|store| {
@@ -1451,10 +1457,6 @@ impl Executor {
             omitted_segments,
             ..
         } = forward;
-        let mut generations = std::mem::take(
-            &mut *self.superseded.lock().unwrap_or_else(|e| e.into_inner()),
-        );
-        generations.push(Arc::downgrade(&live));
         drop(live);
         self.pending_reclaim.push(PendingReclaim {
             generations,
