@@ -252,3 +252,58 @@ async fn unique_is_declared_and_removed_on_a_column_that_exists() {
     let (status, body) = declare(&served, json!({ "name": "f", "type": "f64", "unique": true })).await;
     assert_eq!(status, 422, "unique on a float: {body}");
 }
+
+/// **`unique` declared after the rows it covers restarts to what the live service served.** The
+/// log holds rows, then the declaration, then a row naming a holder by the value: a restart reads
+/// the declarations and the rows in separate walks, and must still find each value's holder, keep
+/// the one flushed and the one buffered row, and refuse nothing it accepted.
+#[tokio::test]
+async fn unique_declared_after_its_rows_restarts_to_what_was_served() {
+    let served = Served::build(fixture).await;
+    let (status, body) = declare(
+        &served,
+        json!({ "name": "gid", "type": "u64", "unique": false }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (flushed, buffered) = (5_000u64, 5_002u64);
+    let (status, body) = ingest(&served, "flushed", batch(&[(flushed, "f")])).await;
+    assert_eq!(status, 200, "{body}");
+    drain(&served.server).await;
+    let (status, body) = ingest(&served, "buffered", batch(&[(buffered, "b")])).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = declare(
+        &served,
+        json!({ "name": "gid", "type": "u64", "unique": true }),
+    )
+    .await;
+    assert_eq!(status, 200, "every value is held once: {body}");
+    let (status, body) = ingest(&served, "names", batch(&[(flushed, "f")])).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 0, "the value names its holder: {body}");
+
+    drain(&served.server).await;
+    let holders = async |served: &Served| {
+        let mut out = Vec::new();
+        for value in [flushed, buffered] {
+            out.push(filtered(served, json!({ "gid": { "eq": value.to_string() } })).await);
+        }
+        out
+    };
+    let live = holders(&served).await;
+    assert!(live.iter().all(|held| held.1.len() == 1), "{live:?}");
+
+    let served = served.restart().await;
+    assert_eq!(
+        holders(&served).await,
+        live,
+        "the restart serves each value's one holder"
+    );
+    let (status, body) = ingest(&served, "again", batch(&[(buffered, "b")])).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["tessera_ids"][0],
+        live[1].1.iter().next().unwrap().to_string(),
+        "and `unique` is in force over the replayed rows: {body}"
+    );
+}

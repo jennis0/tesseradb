@@ -806,3 +806,56 @@ fn without_publication(mut body: Value) -> Value {
     );
     body
 }
+
+/// **A vocabulary declared between batches restarts to what the live service served.** The log
+/// holds a batch, the declaration and its column, a batch carrying its values, a page adding a
+/// value and a batch carrying that one, unflushed: a restart reads the declarations and the rows
+/// in separate walks, and must serve the same codes and the same rows under each key.
+#[tokio::test]
+async fn a_vocabulary_declared_between_batches_restarts_to_what_was_served() {
+    let served = Served::build(fixture).await;
+    let (status, body) = ingest(&served, "before", batch(&[(1.0, None)], false, &[])).await;
+    assert_eq!(status, 200, "{body}");
+    drain(&served.server).await;
+    assert_eq!(declare(&served, "severity", severity()).await.0, 201);
+    let (status, body) = declare_attribute(
+        &served,
+        json!({ "name": "severity", "type": "category", "vocabulary": "severity", "index": true }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = ingest(
+        &served,
+        "carrying",
+        batch(&[(2.0, Some("high")), (3.0, Some("low"))], true, &[]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    drain(&served.server).await;
+    let (status, body) = page(&served, "severity", json!([{ "key": "mid" }])).await;
+    assert!(status == 200 || status == 201, "{status} {body}");
+    let (status, body) = ingest(&served, "paged", batch(&[(4.0, Some("mid"))], true, &[])).await;
+    assert_eq!(status, 200, "{body}");
+    let mid = ingested_ids(&body)[0];
+
+    let observed = async |served: &Served| {
+        let mut rows = Vec::new();
+        for key in ["high", "low", "mid"] {
+            rows.push(filtered(served, json!({ "severity": { "in": [key] } })).await);
+        }
+        (categories(served, "severity").await, rows)
+    };
+    let live = observed(&served).await;
+    let served = served.restart().await;
+    assert_eq!(
+        observed(&served).await,
+        live,
+        "the restart serves what was served"
+    );
+    drain(&served.server).await;
+    assert_eq!(
+        filtered(&served, json!({ "severity": { "in": ["mid"] } })).await,
+        BTreeSet::from([mid]),
+        "and the buffered row flushes under the paged value"
+    );
+}

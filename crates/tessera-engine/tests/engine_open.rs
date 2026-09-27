@@ -59,7 +59,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
     // the row's other fields never matter.
     let wal_path = tmp.path().join("wal.log");
     {
-        let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
+        let mut wal = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),

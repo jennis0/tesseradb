@@ -770,3 +770,108 @@ fn verify_refuses_edited_items_that_disagree() {
         "a listed edited-rows file that is missing refuses the open"
     );
 }
+
+/// **An item edited twice, the first edit flushed and the second buffered, is found where the
+/// second put it after a restart.** A growth holds the log, so the restart replays both edits;
+/// the first edit's entity has its row and its pair in a run, and replay keeps no pair for it.
+/// The item is served with the second edit's value under its one `tessera_id`, a change addressed
+/// by that `tessera_id` reaches the second edit's entity, and neither earlier entity answers it.
+#[test]
+fn an_item_edited_twice_across_a_flush_is_found_at_its_last_entity_after_a_restart() {
+    use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let mut engine = open(tmp.path(), &root);
+    let map = source_to_new_map(&root, "v00000");
+    let entity = |s: u64| EntityId::new(map[&s]);
+    let a = entity(X);
+    let tid = engine.tessera_id_of(a).unwrap();
+
+    let mut pinning = label_layer();
+    pinning.name = "topics/b".into();
+    engine.register_layer(pinning).unwrap();
+    engine
+        .publish_artifacts(
+            "topics/b".into(),
+            0,
+            vec![IncomingArtifact::from_entities(
+                Some("g0".into()),
+                [entity(Y)],
+            )],
+        )
+        .unwrap();
+    tick(&engine);
+    engine
+        .grow_memberships(
+            "topics/b".into(),
+            0,
+            vec![IncomingGrowth::from_entities("g0".into(), [entity(0)])],
+        )
+        .unwrap();
+
+    let set_score = |score: i32| {
+        naming(tid, move |row| {
+            row.scalars[SCORE_AT] = WalScalar::I32(score);
+            row.omitted.retain(|at| *at != SCORE_AT);
+        })
+    };
+    edit(&engine, "to-b", "s0", set_score(555));
+    publish_buffered(&engine);
+    let b = engine.resolve_tessera_ids(&[tid]).unwrap()[0].unwrap();
+    edit(&engine, "to-c", "s0", set_score(777));
+    let c = engine.resolve_tessera_ids(&[tid]).unwrap()[0].unwrap();
+    assert!(
+        a != b && b != c && a != c,
+        "each edit gave the item a new entity"
+    );
+    drop(engine);
+
+    let wal = tessera_lifecycle::Wal::open(tmp.path().join("wal.log")).unwrap();
+    let edits = wal
+        .records()
+        .map(|r| r.unwrap().1)
+        .filter(|r| matches!(r, tessera_lifecycle::WalRecord::IngestBatch { edits, .. } if !edits.is_empty()))
+        .count();
+    assert_eq!(edits, 2, "the growth held both edits in the log");
+    drop(wal);
+
+    engine = open(tmp.path(), &root);
+    for pass in ["the restart", "the flush after it"] {
+        assert_eq!(
+            engine.resolve_tessera_ids(&[tid]).unwrap()[0],
+            Some(c),
+            "the tessera_id names the last entity after {pass}"
+        );
+        for earlier in [a, b] {
+            assert_eq!(
+                engine.resolve_tessera_ids(&[engine.tessera_id_of(earlier).unwrap()]).unwrap()[0],
+                Some(c),
+                "an earlier entity's tessera_id is the item's, and names the last entity after {pass}"
+            );
+        }
+        let full = engine.authorise(&full_coverage_credential()).unwrap();
+        if pass == "the flush after it" {
+            let card = engine
+                .item(&full, tid)
+                .unwrap()
+                .expect("the item has a card");
+            assert_eq!(
+                field(&card, "score"),
+                Some(ScalarOut::I32(777)),
+                "after {pass}"
+            );
+            assert!(served(&engine, &full, "s0", None).contains(&tid.raw()));
+        }
+        publish_buffered(&engine);
+    }
+
+    let target = engine.resolve_tessera_ids(&[tid]).unwrap()[0].unwrap();
+    engine.accept_change(target, ChangeOp::Suppress).unwrap();
+    tick(&engine);
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    assert!(
+        engine.item(&full, tid).unwrap().is_none(),
+        "the suppression addressed by the tessera_id reached the last entity"
+    );
+    assert!(!served(&engine, &full, "s0", None).contains(&tid.raw()));
+}

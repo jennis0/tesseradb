@@ -62,7 +62,7 @@ fn read_sync_offset(sync_path: &Path) -> u64 {
     u64::from_le_bytes(b)
 }
 
-fn expect_corruption(result: tessera_lifecycle::wal::Result<(Wal, Vec<WalRecord>)>) {
+fn expect_corruption(result: tessera_lifecycle::wal::Result<Wal>) {
     match result {
         Err(WalError::WalCorruption) => {}
         Err(other) => panic!("expected WalCorruption, got a different error: {other}"),
@@ -76,7 +76,8 @@ fn round_trip_three_records() {
     let path = dir.path().join("wal.log");
 
     {
-        let (mut wal, initial) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
+        let initial = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert!(initial.is_empty());
         for i in 0..3u8 {
             wal.append(&sample_record(i)).unwrap();
@@ -84,7 +85,8 @@ fn round_trip_three_records() {
         wal.fsync().unwrap();
     }
 
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(records.len(), 3);
     for (i, r) in records.iter().enumerate() {
         assert_eq!(r, &sample_record(i as u8));
@@ -97,7 +99,7 @@ fn tail_corruption_past_sync_point_truncates_silently() {
     let path = dir.path().join("wal.log");
 
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         wal.append(&sample_record(1)).unwrap();
         wal.fsync().unwrap();
@@ -109,7 +111,8 @@ fn tail_corruption_past_sync_point_truncates_silently() {
     let len = fs::metadata(member(&path, 1)).unwrap().len();
     corrupt_byte(&member(&path, 1), len - 1);
 
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(records.len(), 2);
     for (i, r) in records.iter().enumerate() {
         assert_eq!(r, &sample_record(i as u8));
@@ -122,7 +125,7 @@ fn corruption_before_sync_point_fails_closed() {
     let path = dir.path().join("wal.log");
 
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         wal.append(&sample_record(1)).unwrap();
         wal.append(&sample_record(2)).unwrap();
@@ -146,7 +149,7 @@ fn wal_shorter_than_sync_point_fails_closed() {
     let path = dir.path().join("wal.log");
 
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         let after_record1 = fs::metadata(member(&path, 1)).unwrap().len();
         wal.append(&sample_record(1)).unwrap();
@@ -170,7 +173,7 @@ fn wal_shorter_than_sync_point_fails_closed() {
 // fsynced records to discardable tail noise. ---
 
 fn setup_two_synced_records(path: &Path) {
-    let (mut wal, _) = Wal::open(path).unwrap();
+    let mut wal = Wal::open(path).unwrap();
     wal.append(&sample_record(0)).unwrap();
     wal.append(&sample_record(1)).unwrap();
     wal.fsync().unwrap();
@@ -236,7 +239,7 @@ fn huge_length_prefix_past_sync_point_truncates_silently() {
 
     let record3_start;
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         wal.append(&sample_record(1)).unwrap();
         wal.fsync().unwrap();
@@ -247,7 +250,8 @@ fn huge_length_prefix_past_sync_point_truncates_silently() {
 
     corrupt_length_prefix(&member(&path, 1), record3_start, 0xFFFF_FFFF);
 
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(records.len(), 2);
 }
 
@@ -257,7 +261,7 @@ fn huge_length_prefix_before_sync_point_fails_closed() {
     let path = dir.path().join("wal.log");
 
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         wal.append(&sample_record(1)).unwrap();
         wal.append(&sample_record(2)).unwrap();
@@ -280,7 +284,7 @@ fn a_well_formed_record_past_the_sync_point_is_not_replayed() {
     let path = dir.path().join("wal.log");
 
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         wal.fsync().unwrap();
         // Appended, framed and checksummed perfectly — and never fsynced, so no caller was ever
@@ -288,7 +292,8 @@ fn a_well_formed_record_past_the_sync_point_is_not_replayed() {
         wal.append(&sample_record(1)).unwrap();
     }
 
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(
         records,
         vec![sample_record(0)],
@@ -304,14 +309,14 @@ fn the_discarded_tail_is_truncated_rather_than_left_to_be_rediscovered() {
 
     let sync_point;
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         sync_point = wal.fsync().unwrap();
         wal.append(&sample_record(1)).unwrap();
         assert!(fs::metadata(member(&path, 1)).unwrap().len() > sync_point);
     }
 
-    let (_wal, _records) = Wal::open(&path).unwrap();
+    let _wal = Wal::open(&path).unwrap();
     assert_eq!(
         fs::metadata(member(&path, 1)).unwrap().len(),
         sync_point,
@@ -338,7 +343,7 @@ fn a_record_stranded_by_a_real_fsync_failure_is_not_replayed() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         wal.fsync().unwrap();
 
@@ -351,7 +356,8 @@ fn a_record_stranded_by_a_real_fsync_failure_is_not_replayed() {
     }
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
 
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(
         records,
         vec![sample_record(0)],
@@ -399,7 +405,7 @@ fn bad_header_is_rejected() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         wal.fsync().unwrap();
     }
@@ -443,7 +449,7 @@ fn a_real_fsync_failure_poisons_the_handle() {
 
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");
-    let (mut wal, _) = Wal::open(&path).unwrap();
+    let mut wal = Wal::open(&path).unwrap();
     wal.append(&sample_record(1)).unwrap();
     wal.fsync().unwrap();
     assert!(!wal.is_poisoned(), "a healthy handle is not poisoned");
@@ -496,7 +502,7 @@ fn a_real_fsync_failure_is_repaired_by_retrying_durability() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&sample_record(0)).unwrap();
         wal.fsync().unwrap();
 
@@ -523,7 +529,8 @@ fn a_real_fsync_failure_is_repaired_by_retrying_durability() {
         );
     }
 
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(
         records,
         vec![sample_record(0), sample_record(1)],
@@ -547,7 +554,7 @@ fn a_repair_offered_the_wrong_records_refuses() {
 
     let dir = tempdir().unwrap();
     let path = dir.path().join("wal.log");
-    let (mut wal, _) = Wal::open(&path).unwrap();
+    let mut wal = Wal::open(&path).unwrap();
     wal.append(&sample_record(0)).unwrap();
     wal.fsync().unwrap();
 
@@ -575,7 +582,8 @@ fn a_repair_offered_the_wrong_records_refuses() {
         .expect("the correct records repair the same handle");
     drop(wal);
 
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(
         records,
         vec![sample_record(0), sample_record(1), sample_record(2)]
@@ -596,7 +604,7 @@ fn an_injected_failure_is_indistinguishable_from_a_real_one() {
     use tessera_lifecycle::wal::ExecutorWal;
 
     let dir = tempdir().unwrap();
-    let (wal, _) = Wal::open(dir.path().join("wal.log")).unwrap();
+    let wal = Wal::open(dir.path().join("wal.log")).unwrap();
     let faults = Arc::new(FaultSwitchboard::new());
     let meter = Arc::new(WalMeter::new());
     let mut wal = ExecutorWal::new(wal, Arc::clone(&meter)).with_faults(Arc::clone(&faults));
@@ -653,7 +661,7 @@ fn an_injected_sync_failure_is_repaired_only_once_the_arming_runs_out() {
     use tessera_lifecycle::wal::ExecutorWal;
 
     let dir = tempdir().unwrap();
-    let (wal, _) = Wal::open(dir.path().join("wal.log")).unwrap();
+    let wal = Wal::open(dir.path().join("wal.log")).unwrap();
     let faults = Arc::new(FaultSwitchboard::new());
     let meter = Arc::new(WalMeter::new());
     let mut wal = ExecutorWal::new(wal, Arc::clone(&meter)).with_faults(Arc::clone(&faults));
@@ -691,7 +699,7 @@ fn an_injected_append_failure_is_not_repairable() {
     use tessera_lifecycle::wal::ExecutorWal;
 
     let dir = tempdir().unwrap();
-    let (wal, _) = Wal::open(dir.path().join("wal.log")).unwrap();
+    let wal = Wal::open(dir.path().join("wal.log")).unwrap();
     let faults = Arc::new(FaultSwitchboard::new());
     let mut wal = ExecutorWal::new(wal, Arc::new(WalMeter::new())).with_faults(Arc::clone(&faults));
 
@@ -739,7 +747,7 @@ fn an_injected_append_failure_follows_the_real_sequence() {
     use tessera_lifecycle::wal::ExecutorWal;
 
     let dir = tempdir().unwrap();
-    let (wal, _) = Wal::open(dir.path().join("wal.log")).unwrap();
+    let wal = Wal::open(dir.path().join("wal.log")).unwrap();
     let faults = Arc::new(FaultSwitchboard::new());
     let meter = Arc::new(WalMeter::new());
     let mut wal = ExecutorWal::new(wal, Arc::clone(&meter)).with_faults(Arc::clone(&faults));
@@ -819,7 +827,7 @@ fn the_sync_offset_is_published_only_after_the_sync_that_makes_it_true() {
     let path = dir.path().join("wal.log");
     let sync_path = sidecar(&path, 1);
 
-    let (mut wal, _) = Wal::open(&path).unwrap();
+    let mut wal = Wal::open(&path).unwrap();
     let faults = Arc::new(FaultSwitchboard::new());
     wal.attach_faults(Arc::clone(&faults));
 
@@ -863,7 +871,8 @@ fn the_sync_offset_is_published_only_after_the_sync_that_makes_it_true() {
     );
     drop(wal);
 
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(
         records,
         vec![sample_record(1), sample_record(2)],

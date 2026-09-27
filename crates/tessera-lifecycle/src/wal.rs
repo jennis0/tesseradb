@@ -88,7 +88,7 @@
 //! [`Wal::is_poisoned`], because until the repair succeeds nothing above the last durable offset
 //! may be treated as written.
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -272,7 +272,7 @@ pub enum WalRecord {
     /// fails closed only if every earlier link survives.
     ///
     /// Under replay it is an ordinary record in position: it is applied where it occurs, and a
-    /// `ChangeBatch` earlier in the same file still applies before it. See [`crate::replay`].
+    /// `ChangeBatch` earlier in the same file still applies before it. See [`crate::Replay`].
     OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
     /// An accepted `/control/changes` request: every change it carries, in request order,
     /// addressed by entity id. One record per request, so the request is durable whole or not at
@@ -1246,8 +1246,6 @@ pub struct Wal {
     /// immediately (I3) rather than risk `len` disagreeing with the file, or building on bytes
     /// that may not exist.
     state: WalState,
-    /// Where each record `open` replayed sits in the sequence — see [`Wal::replayed_positions`].
-    replayed_positions: Vec<u64>,
     /// The pause sites armed on this handle. **The one `#[cfg]` inside the durability primitive**,
     /// and it is here because the ordering it holds is decided here: see
     /// [`Wal::sync_data`] and [`crate::faults::PauseSite::BeforeSyncData`]. Every other fault
@@ -1337,10 +1335,10 @@ fn resolve_sync_point(sync_path: &Path, wal_len: u64) -> Result<u64> {
 
 /// Reads up to `buf.len()` bytes, stopping at EOF. Returns the number of bytes actually read,
 /// which is less than `buf.len()` iff EOF was reached before the buffer was filled.
-fn read_up_to(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
+fn read_up_to(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut total = 0;
     while total < buf.len() {
-        let n = file.read(&mut buf[total..])?;
+        let n = reader.read(&mut buf[total..])?;
         if n == 0 {
             break;
         }
@@ -1385,75 +1383,198 @@ fn check_header(file: &mut File, expected_number: u64) -> Result<(u64, u64)> {
     Ok((number, base_pos))
 }
 
-/// Replays the log's **durable prefix** — the records lying wholly below `sync_point` — and
-/// discards whatever follows it. Returns the records collected and the offset replay stopped at,
-/// which is the file's logical length once the tail has been truncated away.
+/// Reads the frame starting at file offset `offset`, whose durable region ends at `end`, into
+/// `body`, checking its length and checksum. Returns the frame's length.
 ///
-/// Every failure inside the prefix is corruption of acknowledged state and returns
-/// [`WalError::WalCorruption`]; see the module doc for why the answer is uniform here and uniform
-/// the other way past the boundary.
-fn replay(file: &mut File, sync_point: u64) -> Result<(Vec<(u64, WalRecord)>, u64)> {
+/// Every failure is [`WalError::WalCorruption`]: the frame lies below a durable boundary, so bytes
+/// that will not read are damage to acknowledged state. See the module doc for why the answer is
+/// uniform here and uniform the other way past the boundary.
+fn read_frame(reader: &mut impl Read, offset: u64, end: u64, body: &mut Vec<u8>) -> Result<u64> {
+    let mut len_buf = [0u8; 4];
+    if read_up_to(reader, &mut len_buf)? < 4 {
+        // End of file before the durable offset was reached: the log is *shorter* than what
+        // the sidecar says was made durable (C1). No record is damaged, and that is exactly
+        // what makes it dangerous — the acked bytes are simply gone.
+        return Err(WalError::WalCorruption);
+    }
+    let body_len = u32::from_le_bytes(len_buf) as u64;
+
+    // Bound the claimed frame against what the durable prefix can actually hold, before
+    // allocating for it. Two things at once: a corrupted length prefix (e.g. a stray
+    // 0xFFFFFFFF) never becomes a multi-gigabyte allocation attempt (I1), and a record that
+    // would straddle the boundary — starting inside the prefix, ending past it — is refused
+    // here rather than being read out of the undurable region. Both are failures below the
+    // sync point, so both fail closed.
+    let framed = 4 + body_len + 4;
+    if framed > end.saturating_sub(offset) {
+        return Err(WalError::WalCorruption);
+    }
+
+    body.clear();
+    body.resize(body_len as usize, 0);
+    if (read_up_to(reader, body)? as u64) < body_len {
+        return Err(WalError::WalCorruption);
+    }
+
+    let mut crc_buf = [0u8; 4];
+    if read_up_to(reader, &mut crc_buf)? < 4 {
+        return Err(WalError::WalCorruption);
+    }
+    if crc32fast::hash(body) != u32::from_le_bytes(crc_buf) {
+        return Err(WalError::WalCorruption);
+    }
+    Ok(framed)
+}
+
+/// Decodes a frame's body.
+///
+/// Framing + CRC alone cannot catch every corruption: an all-zero region (e.g. sparse-file
+/// zero-fill, or a hole left by a crash mid-write with no CRC ever written) has `body_len == 0`
+/// and `crc32fast::hash(&[]) == 0`, which passes both checks trivially. `postcard::from_bytes` is
+/// the backstop — an empty (or otherwise all-zero) byte string cannot select any `WalRecord`
+/// variant, so the decode fails and the record fails closed like any other damaged one.
+fn decode(body: &[u8]) -> Result<WalRecord> {
+    postcard::from_bytes(body).map_err(|_| WalError::WalCorruption)
+}
+
+/// The variant index postcard writes at the head of every `IngestBatch` body, read off an encoded
+/// one so it follows the enum's order.
+fn ingest_batch_tag() -> u32 {
+    static TAG: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *TAG.get_or_init(|| {
+        let empty = WalRecord::IngestBatch {
+            batch_id: String::new(),
+            body_hash: [0; 32],
+            rows: Vec::new(),
+            edits: Vec::new(),
+            receipt: Vec::new(),
+        };
+        let bytes = postcard::to_allocvec(&empty).expect("a record encodes");
+        postcard::take_from_bytes::<u32>(&bytes)
+            .expect("a body starts with its variant index")
+            .0
+    })
+}
+
+/// The read buffer for a member's records: a pass over the log costs a read call per megabyte,
+/// where an unbuffered one costs three per record.
+const READ_BUFFER: usize = 1 << 20;
+
+/// Checks the member's **durable prefix** — every record lying wholly below `sync_point` frames,
+/// checksums and decodes — and discards whatever follows it. Returns the offset the prefix ends
+/// at, which is the file's logical length once the tail has been truncated away. Each record is
+/// dropped as soon as it has decoded.
+fn check_prefix(file: &mut File, sync_point: u64) -> Result<u64> {
     let total_len = file.metadata()?.len();
     file.seek(SeekFrom::Start(HEADER_LEN))?;
-    let mut records = Vec::new();
-    let mut pos: u64 = HEADER_LEN;
-
-    while pos < sync_point {
-        let mut len_buf = [0u8; 4];
-        if read_up_to(file, &mut len_buf)? < 4 {
-            // End of file before the durable offset was reached: the log is *shorter* than what
-            // the sidecar says was made durable (C1). No record is damaged, and that is exactly
-            // what makes it dangerous — the acked bytes are simply gone.
-            return Err(WalError::WalCorruption);
+    let mut offset: u64 = HEADER_LEN;
+    {
+        let mut reader = BufReader::with_capacity(READ_BUFFER, &mut *file);
+        let mut body = Vec::new();
+        while offset < sync_point {
+            offset += read_frame(&mut reader, offset, sync_point, &mut body)?;
+            decode(&body)?;
         }
-        let body_len = u32::from_le_bytes(len_buf) as u64;
-
-        // Bound the claimed frame against what the durable prefix can actually hold, before
-        // allocating for it. Two things at once: a corrupted length prefix (e.g. a stray
-        // 0xFFFFFFFF) never becomes a multi-gigabyte allocation attempt (I1), and a record that
-        // would straddle the boundary — starting inside the prefix, ending past it — is refused
-        // here rather than being read out of the undurable region. Both are failures below the
-        // sync point, so both fail closed.
-        let framed = 4 + body_len + 4;
-        if framed > sync_point.saturating_sub(pos) {
-            return Err(WalError::WalCorruption);
-        }
-
-        let mut body = vec![0u8; body_len as usize];
-        if (read_up_to(file, &mut body)? as u64) < body_len {
-            return Err(WalError::WalCorruption);
-        }
-
-        let mut crc_buf = [0u8; 4];
-        if read_up_to(file, &mut crc_buf)? < 4 {
-            return Err(WalError::WalCorruption);
-        }
-        if crc32fast::hash(&body) != u32::from_le_bytes(crc_buf) {
-            return Err(WalError::WalCorruption);
-        }
-
-        // Framing + CRC alone cannot catch every corruption: an all-zero region (e.g. sparse-file
-        // zero-fill, or a hole left by a crash mid-write with no CRC ever written) has
-        // `body_len == 0` and `crc32fast::hash(&[]) == 0`, which passes both checks trivially.
-        // `postcard::from_bytes` is the backstop — an empty (or otherwise all-zero) byte string
-        // cannot select any `WalRecord` variant, so the decode fails and the record fails closed
-        // like any other damaged one.
-        let record: WalRecord = postcard::from_bytes(&body).map_err(|_| WalError::WalCorruption)?;
-
-        records.push((pos, record));
-        pos += framed;
     }
 
     // Nothing past here was ever acknowledged. Discard it on disk rather than in memory alone, and
     // fsync the truncation before returning, so a crash before the next `Wal::fsync` cannot let the
     // filesystem resurrect the tail just dropped. A failure propagates: a handle that cannot
     // establish where its log ends must not be handed out.
-    if total_len > pos {
-        file.set_len(pos)?;
+    if total_len > offset {
+        file.set_len(offset)?;
         file.sync_data()?;
     }
 
-    Ok((records, pos))
+    Ok(offset)
+}
+
+/// The durable records a log retains, oldest first, each with its sequence-global position: read
+/// from disc and decoded one record at a time. See [`Wal::records`].
+pub struct Records<'a> {
+    base: &'a SequenceBase,
+    spans: std::vec::IntoIter<SealedSpan>,
+    member: Option<MemberReader>,
+    body: Vec<u8>,
+    /// Leave `IngestBatch` records out, unread past their variant index.
+    skip_ingest: bool,
+}
+
+/// The member [`Records`] is reading: where it is in the file, and where the member's durable
+/// records end.
+struct MemberReader {
+    reader: BufReader<File>,
+    base_pos: u64,
+    offset: u64,
+    end: u64,
+}
+
+impl Records<'_> {
+    /// Opens `span`'s member, refusing a file whose header does not name the member and position
+    /// the handle recorded for it.
+    fn open_member(&self, span: SealedSpan) -> Result<MemberReader> {
+        let mut file = File::open(self.base.member(span.number))?;
+        let (_, base_pos) = check_header(&mut file, span.number)?;
+        if base_pos != span.start_pos {
+            return Err(WalError::WalCorruption);
+        }
+        Ok(MemberReader {
+            reader: BufReader::with_capacity(READ_BUFFER, file),
+            base_pos,
+            offset: HEADER_LEN,
+            end: HEADER_LEN + (span.end_pos - span.start_pos),
+        })
+    }
+
+    /// The next record of the open member, or `None` where it has no more.
+    fn next_in_member(&mut self) -> Option<Result<(u64, WalRecord)>> {
+        let member = self.member.as_mut()?;
+        while member.offset < member.end {
+            let at = member.offset;
+            let framed = match read_frame(&mut member.reader, at, member.end, &mut self.body) {
+                Ok(framed) => framed,
+                Err(e) => return Some(Err(e)),
+            };
+            member.offset += framed;
+            if self.skip_ingest
+                && postcard::take_from_bytes::<u32>(&self.body)
+                    .is_ok_and(|(tag, _)| tag == ingest_batch_tag())
+            {
+                continue;
+            }
+            let position = member.base_pos + (at - HEADER_LEN);
+            return Some(decode(&self.body).map(|record| (position, record)));
+        }
+        None
+    }
+}
+
+impl Iterator for Records<'_> {
+    type Item = Result<(u64, WalRecord)>;
+
+    /// The next record, or the error that ends the walk: nothing is read after one.
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let next = match self.next_in_member() {
+                Some(next) => next,
+                None => {
+                    let span = self.spans.next()?;
+                    match self.open_member(span) {
+                        Ok(member) => {
+                            self.member = Some(member);
+                            continue;
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+            if next.is_err() {
+                self.member = None;
+                self.spans = Vec::new().into_iter();
+            }
+            return Some(next);
+        }
+    }
 }
 
 /// Creates member `number` of `base`, headered, sidecarred and durable — including its directory
@@ -1491,8 +1612,9 @@ fn create_member(base: &SequenceBase, number: u64, base_pos: u64) -> Result<WalF
 }
 
 impl Wal {
-    /// Opens (creating if absent) the WAL sequence based at `path`, replays every surviving member
-    /// under the positional CRC rule, and returns the live handle plus every record recovered.
+    /// Opens (creating if absent) the WAL sequence based at `path`, checks every surviving member
+    /// under the positional CRC rule, and returns the live handle. [`Wal::records`] reads what it
+    /// recovered.
     ///
     /// **Recovery walks every surviving file in sequence order.** It does not start *at* the
     /// newest overlay snapshot and resume: an older member can still carry `Change` records above
@@ -1509,24 +1631,20 @@ impl Wal {
     /// first. A **broken position chain** — a member whose header base position does not continue
     /// its predecessor's durable end — means a stale or foreign file has taken a member's place,
     /// and every position derived from it afterwards would name the wrong bytes.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<(Wal, Vec<WalRecord>)> {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Wal> {
         let base = SequenceBase::of(path.as_ref());
         let members = base.members()?;
 
         if members.is_empty() {
             let active = create_member(&base, 1, 0)?;
-            return Ok((
-                Wal {
-                    base,
-                    sealed: Vec::new(),
-                    active,
-                    state: WalState::Healthy,
-                    replayed_positions: Vec::new(),
-                    #[cfg(feature = "fault-injection")]
-                    faults: None,
-                },
-                Vec::new(),
-            ));
+            return Ok(Wal {
+                base,
+                sealed: Vec::new(),
+                active,
+                state: WalState::Healthy,
+                #[cfg(feature = "fault-injection")]
+                faults: None,
+            });
         }
 
         let first = members[0];
@@ -1535,7 +1653,6 @@ impl Wal {
             return Err(WalError::WalCorruption);
         }
 
-        let mut records = Vec::new();
         let mut sealed = Vec::new();
         let mut active = None;
         // `None` for the oldest surviving member: reclamation has removed whatever preceded it, so
@@ -1572,14 +1689,7 @@ impl Wal {
             }
 
             let sync_point = resolve_sync_point(&sync_path, file_len)?;
-            let (member_records, len) = replay(&mut file, sync_point)?;
-            // File offsets become sequence-global positions here, at the one place both terms are
-            // in hand: a member's records are `base_pos + (offset - HEADER_LEN)` into the sequence.
-            records.extend(
-                member_records
-                    .into_iter()
-                    .map(|(offset, record)| (base_pos + (offset - HEADER_LEN), record)),
-            );
+            let len = check_prefix(&mut file, sync_point)?;
             expected_base = Some(base_pos + (len - HEADER_LEN));
 
             if is_last {
@@ -1604,32 +1714,49 @@ impl Wal {
             }
         }
 
-        let (replayed_positions, records): (Vec<u64>, Vec<WalRecord>) = records.into_iter().unzip();
-
-        Ok((
-            Wal {
-                base,
-                sealed,
-                active: active.expect("the last member is always the active one"),
-                state: WalState::Healthy,
-                replayed_positions,
-                #[cfg(feature = "fault-injection")]
-                faults: None,
-            },
-            records,
-        ))
+        Ok(Wal {
+            base,
+            sealed,
+            active: active.expect("the last member is always the active one"),
+            state: WalState::Healthy,
+            #[cfg(feature = "fault-injection")]
+            faults: None,
+        })
     }
 
-    /// The sequence-global position of each record `open` replayed, in the same order as the
-    /// records it returned.
+    /// Every durable record the log retains, oldest first, each with its sequence-global
+    /// position: what a restart replays.
     ///
-    /// Parallel to the records rather than zipped into them because every other consumer of a
-    /// replayed record — `overlay::replay`, `high_water_from` — wants the record alone, and a tuple
-    /// would put a position into six signatures to serve one caller. That caller is
-    /// `WritePath::reconstruct`, which stamps each buffered row with the position it arrived at so a
-    /// later rotation knows what it may reclaim below.
-    pub fn replayed_positions(&self) -> &[u64] {
-        &self.replayed_positions
+    /// Read from disc and decoded one record at a time, so a caller holds one record and not the
+    /// log. A caller that needs to see later records before applying earlier ones walks this
+    /// twice, at the cost of a second read.
+    ///
+    /// [`Wal::open`] has already checked every record this yields, so an error here means a file
+    /// changed underneath the handle, and it is the last item.
+    pub fn records(&self) -> Records<'_> {
+        self.walk(false)
+    }
+
+    /// [`Wal::records`] without the `IngestBatch` records, which are left undecoded: for a walk
+    /// that reads none of them, since they are most of a log's bytes.
+    pub fn records_but_ingest(&self) -> Records<'_> {
+        self.walk(true)
+    }
+
+    fn walk(&self, skip_ingest: bool) -> Records<'_> {
+        let active = SealedSpan {
+            number: self.active.number,
+            start_pos: self.active.base_pos,
+            end_pos: self.active.end_pos(),
+        };
+        let spans: Vec<SealedSpan> = self.sealed.iter().copied().chain([active]).collect();
+        Records {
+            base: &self.base,
+            spans: spans.into_iter(),
+            member: None,
+            body: Vec::new(),
+            skip_ingest,
+        }
     }
 
     /// The sequence-global position the next record will be written at.
@@ -2383,14 +2510,16 @@ mod tests {
             }],
         };
 
-        let (mut wal, replayed) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert!(replayed.is_empty());
         wal.append(&mint).unwrap();
         wal.append(&batch).unwrap();
         wal.fsync().unwrap();
         drop(wal);
 
-        let (_wal, replayed) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(
             replayed,
             vec![mint, batch],
@@ -2471,14 +2600,16 @@ mod tests {
             version: 2,
         };
 
-        let (mut wal, replayed) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert!(replayed.is_empty());
         wal.append(&create).unwrap();
         wal.append(&dropped).unwrap();
         wal.fsync().unwrap();
         drop(wal);
 
-        let (_wal, replayed) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(replayed, vec![create, dropped]);
     }
 
@@ -2574,12 +2705,13 @@ mod tests {
             ],
         };
 
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&publish).unwrap();
         wal.fsync().unwrap();
         drop(wal);
 
-        let (_wal, replayed) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(replayed, vec![publish]);
         let WalRecord::ArtifactPublish { artifacts, .. } = &replayed[0] else {
             unreachable!()
@@ -2801,14 +2933,15 @@ mod tests {
             ]
         );
 
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         for record in &records {
             wal.append(record).unwrap();
         }
         wal.fsync().unwrap();
         drop(wal);
 
-        let (_wal, replayed) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(replayed, records);
 
         // The membership route's own growth is what every reader applies today.
@@ -2841,7 +2974,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.log");
         {
-            let (mut wal, _) = Wal::open(&path).unwrap();
+            let mut wal = Wal::open(&path).unwrap();
             wal.append(&record(0)).unwrap();
             wal.fsync().unwrap();
             let durable = wal.active.durable_len;
@@ -2859,7 +2992,8 @@ mod tests {
             assert!(!wal.is_poisoned());
         }
 
-        let (_wal, records) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(
             records,
             vec![record(0), record(1), record(2)],
@@ -2880,7 +3014,7 @@ mod tests {
     fn a_torn_handle_recovers_by_neither_route() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.log");
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&record(0)).unwrap();
         wal.fsync().unwrap();
         wal.append(&record(1)).unwrap();
@@ -2912,7 +3046,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.log");
         {
-            let (mut wal, _) = Wal::open(&path).unwrap();
+            let mut wal = Wal::open(&path).unwrap();
             wal.append(&record(0)).unwrap();
             wal.fsync().unwrap();
             let durable = wal.active.durable_len;

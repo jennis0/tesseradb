@@ -2712,3 +2712,130 @@ async fn an_edit_in_a_view_dropped_before_the_tick_is_still_written() {
         "and after a restart"
     );
 }
+
+/// What a viewer is served of `world` after the buffer drains: every point, the points whose
+/// `score` is 7, and the points a principal holding only `1` sees.
+async fn world_as_served(served: &mut Served) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
+    drain(&served.server).await;
+    served.reauthorise().await;
+    let ids = |rows: Vec<PointRow>| {
+        let mut ids: Vec<u64> = rows.into_iter().map(|(id, _)| id).collect();
+        ids.sort_unstable();
+        ids
+    };
+    let all = ids(points(served, "world").await);
+    let scored = ids(filtered_points(served, "world", json!({ "score": { "eq": 7 } })).await);
+    let token = std::mem::replace(&mut served.token, token_for(&served.server, &["1"]).await);
+    let restricted = ids(points(served, "world").await);
+    served.token = token;
+    (all, scored, restricted)
+}
+
+/// **A restart serves a dropped view's joined item as the live service does.** An item's own row
+/// is flushed into a created view, a row joining it to `world` waits in the buffer, and the view
+/// is dropped. The live service has only the join buffered when the drop arrives; a restart
+/// replays both rows and meets the drop between them. Either way `world` serves the item once,
+/// with its score, to the principals its label admits.
+#[tokio::test]
+async fn a_dropped_views_joined_item_is_served_alike_live_and_after_a_restart() {
+    let mut observed = Vec::new();
+    for restart in [false, true] {
+        let mut served = Served::build(build_fixture_bundle).await;
+        assert_eq!(
+            create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
+                .await
+                .status(),
+            201
+        );
+        served.reauthorise().await;
+        let item = Some(NEW_ID + 50);
+        let own = accepted(
+            ingest(
+                &served,
+                "own",
+                "quarter:2026-Q5",
+                &[(item, 800.0, 300.0, &["0"][..], Some(7))],
+            )
+            .await,
+        )
+        .await;
+        let tessera_id = ingested_ids(&own)[0];
+        drain(&served.server).await;
+        accepted(
+            ingest(
+                &served,
+                "join",
+                "world",
+                &[(item, 60.0, 60.0, &["0"][..], Some(7))],
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(drop_view(&served, "quarter", "2026-Q5").await["deleted"], 0);
+        if restart {
+            served = served.restart().await;
+        }
+        let (all, scored, restricted) = world_as_served(&mut served).await;
+        assert!(
+            all.contains(&tessera_id) && scored.contains(&tessera_id),
+            "`world` serves the item with its score (restart {restart})"
+        );
+        assert!(
+            !restricted.contains(&tessera_id),
+            "and not to a principal its label does not admit (restart {restart})"
+        );
+        observed.push((all, scored, restricted));
+    }
+    assert_eq!(observed[0], observed[1], "live, then after a restart");
+}
+
+/// **A key dropped and created again, with flushed rows on both sides of the drop and one batch
+/// still buffered, restarts to what the live service served.**
+#[tokio::test]
+async fn a_recreated_key_with_flushed_rows_on_both_sides_restarts_to_what_was_served() {
+    let mut served = Served::build(build_fixture_bundle).await;
+    let rows = |x: f32, n: i32| -> Vec<Row<'static>> {
+        (0..n)
+            .map(|i| (None, x + i as f32, x, &["0"][..], Some(i)))
+            .collect()
+    };
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5 first", 1))
+            .await
+            .status(),
+        201
+    );
+    served.reauthorise().await;
+    accepted(ingest(&served, "first", "quarter:2026-Q5", &rows(300.0, 6)).await).await;
+    drain(&served.server).await;
+    drop_view(&served, "quarter", "2026-Q5").await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5 second", 2))
+            .await
+            .status(),
+        201
+    );
+    served.reauthorise().await;
+    accepted(ingest(&served, "second", "quarter:2026-Q5", &rows(500.0, 4)).await).await;
+    drain(&served.server).await;
+    accepted(ingest(&served, "third", "quarter:2026-Q5", &rows(600.0, 2)).await).await;
+    let buffered = served.server.state.engine.buffered_items();
+    let before = points(&served, "quarter:2026-Q5").await.len();
+    assert_eq!(before, 4, "the second incarnation's flushed rows");
+
+    let mut served = served.restart().await;
+    served.reauthorise().await;
+    assert_eq!(
+        served.server.state.engine.buffered_items(),
+        buffered,
+        "the restart buffers what the live service had buffered"
+    );
+    assert_eq!(points(&served, "quarter:2026-Q5").await.len(), before);
+    drain(&served.server).await;
+    served.reauthorise().await;
+    assert_eq!(
+        points(&served, "quarter:2026-Q5").await.len(),
+        6,
+        "the buffered rows flush once, beside the second incarnation's and none of the first's"
+    );
+}

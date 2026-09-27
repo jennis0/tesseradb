@@ -538,8 +538,9 @@ async fn a_restated_growth_appends_only_the_members_the_artifact_does_not_hold()
     assert_eq!(count(&server, &["0"]).await, 20);
 
     server.shutdown().await;
-    let (_wal, records) =
+    let wal =
         tessera_lifecycle::wal::Wal::open(tmp.path().join("wal.log")).expect("the log reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     let growths: Vec<&Vec<tessera_lifecycle::wal::MembershipGrowth>> = records
         .iter()
         .filter_map(|record| match record {

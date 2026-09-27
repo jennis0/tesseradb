@@ -244,7 +244,8 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
 
 /// Every `VocabularyMint` record in the WAL at `wal_path`, in file order.
 fn mint_records(wal_path: &Path) -> Vec<(String, String, u32)> {
-    let (_wal, records) = Wal::open(wal_path).expect("the WAL reopens");
+    let wal = Wal::open(wal_path).expect("the WAL reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     records
         .into_iter()
         .filter_map(|r| match r {
@@ -389,7 +390,8 @@ fn the_mint_record_precedes_the_ingest_batch_record_in_the_wal() {
     let wal_path = tmp.path().join("wal.log");
     drop(engine); // joins the executor and closes the WAL handle before it is reopened below
 
-    let (_wal, records) = Wal::open(&wal_path).expect("the WAL reopens");
+    let wal = Wal::open(&wal_path).expect("the WAL reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     let mint_index = records
         .iter()
         .position(|r| {
@@ -577,7 +579,8 @@ fn a_predicate_layer_over_a_category_names_its_artifact_by_the_key() {
 
 /// The key of every artifact published into `layer` by the records in the WAL at `wal_path`.
 fn published_keys(wal_path: &Path, layer: &str) -> Vec<String> {
-    let (_wal, records) = Wal::open(wal_path).expect("the WAL reopens");
+    let wal = Wal::open(wal_path).expect("the WAL reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     records
         .into_iter()
         .filter_map(|r| match r {

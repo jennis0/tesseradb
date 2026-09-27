@@ -524,7 +524,7 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
 #[test]
 fn step3_restart_replay_survives_cross_cause_sequences() {
     use tessera_lifecycle::wal::{Wal, WalRecord, WalRow};
-    use tessera_lifecycle::{replay, ChangeOp};
+    use tessera_lifecycle::{ChangeOp, Replay};
 
     const ENTITY_X: u64 = 10_002;
     const ENTITY_Y: u64 = 10_003;
@@ -533,7 +533,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     let wal_path = wal_dir.path().join("wal.log");
 
     {
-        let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
+        let mut wal = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),
@@ -602,13 +602,13 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     let dict = tessera_authz::Dict::load(&dict_paths).unwrap();
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
-    let (_wal, records) = Wal::open(&wal_path).unwrap();
-    let (overlay, buffer, _resolver) = replay(
-        &records,
-        &dict,
-        Overlay::new(),
-        &tessera_lifecycle::owner_id_only,
-    );
+    let wal = Wal::open(&wal_path).unwrap();
+    let mut replay = Replay::new(&dict, Overlay::new(), &tessera_lifecycle::owner_id_only);
+    for record in wal.records() {
+        let (position, record) = record.unwrap();
+        replay.apply(&record, position, |_, _| false);
+    }
+    let (overlay, buffer, _resolver) = replay.finish();
 
     assert!(
         overlay.is_deleted(e(ENTITY_X)),
