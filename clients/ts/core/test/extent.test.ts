@@ -35,7 +35,7 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     const client = {
       meta: async () => META,
       viewport: vi.fn(async () => reply()),
-      item: async () => ({fields: {}, externalId: null}),
+      item: async () => ({fields: {}}),
       artifact: async () => ({layer: 'clusters/a', key: 'far', maskedCount: 10n}),
       categories: async () => [],
       close: () => {}

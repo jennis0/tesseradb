@@ -68,7 +68,7 @@ function fakeClient(reply: (req: FakeRequest) => ViewportResponse, meta: Meta = 
   const client = {
     meta: async () => meta,
     viewport,
-    item: async () => ({fields: {archive: 'cs'}, externalId: null}),
+    item: async () => ({fields: {archive: 'cs'}}),
     artifact: async () => ({layer: 'l', key: 'k', maskedCount: 42n, centroid: null, box: null, shape: null}),
     categories: async () => [{code: 5, key: 'cs', title: 'CS'}],
     suggest: async () => ({status: 'ok' as const, column: 'admin4', q: '', values: [], more: false}),
@@ -717,7 +717,7 @@ describe('the store holds the drawn shape by identifier', () => {
     const client = {
       meta: async () => META,
       viewport: async () => response('k'),
-      item: async () => ({fields: {}, externalId: null}),
+      item: async () => ({fields: {}}),
       artifact,
       categories: async () => [],
       close: () => {}
@@ -1044,7 +1044,7 @@ describe('the token', () => {
       ]
     }));
     const shapeOf = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}));
-    const item = vi.fn(async (token: string) => ({fields: {asked: token}, externalId: null, views: [], scoped: {}, labels: []}));
+    const item = vi.fn(async (token: string) => ({fields: {asked: token}, views: [], scoped: {}, labels: []}));
     Object.assign(client, {artifact: shapeOf, item});
     let issued = 0;
     const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
@@ -1073,7 +1073,7 @@ describe('the token', () => {
     const scheduler = fakeScheduler();
     const {client} = fakeClient(() => response('ck'));
     const shape: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
-    const detail = {fields: {archive: 'cs'}, externalId: null, views: [], scoped: {}, labels: []};
+    const detail = {fields: {archive: 'cs'}, views: [], scoped: {}, labels: []};
     Object.assign(client, {
       item: vi.fn(async () => detail),
       artifact: vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape})),
@@ -1268,7 +1268,7 @@ describe('the item a click opens and the record a hover names', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {client} = fakeClient(() => response('ck'));
-    const detail = {fields: {archive: 'cs'}, externalId: null, views: [], scoped: {}, labels: []};
+    const detail = {fields: {archive: 'cs'}, views: [], scoped: {}, labels: []};
     const item = vi.fn(async (_token: string, id: bigint) => {
       if (id === 404n) throw new TesseraError(404, 'not-found', 'no such item');
       return detail;
@@ -1291,7 +1291,7 @@ describe('the item a click opens and the record a hover names', () => {
     let answer: (() => void) | null = null;
     const item = vi.fn(async (_token: string, id: bigint) => {
       if (id === 8n) await new Promise<void>((resolve) => (answer = resolve));
-      return {fields: {title: `paper ${id}`}, externalId: null, views: [], scoped: {}, labels: []};
+      return {fields: {title: `paper ${id}`}, views: [], scoped: {}, labels: []};
     });
     (client as unknown as {item: typeof item}).item = item;
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
@@ -1347,7 +1347,7 @@ describe('the item a click opens and the record a hover names', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {client} = fakeClient(() => response('ck'));
-    const item = vi.fn(async (_token: string, id: bigint) => ({fields: {title: `paper ${id}`}, externalId: null, views: [], scoped: {}, labels: []}));
+    const item = vi.fn(async (_token: string, id: bigint) => ({fields: {title: `paper ${id}`}, views: [], scoped: {}, labels: []}));
     (client as unknown as {item: typeof item}).item = item;
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
     await clock.advance(1);

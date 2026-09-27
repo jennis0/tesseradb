@@ -139,7 +139,7 @@ export class TesseraItemCard extends TesseraElement {
       return html`<div class="panel">${heading}<span part="state" data-state="empty">No item selected</span></div>`;
     }
     const declared = meta?.declaredScalars ?? [];
-    const {fields, externalId} = item.detail;
+    const {fields} = item.detail;
     const names = Object.keys(fields);
     const ordered = [...declared.map((c) => c.name).filter((n) => n in fields), ...names.filter((n) => !declared.some((c) => c.name === n))];
     const id = idString(item.id);
@@ -158,11 +158,10 @@ export class TesseraItemCard extends TesseraElement {
         ${titleName
           ? html`<div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>`
           : nothing}
-        ${externalId ? html`<div part="field" data-name="external_id" style="display:contents"><span part="label" class="k">external_id</span><span part="value" class="v mono">${externalId}</span></div>` : nothing}
       </div>
       ${this.scoped(item.detail.scoped)}
       <div class="row actions">
-        <button part="open" class="btn" type="button" @click=${() => emit(this, 'tessera-open', {id, fields, externalId})}>${icon('open', 14)}Open</button>
+        <button part="open" class="btn" type="button" @click=${() => emit(this, 'tessera-open', {id, fields})}>${icon('open', 14)}Open</button>
         <button part="copy" class="btn quiet" type="button" @click=${copy}>Copy id</button>
       </div>
     </div>`;

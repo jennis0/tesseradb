@@ -124,7 +124,7 @@ async function register(declaration) {
 }
 
 async function publish(layer, artifactsToPublish) {
-  return accepted(`publish into ${layer}`, await control.publish(layer, {level: 0, addressing: 'tessera', artifacts: artifactsToPublish}));
+  return accepted(`publish into ${layer}`, await control.publish(layer, {level: 0, artifacts: artifactsToPublish}));
 }
 
 async function status() {

@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {addressed, Control, MAX_ATTEMPTS, MAX_BACKOFF, MIN_BACKOFF, UNANSWERED, type Answer, type WriteOptions} from '../src/control.js';
+import {Control, MAX_ATTEMPTS, MAX_BACKOFF, MIN_BACKOFF, UNANSWERED, type Answer, type WriteOptions} from '../src/control.js';
 import {headersOf} from './support.js';
 
 /**
@@ -46,7 +46,7 @@ describe('each route', () => {
     {name: 'createView', call: (c) => c.createView('g', 'k 1', {metadata: {}}), method: 'PUT', path: '/control/views/g/k%201', headers: JSON_ROUTE, json: {metadata: {}}},
     {name: 'publish', call: (c) => c.publish('clusters/kmeans', {level: 0}), method: 'PUT', path: '/control/layers/clusters%2Fkmeans/artifacts', headers: JSON_ROUTE, json: {level: 0}},
     {name: 'grow (JSON)', call: (c) => c.grow('clusters/kmeans', {level: 0}), method: 'PATCH', path: '/control/layers/clusters%2Fkmeans/artifacts', headers: JSON_ROUTE, json: {level: 0}},
-    {name: 'changes', call: (c) => c.changes([{external_id: 'AQ==', op: 'suppress'}]), method: 'POST', path: '/control/changes', headers: JSON_ROUTE, json: [{external_id: 'AQ==', op: 'suppress'}]},
+    {name: 'changes', call: (c) => c.changes([{field: 'doi', value: '10.1/x', op: 'suppress'}]), method: 'POST', path: '/control/changes', headers: JSON_ROUTE, json: [{field: 'doi', value: '10.1/x', op: 'suppress'}]},
     {name: 'dropLayer', call: (c) => c.dropLayer('a/b'), method: 'DELETE', path: '/control/layers/a%2Fb'},
     {name: 'dropLayer waiting', call: (c) => c.dropLayer('a', {wait: true}), method: 'DELETE', path: '/control/layers/a?wait=visible'},
     {name: 'dropView', call: (c) => c.dropView('g', 'k'), method: 'DELETE', path: '/control/views/g/k'},
@@ -255,35 +255,5 @@ describe('an answer', () => {
   it('limits is the status body’s limits block', async () => {
     recording({status: 200, body: {limits: {changes: {max_changes_per_request: 10_000}}}});
     expect(await control.limits()).toEqual({changes: {max_changes_per_request: 10_000}});
-  });
-});
-
-describe('addressed', () => {
-  it('is base64 of a string’s UTF-8, an integer’s eight little-endian bytes, or the bytes given', () => {
-    expect(addressed('é')).toBe('w6k=');
-    expect(addressed(1n)).toBe('AQAAAAAAAAA=');
-    expect(addressed(1)).toBe('AQAAAAAAAAA=');
-    expect(addressed(-1n)).toBe('//////////8=');
-    expect(addressed(new Uint8Array([0xff, 0]))).toBe('/wA=');
-  });
-
-  it('takes every integer in [-2^63, 2^64) and refuses those outside it', () => {
-    expect(addressed(2n ** 64n - 1n)).toBe('//////////8=');
-    expect(addressed(-(2n ** 63n))).toBe('AAAAAAAAAIA=');
-    expect(() => addressed(2n ** 64n)).toThrow(RangeError);
-    expect(() => addressed(-(2n ** 63n) - 1n)).toThrow(RangeError);
-  });
-
-  it('refuses a number that is not a safe integer', () => {
-    expect(() => addressed(2 ** 53)).toThrow(RangeError);
-    expect(() => addressed(1.5)).toThrow(RangeError);
-    expect(() => addressed(Number.NaN)).toThrow(RangeError);
-    expect(addressed(Number.MAX_SAFE_INTEGER)).toBe(addressed(BigInt(Number.MAX_SAFE_INTEGER)));
-  });
-
-  it('refuses any other type', () => {
-    for (const other of [null, undefined, {}, [1], true]) {
-      expect(() => addressed(other as unknown as string)).toThrow(TypeError);
-    }
   });
 });

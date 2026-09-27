@@ -64,11 +64,8 @@ export type TesseraEventDetails = {
    * and `highlight`, `verb` is its new position and `expr` is absent.
    */
   'tessera-filterchange': {column: string | null; expr?: FilterExpr | null; verb?: ClauseVerb};
-  /**
-   * Open was pressed on the item `id`: `fields` is its record's fields and `externalId` its
-   * external id, or null where it has none.
-   */
-  'tessera-open': {id: string; fields: Record<string, unknown>; externalId: string | null};
+  /** Open was pressed on the item `id`: `fields` is its record's fields. */
+  'tessera-open': {id: string; fields: Record<string, unknown>};
   /**
    * The view changed from `from` to `to`. `sameFrame` is true where both views are quantised
    * against one extent, so the camera keeps its place; otherwise the map refits.

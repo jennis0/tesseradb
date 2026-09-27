@@ -66,8 +66,8 @@ export type RowAnswer = Answer & {
 
 /**
  * One item of a `POST /control/changes` request, in the route's own field names. The item is
- * addressed by `external_id`, base64 of the id's bytes as {@link addressed} makes it, or by
- * `tessera_id`, a decimal string.
+ * named by `tessera_id`, a decimal string, or by `field` and `value`: a unique attribute and one
+ * of its values as text, a keyword itself or an integer or timestamp in decimal digits.
  *
  * @category Control plane
  */
@@ -79,8 +79,8 @@ export type ChangeItem = {
    */
   op: 'delete' | 'suppress' | 'unsuppress';
 } & (
-  | {external_id: string}
   | {tessera_id: string}
+  | {field: string; value: string}
 );
 
 /**
@@ -158,37 +158,6 @@ export function base64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-const INTEGER_MIN = -(2n ** 63n);
-const INTEGER_END = 2n ** 64n;
-
-/**
- * An external id as a JSON control route carries it, such as {@link ChangeItem}'s `external_id`:
- * base64 of the bytes the id column holds. A string is taken as its UTF-8 bytes, an integer as
- * eight little-endian bytes (two's complement when negative), and a `Uint8Array` as it stands. A
- * build reads an id column to the same bytes, so a row has one address whichever path stored it.
- *
- * @param id - A string, a `Uint8Array`, a `bigint` in [-2^63, 2^64), or a `number` that is a safe
- *   integer.
- * @throws `RangeError` for a `number` that is not a safe integer, or a `bigint` outside
- *   [-2^63, 2^64).
- * @throws `TypeError` for a value of any other type.
- *
- * @category Control plane
- */
-export function addressed(id: string | bigint | number | Uint8Array): string {
-  if (typeof id === 'string') return base64(new TextEncoder().encode(id));
-  if (id instanceof Uint8Array) return base64(id);
-  if (typeof id === 'number') {
-    if (!Number.isSafeInteger(id)) throw new RangeError(`${id} is not a safe integer; pass an integer id as a bigint`);
-    id = BigInt(id);
-  }
-  if (typeof id !== 'bigint') throw new TypeError(`an external id is a string, a bigint, a number or a Uint8Array, not ${typeof id}`);
-  if (id < INTEGER_MIN || id >= INTEGER_END) throw new RangeError(`${id} does not fit in eight bytes; an integer id is in [-2^63, 2^64)`);
-  const bytes = new Uint8Array(8);
-  new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, id), true);
-  return base64(bytes);
-}
-
 /** A fresh batch id: 128 random bits in hex. */
 function freshBatch(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -256,7 +225,7 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
  * The server holds each accepted batch id against its body, so the same bytes sent again under it
  * are answered as a replay with `replayed: true` and no effect, and different bytes under it are
  * refused with `409`. The id is never derived from the body. The same rows sent in two calls are
- * resolved twice: a row naming its item by `tessera_id`, `external_id` or a unique value names in
+ * resolved twice: a row naming its item by `tessera_id` or a unique value names in
  * the second call the item the first created, and changes nothing.
  *
  * @category Control plane
@@ -344,7 +313,7 @@ export class Control {
 
   /**
    * `POST /control/ingest`: one page of rows, given as an Arrow IPC stream. A row names an item by
-   * its `tessera_id`, its `external_id` or a unique column's value; a row naming none creates an
+   * its `tessera_id` or a unique column's value; a row naming none creates an
    * item at its position, one naming an item it matches changes nothing, one naming an item with
    * no row in the view adds it there, and any other edits the item, which keeps its `tessera_id`.
    * A row without coordinates changes only what it carries. Any column may be left out, which

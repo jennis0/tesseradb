@@ -214,7 +214,7 @@ describe('bulk reads against a live server', () => {
 
   it('gives a read that finds nothing one page of no rows, with the columns and types of a page with rows', async (ctx) => {
     live(ctx);
-    const request: ItemsRequest = {view: 's0', fields: ['archive', 'title', 'submitted_at'], systemFields: ['position', 'external_id', 'labels'], pageRows: 100};
+    const request: ItemsRequest = {view: 's0', fields: ['archive', 'title', 'submitted_at'], systemFields: ['position', 'labels'], pageRows: 100};
     const some = await firstPage(client.items(session.token, request));
     expect(some.numRows).toBe(100);
     const none = await items({...request, filters: {arxiv_id: {eq: 'no such paper'}}, count: true});
@@ -274,7 +274,7 @@ describe('bulk reads against a live server', () => {
 
   it('decodes zstd-compressed pages to the tables sent uncompressed', async (ctx) => {
     live(ctx);
-    const request: ItemsRequest = {view: 's0', fields: ['archive', 'primary_category', 'submitted_at', 'title', 'arxiv_id'], systemFields: ['position', 'external_id', 'labels'], pageRows: 700, pages: 2};
+    const request: ItemsRequest = {view: 's0', fields: ['archive', 'primary_category', 'submitted_at', 'title', 'arxiv_id'], systemFields: ['position', 'labels'], pageRows: 700, pages: 2};
     const plain = await items(request);
     const zstd = await items({...request, compression: 'zstd'});
     expect(plain.tables.length).toBeGreaterThan(2);
