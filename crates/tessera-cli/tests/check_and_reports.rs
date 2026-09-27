@@ -178,7 +178,8 @@ topics        = "topics.parquet"
 topic_members = "topic_members.parquet"
 
 [defaults]
-source = "points"
+source     = "points"
+join_field = "id"
 
 [[view]]
 name             = "s0"
@@ -227,6 +228,13 @@ content                   = { computed = ["centroid", "box"] }
 
     [layer.labels.members]
     source = "topic_members"
+
+# The points file's `entity_id`, which every file names its item by.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 "#;
 
 fn run(cwd: &Path, args: &[&str]) -> Output {
@@ -618,11 +626,11 @@ fn a_declaration_that_decides_nothing_writes_no_report() {
 }
 
 // -------------------------------------------------------------------------------------------
-// A points file with no identity column
+// A declaration with no join field
 // -------------------------------------------------------------------------------------------
 
-/// The project's points, minus the identity column: geometry, access terms and one attribute.
-fn write_points_without_identity(dir: &Path) {
+/// The project's points, minus the join column: geometry, access terms and one attribute.
+fn write_points_without_join(dir: &Path) {
     let rows = N as usize;
     let ids: Vec<u64> = (0..N).collect();
     write(
@@ -660,8 +668,8 @@ fn write_keys(dir: &Path) {
 }
 
 /// The whole declaration over that file. The attribute is read from the points file itself, which
-/// is the one place a positional build can read one from.
-const NO_IDENTITY: &str = r#"
+/// is the one place a build with no join field can read one from.
+const NO_JOIN: &str = r#"
 [sources]
 points = "points.parquet"
 
@@ -688,21 +696,21 @@ vocabulary = "severity"
 render     = true
 "#;
 
-/// **A points file may carry no identity column** (`configuration.md` §8), and the check accepts
-/// exactly what the build does: the rows are named by their position, the note says how they are
-/// addressed instead, and the check stays clean.
+/// **A declaration may name no join field**, and the check accepts exactly what the build does:
+/// each row is an item of its own, the note says how items are addressed instead, and the check
+/// stays clean.
 #[test]
-fn a_points_file_with_no_identity_column_checks_clean_and_builds() {
+fn a_declaration_with_no_join_field_checks_clean_and_builds() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
-    write_points_without_identity(tmp.path());
-    std::fs::write(tmp.path().join("schema.toml"), NO_IDENTITY).unwrap();
+    write_points_without_join(tmp.path());
+    std::fs::write(tmp.path().join("schema.toml"), NO_JOIN).unwrap();
 
     let output = run(tmp.path(), &["check"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let said = stderr(&output);
     assert!(
-        said.contains("no identity column: rows addressable by tessera_id only"),
+        said.contains("no join field"),
         "{said}"
     );
     assert!(said.contains("check OK"), "{said}");
@@ -710,14 +718,14 @@ fn a_points_file_with_no_identity_column_checks_clean_and_builds() {
     build(tmp.path());
 }
 
-/// A `[layer.members]` table names one entity per row, and a position is not an entity. The
-/// finding names the table, so the author reads what needs the column rather than that one is
-/// missing.
+/// A `[layer.members]` table names one item per row by its join value, and a declaration with no
+/// join field gives items none. The finding names the table, so the author reads what needs the
+/// join field rather than that one is missing.
 #[test]
-fn a_members_table_over_a_file_with_no_identity_column_is_a_finding_naming_it() {
+fn a_members_table_under_no_join_field_is_a_finding_naming_it() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
-    write_points_without_identity(tmp.path());
+    write_points_without_join(tmp.path());
     write_keys(tmp.path());
     std::fs::write(
         tmp.path().join("schema.toml"),
@@ -755,5 +763,5 @@ require_member_visibility = "all"
     let said = stderr(&output);
     assert!(said.contains("view 's0'"), "{said}");
     assert!(said.contains("topic_members.parquet"), "{said}");
-    assert!(said.contains("Declare an identity column"), "{said}");
+    assert!(said.contains("join_field"), "{said}");
 }

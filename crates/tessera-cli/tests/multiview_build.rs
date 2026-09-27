@@ -41,6 +41,16 @@ fn position(view: &str, e: u64) -> (f64, f64) {
     }
 }
 
+/// Every item's `entity_id`, one row each.
+fn write_ids(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![Field::new("entity_id", DataType::UInt64, false)]));
+    let ids: Vec<u64> = (0..ENTITIES).collect();
+    let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(UInt64Array::from(ids))]).unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
 /// A points file with no discriminator: `entity_id, x, y, access`, plus `sentiment` where the
 /// group's scoped attribute is read from it.
 fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, sentiment: bool) {
@@ -173,6 +183,7 @@ fn write(path: &Path, schema: Arc<Schema>, columns: Vec<ArrayRef>) {
 const CORPUS: &str = r#"
 [sources]
 world    = "world.parquet"
+ids      = "ids.parquet"
 q1       = "q1.parquet"
 q2       = "q2.parquet"
 alt      = "alt.parquet"
@@ -181,6 +192,16 @@ clusters = "clusters.parquet"
 
 [defaults]
 allocation_view = "world"
+join_field      = "id"
+
+# Every file names its item by its `entity_id`. No view's points hold every item, so the values
+# are read from a file that does.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+source = "ids"
 
 [[view]]
 name             = "world"
@@ -287,6 +308,7 @@ fn the_whole_declaration_builds_and_verifies() {
     let dir = tempfile::tempdir().unwrap();
     let at = |name: &str| dir.path().join(name);
     write_points(&at("world.parquet"), "world", WORLD, false);
+    write_ids(&at("ids.parquet"));
     write_points(&at("q1.parquet"), "q1", Q1, true);
     write_points(&at("q2.parquet"), "q2", Q2, true);
     write_discriminated(&at("alt.parquet"));
