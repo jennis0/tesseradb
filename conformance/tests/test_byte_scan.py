@@ -504,7 +504,7 @@ class RecordsScan(NamedTuple):
     #: 8-byte windows of the `tessera:x` and `tessera:y` value buffers, at their own stride.
     position_windows: set[int]
     tessera_ids: list[int]
-    #: Each row's `serial`, in row order beside `tessera_ids`.
+    #: Each row's `serial`, in row order beside `tessera_ids`, where the frame carries it.
     serials: list[int]
     labels: list[str]
 
@@ -526,7 +526,8 @@ def _records_scan(payload: bytes) -> RecordsScan:
             ids = batch.column("tessera_id")
             scan.tessera_windows.update(_le_windows(_value_buffer(ids, 8), 8, stride=8))
             scan.tessera_ids.extend(ids.to_pylist())
-            scan.serials.extend(batch.column("serial").to_pylist())
+            if "serial" in names:
+                scan.serials.extend(batch.column("serial").to_pylist())
             for name in ("tessera:x", "tessera:y"):
                 if name in names:
                     scan.position_windows.update(
