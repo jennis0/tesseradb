@@ -123,25 +123,26 @@ pub(super) fn growth_receipt(
             //
             // `left` is counted against the set the joins have already entered, which is the
             // order the page is applied in: an entity this page both joins and leaves is one this
-            // page took out. The copy that takes is skipped where nothing leaves, which is every
-            // membership row.
-            let counted = |set: &croaring::Bitmap| {
-                let joined = join.joining.andnot_cardinality(set);
+            // page took out. Both counts are taken from how much of a bitmap the set holds, so
+            // neither the set nor the set after the joins is built.
+            let counted = |held: &dyn Fn(&croaring::Bitmap) -> u64| {
+                let joined = join.joining.cardinality() - held(&join.joining);
                 let left = if join.leaving.is_empty() {
                     0
                 } else {
-                    let mut after_joins = set.clone();
-                    after_joins.or_inplace(&join.joining);
-                    join.leaving.and_cardinality(&after_joins)
+                    let both = join.leaving.and(&join.joining);
+                    held(&join.leaving) + both.cardinality() - held(&both)
                 };
                 (joined, left)
             };
             let (joined, left) = match join.rank {
-                None => counted(&record.members),
+                None => counted(&|other| record.members.and_cardinality(other)),
                 Some(rank) => record
                     .contents
                     .get(rank as usize)
-                    .map_or((0, 0), |content| counted(&content.generated_from)),
+                    .map_or((0, 0), |content| {
+                        counted(&|other| content.generated_from.and_cardinality(other))
+                    }),
             };
             tessera_lifecycle::MembershipGrown {
                 entity: record.entity,

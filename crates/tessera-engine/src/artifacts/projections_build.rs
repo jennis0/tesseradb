@@ -215,16 +215,18 @@ impl ArtifactProjections {
         let mut adopted = self.claim_index(at);
         let from_prefix = adopted.is_some();
         // A row-major column this prefix holds is transposed, not projected twice: an attribute
-        // predicate's column is not a stored membership and is not a candidate for this.
+        // predicate's column is not a stored membership and is not a candidate for this. A column
+        // written before the level last moved is taken only by a form served from its column,
+        // which completes it ([`Self::brought_over`]); transposed, it would hold rows short.
         let claimed = match attribute {
             Some(_) => None,
             _ if !layout.is_row_major() => None,
             _ => self
                 .claim_column(at)
-                .filter(|claimed| claimed.layout() == layout)
-                .map(Arc::new),
+                .filter(|(claimed, behind)| claimed.layout() == layout && (column_only || !behind))
+                .map(|(claimed, behind)| (Arc::new(claimed), behind)),
         };
-        let transposed = claimed.as_ref().and_then(|column| {
+        let transposed = claimed.as_ref().and_then(|(column, _)| {
             ArtifactRows::build_from_column(
                 store.level_in_view(at.layer, at.level, view_key(at.view)),
                 space,
@@ -247,6 +249,7 @@ impl ArtifactProjections {
                  ordinals, so the level's row form is projected; every answer is unchanged"
             );
         }
+        let behind = claimed.as_ref().is_some_and(|(_, behind)| *behind);
         let built = transposed.unwrap_or_else(|| {
             ArtifactRows::build_over(
                 store.level_in_view(at.layer, at.level, view_key(at.view)),
@@ -265,6 +268,10 @@ impl ArtifactProjections {
         };
         let from_column = column.is_some();
         let mut built = built.with_column(column);
+        if !built.membership().rows_held() && !self.brought_over(at, &mut built, store, space, behind)
+        {
+            built = built.with_column(None);
+        }
         self.transpose_back(at, &mut built, store, space);
         let inherited = self.inherited(at, &mut built, store, space);
         if layout.is_row_major() && !from_column && inherited == 0 {
@@ -306,25 +313,77 @@ impl ArtifactProjections {
     /// The served column of a level whose membership is stored: the one the prefix held, and
     /// otherwise the column composed from the form just built.
     ///
-    /// A fold-written column is served only while the row space has no extents: a column that does
-    /// not label a flushed segment's rows would count every point ingested since the fold as in no
-    /// artifact. With extents the column is composed over the form the transpose just produced.
+    /// A column-only form is served from the fold-written column, which the caller then brings
+    /// over the rows it does not label. A form holding its rows is served the fold-written column
+    /// only while the row space has no extents and the column is at the level's version: one that
+    /// does not label a flushed segment's rows would count every point ingested since the fold as
+    /// in no artifact. Otherwise the column is composed over the form just built.
     fn claimed_or_composed(
         &self,
         at: &Coordinate<'_>,
-        claimed: Option<Arc<RowColumn>>,
+        claimed: Option<(Arc<RowColumn>, bool)>,
         layout: ServingLayout,
         space: &RowSpace,
         built: &ArtifactRows,
     ) -> Option<Arc<RowColumn>> {
         match claimed {
-            Some(claimed) if space.extent_count() == 0 => {
+            Some((claimed, behind))
+                if !built.membership().rows_held() || (space.extent_count() == 0 && !behind) =>
+            {
                 self.columns_adopted
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Some(claimed)
             }
-            _ => self.column_for(at, layout, built),
+            Some(_) => self.composed_column(built, layout),
+            None => self.column_for(at, layout, built),
         }
+    }
+
+    /// Bring a column-only form from the base rows its column labels to the whole of `space`, on
+    /// the terms a growth and a flush bring a held form forward: the base rows a column written
+    /// before the level last moved does not label (`behind`), then every extent's rows, each
+    /// amended into the column and the tile index. What this holds is the pairs added, which is
+    /// what a running engine's amended column holds for the same writes.
+    ///
+    /// `false` where the column could not take the pairs and could not be recomposed as a list
+    /// either; the caller then serves the level from its rows.
+    fn brought_over(
+        &self,
+        at: &Coordinate<'_>,
+        built: &mut ArtifactRows,
+        store: &ArtifactStore,
+        space: &RowSpace,
+        behind: bool,
+    ) -> bool {
+        if built.column().is_none() || (!behind && built.covers(space)) {
+            return true;
+        }
+        let started = std::time::Instant::now();
+        let level = || store.level_in_view(at.layer, at.level, view_key(at.view));
+        let mut added = if behind {
+            built.base_joins(level(), space)
+        } else {
+            Vec::new()
+        };
+        let base_joins = added.len();
+        let (extended, _) = built.extend_by(level(), space);
+        added.extend(extended);
+        built.covering(space);
+        tracing::info!(
+            layer = %at.layer,
+            level = at.level,
+            view = %at.view,
+            base_joins,
+            extent_rows = added.len() - base_joins,
+            extents = space.extent_count(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "a level served from its column is brought over the rows written since its column was"
+        );
+        if added.is_empty() {
+            return true;
+        }
+        let lost = built.amend_derived(&added, total_rows(space));
+        !lost || self.kept_without_a_column(&at.address(), built, &added, "brought over")
     }
 
     /// A column-only form without its column is not a form at all, so its rows are projected back
@@ -513,8 +572,9 @@ impl ArtifactProjections {
         if !layout.is_row_major() {
             return None;
         }
-        if let Some(claimed) = self.claim_column(at) {
-            // The adopted form has to be the recorded one.
+        // The adopted form has to be the recorded one, and at the level's version: nothing here
+        // completes one written before the level moved.
+        if let Some((claimed, false)) = self.claim_column(at) {
             if claimed.layout() == layout {
                 self.columns_adopted
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -548,19 +608,23 @@ impl ArtifactProjections {
         composed
     }
 
-    /// Take the fold-written column for this `(view, layer, level)`. [`Self::claim_index`]'s rule.
-    fn claim_column(&self, at: &Coordinate<'_>) -> Option<RowColumn> {
-        let map_key = at.address();
-        let mut held = self.columns_held.lock().unwrap_or_else(|e| e.into_inner());
-        let (key, _) = held.get(&map_key)?;
-        if key.prefix != at.prefix {
+    /// The fold-written column for this `(view, layer, level)`, and whether the level has moved
+    /// since it was written. A column written at an earlier version is still taken: a membership
+    /// only grows between folds, so such a column labels a subset of the level and can be
+    /// completed. One held for another prefix is left for [`Self::adopt_columns`] to purge.
+    ///
+    /// The key names no view incarnation, and a view dropped and created again keeps its id. Two
+    /// guards keep a recreated view off its predecessor's column: an open adopts only columns
+    /// stamped with the view's live incarnation (`adopt_derived_structures`), and
+    /// [`ArtifactRows::build_from_column`] refuses a column whose base row count is not the
+    /// view's.
+    fn claim_column(&self, at: &Coordinate<'_>) -> Option<(RowColumn, bool)> {
+        let held = self.columns_held.lock().unwrap_or_else(|e| e.into_inner());
+        let (key, column) = held.get(&at.address())?;
+        if key.prefix != at.prefix || key.level_version > at.level_version {
             return None;
         }
-        if key.level_version != at.level_version {
-            held.remove(&map_key);
-            return None;
-        }
-        held.remove(&map_key).map(|(_, column)| column)
+        Some((column.clone(), key.level_version < at.level_version))
     }
 
     /// This level's containment partition, composing it if what is held is stale.

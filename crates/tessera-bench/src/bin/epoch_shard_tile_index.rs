@@ -435,7 +435,7 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
         let entities = sharding.entities_of(shard, fixture.bound);
         memberships = 0;
         for (ordinal, record) in &fixture.records {
-            let mut members = record.members.and(&entities);
+            let mut members = record.members.projected(|part| part.and(&entities));
             members.run_optimize();
             memberships += members.cardinality();
             restricted.push((

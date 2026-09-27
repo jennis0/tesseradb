@@ -1261,7 +1261,8 @@ impl LayerRegistry {
                 ordinal,
                 part,
             }));
-            let delta = artifact.members.andnot(&record.members);
+            let mut delta = artifact.members.clone();
+            record.members.remove_from(&mut delta);
             if !delta.is_empty() {
                 joins.push((ordinal, delta));
             }
@@ -2303,7 +2304,7 @@ impl LayerRegistry {
             // against and the state `growth_receipt` counts `joined` over.
             let mut joining = join.joining.clone();
             if let Some(record) = store.get(layer_name, level, ordinal) {
-                joining.andnot_inplace(&record.members);
+                record.members.remove_from(&mut joining);
             }
             if joining.is_empty() {
                 continue;

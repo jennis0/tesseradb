@@ -145,7 +145,9 @@ impl ArtifactRows {
         let mut taken = 0u64;
         for (ordinal, record) in artifacts {
             self.extend_generating_of(ordinal, record, space, from);
-            let rows = space.project_extents_from(&record.members, from);
+            let rows = record
+                .members
+                .projected(|part| space.project_extents_from(part, from));
             if rows.is_empty() {
                 continue;
             }
@@ -157,6 +159,56 @@ impl ArtifactRows {
             }
         }
         (added, taken)
+    }
+
+    /// The `(row, ordinal)` pairs over the base rows that the form's column does not carry: what a
+    /// column written at an earlier level version misses. A membership only grows between folds,
+    /// so the column's labels are a subset of the records' and these pairs are the whole
+    /// difference.
+    ///
+    /// What is projected is what joined, not the artifact. A mapped membership below the column's
+    /// length was mapped from the pack the fold wrote beside the column, so what has joined it
+    /// since ([`Members::joined`]) is all the column lacks for it, and one nothing joined is passed
+    /// over. An artifact published since the column sits at or beyond its length and is projected
+    /// whole. A membership held on the heap below that length carries no record of its joins, and
+    /// is passed over only where it is exactly as large as the column labels it: sound because an
+    /// entity has at most one base row per view and a retired entity has none, so a membership
+    /// that has grown is larger than its labels. This holds one artifact's rows and the pairs
+    /// found, never the level.
+    ///
+    /// [`Members::joined`]: tessera_lifecycle::membership::Members::joined
+    pub(super) fn base_joins<'a>(
+        &self,
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+    ) -> Vec<(u32, u32)> {
+        let Some(column) = self.column.as_deref() else {
+            return Vec::new();
+        };
+        let mut added = Vec::new();
+        for (ordinal, record) in artifacts {
+            let members = &record.members;
+            let rows = if ordinal as usize >= column.len() {
+                members.projected(|part| space.project_base(part))
+            } else if members.is_mapped() {
+                match members.joined() {
+                    Some(joined) => space.project_base(joined),
+                    None => continue,
+                }
+            } else if members.cardinality() == column.declared_size(ordinal) {
+                continue;
+            } else {
+                members.projected(|part| space.project_base(part))
+            };
+            for row in rows.iter() {
+                let mut carried = false;
+                column.for_each_label(row, |held| carried |= held == ordinal);
+                if !carried {
+                    added.push((row, ordinal));
+                }
+            }
+        }
+        added
     }
 
     /// Every artifact's generating sets extended by the extents this form does not yet cover —
@@ -312,7 +364,9 @@ impl ArtifactRows {
         let mut taken = 0u64;
         for (ordinal, record) in artifacts {
             Self::rebase_generating_of(&mut self.membership, ordinal, record, space, start, lo, hi);
-            let rows = space.project_extent(&record.members, start);
+            let rows = record
+                .members
+                .projected(|part| space.project_extent(part, start));
             if self.membership.rebase_rows(ordinal as usize, lo, hi, &rows) {
                 taken += rows.cardinality();
                 if self.layout.is_row_major() {

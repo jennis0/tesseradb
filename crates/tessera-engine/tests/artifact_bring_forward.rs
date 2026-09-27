@@ -20,7 +20,7 @@ mod common;
 use common::*;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
+use tessera_lifecycle::{ChangeOp, IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
@@ -104,7 +104,12 @@ impl Fixture {
 /// Every served artifact's key and masked count, ascending by key — what a viewer is told, which
 /// is what every assertion here is finally about.
 fn served(engine: &Engine) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
+    counts_for(engine, &full_coverage_credential())
+}
+
+/// [`served`], to the principal `credential` authorises.
+fn counts_for(engine: &Engine, credential: &[u8]) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = artifacts_of(engine, credential)
         .into_iter()
         .map(|a| (a.key.unwrap_or_default(), a.masked_count))
         .collect();
@@ -905,6 +910,395 @@ fn an_amended_form_equals_one_built_from_scratch() {
             }
         }
     }
+}
+
+/// **Points flushed and merged after a fold, joining nothing, leave the level served from its
+/// column at a restart.** The level has not moved, so the fold's column is current for the base
+/// rows; the row space has extents it does not reach, and the restart brings it over them rather
+/// than transposing it into per-artifact rows, which at billions of rows is more memory than the
+/// server has.
+#[test]
+fn a_restart_over_flushed_and_merged_rows_serves_the_level_from_its_column() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    fold(&engine);
+    merge(&engine);
+    let before = served(&engine);
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(served(&reopened), before);
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the level's form is held");
+    assert!(
+        !form.membership().rows_held(),
+        "the level is served from its column and holds no rows"
+    );
+    assert_eq!(form.layout(), ServingLayout::RowMajorLabel);
+    assert_eq!(reopened.columns_composed(), 0);
+}
+
+/// **A restart after writes serves a row-major level from the fold's column, brought forward,
+/// and never from rows it transposes or projects.**
+///
+/// After a fold the level takes a growth and a publication over base rows, which move it past the
+/// column the fold wrote, and flushes and a merge, which give the row space extents the column
+/// does not reach; members join on both sides of the merge. A restart then has the fold's column
+/// and records that say more. It completes the column with the base rows it misses and brings it
+/// over every extent, the amendments the live engine made as the writes arrived, so it holds the
+/// pairs those writes added and no row of the level. The form it serves is compared with one built
+/// from scratch over the same records and row space, extent for extent and declared size for
+/// declared size.
+#[test]
+fn a_restart_after_writes_brings_the_folds_column_forward_without_holding_rows() {
+    // The two layouts that hold a column.
+    for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+        let fx = fixture();
+        let engine = fx.open();
+        engine
+            .register_layer(declaration(LAYER, Some(layout)))
+            .unwrap();
+        publish(&engine, "a0", fx.members(0..100));
+        publish(&engine, "a1", fx.members(500..600));
+        // Read before the fold reclaims the prefix the map is read from.
+        let (joining, later) = (fx.members(100..150), fx.members(700..720));
+        fold(&engine);
+
+        grow(&engine, "a0", joining);
+        publish(&engine, "a2", later);
+        let merged = merge(&engine);
+        engine.set_merge_for_test(false);
+        grow(&engine, "a1", vec![merged[0], merged[2]]);
+        let fresh = ingest(&engine, b"after-the-merge");
+        publish_buffered(&engine);
+        grow(&engine, "a2", vec![fresh]);
+        let before = served(&engine);
+        assert_eq!(
+            before,
+            vec![
+                ("a0".to_string(), 150),
+                ("a1".to_string(), 102),
+                ("a2".to_string(), 21)
+            ],
+            "{layout:?}: the writes reached the live engine"
+        );
+        drop(engine);
+
+        let reopened = fx.open();
+        assert_eq!(
+            served(&reopened),
+            before,
+            "{layout:?}: the restart serves what the live engine served"
+        );
+        let form = reopened
+            .held_artifact_form_for_test("s0", LAYER, 0)
+            .expect("the level's form is held");
+        assert!(
+            !form.membership().rows_held(),
+            "{layout:?}: the level is served from its column and holds no rows"
+        );
+        assert_eq!(
+            form.layout(),
+            layout,
+            "{layout:?}: and in the layout the fold wrote"
+        );
+        assert!(reopened.columns_adopted() > 0);
+        assert_eq!(
+            reopened.columns_composed(),
+            0,
+            "{layout:?}: the fold's column was brought forward and nothing was composed"
+        );
+        // Everything but the per-artifact bitmaps, which a column-only form does not hold.
+        let without_rows = |form: Vec<String>| -> Vec<String> {
+            form.into_iter()
+                .map(|line| match (line.find(" rows="), line.find(" extent=")) {
+                    (Some(from), Some(to)) => format!("{}{}", &line[..from], &line[to..]),
+                    _ => line,
+                })
+                .collect()
+        };
+        let brought = without_rows(form_of(&reopened, LAYER));
+
+        reopened.forget_artifact_forms_for_test(LAYER);
+        assert_eq!(served(&reopened), before);
+        let rebuilt = without_rows(form_of(&reopened, LAYER));
+        assert_eq!(brought.len(), rebuilt.len());
+        for (brought, built) in brought.iter().zip(&rebuilt) {
+            assert_eq!(
+                brought, built,
+                "{layout:?}: the restart's form and one built from scratch describe different \
+                 levels"
+            );
+        }
+    }
+}
+
+/// **A deletion and a suppression written between a fold and a restart are served to a viewer who
+/// sees part of the level, before the restart and after it.** The level has also taken a growth,
+/// so the restart completes the fold's column; the denied members are on both sides of it, in the
+/// rows the column labels and in the rows the growth added.
+#[test]
+fn a_restart_serves_denials_written_since_the_fold_to_a_restricted_viewer() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let member = |source: u64| fx.members(source..source + 1)[0];
+    let (joining, denied) = (
+        fx.members(100..150),
+        [
+            (member(3), ChangeOp::Delete),
+            (member(6), ChangeOp::Suppress),
+            (member(102), ChangeOp::Delete),
+            (member(105), ChangeOp::Suppress),
+            (member(501), ChangeOp::Suppress),
+        ],
+    );
+    fold(&engine);
+    grow(&engine, "a0", joining);
+    for (entity, op) in denied {
+        engine
+            .accept_change(entity, op)
+            .expect("the change is accepted");
+    }
+    tick(&engine);
+
+    // The subset viewer sees the source ids divisible by three: 50 of a0's 150 and 33 of a1's
+    // 100, each less the denials among them. Every denial above is one of those.
+    let subset = vec![("a0".to_string(), 46), ("a1".to_string(), 32)];
+    let whole = vec![("a0".to_string(), 146), ("a1".to_string(), 99)];
+    assert_eq!(counts_for(&engine, &subset_credential()), subset);
+    assert_eq!(served(&engine), whole);
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(counts_for(&reopened, &subset_credential()), subset);
+    assert_eq!(served(&reopened), whole);
+    assert!(
+        !reopened
+            .held_artifact_form_for_test("s0", LAYER, 0)
+            .expect("the level's form is held")
+            .membership()
+            .rows_held(),
+        "the level is served from its column"
+    );
+}
+
+/// **A growth into rows another artifact's base already labels, between a fold and a restart,
+/// takes the label column past a partition.** The restart brings the column over the joined
+/// rows, cannot hold them in the label form, and recomposes the level as a list, as the live
+/// engine did when the growth arrived. The answers are the same on both sides of the restart.
+#[test]
+fn a_restart_after_a_growth_into_anothers_base_rows_serves_the_level_as_a_list() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let joining = fx.members(50..60);
+    fold(&engine);
+    grow(&engine, "a1", joining);
+    let before = served(&engine);
+    assert_eq!(
+        before,
+        vec![("a0".to_string(), 100), ("a1".to_string(), 110)]
+    );
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(served(&reopened), before);
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the level's form is held");
+    assert_eq!(
+        form.layout(),
+        ServingLayout::RowMajorList,
+        "a row carrying two artifacts is held by the list form"
+    );
+    assert!(
+        !form.membership().rows_held(),
+        "and the level is still served from its column"
+    );
+    assert_eq!(counts_for(&reopened, &subset_credential()), {
+        // 0, 3, ... 99 is 34; 501 ... 597 is 33, and 51 ... 57 joined it.
+        vec![("a0".to_string(), 34), ("a1".to_string(), 36)]
+    });
+}
+
+/// **A layer that derives a hull holds its level's rows, so a restart does not complete a column
+/// the level has moved past: it projects the level and composes the column over what it built.**
+/// Taking the fold's column would have transposed it into rows that lack the growth.
+#[test]
+fn a_restart_of_a_hull_level_behind_its_column_projects_the_level() {
+    let fx = fixture();
+    let engine = fx.open();
+    let mut hulled = declaration(LAYER, Some(ServingLayout::RowMajorLabel));
+    hulled.content.computed = vec!["hull".into()];
+    engine.register_layer(hulled).unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let joining = fx.members(100..130);
+    fold(&engine);
+    grow(&engine, "a0", joining);
+    let before = served(&engine);
+    assert_eq!(
+        before,
+        vec![("a0".to_string(), 130), ("a1".to_string(), 100)]
+    );
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(served(&reopened), before);
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the level's form is held");
+    assert!(form.membership().rows_held(), "a hull level holds its rows");
+    assert_eq!(form.layout(), ServingLayout::RowMajorLabel);
+    let restarted = form_of(&reopened, LAYER);
+    reopened.forget_artifact_forms_for_test(LAYER);
+    assert_eq!(served(&reopened), before);
+    assert_eq!(
+        form_of(&reopened, LAYER),
+        restarted,
+        "the restart's form is the one built from scratch"
+    );
+}
+
+/// **Members joining a mapped membership are held beside the mapping, on the live engine and when
+/// a restart replays them.** Holding the membership whole on the heap for every join is what a
+/// taxonomy whose every top rank gains a member cannot afford; the join is what is held.
+#[test]
+fn a_growth_over_a_mapped_membership_keeps_it_mapped_live_and_after_a_restart() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let joining = fx.members(100..150);
+    let mut expected: Vec<u32> = fx
+        .members(0..150)
+        .iter()
+        .map(|entity| entity.raw() as u32)
+        .collect();
+    expected.sort_unstable();
+    fold(&engine);
+    grow(&engine, "a0", joining);
+
+    let held = |engine: &Engine, when: &str| {
+        let level = engine.level_memberships_for_test(LAYER, 0);
+        let (_, members, mapped) = &level[0];
+        assert_eq!(
+            members, &expected,
+            "{when}: a0 holds its members and the joined"
+        );
+        assert!(
+            *mapped,
+            "{when}: a0's membership is still read through its extent"
+        );
+        assert_eq!(engine.owned_memberships_for_test(), 0, "{when}");
+    };
+    held(&engine, "live");
+    let before = served(&engine);
+    drop(engine);
+
+    let reopened = fx.open();
+    held(&reopened, "replayed");
+    assert_eq!(served(&reopened), before);
+    assert_eq!(reopened.columns_composed(), 0);
+}
+
+/// **A fold after members joined a mapped membership carries the joins, and a deletion among
+/// them, into the membership it maps back.** The first fold maps a0; the joins are held beside
+/// the mapping; the second fold retires the deleted one and reads a0 back through its own pack,
+/// leaving nothing on the heap. Served to the subset viewer and the full viewer, before a restart
+/// and after it.
+#[test]
+fn a_fold_after_joins_to_a_mapped_membership_maps_back_their_union() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let (joining, deleted) = (fx.members(100..150), fx.members(102..103)[0]);
+    fold(&engine);
+    grow(&engine, "a0", joining);
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("the delete is accepted");
+    fold(&engine);
+
+    // The subset viewer sees the source ids divisible by three: 50 of a0's 150 less the deleted
+    // 102, and 33 of a1's 100.
+    let subset = vec![("a0".to_string(), 49), ("a1".to_string(), 33)];
+    let whole = vec![("a0".to_string(), 149), ("a1".to_string(), 100)];
+    let check = |engine: &Engine, when: &str| {
+        assert_eq!(counts_for(engine, &subset_credential()), subset, "{when}");
+        assert_eq!(served(engine), whole, "{when}");
+        let level = engine.level_memberships_for_test(LAYER, 0);
+        assert_eq!(level[0].1.len(), 149, "{when}: a0 holds its joins less the deleted");
+        assert!(level[0].2, "{when}: a0 is read through the pack the fold wrote");
+        assert_eq!(engine.owned_memberships_for_test(), 0, "{when}");
+    };
+    check(&engine, "after the fold");
+    drop(engine);
+    check(&fx.open(), "after a restart");
+}
+
+/// **Members joining while a fold is in flight survive the fold and a restart.** The fold packed
+/// a0 before the join, so what it wrote is short of the membership the store holds; the swap
+/// that would map a0 back through that pack is refused and the joins stay held.
+#[test]
+fn a_join_while_a_fold_is_in_flight_survives_the_fold_and_a_restart() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let (first, second) = (fx.members(100..130), fx.members(130..150));
+    fold(&engine);
+    grow(&engine, "a0", first);
+
+    let folds = engine.write_executor_stats().folds;
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    wait_until("the fold holds", std::time::Duration::from_secs(60), || {
+        engine.fold_is_holding_for_test()
+    });
+    grow(&engine, "a0", second);
+    engine.set_fold_paused_for_test(false);
+    wait_until(
+        "the fold publishes",
+        std::time::Duration::from_secs(60),
+        || engine.write_executor_stats().folds > folds,
+    );
+    tick(&engine);
+
+    let subset = vec![("a0".to_string(), 50), ("a1".to_string(), 33)];
+    let whole = vec![("a0".to_string(), 150), ("a1".to_string(), 100)];
+    assert_eq!(counts_for(&engine, &subset_credential()), subset);
+    assert_eq!(served(&engine), whole);
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(counts_for(&reopened, &subset_credential()), subset, "after a restart");
+    assert_eq!(served(&reopened), whole, "after a restart");
 }
 
 /// **A level whose generating sets are paged is maintained into the form a build produces.**

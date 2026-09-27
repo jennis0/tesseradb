@@ -582,7 +582,10 @@ impl RowColumn {
     {
         let each = |visit: &mut dyn FnMut(u32, &Bitmap)| {
             for (ordinal, record) in level() {
-                visit(ordinal, &space.project_base(&record.members));
+                visit(
+                    ordinal,
+                    &record.members.projected(|part| space.project_base(part)),
+                );
             }
         };
         Self::assemble(ordinals, space.base_rows(), layout, scratch, &each)
@@ -1363,6 +1366,14 @@ impl RowColumn {
                 }
             })
             .collect();
+        // An ordinal published after the base was written is live and labels no base row.
+        if let Some(later) = live.get(out.len()..) {
+            out.extend(
+                later
+                    .iter()
+                    .map(|&live| if live { TILE_INDEX_EMPTY } else { TILE_INDEX_HOLE }),
+            );
+        }
         let mut widen = |ordinal: u32, row: u32| {
             let Some(e) = out.get_mut(ordinal as usize) else {
                 return;

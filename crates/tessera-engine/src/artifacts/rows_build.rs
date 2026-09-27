@@ -75,14 +75,20 @@ impl ArtifactRows {
     /// row; transposing it costs one sequential read against a decode and permutation of the whole
     /// level, measured at roughly half the cost ([`RowColumn::transpose`]). The generating sets
     /// still project: they are a different set from the membership and are nowhere in the column.
+    ///
     /// Nothing is transposed where the level can be served from the column alone: the form is then
     /// column-only, avoiding tens of gigabytes retained at scale per level ([`MembershipRows::rows_held`]).
-    /// The extents still come off the column and never off a second file, since a fold-written
-    /// extent column would be a separate artefact whose agreement with the column nothing checks.
+    /// Such a form covers the base rows alone, whatever extents `space` carries: the caller attaches
+    /// the column and brings it over the rest
+    /// ([`ArtifactProjections::brought_over`](super::ArtifactProjections)), as a flush and a growth
+    /// do.
+    /// Its extents come off the column and never off a second file, since a fold-written extent
+    /// column would be a separate artefact whose agreement with the column nothing checks.
+    ///
     /// `column_only` is `false` for a level whose layer derives a hull, which needs the member
     /// positions themselves. `adopted` is taken only on success. `None` where the column cannot
-    /// stand in for the projection — a tail attached, a base row count that is not this view's, or
-    /// fewer ordinals than the level has records for — each would leave the form narrow.
+    /// stand in for the projection — a base row count that is not this view's, or, for a form that
+    /// holds its rows, fewer ordinals than the level has records for, which would leave it narrow.
     pub fn build_from_column<'a>(
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         space: &RowSpace,
@@ -95,24 +101,25 @@ impl ArtifactRows {
         }
         let mut records = ArtifactRecords::default();
         let mut membership = MembershipRows::default();
-        // The extent rows are projected here; the base rows come off the column.
+        // The extent rows are projected here for a form that holds its rows; the base rows come
+        // off the column.
         let mut above = Vec::new();
         for (ordinal, record) in artifacts {
             let idx = ordinal as usize;
             records.put(idx, record);
             membership.put_generating(idx, record, space);
-            if space.extent_count() > 0 {
-                above.push((idx, space.project_extents_from(&record.members, 0)));
+            if !column_only && space.extent_count() > 0 {
+                above.push((
+                    idx,
+                    record
+                        .members
+                        .projected(|part| space.project_extents_from(part, 0)),
+                ));
             }
         }
-        if column.len() < membership.len() {
-            return None;
-        }
         // The column answers candidacy, counts and declared sizes; a column-only level builds no
-        // artifact-major half. Only with no extents: a column adopted over extent rows would not
-        // label all of the row space, and a form built column-only goes on taking every later
-        // flush through the column ([`ArtifactProjections::extend_flushed`]).
-        if column_only && space.extent_count() == 0 {
+        // artifact-major half.
+        if column_only {
             let live: Vec<bool> = membership.live_slots();
             let index = TileIndex::of_bytes(tessera_store::membership::pack_tile_index(
                 total_rows(space),
@@ -127,9 +134,12 @@ impl ArtifactRows {
                 layout: ServingLayout::ArtifactMajor,
                 column: None,
                 base_rows: space.base_rows(),
-                covered: covered_by(space),
+                covered: Vec::new(),
                 inherited: Vec::new(),
             });
+        }
+        if column.len() < membership.len() {
+            return None;
         }
         // [`Self::build_over`]'s rule again: an index the fold wrote is over the base rows.
         let offered = adopted.take().filter(|_| space.extent_count() == 0);
@@ -299,8 +309,10 @@ impl ArtifactRows {
                 self.membership =
                     MembershipRows::build(store.level_in_view(layer, level, view), space);
             }
-            self.membership
-                .put_rows(ordinal as usize, space.project(members));
+            self.membership.put_rows(
+                ordinal as usize,
+                members.projected(|part| space.project(part)),
+            );
             taken += 1;
             for hop in hops {
                 let version = store.level_version(&hop.0, hop.1);
