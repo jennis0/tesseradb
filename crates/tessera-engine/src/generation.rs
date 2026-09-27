@@ -56,15 +56,6 @@ pub struct GenerationParts {
     /// [`tessera_authz::FrozenFragment::identity`]: `Engine::fragment_for` for the first,
     /// `RowProjectionCache::freshest_fragment`'s prefix scoping for the second.
     pub(crate) fragments: Arc<FragmentCache>,
-    /// External ids established by the bundle's runs — the reader half of contracts §2.4.
-    ///
-    /// **Per generation, because a fold is not content-preserving.** The entity-space coalesce
-    /// that first made this swappable is: an old sidecar and a new generation answer identically
-    /// for every key, so which one a request held could not be observed. A fold drops the retired
-    /// entities' keys (compaction §3, pass 3) and rewrites the locator into a new prefix, so a
-    /// request pairing the new geometry with the pre-fold sidecar would resolve through files the
-    /// old prefix holds and reclamation is about to delete. One pointer, one answer.
-    pub(crate) external_index: Arc<crate::engine::ExternalIdIndex>,
     /// Every unique column's index runs, as the partition manifest lists them. Replaced by every
     /// publication that changes the list, sharing the runs it already opened.
     pub(crate) unique: Arc<tessera_store::unique::UniqueIndexes>,
@@ -132,8 +123,8 @@ pub struct GenerationParts {
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
 ///
 /// **⊘ No compaction exists**, but this type is what one would publish: the fields a fold rotates
-/// — the base postings, the fragment cache and the bundle identity it keys, and the external-id
-/// sidecar — are here rather than on `Engine`, which is what makes a prefix flip expressible at all
+/// — the base postings, and the fragment cache and the bundle identity it keys — are here rather
+/// than on `Engine`, which is what makes a prefix flip expressible at all
 /// (compaction §4). Merge publishes through this type too: the entity-space coalesce without moving
 /// `segments_version`, the row-space merge as its own swap (`crate::coalesce`, `crate::merge`).
 ///
@@ -394,12 +385,6 @@ impl Generation {
         let dir = tempfile::TempDir::new().expect("a temp dir");
         let postings_path = dir.path().join("postings.arrow");
         tessera_authz::write_postings(&postings_path, &[], 32).expect("an empty postings file");
-        let external_index = crate::engine::ExternalIdIndex::open(
-            &manifest,
-            &tessera_store::manifest::SegmentsManifest::empty(),
-            std::path::Path::new("fixture-prefix-never-read"),
-        )
-        .expect("a manifest naming no runs opens deferred");
         Generation::new(GenerationParts {
             prefix: prefix.to_string(),
             segments_version,
@@ -415,7 +400,6 @@ impl Generation {
                 [0u8; 32],
                 [0u8; 32],
             )),
-            external_index: Arc::new(external_index),
             unique: Arc::default(),
             unique_live: Arc::default(),
             edited: Arc::default(),

@@ -2,24 +2,19 @@
 //! ~10k-item synthetic bundle in [`common`].
 //!
 //! What the verb owes a caller is the same at every layer: an id it cannot see and an id that
-//! names nothing are one answer, a corrupt sidecar is an error rather than a missing external id,
-//! and neither costs a row projection.
+//! names nothing are one answer, and neither costs a row projection.
 
 mod common;
 
 use tempfile::TempDir;
 
-use tessera_build::{build, BuildArgs};
-use tessera_engine::EngineError;
-use tessera_store::read::open_bundle;
-use tessera_store::StoreError;
 use tessera_types::EntityId;
 
 use common::*;
 
 /// `Engine::item` resolves a row wherever it sits: the item asserted here is a source item whose
 /// signature-sorted entity id — and therefore its row — is not among the first built, and it comes
-/// back with the right external id. `Permutation::row_of` is an O(1) bijection lookup and does not
+/// back with its own `id`. `Permutation::row_of` is an O(1) bijection lookup and does not
 /// care where the row sits; contracts r6 replaced the identity column's contents with the opaque
 /// `tessera_id`, so a scan of *that* column would search the wrong space entirely.
 ///
@@ -56,74 +51,9 @@ fn item_lookup_resolves_a_row_far_from_the_segments_start() {
         out.is_some(),
         "an item far from segment start must still resolve through the permutation"
     );
-    assert_eq!(
-        out.unwrap().external_id,
-        Some(last_source.to_le_bytes().to_vec())
-    );
-}
-
-/// A bundle built without minted external IDs (the spec-conformant default — contracts §2.4:
-/// callers supplied none, so the build wrote no extents and no locator) must serve the item
-/// drill-down normally: `external_id` is `None` — the ordinary "identity is the tessera_id"
-/// case — never an `InvalidSidecar` error. Regression test for the review finding that
-/// `external_id_of_checked` treated every built entity of a no-sidecar bundle as a
-/// live-map inconsistency and 500'd the whole `/v1/items` verb.
-#[test]
-fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    write_points_n(&tmp.path().join("points.parquet"), N_ITEMS);
-    write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: tmp.path().join("points.parquet"),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: bundle_root.clone(),
-        limit: None,
-        identity_key: test_key(),
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    };
-    build(&args).expect("no-mint build should succeed");
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    // Any built entity: below the high-water, no locator anywhere. Drill-down must succeed
-    // with no external id, for the first entity and the last alike.
-    for entity in [0, N_ITEMS - 1] {
-        let id = test_key().forward(0, EntityId::new(entity)).unwrap();
-        let out = engine
-            .item(&session, id)
-            .expect("a no-sidecar bundle must serve items, not error");
-        let out = out.expect("a visible item must resolve");
-        assert_eq!(
-            out.external_id, None,
-            "an item with no caller-supplied external id reports None"
-        );
-    }
+    let fields = out.unwrap().fields;
+    let held = fields.iter().find(|f| f.name == "id").map(|f| f.value.clone());
+    assert_eq!(held, Some(tessera_engine::ScalarOut::U64(last_source)));
 }
 
 /// An identifier naming nothing and one naming an invisible item are indistinguishable
@@ -233,61 +163,3 @@ fn drill_down_works_on_a_session_that_has_never_drawn_a_viewport() {
         "a visible item's first request against this session may be a drill-down"
     );
 }
-
-/// A corrupt sidecar must surface as `Err`, never fold into `Ok(None)` (which
-/// would report "this item has no external id" for one that does, at a `200`). The digest check
-/// runs before Arrow decoding (`tessera_store::sidecar`'s `load_validated`), so corrupting any
-/// byte of the extent is sufficient to trip it, regardless of where in the file it lands.
-#[test]
-fn a_sidecar_error_on_drill_down_is_an_error_not_a_missing_external_id() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    // Resolve the target entity, and open the engine, against the *pristine* extent first —
-    // `Engine::open`'s bundle-open protocol (`tessera_store::read::open_bundle`) eagerly
-    // verifies every manifest-listed file's digest up front (a bundle-level integrity property,
-    // independent of the sidecar's own per-extent laziness), so corrupting the file before open
-    // would fail at `Engine::open` itself rather than exercising the drill-down path this test
-    // targets.
-    let source_to_new = source_to_new_map(&bundle_root, "v00000");
-    let entity = EntityId::new(source_to_new[&0]);
-    let id = test_key().forward(0, entity).unwrap();
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    // Now corrupt the extent's bytes on disk — the sidecar's lazy open verifies digest
-    // and sortedness on first touch, so this failure is deferred until `item()` actually
-    // resolves the visible entity's external id.
-    let bundle = open_bundle(&bundle_root).unwrap();
-    let part = &bundle.partitions["default"];
-    let ext_rel = &part.manifest.external_id_runs[0];
-    let ext_path = bundle_root.join("v00000").join(ext_rel);
-    drop(bundle);
-    let mut bytes = std::fs::read(&ext_path).unwrap();
-    let last = bytes.len() - 1;
-    bytes[last] ^= 0xFF;
-    std::fs::write(&ext_path, bytes).unwrap();
-
-    let err = engine.item(&session, id).unwrap_err();
-    assert!(
-        matches!(err, EngineError::Store(StoreError::InvalidSidecar { .. })),
-        "a corrupt sidecar must be Err(EngineError::Store(InvalidSidecar)), never a fail-open \
-         Ok(None): {err:?}"
-    );
-}
-
-// `drill_down_resolves_an_external_id_for_a_post_build_entity` moved to `tests/write.rs` — see
-// that file's module doc. It was this file's only `accept_ingest` call site, and the acceptance
-// API's shape belongs beside the rest of the write path rather than here — leaving it would put a
-// write-path assertion in a file frozen for every
-// track. The subject moved; the shared fixtures did not.

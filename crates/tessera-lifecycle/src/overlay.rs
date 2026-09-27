@@ -22,7 +22,6 @@
 //! collapse the two that remain, whose separation carries the whole argument above.
 
 use croaring::Bitmap;
-use rustc_hash::FxHashMap;
 
 use tessera_authz::Dict;
 use tessera_types::EntityId;
@@ -270,14 +269,9 @@ pub(crate) fn as_u32(entity: EntityId) -> u32 {
 /// Single left-to-right pass over `records`, in on-disk order (the order changes and ingests
 /// were accepted in — WAL append order is causal order):
 /// - `IngestBatch` rows populate `IngestBuffer` (term descriptors resolved via `dict` plus a
-///   deterministic, replay-order in-memory extension — see [`DescriptorResolver`]) and register
-///   `external_id → entity_id` in this replay's own external-id map, which the caller keeps for
-///   live `/control/changes` admission.
+///   deterministic, replay-order in-memory extension — see [`DescriptorResolver`]).
 /// - `ChangeBatch` records apply their disposition directly. **No resolution happens here at
-///   all**: the entity was fixed at admission, which is what makes the record replay to the same
-///   entity under a rotated identity key and lets it address an item that never had an external
-///   id. The external-id-keyed `Change` record this replay once also had to resolve was deleted
-///   with `WAL_VERSION` 5 (decision 0048), and replay became infallible with it.
+///   all**: the entity was fixed at admission, which is what makes replay infallible.
 /// - `OverlaySnapshot` records are applied **at the position they occupy**, never used as a
 ///   starting state the walk then resumes from. Those are different algorithms: recovery walks
 ///   every surviving file in sequence order, and a file older than the one holding the snapshot may
@@ -303,26 +297,18 @@ pub fn owner_id_only(group: &str, key: &str) -> Vec<String> {
 /// `tessera-store`; `Engine::open` supplies `Manifest::view_ids_for_key`, and a caller with no
 /// manifest supplies the owner's id alone.
 ///
-/// Returns, alongside the overlay and buffer, the `external_id -> entity_id` map this replay
-/// established from `IngestBatch` rows, and the `DescriptorResolver` in its final state — both
-/// borrowed from `dict` for exactly as long as this call. `Engine::open` immediately
-/// detaches them (`.into_state()`) into owned data it keeps for the process's lifetime, so a live
-/// `/control/ingest` or `/control/changes` acceptance can keep resolving external ids and novel
-/// descriptors from exactly where replay left off, rather than restarting either sequence (see
-/// [`DescriptorResolver::resume`]'s doc for why restarting descriptor extension ids would be
-/// fail-open).
-#[allow(clippy::type_complexity)]
+/// Returns, alongside the overlay and buffer, the `DescriptorResolver` in its final state,
+/// borrowed from `dict` for exactly as long as this call. `Engine::open` immediately detaches it
+/// (`.into_state()`) into owned data it keeps for the process's lifetime, so a live
+/// `/control/ingest` acceptance can keep resolving novel descriptors from exactly where replay left
+/// off, rather than restarting the sequence (see [`DescriptorResolver::resume`]'s doc for why
+/// restarting descriptor extension ids would be fail-open).
 pub fn replay<'a>(
     records: &[WalRecord],
     dict: &'a Dict,
     seed: Overlay,
     view_ids_of_key: &dyn Fn(&str, &str) -> Vec<String>,
-) -> (
-    Overlay,
-    IngestBuffer,
-    FxHashMap<Vec<u8>, EntityId>,
-    DescriptorResolver<'a>,
-) {
+) -> (Overlay, IngestBuffer, DescriptorResolver<'a>) {
     // **The seed is the starting state, and replay runs over it — that order is load-bearing.**
     // `seed` is what the partition manifests carry (`initial_deny_of`); every WAL record postdates
     // it, because a manifest is only ever written above WAL durability and a member is only
@@ -340,7 +326,6 @@ pub fn replay<'a>(
     let mut overlay = seed;
     let mut buffer = IngestBuffer::new();
     let mut resolver = DescriptorResolver::new(dict);
-    let mut established: FxHashMap<Vec<u8>, EntityId> = FxHashMap::default();
 
     for record in records {
         match record {
@@ -356,11 +341,6 @@ pub fn replay<'a>(
                     }
                 }
                 for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
-                    // Contracts §3.4 r6: no external id means no sidecar entry and nothing to
-                    // establish here either — the item is addressable only by its `tessera_id`.
-                    if let Some(external_id) = &row.external_id {
-                        established.insert(external_id.clone(), row.entity_id);
-                    }
                     buffer.insert_row(row, &mut resolver);
                 }
             }
@@ -432,7 +412,7 @@ pub fn replay<'a>(
     }
 
     drop_deleted(&overlay, &mut buffer);
-    (overlay, buffer, established, resolver)
+    (overlay, buffer, resolver)
 }
 
 /// Drop every row the buffer holds for an entity the overlay has deleted, in every view — **the
@@ -449,9 +429,8 @@ pub fn replay<'a>(
 /// **Composition-neutral, which is what makes the removal safe rather than merely cheap.**
 /// `compose::verdict` answers `Some(false)` from `overlay.is_deleted` before it ever consults the
 /// buffer, and a deletion retires only at the fold that executes it (Rule F), so nothing downstream
-/// can observe the difference. Under decision 0047 the entity is *forgotten*, and a re-ingest of
-/// its external id binds a new one, so the end state after reclamation, no row and no buffer
-/// entry, is the ruled one and not a loss.
+/// can observe the difference. A deleted item names nothing, so the end state after reclamation,
+/// no row and no buffer entry, is the ruled one and not a loss.
 ///
 /// Applied as an end-of-pass rule rather than at each `Delete`, because the manifests' deny seed
 /// is applied *before* the walk: a tombstone the seed carries would otherwise miss the
@@ -555,11 +534,10 @@ mod tests {
     /// that is a property of *this* function, not of the retry. Any future repair that appends a
     /// second copy instead of rewinding depends on it directly.
     ///
-    /// Three pieces of replayed state could have carried the difference, and each is checked here or
-    /// named: the **overlay** (below, by comparing against the single-copy replay), the
-    /// **external-id map** (below — change records never write to it; only `IngestBatch` rows do),
-    /// and the **allocator seed**, which `high_water_from` derives from `IngestBatch` rows alone —
-    /// pinned by `alloc.rs`'s own tests.
+    /// Two pieces of replayed state could have carried the difference, and each is checked here or
+    /// named: the **overlay** (below, by comparing against the single-copy replay), and the
+    /// **allocator seed**, which `high_water_from` derives from `IngestBatch` rows alone — pinned
+    /// by `alloc.rs`'s own tests.
     #[test]
     fn a_disposition_replayed_twice_is_the_same_as_replayed_once() {
         use tempfile::TempDir;
@@ -574,13 +552,13 @@ mod tests {
             changes: vec![(entity, ChangeOp::Suppress)],
         };
 
-        let (once, _, established_once, _) = replay(
+        let (once, _, _) = replay(
             std::slice::from_ref(&suppress),
             &dict,
             Overlay::new(),
             &owner_id_only,
         );
-        let (twice, _, established_twice, _) = replay(
+        let (twice, _, _) = replay(
             &[suppress.clone(), suppress],
             &dict,
             Overlay::new(),
@@ -597,64 +575,5 @@ mod tests {
             twice.is_suppressed(entity),
             "and the entry must actually be a suppression, or this compares two absences"
         );
-        assert_eq!(
-            (established_once.len(), established_twice.len()),
-            (0, 0),
-            "a change record establishes no external id, so a second copy cannot double-register one"
-        );
-    }
-
-    /// Contracts §3.4 r6: an ingested item with no external id gets no `established` entry at
-    /// all — two such items in the same batch must not collide with each other (`None` is not a
-    /// key that can be inserted twice and clobber itself), and both rows must still land in the
-    /// buffer.
-    #[test]
-    fn two_null_external_ids_in_one_batch_do_not_collide() {
-        use tempfile::TempDir;
-
-        let temp = TempDir::new().unwrap();
-        let writer = tessera_authz::DictWriter::new(temp.path());
-        let paths = writer.finish().unwrap();
-        let dict = Dict::load(&paths).unwrap();
-
-        let records = vec![WalRecord::IngestBatch {
-            edits: Vec::new(),
-            receipt: Vec::new(),
-            batch_id: "b".to_string(),
-            body_hash: [0u8; 32],
-            rows: vec![
-                crate::wal::WalRow {
-                    external_id: None,
-                    entity_id: EntityId::new(100),
-                    view: "default".to_string(),
-                    join: false,
-                    descriptors: Vec::new(),
-                    x: 0.0,
-                    y: 0.0,
-                    scalars: Vec::new(),
-                    scoped: Vec::new(),
-                },
-                crate::wal::WalRow {
-                    external_id: None,
-                    entity_id: EntityId::new(101),
-                    view: "default".to_string(),
-                    join: false,
-                    descriptors: Vec::new(),
-                    x: 0.0,
-                    y: 0.0,
-                    scalars: Vec::new(),
-                    scoped: Vec::new(),
-                },
-            ],
-        }];
-
-        let (_overlay, buffer, established, _resolver) =
-            replay(&records, &dict, Overlay::new(), &owner_id_only);
-
-        assert!(
-            established.is_empty(),
-            "no external id was supplied, so nothing should be established"
-        );
-        assert_eq!(buffer.len(), 2, "both null-external-id rows still buffer");
     }
 }

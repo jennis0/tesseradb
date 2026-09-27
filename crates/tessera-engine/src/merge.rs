@@ -7,9 +7,8 @@
 //! space must therefore be keyed on `segments_version`. A merge keeps every row; removing
 //! deleted rows is the fold's work. It takes extents only and leaves the base segment alone.
 //!
-//! A merge touches row space only. The consumed segments' external-id runs and locator extents
-//! stay listed, and only the entity-space coalesce merges them, so the two passes never want the
-//! same manifest entries.
+//! A merge touches row space only, and the entity-space coalesce entity space only, so the two
+//! passes never want the same manifest entries.
 
 use tessera_store::manifest::SegmentDescriptor;
 use tessera_store::merge::{execute_merge, MergeInput, MergeOutput, MergePolicy, MergeSpec};
@@ -114,9 +113,7 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
     None
 }
 
-/// One segment's row-space bytes, from the manifest's own digests. A flush segment's run and
-/// locator sit in its directory until a coalesce takes them, and are not counted, so a segment's
-/// size does not depend on when the coalesce ran.
+/// One segment's bytes, from the manifest's own digests: every file its directory holds.
 fn segment_bytes(
     manifest: &tessera_store::manifest::SegmentsManifest,
     partition: &str,
@@ -130,11 +127,7 @@ fn segment_bytes(
     manifest
         .files
         .iter()
-        .filter(|(path, _)| {
-            path.starts_with(&dir)
-                && !path.ends_with("/external-ids.arrow")
-                && !path.ends_with("/ext-locator.u32")
-        })
+        .filter(|(path, _)| path.starts_with(&dir))
         .map(|(_, digest)| digest.size)
         .sum()
 }
@@ -211,9 +204,8 @@ pub(crate) fn execute(
 /// Apply `completed` to `manifest` in place, or `false` if a consumed segment is no longer listed.
 ///
 /// The consumed descriptors leave `segments` and the merged one takes the first's position, and
-/// their row-space files leave `files`. Every other list is unchanged: delta tiers, external-id
-/// runs and locator extents address entities, and the consumed segments' entities still have rows
-/// in the merged segment. The runs and locators stay in `files` with their entries.
+/// their row-space files leave `files`. Every other list is unchanged: delta tiers address
+/// entities, and the consumed segments' entities still have rows in the merged segment.
 pub(crate) fn rebase_into(
     manifest: &mut tessera_store::manifest::SegmentsManifest,
     completed: &CompletedMerge,

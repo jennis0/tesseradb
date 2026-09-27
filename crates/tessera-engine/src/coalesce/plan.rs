@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use tessera_store::manifest::{
-    DictExtent, EntityTermsExtent, FileDigest, LocatorExtent, RecordExtent, SegmentsManifest,
+    DictExtent, EntityTermsExtent, FileDigest, RecordExtent, SegmentsManifest,
 };
 use tessera_store::merge::size_tier;
 
@@ -37,31 +37,10 @@ pub(crate) fn plan_coalesce(
         plan.tiers = manifest.deltas[window].to_vec();
     }
 
-    // Spans may overlap: a lookup asks every extent containing the entity. The runs must be a
-    // contiguous block of `external_id_runs` in the same order, because recency is list position.
-    // No locator extent names the base run, so it is never taken.
-    let locator_size =
-        |extent: &LocatorExtent| -> Option<u64> { extent.files().map(&size_of).sum() };
     let runs_policy = CoalescePolicy {
         floor_bytes: policy.run_floor_bytes,
         ..policy
     };
-    if let Some(window) = select_window(
-        &manifest.locator_extents,
-        policy.run_width,
-        runs_policy,
-        locator_size,
-    ) {
-        let extents = &manifest.locator_extents[window];
-        let runs: Vec<String> = extents.iter().map(|e| e.external_id_run.clone()).collect();
-        let contiguous = manifest
-            .external_id_runs
-            .windows(runs.len().max(1))
-            .any(|w| w == runs.as_slice());
-        if contiguous {
-            plan.locators = extents.to_vec();
-        }
-    }
 
     // An ordinal indexes the concatenation of dictionary extents in list order. The first is the
     // base dictionary and is never taken; the merged extent must land in the window's place, or
@@ -100,8 +79,7 @@ pub(crate) fn plan_coalesce(
         }
     }
 
-    // A lookup reads every live run of a unique column, so they coalesce on the external-id
-    // runs' policy.
+    // A lookup reads every live run of a unique column, so they coalesce on the key runs' policy.
     for index in &manifest.unique_indexes {
         if let Some(window) =
             select_window(&index.live, policy.run_width, runs_policy, |rel| size_of(rel))

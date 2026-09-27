@@ -33,7 +33,6 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
         .map(|e| FlushRow {
             entity_id: EntityId::new(e),
             number: EntityId::new(e),
-            external_id: Some(format!("ext-{e}").into_bytes()),
             x: (((e * stride) % 97) as f64) / 97.0,
             y: (((e * 53) % 89) as f64) / 89.0,
             scalars: vec![],
@@ -53,7 +52,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
             scalar_schema: &[],
             row_base: 0,
             entity_floor: 0,
-        }, &[],
+        },
     )
     .expect("the input segment writes");
     MergeInput {

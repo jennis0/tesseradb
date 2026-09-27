@@ -58,9 +58,7 @@ pub(super) struct Executor {
     pub(super) unique_declarations: UniqueDeclarations,
     /// When the last fold attempt started, as a unix second, so the interval can limit attempts.
     pub(super) last_fold_start_unix: Option<u64>,
-    /// Held weakly, so a `Weak` answers if one is alive; moved to [`PendingReclaim`] at a fold.
-    pub(super) superseded_sidecars: Vec<std::sync::Weak<crate::engine::ExternalIdIndex>>,
-    /// Deleted once nothing holds its generation or sidecar; a dead node leaves it to the sweep.
+    /// Deleted once nothing holds its generation; a dead node leaves it to the sweep.
     pub(super) pending_reclaim: Vec<PendingReclaim>,
     /// So the first tick lands one period after construction, not immediately.
     pub(super) last_tick: std::time::Instant,
@@ -324,13 +322,10 @@ impl Executor {
         // not move it.
         let (overlay, overlay_version) = match rotation.as_ref().map(|r| &r.retired) {
             Some(retired) if !retired.is_empty() => {
-                // The live external-id map loses the retired bindings first.
-                let forgotten = self.live.forget_established(retired);
                 let mut overlay = (*previous.overlay).clone();
                 let count = overlay.retire(retired);
                 tracing::info!(
                     retired = count,
-                    forgotten_external_ids = forgotten,
                     prefix = %prefix,
                     "Rule F: executed deletions retired in the fold's own publication"
                 );
@@ -351,7 +346,6 @@ impl Executor {
                 g.filter_columns = Arc::clone(&r.filter_columns);
                 g.postings = Arc::clone(&r.postings);
                 g.fragments = Arc::clone(&r.fragments);
-                g.external_index = Arc::clone(&r.external_index);
                 g.unique = Arc::clone(&r.unique);
                 g.edited = Arc::clone(&r.edited);
                 // The retired entities' pairs leave the live map with their runs' entries, or an id

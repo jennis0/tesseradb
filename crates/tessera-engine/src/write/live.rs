@@ -37,15 +37,12 @@ pub(in crate::write) struct RegistryForPublication {
 /// State the handler side reads and the executor thread writes.
 ///
 /// Each field carries its own lock because it is read concurrently by a request path that is not
-/// the executor (`Engine::resolve_external_id`, `Engine::external_id_of`, `/control/ingest`'s
-/// replay check, `/control/status`'s high-water). The generation pointer is not held here: it is
+/// the executor (`/control/ingest`'s replay check, `/control/status`'s high-water). The generation pointer is not held here: it is
 /// swapped by `Executor::publish_arc`, the crate's one non-atomic store.
 pub(crate) struct LiveState {
     /// The entity id allocator. Written only by the executor, never by a handler: entity ids are
     /// assigned at a window's close, on the one thread that also advances the high-water mark.
     pub(in crate::write) allocator: Mutex<Allocator>,
-    pub(in crate::write) established: Mutex<std::collections::HashMap<Vec<u8>, EntityId>>,
-    pub(in crate::write) established_inverse: Mutex<FxHashMap<EntityId, Vec<u8>>>,
     /// The descriptor resolver's extension state. Resolved in the handler before submitting, not
     /// on the executor: signature-sorted assignment needs the term set to compute a sort key
     /// before any id exists, the structural exception argued at [`WritePath::resolve_terms`].
@@ -77,24 +74,6 @@ pub(crate) struct LiveState {
 }
 
 impl LiveState {
-    pub(crate) fn established_entity(&self, external_id: &[u8]) -> Option<EntityId> {
-        lock_recover(&self.established).get(external_id).copied()
-    }
-
-    pub(crate) fn established_entities(&self, external_ids: &[Vec<u8>]) -> Vec<Option<EntityId>> {
-        let established = lock_recover(&self.established);
-        external_ids
-            .iter()
-            .map(|id| established.get(id.as_slice()).copied())
-            .collect()
-    }
-
-    pub(crate) fn established_external_id(&self, entity: EntityId) -> Option<Vec<u8>> {
-        lock_recover(&self.established_inverse)
-            .get(&entity)
-            .cloned()
-    }
-
     pub(crate) fn allocator_high_water(&self) -> u64 {
         lock_recover(&self.allocator).high_water()
     }
@@ -499,38 +478,6 @@ impl LiveState {
                     .or_else(|| state.0.get(d.as_slice()).copied())
             })
             .collect()
-    }
-
-    /// Drop every retired entity's external-id binding from the live map: the other half of a
-    /// deletion's retirement (Rule F). Without it, retirement 409s a lawful re-ingest, since
-    /// compaction drops the same keys from the folded run and either alone leaves the other path
-    /// answering.
-    ///
-    /// Called before the swap, not after, at the one site that also retires
-    /// ([`Executor::publish_geometry`]): between a prune and a retirement the sidecar still
-    /// answers deleted for the key, so the check still exempts it. The other order has a window
-    /// where the key resolves to an entity that is no longer deleted.
-    ///
-    /// A rebind is not disturbed: the forward entry is removed only when it still names the
-    /// retired entity.
-    pub(in crate::write) fn forget_established(&self, retired: &croaring::Bitmap) -> usize {
-        if retired.is_empty() {
-            return 0;
-        }
-        let mut inverse = lock_recover(&self.established_inverse);
-        let mut established = lock_recover(&self.established);
-        let mut forgotten = 0usize;
-        for entity in retired.iter() {
-            let entity = EntityId::new(u64::from(entity));
-            let Some(key) = inverse.remove(&entity) else {
-                continue;
-            };
-            if established.get(&key) == Some(&entity) {
-                established.remove(&key);
-            }
-            forgotten += 1;
-        }
-        forgotten
     }
 
     /// Run `f` with the entity id allocator held. The window's whole allocation is one call to

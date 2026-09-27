@@ -3,7 +3,6 @@
 //! only legal EntityId→RowId path in the codebase (invariant I4).
 
 pub mod access_column;
-pub mod coalesce;
 pub mod columns;
 pub mod coordinates;
 pub mod declaration;
@@ -14,7 +13,6 @@ pub mod flush;
 pub mod fold;
 pub mod edited;
 pub mod key_index;
-mod locator;
 pub mod manifest;
 pub mod manifest_write;
 pub mod member_key;
@@ -29,7 +27,6 @@ pub mod render_presence;
 pub mod row_entity;
 pub mod scalar_column;
 mod segment_cursor;
-mod sidecar;
 pub mod term_images;
 pub mod unique;
 pub mod utf8;
@@ -37,9 +34,6 @@ mod view_path;
 pub mod vocabulary;
 pub mod write;
 
-pub use coalesce::coalesce_external_id_runs;
-pub use coalesce::fold_external_id_runs;
-pub use coalesce::listed_entities;
 pub use entity_terms::{
     coalesce_entity_terms_extents, EntityTerms, EntityTermsExtentPaths, EntityTermsStack,
     EntityTermsWriter, ENTITY_TERMS_BASES_FILE, ENTITY_TERMS_BLOCK_SHIFT, ENTITY_TERMS_DIR,
@@ -63,7 +57,6 @@ pub use read::{
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix};
 pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
-pub use sidecar::{locators_covering, ExternalIdSidecar, Locator};
 pub use view_path::{
     scoped_column_components, scoped_column_rel, view_path, view_path_components, view_rel,
     GROUP_SEPARATOR,

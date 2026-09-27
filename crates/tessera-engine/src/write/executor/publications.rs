@@ -662,14 +662,12 @@ impl Executor {
         any
     }
 
-    /// Publish an entity-space coalesce: a manifest edit, a sidecar swap and a tier-list swap, and
-    /// no `segments_version` bump.
+    /// Publish an entity-space coalesce: a manifest edit and a tier-list swap, and no
+    /// `segments_version` bump.
     ///
-    /// It touches no row space: a delta tier is `(term, entity)` pairs, a run
-    /// and its locator are `external_id ↔ entity`, a dictionary extent is descriptors, so no
-    /// projection is invalidated and no session pays anything. It swaps the generation's tier list
-    /// and the external-id sidecar, both content-preserving, so a request holding either version
-    /// agrees on every answer.
+    /// It touches no row space: a delta tier is `(term, entity)` pairs and a dictionary extent is
+    /// descriptors, so no projection is invalidated and no session pays anything. What it swaps is
+    /// content-preserving, so a request holding either version agrees on every answer.
     ///
     /// The consumed files are not deleted: every side-manifest below this `n` still names them, and
     /// reclaiming them is compaction's.
@@ -860,33 +858,6 @@ impl Executor {
             return;
         }
 
-        // The sidecar reads the *new* manifest, so it must be built after the edit and before the
-        // swap. It is built here, on the executor, because a failure must abandon the publication
-        // rather than leave the generation naming runs no sidecar can resolve.
-        let next_index = match crate::engine::ExternalIdIndex::open(
-            &live.bundle.manifest,
-            &manifest,
-            &self.prefix_dir(&live),
-        ) {
-            Ok(index) => index,
-            Err(e) => {
-                // Not the discard above: this manifest is already committed. The process keeps
-                // serving the pre-coalesce sidecar, which answers identically.
-                self.health
-                    .coalesce_failures
-                    .fetch_add(taken, Ordering::Relaxed);
-                self.health
-                    .coalesce_passes_failed
-                    .fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a coalesce's manifest committed but its external-id sidecar would not \
-                     open; a restart opens the committed manifest and no operator action is owed"
-                );
-                return;
-            }
-        };
-
         let next_bundle = match live.bundle.with_manifest(
             &completed.partition,
             tessera_store::read::PublishedManifest {
@@ -919,7 +890,7 @@ impl Executor {
                 None => held_tier(&live.delta_postings, &partition_data.manifest.deltas, rel),
             };
             let Some(tier) = held else {
-                // The manifest is already committed, as at the sidecar exit above.
+                // The manifest is already committed: a restart opens it.
                 self.health
                     .coalesce_failures
                     .fetch_add(taken, Ordering::Relaxed);
@@ -993,22 +964,8 @@ impl Executor {
             g.unique = unique;
             g.edited = edited;
             g.bundle = next_bundle;
-            // The sidecar rides the swap, rather than being stored beside it: a coalesce is
-            // content-preserving, but a fold is not, since it drops the retired entities' keys and
-            // writes into a new prefix. One pointer carries both, so no request can ever hold a
-            // generation and a sidecar from two publications.
-            g.external_index = Arc::new(next_index);
             g.delta_postings = delta_postings;
         });
-        // The outgoing sidecar is remembered before it stops being live. A coalesce is the one
-        // publication that builds a new one over the same prefix, so from here a generation
-        // holding the old one is invisible to the sidecar count reclamation takes; see
-        // `superseded_sidecars`. Held weakly and pruned as it goes, so a prefix that coalesces all
-        // day accumulates pointers rather than mappings.
-        self.superseded_sidecars
-            .retain(|held| held.strong_count() > 0);
-        self.superseded_sidecars
-            .push(Arc::downgrade(&live.external_index));
         self.publish(next, started);
         self.health.coalesces.fetch_add(1, Ordering::Relaxed);
     }
@@ -2117,14 +2074,10 @@ impl Executor {
             }
         }
         // The segment's own manifest lists, taken together or not at all: a values-only
-        // publication wrote none of the files they name, and a flush of joins alone wrote no run.
+        // publication wrote none of the files they name.
         if let Some(segment) = &completed.segment {
             manifest.segments.push(segment.descriptor.clone());
             manifest.deltas.push(segment.tier_path.clone());
-            if let Some(extent) = &segment.locator_extent {
-                manifest.external_id_runs.push(extent.external_id_run.clone());
-                manifest.locator_extents.push(extent.clone());
-            }
         }
         manifest.files.extend(completed.files);
         let edited = &completed.edited_runs;
@@ -2228,10 +2181,6 @@ impl Executor {
         // A values-only publication substitutes the manifest and leaves the row space alone. It
         // wrote no segment, so there is nothing to rebase and nothing that could fail to; what it
         // publishes is the value extents its manifest now names.
-        let binds = completed
-            .segment
-            .as_ref()
-            .is_some_and(|segment| segment.locator_extent.is_some());
         let (seg_id, shape_pieces, tier, tier_tally, next_bundle) = match completed.segment {
             None => {
                 let bundle = match live.bundle.with_manifest(&completed.partition, published) {
@@ -2453,35 +2402,6 @@ impl Executor {
             );
             Arc::new(unique_live)
         };
-        // The sidecar gains the locator extent this flush wrote, so an item it created with no
-        // external id is answered as having none rather than as unknown.
-        let external_index = match next_bundle.partitions.get(&completed.partition) {
-            Some(partition) if binds => match crate::engine::ExternalIdIndex::open(
-                &next_bundle.manifest,
-                &partition.manifest,
-                &self.prefix_dir(&live),
-            ) {
-                Ok(index) => Arc::new(index),
-                Err(e) => {
-                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(
-                        error = %e,
-                        "ALARM: a flush's side-manifest was committed naming an external-id \
-                         locator extent this process could not open; a restart opens the \
-                         committed manifest"
-                    );
-                    return false;
-                }
-            },
-            _ => Arc::clone(&live.external_index),
-        };
-        if binds {
-            // Remembered as a coalesce's outgoing sidecar is: see `superseded_sidecars`.
-            self.superseded_sidecars
-                .retain(|held| held.strong_count() > 0);
-            self.superseded_sidecars
-                .push(Arc::downgrade(&live.external_index));
-        }
         self.unique_declarations.flushed(&completed.consumed);
         let next = Arc::new(live.with(|g| {
             // The live columns with this flush's extents composed on: the whole of what makes an
@@ -2497,7 +2417,6 @@ impl Executor {
             g.unique_live = unique_live;
             g.edited = edited;
             g.edited_live = edited_live;
-            g.external_index = external_index;
         }));
         // Armed before the swap, and that ordering is the mechanism. A request landing between
         // the swap and the pool task's first insert must find the flag set, or it takes the cost
@@ -2589,12 +2508,10 @@ mod dispatch_rules_tests {
             y: 0.5,
             scalars: Vec::new(),
             scoped: Vec::new(),
-            external_id: None,
             wal_pos: None,
         };
         crate::flush::FlushPlan {
             items: vec![(EntityId::new(oldest), item)],
-            recorded_joins: Vec::new(),
         }
     }
 

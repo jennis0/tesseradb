@@ -202,9 +202,7 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
 
     let rows: Vec<UnallocatedRow> = points
         .iter()
-        .enumerate()
-        .map(|(i, (x, y))| UnallocatedRow {
-            external_id: Some(format!("ingested-{i}").into_bytes()),
+        .map(|(x, y)| UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: vec![ALL_TERM.to_string().into_bytes()],

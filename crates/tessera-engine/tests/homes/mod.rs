@@ -40,8 +40,6 @@ homes! {
     TextIndex,
     /// The per-entity record blob: every field with no other home, and a text column's prose.
     RecordBlob,
-    /// The external-id binding.
-    ExternalIdSidecar,
     /// The access-control postings that decide who may see the item.
     TermPostings,
     /// A unique column's index from value to item.

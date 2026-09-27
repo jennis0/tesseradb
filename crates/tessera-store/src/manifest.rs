@@ -1805,43 +1805,6 @@ pub struct TermImageExtent {
     pub keep_rows_per_container: u32,
 }
 
-/// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
-/// entity range (§3.6).
-///
-/// The build's `entities/ext-locator.u32` is one file whose length is the entity space *at build
-/// time*, so it says nothing about an entity a flush created. Without a durable reverse path for
-/// those, an item visible on the map would answer `/v1/items` with a typed error forever once its
-/// WAL region is reclaimed — contracts §2.4 serves that direction live-map-first,
-/// locator-second, and rotation empties the live map at restart.
-///
-/// The file is a dense `u32` array over `[entity_lo, entity_hi]`, no header, `0xFFFFFFFF` for an
-/// entity with no caller-supplied external id (contracts §3.4 r6 makes it optional), followed by
-/// [`Self::listed`] `(entity, slot)` pairs of `u32`s for the entities below `entity_lo` it covers,
-/// ascending by entity: an entity id a fold freed and an edit took again, as
-/// [`crate::permutation::SegmentExtent::below`] lists its row. Each slot is an **ordinal into
-/// `external_id_run`**, named here rather than inferred, because a segment's extent is its own
-/// file and the concatenation order that gives the base locator its meaning does not extend across
-/// flushes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocatorExtent {
-    pub path: String,
-    pub entity_lo: u64,
-    /// Inclusive; `entity_lo - 1` where every entity the extent covers is listed.
-    pub entity_hi: u64,
-    /// How many `(entity, slot)` pairs follow the dense array.
-    pub listed: u64,
-    /// Prefix-relative path of the `external_id_runs` entry these ordinals index.
-    pub external_id_run: String,
-}
-
-impl LocatorExtent {
-    /// Every file this extent names, the run it indexes included — which is also named by
-    /// `external_id_runs`, so a caller walking both lists sees it twice.
-    pub fn files(&self) -> impl Iterator<Item = &str> {
-        [self.path.as_str(), self.external_id_run.as_str()].into_iter()
-    }
-}
-
 /// One unique column's index in [`SegmentsManifest::unique_indexes`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2129,7 +2092,7 @@ pub struct SegmentsManifest {
     /// Every filter-column extent this partition holds — see [`AttrExtent`]. Empty in a bundle
     /// straight out of `tessera build`, whose value columns cover every entity it knows about.
     ///
-    /// **Not in [`HONOURED_STATE`], for the reason `dict_extents` and `locator_extents` are not:**
+    /// **Not in [`HONOURED_STATE`], for the reason `dict_extents` is not:**
     /// that list gates *state a reader might not be able to act on*, and this landed with the code
     /// that reads it. A reader that carried the field and ignored it would answer filters short
     /// over post-build entities, which is the failure the extent exists to remove — so there is no
@@ -2163,8 +2126,6 @@ pub struct SegmentsManifest {
     /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
     /// omits it is malformed, not extent-free.
     pub text_extents: Vec<TextExtent>,
-    #[serde(default)]
-    pub external_id_runs: Vec<String>,
     /// One entry per unique column: the runs of its index ([`crate::unique`]). A column is unique
     /// exactly where it has an entry, empty lists and all, so this list is also the served
     /// schema's `unique` flags.
@@ -2184,11 +2145,6 @@ pub struct SegmentsManifest {
     /// Freed entity ids the allocator holds back until the log keeps no record older than the
     /// position beside them.
     pub held_entities: Vec<HeldEntities>,
-    /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
-    /// a bundle straight out of `tessera build`, whose one `ext-locator.u32` covers every entity
-    /// it knows about.
-    #[serde(default)]
-    pub locator_extents: Vec<LocatorExtent>,
     /// The entities already deleted whose rows a fold has not yet removed — see [`EntitySet`].
     #[serde(default)]
     pub tombstones: EntitySet,
@@ -2331,12 +2287,10 @@ impl SegmentsManifest {
             record_extents: Vec::new(),
             entity_terms_extents: Vec::new(),
             text_extents: Vec::new(),
-            external_id_runs: Vec::new(),
             unique_indexes: Vec::new(),
             edited_items: EditedItemsRuns::default(),
             free_entities: EntitySet::default(),
             held_entities: Vec::new(),
-            locator_extents: Vec::new(),
             tombstones: EntitySet::default(),
             deny: EntitySet::default(),
             vocabulary_extensions: Vec::new(),

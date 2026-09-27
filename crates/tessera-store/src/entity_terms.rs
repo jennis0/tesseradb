@@ -75,8 +75,7 @@
 //! end where the last absolute offset says, and a descending or out-of-range offset pair are all
 //! [`StoreError::InvalidEntityTerms`] — never a truncated answer. The two ends are checked at
 //! open and each pair at the read that uses it, which is O(1) both times: walking every offset at
-//! open would be a 4 GB sequential read at 10⁹, on the path the external-ID sidecar was made lazy
-//! to keep clear. `bases` **is** walked at open, because it is one entry per 65,536 ranks, which
+//! open would be a 4 GB sequential read at 10⁹, on the open path. `bases` **is** walked at open, because it is one entry per 65,536 ranks, which
 //! is 427 KB at 3.5×10⁹, and its order is what the length equality rests on.
 //!
 //! A truncated list would under-report an entity's labels, which on the write path is a **409 that
@@ -105,8 +104,7 @@
 //! **No error detail here names a descriptor**, only ordinals, lengths and paths: these strings
 //! reach an operator log, and a descriptor is a compartment name.
 //!
-//! **The reader's details name no entity either** — the external-ID sidecar's rule, at the same
-//! standard and for its reason: a read failure is reachable from a request, contracts §4 has the
+//! **The reader's details name no entity either**: a read failure is reachable from a request, contracts §4 has the
 //! byte-scanner sweep logs as well as payloads for entity ids (**I10**), and a corrupt layer is a
 //! systematic build or flush fault whose file and inconsistency shape are what an operator needs.
 //! The **writer's** own refusals do name the entity, and that is the one place it belongs: they
@@ -400,8 +398,8 @@ impl EntityTerms {
         }
         // **`bases` whole, the offsets at their ends.** One entry per 65,536 ranks is 427 KB at
         // 3.5×10⁹, so the whole array is walked here and its order established once; the offsets
-        // are one entry per rank, and walking those would be the 4 GB sequential read at 10⁹ that
-        // the external-ID sidecar was made lazy to avoid. So the first and the last absolute
+        // are one entry per rank, and walking those would be a 4 GB sequential read at 10⁹ on the
+        // open path. So the first and the last absolute
         // offset are checked here and every pair between them at the read that uses it
         // (`terms_of`), which is the same fail-closed answer at the point where a bad pair could
         // produce a wrong one.
@@ -642,8 +640,8 @@ pub fn coalesce_entity_terms_extents(
 
 /// The base layer plus every flush extent, probed as one.
 ///
-/// `Arc` per layer, and appended rather than reopened after a flush, for the reason
-/// [`crate::sidecar`] and the record stack both give: the base is the largest artefact of its
+/// `Arc` per layer, and appended rather than reopened after a flush, for the reason the record
+/// stack gives: the base is the largest artefact of its
 /// family and remapping it at every publication would undo a generation's cheap succession.
 pub struct EntityTermsStack {
     layers: Vec<Arc<EntityTerms>>,
@@ -755,7 +753,7 @@ fn map(path: &Path) -> Result<Mmap> {
     let file = File::open(path).map_err(|e| io(path, e))?;
     // SAFETY: the file is a published, immutable bundle artefact (contracts §2.1 — every file but
     // `CURRENT` is immutable and a prefix grows only by whole new files), so nothing truncates it
-    // under the mapping. Identical justification to the external-ID sidecar's extents.
+    // under the mapping.
     unsafe { Mmap::map(&file) }.map_err(|e| io(path, e))
 }
 

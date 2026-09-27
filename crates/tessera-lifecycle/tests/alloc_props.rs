@@ -69,7 +69,6 @@ proptest! {
                         batch_id: format!("batch-{id}"),
                         body_hash: [0u8; 32],
                         rows: vec![WalRow {
-                            external_id: Some(id.to_le_bytes().to_vec()),
                             entity_id: EntityId::new(id),
                             view: "default".to_string(),
                             join: false,
@@ -136,7 +135,6 @@ proptest! {
                     batch_id: format!("batch-{id}"),
                     body_hash: [0u8; 32],
                     rows: vec![WalRow {
-                        external_id: Some(id.to_le_bytes().to_vec()),
                         entity_id: EntityId::new(id),
                         view: "default".to_string(),
                         join: false,
@@ -232,9 +230,7 @@ proptest! {
     ) {
         let mut items: Vec<PendingItem> = signatures
             .iter()
-            .enumerate()
-            .map(|(i, sig)| PendingItem {
-                external_id: Some(format!("ext-{i:05}").into_bytes()),
+            .map(|sig| PendingItem {
                 terms: sig.iter().map(|&t| TermId::new(t)).collect(),
                 entity_id: None,
             })
@@ -286,7 +282,6 @@ fn row(id: u64) -> WalRecord {
         batch_id: format!("batch-{id}"),
         body_hash: [0u8; 32],
         rows: vec![WalRow {
-            external_id: None,
             entity_id: EntityId::new(id),
             view: "default".to_string(),
             join: false,

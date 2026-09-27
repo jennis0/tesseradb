@@ -284,26 +284,19 @@ fn all_term_of(root: &Path, prefix: &str) -> TermId {
         .expect("every fixture item carries ALL_TERM")
 }
 
-/// Ingest one item at (5, 5) carrying the fixture's `ALL_TERM`, under `external_id`.
-fn ingest(
-    engine: &Engine,
-    external_id: Vec<u8>,
-    batch: &str,
-) -> Result<EntityId, tessera_engine::AcceptError> {
-    ingest_with_descriptors(engine, external_id, batch, &[b"0".to_vec()])
+/// Ingest one item at (5, 5) carrying the fixture's `ALL_TERM`.
+fn ingest(engine: &Engine, batch: &str) -> Result<EntityId, tessera_engine::AcceptError> {
+    ingest_with_descriptors(engine, batch, &[b"0".to_vec()])
 }
 
 /// [`ingest`] with the descriptor set spelled out — `&[]` for a **zero-term item**, which no tier
-/// names at all and which is therefore reachable only through the run its locator extent covers
-/// (compaction §12's obligation 2b).
+/// names at all.
 fn ingest_with_descriptors(
     engine: &Engine,
-    external_id: Vec<u8>,
     batch: &str,
     descriptors: &[Vec<u8>],
 ) -> Result<EntityId, tessera_engine::AcceptError> {
     let row = UnallocatedRow {
-        external_id: Some(external_id),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.to_vec(),
@@ -443,9 +436,8 @@ fn every_surviving_row_keeps_its_own_identity_and_row_space_is_dense() {
     let root = tmp.path().join("bundle");
     let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
 
-    // Resolved before the fold: entity ids are stable across it (§5.1, and the fold does not
-    // renumber the entity axis), but the folded run no longer carries a deleted entity's key —
-    // which is what `external_ids_resolve_both_ways_after_a_fold_…` asserts on purpose.
+    // Resolved before the fold: entity ids are stable across it, but the folded key runs no
+    // longer carry a deleted entity's key.
     let source_to_entity = source_to_new_map(&root, "v00000");
     let deleted: Vec<EntityId> = [4u64, 11, 900]
         .iter()
@@ -494,56 +486,6 @@ fn every_surviving_row_keeps_its_own_identity_and_row_space_is_dense() {
         *rows_seen.last().expect("some row survived") as u64,
         N_ITEMS - deleted.len() as u64 - 1,
         "row ids are dense: a dropped row shifts every row after it rather than leaving a hole"
-    );
-}
-
-/// **A retired entity's external id is re-ingestible** — the fold's other half of decision 0047,
-/// and the one that lives in memory rather than in a file.
-///
-/// Pass 3 drops `D₀`'s keys from the folded run, and that alone is not enough: the write path's own
-/// `established` map is consulted first and is never rebuilt, so a binding left standing there
-/// resolves the external id to an entity retirement has just made not-deleted — and both duplicate
-/// checks exempt only a *deleted* holder. The re-ingest is then refused **409**, permanently,
-/// contradicting decision 0047's "edit is delete plus re-ingest" directly.
-///
-/// **Mutations this kills:** dropping `LiveState::forget_established` (the re-ingest below fails
-/// with `DuplicateExternalId`); pruning the inverse map without the forward one (same); pruning
-/// after the swap instead of before it (a window rather than a failure, so this asserts the
-/// ordering only in as much as it asserts the outcome — the ordering's argument is at the
-/// function).
-#[test]
-fn a_retired_entitys_external_id_is_re_ingestible() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
-
-    // An item ingested in *this* process, so its external id is in the live `established` map —
-    // which is what the bundle's own sidecar cannot stand in for.
-    let key = b"re-ingest-me".to_vec();
-    let entity = ingest(&engine, key.clone(), "first").expect("the first ingest is accepted");
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().flushes == 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never landed"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    engine
-        .accept_change(entity, ChangeOp::Delete)
-        .expect("a delete is accepted");
-
-    fold(&engine);
-    assert_eq!(engine.overlay_depth(), 0, "the deletion retired");
-
-    let reborn = ingest(&engine, key.clone(), "second")
-        .expect("a lawful re-ingest of a retired entity's external id must not 409");
-    assert_ne!(reborn, entity, "a re-ingest takes a fresh entity id (I9)");
-    assert_eq!(
-        engine.resolve_external_id(&key).unwrap(),
-        Some(reborn),
-        "and the key now names the new holder"
     );
 }
 
@@ -613,11 +555,7 @@ fn wait_ticking(engine: &Engine, what: &str, mut cond: impl FnMut() -> bool) {
 /// The shape both suspension cases need: `tier_width` is 4, so three published segments are one
 /// short of a selectable merge and the fourth is what makes one.
 fn publish_one_segment(engine: &Engine, round: &mut usize) {
-    ingest(
-        engine,
-        format!("seg-{}", *round).into_bytes(),
-        &format!("s{}", *round),
-    )
+    ingest(engine, &format!("s{}", *round))
     .expect("ingest is accepted");
     *round += 1;
     let flushes = engine.write_executor_stats().flushes;
@@ -861,95 +799,6 @@ fn the_startup_sweep_reclaims_an_orphaned_prefix_and_leaves_everything_else() {
     );
 }
 
-/// **A generation holding a sidecar that a coalesce replaced still holds the prefix back.**
-///
-/// Reclamation waits on the readers, and the question it has to answer is *"can any live generation
-/// still resolve a path under this prefix"* — a generation resolves external ids through its
-/// sidecar, and the sidecar opens its runs **lazily**, so unlinking the tree under one turns its
-/// next lookup into an IO error rather than an answer.
-///
-/// **The wait used to reach every generation but this one.** A flush publishes by *cloning* the
-/// live sidecar `Arc`, so one strong count answers for every generation a flush produced. A
-/// **coalesce** does not: it builds a new sidecar over an unchanged prefix, and from that moment a
-/// generation still holding the old one is counted by neither the held generation's own reference
-/// nor its sidecar's. `Executor::superseded_sidecars` closes it with a `Weak` per replaced sidecar —
-/// which answers the question and, unlike holding them strongly, does not keep the mappings of every
-/// sidecar the prefix ever had alive for its whole life.
-///
-/// **Mutations this kills:** dropping the weak list (the prefix is unlinked while this generation
-/// holds it, and the lookup below fails); holding the list *strongly* (nothing is ever reclaimable,
-/// because the executor itself is a holder — the assertion after the drop fails).
-#[test]
-fn a_generation_holding_a_coalesce_superseded_sidecar_holds_the_prefix_back() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    let engine = engine_over_fixture(
-        tmp.path(),
-        &root,
-        EngineConfig {
-            // Two same-tier runs select a coalesce, so one extra flush reaches it.
-            ..config_uncapped()
-        },
-    );
-    ingest(&engine, b"coalesce-witness".to_vec(), "w0").expect("ingest is accepted");
-    engine.request_flush();
-    wait_for("the witness to be flushed", || {
-        engine.write_executor_stats().flushes > 0
-    });
-
-    // **A generation captured before any coalesce**, held for the rest of the case. This is the
-    // holder the two old counts could not see once a coalesce replaced what it points at: it is
-    // neither the generation the fold supersedes (several publications newer) nor a holder of that
-    // generation's sidecar (the coalesce built a new one).
-    let held = engine.generation();
-
-    // Drive flushes until a coalesce publishes a *new* sidecar over the same prefix.
-    let mut round = 1;
-    while engine.write_executor_stats().coalesces == 0 {
-        assert!(round < 64, "no coalesce published in {round} rounds");
-        ingest(
-            &engine,
-            format!("c{round}").into_bytes(),
-            &format!("c{round}"),
-        )
-        .expect("ingest is accepted");
-        let flushes = engine.write_executor_stats().flushes;
-        engine.request_flush();
-        wait_for("a flush to publish", || {
-            engine.write_executor_stats().flushes > flushes
-        });
-        round += 1;
-    }
-    // That a coalesce builds a *new* sidecar rather than cloning the live one is stated at its
-    // publication site and is the whole reason this case differs from a flush's; the sidecar
-    // pointer itself is crate-internal, so what is asserted here is that a coalesce happened at
-    // all — without one, this test is about nothing.
-    assert!(engine.write_executor_stats().coalesces > 0);
-
-    fold(&engine);
-
-    // **The prefix stands while the pre-coalesce generation is held.** Reclamation is retried at
-    // every tick, so this is not a race that has not happened yet; it is a wait that is holding.
-    for _ in 0..5 {
-        tick(&engine);
-    }
-    assert!(
-        root.join("v00000").exists(),
-        "the superseded prefix must not be unlinked while a generation over it is still held"
-    );
-    // Released — and now it goes.
-    drop(held);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while root.join("v00000").exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the prefix was never reclaimed after its last reader released it"
-        );
-        tick(&engine);
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// **Obligation 15's converging half: a restart onto the folded prefix serves the same state.**
 ///
 /// `CURRENT` is the commit point, so a process that has flipped it has already published whatever
@@ -1088,7 +937,7 @@ fn a_restart_before_the_rotation_resurrects_the_retirement_harmlessly_and_perman
 
     // **Permanent.** Force a rotation by giving the log something to grow with: a snapshot written
     // now *applies* the resurrected entry rather than assigning over it, so it cannot remove one.
-    ingest(&restarted, b"after-restart".to_vec(), "after").expect("ingest is accepted");
+    ingest(&restarted, "after").expect("ingest is accepted");
     restarted.request_flush();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while restarted.write_executor_stats().flushes == 0 {
@@ -1159,50 +1008,6 @@ fn a_suppression_survives_the_fold_and_an_unsuppress_afterwards_reveals_its_item
     );
 }
 
-/// **Every external id resolves both ways after the fold, and a folded-away entity's key is gone**
-/// (obligation 7).
-///
-/// Pass 3's locator is sized to the *snapshot's* entity space and the new `MANIFEST.json` carries
-/// that bound as `entity_id_high_water`, which is the only thing that reads it — the sidecar's
-/// declared locator length. A live value there would make the base locator claim every
-/// post-snapshot entity; a mismatched one fails the sidecar's own length check at first touch.
-///
-/// **Mutations this kills:** writing the live `entity_id_high_water` into `MANIFEST.json` (the
-/// locator's declared length no longer matches its bytes and every reverse resolution errors);
-/// carrying the pre-fold sidecar onto the new generation (it resolves through the reclaimed prefix,
-/// so both directions fail once `v00000` is gone).
-#[test]
-fn external_ids_resolve_both_ways_after_a_fold_and_a_folded_entitys_key_is_gone() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
-
-    let deleted = entity_of_source(&root, "v00000", 4);
-    let survivor = entity_of_source(&root, "v00000", 5);
-    engine
-        .accept_change(deleted, ChangeOp::Delete)
-        .expect("a delete is accepted");
-
-    fold(&engine);
-
-    assert_eq!(
-        engine.external_id_of(survivor).unwrap(),
-        Some(source_id_key(5)),
-        "a survivor still names its external id, through a sidecar opened on the new prefix"
-    );
-    assert_eq!(
-        engine.resolve_external_id(&source_id_key(5)).unwrap(),
-        Some(survivor),
-        "and the reverse direction agrees"
-    );
-    assert_eq!(
-        engine.resolve_external_id(&source_id_key(4)).unwrap(),
-        None,
-        "the folded entity's key is gone from the run: leaving it standing 409s a lawful \
-         re-ingest of that external id (decision 0047)"
-    );
-}
-
 /// **A merge cap far above the base segment is obeyed, and the bundle stays whole.**
 ///
 /// With `max_merged_segment_bytes` above anything the base can reach, a fold publishes, the next
@@ -1234,7 +1039,7 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
     let merges = engine.write_executor_stats().merges;
     let mut flushed = Vec::new();
     for round in 0..4 {
-        let entity = ingest(&engine, format!("capped-{round}").into_bytes(), &format!("c{round}"))
+        let entity = ingest(&engine, &format!("c{round}"))
             .expect("ingest is accepted");
         flushed.push(entity);
         let flushes = engine.write_executor_stats().flushes;
@@ -1378,14 +1183,13 @@ fn unnamed_files(root: &Path, prefix: &str, live: &[&str]) -> usize {
 /// right after that flush publishes)` — the two fields `write.rs`'s `publish_fold` carries through
 /// from `live_manifest` untouched, captured at the one moment they can be told apart from the
 /// fold's own pre-flight snapshot (`the_watermark_and_high_water_published_are_the_live_ones_not_
-/// the_snapshot` and `the_folded_manifests_high_water_is_the_snapshots_entity_space` are why that
-/// moment matters).
+/// the_snapshot` is why that moment matters).
 ///
 /// The hold is a test hook and models duration, not behaviour — see
 /// `Engine::set_fold_paused_for_test`. Everything the flush does here it does exactly as it would
 /// in production: it plans against the live generation, writes into the **old** prefix, and
 /// publishes there, because the fold has not flipped `CURRENT` yet.
-fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> (EntityId, u64, u64) {
+fn fold_with_a_flush_in_flight(engine: &Engine) -> (EntityId, u64, u64) {
     engine.set_fold_paused_for_test(true);
     let before = engine.write_executor_stats();
     engine.request_fold();
@@ -1396,7 +1200,7 @@ fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> (EntityId, u64,
         engine.fold_is_holding_for_test()
     });
 
-    let entity = ingest(engine, key, "mid-flight").expect("ingest is accepted during a fold");
+    let entity = ingest(engine, "mid-flight").expect("ingest is accepted during a fold");
     engine.request_flush();
     wait_for("the mid-flight flush to publish", || {
         engine.write_executor_stats().flushes > before.flushes
@@ -1422,16 +1226,12 @@ fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> (EntityId, u64,
 ///
 /// This is the only case here in which the publication has anything to carry — every other fold
 /// consumes the whole bundle — so it is also the only one that exercises the rebase check, the
-/// hard-linking of a carried segment, the run and locator lists' recency order, and the
-/// carry-forward set that retirement subtracts.
+/// hard-linking of a carried segment, and the carry-forward set that retirement subtracts.
 ///
 /// **Mutations this kill:** dropping carried segments from the assembled manifest (the mid-flight
-/// item is invisible and its external id resolves to nothing); listing the carried segment *before*
-/// the fold's own base (the reader takes the first segment of a view as the base
-/// `permutation.bin` addresses, so the bundle either refuses to open or serves the wrong row
-/// space); listing the carried run before the folded run 0 (the sidecar derives the base locator's
-/// path from `external_id_runs[0]`, so it takes a flush's entity-range extent for the full-length
-/// base locator and every reverse resolution errors).
+/// item is invisible); listing the carried segment *before* the fold's own base (the reader takes
+/// the first segment of a view as the base `permutation.bin` addresses, so the bundle either
+/// refuses to open or serves the wrong row space).
 #[test]
 fn a_flush_inside_the_folds_flight_is_carried_forward() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1442,8 +1242,7 @@ fn a_flush_inside_the_folds_flight_is_carried_forward() {
         let session = engine.authorise(&full_coverage_credential()).unwrap();
         visible(&engine, &session)
     };
-    let key = b"landed-mid-fold".to_vec();
-    let (entity, _, _) = fold_with_a_flush_in_flight(&engine, key.clone());
+    let (entity, _, _) = fold_with_a_flush_in_flight(&engine);
 
     assert_eq!(engine.generation().prefix, "v00001");
     let session = engine.authorise(&full_coverage_credential()).unwrap();
@@ -1451,17 +1250,6 @@ fn a_flush_inside_the_folds_flight_is_carried_forward() {
         visible(&engine, &session),
         baseline + 1,
         "the mid-flight item is visible after the flip, at its re-based row id"
-    );
-    assert_eq!(
-        engine.resolve_external_id(&key).unwrap(),
-        Some(entity),
-        "and its external-id binding was carried forward with it"
-    );
-    assert_eq!(
-        engine.external_id_of(entity).unwrap(),
-        Some(key),
-        "including the reverse direction, which resolves past the fold's own base locator into \
-         the carried-forward extent"
     );
 
     // And the bundle a restart opens says the same thing.
@@ -1586,30 +1374,13 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
 /// naming more is fail-closed, naming fewer is the fail-open.
 ///
 /// **A zero-term item runs beside it**, deleted the same way. It has no postings, so no tier could
-/// name it; what the carry-forward set covers is its *entity*, through the run and locator extent
-/// the same flush publishes. That is the shape 2b was added for.
-///
-/// **And the re-ingest the obligation's own text requires**, which this case omitted until it was
-/// recounted. A protected entity keeps its tombstone, and a tombstone must not become a
-/// reservation on the external id: decision 0047 makes an edit a delete plus a re-ingest, so a
-/// deleted holder that blocked one would fail every edit of a mid-fold deletion until some later
-/// fold happened to run. This is a **different rule** from the retired case that
-/// `a_retired_entitys_external_id_is_re_ingestible` covers — that one passes unmoved when
-/// `established_collisions` is made to collide on a still-deleted holder, and this one does not.
+/// name it; what the carry-forward set covers is its *entity*, through the segment's declared
+/// range. That is the shape 2b was added for.
 ///
 /// **Mutations this kills:** retiring `D₀` wholesale (all three retire, which is the r3
 /// fail-open); leaving the carry-forward set empty; building it from the plan rather than from the
-/// live manifest at publication (the flush's four artefacts are not in the plan, so nothing is
-/// carried and all retire); and colliding a re-ingest against a deleted holder.
-///
-/// **What it does *not* kill, verified rather than assumed: dropping either single artefact kind.**
-/// A flush publishes a segment, a tier, a run and a locator extent *together, over one entity
-/// range*, so end to end the segment adder and the locator adder each cover both protected
-/// entities on their own and removing either leaves this case green — checked by running both
-/// mutations. That is not a hole in the rule, it is the reason the rule is stated over the whole
-/// carry-forward set; the per-artefact independence is where a fixture can actually separate them,
-/// in `compact.rs`'s `none_of_obligation_2bs_three_shapes_retires`, which gives one flush only a
-/// segment and another only a locator extent. Read the two together.
+/// live manifest at publication (the flush's artefacts are not in the plan, so nothing is carried
+/// and all retire).
 #[test]
 fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1619,15 +1390,13 @@ fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
     // Three ingests in three windows, so the ids are consecutive and ascending, and the middle one
     // is deleted before anything flushes. `a` and `c` stay buffered; `doomed` is dropped from the
     // buffer at its own deny apply, so no flush will ever write a row for it.
-    let a = ingest(&engine, b"a".to_vec(), "a").expect("ingest is accepted");
-    let doomed = ingest(&engine, b"doomed".to_vec(), "doomed").expect("ingest is accepted");
+    let a = ingest(&engine, "a").expect("ingest is accepted");
+    let doomed = ingest(&engine, "doomed").expect("ingest is accepted");
     // **A zero-term item, deleted the same way.** No tier names it — it has no postings to hold —
     // so what stands between it and a fail-open retirement is the carry-forward set's coverage of
-    // its *entity*, through the run and locator extent the same flush publishes. This is the shape
-    // obligation 2b was added for, and it never ran end to end before.
-    let zero_term = ingest_with_descriptors(&engine, b"zero-term".to_vec(), "zero-term", &[])
-        .expect("accepted");
-    let c = ingest(&engine, b"c".to_vec(), "c").expect("ingest is accepted");
+    // its *entity*, through the declared range of the segment the same flush publishes.
+    let zero_term = ingest_with_descriptors(&engine, "zero-term", &[]).expect("accepted");
+    let c = ingest(&engine, "c").expect("ingest is accepted");
     assert_eq!(doomed.raw(), a.raw() + 1);
     assert_eq!(zero_term.raw(), doomed.raw() + 1);
     assert_eq!(c.raw(), zero_term.raw() + 1);
@@ -1683,85 +1452,8 @@ fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
     // The mid-flight flush's own items are unharmed by any of it.
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(visible(&engine, &session), N_ITEMS + 1);
-    assert_eq!(engine.resolve_external_id(b"a").unwrap(), Some(a));
-    assert_eq!(engine.resolve_external_id(b"c").unwrap(), Some(c));
-
-    // **And the re-ingest 2b's own text requires, which this case never attempted.** A protected
-    // entity keeps its tombstone, and a tombstone must not become a reservation on the external
-    // id: decision 0047 makes an edit a delete followed by a re-ingest, so a deleted holder
-    // blocking the re-ingest would make every edit of a mid-fold deletion fail with a 409 until
-    // some later fold happened to run. The new item is a *different* entity — the id is not
-    // recycled (I9) — and the old one stays deleted.
-    for (external_id, deleted) in [
-        (b"doomed".to_vec(), doomed),
-        (b"zero-term".to_vec(), zero_term),
-    ] {
-        // A distinct batch label per re-ingest: the two calls share an idempotency digest, so one
-        // label would make the second a *replay* of the first and return its ids unchanged.
-        let batch = format!("re-ingest-{}", String::from_utf8_lossy(&external_id));
-        let reborn = ingest(&engine, external_id.clone(), &batch)
-            .expect("a re-ingest of a protected entity's external id succeeds, never 409s");
-        assert_ne!(
-            reborn, deleted,
-            "the re-ingest takes a fresh entity id; I9 never reissues the deleted one"
-        );
-        assert!(
-            engine.generation().overlay.is_deleted(deleted),
-            "and the re-ingest does not resurrect the entity that was deleted"
-        );
-        assert_eq!(
-            engine.resolve_external_id(&external_id).unwrap(),
-            Some(reborn),
-            "the external id now resolves to the new entity"
-        );
-    }
-}
-
-/// **The new `MANIFEST.json`'s `entity_id_high_water` is the *snapshot's* entity space, not the
-/// live one** — compaction §3 pass 3's fidelity F1, which was fatal as first written.
-///
-/// That field is read by exactly one thing: the base locator's declared length. The base locator
-/// has absolute priority for every entity below it and the carried-forward extents are consulted
-/// only *past* it, so a live value makes the fold's own locator claim every post-snapshot entity
-/// and answer "this item has no external id" for items that have one — contracts §2.4's
-/// wrong-answer-wearing-a-legitimate-state's-clothes.
-///
-/// **This is the only case in which the two values differ**, which is why it needs a mid-flight
-/// flush: without one the snapshot's entity space *is* the live one, and the mutation survives.
-///
-/// **Mutation this kills:** `bundle_manifest.entity_id_high_water = live_manifest
-/// .entity_id_high_water` — the locator's declared length then exceeds its bytes and the sidecar's
-/// own length check fails every reverse resolution, and if it did not, the carried-forward extent
-/// would be unreachable.
-#[test]
-fn the_folded_manifests_high_water_is_the_snapshots_entity_space() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
-
-    let (entity, _, _) = fold_with_a_flush_in_flight(&engine, b"landed-mid-fold".to_vec());
-
-    let bundle = open_bundle(&root).expect("the folded bundle opens");
-    let snapshot_bound = bundle.manifest.entity_id_high_water;
-    let live_bound = bundle.partitions["default"].manifest.entity_id_high_water;
-    assert!(
-        snapshot_bound < live_bound,
-        "the mid-flight flush moved the side-manifest's high-water past the fold's locator bound \
-         ({snapshot_bound} vs {live_bound}); without that this case proves nothing"
-    );
-    assert_eq!(
-        snapshot_bound,
-        entity.raw(),
-        "the locator covers exactly the entities that had a row at the snapshot"
-    );
-    assert_eq!(
-        std::fs::metadata(root.join("v00001/partitions/default/entities/ext-locator.u32"))
-            .unwrap()
-            .len(),
-        snapshot_bound * 4,
-        "and the file's bytes are what the manifest declares — the sidecar checks this at open, \
-         so a live bound here is a hard failure at the first reverse resolution"
-    );
+    assert!(!engine.generation().overlay.is_deleted(a));
+    assert!(!engine.generation().overlay.is_deleted(c));
 }
 
 /// **Obligation 10: the watermark and `entity_id_high_water` published in `SEGMENTS-<n>.json` are
@@ -1771,9 +1463,7 @@ fn the_folded_manifests_high_water_is_the_snapshots_entity_space() {
 /// "Live, and untouched. Deriving either from the fold's inputs moves the watermark backwards past
 /// every post-snapshot entity, and composition treats an entity at or above it as buffered rather
 /// than rowed — so the gap goes invisible to every principal with no error." That sentence is
-/// about the `SEGMENTS-<n>.json` half of each field — the counterpart
-/// `the_folded_manifests_high_water_is_the_snapshots_entity_space` pins is `MANIFEST.json`'s, which
-/// is deliberately the *other* value.
+/// about the `SEGMENTS-<n>.json` half of each field.
 ///
 /// A mid-flight flush is required to tell "live" from "snapshot" apart at all: without one the two
 /// coincide and a fold that mistakenly published its own pre-flight bound would pass by accident,
@@ -1794,7 +1484,7 @@ fn the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot() {
         .entity_id_high_water;
 
     let (_, mid_flight_watermark, mid_flight_high_water) =
-        fold_with_a_flush_in_flight(&engine, b"landed-mid-fold-watermark".to_vec());
+        fold_with_a_flush_in_flight(&engine);
 
     assert!(
         mid_flight_watermark > baseline_watermark,
@@ -2218,7 +1908,6 @@ fn term_ordinals_are_stable_across_a_fold() {
     // `dict_extents` entry across it — the shape a single-extent dictionary cannot distinguish
     // from "coincidentally unchanged".
     let novel_row = UnallocatedRow {
-        external_id: Some(b"novel-holder".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"novel".to_vec()],
@@ -2622,11 +2311,7 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
     // Four flush segments and the merge that consumes them: the consumed segments stay on disc,
     // named by no live manifest, which is exactly the dead weight this route is about.
     for round in 0..4 {
-        ingest(
-            &engine,
-            format!("dead-{round}").into_bytes(),
-            &format!("d{round}"),
-        )
+        ingest(&engine, &format!("d{round}"))
         .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
@@ -2698,7 +2383,7 @@ fn the_segment_ceiling_dispatches_a_fold_outside_the_window() {
 
     let flush_once = |n: usize| {
         let before = engine.write_executor_stats().flushes;
-        ingest(&engine, format!("seg-{n}").into_bytes(), &format!("b{n}")).expect("ingest");
+        ingest(&engine, &format!("b{n}")).expect("ingest");
         engine.request_flush();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while engine.write_executor_stats().flushes == before {
@@ -2780,7 +2465,7 @@ fn the_windowed_route_fires_inside_its_window_and_not_outside_it() {
     let engine = engine_over_fixture(tmp.path(), &root, config_scheduling(closed));
     engine.set_merge_for_test(false);
     // Two segments, so the *only* thing keeping this from folding is the shut window.
-    ingest(&engine, b"second-segment".to_vec(), "b1").expect("ingest");
+    ingest(&engine, "b1").expect("ingest");
     engine.request_flush();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while engine.write_executor_stats().flushes == 0 {
@@ -2806,7 +2491,7 @@ fn the_windowed_route_fires_inside_its_window_and_not_outside_it() {
     assert_no_fold_within(&engine, 2);
 
     // The second segment arrives and the same open window now has work.
-    ingest(&engine, b"second-segment".to_vec(), "b1").expect("ingest");
+    ingest(&engine, "b1").expect("ingest");
     engine.request_flush();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while engine.write_executor_stats().folds == 0 {
@@ -2889,7 +2574,7 @@ fn dropping_the_engine_returns_while_a_fold_is_held_in_flight() {
 /// buffered, and they publish during the fold's flight.
 #[test]
 fn a_fold_lands_while_ingest_continues_into_several_views() {
-    a_fold_lands_while_the_feed_runs(|round, _view, i| format!("feed-{round}-{i}"));
+    a_fold_lands_while_the_feed_runs(true);
 }
 
 /// **A fold lands while ingest continues into several views, each taking new items of its own.**
@@ -2897,12 +2582,13 @@ fn a_fold_lands_while_ingest_continues_into_several_views() {
 /// one another and, published during the fold's flight, the fold's base.
 #[test]
 fn a_fold_lands_while_ingest_of_new_items_continues_into_several_views() {
-    a_fold_lands_while_the_feed_runs(|round, view, i| format!("feed-{round}-{view}-{i}"));
+    a_fold_lands_while_the_feed_runs(false);
 }
 
-/// Feed `s0`, `s1` and `s2` with eight rows each per round, keyed by `key(round, view, i)`, and
-/// ask for folds while it runs: one of a bounded number of attempts must publish.
-fn a_fold_lands_while_the_feed_runs(key: fn(u64, &str, u64) -> String) {
+/// Feed `s0`, `s1` and `s2` with eight rows each per round, `s1` and `s2` joining the items `s0`
+/// created when `join` holds, and ask for folds while it runs: one of a bounded number of attempts
+/// must publish.
+fn a_fold_lands_while_the_feed_runs(join: bool) {
     const ATTEMPTS: u64 = 5;
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
@@ -2916,12 +2602,12 @@ fn a_fold_lands_while_the_feed_runs(key: fn(u64, &str, u64) -> String) {
         let feed = scope.spawn(|| {
             let mut round = 0u64;
             while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let mut created: Vec<EntityId> = Vec::new();
                 for view in ["s0", "s1", "s2"] {
                     let rows: Vec<UnallocatedRow> = (0..8u64)
                         .map(|i| UnallocatedRow {
-                            external_id: Some(key(round, view, i).into_bytes()),
                             view: view.to_string(),
-                            join: None,
+                            join: (join && view != "s0").then(|| created[i as usize]),
                             descriptors: vec![b"0".to_vec()],
                             x: (10 + i * 100) as f64,
                             y: (10 + round % 90 * 10) as f64,
@@ -2930,9 +2616,12 @@ fn a_fold_lands_while_the_feed_runs(key: fn(u64, &str, u64) -> String) {
                             scoped: Vec::new(),
                         })
                         .collect();
-                    engine
+                    let ids = engine
                         .ingest_rows(rows, format!("feed-{round}-{view}"), [0u8; 32])
                         .expect("the feed's batch is accepted");
+                    if view == "s0" {
+                        created = ids;
+                    }
                 }
                 engine.request_flush();
                 round += 1;
@@ -3006,221 +2695,6 @@ fn create_view(engine: &Engine, name: &str) {
         .expect("the view is created");
 }
 
-/// **A flush of joins alone writes no external-id run and no locator extent, and the joined
-/// entity's external id still resolves both ways**: live, after a restart, and after a fold.
-#[test]
-fn a_flush_of_joins_binds_nothing_and_the_joined_key_resolves_both_ways() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
-    create_view(&engine, "s1");
-    let key = b"joined".to_vec();
-    let flush = |engine: &Engine| {
-        let flushes = engine.write_executor_stats().flushes;
-        engine.request_flush();
-        wait_for("a flush to publish", || {
-            engine.write_executor_stats().flushes > flushes
-        });
-    };
-
-    let entity = ingest(&engine, key.clone(), "own").expect("the item is accepted");
-    flush(&engine);
-    let bindings = |engine: &Engine| {
-        let generation = engine.generation();
-        let manifest = &generation.bundle.partitions["default"].manifest;
-        (manifest.external_id_runs.len(), manifest.locator_extents.len())
-    };
-    let before = bindings(&engine);
-
-    let join = UnallocatedRow {
-        external_id: Some(key.clone()),
-        view: "s1".to_string(),
-        join: None,
-        descriptors: vec![b"0".to_vec()],
-        x: 5.0,
-        y: 5.0,
-        scalars: Vec::new(),
-        terms: engine.resolve_terms(&[b"0".to_vec()]),
-        scoped: Vec::new(),
-    };
-    let joined = engine
-        .ingest_rows(vec![join], "join".to_string(), [0u8; 32])
-        .expect("the join is accepted");
-    assert_eq!(joined, vec![entity], "a known external id joins its entity");
-    flush(&engine);
-    assert!(
-        !engine.generation().bundle.partitions["default"].views["s1"]
-            .segments
-            .is_empty(),
-        "the join has a row in s1"
-    );
-    assert_eq!(
-        bindings(&engine),
-        before,
-        "a flush of joins alone adds no run and no locator extent"
-    );
-
-    let resolves_both_ways = |engine: &Engine, when: &str| {
-        assert_eq!(
-            engine.resolve_external_id(&key).unwrap(),
-            Some(entity),
-            "the key names its entity {when}"
-        );
-        assert_eq!(
-            engine.external_id_of(entity).unwrap(),
-            Some(key.clone()),
-            "the entity names its key {when}"
-        );
-    };
-    let reopen = |engine: Engine| {
-        drop(engine);
-        let mut engine = Engine::open(
-            &root,
-            &tmp.path().join("cache"),
-            &tmp.path().join("wal.log"),
-            tessera_plugin::Passthrough::new(),
-            config_uncapped(),
-        )
-        .expect("the bundle reopens");
-        engine.start_write_executor(8).expect("the executor starts");
-        engine
-    };
-
-    resolves_both_ways(&engine, "live");
-    let engine = reopen(engine);
-    resolves_both_ways(&engine, "after a restart");
-    fold(&engine);
-    resolves_both_ways(&engine, "after a fold");
-    let engine = reopen(engine);
-    resolves_both_ways(&engine, "after a fold and a restart");
-}
-
-/// **New items for two views in one commit window each keep their external id, both ways, once
-/// the answers come from the sidecar.** Batches sent in turn allocate interleaved ids to `s0` and
-/// `s1`, so the two flushes' locator extents overlap; a restart past the log's rotation leaves the live map
-/// empty.
-#[test]
-fn interleaved_new_items_in_two_views_resolve_both_ways_from_the_sidecar() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
-    create_view(&engine, "s1");
-
-    let keys: Vec<Vec<u8>> = (0..6).map(|i| format!("mixed-{i}").into_bytes()).collect();
-    let rows: Vec<UnallocatedRow> = keys
-        .iter()
-        .enumerate()
-        .map(|(i, key)| UnallocatedRow {
-            external_id: Some(key.clone()),
-            view: if i % 2 == 0 { "s0" } else { "s1" }.to_string(),
-            join: None,
-            descriptors: vec![b"0".to_vec()],
-            x: 5.0,
-            y: 5.0,
-            scalars: Vec::new(),
-            terms: engine.resolve_terms(&[b"0".to_vec()]),
-            scoped: Vec::new(),
-        })
-        .collect();
-    // A batch names one view, so each row is its own batch; sent in turn, their ids alternate
-    // between the two views.
-    let entities: Vec<EntityId> = rows
-        .into_iter()
-        .enumerate()
-        .map(|(i, row)| {
-            engine
-                .ingest_rows(vec![row], format!("mixed-{i}"), [0u8; 32])
-                .expect("the batch is accepted")[0]
-        })
-        .collect();
-    wait_ticking(&engine, "both views to flush", || {
-        engine.request_flush();
-        engine.generation().buffer.is_empty()
-    });
-
-    drop(engine);
-    let engine = Engine::open(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
-        config_uncapped(),
-    )
-    .expect("the bundle reopens");
-    assert!(
-        engine.accepted_batch("mixed").is_none(),
-        "the log rotated past the batch, so no live map answers for it"
-    );
-    let mut wrong = Vec::new();
-    for (key, entity) in keys.iter().zip(&entities) {
-        let name = String::from_utf8_lossy(key).into_owned();
-        if engine.resolve_external_id(key).unwrap() != Some(*entity) {
-            wrong.push(format!("{name}: key to entity"));
-        }
-        if engine.external_id_of(*entity).unwrap() != Some(key.clone()) {
-            wrong.push(format!("{name}: entity to key"));
-        }
-    }
-    assert!(wrong.is_empty(), "answered wrong from the sidecar: {wrong:?}");
-    drop(engine);
-    tessera_build::verify_deep(&root, &Default::default())
-        .expect("the bundle's two external-id directions agree under the lookup the sidecar uses");
-}
-
-/// **A join keeps its entity's key when the view holding the entity's own row is dropped before
-/// that row flushes.** The drop discards the own row, so the join's flush is the only record of
-/// the binding; after a restart past the log's rotation the key still resolves both ways.
-#[test]
-fn a_join_keeps_its_key_when_the_binding_view_is_dropped_before_it_flushes() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
-    create_quarter_q2(&engine);
-
-    let key = b"dropped-binding".to_vec();
-    let row = |view: &str| UnallocatedRow {
-        external_id: Some(key.clone()),
-        view: view.to_string(),
-        join: None,
-        descriptors: vec![b"0".to_vec()],
-        x: 5.0,
-        y: 5.0,
-        scalars: Vec::new(),
-        terms: engine.resolve_terms(&[b"0".to_vec()]),
-        scoped: Vec::new(),
-    };
-    let entity = engine
-        .ingest_rows(vec![row("quarter:q2")], "own".to_string(), [0u8; 32])
-        .expect("the item is accepted")[0];
-    let joined = engine
-        .ingest_rows(vec![row("s0")], "join".to_string(), [0u8; 32])
-        .expect("the join is accepted");
-    assert_eq!(joined, vec![entity], "a known external id joins its entity");
-    engine
-        .drop_view("quarter".into(), "q2".into())
-        .expect("the view drops");
-    wait_ticking(&engine, "the join to flush", || {
-        engine.request_flush();
-        engine.generation().buffer.is_empty()
-    });
-
-    drop(engine);
-    let engine = Engine::open(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
-        config_uncapped(),
-    )
-    .expect("the bundle reopens");
-    assert!(
-        engine.accepted_batch("join").is_none(),
-        "the log rotated past the batches, so no live map answers for them"
-    );
-    assert_eq!(engine.resolve_external_id(&key).unwrap(), Some(entity), "the key names its entity");
-    assert_eq!(engine.external_id_of(entity).unwrap(), Some(key), "the entity names its key");
-}
-
 /// A view group `quarter` with one view, `quarter:q2`, over a 1000 by 1000 frame.
 fn create_quarter_q2(engine: &Engine) {
     engine
@@ -3245,18 +2719,15 @@ fn create_quarter_q2(engine: &Engine) {
         .expect("the view is created");
 }
 
-/// **A fold publishes when a dropped view held the highest entity a run binds.** The surviving
-/// views' rows end below it; the drop deleted the item, which was in no other view, and the fold
-/// removes its binding with it.
+/// **A fold publishes when a dropped view held the highest entity.** The surviving views' rows
+/// end below it; the drop deleted the item, which was in no other view.
 #[test]
 fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
     create_quarter_q2(&engine);
-    let key = b"dropped-view-item".to_vec();
     let row = UnallocatedRow {
-        external_id: Some(key.clone()),
         view: "quarter:q2".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -3279,6 +2750,8 @@ fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
     assert_eq!(dropped.deleted, 1, "the drop deletes the item it leaves in no view");
 
     fold(&engine);
-    assert_eq!(engine.resolve_external_id(&key).unwrap(), None, "the key names nothing");
-    assert_eq!(engine.external_id_of(entity).unwrap(), None, "the entity names no key");
+    assert!(
+        !engine.generation().overlay.is_deleted(entity) && engine.overlay_depth() == 0,
+        "the fold removed the dropped item's row, so its deletion retired"
+    );
 }

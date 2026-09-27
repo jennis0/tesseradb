@@ -624,7 +624,6 @@ fn concurrent_ingest_and_change_both_survive() {
         // A caller does not name the entity id at all: the executor assigns it.
         let row = tessera_lifecycle::IngestRow {
             tessera_id: None,
-            external_id: Some(new_external_id.clone()),
             labels: Some(vec![b"0".to_vec()]),
             position: Some((5.0, 5.0)),
             scalars: Vec::new(),

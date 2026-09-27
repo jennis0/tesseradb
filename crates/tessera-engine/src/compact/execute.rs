@@ -8,7 +8,7 @@ use tessera_store::edited::{EditedRows, RowEntities};
 use tessera_store::manifest::{DeclaredScalar, FileDigest, ManifestVocabulary, SegmentDescriptor};
 use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::{
-    fold_external_id_runs, fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
+    fold_row_space, FoldRowSpaceSpec, FoldSegmentInput, PairsParquetWriter,
 };
 use tessera_types::IdentityKey;
 
@@ -61,8 +61,6 @@ pub(crate) struct CompletedFold {
     pub(crate) segments: Vec<SegmentDescriptor>,
     /// The files the fold wrote. Publication adds the carried files' digests for `MANIFEST.json`.
     pub(crate) files: BTreeMap<String, FileDigest>,
-    /// Run 0's path, or `None` when the deployment holds no external ids.
-    pub(crate) external_id_run: Option<String>,
     /// Each unique column's new base runs, in key order with disjoint ranges.
     pub(crate) unique: Vec<(String, Vec<tessera_store::manifest::BaseKeyRun>)>,
     /// The edited-items map's new base runs, each direction in key order with disjoint ranges.
@@ -137,9 +135,6 @@ pub(crate) fn execute(
     let term_images = derive_term_images(&plan, &ctx, &segments, &postings_path, &mut out)?;
     stairs.record("2b term images");
 
-    let external_id_run = fold_external_ids(&plan, &ctx, &entities_dir, &mut out)?;
-    stairs.record("3 external ids");
-
     let unique = fold_unique_indexes(&plan, &ctx, &mut out)?;
     stairs.record("3b unique indexes");
 
@@ -164,7 +159,6 @@ pub(crate) fn execute(
         prefix: ctx.to_prefix,
         segments,
         files,
-        external_id_run,
         unique,
         edited,
         term_images,
@@ -408,42 +402,6 @@ fn derive_term_images(
     }
 
     Ok(term_images)
-}
-
-/// Pass 3: external-id run 0 and its locator, over every entity a snapshot run binds.
-/// Tombstoned entities' keys are dropped, or a lawful re-ingest of that external id would be
-/// refused once retirement lifts the deletion.
-fn fold_external_ids(
-    plan: &FoldPlan,
-    ctx: &FoldContext,
-    entities_dir: &Path,
-    out: &mut FoldOutput,
-) -> Result<Option<String>, MaintenanceFailed> {
-    let external_id_run = if plan.runs.is_empty() {
-        None
-    } else {
-        let run_paths: Vec<PathBuf> = plan
-            .runs
-            .iter()
-            .map(|rel| ctx.from_prefix_dir.join(rel))
-            .collect();
-        fold_external_id_runs(
-            &run_paths,
-            0,
-            plan.external_id_bound.saturating_sub(1),
-            &plan.tombstones,
-            entities_dir,
-        )
-        .map_err(failed("pass 3 (external ids)"))?;
-        // Run 0 stays first: the sidecar finds the base locator from its directory.
-        let run_rel = format!("partitions/{}/entities/external-ids.arrow", plan.partition);
-        let locator_rel = format!("partitions/{}/entities/ext-locator.u32", plan.partition);
-        out.push(run_rel.clone(), entities_dir.join("external-ids.arrow"));
-        out.push(locator_rel, entities_dir.join("ext-locator.u32"));
-        Some(run_rel)
-    };
-
-    Ok(external_id_run)
 }
 
 /// Pass 3b: each unique column's runs, base and live, merged into new base runs with the

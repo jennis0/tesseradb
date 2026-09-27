@@ -68,7 +68,6 @@ fn fixture(tmp: &Path) -> PathBuf {
 /// Ingest one item at (5, 5) carrying the fixture's `ALL_TERM`.
 fn ingest(engine: &Engine, external_id: &str) -> EntityId {
     let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -381,14 +380,12 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
         .expect("the view is created");
     tick(&engine);
 
-    // One row into each view, in one window, so both views have a plan at the same tick. The
-    // anchor holds the older entity id — ids are assigned by signature then external id, and
-    // "anchor" sorts below "joiner" — so `s1`'s plan is the one the dispatch sends first.
-    let ingest_into = |batch: &str, view: &str, external_id: &str, descriptors: Vec<Vec<u8>>| {
+    // One row into each view, so both views have a plan at the same tick. The anchor holds the
+    // older entity id — it is ingested first — so `s1`'s plan is the one the dispatch sends first.
+    let ingest_into = |batch: &str, view: &str, join: Option<EntityId>, descriptors: Vec<Vec<u8>>| {
         let row = UnallocatedRow {
-            external_id: Some(external_id.as_bytes().to_vec()),
             view: view.to_string(),
-            join: None,
+            join,
             x: 5.0,
             y: 5.0,
             scalars: Vec::new(),
@@ -400,11 +397,10 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
             .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
             .expect("ingest is accepted")[0]
     };
-    ingest_into("b-anchor", JOINED_VIEW, "anchor", vec![b"0".to_vec(), b"1".to_vec()]);
-    let joiner = ingest_into("b-own", "s0", "joiner", vec![b"0".to_vec()]);
-    // The same external id in the other view: the admission resolves it to `joiner` and the row
-    // becomes a join, carrying geometry and no terms of its own.
-    ingest_into("b-join", JOINED_VIEW, "joiner", vec![b"0".to_vec()]);
+    ingest_into("b-anchor", JOINED_VIEW, None, vec![b"0".to_vec(), b"1".to_vec()]);
+    let joiner = ingest_into("b-own", "s0", None, vec![b"0".to_vec()]);
+    // `joiner` in the other view: the row is a join, carrying geometry and no terms of its own.
+    ingest_into("b-join", JOINED_VIEW, Some(joiner), vec![b"0".to_vec()]);
 
     // Let `s1`'s flush publish and park `s0`'s before it commits its side-manifest.
     faults.arm_pause_after(PauseSite::BeforeManifestPublish, PauseAction::Stall, 1);
@@ -567,11 +563,10 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
         tick(&engine);
 
         let ingest_into =
-            |batch: &str, view: &str, external_id: &str, descriptors: Vec<Vec<u8>>| {
+            |batch: &str, view: &str, join: Option<EntityId>, descriptors: Vec<Vec<u8>>| {
                 let row = UnallocatedRow {
-                    external_id: Some(external_id.as_bytes().to_vec()),
                     view: view.to_string(),
-                    join: None,
+                    join,
                     x: 5.0,
                     y: 5.0,
                     scalars: Vec::new(),
@@ -586,11 +581,11 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
         ingest_into(
             "b-anchor",
             JOINED_VIEW,
-            "anchor",
+            None,
             vec![b"0".to_vec(), b"1".to_vec()],
         );
-        let joiner = ingest_into("b-own", "s0", "joiner", vec![b"0".to_vec()]);
-        ingest_into("b-join", JOINED_VIEW, "joiner", vec![b"0".to_vec()]);
+        let joiner = ingest_into("b-own", "s0", None, vec![b"0".to_vec()]);
+        ingest_into("b-join", JOINED_VIEW, Some(joiner), vec![b"0".to_vec()]);
 
         // `s1` publishes; `s0`'s publication dies at the seam with its files on disc and nothing
         // durable naming them.
@@ -636,7 +631,6 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
         let mut unrelated = Vec::new();
         for n in 0..3u32 {
             let row = UnallocatedRow {
-                external_id: Some(format!("unrelated-{n}").into_bytes()),
                 view: JOINED_VIEW.to_string(),
                 join: None,
                 x: 5.0,

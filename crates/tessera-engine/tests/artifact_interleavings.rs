@@ -205,15 +205,15 @@ fn body_hash(seed: &str) -> [u8; 32] {
     hash
 }
 
-fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
+/// A new item at `(x, y)` holding the `id` of `key`.
+fn row(engine: &Engine, key: &str, x: f64, y: f64) -> UnallocatedRow {
     let descriptors = vec![b"0".to_vec()];
     UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         x,
         y,
-        scalars: Vec::new(),
+        scalars: keyed(key),
         terms: engine.resolve_terms(&descriptors),
         descriptors,
         scoped: Vec::new(),
@@ -841,10 +841,7 @@ fn a_batchs_rows_and_its_joins_are_durable_together_and_applied_together() {
                 "the mint record is durable and the level does not hold it yet"
             );
             assert!(
-                engine
-                    .resolve_external_id(b"b1")
-                    .expect("the lookup answers")
-                    .is_none(),
+                item_of_key(&engine, "b1").is_none(),
                 "and the row it was appended beside is not in force either"
             );
 
@@ -863,10 +860,7 @@ fn a_batchs_rows_and_its_joins_are_durable_together_and_applied_together() {
         "the mint replayed from the log"
     );
     assert!(
-        engine
-            .resolve_external_id(b"b1")
-            .expect("the lookup answers")
-            .is_some(),
+        item_of_key(&engine, "b1").is_some(),
         "and so did the row that named it — one fsync covered both"
     );
     settle(&engine);
@@ -930,10 +924,7 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
         "and none replayed: the record was never written"
     );
     assert!(
-        engine
-            .resolve_external_id(b"b1")
-            .expect("the lookup answers")
-            .is_none(),
+        item_of_key(&engine, "b1").is_none(),
         "nor did the row, which is the half that would otherwise be a point with no membership"
     );
 }

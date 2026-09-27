@@ -27,7 +27,6 @@ impl IngestRows for Engine {
             .into_iter()
             .map(|row| IngestRow {
                 tessera_id: None,
-                external_id: row.external_id,
                 labels: Some(row.descriptors),
                 position: Some((row.x, row.y)),
                 scalars: row.scalars,

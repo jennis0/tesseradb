@@ -249,8 +249,7 @@ impl Engine {
     }
 
     /// Publish a new prefix this process just wrote: open it, rotate the term index, the bundle
-    /// identity, the fragment cache and the external-id sidecar onto it, retire `retired`, and
-    /// swap.
+    /// identity and the fragment cache onto it, retire `retired`, and swap.
     ///
     /// No production caller: a fold publishes from the executor thread instead, calling
     /// [`open_rotation`] directly and inline, since submitting to the executor from the executor

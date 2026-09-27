@@ -1,35 +1,34 @@
-//! **Edit is delete + re-ingest, and a deleted holder is forgotten** (decision 0047, owner-ruled
-//! 2026-08-04): our retention of a dead external-id binding must never refuse a user's write.
-//! The duplicate check counts only non-deleted holders, re-ingest re-binds the id, and
-//! resolution prefers the newest binding — through the live map while the WAL holds the rows,
-//! and through the newest-run-first sidecar walk after rotation has reclaimed them.
+//! **A deleted holder of a unique value is forgotten**: our retention of a deleted item's value
+//! must never refuse a user's write. The check counts only live holders, a re-ingest gives the
+//! value to a new item, and a lookup names that item — while the WAL holds the rows, and through
+//! the key runs after rotation has reclaimed them.
 
 mod common;
 
 use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, IngestRequest};
-use tessera_lifecycle::{ChangeOp, IngestRow, UnallocatedRow};
+use tessera_engine::{Engine, EngineConfig};
+use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 
 const WAIT: Duration = Duration::from_secs(10);
 
-fn row(engine: &Engine, external_id: &[u8]) -> UnallocatedRow {
+/// A new item holding the `id` of `key`.
+fn row(engine: &Engine, key: &str) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
         x: 0.5,
         y: 0.5,
-        scalars: Vec::new(),
+        scalars: keyed(key),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
         scoped: Vec::new(),
     }
 }
 
 #[test]
-fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restart() {
+fn delete_then_reingest_gives_the_value_to_the_new_item_across_flush_rotation_and_restart() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     build_fixture(
@@ -62,10 +61,10 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
     };
     let engine = open();
 
-    // First life: ingest doc-1, flush it so its binding reaches a sidecar run.
+    // First life: ingest doc-1, flush it so its value reaches a key run.
     let first = engine
         .ingest_rows(
-            vec![row(&engine, b"doc-1")],
+            vec![row(&engine, "doc-1")],
             "life-1".to_string(),
             [1u8; 32],
         )
@@ -75,20 +74,20 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
         engine.generation().segments_version >= 1
     });
 
-    // Delete it. The binding is now a dead one and must not block a user's write.
+    // Delete it. Its value is now held by a deleted item and must not block a user's write.
     engine
         .accept_change(first, ChangeOp::Delete)
         .expect("delete accepted");
 
-    // Second life: same external id, accepted — the executor's own backstop check is the one
-    // this exercises (no HTTP handler in front of it here).
+    // Second life: the same value, accepted — the executor's own backstop check is the one this
+    // exercises (no HTTP handler in front of it here).
     let second = engine
         .ingest_rows(
-            vec![row(&engine, b"doc-1")],
+            vec![row(&engine, "doc-1")],
             "life-2".to_string(),
             [2u8; 32],
         )
-        .expect("a deleted holder does not block re-ingest (decision 0047)")[0];
+        .expect("a deleted holder does not block re-ingest")[0];
     assert_ne!(
         first, second,
         "I9: the dead entity's id is burned, never reused"
@@ -100,24 +99,21 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
     });
 
     // Restart onto the rotated log: the buffer was drained by the flushes, so rotation reclaimed
-    // the IngestBatch records and the live map comes back empty — resolution must find the
-    // newest binding through the sidecar's newest-run-first walk, not the reclaimed WAL.
+    // the IngestBatch records — the lookup must find the live holder through the key runs, not
+    // the reclaimed WAL.
     drop(engine);
     let reopened = open();
-    let resolved = reopened
-        .resolve_external_id(b"doc-1")
-        .expect("resolution succeeds")
-        .expect("doc-1 still names something");
+    let resolved = item_of_key(&reopened, "doc-1").expect("doc-1 still names something");
     assert_eq!(
         resolved, second,
-        "resolution must prefer the newest binding: the deleted first life is forgotten"
+        "the lookup names the live holder: the deleted first life is forgotten"
     );
     assert!(
         reopened.generation().overlay.is_deleted(first),
         "the first life's deny survives rotation and restart"
     );
 
-    // And the live binding is fully operable: a suppress by external id lands on the second life.
+    // And the value is fully operable: a suppress through it lands on the second life.
     reopened
         .accept_change(resolved, ChangeOp::Suppress)
         .expect("suppress accepted");
@@ -154,52 +150,23 @@ fn open_engine(dir: &std::path::Path) -> Engine {
     engine
 }
 
-/// A suppressed item still holds its external id: the same row sent again names it and changes
-/// nothing, rather than creating a copy no deny reaches. The copy stays hidden.
+/// A suppressed item still holds its unique value: the same row sent again names it and changes
+/// nothing, rather than creating a copy no deny reaches.
 #[test]
 fn a_suppressed_holder_is_named_by_a_reingest_and_no_copy_is_made() {
     let tmp = tempfile::TempDir::new().unwrap();
     let engine = open_engine(tmp.path());
 
     let entity = engine
-        .ingest_rows(vec![row(&engine, b"doc-2")], "s-1".to_string(), [3u8; 32])
+        .ingest_rows(vec![row(&engine, "doc-2")], "s-1".to_string(), [3u8; 32])
         .expect("ingest accepted")[0];
     engine
         .accept_change(entity, ChangeOp::Suppress)
         .expect("suppress accepted");
 
     let again = engine
-        .ingest_rows(vec![row(&engine, b"doc-2")], "s-2".to_string(), [4u8; 32])
+        .ingest_rows(vec![row(&engine, "doc-2")], "s-2".to_string(), [4u8; 32])
         .expect("a row naming a suppressed item is accepted");
     assert_eq!(again, vec![entity], "the row names the suppressed item");
-    assert_eq!(engine.resolve_external_id(b"doc-2").unwrap(), Some(entity));
-}
-
-/// **An item created with no external id answers none once a flush has written it**, rather than
-/// failing the lookup.
-#[test]
-fn an_item_created_without_an_external_id_answers_none_after_its_flush() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let engine = open_engine(tmp.path());
-    let receipt = engine
-        .ingest(IngestRequest {
-            batch_id: "bare".to_string(),
-            body_hash: [1u8; 32],
-            view: Some("s0".to_string()),
-            rows: vec![IngestRow {
-                tessera_id: None,
-                external_id: None,
-                labels: Some(vec![b"0".to_vec()]),
-                position: Some((0.5, 0.5)),
-                scalars: Vec::new(),
-                scoped: Vec::new(),
-                omitted: Vec::new(),
-            }],
-            artifacts: Default::default(),
-        })
-        .expect("the batch is accepted");
-    let entity =
-        engine.resolve_tessera_ids(&receipt.tessera_ids).unwrap()[0].expect("the item it made");
-    publish_buffered(&engine);
-    assert_eq!(engine.external_id_of(entity).expect("the lookup answers"), None);
+    assert_eq!(item_of_key(&engine, "doc-2"), Some(entity));
 }

@@ -38,9 +38,6 @@ pub(crate) struct FoldPlan {
     pub(crate) views: Vec<FoldViewPlan>,
     /// Prefix-relative, in the live manifest's order.
     pub(crate) tiers: Vec<String>,
-    /// Prefix-relative, oldest first.
-    pub(crate) runs: Vec<String>,
-    pub(crate) locator_extents: Vec<String>,
     pub(crate) attr_extents: Vec<AttrExtent>,
     pub(crate) record_extents: Vec<RecordExtent>,
     pub(crate) entity_terms_extents: Vec<tessera_store::manifest::EntityTermsExtent>,
@@ -52,9 +49,9 @@ pub(crate) struct FoldPlan {
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity with a row in this partition at the snapshot.
     pub(crate) entity_bound: u64,
-    /// Where the base external-id run and locator end: the larger of [`Self::entity_bound`] and
-    /// one past the highest entity a snapshot run binds, which a dropped view's rows can hold.
-    pub(crate) external_id_bound: u64,
+    /// The high-water the new bundle manifest records: the larger of [`Self::entity_bound`] and
+    /// the bundle's own, which a dropped view's rows can hold.
+    pub(crate) high_water: u64,
     pub(crate) dict_len: u32,
     pub(crate) small_term_threshold: u32,
     /// A publication into a prefix other than this one is discarded.
@@ -141,7 +138,6 @@ pub(super) const TERM_IMAGE_MANIFEST_N: u64 = 0;
 /// | term | basis |
 /// |---|---|
 /// | 4 B × permutation bound | `permutation.bin`, written through a mapping |
-/// | 4 B × entity bound | `ext-locator.u32`, same |
 /// | 8 B × dictionary length | `PostingsSpool`'s offsets buffer |
 /// | 90 B × membership containers | the artifact pass's row forms |
 /// | threads × (posting + image + frozen + scratch) | pass 2b's window and its projection |
@@ -149,14 +145,12 @@ pub(super) const TERM_IMAGE_MANIFEST_N: u64 = 0;
 /// The permutation and image terms take the widest view: passes 1 and 2b go one view at a time.
 pub(crate) fn memory_estimate(
     permutation_bound: u64,
-    entity_bound: u64,
     dict_len: u64,
     membership_containers: u64,
     base_rows: u64,
 ) -> u64 {
     let terms = 4u64
         .saturating_mul(permutation_bound)
-        .saturating_add(4u64.saturating_mul(entity_bound))
         .saturating_add(8u64.saturating_mul(dict_len))
         .saturating_add(ARTIFACT_BYTES_PER_CONTAINER.saturating_mul(membership_containers))
         .saturating_add(term_image_estimate(dict_len, permutation_bound, base_rows));
@@ -301,7 +295,6 @@ pub(crate) fn plan_fold(
         // The widest view's permutation bound is the partition's entity bound.
         let need = memory_estimate(
             entity_bound,
-            entity_bound,
             u64::from(dict_len),
             resources.membership_containers,
             views.iter().map(|view| view.rows).max().unwrap_or(0),
@@ -327,22 +320,12 @@ pub(crate) fn plan_fold(
     }
 
     let tombstones = generation.overlay.deleted_set().clone();
-    let external_id_bound = manifest
-        .locator_extents
-        .iter()
-        .map(|extent| extent.entity_hi + 1)
-        .fold(entity_bound.max(generation.bundle.manifest.entity_id_high_water), u64::max);
+    let high_water = entity_bound.max(generation.bundle.manifest.entity_id_high_water);
 
     Ok(FoldPlan {
         partition: partition.clone(),
         views,
         tiers: manifest.deltas.clone(),
-        runs: manifest.external_id_runs.clone(),
-        locator_extents: manifest
-            .locator_extents
-            .iter()
-            .map(|extent| extent.path.clone())
-            .collect(),
         attr_extents: manifest.attr_extents.clone(),
         record_extents: manifest.record_extents.clone(),
         entity_terms_extents: manifest.entity_terms_extents.clone(),
@@ -351,7 +334,7 @@ pub(crate) fn plan_fold(
         edited: manifest.edited_items.clone(),
         tombstones,
         entity_bound,
-        external_id_bound,
+        high_water,
         dict_len,
         small_term_threshold: generation.bundle.manifest.small_term_threshold,
         prefix: generation.prefix.clone(),
@@ -362,24 +345,24 @@ pub(crate) fn plan_fold(
 mod tests {
     use super::*;
 
-    /// A billion entities over 117 million terms: about 9.4 GB, doubled by the safety factor.
+    /// A billion entities over 117 million terms: about 5.4 GB, doubled by the safety factor.
     #[test]
-    fn the_memory_estimate_at_a_billion_entities_is_about_19_gb() {
-        let need = memory_estimate(1_000_000_000, 1_000_000_000, 117_000_000, 0, 1_000_000_000);
+    fn the_memory_estimate_at_a_billion_entities_is_about_11_gb() {
+        let need = memory_estimate(1_000_000_000, 117_000_000, 0, 1_000_000_000);
         let gb = need as f64 / 1e9;
-        assert!((17.0..=19.0).contains(&gb), "estimate is {gb:.1} GB");
+        assert!((10.0..=11.5).contains(&gb), "estimate is {gb:.1} GB");
     }
 
-    /// Four bytes per entity for the permutation and four for the locator, doubled.
+    /// Four bytes per entity for the permutation, doubled.
     #[test]
-    fn the_estimate_charges_one_permutation_and_one_locator() {
+    fn the_estimate_charges_one_permutation() {
         assert_eq!(
-            memory_estimate(1_000, 1_000, 0, 0, 1_000),
-            (4 * 1_000 + 4 * 1_000) * 2,
+            memory_estimate(1_000, 0, 0, 1_000),
+            4 * 1_000 * 2,
             "no terms, so no images"
         );
         // 8 B per dictionary ordinal, whatever the entity space.
-        assert_eq!(memory_estimate(0, 0, 1_000, 0, 0), 8 * 1_000 * 2);
+        assert_eq!(memory_estimate(0, 1_000, 0, 0), 8 * 1_000 * 2);
     }
 
     /// Pass 2b is charged one posting, one image, its buffer and one scratch, and only where it
@@ -387,12 +370,12 @@ mod tests {
     #[test]
     fn the_estimate_charges_one_posting_one_image_one_buffer_and_one_scratch() {
         assert_eq!(
-            memory_estimate(0, 0, 0, 0, 1_000_000),
+            memory_estimate(0, 0, 0, 1_000_000),
             0,
             "no terms, so no images"
         );
         assert_eq!(
-            memory_estimate(0, 0, 1, 0, 0),
+            memory_estimate(0, 1, 0, 0),
             8 * 2,
             "no rows, so no images"
         );
@@ -401,19 +384,19 @@ mod tests {
         };
         // One container of rows: an 8 KiB image and a buffer of the same width.
         assert_eq!(
-            memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER),
+            memory_estimate(0, 1, 0, VALUES_PER_CONTAINER),
             (8 + 2 * BYTES_PER_BITSET_CONTAINER + scratch(0, VALUES_PER_CONTAINER))
                 * FOLD_MEMORY_SAFETY_FACTOR
         );
         // One more row adds a container to the image and to the buffer.
         assert_eq!(
-            memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER + 1),
+            memory_estimate(0, 1, 0, VALUES_PER_CONTAINER + 1),
             (8 + 4 * BYTES_PER_BITSET_CONTAINER + scratch(0, VALUES_PER_CONTAINER + 1))
                 * FOLD_MEMORY_SAFETY_FACTOR
         );
         // A container of entity space adds its 4 B per entity and one posting container.
         assert_eq!(
-            memory_estimate(VALUES_PER_CONTAINER, 0, 1, 0, VALUES_PER_CONTAINER),
+            memory_estimate(VALUES_PER_CONTAINER, 1, 0, VALUES_PER_CONTAINER),
             (4 * VALUES_PER_CONTAINER
                 + 8
                 + 3 * BYTES_PER_BITSET_CONTAINER
@@ -434,8 +417,8 @@ mod tests {
     /// measured, before doubling.
     #[test]
     fn the_estimate_charges_the_artifact_pass_per_container() {
-        assert_eq!(memory_estimate(0, 0, 0, 0, 0), 0, "no artifacts, no charge");
-        let need = memory_estimate(0, 0, 0, 40_000_000, 0);
+        assert_eq!(memory_estimate(0, 0, 0, 0), 0, "no artifacts, no charge");
+        let need = memory_estimate(0, 0, 40_000_000, 0);
         let gb = need as f64 / 1e9 / FOLD_MEMORY_SAFETY_FACTOR as f64;
         assert!((3.2..=3.9).contains(&gb), "priced at {gb:.1} GB");
     }

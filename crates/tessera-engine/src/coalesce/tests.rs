@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use tessera_authz::DictStreamWriter;
 use tessera_filter::RecordField;
 use tessera_store::manifest::{Quantisation, SegmentsManifest, DECLARED_INCARNATION};
-use tessera_store::{ExternalIdSidecar, FlushOutput};
+use tessera_store::manifest::UniqueIndexRuns;
+use tessera_store::FlushOutput;
 use tessera_types::view::ViewIncarnation;
 use tessera_types::{AttrLocalId, EntityId, TermId};
 
@@ -77,7 +78,7 @@ impl Fixture {
         }
     }
 
-    /// The build's run and dictionary, then four flushes of every kind the coalesce takes.
+    /// The build's segment and dictionary, then four flushes of every kind the coalesce takes.
     fn with_every_kind() -> Self {
         let mut fx = Fixture::empty();
         fx.write_build();
@@ -120,8 +121,7 @@ impl Fixture {
         execute_coalesce(plan, ctx)
     }
 
-    /// A geometry segment with its external-id run and locator. Every entity ending in 2 has no
-    /// external id.
+    /// A geometry segment.
     fn write_segment(&self, seg: &str, entities: &[u32], row_base: u32) -> FlushOutput {
         let key = tessera_types::IdentityKey::from_hex("0123456789abcdef0123456789abcdef").unwrap();
         let rows = entities
@@ -129,7 +129,6 @@ impl Fixture {
             .map(|&e| tessera_store::FlushRow {
                 entity_id: EntityId::new(e.into()),
                 number: EntityId::new(e.into()),
-                external_id: (e % 10 != 2).then(|| format!("ext-{e}").into_bytes()),
                 x: 0.5,
                 y: 0.5,
                 scalars: Vec::new(),
@@ -151,7 +150,7 @@ impl Fixture {
             row_base,
             entity_floor: 0,
         };
-        tessera_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input, &[]).unwrap()
+        tessera_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input).unwrap()
     }
 
     fn write_dict(&self, dir_rel: &str, descriptors: &[String]) -> String {
@@ -165,12 +164,10 @@ impl Fixture {
         format!("{dir_rel}/terms-0.dict")
     }
 
-    /// What the build leaves: a run and a dictionary that `MANIFEST.json` digests.
+    /// What the build leaves: a segment and a dictionary that `MANIFEST.json` digests.
     fn write_build(&mut self) {
         let base = self.write_segment("base", &[0, 1, 2, 3], 0);
         self.build_files.extend(base.files);
-        let run = base.locator_extent.expect("the base binds").external_id_run;
-        self.manifest.external_id_runs.push(run);
         let path = self.write_dict("terms", &["base-0".into(), "base-1".into()]);
         self.build_files.insert(path.clone(), self.digest_of(&path));
         self.manifest.dict_extents.push(DictExtent { path, records: 2 });
@@ -179,7 +176,7 @@ impl Fixture {
     fn write_flush(&mut self, flush: u32) {
         let entities = entities_of(flush);
         let seg = format!("flush-{flush}-1");
-        let seg_rel = self.write_bindings(flush, &entities);
+        let seg_rel = self.write_geometry(flush, &entities);
 
         let tier = format!("{seg_rel}/delta.arrow");
         let pairs = [
@@ -213,15 +210,14 @@ impl Fixture {
         self.write_entity_terms(&seg, flush, &entities);
     }
 
-    /// A flush's segment, external-id run and locator extent, listed; returns its directory.
-    fn write_bindings(&mut self, flush: u32, entities: &[u32]) -> String {
+    /// A flush's segment, listed; returns its directory.
+    fn write_geometry(&mut self, flush: u32, entities: &[u32]) -> String {
         let seg = format!("flush-{flush}-1");
         let segment = self.write_segment(&seg, entities, 4 + 3 * flush);
+        let columns = segment.files.keys().find(|rel| rel.ends_with("/columns.arrow"));
+        let seg_rel = columns.expect("a segment has columns").rsplit_once('/').unwrap().0;
+        let seg_rel = seg_rel.to_string();
         self.manifest.files.extend(segment.files);
-        let locator = segment.locator_extent.expect("the flush binds");
-        self.manifest.external_id_runs.push(locator.external_id_run.clone());
-        let seg_rel = locator.path.rsplit_once('/').unwrap().0.to_string();
-        self.manifest.locator_extents.push(locator);
         seg_rel
     }
 
@@ -397,40 +393,6 @@ impl Fixture {
         pairs
     }
 
-    /// Each flushed entity's external id, and the entity each external id resolves to.
-    fn external_ids(&self, manifest: &SegmentsManifest) -> Vec<(Option<Vec<u8>>, Option<u64>)> {
-        self.external_ids_of(manifest, flushed_entities())
-    }
-
-    /// [`Self::external_ids`] over `entities`, through a sidecar opened from `manifest` as a
-    /// restart opens it.
-    fn external_ids_of(
-        &self,
-        manifest: &SegmentsManifest,
-        entities: impl IntoIterator<Item = u32>,
-    ) -> Vec<(Option<Vec<u8>>, Option<u64>)> {
-        let generation = crate::Generation::synthetic(
-            "v00000",
-            0,
-            0,
-            tessera_lifecycle::Overlay::default(),
-            tessera_lifecycle::IngestBuffer::default(),
-        );
-        let mut bundle = generation.bundle.manifest.clone();
-        bundle.files = self.build_files.clone();
-        bundle.entity_id_high_water = 4;
-        let sidecar = ExternalIdSidecar::deferred_from_manifest(&bundle, manifest, &self.prefix_dir)
-            .unwrap();
-        entities
-            .into_iter()
-            .map(|e| {
-                let external_id = sidecar.external_id_of_checked(EntityId::new(e.into()), 100);
-                let entity = sidecar.resolve(format!("ext-{e}").as_bytes()).unwrap();
-                (external_id.unwrap(), entity.map(EntityId::raw))
-            })
-            .collect()
-    }
-
     /// The term id every descriptor resolves to through `dicts`.
     fn term_ids(&self, dicts: &[DictExtent]) -> Vec<Option<u32>> {
         let paths: Vec<PathBuf> = dicts.iter().map(|d| self.path(&d.path)).collect();
@@ -596,31 +558,6 @@ fn coalesced_tiers_keep_every_pair() {
     assert_eq!(c.after.deltas, replaced(&c.before().deltas, &consumed, &m.output.0));
     c.assert_files(consumed, [m.output.0.as_str()]);
     c.assert_reads_same(|fx, m| fx.tier_pairs(&m.deltas));
-}
-
-/// A coalesced run and its locator take the window's place behind the build's run, and every
-/// entity and external id resolves as before.
-#[test]
-fn coalesced_runs_keep_every_binding() {
-    let c = coalesced();
-    let m = c.completed.run.as_ref().expect("the runs are taken");
-    let runs: Vec<&str> = m.consumed.iter().map(|e| e.external_id_run.as_str()).collect();
-    let before_runs = &c.before().external_id_runs;
-    assert_eq!(c.after.external_id_runs, replaced(before_runs, &runs, &m.output.external_id_run));
-    let locators: Vec<&str> = m.consumed.iter().map(|e| e.path.as_str()).collect();
-    assert_eq!(
-        keys(&c.after.locator_extents, |e| &e.path),
-        replaced(
-            &keys(&c.before().locator_extents, |e| &e.path),
-            &locators,
-            &m.output.path
-        )
-    );
-    c.assert_files(
-        m.consumed.iter().flat_map(LocatorExtent::files),
-        m.output.files(),
-    );
-    c.assert_reads_same(|fx, m| fx.external_ids(m));
 }
 
 /// A coalesced dictionary extent takes the window's place after the build's, so every
@@ -830,35 +767,29 @@ fn digest(size: u64) -> FileDigest {
     }
 }
 
-/// `flushes` flushes of tiers, runs, dictionaries and two interleaved columns, digested but
-/// never written, behind the build's run and dictionary.
+/// `flushes` flushes of tiers, unique key runs, dictionaries and two interleaved columns,
+/// digested but never written, behind the build's dictionary.
 fn listed(flushes: u64) -> (SegmentsManifest, BTreeMap<String, FileDigest>) {
-    let build_files = BTreeMap::from([
-        ("entities/external-ids-0.arrow".to_string(), digest(4096)),
-        ("terms/terms-0.dict".to_string(), digest(4096)),
-    ]);
+    let build_files = BTreeMap::from([("terms/terms-0.dict".to_string(), digest(4096))]);
     let mut manifest = SegmentsManifest {
         dict_extents: vec![DictExtent {
             path: "terms/terms-0.dict".to_string(),
             records: 4,
         }],
-        external_id_runs: vec!["entities/external-ids-0.arrow".to_string()],
+        unique_indexes: vec![UniqueIndexRuns {
+            attribute: "doi".to_string(),
+            base: Vec::new(),
+            live: Vec::new(),
+        }],
         ..SegmentsManifest::empty()
     };
     for i in 0..flushes {
         let seg = format!("segments/flush-{i}");
-        for name in ["delta.arrow", "external-ids.arrow", "ext-locator.u32", "terms-0.dict"] {
+        for name in ["delta.arrow", "doi.keys", "terms-0.dict"] {
             manifest.files.insert(format!("{seg}/{name}"), digest(1024));
         }
         manifest.deltas.push(format!("{seg}/delta.arrow"));
-        manifest.external_id_runs.push(format!("{seg}/external-ids.arrow"));
-        manifest.locator_extents.push(LocatorExtent {
-            path: format!("{seg}/ext-locator.u32"),
-            entity_lo: i * 10,
-            entity_hi: i * 10 + 9,
-            listed: 0,
-            external_id_run: format!("{seg}/external-ids.arrow"),
-        });
+        manifest.unique_indexes[0].live.push(format!("{seg}/doi.keys"));
         manifest.dict_extents.push(DictExtent {
             path: format!("{seg}/terms-0.dict"),
             records: 1,
@@ -905,10 +836,10 @@ fn window_len(plan: &CoalescePlan, column: &str) -> Option<usize> {
     plan.attrs.iter().find(|w| w.column == column).map(|w| w.extents.len())
 }
 
-/// The build's run and dictionary are never taken, and every later entry is, whether the
-/// side-manifest digests it or a fold has moved its digest into `MANIFEST.json`.
+/// The build's dictionary is never taken, and every later entry is, whether the side-manifest
+/// digests it or a fold has moved its digest into `MANIFEST.json`.
 #[test]
-fn the_builds_run_and_dictionary_are_never_taken() {
+fn the_builds_dictionary_is_never_taken() {
     let (mut manifest, mut build_files) = listed(3);
     for folded in [false, true] {
         if folded {
@@ -916,9 +847,7 @@ fn the_builds_run_and_dictionary_are_never_taken() {
         }
         let plan = plan(&manifest, &build_files).expect("a plan");
         assert_eq!(plan.tiers, manifest.deltas, "folded: {folded}");
-        let runs: Vec<&String> = plan.locators.iter().map(|e| &e.external_id_run).collect();
-        let expected: Vec<&String> = manifest.external_id_runs[1..].iter().collect();
-        assert_eq!(runs, expected, "folded: {folded}");
+        assert_eq!(plan.unique[0].runs, manifest.unique_indexes[0].live, "folded: {folded}");
         let dicts: Vec<&String> = plan.dicts.iter().map(|e| &e.path).collect();
         let expected: Vec<&String> = manifest.dict_extents[1..].iter().map(|e| &e.path).collect();
         assert_eq!(dicts, expected, "folded: {folded}");
@@ -929,43 +858,14 @@ fn the_builds_run_and_dictionary_are_never_taken() {
 #[test]
 fn an_entry_with_an_undigested_file_is_not_taken() {
     let (mut manifest, build_files) = listed(3);
-    for name in ["delta.arrow", "ext-locator.u32", "terms-0.dict"] {
+    for name in ["delta.arrow", "doi.keys", "terms-0.dict"] {
         manifest.files.remove(&format!("segments/flush-1/{name}"));
     }
     manifest.files.remove("attrs/title/flush-1.roaring");
     let plan = plan(&manifest, &build_files).expect("a plan");
-    assert!(plan.tiers.is_empty() && plan.locators.is_empty() && plan.dicts.is_empty());
+    assert!(plan.tiers.is_empty() && plan.unique.is_empty() && plan.dicts.is_empty());
     let columns: Vec<&str> = plan.attrs.iter().map(|w| w.column.as_str()).collect();
     assert_eq!(columns, ["department"]);
-}
-
-/// Flushes whose entity ids interleave, as two views' flushes from one commit window do, have
-/// overlapping locator spans. They coalesce into one extent over the union of the spans, and every
-/// entity and external id resolves both ways as before, through a sidecar opened as a restart
-/// opens it.
-#[test]
-fn overlapping_locator_spans_coalesce_and_keep_every_binding() {
-    let mut fx = Fixture::empty();
-    fx.write_build();
-    let flushes = [vec![10, 13, 16], vec![11, 14, 17], vec![12, 15, 18]];
-    for (flush, entities) in flushes.iter().enumerate() {
-        fx.write_bindings(flush as u32, entities);
-    }
-    let entities = 10..=18;
-    let before = fx.external_ids_of(&fx.manifest, entities.clone());
-    for (entity, (key, resolved)) in entities.clone().zip(&before) {
-        let expected = (entity % 10 != 2).then(|| format!("ext-{entity}").into_bytes());
-        assert_eq!(key, &expected, "entity {entity} names its key");
-        assert_eq!(*resolved, expected.map(|_| u64::from(entity)), "ext-{entity} names its entity");
-    }
-
-    let plan = fx.plan().expect("a plan");
-    assert_eq!(plan.locators.len(), 3, "the overlapping extents are taken");
-    let completed = fx.execute(plan).expect("the pass writes");
-    let after = rebased(&fx.manifest, &completed).expect("nothing moved under the pass");
-    let merged = &completed.run.as_ref().expect("the runs are coalesced").output;
-    assert_eq!((merged.entity_lo, merged.entity_hi), (10, 18), "the union of the spans");
-    assert_eq!(fx.external_ids_of(&after, entities), before);
 }
 
 /// A window whose entries fall in two size classes is not taken.
@@ -977,15 +877,15 @@ fn a_window_spanning_two_size_classes_is_not_taken() {
     assert!(plan.tiers.is_empty());
 }
 
-/// Under the built-in policy the runs are taken four at a time while the other kinds wait for
+/// Under the built-in policy the key runs are taken four at a time while the other kinds wait for
 /// eight, and runs below the run floor share one size class with a run far larger than the other
 /// kinds' floor.
 #[test]
-fn the_runs_take_their_own_narrower_window_and_floor() {
+fn the_key_runs_take_their_own_narrower_window_and_floor() {
     let (mut manifest, build_files) = listed(4);
     manifest
         .files
-        .insert(manifest.external_id_runs[1].clone(), digest(8 << 20));
+        .insert(manifest.unique_indexes[0].live[1].clone(), digest(8 << 20));
     let plan = plan_coalesce(
         PARTITION,
         &manifest,
@@ -994,7 +894,7 @@ fn the_runs_take_their_own_narrower_window_and_floor() {
         &all_live,
     )
     .expect("the runs qualify");
-    assert_eq!(plan.locators.len(), 4);
+    assert_eq!(plan.unique[0].runs.len(), 4);
     assert!(plan.tiers.is_empty() && plan.dicts.is_empty() && plan.attrs.is_empty());
 }
 

@@ -1,14 +1,13 @@
 //! The entity-space coalesce, end to end (decision 0044's D2).
 //!
 //! What is asserted here is the pair of claims the pass exists for and the pair that makes it safe:
-//! the tier, run and dictionary-extent counts come **down** while every item stays visible and
-//! every external id still resolves to the same entity; and geometry does not move — no
+//! the tier, key-run and dictionary-extent counts come **down** while every item stays visible and
+//! every unique value still names the same entity; and geometry does not move — no
 //! `segments_version` bump, so no projection is invalidated and no session pays anything.
 //!
-//! The selection rules themselves are unit-tested beside the code (`crates/tessera-engine/src/coalesce.rs`); what needs a
-//! whole engine is that a published coalesce is *live* — the generation's tier list and the
-//! process's external-id sidecar both swapped, rather than a manifest edit the running process
-//! keeps ignoring until its next restart.
+//! The selection rules themselves are unit-tested beside the code; what needs a whole engine is
+//! that a published coalesce is *live* — the generation's tier list and unique indexes both
+//! swapped, rather than a manifest edit the running process keeps ignoring until its next restart.
 
 mod common;
 
@@ -16,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::wal::ChangeOp;
+use tessera_lifecycle::wal::{ChangeOp, WalScalar};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_types::EntityId;
 
@@ -26,25 +25,35 @@ const WAIT: Duration = Duration::from_secs(30);
 /// is selected.
 const WIDTH: usize = 8;
 
-/// The width of the external-id run and locator axis.
+/// The width of the unique key-run axis.
 const RUN_WIDTH: usize = 4;
 
-/// Drive ticks until the tiers are one and the runs are fewer than a run window, which is where
-/// every axis a coalesce takes has come to rest.
+/// The live key runs of the fixture's unique `id`.
+fn live_runs(manifest: &tessera_store::manifest::SegmentsManifest) -> &[String] {
+    &manifest.unique_indexes.iter().find(|i| i.attribute == "id").expect("`id` is unique").live
+}
+
+/// Drive ticks until the tiers are one and the key runs are fewer than a run window, which is
+/// where every axis a coalesce takes has come to rest.
 fn settle_coalesce(engine: &Engine) {
     tick_until(engine, "the coalesce to settle", WAIT, || {
         let generation = engine.generation();
         let manifest = &generation.bundle.partitions["default"].manifest;
-        generation.delta_postings.len() == 1 && manifest.locator_extents.len() < RUN_WIDTH
+        generation.delta_postings.len() == 1 && live_runs(manifest).len() < RUN_WIDTH
     });
 }
 
-/// The runs after a coalesce: the base run first and unchanged, one run per locator extent, and
-/// fewer extents than a run window.
-fn assert_runs_coalesced(after: &tessera_store::manifest::SegmentsManifest, base_run: &str) {
-    assert_eq!(after.external_id_runs[0], base_run);
-    assert_eq!(after.external_id_runs.len(), after.locator_extents.len() + 1);
-    assert!(after.locator_extents.len() < RUN_WIDTH);
+/// The key runs after a coalesce: the base runs unchanged, and fewer live runs than a run window.
+fn assert_runs_coalesced(
+    after: &tessera_store::manifest::SegmentsManifest,
+    before: &tessera_store::manifest::SegmentsManifest,
+) {
+    let base = |m: &tessera_store::manifest::SegmentsManifest| {
+        let index = m.unique_indexes.iter().find(|i| i.attribute == "id").unwrap();
+        index.base.iter().map(|run| run.path.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(base(after), base(before));
+    assert!(live_runs(after).len() < RUN_WIDTH);
 }
 
 fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
@@ -78,17 +87,16 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
 }
 
 /// One ingest carrying a **novel** descriptor, so the flush that takes it promotes and publishes a
-/// dictionary extent — which is what puts the third axis in play.
+/// dictionary extent — which is what puts the third axis in play. It holds the `id` of `ext-{i}`.
 fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
     let descriptor = format!("novel-{i}").into_bytes();
     let row = UnallocatedRow {
-        external_id: Some(format!("ext-{i}").into_bytes()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![descriptor.clone()],
         x: 5.0,
         y: 5.0,
-        scalars: Vec::new(),
+        scalars: keyed(&format!("ext-{i}")),
         terms: engine.resolve_terms(&[descriptor]),
         scoped: Vec::new(),
     };
@@ -105,8 +113,8 @@ fn manifest_of(root: &std::path::Path) -> tessera_store::manifest::SegmentsManif
 /// **The pass bounds all three axes, and moves no geometry doing it.**
 ///
 /// Without it the three counts grow by one per tick for the life of the deployment, and each is a
-/// term in a steady-state cost: a fragment build probes every tier, the ingest duplicate check
-/// scans every run, and `Engine::open` reads every dictionary extent.
+/// term in a steady-state cost: a fragment build probes every tier, a unique lookup reads every
+/// live run, and `Engine::open` reads every dictionary extent.
 ///
 /// **Mutation:** bump `segments_version` in `publish_coalesce` and the geometry assertion fails —
 /// which is the whole of decision 0044's D2, since that bump is what would cost every live session
@@ -123,10 +131,10 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
     );
     let engine = engine_at(tmp.path(), &root);
 
-    let mut ingested: Vec<(EntityId, Vec<u8>)> = Vec::new();
+    let mut ingested: Vec<(EntityId, String)> = Vec::new();
     for i in 0..WIDTH {
         let entity = ingest_novel(&engine, i);
-        ingested.push((entity, format!("ext-{i}").into_bytes()));
+        ingested.push((entity, format!("ext-{i}")));
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
         wait_until("the flush to publish", WAIT, || {
@@ -147,7 +155,7 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
         "{WIDTH} tiers became one: {:?}",
         after.deltas
     );
-    assert_runs_coalesced(&after, &before.external_id_runs[0]);
+    assert_runs_coalesced(&after, &before);
     assert_eq!(
         after.dict_extents.len(),
         2,
@@ -172,19 +180,14 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
         "the live tier list is swapped too, or the bound is only realised at the next restart"
     );
 
-    // **Every binding still resolves, live** — through the swapped sidecar, not the old one.
-    for (entity, external_id) in &ingested {
-        assert_eq!(
-            engine.resolve_external_id(external_id).expect("resolvable"),
-            Some(*entity),
-            "external id {} lost its binding to the coalesce",
-            String::from_utf8_lossy(external_id)
-        );
+    // **Every value still names its item, live** — through the swapped index, not the old one.
+    for (entity, key) in &ingested {
+        assert_eq!(item_of_key(&engine, key), Some(*entity), "{key} lost its item to the coalesce");
     }
 }
 
-/// A merge publishes over segments whose external-id runs and locator extents a coalesce has
-/// already taken, and every binding still answers, live and after a restart.
+/// A merge publishes over segments whose key runs a coalesce has already taken, and every value
+/// still names its item, live and after a restart.
 #[test]
 fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -195,12 +198,12 @@ fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
         &tmp.path().join("pairs.parquet"),
         64,
     );
-    let ingested: Vec<(EntityId, Vec<u8>)> = {
+    let ingested: Vec<(EntityId, String)> = {
         let engine = engine_at(tmp.path(), &root);
         let mut ingested = Vec::new();
         for i in 0..WIDTH {
             let entity = ingest_novel(&engine, i);
-            ingested.push((entity, format!("ext-{i}").into_bytes()));
+            ingested.push((entity, format!("ext-{i}")));
             publish_buffered(&engine);
         }
         settle_coalesce(&engine);
@@ -214,25 +217,16 @@ fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
         });
         let merged = manifest_of(&root);
         assert!(merged.segments.len() < segments);
-        assert_eq!(merged.external_id_runs, coalesced.external_id_runs);
-        assert_eq!(merged.locator_extents.len(), coalesced.locator_extents.len());
-        for (entity, external_id) in &ingested {
-            assert_eq!(engine.resolve_external_id(external_id).unwrap(), Some(*entity));
-            assert_eq!(
-                engine.external_id_of(*entity).unwrap().as_deref(),
-                Some(external_id.as_slice())
-            );
+        assert_eq!(merged.unique_indexes, coalesced.unique_indexes);
+        for (entity, key) in &ingested {
+            assert_eq!(item_of_key(&engine, key), Some(*entity));
         }
         ingested
     };
 
     let reopened = engine_at(tmp.path(), &root);
-    for (entity, external_id) in &ingested {
-        assert_eq!(reopened.resolve_external_id(external_id).unwrap(), Some(*entity));
-        assert_eq!(
-            reopened.external_id_of(*entity).unwrap().as_deref(),
-            Some(external_id.as_slice())
-        );
+    for (entity, key) in &ingested {
+        assert_eq!(item_of_key(&reopened, key), Some(*entity));
     }
 }
 
@@ -250,12 +244,12 @@ fn a_coalesced_manifest_reopens_with_every_item_and_binding_intact() {
         64,
     );
 
-    let ingested: Vec<(EntityId, Vec<u8>)> = {
+    let ingested: Vec<(EntityId, String)> = {
         let engine = engine_at(tmp.path(), &root);
         let mut ingested = Vec::new();
         for i in 0..WIDTH {
             let entity = ingest_novel(&engine, i);
-            ingested.push((entity, format!("ext-{i}").into_bytes()));
+            ingested.push((entity, format!("ext-{i}")));
             let flushes = engine.write_executor_stats().flushes;
             engine.request_flush();
             wait_until("the flush to publish", WAIT, || {
@@ -273,13 +267,11 @@ fn a_coalesced_manifest_reopens_with_every_item_and_binding_intact() {
         1,
         "the reopened bundle holds exactly the tiers its manifest names"
     );
-    for (entity, external_id) in &ingested {
+    for (entity, key) in &ingested {
         assert_eq!(
-            reopened
-                .resolve_external_id(external_id)
-                .expect("resolvable"),
+            item_of_key(&reopened, key),
             Some(*entity),
-            "a binding did not survive the restart"
+            "a value did not survive the restart"
         );
         assert!(
             generation.bundle.partitions["default"].views["s0"]
@@ -326,10 +318,10 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
         .start_write_executor(64)
         .expect("the executor starts once");
 
-    let mut ingested: Vec<(EntityId, Vec<u8>)> = Vec::new();
+    let mut ingested: Vec<(EntityId, String)> = Vec::new();
     for i in 0..2 {
         let entity = ingest_novel(&engine, i);
-        ingested.push((entity, format!("ext-{i}").into_bytes()));
+        ingested.push((entity, format!("ext-{i}")));
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
         wait_until("the flush to publish", WAIT, || {
@@ -348,13 +340,8 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
         1,
         "two tiers became one at the configured width"
     );
-    for (entity, external_id) in &ingested {
-        assert_eq!(
-            engine.resolve_external_id(external_id).expect("resolvable"),
-            Some(*entity),
-            "external id {} lost its binding to the coalesce",
-            String::from_utf8_lossy(external_id)
-        );
+    for (entity, key) in &ingested {
+        assert_eq!(item_of_key(&engine, key), Some(*entity), "{key} lost its item to the coalesce");
     }
 }
 
@@ -565,16 +552,15 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
     }
 }
 
-/// One item at (5, 5) under `key`, carrying `descriptors`.
-fn ingest_with(engine: &Engine, key: &[u8], descriptors: &[&[u8]], batch: &str) -> EntityId {
+/// One item at (5, 5) holding `id`, carrying `descriptors`.
+fn ingest_with(engine: &Engine, id: u64, descriptors: &[&[u8]], batch: &str) -> EntityId {
     let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
     let row = UnallocatedRow {
-        external_id: Some(key.to_vec()),
         view: "s0".to_string(),
         join: None,
         x: 5.0,
         y: 5.0,
-        scalars: Vec::new(),
+        scalars: vec![WalScalar::U64(id)],
         terms: engine.resolve_terms(&descriptors),
         descriptors,
         scoped: Vec::new(),
@@ -584,27 +570,25 @@ fn ingest_with(engine: &Engine, key: &[u8], descriptors: &[&[u8]], batch: &str) 
         .expect("ingest is accepted")[0]
 }
 
-/// A served item's external id and labels, or `None` when it is not served.
-type Served = Option<(Option<Vec<u8>>, Vec<String>)>;
+/// A served item's labels, or `None` when it is not served.
+type Served = Option<Vec<String>>;
 
-/// What the engine tells a viewer and the admin plane about `bindings`: each key's entity, each
-/// entity's key, and, under a credential for each fixture term, the visible count per tile and
-/// each entity's drill-down.
+/// What the engine tells a viewer and the admin plane about `bindings`: the item each `id` names,
+/// and, under a credential for each fixture term, the visible count per tile and each entity's
+/// drill-down.
 struct Answers {
     entities: Vec<Option<EntityId>>,
-    keys: Vec<Option<Vec<u8>>>,
     tiles: Vec<Vec<(u64, u64)>>,
     items: Vec<Vec<Served>>,
 }
 
 fn assert_same(got: &Answers, expected: &Answers, when: &str) {
-    assert_eq!(got.entities, expected.entities, "a key's entity changed at the {when}");
-    assert_eq!(got.keys, expected.keys, "an entity's key changed at the {when}");
+    assert_eq!(got.entities, expected.entities, "an id's item changed at the {when}");
     assert_eq!(got.tiles, expected.tiles, "a masked count changed at the {when}");
     assert_eq!(got.items, expected.items, "a drill-down changed at the {when}");
 }
 
-fn answers(engine: &Engine, bindings: &[(EntityId, Vec<u8>)]) -> Answers {
+fn answers(engine: &Engine, bindings: &[(EntityId, u64)]) -> Answers {
     let sessions: Vec<_> = [full_coverage_credential(), subset_credential()]
         .iter()
         .map(|credential| engine.authorise(credential).expect("the session authorises"))
@@ -612,11 +596,7 @@ fn answers(engine: &Engine, bindings: &[(EntityId, Vec<u8>)]) -> Answers {
     Answers {
         entities: bindings
             .iter()
-            .map(|(_, key)| engine.resolve_external_id(key).expect("the sidecar reads"))
-            .collect(),
-        keys: bindings
-            .iter()
-            .map(|(entity, _)| engine.external_id_of(*entity).expect("the sidecar reads"))
+            .map(|(_, id)| item_of_id(engine, *id).expect("the index reads"))
             .collect(),
         tiles: sessions
             .iter()
@@ -643,7 +623,7 @@ fn answers(engine: &Engine, bindings: &[(EntityId, Vec<u8>)]) -> Answers {
                         engine
                             .item(session, id)
                             .expect("the drill-down answers")
-                            .map(|item| (item.external_id, item.labels))
+                            .map(|item| item.labels)
                     })
                     .collect()
             })
@@ -651,10 +631,10 @@ fn answers(engine: &Engine, bindings: &[(EntityId, Vec<u8>)]) -> Answers {
     }
 }
 
-/// A fold carries forward the tiers, runs and locator extents that flushes published during its
-/// flight, and their digests land in the new `MANIFEST.json`. A coalesce then takes them, and
-/// every binding, count, drill-down and deny is what it was before, live and after a restart. A
-/// later fold still retires what was deleted, and each retired key can be ingested again.
+/// A fold carries forward the tiers and key runs that flushes published during its flight, and
+/// their digests land in the new `MANIFEST.json`. A coalesce then takes them, and every value,
+/// count, drill-down and deny is what it was before, live and after a restart. A later fold still
+/// retires what was deleted, and each retired value can be ingested again.
 #[test]
 fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a_restart() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -667,9 +647,9 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     );
     let base = source_to_new_map(&root, "v00000");
     let base_entity = |source: u64| EntityId::new(base[&source]);
-    let mut bindings: Vec<(EntityId, Vec<u8>)> = base
+    let mut bindings: Vec<(EntityId, u64)> = base
         .iter()
-        .map(|(source, entity)| (EntityId::new(*entity), source_id_key(*source)))
+        .map(|(source, entity)| (EntityId::new(*entity), *source))
         .collect();
 
     let engine = engine_at(tmp.path(), &root);
@@ -694,12 +674,12 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     wait_until("the fold to reach its hold", WAIT, || {
         engine.fold_is_holding_for_test()
     });
-    let mut carried: Vec<(EntityId, Vec<u8>)> = Vec::new();
+    let mut carried: Vec<(EntityId, u64)> = Vec::new();
     for i in 0..WIDTH {
-        let key = format!("carried-{i}").into_bytes();
+        let id = key_id(&format!("carried-{i}"));
         let descriptors: &[&[u8]] = if i % 2 == 0 { &[b"0", b"1"] } else { &[b"0"] };
-        let entity = ingest_with(&engine, &key, descriptors, &format!("carried-{i}"));
-        carried.push((entity, key));
+        let entity = ingest_with(&engine, id, descriptors, &format!("carried-{i}"));
+        carried.push((entity, id));
         publish_buffered(&engine);
     }
 
@@ -727,16 +707,13 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     // Every carried entry is digested in the new prefix's MANIFEST.json.
     let folded = manifest_of(&root);
     assert_eq!(folded.deltas.len(), WIDTH, "one carried tier per flush");
-    assert_eq!(folded.locator_extents.len(), WIDTH, "one carried locator extent per flush");
+    assert_eq!(live_runs(&folded).len(), WIDTH, "one carried key run per flush");
     let digested = tessera_store::open_bundle(&root)
         .expect("the bundle opens")
         .manifest
         .files;
     assert!(folded.deltas.iter().all(|tier| digested.contains_key(tier)));
-    assert!(folded
-        .locator_extents
-        .iter()
-        .all(|extent| extent.files().all(|rel| digested.contains_key(rel))));
+    assert!(live_runs(&folded).iter().all(|run| digested.contains_key(run)));
 
     bindings.extend(carried.iter().cloned());
     let expected = answers(&engine, &bindings);
@@ -760,7 +737,7 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     settle_coalesce(&engine);
     let coalesced = manifest_of(&root);
     assert_eq!(coalesced.deltas.len(), 1, "the carried tiers became one");
-    assert_runs_coalesced(&coalesced, &folded.external_id_runs[0]);
+    assert_runs_coalesced(&coalesced, &folded);
     assert_same(&answers(&engine, &bindings), &expected, "coalesce");
 
     drop(engine);
@@ -768,26 +745,23 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     assert_same(&answers(&engine, &bindings), &expected, "restart");
 
     // A second fold retires the deletions the first could not, including one whose run the
-    // coalesce merged. Every deleted key, the one the first fold retired among them, then resolves
-    // to nothing and can be ingested again as a new entity.
+    // coalesce merged. Every deleted value, the one the first fold retired among them, then names
+    // nothing and can be ingested again as a new entity.
     fold(&engine);
     let retired = [
-        (deleted_before, source_id_key(4)),
-        (base_deleted_during, source_id_key(9)),
-        (deleted_during, carried[1].1.clone()),
+        (deleted_before, 4),
+        (base_deleted_during, 9),
+        (deleted_during, carried[1].1),
     ];
-    for (i, (entity, key)) in retired.iter().enumerate() {
+    for (i, (entity, id)) in retired.iter().enumerate() {
         assert_eq!(
-            engine.resolve_external_id(key).expect("the sidecar reads"),
+            item_of_id(&engine, *id).expect("the index reads"),
             None,
-            "a retired entity's key resolves to nothing"
+            "a retired entity's value names nothing"
         );
-        let reborn = ingest_with(&engine, key, &[b"0"], &format!("reborn-{i}"));
+        let reborn = ingest_with(&engine, *id, &[b"0"], &format!("reborn-{i}"));
         assert_ne!(reborn, *entity, "a re-ingest takes a fresh entity");
-        assert_eq!(
-            engine.resolve_external_id(key).expect("the sidecar reads"),
-            Some(reborn)
-        );
+        assert_eq!(item_of_id(&engine, *id).expect("the index reads"), Some(reborn));
     }
 }
 
@@ -930,7 +904,6 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
             .map(|j| {
                 let i = window * 4 + j;
                 UnallocatedRow {
-                    external_id: Some(format!("mixed-{i}").into_bytes()),
                     view: if j % 2 == 0 { "s0" } else { "s1" }.to_string(),
                     join: None,
                     descriptors: vec![b"0".to_vec()],

@@ -678,7 +678,6 @@ fn a_value_minted_at_ingest_is_suggested_before_any_flush() {
     engine
         .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"row-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -900,7 +899,6 @@ fn suppressing_a_minted_values_only_member_retires_it_from_the_side_map() {
     let entity = engine
         .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"row-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -1234,7 +1232,6 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
         engine
             .ingest_rows(
                 vec![UnallocatedRow {
-                    external_id: Some(batch.as_bytes().to_vec()),
                     view: "s0".to_string(),
                     join: None,
                     descriptors: vec![b"0".to_vec()],

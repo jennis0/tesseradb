@@ -85,11 +85,20 @@ name   = "ident"
 type   = "u64"
 index  = true
 unique = true
+
+# The points file's `entity_id`, declared unique, which is how the test finds the item a source
+# row became.
+[[attribute]]
+name   = "id"
+type   = "u64"
+field  = "entity_id"
+unique = true
 "#;
 
-/// The positions of `score`, `tag` and the rest in a row's scalars, in declared order.
+/// The positions of `score`, `ident` and the rest in a row's scalars, in declared order.
 pub const SCORE_AT: usize = 1;
-pub const DECLARED: usize = 6;
+pub const IDENT_AT: usize = 5;
+pub const DECLARED: usize = 7;
 
 pub fn position(s: u64) -> (f64, f64) {
     (((s * 37) % 1000) as f64, ((s * 53) % 1000) as f64)

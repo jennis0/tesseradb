@@ -1,10 +1,10 @@
 //! **The soak** (write-path §14's obligation 10): under sustained ingest, the four axes flush
 //! grows are **bounded**, and nothing is lost bounding them.
 //!
-//! Flush appends one segment, one delta tier, one external-id run and one locator extent per tick.
-//! Each is a term in a steady-state cost — a viewport pays a binary search and a
-//! `range_cardinality` per live segment per tile, a fragment build probes every tier, the ingest
-//! duplicate check scans every run — and at a 90 s tick a day of ingest produces ~960 of each.
+//! Flush appends one segment, one delta tier, one dictionary extent and one run of each unique
+//! column's keys per tick. Each is a term in a steady-state cost — a viewport pays a binary search
+//! and a `range_cardinality` per live segment per tile, a fragment build probes every tier, a unique
+//! lookup reads every live run — and at a 90 s tick a day of ingest produces ~960 of each.
 //! Two maintenance passes bound them, on separate cadences and by different arguments: the
 //! entity-space coalesce (`crate::coalesce`, no `segments_version` bump) and the row-space merge
 //! (`crate::merge`, its own swap behind the background refresh).
@@ -104,7 +104,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
 
     let mut ingested: Vec<(EntityId, String)> = Vec::new();
     for round in 0..ROUNDS {
-        let external_id = format!("soak-{round}");
+        let key = format!("soak-{round}");
         // **Two descriptors: the grant's, and a novel one.** The novel one makes the flush promote,
         // so the dictionary-extent axis grows rather than being vacuously bounded. It cannot be the
         // only one: `satisfied` is fixed at authorise and never re-resolved (§3.3), so an item
@@ -112,20 +112,19 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         // visibility assertion below would then be measuring that rule instead of the merge's.
         let descriptors = vec![b"0".to_vec(), format!("soak-term-{round}").into_bytes()];
         let row = UnallocatedRow {
-            external_id: Some(external_id.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
             descriptors: descriptors.clone(),
             x: 3.0 * (round as f64 + 1.0),
             y: 7.0,
-            scalars: Vec::new(),
+            scalars: keyed(&key),
             terms: engine.resolve_terms(&descriptors),
             scoped: Vec::new(),
         };
         let entity = engine
-            .ingest_rows(vec![row], external_id.clone(), [round as u8; 32])
+            .ingest_rows(vec![row], key.clone(), [round as u8; 32])
             .expect("ingest is accepted")[0];
-        ingested.push((entity, external_id));
+        ingested.push((entity, key));
 
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
@@ -162,15 +161,14 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
     let generation = engine.generation();
     let partition = &generation.bundle.partitions["default"];
     let manifest = &partition.manifest;
+    let runs = live_runs(manifest);
     let segments = partition.views["s0"].segments.len();
     let stats = engine.write_executor_stats();
     eprintln!(
-        "soak: {ROUNDS} flushes → segments {segments}, deltas {}, runs {}, dict extents {}, \
-         locators {} (merges {}, coalesces {}, refreshes {}, stale serves {}, full builds {})",
+        "soak: {ROUNDS} flushes → segments {segments}, deltas {}, key runs {runs}, dict extents \
+         {} (merges {}, coalesces {}, refreshes {}, stale serves {}, full builds {})",
         manifest.deltas.len(),
-        manifest.external_id_runs.len(),
         manifest.dict_extents.len(),
-        manifest.locator_extents.len(),
         stats.merges,
         stats.coalesces,
         engine.refreshes(),
@@ -187,11 +185,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         "the delta-tier axis is unbounded: {} tiers",
         manifest.deltas.len()
     );
-    assert!(
-        manifest.external_id_runs.len() <= ROUNDS / 2,
-        "the external-id run axis is unbounded: {} runs",
-        manifest.external_id_runs.len()
-    );
+    assert!(runs <= ROUNDS / 2, "the key-run axis is unbounded: {runs} runs");
     assert!(
         manifest.dict_extents.len() <= ROUNDS * 3 / 4,
         "the dictionary-extent axis is unbounded: {} extents",
@@ -223,14 +217,8 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         CORPUS + ROUNDS as u64,
         "every ingested item is still on the map"
     );
-    for (entity, external_id) in &ingested {
-        assert_eq!(
-            engine
-                .resolve_external_id(external_id.as_bytes())
-                .expect("resolvable"),
-            Some(*entity),
-            "{external_id} lost its binding"
-        );
+    for (entity, key) in &ingested {
+        assert_eq!(item_of_key(&engine, key), Some(*entity), "{key} lost its item");
         assert!(
             partition.views["s0"].row_space.row_of(*entity).is_some(),
             "entity {} lost its row",
@@ -277,21 +265,20 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
     engine.set_coalesce_for_test(false);
 
     for round in 0..ROUNDS {
-        let external_id = format!("soak-{round}");
+        let key = format!("soak-{round}");
         let descriptors = vec![b"0".to_vec(), format!("soak-term-{round}").into_bytes()];
         let row = UnallocatedRow {
-            external_id: Some(external_id.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
             descriptors: descriptors.clone(),
             x: 3.0 * (round as f64 + 1.0),
             y: 7.0,
-            scalars: Vec::new(),
+            scalars: keyed(&key),
             terms: engine.resolve_terms(&descriptors),
             scoped: Vec::new(),
         };
         engine
-            .ingest_rows(vec![row], external_id, [round as u8; 32])
+            .ingest_rows(vec![row], key, [round as u8; 32])
             .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
@@ -313,13 +300,19 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
         "one tier per flush — this is what the coalesce bounds"
     );
     assert_eq!(
-        partition.manifest.external_id_runs.len(),
-        ROUNDS + 1,
-        "the build's run plus one per flush"
+        live_runs(&partition.manifest),
+        ROUNDS,
+        "one key run per flush"
     );
     assert_eq!(
         partition.manifest.dict_extents.len(),
         ROUNDS + 1,
         "the build's dictionary extent plus one per promoting flush"
     );
+}
+
+/// How many live runs of keys the fixture's unique `id` holds.
+fn live_runs(manifest: &tessera_store::manifest::SegmentsManifest) -> usize {
+    let index = manifest.unique_indexes.iter().find(|i| i.attribute == "id");
+    index.expect("`id` is unique").live.len()
 }

@@ -57,7 +57,7 @@ pub(crate) struct ManifestSeed<'a> {
 
 impl WritePath {
     /// Rebuilds the write-side state from durable storage: opens and replays the WAL, seeds the
-    /// allocator, and rebuilds the external-id maps, the descriptor resolver's extension, the
+    /// allocator, and rebuilds the descriptor resolver's extension, the
     /// registries and the idempotency index. Returns the first generation's overlay and buffer.
     ///
     /// `initial_deny` is the side-manifest's deny state; it seeds the overlay before replay, and
@@ -434,7 +434,7 @@ impl WritePath {
         let view_ids_of_key = seed.view_ids_of_key;
         // Same ordering rule again, with one exception: `Unsuppress` needs the later record to
         // win, so seeding first and replaying on top reverts an acked unsuppress otherwise.
-        let (overlay, mut buffer, established, resolver) =
+        let (overlay, mut buffer, resolver) =
             replay(&records, dict, initial_deny.clone(), view_ids_of_key);
 
         // An id the manifest records as free and a kept record or the overlay names was issued
@@ -443,10 +443,6 @@ impl WritePath {
         named.or_inplace(overlay.deleted_set());
         named.or_inplace(overlay.suppressed_set());
         allocator.seed_freed(seed.free, seed.held, wal.retained_from(), &named);
-        // Re-hashed once at open: `replay` builds this with `FxHashMap`, the live index does not
-        // (see `WritePath::established`'s doc).
-        let established: std::collections::HashMap<Vec<u8>, EntityId> =
-            established.into_iter().collect();
 
         // Replay walks every retained record, including batches whose rows a flush has already
         // given geometry; those rows are dropped here or the next flush would write them twice.
@@ -477,10 +473,6 @@ impl WritePath {
         }
         let edited_live = crate::edited::EditedLive::derive(&records, &buffer, &overlay);
 
-        let established_inverse: FxHashMap<EntityId, Vec<u8>> = established
-            .iter()
-            .map(|(ext, ent)| (*ent, ext.clone()))
-            .collect();
         let resolver_state = resolver.into_state();
 
         // Every batch-carrying record, by the rule both accept sites use
@@ -505,8 +497,6 @@ impl WritePath {
             WritePathState {
                 wal,
                 allocator,
-                established,
-                established_inverse,
                 resolver_state,
                 accepted_batches,
                 registry,

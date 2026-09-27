@@ -123,7 +123,6 @@ impl Ids {
 
 fn wal_row(entity: EntityId, view: &str, join: bool) -> WalRow {
     WalRow {
-        external_id: Some(format!("buffer-read-{}", entity.raw()).into_bytes()),
         entity_id: entity,
         view: view.to_string(),
         join,
@@ -582,7 +581,6 @@ fn synth_rows(fx: &Fixture, count: usize, start: u64, terms: &[TermId]) -> Vec<U
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
-                external_id: Some(format!("buffer-read-{n}").into_bytes()),
                 view: fx.view.clone(),
                 join: None,
                 descriptors: fx.descriptors.clone(),

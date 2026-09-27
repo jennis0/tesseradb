@@ -160,10 +160,8 @@ enum Command {
     /// Verify a bundle's files and its identity column.
     ///
     /// It opens the bundle as the server does. That checks every manifest digest, the size and
-    /// SHA-256 of every file except the external-id files and their locator, and that each
-    /// segment's permutation maps one-to-one onto its rows. `--deep` hashes the external-id
-    /// files too. It
-    /// then confirms that the row space holds exactly the rows the segments claim, and computes
+    /// SHA-256 of every file except the unique indexes' runs, and that each segment's permutation
+    /// maps one-to-one onto its rows. `--deep` hashes those runs too. It then confirms that the row space holds exactly the rows the segments claim, and computes
     /// each row's `tessera_id` again from the identity key, failing on the first row that
     /// differs.
     ///
@@ -175,10 +173,8 @@ enum Command {
         bundle: PathBuf,
         /// Also check the bundle's internal structures.
         ///
-        /// The external-id files and their locator are hashed against the manifest. The term
-        /// lists must be sorted, free of duplicates and in range; the external-id
-        /// index and its locator must agree in both directions; dictionary records must not
-        /// repeat; record blobs and Morton cells must agree with their indexes; each group-scoped
+        /// The term lists must be sorted, free of duplicates and in range; dictionary records must
+        /// not repeat; record blobs and Morton cells must agree with their indexes; each group-scoped
         /// render column must be present in every segment; each unique column's index must be
         /// hashed against the manifest, name at most one live item for a value and agree with the
         /// column's values in both directions; and `pairs.parquet`, when present, must match the
@@ -260,7 +256,7 @@ enum Command {
     /// `--count`, is printed on stderr at the end.
     ///
     /// For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields
-    /// title,year --system-fields external_id --out papers.parquet`.
+    /// title,year --system-fields labels --out papers.parquet`.
     Items(records::ItemsArgs),
     /// Read every artifact of one layer a session token is served, with the properties named, from
     /// a running server, and write them as Arrow IPC or Parquet.

@@ -1,9 +1,8 @@
 use croaring::Bitmap;
 
-use tessera_store::manifest::LocatorExtent;
 use tessera_store::permutation::SegmentExtent;
 
-/// The entities every carried-forward segment and locator extent can name: each dense span whole,
+/// The entities every carried-forward segment can name: each dense span whole,
 /// and each entity listed below one. Naming too many keeps a tombstone for another fold; naming
 /// too few exposes a deleted item. Built at publication, because built at plan time it would miss
 /// flushes published while the fold ran.
@@ -19,18 +18,12 @@ impl CarriedForward {
         }
     }
 
-    /// A flush's tier, run and locator extent lie within the entities its segment holds, so the
-    /// segment's span and listed rows cover them all, including an item with no terms.
+    /// A flush's tier lies within the entities its segment holds, so the segment's span and listed
+    /// rows cover it, including an item with no terms.
     pub(crate) fn add_segment(&mut self, extent: &SegmentExtent) {
         self.add_range(extent.entity_lo, extent.entity_hi);
         self.entities
             .add_many(&extent.below.iter().map(|&(entity, _)| entity).collect::<Vec<_>>());
-    }
-
-    /// `listed` is what the extent's file lists below its span.
-    pub(crate) fn add_locator_extent(&mut self, extent: &LocatorExtent, listed: &[u32]) {
-        self.add_range(extent.entity_lo, extent.entity_hi);
-        self.entities.add_many(listed);
     }
 
     /// Inclusive. A range past `u32::MAX` is clamped outward to it, never dropped.
@@ -65,16 +58,6 @@ mod tests {
             .expect("a dense extent")
     }
 
-    fn locator(entity_lo: u64, entity_hi: u64) -> LocatorExtent {
-        LocatorExtent {
-            path: "entities/ext-locator-1.u32".to_string(),
-            entity_lo,
-            entity_hi,
-            listed: 0,
-            external_id_run: "entities/external-ids-1.arrow".to_string(),
-        }
-    }
-
     fn bitmap(entities: &[u32]) -> Bitmap {
         Bitmap::of(entities)
     }
@@ -105,36 +88,6 @@ mod tests {
 
         assert_eq!(executed.cardinality(), 1);
         assert!(executed.contains(3));
-    }
-
-    /// The segment and the locator extent cover disjoint ranges, so each protects its own
-    /// entities with no help from the other.
-    #[test]
-    fn a_carried_segment_and_a_carried_locator_extent_each_protect_their_range() {
-        // 51 and 53: postings and a row, named only by the segment.
-        // 55: an item with no terms, named only by the locator extent.
-        let d0 = bitmap(&[51, 53, 55, 90]);
-
-        let mut carried = CarriedForward::new();
-        carried.add_segment(&segment("flush-3-1", 50, 53));
-        carried.add_locator_extent(&locator(54, 56), &[]);
-
-        let executed = executed(&d0, &carried);
-
-        for entity in [51u32, 53, 55] {
-            assert!(!executed.contains(entity), "carried {entity} retired");
-        }
-        assert!(executed.contains(90), "an uncarried deletion was kept");
-    }
-
-    /// A carried locator extent protects its range even with no segment beside it.
-    #[test]
-    fn a_locator_extent_alone_protects_its_range() {
-        let d0 = bitmap(&[12]);
-        let mut carried = CarriedForward::new();
-        carried.add_locator_extent(&locator(10, 20), &[]);
-
-        assert!(executed(&d0, &carried).is_empty());
     }
 
     #[test]

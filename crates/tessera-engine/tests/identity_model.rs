@@ -8,7 +8,7 @@
 //! runs long sequences that edit the same items again and again, so that folds free the entities
 //! the edits leave and later edits take them.
 //!
-//! An ingest row names an item by its `tessera_id`, its external id or a unique value, and carries
+//! An ingest row names an item by its `tessera_id` or a unique value, and carries
 //! any of the item's fields, its label and a position in the batch's view. The model decides each
 //! row the way the service must: a row naming nothing creates an item, one naming an item it
 //! leaves unchanged is counted unchanged, one adding the item to a view it is not in is added, and
@@ -440,7 +440,6 @@ fn open(fx: &Fixture) -> Engine {
 #[derive(Debug, Clone)]
 struct Item {
     tid: u64,
-    external_id: Option<Vec<u8>>,
     labels: BTreeSet<String>,
     gid: Option<u64>,
     doi: Option<String>,
@@ -483,7 +482,6 @@ struct Model {
 #[derive(Debug, Clone, PartialEq)]
 struct Row {
     tid: Option<u64>,
-    external_id: Option<Vec<u8>>,
     gid: Option<Option<u64>>,
     doi: Option<Option<String>>,
     score: Option<Option<f64>>,
@@ -525,7 +523,6 @@ impl Model {
                 tid,
                 Item {
                     tid,
-                    external_id: Some(source_id_key(source)),
                     labels,
                     gid: Some(built_gid(source)),
                     doi: Some(built_doi(source)),
@@ -558,11 +555,10 @@ impl Model {
             named.insert(tid);
         }
         for item in self.items.values() {
-            let by_external = row.external_id.is_some() && row.external_id == item.external_id;
             let by_gid = matches!(row.gid, Some(Some(g)) if item.gid == Some(g));
             let by_doi = self.doi_unique
                 && matches!(&row.doi, Some(Some(d)) if item.doi.as_ref() == Some(d));
-            if by_external || by_gid || by_doi {
+            if by_gid || by_doi {
                 named.insert(item.tid);
             }
         }
@@ -591,9 +587,6 @@ impl Model {
         let mut values: BTreeSet<String> = BTreeSet::new();
         for row in rows {
             let mut set = Vec::new();
-            if let Some(e) = &row.external_id {
-                set.push(format!("x:{e:?}"));
-            }
             if let Some(Some(g)) = row.gid {
                 set.push(format!("g:{g}"));
             }
@@ -618,8 +611,7 @@ impl Model {
                 continue;
             };
             let item = &self.items[tid];
-            let differs = row.external_id.is_some() && row.external_id != item.external_id
-                || row.gid.is_some_and(|g| g != item.gid)
+            let differs = row.gid.is_some_and(|g| g != item.gid)
                 || row.doi.as_ref().is_some_and(|d| *d != item.doi)
                 || row.score.is_some_and(|s| s != item.score)
                 || row
@@ -677,7 +669,6 @@ impl Model {
                     };
                     let item = Item {
                         tid: *tid,
-                        external_id: row.external_id.clone(),
                         labels,
                         gid: row.gid.flatten(),
                         doi: row.doi.clone().flatten(),
@@ -712,9 +703,6 @@ impl Model {
                     let item = self.items.get_mut(named).unwrap();
                     if let Some(labels) = &row.labels {
                         item.labels = labels.clone();
-                    }
-                    if row.external_id.is_some() {
-                        item.external_id = row.external_id.clone();
                     }
                     if let Some(gid) = row.gid {
                         item.gid = gid;
@@ -779,9 +767,9 @@ impl Model {
 #[derive(Debug, Clone)]
 struct RowGen {
     about: Option<u16>,
-    /// 0 `tessera_id`, 1 gid, 2 doi, 3 external id, 4 a `tessera_id` nobody holds.
+    /// 0 `tessera_id`, 1 gid, 2 doi, 4 a `tessera_id` nobody holds.
     by: u8,
-    /// Bits: 1 gid, 2 doi, 4 score, 8 labels, 16 external id.
+    /// Bits: 1 gid, 2 doi, 4 score, 8 labels.
     carry: u8,
     /// Bits of carried fields given a value other than the item's.
     differ: u8,
@@ -826,7 +814,7 @@ enum Op {
 fn row_gen() -> impl Strategy<Value = RowGen> {
     (
         prop::option::weighted(0.75, any::<u16>()),
-        prop_oneof![24 => 0u8..4, 1 => Just(4u8)],
+        prop_oneof![24 => 0u8..3, 1 => Just(4u8)],
         any::<u8>(),
         prop_oneof![12 => Just(0u8), 1 => any::<u8>()],
         prop_oneof![12 => Just(0u8), 1 => any::<u8>()],
@@ -925,7 +913,6 @@ impl Run {
         } else {
             ["0"].iter().map(|s| s.to_string()).collect()
         };
-        let fresh_external = format!("x{}", seed % 24).into_bytes();
         let fresh_position = (
             ((seed * 37) % 1000) as f64,
             ((seed * 53 + 11) % 1000) as f64,
@@ -934,7 +921,6 @@ impl Run {
         let mut carry = gen.carry;
         let mut row = Row {
             tid: None,
-            external_id: None,
             gid: None,
             doi: None,
             score: None,
@@ -947,8 +933,7 @@ impl Run {
             (_, 4) => row.tid = Some(u64::from(gen.seed) * 7_919 + 1),
             (Some(item), 0) => row.tid = Some(item.tid),
             (Some(_), 1) => carry |= 1,
-            (Some(_), 2) => carry |= 2,
-            (Some(_), _) => carry |= 16,
+            (Some(_), _) => carry |= 2,
             (None, _) => carry |= 8,
         }
         let field = |bit: u8| {
@@ -1012,12 +997,6 @@ impl Run {
                 _ => fresh_labels,
             });
         }
-        if carry & 16 != 0 {
-            row.external_id = match subject {
-                Some(item) if gen.differ & 16 == 0 => item.external_id.clone(),
-                _ => Some(fresh_external),
-            };
-        }
         if let Some(view) = view {
             row.position = match gen.position {
                 0 => None,
@@ -1057,7 +1036,6 @@ impl Run {
         }
         let wire = IngestRow {
             tessera_id: row.tid.map(TesseraId::new),
-            external_id: row.external_id.clone(),
             labels: row
                 .labels
                 .as_ref()
@@ -2055,7 +2033,7 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
         // Unchanged by each identifier, carrying every field as stored.
         Op::Ingest {
             view: 0,
-            rows: vec![about(0, 0, 31, 1), about(1, 1, 31, 1), about(2, 2, 31, 1)],
+            rows: vec![about(0, 0, 15, 1), about(1, 1, 15, 1), about(2, 2, 15, 1)],
         },
         // New items, then the same again: unchanged.
         Op::Ingest {
@@ -2064,7 +2042,7 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
         },
         Op::Ingest {
             view: 0,
-            rows: vec![about(12, 1, 31, 1), about(13, 1, 31, 1)],
+            rows: vec![about(12, 1, 15, 1), about(13, 1, 15, 1)],
         },
         // One of them added to the other view, then an edit refused.
         Op::Ingest {
@@ -2117,7 +2095,7 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
         Op::DoiUnique(false),
         Op::Ingest {
             view: 2,
-            rows: vec![about(5, 1, 31, 0)],
+            rows: vec![about(5, 1, 15, 0)],
         },
         Op::DoiUnique(true),
         Op::Fold,
@@ -2152,9 +2130,8 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     let fx = fixture();
     let mut engine = open(&fx);
     engine.set_merge_for_test(false);
-    let row = |external: &[u8], position: (f64, f64)| IngestRow {
+    let row = |position: (f64, f64)| IngestRow {
         tessera_id: None,
-        external_id: Some(external.to_vec()),
         labels: Some(vec![b"0".to_vec()]),
         position: Some(position),
         scalars: vec![WalScalar::Null; 3],
@@ -2174,9 +2151,9 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     };
     // `older` is given an entity between two items of the other view, so that view's segment spans
     // it with no row.
-    send(&engine, "before", VIEWS[1], vec![row(b"before", (20.0, 20.0))]);
-    let older = send(&engine, "older", VIEWS[0], vec![row(b"older", (10.0, 10.0))]).tessera_ids[0];
-    send(&engine, "after", VIEWS[1], vec![row(b"after", (25.0, 25.0))]);
+    send(&engine, "before", VIEWS[1], vec![row((20.0, 20.0))]);
+    let older = send(&engine, "older", VIEWS[0], vec![row((10.0, 10.0))]).tessera_ids[0];
+    send(&engine, "after", VIEWS[1], vec![row((25.0, 25.0))]);
     publish_buffered(&engine);
     let entity = |engine: &Engine| engine.resolve_tessera_ids(&[older]).unwrap()[0];
     let first = entity(&engine);
@@ -2207,7 +2184,11 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
         )
     };
 
-    let added = send(&engine, "add-older", VIEWS[1], vec![row(b"older", (30.0, 30.0))]);
+    let joining = IngestRow {
+        tessera_id: Some(older),
+        ..row((30.0, 30.0))
+    };
+    let added = send(&engine, "add-older", VIEWS[1], vec![joining]);
     assert_eq!((added.added, added.edited), (1, 0));
     assert_eq!(added.tessera_ids, vec![older], "the item keeps its tessera_id");
     assert_eq!(entity(&engine), first, "and its entity");
@@ -2230,7 +2211,7 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     let merges = engine.write_executor_stats().merges;
     for i in 0..4 {
         let key = format!("more{i}");
-        send(&engine, &key, VIEWS[1], vec![row(key.as_bytes(), (40.0 + f64::from(i), 40.0))]);
+        send(&engine, &key, VIEWS[1], vec![row((40.0 + f64::from(i), 40.0))]);
         publish_buffered(&engine);
     }
     tick_until(&engine, "a merge", Duration::from_secs(60), || {

@@ -97,7 +97,6 @@ fn write_inputs(root: &Path, rows: u64, segments: u64) -> Vec<MergeInput> {
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
                     number: EntityId::new(e),
-                    external_id: Some(format!("ext-{e}").into_bytes()),
                     x: (((e * 7 + s * 13) % 65_521) as f64) / 65_521.0,
                     y: (((e * 31 + s * 17) % 65_519) as f64) / 65_519.0,
                     scalars: vec![],
@@ -117,7 +116,7 @@ fn write_inputs(root: &Path, rows: u64, segments: u64) -> Vec<MergeInput> {
                     scalar_schema: &[],
                     row_base: (s * rows) as u32,
                     entity_floor: 0,
-                }, &[],
+                },
             )
             .expect("the input segment writes");
             MergeInput {

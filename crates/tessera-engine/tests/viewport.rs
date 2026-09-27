@@ -214,10 +214,9 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
 
     // A WAL pre-populated with a suppression of source item 5. The entity is resolved from the
     // bundle here, exactly as the handler resolves one at admission — a change record names an
-    // entity, never an external id (decision 0048).
+    // entity, never a field value.
     const SUPPRESS_SOURCE_ID: u64 = 5;
-    let suppressed_entity = engine_a
-        .resolve_external_id(&SUPPRESS_SOURCE_ID.to_le_bytes())
+    let suppressed_entity = item_of_id(&engine_a, SUPPRESS_SOURCE_ID)
         .unwrap()
         .expect("source item 5 is established in the bundle");
     let wal_path_b = tmp.path().join("wal_b.log");
@@ -941,8 +940,7 @@ fn the_theta_anchor_falls_when_an_item_is_suppressed() {
         .unwrap();
 
     const SUPPRESS_SOURCE_ID: u64 = 5;
-    let suppressed_entity = baseline
-        .resolve_external_id(&SUPPRESS_SOURCE_ID.to_le_bytes())
+    let suppressed_entity = item_of_id(&baseline, SUPPRESS_SOURCE_ID)
         .unwrap()
         .expect("source item 5 is established in the bundle");
     let wal_path_b = tmp.path().join("wal_b.log");
@@ -1028,8 +1026,7 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
     let suppress = |wal_path: &std::path::Path, ids: &[u64]| {
         let (mut wal, _initial) = Wal::open(wal_path).unwrap();
         for id in ids {
-            let entity = baseline
-                .resolve_external_id(&id.to_le_bytes())
+            let entity = item_of_id(&baseline, *id)
                 .unwrap()
                 .expect("the source item is established in the bundle");
             wal.append(&WalRecord::ChangeBatch {

@@ -1,7 +1,7 @@
 //! **One item edited, and every home it has to be carried to.** An edit moves the item to a new
 //! entity and keeps its `tessera_id`, so every place the old entity's data lives must be written
 //! again for the new one, or read through to it: its rows and positions in every view, every
-//! column family, the record blob, its external id, its labels, a unique value, its layer
+//! column family, the record blob, its labels, a unique value, its layer
 //! memberships, the items a content was generated from, a suppression standing against it, and
 //! the group-scoped values and prose of every key it holds.
 //!
@@ -72,21 +72,6 @@ fn check(engine: &Engine, expected: &Expected, after: &str) {
                     engine.tessera_id_of(entity).unwrap(),
                     tid,
                     "Home::EditedItems: the entity it names answers another tessera_id, after {after}"
-                );
-            }
-            Home::ExternalIdSidecar => {
-                let entity = engine
-                    .resolve_external_id(&source_id_key(X))
-                    .unwrap()
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Home::ExternalIdSidecar: the external id names nothing, after {after}"
-                        )
-                    });
-                assert_eq!(
-                    engine.tessera_id_of(entity).unwrap(),
-                    tid,
-                    "Home::ExternalIdSidecar: the external id names another item, after {after}"
                 );
             }
             Home::Suppression => {
@@ -357,7 +342,6 @@ fn edit(engine: &Engine, batch: &str, view: &str, row: IngestRow) {
 fn naming(tid: TesseraId, set: impl FnOnce(&mut IngestRow)) -> IngestRow {
     let mut row = IngestRow {
         tessera_id: Some(tid),
-        external_id: None,
         labels: None,
         position: None,
         scalars: vec![WalScalar::Null; DECLARED],

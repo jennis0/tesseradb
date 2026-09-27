@@ -4,15 +4,13 @@ use super::*;
 use super::out::flat_families;
 
 /// `POST /v1/items/{handle}`'s payload: a visible item's full record — every declared field that
-/// carries a value, by declared name — plus its caller-supplied external id, if it has one. Names,
-/// not tags: a blob field's tag is a declaration position and an index internal, resolved to the
+/// carries a value, by declared name. Names, not tags: a blob field's tag is a declaration position and an index internal, resolved to the
 /// declared name engine-side. No tag, no entity id and no blob detail crosses the trust boundary.
 /// A category field carries its vocabulary key, never its code.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemOut {
     /// Present fields only, in declaration order — an absent field is absent, not null.
     pub fields: Vec<ItemField>,
-    pub external_id: Option<Vec<u8>>,
     /// The satisfied terms only: the intersection of this item's own term set with the asking
     /// session's satisfied set, presented through the plugin, sorted by the presented string.
     /// Never the item's full label set. Taken against [`Session::satisfied_descriptors`], which
@@ -151,7 +149,7 @@ impl Engine {
     }
 
     /// `POST /v1/items/{handle}`: invert `id` to its number and the entity holding it, test
-    /// visibility in entity space, and only then locate a row and read its scalars/external id.
+    /// visibility in entity space, and only then locate a row and read its scalars.
     /// Returns `Ok(None)` both when `id` names nothing in this bundle and when it names an item the
     /// principal may not see: one outcome from one code path.
     /// The timing channel is kept small. Inversion is a pure function and the edited-items map is
@@ -159,10 +157,7 @@ impl Engine {
     /// entity-space question — three constant-time probes — and is the same three probes for an
     /// identifier that names nothing and one that names an invisible item: no `RowProjection` is
     /// constructed or read, so there is no per-ID cost to correlate against. A row is located only
-    /// after the answer is already visible, and the sidecar is read only after that. Returns `Err`
-    /// rather than a fail-open `None`: a digest mismatch, an out-of-order extent or a short locator
-    /// is a `500`, never an item served with `external_id: null`. This does not reopen the timing
-    /// channel, since the sidecar is touched only for an item already established visible.
+    /// after the answer is already visible.
     pub fn item(
         &self,
         session: &Session,
@@ -210,7 +205,7 @@ impl Engine {
         }
 
         // Visible. Now, and only now, find the row: every read below — the row lookup, the
-        // entity-space value reads, the blob block read and the sidecar read — is reachable only
+        // entity-space value reads and the blob block read — is reachable only
         // for an item already established visible, so none of that cost is probeable by an
         // attacker. The allocator caps entity ids at `u32::MAX`, and inversion produced this one
         // from a 32-bit half; checked rather than cast so a violated invariant fails loudly.
@@ -233,12 +228,6 @@ impl Engine {
             labels: self.labels_for(&generation, session, entity_raw)?,
             views,
             scoped,
-            // Propagate, never swallow: the same `EngineError::Store` wrapping every other
-            // store-backed call in this crate uses. Against the generation this request loaded,
-            // never a second `load()`.
-            external_id: self
-                .external_id_of_in(&generation, entity)
-                .map_err(EngineError::Store)?,
         }))
     }
 }

@@ -400,19 +400,6 @@ impl Engine {
         self.counters.occupancy_walks.load(Ordering::Relaxed)
     }
 
-    /// Whether the external-id sidecar has opened any extent yet — exposed for tests confirming
-    /// `Engine::open` never touches it.
-    pub fn external_id_sidecar_is_open(&self) -> bool {
-        self.generation.load().external_index.0.is_open()
-    }
-
-    /// Whether the served bundle holds any external-id run, from the build or from a flush. Lets a
-    /// route resolving external ids say once that a bundle carries none, rather than once per id.
-    /// Reads the manifest's run list; opens nothing, and does not consult ids not yet flushed.
-    pub fn bundle_carries_external_ids(&self) -> bool {
-        self.generation.load().external_index.0.has_runs()
-    }
-
     /// The write executor's posture: the liveness signal `readyz` reads, answerable without
     /// submitting anything.
     pub fn write_executor_posture(&self) -> crate::write::ExecutorPosture {

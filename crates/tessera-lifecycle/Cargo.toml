@@ -30,7 +30,6 @@ serde = { workspace = true }
 # record is built, so the extent and the log carry one number for one part.
 sha2 = { workspace = true }
 rustc-hash = "1"
-twox-hash = { workspace = true }
 
 [dev-dependencies]
 # Self dev-dependency: the only way this crate's own integration tests can turn on a feature of

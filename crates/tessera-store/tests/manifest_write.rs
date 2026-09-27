@@ -127,8 +127,6 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         }],
         deltas: vec![],
         dict_extents: vec![],
-        external_id_runs: vec![],
-        locator_extents: vec![],
         tombstones: EntitySet::default(),
         deny: EntitySet::default(),
         vocabulary_extensions: vec![],

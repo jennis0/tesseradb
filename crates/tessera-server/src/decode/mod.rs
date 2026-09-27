@@ -18,7 +18,6 @@ pub(crate) struct DecodeError(pub(crate) String);
 /// A column a route gives a meaning of its own, whatever the manifest declares.
 #[derive(Clone, Copy)]
 pub(crate) enum Fixed<'a> {
-    ExternalId,
     /// A coordinate, under the name the view's projection gives its axis.
     Coordinate(&'a str),
     Access,
@@ -29,7 +28,6 @@ pub(crate) enum Fixed<'a> {
 impl Fixed<'_> {
     pub(crate) fn name(&self) -> &str {
         match self {
-            Fixed::ExternalId => "external_id",
             Fixed::Coordinate(name) => name,
             Fixed::Access => "access",
             Fixed::NodeId => "node_id",
@@ -40,8 +38,9 @@ impl Fixed<'_> {
 
 /// How one item names its entity: the two address forms, already shape-validated.
 pub(crate) enum Address {
-    External(Vec<u8>),
     Tessera(TesseraId),
+    /// A unique field and one value of it, as the value's text.
+    Unique { field: String, value: String },
 }
 
 /// The two encodings a record-bearing route takes; both decode to one row form.
@@ -50,10 +49,6 @@ pub(crate) enum BodyEncoding {
     Json,
     Arrow,
 }
-
-/// The longest external id, in bytes. A longer one is refused, never truncated: truncating
-/// would merge two items whose ids share a prefix.
-pub(crate) const EXTERNAL_ID_MAX_LEN: usize = 64;
 
 /// A group-scoped family as a [`DeclaredScalar`], so its key check, wire type and code minting
 /// are the entity-scoped ones; the scope changes only which column file a value lands in.

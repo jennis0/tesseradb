@@ -1,7 +1,7 @@
 //! Which item each row of an ingest batch names.
 //!
-//! A row names an item by the values that identify one: its `tessera_id`, its external id, and
-//! each non-null value of a unique field. A row whose values name no item creates one. A row
+//! A row names an item by the values that identify one: its `tessera_id` and each non-null value
+//! of a unique field. A row whose values name no item creates one. A row
 //! whose values name one item addresses it. A row whose values name two items is refused, and so
 //! is a `tessera_id` naming no live or suppressed item, since a new item is never given a
 //! `tessera_id` its caller chose. Across a batch, two rows may not name one item, and two rows may
@@ -19,14 +19,10 @@ use tessera_types::{EntityId, TesseraId};
 /// are equal exactly where their keys are.
 pub type Key = u128;
 
-/// The pseudo-field an external id is identified under, beside the declared unique fields.
-pub const EXTERNAL_ID_FIELD: u16 = u16::MAX;
-
 /// The values one row identifies an item by.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RowIdentity {
     pub tessera_id: Option<TesseraId>,
-    pub external_id: Option<Vec<u8>>,
     /// `(declared position, key)` for each non-null value of a unique field the row carries.
     pub unique: Vec<(u16, Key)>,
 }
@@ -38,9 +34,6 @@ pub trait Holdings {
     /// For each key, every item holding it in the unique field at declared position `field`.
     fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<Vec<EntityId>>, Self::Error>;
 
-    /// For each external id, the item bound to it.
-    fn external_holders(&self, ids: &[&[u8]]) -> Result<Vec<Option<EntityId>>, Self::Error>;
-
     /// For each `tessera_id`, the item it names.
     fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, Self::Error>;
 }
@@ -49,7 +42,6 @@ pub trait Holdings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Identifier {
     TesseraId,
-    ExternalId,
     /// The unique field at this declared position.
     Unique(u16),
 }
@@ -66,7 +58,7 @@ pub enum Refusal {
     UnknownTesseraId { row: usize },
     /// Two rows name one item.
     OneItemTwice { rows: [usize; 2], item: EntityId },
-    /// Two rows set one value of one unique field (or one external id) and name no one item.
+    /// Two rows set one value of one unique field and name no one item.
     OneValueTwice { rows: [usize; 2], field: Identifier },
 }
 
@@ -88,18 +80,6 @@ pub fn resolve<H: Holdings>(
         match holder {
             Some(entity) => named[*at].push((Identifier::TesseraId, entity)),
             None => return Ok(Err(Refusal::UnknownTesseraId { row: *at })),
-        }
-    }
-
-    let external: Vec<(usize, &[u8])> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(at, row)| row.external_id.as_deref().map(|id| (at, id)))
-        .collect();
-    let ids: Vec<&[u8]> = external.iter().map(|(_, id)| *id).collect();
-    for ((at, _), holder) in external.iter().zip(holdings.external_holders(&ids)?) {
-        if let Some(entity) = holder {
-            named[*at].push((Identifier::ExternalId, entity));
         }
     }
 
@@ -145,16 +125,9 @@ pub fn resolve<H: Holdings>(
     // Two rows setting one value name no one item here, or the rule above would have met them.
     let mut set: FxHashMap<(Identifier, Key), usize> = FxHashMap::default();
     for (at, row) in rows.iter().enumerate() {
-        let external = row
-            .external_id
-            .as_deref()
-            .map(|id| (Identifier::ExternalId, external_key(id)));
-        let unique = row
-            .unique
-            .iter()
-            .map(|(field, key)| (Identifier::Unique(*field), *key));
-        for (field, key) in external.into_iter().chain(unique) {
-            if let Some(first) = set.insert((field, key), at) {
+        for (field, key) in &row.unique {
+            let field = Identifier::Unique(*field);
+            if let Some(first) = set.insert((field, *key), at) {
                 return Ok(Err(Refusal::OneValueTwice {
                     rows: [first, at],
                     field,
@@ -165,22 +138,14 @@ pub fn resolve<H: Holdings>(
     Ok(Ok(items))
 }
 
-/// An external id as a key for the batch's own duplicate check. Only rows of one batch are
-/// compared under it, so a collision costs a refusal of two rows that differ, at odds of one in
-/// 2^128.
-fn external_key(id: &[u8]) -> Key {
-    twox_hash::XxHash3_128::oneshot_with_seed(0, id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Holdings over fixed maps: `unique[(field, key)]`, `external[id]`, `tessera[id]`.
+    /// Holdings over fixed maps: `unique[(field, key)]` and `tessera[id]`.
     #[derive(Default)]
     struct Held {
         unique: FxHashMap<(u16, Key), Vec<EntityId>>,
-        external: FxHashMap<Vec<u8>, EntityId>,
         tessera: FxHashMap<u64, EntityId>,
     }
 
@@ -191,9 +156,6 @@ mod tests {
                 .iter()
                 .map(|key| self.unique.get(&(field, *key)).cloned().unwrap_or_default())
                 .collect())
-        }
-        fn external_holders(&self, ids: &[&[u8]]) -> Result<Vec<Option<EntityId>>, ()> {
-            Ok(ids.iter().map(|id| self.external.get(*id).copied()).collect())
         }
         fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, ()> {
             Ok(ids.iter().map(|id| self.tessera.get(&id.raw()).copied()).collect())
@@ -209,7 +171,6 @@ mod tests {
         held.unique.insert((0, 17), vec![e(1)]);
         held.unique.insert((0, 18), vec![e(2)]);
         held.unique.insert((1, 5), vec![e(1)]);
-        held.external.insert(b"x1".to_vec(), e(1));
         held.tessera.insert(101, e(1));
         held.tessera.insert(102, e(2));
         held
@@ -232,7 +193,6 @@ mod tests {
     fn a_row_names_the_one_item_its_values_name() {
         let agreeing = RowIdentity {
             tessera_id: Some(TesseraId::new(101)),
-            external_id: Some(b"x1".to_vec()),
             unique: vec![(0, 17), (1, 5)],
         };
         let rows = [agreeing, by_unique(0, 18), by_unique(0, 99), RowIdentity::default()];
@@ -266,7 +226,7 @@ mod tests {
     }
 
     /// Two rows naming one item by different values are refused, and so are two new items given
-    /// one value or one external id. Nulls are not values and never collide.
+    /// one value. Nulls are not values and never collide.
     #[test]
     fn two_rows_may_not_name_one_item_or_set_one_value() {
         let by_tessera = RowIdentity {
@@ -285,17 +245,6 @@ mod tests {
             Err(Refusal::OneValueTwice {
                 rows: [0, 2],
                 field: Identifier::Unique(0)
-            })
-        );
-        let external = |id: &[u8]| RowIdentity {
-            external_id: Some(id.to_vec()),
-            ..RowIdentity::default()
-        };
-        assert_eq!(
-            resolved(&[external(b"new"), external(b"new")]),
-            Err(Refusal::OneValueTwice {
-                rows: [0, 1],
-                field: Identifier::ExternalId
             })
         );
         assert_eq!(

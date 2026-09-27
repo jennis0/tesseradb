@@ -21,7 +21,7 @@ pub enum ApiError {
     /// 403: a recognised token whose `expires_at` has passed. The engine does not check expiry;
     /// `AppState::authenticated_session` does.
     ExpiredToken,
-    /// 404: a named view, external id, or handle this bundle/session has never heard of.
+    /// 404: a named view, unique value, or handle this bundle/session has never heard of.
     Unknown(String),
     /// 409: the request conflicts with what is already held, such as a batch id replayed with a
     /// different body. It had no effect.
@@ -203,6 +203,8 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // The detail names columns and families, which `/v1/meta` publishes to every principal.
         // `FilterRefused` is an unreadable artefact and stays a 500.
         EngineError::FilterMalformed(detail) => ApiError::Contract(detail),
+        // The detail names only the field and the value the caller sent.
+        EngineError::AddressMalformed(detail) => ApiError::Contract(detail),
         // Each refusal names a layer, a level or a page bound from `/v1/meta`, never an artifact.
         browse @ EngineError::BrowseRefused(_) => ApiError::Contract(browse.to_string()),
         // Each names only a field, a system field or a paging argument the caller sent.
@@ -258,7 +260,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
 /// `StoreError`. The error's text can name a path or an entity, so it is logged and the body is a
 /// fixed string.
 pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
-    tracing::error!(detail = %e, "bundle/sidecar read failed; answering fail-closed");
+    tracing::error!(detail = %e, "a bundle read failed; answering fail-closed");
     ApiError::FailClosed(
         "could not read this bundle's stored data".to_string(),
     )
@@ -572,8 +574,8 @@ mod tests {
     /// A store error's text, which can name a path and an entity, never reaches the body.
     #[test]
     fn map_store_error_does_not_forward_the_detail_to_the_caller() {
-        let leaky = "invalid sidecar at /srv/tessera/v00000/partitions/default/entities/\
-                     ext-locator.u32: entity 123456 is inconsistent";
+        let leaky = "invalid run at /srv/tessera/v00000/partitions/default/entities/\
+                     unique/doc/base-0.keys: entity 123456 is inconsistent";
         let (status, code, detail) = map_store_error(leaky).parts();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(code, "fail-closed");
@@ -588,8 +590,8 @@ mod tests {
     async fn map_join_error_does_not_forward_the_detail_to_the_caller() {
         let join_error = tokio::spawn(async {
             panic!(
-                "invalid sidecar at /srv/tessera/v00000/partitions/default/entities/\
-                 ext-locator.u32: entity 123456 is inconsistent"
+                "invalid run at /srv/tessera/v00000/partitions/default/entities/\
+                 unique/doc/base-0.keys: entity 123456 is inconsistent"
             );
         })
         .await

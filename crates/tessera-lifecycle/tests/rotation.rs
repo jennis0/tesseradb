@@ -172,7 +172,7 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     }
 
     let (_wal, records) = Wal::open(&base).unwrap();
-    let (overlay, _buffer, _established, _resolver) = replay(
+    let (overlay, _buffer, _resolver) = replay(
         &records,
         &dict,
         Overlay::new(),

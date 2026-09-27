@@ -189,7 +189,6 @@ fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId
     engine
         .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -323,8 +322,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     build_fixture_with_schema(&root, tmp.path(), DISCOVERED_WIDE, "department", 4);
     let engine = engine_over(tmp.path(), &root, config());
 
-    let row = |external_id: &str| UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
+    let row = || UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -337,7 +335,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
 
     let entities = engine
         .ingest_rows(
-            vec![row("f-1"), row("f-2")],
+            vec![row(), row()],
             "batch-finance".to_string(),
             [1u8; 32],
         )
@@ -495,7 +493,6 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
     let err = engine
         .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"one-too-many".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -607,8 +604,7 @@ fn a_refused_window_publishes_none_of_the_keys_it_drew() {
     build_fixture_with_schema(&root, tmp.path(), DISCOVERED_WIDE, "department", 4);
     let engine = engine_over(tmp.path(), &root, config());
 
-    let row = |external_id: &str, key: &str| UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
+    let row = |key: &str| UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -623,7 +619,7 @@ fn a_refused_window_publishes_none_of_the_keys_it_drew() {
     // the window is refused after the first has already minted.
     engine
         .ingest_rows(
-            vec![row("drawn-1", "logistics"), row("empty-1", "")],
+            vec![row("logistics"), row("")],
             "batch-refused".to_string(),
             [7u8; 32],
         )

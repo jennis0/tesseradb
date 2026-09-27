@@ -1,7 +1,7 @@
 //! What the row-space merge and the entity-space coalesce leave behind over a long steady ingest.
 //!
-//! One view takes `--rows` new items per tick for `--ticks` ticks, each with an external id, a
-//! keyword held in the record blob, an indexed keyword and an indexed text column, and one novel
+//! One view takes `--rows` new items per tick for `--ticks` ticks, each with a keyword held in the
+//! record blob, an indexed keyword and an indexed text column, and one novel
 //! descriptor so every flush promotes a dictionary extent. Merge and coalesce run at their default
 //! policies; no fold runs.
 //!
@@ -10,18 +10,14 @@
 //!
 //! After every tick, once nothing under the prefix and no maintenance counter has changed for
 //! `QUIET`, it prints one row: segments listed for the view, the entries in each entity-space
-//! list, files and bytes under the live prefix, bytes of the view's row-space files and of every
-//! external-id run and locator, the merge and coalesce output directories on disc, and the
+//! list, files and bytes under the live prefix, bytes of the view's row-space files, the merge and
+//! coalesce output directories on disc, and the
 //! executor's published and failed counts. Each attempt writes its own directory, and one
 //! that neither published nor failed was discarded at its rebase, so `abandoned` is directories
 //! less published less failed.
 //!
-//! Every side-manifest still on disc after a tick is checked once against the ordering rules the
-//! readers rely on: the base run is `external_id_runs[0]`; the other runs are the runs the locator
-//! extents name, in the same order; each locator span is well formed (spans may overlap, since a
-//! lookup asks every extent covering an entity); each view's segments ascend without overlap in
-//! entity order. At the end every ingested binding is looked up both ways through a sidecar opened
-//! from the bundle on disc.
+//! Every side-manifest still on disc after a tick is checked once against the ordering rule the
+//! readers rely on: each view's segments ascend without overlap in entity order.
 //!
 //! ```text
 //! cargo run --release -p tessera-bench --bin maintenance_steady_state -- \
@@ -49,9 +45,8 @@ use tessera_engine::{AttributeRequest, Engine, EngineConfig};
 use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::UnallocatedRow;
 use tessera_store::manifest::SegmentsManifest;
-use tessera_store::ExternalIdSidecar;
 use tessera_types::layer::LayerScope;
-use tessera_types::EntityId;
+
 
 const VIEW: &str = "s0";
 const BASE_ITEMS: u64 = 10_000;
@@ -102,9 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
     }
 
-    let base_run = live_manifest(&engine).external_id_runs.first().cloned();
-    let mut probe = Probe::new(&root, base_run);
-    let mut bindings: Vec<(EntityId, Vec<u8>)> = Vec::new();
+    let mut probe = Probe::new(&root);
     let mut rng = rand::rngs::StdRng::seed_from_u64(7);
     let common = engine.resolve_terms(&[b"0".to_vec()]);
 
@@ -121,14 +114,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let novel_terms = engine.resolve_terms(std::slice::from_ref(&novel));
             let batch: Vec<UnallocatedRow> = (0..args.rows)
                 .map(|i| {
-                    let key = format!("ext-{tick:05}-{i:06}").into_bytes();
                     let (descriptors, terms) = if i == 0 {
                         (vec![novel.clone()], novel_terms.clone())
                     } else {
                         (vec![b"0".to_vec()], common.clone())
                     };
                     UnallocatedRow {
-                        external_id: Some(key),
                         view: VIEW.to_string(),
                         join: None,
                         descriptors,
@@ -144,11 +135,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 })
                 .collect();
-            let keys: Vec<Vec<u8>> = batch.iter().map(|r| r.external_id.clone().unwrap()).collect();
             let mut digest = [0u8; 32];
             digest[..8].copy_from_slice(&(tick as u64).to_le_bytes());
-            let entities = engine.ingest_rows(batch, format!("tick-{tick}"), digest)?;
-            bindings.extend(entities.into_iter().zip(keys));
+            engine.ingest_rows(batch, format!("tick-{tick}"), digest)?;
         }
         let before = engine.write_executor_stats();
         engine.request_flush();
@@ -186,12 +175,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for breach in probe.breaches.iter().take(20) {
         println!("    {breach}");
     }
-
-    let high_water = live_manifest(&engine).entity_id_high_water;
-    drop(engine);
-    let (checked, wrong) = check_bindings(&root, &bindings, high_water)?;
-    println!("  bindings checked   {checked:>10}");
-    println!("  bindings wrong     {wrong:>10}");
     Ok(())
 }
 
@@ -298,19 +281,11 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-fn live_manifest(engine: &Engine) -> SegmentsManifest {
-    let generation = engine.generation();
-    let (_, partition) = generation.bundle.partitions.iter().next().expect("one partition");
-    partition.manifest.clone()
-}
-
 #[derive(Clone, Copy, Default)]
 struct Row {
     tick: u64,
     segments: u64,
     deltas: u64,
-    runs: u64,
-    locators: u64,
     dicts: u64,
     attrs: u64,
     records: u64,
@@ -319,7 +294,6 @@ struct Row {
     files: u64,
     mib: u64,
     geometry_mib: u64,
-    runs_mib: u64,
     merge_dirs: u64,
     merges: u64,
     merge_failures: u64,
@@ -338,8 +312,6 @@ impl Row {
         vec![
             ("segments", |r| r.segments),
             ("deltas", |r| r.deltas),
-            ("runs", |r| r.runs),
-            ("locators", |r| r.locators),
             ("dicts", |r| r.dicts),
             ("attrs", |r| r.attrs),
             ("records", |r| r.records),
@@ -348,7 +320,6 @@ impl Row {
             ("files", |r| r.files),
             ("MiB", |r| r.mib),
             ("geometry_MiB", |r| r.geometry_mib),
-            ("runs_MiB", |r| r.runs_mib),
             ("merge_dirs", |r| r.merge_dirs),
             ("merges", |r| r.merges),
             ("merge_failed", |r| r.merge_failures),
@@ -380,17 +351,15 @@ struct Probe {
     /// Published and failed counts of engines already closed: merges, merge failures, coalesces,
     /// failed coalesce windows, failed coalesce passes.
     carried: [u64; 5],
-    base_run: Option<String>,
     checked: BTreeSet<(String, u64)>,
     breaches: Vec<String>,
 }
 
 impl Probe {
-    fn new(root: &Path, base_run: Option<String>) -> Self {
+    fn new(root: &Path) -> Self {
         Probe {
             root: root.to_path_buf(),
             carried: [0; 5],
-            base_run,
             checked: BTreeSet::new(),
             breaches: Vec::new(),
         }
@@ -429,8 +398,6 @@ impl Probe {
             tick: tick as u64,
             segments: m.segments.iter().filter(|s| s.view == VIEW).count() as u64,
             deltas: m.deltas.len() as u64,
-            runs: m.external_id_runs.len() as u64,
-            locators: m.locator_extents.len() as u64,
             dicts: m.dict_extents.len() as u64,
             attrs: m.attr_extents.len() as u64,
             records: m.record_extents.len() as u64,
@@ -438,8 +405,7 @@ impl Probe {
             terms: m.entity_terms_extents.len() as u64,
             files,
             mib: bytes >> 20,
-            geometry_mib: walk(&segments_dir, |name| !is_run(name)).1 >> 20,
-            runs_mib: walk(&prefix_dir, is_run).1 >> 20,
+            geometry_mib: walk(&segments_dir, |_| true).1 >> 20,
             merge_dirs,
             merges,
             merge_failures,
@@ -469,7 +435,7 @@ impl Probe {
                 continue;
             };
             let manifest: SegmentsManifest = serde_json::from_slice(&raw)?;
-            for breach in ordering_breaches(&manifest, self.base_run.as_deref()) {
+            for breach in ordering_breaches(&manifest) {
                 self.breaches.push(format!("SEGMENTS-{n}: {breach}"));
             }
         }
@@ -477,28 +443,8 @@ impl Probe {
     }
 }
 
-fn ordering_breaches(m: &SegmentsManifest, base_run: Option<&str>) -> Vec<String> {
+fn ordering_breaches(m: &SegmentsManifest) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(base) = base_run {
-        if m.external_id_runs.first().map(String::as_str) != Some(base) {
-            out.push(format!("external_id_runs[0] is {:?}, not the base run", m.external_id_runs.first()));
-        }
-    }
-    let named: Vec<&str> = m.locator_extents.iter().map(|e| e.external_id_run.as_str()).collect();
-    let listed: Vec<&str> = m.external_id_runs.iter().skip(1).map(String::as_str).collect();
-    if named != listed {
-        out.push(format!("runs after the base {listed:?} are not the locator extents' runs {named:?} in order"));
-    }
-    for run in &named {
-        if !m.external_id_runs.iter().any(|r| r == run) {
-            out.push(format!("locator extent names unlisted run {run}"));
-        }
-    }
-    for extent in &m.locator_extents {
-        if extent.entity_lo > extent.entity_hi {
-            out.push(format!("locator span {}..={} is empty", extent.entity_lo, extent.entity_hi));
-        }
-    }
     let views: BTreeSet<&str> = m.segments.iter().map(|s| s.view.as_str()).collect();
     for view in views {
         let segs: Vec<_> = m.segments.iter().filter(|s| s.view == view).collect();
@@ -512,27 +458,6 @@ fn ordering_breaches(m: &SegmentsManifest, base_run: Option<&str>) -> Vec<String
         }
     }
     out
-}
-
-fn check_bindings(root: &Path, bindings: &[(EntityId, Vec<u8>)], high_water: u64) -> Result<(usize, usize), Box<dyn std::error::Error>> {
-    let bundle = tessera_store::open_bundle(root)?;
-    let prefix = std::fs::read(root.join("CURRENT"))?;
-    let prefix: serde_json::Value = serde_json::from_slice(&prefix)?;
-    let prefix_dir = root.join(prefix["prefix"].as_str().ok_or("CURRENT names no prefix")?);
-    let (_, partition) = bundle.partitions.iter().next().ok_or("no partition")?;
-    let sidecar = ExternalIdSidecar::deferred_from_manifest(&bundle.manifest, &partition.manifest, &prefix_dir)?;
-    let mut wrong = 0;
-    for chunk in bindings.chunks(50_000) {
-        let keys: Vec<Vec<u8>> = chunk.iter().map(|(_, key)| key.clone()).collect();
-        let forward = sidecar.resolve_many(&keys)?;
-        for ((entity, key), forward) in chunk.iter().zip(forward) {
-            let reverse = sidecar.external_id_of_checked(*entity, high_water)?;
-            if forward != Some(*entity) || reverse.as_deref() != Some(key.as_slice()) {
-                wrong += 1;
-            }
-        }
-    }
-    Ok((bindings.len(), wrong))
 }
 
 /// Wait until the bytes under the bundle and the maintenance counters hold still for `QUIET`.
@@ -556,10 +481,6 @@ fn settle(root: &Path, engine: &Engine) -> Result<(), Box<dyn std::error::Error>
         }
     }
     Ok(())
-}
-
-fn is_run(name: &str) -> bool {
-    name == "external-ids.arrow" || name == "ext-locator.u32"
 }
 
 /// Files and bytes under `dir`, counting the files whose names `keep` accepts.

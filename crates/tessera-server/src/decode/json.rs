@@ -11,13 +11,12 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int16Builder,
+    Array, ArrayRef, BooleanBuilder, Float32Builder, Float64Builder, Int16Builder,
     Int32Builder, Int64Builder, Int8Builder, ListBuilder, StringBuilder,
     TimestampMicrosecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
 };
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use base64::Engine as _;
 use serde_json::{Map, Value};
 use tessera_engine::{member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::layer::LayerDeclaration;
@@ -141,36 +140,6 @@ fn fixed_column(
     fixed: Fixed<'_>,
 ) -> Result<ArrayRef, DecodeError> {
     Ok(match fixed {
-        Fixed::ExternalId => {
-            let mut builder = BinaryBuilder::new();
-            for (row, record) in rows.iter().enumerate() {
-                match record.get("external_id") {
-                    None | Some(Value::Null) => builder.append_null(),
-                    Some(Value::String(text)) => {
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(text)
-                            .map_err(|_| {
-                                refusal(
-                                    body_name,
-                                    row,
-                                    "external_id",
-                                    "is not base64; send the external id's bytes as base64",
-                                )
-                            })?;
-                        builder.append_value(bytes);
-                    }
-                    Some(_) => {
-                        return Err(refusal(
-                            body_name,
-                            row,
-                            "external_id",
-                            "is not a string; send the external id as a base64 string",
-                        ))
-                    }
-                }
-            }
-            Arc::new(builder.finish())
-        }
         Fixed::Coordinate(name) => {
             let mut builder = Float64Builder::new();
             for (row, record) in rows.iter().enumerate() {

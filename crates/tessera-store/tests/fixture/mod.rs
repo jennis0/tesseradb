@@ -118,8 +118,6 @@ pub fn build_bundle(root: &Path, n: u64) {
         }],
         deltas: vec![],
         dict_extents: vec![],
-        external_id_runs: vec![],
-        locator_extents: vec![],
         tombstones: EntitySet::default(),
         deny: EntitySet::default(),
         vocabulary_extensions: vec![],
@@ -213,7 +211,6 @@ pub fn flush_segment(
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
                     number: EntityId::new(e),
-                    external_id: Some(format!("ext-{e}").into_bytes()),
                     x: ((e * 37) % 100) as f64 / 100.0,
                     y: ((e * 61) % 100) as f64 / 100.0,
                     scalars: vec![],
@@ -230,7 +227,7 @@ pub fn flush_segment(
             scalar_schema: &[],
             row_base,
             entity_floor: 0,
-        }, &[],
+        },
     )
     .expect("write_flush_segment");
 

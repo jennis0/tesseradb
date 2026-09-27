@@ -1303,9 +1303,7 @@ fn a_response_cancelled_before_it_starts_counts_nothing() {
 fn ingest_at(engine: &Engine, batch: &str, places: &[(f64, f64)]) -> Vec<EntityId> {
     let rows = places
         .iter()
-        .enumerate()
-        .map(|(i, &(x, y))| tessera_lifecycle::UnallocatedRow {
-            external_id: Some(format!("{batch}-{i}").into_bytes()),
+        .map(|&(x, y)| tessera_lifecycle::UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],

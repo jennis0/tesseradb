@@ -183,13 +183,6 @@ impl BuildObserver for StageCollector {
 /// superlinear — and 45% of the 25M build. It is also the one stage that cannot be skipped or
 /// deferred: assignment is permanent under I9.
 ///
-/// **`external_ids` is the second cost, and it is avoidable.** 2.3 s → 24.0 s, near-perfectly
-/// linear, 20% of the build. The same sidecar is 42% of bundle *bytes*, and is synthesised for
-/// every row from the source entity id even though the corpus supplies no external ids
-/// (`pipeline.rs`, stage 7). A build flag to skip it would take ~20% off build time and ~42% off
-/// disk — but it backs `/v1/items` drill-down and the C-5 constant-time property, so it is a
-/// deliberate trade, not free.
-///
 /// **Bundle size is 47.0 B/item, dead flat across 100x of scale** (47.1 / 47.0 / 47.0).
 ///
 /// A prediction that was in this comment and is now falsified: the pairs file is sorted by
@@ -371,7 +364,6 @@ pub(crate) fn synth_rows(
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
-                external_id: Some(format!("bench-{n}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: descriptors.to_vec(),
@@ -1056,7 +1048,7 @@ const POOL_TERMS: usize = 1_024;
 ///
 /// Spread rather than taken from the head: a dictionary is written in term order and the head is
 /// systematically the shortest and widest descriptors, so a prefix would make descriptor *length*
-/// — which is what the WAL record and the external-id compare pay for — unrepresentative.
+/// — which is what the WAL record pays for — unrepresentative.
 fn dictionary_pool(dict: &Dictionary, limit: usize) -> (Vec<TermId>, Vec<Vec<u8>>) {
     let n = dict.len();
     let take = limit.min(n);
@@ -1081,8 +1073,7 @@ fn dictionary_pool(dict: &Dictionary, limit: usize) -> (Vec<TermId>, Vec<Vec<u8>
 /// and the number of distinct signatures is `P` at every density. Taking a contiguous run instead
 /// would make the signature count `P/gcd(density, P)` — so `density` would move two things at once
 /// and neither column of the table would mean anything. `assign_sorted` sorts a window by
-/// `(signature, external_id)`, and `crates/tessera-engine/tests/ingest_shape.rs` measures that the
-/// tie-break's cost is real, so this is not a hypothetical confound.
+/// signature, so this is not a hypothetical confound.
 fn rate_rows(
     pool_terms: &[TermId],
     pool_descriptors: &[Vec<u8>],
@@ -1098,7 +1089,6 @@ fn rate_rows(
                 .map(|j| ((n as usize).wrapping_mul(7).wrapping_add(j * 137)) % p)
                 .collect();
             UnallocatedRow {
-                external_id: Some(format!("rate-{n}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: picks.iter().map(|&k| pool_descriptors[k].clone()).collect(),

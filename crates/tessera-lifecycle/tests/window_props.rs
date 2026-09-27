@@ -16,9 +16,8 @@ use tessera_lifecycle::wal::WalRecord;
 use tessera_lifecycle::window::{CommitWindow, FragmentationTally, Slot, WindowClaims, WindowEntry};
 use tessera_types::TermId;
 
-fn row(key: &str, terms: &[u32]) -> UnallocatedRow {
+fn row(terms: &[u32]) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(key.as_bytes().to_vec()),
         view: "default".to_string(),
         join: None,
         descriptors: Vec::new(),
@@ -64,11 +63,7 @@ proptest! {
             for (e, entry_rows) in entries.iter().enumerate() {
                 // One term per row: the id properties below do not depend on signature *shape*,
                 // which `assign_sorted_groups_identical_signatures_contiguously` covers already.
-                let rows: Vec<UnallocatedRow> = entry_rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, t)| row(&format!("w{w}-e{e}-r{i}"), &[*t]))
-                    .collect();
+                let rows: Vec<UnallocatedRow> = entry_rows.iter().map(|t| row(&[*t])).collect();
                 window.push(
                     WindowEntry {
                     edits: Vec::new(),
@@ -117,11 +112,7 @@ proptest! {
         sigs in prop::collection::vec(prop::collection::vec(0u32..5, 0..3), 1..40),
         chunk in 1usize..7,
     ) {
-        let rows: Vec<UnallocatedRow> = sigs
-            .iter()
-            .enumerate()
-            .map(|(i, sig)| row(&format!("r{i:04}"), sig))
-            .collect();
+        let rows: Vec<UnallocatedRow> = sigs.iter().map(|sig| row(sig)).collect();
 
         let mut chunked: CommitWindow<()> = CommitWindow::new(0);
         for (c, part) in rows.chunks(chunk).enumerate() {
@@ -200,7 +191,7 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
     const ROWS: usize = 4_000;
     const TERMS: u32 = 20;
     let corpus: Vec<UnallocatedRow> = (0..ROWS)
-        .map(|i| row(&format!("r{i:05}"), &[(i as u32 * 7) % TERMS]))
+        .map(|i| row(&[(i as u32 * 7) % TERMS]))
         .collect();
 
     let assign = |chunk: usize| -> f64 {
@@ -296,7 +287,7 @@ fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_cei
     let corpus: Vec<UnallocatedRow> = (0..ROWS)
         .map(|i| {
             let s = (i as u32 * 7) % SIGNATURES;
-            row(&format!("r{i:05}"), &[s, (s + 1) % SIGNATURES])
+            row(&[s, (s + 1) % SIGNATURES])
         })
         .collect();
 

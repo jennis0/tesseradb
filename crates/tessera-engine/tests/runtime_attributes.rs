@@ -209,19 +209,17 @@ fn request(name: &str, ty: &str) -> AttributeRequest {
 
 /// One row carrying the build's two columns and nothing else, at the arity the build declared,
 /// under the label every principal of the fixture holds.
-fn row(external_id: &str, terms: &Engine, scalars: Vec<WalScalar>) -> UnallocatedRow {
-    row_under(external_id, terms, b"0", scalars)
+fn row(terms: &Engine, scalars: Vec<WalScalar>) -> UnallocatedRow {
+    row_under(terms, b"0", scalars)
 }
 
 /// [`row`] under one label of the caller's choosing.
 fn row_under(
-    external_id: &str,
     terms: &Engine,
     label: &[u8],
     scalars: Vec<WalScalar>,
 ) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![label.to_vec()],
@@ -389,7 +387,7 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     assert_eq!(tag.vocabulary.as_deref(), Some("dept"));
 
     // Rows carrying every column, ingestable at the ack.
-    let full = |id: &str, sentiment: f32, note: &str, prose: &str, tag: &str, memo: u16| {
+    let full = |sentiment: f32, note: &str, prose: &str, tag: &str, memo: u16| {
         let mut scalars = build_columns("mid", 1.0);
         scalars.extend([
             WalScalar::F32(sentiment),
@@ -398,15 +396,15 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
             WalScalar::Utf8(tag.to_string()),
             WalScalar::U16(memo),
         ]);
-        row(id, &engine, scalars)
+        row(&engine, scalars)
     };
     let new = ingest(
         &engine,
         "carrying",
         vec![
-            full("n1", 0.9, "alpha", "the quick brown fox", "eng", 7),
-            full("n2", 0.2, "beta", "a slow red hen", "ops", 8),
-            full("n3", 0.7, "alpha", "the quick grey wolf", "eng", 9),
+            full(0.9, "alpha", "the quick brown fox", "eng", 7),
+            full(0.2, "beta", "a slow red hen", "ops", 8),
+            full(0.7, "alpha", "the quick grey wolf", "eng", 9),
         ],
     );
     publish_buffered(&engine);
@@ -547,7 +545,7 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     let before = ingest(
         &engine,
         "before",
-        vec![row("b1", &engine, build_columns("low", 2.0))],
+        vec![row(&engine, build_columns("low", 2.0))],
     );
     engine
         .declare_attribute(AttributeRequest {
@@ -559,14 +557,14 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     let after = ingest(
         &engine,
         "after-short",
-        vec![row("a1", &engine, build_columns("mid", 3.0))],
+        vec![row(&engine, build_columns("mid", 3.0))],
     );
     // And a row longer than the schema is refused before anything is admitted.
     let mut long = build_columns("high", 4.0);
     long.extend([WalScalar::F32(1.0), WalScalar::F32(2.0)]);
     let refused = engine
         .ingest_rows(
-            vec![row("too-long", &engine, long)],
+            vec![row(&engine, long)],
             "after-long".to_string(),
             [7u8; 32],
         )
@@ -585,7 +583,7 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     let carrying = ingest(
         &engine,
         "after-full",
-        vec![row("c1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("high", 4.0);
             s.push(WalScalar::F32(0.75));
             s
@@ -625,7 +623,7 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
     let before = ingest(
         &engine,
         "before",
-        vec![row("b1", &engine, build_columns("low", 2.0))],
+        vec![row(&engine, build_columns("low", 2.0))],
     );
     engine
         .declare_attribute(AttributeRequest {
@@ -648,7 +646,7 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
     let carrying = ingest(
         &engine,
         "carrying",
-        vec![row("c1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("mid", 1.0);
             s.push(WalScalar::F32(0.6));
             s
@@ -706,7 +704,7 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
     let carrying = ingest(
         &engine,
         "carrying",
-        vec![row("c1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("mid", 1.0);
             s.extend([WalScalar::F32(0.6), WalScalar::Null]);
             s
@@ -796,17 +794,17 @@ fn a_runtime_category_offers_a_restricted_principal_only_its_visible_values() {
             ..request("tag", "category")
         })
         .expect("the declaration is accepted");
-    let tagged = |id: &str, label: &[u8], tag: &str| {
+    let tagged = |label: &[u8], tag: &str| {
         let mut scalars = build_columns("mid", 1.0);
         scalars.push(WalScalar::Utf8(tag.to_string()));
-        row_under(id, &engine, label, scalars)
+        row_under(&engine, label, scalars)
     };
     // `eng` only on a row under label 0, which the principal holding term 1 cannot see; `ops`
     // only on a row under label 1, which the principal holding term 0 cannot.
     ingest(
         &engine,
         "labelled",
-        vec![tagged("e1", b"0", "eng"), tagged("o1", b"1", "ops")],
+        vec![tagged(b"0", "eng"), tagged(b"1", "ops")],
     );
     publish_buffered(&engine);
 
@@ -853,7 +851,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
     ingest(
         &engine,
         "before",
-        vec![row("b1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("mid", 1.0);
             s.push(WalScalar::F32(0.25));
             s
@@ -882,7 +880,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
     let during = ingest(
         &engine,
         "during",
-        vec![row("d1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("high", 2.0);
             s.extend([WalScalar::F32(0.5), WalScalar::F32(0.75)]);
             s
@@ -1096,7 +1094,7 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
         let mut scalars = build_columns("mid", 1.0);
         scalars.push(WalScalar::U16(i + 1));
         let batch = format!("memo-{i}");
-        ingested.push(ingest(&engine, &batch, vec![row(&format!("m{i}"), &engine, scalars)])[0]);
+        ingested.push(ingest(&engine, &batch, vec![row(&engine, scalars)])[0]);
         publish_buffered(&engine);
     }
     engine.request_flush();

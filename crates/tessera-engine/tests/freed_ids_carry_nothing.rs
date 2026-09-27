@@ -1,7 +1,7 @@
 //! **An entity id a fold freed carries nothing of the item that held it.** An edit moves an item
 //! to a new entity; the fold that removes the old entity's rows frees its id, and the allocator
 //! issues it again before any id from the high-water. The item that takes it must hold only what
-//! its own rows say: no value, label, external id, unique value, membership or content of the
+//! its own rows say: no value, label, unique value, membership or content of the
 //! item that held the id before, in any home, through a flush, a merge, a restart and a fold.
 //!
 //! The freed id is the edited item's middle entity: its first is its number, which stays reserved
@@ -52,7 +52,6 @@ fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<T
 fn rescore(tid: TesseraId, score: i32) -> IngestRow {
     let mut row = IngestRow {
         tessera_id: Some(tid),
-        external_id: None,
         labels: None,
         position: None,
         scalars: vec![WalScalar::Null; DECLARED],
@@ -64,10 +63,9 @@ fn rescore(tid: TesseraId, score: i32) -> IngestRow {
 }
 
 /// A row creating an item with a label and a position and nothing else.
-fn create(external_id: &str, label: &str, at: (f64, f64)) -> IngestRow {
+fn create(label: &str, at: (f64, f64)) -> IngestRow {
     IngestRow {
         tessera_id: None,
-        external_id: Some(external_id.as_bytes().to_vec()),
         labels: Some(vec![label.as_bytes().to_vec()]),
         position: Some(at),
         scalars: vec![WalScalar::Null; DECLARED],
@@ -111,7 +109,6 @@ const Z_HEAT: f32 = 42.5;
 fn create_z() -> IngestRow {
     IngestRow {
         tessera_id: None,
-        external_id: Some(b"z".to_vec()),
         labels: Some(vec![b"1".to_vec()]),
         position: Some((901.0, 902.0)),
         scalars: vec![
@@ -279,23 +276,6 @@ fn check(engine: &Engine, x: TesseraId, z: TesseraId, x_score: i32, after: &str)
                 ),
                 "Home::RecordBlob: z's stored values, after {after}"
             ),
-            Home::ExternalIdSidecar => {
-                assert_eq!(
-                    card.external_id.as_deref(),
-                    Some(b"z".as_slice()),
-                    "Home::ExternalIdSidecar: z's external id, after {after}"
-                );
-                for (key, item) in [(source_id_key(X), x), (b"z".to_vec(), z)] {
-                    assert_eq!(
-                        engine
-                            .resolve_external_id(&key)
-                            .unwrap()
-                            .map(|e| engine.tessera_id_of(e).unwrap()),
-                        Some(item),
-                        "Home::ExternalIdSidecar: an external id names its own item, after {after}"
-                    );
-                }
-            }
             Home::TermPostings => {
                 let seen_by_full = served(engine, &full, Q1, None);
                 let seen_by_subset = served(engine, &subset, Q1, None);
@@ -433,8 +413,8 @@ fn a_freed_id_carries_nothing_of_the_item_that_held_it() {
         Q1,
         vec![
             create_z(),
-            create("z2", "1", (903.0, 904.0)),
-            create("z3", "1", (905.0, 906.0)),
+            create("1", (903.0, 904.0)),
+            create("1", (905.0, 906.0)),
         ],
     );
     let entities: Vec<EntityId> = made.iter().map(|t| entity_of(&engine, *t)).collect();
@@ -492,7 +472,7 @@ fn a_freed_id_carries_nothing_of_the_item_that_held_it() {
             &engine,
             &format!("more{i}"),
             Q1,
-            vec![create(&format!("m{i}"), "0", (10.0 + i as f64, 20.0))],
+            vec![create("0", (10.0 + i as f64, 20.0))],
         );
         publish_buffered(&engine);
     }
@@ -538,7 +518,7 @@ fn an_id_a_kept_record_names_is_not_issued_after_a_restart() {
     wait_until("the fold holds", Duration::from_secs(60), || {
         engine.fold_is_holding_for_test()
     });
-    let pinned = send(&engine, "pin", "s0", vec![create("pin", "0", (5.0, 5.0))]);
+    let pinned = send(&engine, "pin", "s0", vec![create("0", (5.0, 5.0))]);
     engine.set_fold_paused_for_test(false);
     wait_until("the fold publishes", Duration::from_secs(60), || {
         engine.write_executor_stats().folds > folds
@@ -552,7 +532,7 @@ fn an_id_a_kept_record_names_is_not_issued_after_a_restart() {
         "new",
         "s0",
         (0..4)
-            .map(|i| create(&format!("n{i}"), "1", (40.0 + f64::from(i), 41.0)))
+            .map(|i| create("1", (40.0 + f64::from(i), 41.0)))
             .collect(),
     );
     publish_buffered(&engine);
@@ -600,7 +580,7 @@ fn a_moved_entitys_suppression_stays_withdrawn_after_a_restart_replays_it() {
     wait_until("the fold holds", Duration::from_secs(60), || {
         engine.fold_is_holding_for_test()
     });
-    send(&engine, "pin", "s0", vec![create("pin", "0", (5.0, 5.0))]);
+    send(&engine, "pin", "s0", vec![create("0", (5.0, 5.0))]);
     engine.set_fold_paused_for_test(false);
     wait_until("the fold publishes", Duration::from_secs(60), || {
         engine.write_executor_stats().folds > folds
@@ -749,7 +729,7 @@ fn a_new_entity_deleted_before_its_flush_is_freed_without_its_suppression() {
         &engine,
         "new",
         Q1,
-        vec![create("z", "1", (901.0, 902.0)), create("z2", "1", (903.0, 904.0))],
+        vec![create("1", (901.0, 902.0)), create("1", (903.0, 904.0))],
     );
     let entities: Vec<EntityId> = made.iter().map(|t| entity_of(&engine, *t)).collect();
     assert!(entities.contains(&unflushed), "a new item takes the freed id: {entities:?}");
@@ -788,7 +768,7 @@ fn a_new_entity_deleted_before_its_flush_is_freed_after_a_restart() {
     fold(&engine);
     publish_buffered(&engine);
     assert_eq!(engine.overlay_depth(), 0, "the fold removes both entities and their denies");
-    let made = send(&engine, "new", Q1, vec![create("z", "1", (901.0, 902.0))]);
+    let made = send(&engine, "new", Q1, vec![create("1", (901.0, 902.0))]);
     assert_eq!(entity_of(&engine, made[0]), unflushed, "the new item takes the freed id");
     publish_buffered(&engine);
     let subset = engine.authorise(&subset_credential()).unwrap();
@@ -820,7 +800,7 @@ fn an_entity_edited_away_before_its_flush_is_freed_without_its_suppression() {
     let overlay = Arc::clone(&engine.generation().overlay);
     assert!(!overlay.touches(number) && !overlay.touches(middle));
     assert!(overlay.is_suppressed(holds), "w stays suppressed through the entity it holds");
-    let made = send(&engine, "new", Q1, vec![create("z", "1", (901.0, 902.0))]);
+    let made = send(&engine, "new", Q1, vec![create("1", (901.0, 902.0))]);
     assert_eq!(entity_of(&engine, made[0]), middle, "the new item takes the middle entity's id");
     publish_buffered(&engine);
     let subset = engine.authorise(&subset_credential()).unwrap();
@@ -839,15 +819,14 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
     let root = build_homes(tmp.path());
     let engine = Arc::new(open(tmp.path(), &root));
     engine.set_merge_for_test(false);
-    // An item in `s0` alone, as the new one will be, and with no external id, which would name
+    // An item in `s0` alone, as the new one will be, and holding no unique value, which would name
     // it where it has moved.
     let x = send(
         &engine,
         "x",
         "s0",
         vec![IngestRow {
-            external_id: None,
-            ..create("x", "0", (700.0, 701.0))
+            ..create("0", (700.0, 701.0))
         }],
     )[0];
     publish_buffered(&engine);
@@ -878,7 +857,7 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
     publish_buffered(&engine);
     fold(&engine);
     publish_buffered(&engine);
-    let z = send(&engine, "z", "s0", vec![create("z", "1", (901.0, 902.0))])[0];
+    let z = send(&engine, "z", "s0", vec![create("1", (901.0, 902.0))])[0];
     assert_eq!(entity_of(&engine, z), resolved, "the new item takes the freed id");
     publish_buffered(&engine);
 
@@ -933,7 +912,7 @@ fn freed_ids_are_restored_at_open_less_those_issued_since() {
     let high_water = engine.allocator_high_water();
 
     // One is taken, and the log alone records it: no flush follows.
-    let first = send(&engine, "a", "s0", vec![create("a", "1", (1.0, 1.0))])[0];
+    let first = send(&engine, "a", "s0", vec![create("1", (1.0, 1.0))])[0];
     let taken = entity_of(&engine, first);
     assert!(freed.contains(&taken), "the first new item takes a freed id");
     drop(engine);
@@ -945,7 +924,7 @@ fn freed_ids_are_restored_at_open_less_those_issued_since() {
         &engine,
         "b",
         "s0",
-        vec![create("b", "1", (2.0, 2.0)), create("c", "1", (3.0, 3.0))],
+        vec![create("1", (2.0, 2.0)), create("1", (3.0, 3.0))],
     );
     let next: BTreeSet<EntityId> = next.iter().map(|t| entity_of(&engine, *t)).collect();
     let other = *freed.iter().find(|e| **e != taken).unwrap();

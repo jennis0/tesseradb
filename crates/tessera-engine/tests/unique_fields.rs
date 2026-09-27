@@ -219,7 +219,6 @@ fn restart(fx: &Fixture, engine: Engine) -> Engine {
 /// A row carrying the four declared columns, under `label`.
 fn row(engine: &Engine, id: &str, label: &[u8], doi: &str, gid: u64, serial: i64) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![label.to_vec()],
@@ -265,10 +264,16 @@ fn taken(result: &Result<Vec<EntityId>, AcceptError>) -> bool {
     matches!(result, Err(AcceptError::Conflict(_)))
 }
 
-/// `r`, naming the built item of `source` by its external id beside whatever its values name.
-fn naming_built(mut r: UnallocatedRow, source: u64) -> UnallocatedRow {
-    r.external_id = Some(source_id_key(source));
+/// `r`, naming the built item of `source` by its `tessera_id` beside whatever its values name.
+fn naming_built(engine: &Engine, mut r: UnallocatedRow, source: u64) -> UnallocatedRow {
+    r.join = Some(built(engine, source));
     r
+}
+
+/// The item the build made of `source`, found by the `gid` it was built with.
+fn built(engine: &Engine, source: u64) -> EntityId {
+    engine.resolve_unique_values("gid", &[gid_of(source).to_string()]).unwrap()[0]
+        .expect("the built item holds its gid")
 }
 
 fn full(engine: &Engine) -> Session {
@@ -471,6 +476,7 @@ fn lookups_answer_the_holders_through_flush_coalesce_fold_and_restart() {
         &engine,
         "after-restart",
         vec![naming_built(
+            &engine,
             row(&engine, "r", b"0", &doi, BIG * 13, 7_777),
             1
         )]
@@ -520,6 +526,7 @@ fn an_ingest_setting_a_held_value_is_refused() {
     let engine = engine_over(&fx);
     let giving = |source: u64, doi: &str, gid: u64| {
         naming_built(
+            &engine,
             row(&engine, "x", b"0", doi, gid, 1_000 + gid as i64),
             source,
         )
@@ -802,6 +809,7 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
             &engine,
             "early-dup",
             vec![naming_built(
+                &engine,
                 row(&engine, "e2", b"0", "10.e/1", BIG * 9 + 1, 5_001),
                 2
             )]
@@ -833,6 +841,7 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
         &engine,
         "dup",
         vec![naming_built(
+            &engine,
             row(&engine, "d1", b"0", &doi_of(3), BIG * 10, 6_000),
             5
         )]
@@ -843,6 +852,7 @@ fn a_runtime_declaration_answers_as_the_build_declaration_does() {
         &engine,
         "dup-2",
         vec![naming_built(
+            &engine,
             row(&engine, "d2", b"0", &doi_of(3), BIG * 11, 6_001),
             5
         )]
@@ -881,11 +891,11 @@ fn a_runtime_declaration_over_duplicates_is_refused() {
     assert!(!engine.meta().declared_scalars.iter().any(|d| d.unique));
 
     // A duplicate held only by a buffered row.
-    ingest(
+    let twin = ingest(
         &engine,
         "twin",
         vec![row(&engine, "tw", b"0", &doi_of(2), BIG * 12, 7_000)],
-    );
+    )[0];
     assert!(matches!(
         declare(&engine, "doi", true),
         Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
@@ -897,10 +907,6 @@ fn a_runtime_declaration_over_duplicates_is_refused() {
         Err(AcceptError::Exec(ExecError::UniqueTaken { .. }))
     ));
     // The values are distinct once the twin is deleted, and the declaration then holds.
-    let twin = engine
-        .resolve_external_id(b"tw")
-        .unwrap()
-        .expect("the twin is held");
     engine.accept_change(twin, ChangeOp::Delete).unwrap();
     assert!(declare(&engine, "doi", true).is_ok());
 }
@@ -966,6 +972,7 @@ fn a_value_arriving_mid_build_is_indexed() {
             &engine,
             "second",
             vec![naming_built(
+                &engine,
                 row(&engine, "second", b"0", &doi, BIG + 15, 7_201),
                 3
             )]
@@ -1038,6 +1045,7 @@ fn an_edit_of_a_holder_during_a_declaration_keeps_its_value_held() {
                     &engine,
                     "second",
                     vec![naming_built(
+                        &engine,
                         row(&engine, "second", b"0", &doi, BIG + 16, 7_300),
                         3
                     )]
@@ -1160,7 +1168,6 @@ fn fill(
             scalars[at] = value;
             tessera_engine::IngestRow {
                 tessera_id: Some(engine.tessera_id_of(entity).unwrap()),
-                external_id: None,
                 labels: None,
                 position: None,
                 scalars,
@@ -1354,6 +1361,7 @@ fn a_new_unique_column_declared_at_runtime_is_enforced_and_indexed() {
         &engine,
         "isbn-2",
         vec![naming_built(
+            &engine,
             with_isbn(&engine, "i2", "10.i/2", BIG * 15 + 1, "978-1"),
             3
         )]
@@ -1373,6 +1381,7 @@ fn a_new_unique_column_declared_at_runtime_is_enforced_and_indexed() {
         &engine,
         "isbn-3",
         vec![naming_built(
+            &engine,
             with_isbn(&engine, "i3", "10.i/3", BIG * 15 + 2, "978-1"),
             3
         )]

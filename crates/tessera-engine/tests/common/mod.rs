@@ -27,8 +27,8 @@ mod ingest_rows {
     use tessera_types::EntityId;
 
     /// Ingest through [`Engine::ingest`] from rows shaped as the executor writes them: each row
-    /// names no item by `tessera_id`, carries its label and position, and carries every value it
-    /// holds, a null clearing one. Every row names the same view.
+    /// names the item its `join` holds by `tessera_id`, or none, carries its label and position,
+    /// and carries every value it holds, a null clearing one. Every row names the same view.
     pub trait IngestRows {
         /// Send `rows` as one batch, and answer the entity each row created or named.
         fn ingest_rows(
@@ -68,8 +68,9 @@ mod ingest_rows {
             let rows = rows
                 .into_iter()
                 .map(|row| IngestRow {
-                    tessera_id: None,
-                    external_id: row.external_id,
+                    tessera_id: row
+                        .join
+                        .map(|entity| self.tessera_id_of(entity).expect("a joined item has an id")),
                     labels: Some(row.descriptors),
                     position: Some((row.x, row.y)),
                     scalars: row.scalars,
@@ -99,7 +100,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -254,6 +255,7 @@ pub fn write_pairs_n(path: &Path, n: u64) {
 pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
+    let schema = id_schema();
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -268,7 +270,10 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &schema,
+        ),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -280,7 +285,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).expect("fixture build should succeed");
 }
@@ -485,43 +490,80 @@ pub fn build_with_layers(
     build(&args).expect("the fixture's own declaration builds");
 }
 
-/// Read the bundle's external-ids extent into a `source_id -> new entity_id` map — the same
-/// ground truth `tessera-build`'s own smoke test cross-checks against.
+/// The fixture's one declared column: `id`, the points file's `entity_id` declared unique, which
+/// is how a test finds, or names in a row, the item a source row became.
+pub fn id_schema() -> tessera_build::config::Schema {
+    tessera_build::config::Schema {
+        attributes: vec![tessera_build::config::Attribute {
+            field: Some("entity_id".to_string()),
+            name: "id".to_string(),
+            title: None,
+            ty: tessera_spatial::tiler::ScalarType::U64,
+            analyser: None,
+            vocabulary: None,
+            value_set: None,
+            index: false,
+            render: false,
+            unique: true,
+        }],
+        vocabularies: Default::default(),
+    }
+}
+
+/// Every `source_id -> entity_id` pair the bundle's unique `id` column holds in its runs.
 pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64> {
     let bundle = open_bundle(bundle_root).unwrap();
     let part = &bundle.partitions["default"];
-    let ext_path = bundle_root
-        .join(prefix)
-        .join(&part.manifest.external_id_runs[0]);
-    let file = File::open(&ext_path).unwrap();
-    let reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
+    let runs = part
+        .manifest
+        .unique_indexes
+        .iter()
+        .find(|runs| runs.attribute == "id")
+        .expect("the fixture declares a unique `id`");
     let mut map = BTreeMap::new();
-    for batch in reader {
-        let batch = batch.unwrap();
-        let ext = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-        // Contracts r6: the external-id extent's entity column is `UInt32` (entities are capped
-        // at `u32::MAX` by the I9 allocator), not the pre-r6 `UInt64`.
-        let ent = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
-            map.insert(source, ent.value(i) as u64);
-        }
+    let paths = runs.base.iter().map(|run| run.path.as_str()).chain(runs.live.iter().map(String::as_str));
+    for rel in paths {
+        tessera_store::unique::for_each_entry(
+            tessera_store::unique::KeyKind::Unsigned,
+            &bundle_root.join(prefix).join(rel),
+            |key, entity| {
+                if let tessera_store::unique::UniqueKey::Int(source) = key {
+                    map.insert(source, u64::from(entity));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
     }
     map
 }
 
-/// The external id `tessera-build` writes for a source row: the source corpus id, 8 bytes
-/// little-endian (see `source_to_new_map`'s decode of the same convention).
-pub fn source_id_key(source_id: u64) -> Vec<u8> {
-    source_id.to_le_bytes().to_vec()
+/// The item the unique `id` value `source` names, deleted items left out.
+pub fn item_of_id(
+    engine: &Engine,
+    source: u64,
+) -> Result<Option<EntityId>, tessera_engine::EngineError> {
+    Ok(engine.resolve_unique_values("id", &[source.to_string()])?[0])
+}
+
+/// The `id` a test gives the item it calls `key`: a stable hash with the top bit set, so it names
+/// none of the fixture's built items.
+pub fn key_id(key: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
+    hash | 1 << 63
+}
+
+/// The row values that give an item the `id` of `key`.
+pub fn keyed(key: &str) -> Vec<tessera_lifecycle::wal::WalScalar> {
+    vec![tessera_lifecycle::wal::WalScalar::U64(key_id(key))]
+}
+
+/// The live item holding the `id` of `key`, if any.
+pub fn item_of_key(engine: &Engine, key: &str) -> Option<EntityId> {
+    engine.resolve_unique_values("id", &[key_id(key).to_string()]).unwrap()[0]
 }
 
 /// An engine with its write executor running.
@@ -610,11 +652,9 @@ pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
     engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
-/// A one-row ingest at the fixture's centre, carrying `ALL_TERM` — the batch id and the external
-/// id are the caller's string.
-pub fn ingest(engine: &Engine, external_id: &str) -> EntityId {
+/// A one-row ingest at the fixture's centre, carrying `ALL_TERM`, under the caller's batch id.
+pub fn ingest(engine: &Engine, batch: &str) -> EntityId {
     let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -625,7 +665,7 @@ pub fn ingest(engine: &Engine, external_id: &str) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .ingest_rows(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0]
 }
 

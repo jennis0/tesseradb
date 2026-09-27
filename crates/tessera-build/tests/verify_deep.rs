@@ -148,7 +148,6 @@ fn flushed_bundle(root: &Path) {
         FlushRow {
             entity_id: EntityId::new(n),
             number: EntityId::new(n),
-            external_id: None,
             x: 10.0,
             y: 10.0,
             scalars: Vec::new(),
@@ -156,7 +155,6 @@ fn flushed_bundle(root: &Path) {
         FlushRow {
             entity_id: EntityId::new(n + 1),
             number: EntityId::new(n + 1),
-            external_id: None,
             x: 990.0,
             y: 990.0,
             scalars: Vec::new(),
@@ -178,7 +176,7 @@ fn flushed_bundle(root: &Path) {
             scalar_schema: &[],
             row_base: n as u32,
             entity_floor: 0,
-        }, &[],
+        },
     )
     .expect("the flush segment writes");
 

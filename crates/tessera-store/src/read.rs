@@ -385,8 +385,8 @@ impl Bundle {
     /// segment added, no extent collapsed, no row space rebuilt.
     ///
     /// The entity-space coalesce publication's whole bundle edit (`tessera_engine::coalesce`): it
-    /// rewrites `deltas`, `external_id_runs`, `locator_extents`, `dict_extents` and `files`, every
-    /// one of which addresses entity space. A caller that needed row space to move would be using
+    /// rewrites `deltas`, `dict_extents`, the extents and runs beside them and `files`, every one
+    /// of which addresses entity space. A caller that needed row space to move would be using
     /// one of the two above, and the type is what keeps the two apart.
     pub fn with_manifest(
         &self,
@@ -1547,10 +1547,8 @@ pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
 /// Verify every entry of `files` (path relative to `base`, forward slashes per R1) by exact
 /// size and SHA-256 hex digest. Any missing, mis-sized or mismatched file is a hard error.
 ///
-/// **One exemption, and only one:** the external-ID sidecar's extents and locator
-/// ([`is_sidecar_deferred`]) are skipped here, per contracts §0.3 deviation 9 — they are still
-/// named, still digested in the manifest, and still fully verified by `crate::sidecar` at first
-/// touch. See that predicate's doc for why open-time verification would defeat the deviation.
+/// **One exemption, and only one:** the key runs ([`is_deferred`]), whose pages are checked as
+/// they are read.
 ///
 /// **TOCTOU note:** this reads each file's bytes once, here, to check size+digest; the loader
 /// (`Permutation::load`, `MortonSlice::load`, `ColumnsRef::load`) then separately mmaps the
@@ -1568,37 +1566,11 @@ pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
 /// through.
 const DIGEST_CHUNK_BYTES: usize = 1 << 20;
 
-/// `true` if `rel` names a file belonging to the external-ID sidecar — an
-/// `external-ids-<k>.arrow` extent or the `ext-locator.u32` locator, both under an `entities/`
-/// directory (contracts §2.4 r6 fixes both names).
-///
-/// **Contracts §0.3 deviation 9**: these paths are *"exempt from the §2.3 reader protocol's
-/// readiness gate… Nothing is mapped, scanned or verified at open"*. [`verify_files`] therefore
-/// skips them — and that exemption is the whole point of the sidecar's per-extent laziness: at
-/// 10⁹ items the family runs to ~18.9 GB, and digesting it at open would reimpose exactly the
-/// sequential read (and page-cache churn) the deviation exists to remove, for a structure no
-/// viewport request ever touches.
-///
-/// **Their digests stay in the manifest, and verification is deferred, not dropped.**
-/// `ExternalIdSidecar` verifies the extent's (or the locator's) SHA-256 against the manifest
-/// entry at first touch, plus sortedness and declared length, before any answer comes out of it
-/// — see `crate::sidecar`. A file skipped here is a file no request path has read yet; the first
-/// read of it is fully checked.
-///
-/// A key run (`*.keys`, [`crate::key_index`]) is skipped too: each of its pages carries its own
-/// checksum, checked the first time the page is read, so a unique index is not read whole before
-/// its first lookup. `tessera verify --deep` digests it.
-fn is_sidecar_deferred(rel: &str) -> bool {
-    if rel.ends_with(".keys") {
-        return true;
-    }
-    let Some((dir, file)) = rel.rsplit_once('/') else {
-        return false;
-    };
-    if dir != "entities" && !dir.ends_with("/entities") {
-        return false;
-    }
-    file == "ext-locator.u32" || (file.starts_with("external-ids-") && file.ends_with(".arrow"))
+/// `true` if `rel` names a key run (`*.keys`, [`crate::key_index`]), which the open does not
+/// digest: each of its pages carries its own checksum, checked the first time the page is read, so
+/// a unique index is not read whole before its first lookup. `tessera verify --deep` digests it.
+fn is_deferred(rel: &str) -> bool {
+    rel.ends_with(".keys")
 }
 
 /// Verify one named file's size and digest. The per-file half of [`verify_files`], split out so
@@ -1606,8 +1578,8 @@ fn is_sidecar_deferred(rel: &str) -> bool {
 fn verify_one(base: &Path, rel_path: &str, digest: &FileDigest) -> Result<()> {
     let path = safe_join(base, rel_path)?;
     // The path is still validated (above) even when its bytes are not read here, so an
-    // unsafe `files`-map key cannot hide behind the sidecar's deferral.
-    if is_sidecar_deferred(rel_path) {
+    // unsafe `files`-map key cannot hide behind the deferral.
+    if is_deferred(rel_path) {
         return Ok(());
     }
     // Read in fixed-size chunks, never whole: at 10^9 items `columns.arrow` alone is over 20 GB,
@@ -1657,8 +1629,8 @@ fn verify_one(base: &Path, rel_path: &str, digest: &FileDigest) -> Result<()> {
 /// Hash every file the manifest names, in full, before the bundle is served.
 ///
 /// The verification is unconditional — a bundle whose bytes were not checked is a bundle whose
-/// authorisation data was not checked (fail closed) — with one exemption, the external-ID sidecar
-/// ([`is_sidecar_deferred`]).
+/// authorisation data was not checked (fail closed) — with one exemption, the key runs
+/// ([`is_deferred`]).
 ///
 /// **The sweep is parallel because it is I/O-bound, not hash-bound, and the two have different
 /// remedies.** SHA-256 runs at ~2.3 GB/s on one core with the hardware extensions this CPU has, but
@@ -1672,10 +1644,9 @@ fn verify_one(base: &Path, rel_path: &str, digest: &FileDigest) -> Result<()> {
 /// **Deferring the value columns to first touch was considered and declined** (owner ruling,
 /// 2026-08-10). It would have paid off only for columns nobody filters on — every declared column
 /// is opened at generation build, so "first touch" has to mean *first scan* to buy anything, and
-/// that puts a multi-second hash of a 4 GB column on a request path budgeted at 0.5–1 s. The
-/// sidecar's deferral works because its extents are small; a value column is the largest artefact
-/// in the bundle. Parallelism takes the wall clock without touching the fail-closed rule, which is
-/// why `attrs/` is **not** in `is_sidecar_deferred` and contracts §2.4 owes no amendment for it.
+/// that puts a multi-second hash of a 4 GB column on a request path budgeted at 0.5–1 s. A value
+/// column is the largest artefact in the bundle. Parallelism takes the wall clock without touching
+/// the fail-closed rule, which is why `attrs/` is **not** in `is_deferred`.
 ///
 /// **The error is deterministic and does not depend on which worker lost.** Results are collected
 /// and the failure reported is the first in the manifest's own (sorted) order, so a bundle with two
@@ -2326,11 +2297,7 @@ fn reject_nulls(
 /// (fail closed on a misaligned buffer rather than silently reallocating) and an explicit
 /// rejection of compressed batches (§ "no compression" in the task brief — decoding would
 /// otherwise quietly succeed via an allocated, decompressed copy, defeating the zero-copy
-/// contract without ever raising an error). Shared with [`crate::sidecar`], which reads the
-/// same on-disk shape (uncompressed, alignment-checked, exactly one batch) for
-/// `external-ids-<n>.arrow` extents — errors come back as `StoreError::InvalidColumns`
-/// regardless of caller; the sidecar remaps them to `InvalidSidecar` at its call sites so the
-/// message names the right file.
+/// contract without ever raising an error). Errors come back as `StoreError::InvalidColumns`.
 pub(crate) fn decode_single_batch(buffer: &Buffer, path: &Path) -> Result<RecordBatch> {
     const FOOTER_TRAILER_LEN: usize = 10; // 4-byte footer length + 6-byte "ARROW1" magic
     if buffer.len() < FOOTER_TRAILER_LEN {

@@ -14,8 +14,8 @@ use tessera_plugin::Plugin;
 use tessera_store::manifest::{CurrentPointer, Declarations};
 use tessera_store::read::open_bundle;
 use tessera_store::vocabulary::Vocabularies;
-use tessera_store::{Bundle, StoreError};
-use tessera_types::{EntityId, IdentityKey};
+use tessera_store::Bundle;
+use tessera_types::IdentityKey;
 
 use crate::cache::RowProjectionCache;
 use crate::config::{coalesce_policy, merge_policy, EngineConfig};
@@ -75,8 +75,8 @@ fn describe_pool_panic(payload: &(dyn std::any::Any + Send)) -> String {
 /// The request-serving engine: one immutable [`Generation`] behind an atomically-swappable
 /// pointer, plus the state that is genuinely process-lifetime — the plugin, the compute pool, the
 /// `tessera_id` key, the row-projection cache and the bundle root. The dictionary, postings
-/// reader, fragment cache and external-id sidecar live in [`Generation`] instead, since each
-/// changes on its own publication.
+/// reader and fragment cache live in [`Generation`] instead, since each changes on its own
+/// publication.
 pub struct Engine {
     /// The live generation pointer, shared with [`WritePath`]: the write path publishes every
     /// swap through this exact pointer and read paths load it, so a copy elsewhere would hide a
@@ -137,8 +137,8 @@ pub struct Engine {
     pub(crate) suggest_dir: std::path::PathBuf,
     pub(crate) config: EngineConfig,
     pub(crate) next_token_id: AtomicU64,
-    /// The write path: the WAL, the entity-id allocator, the live external-id maps, the resolver's
-    /// extension state and the idempotency index.
+    /// The write path: the WAL, the entity-id allocator, the resolver's extension state and the
+    /// idempotency index.
     pub(crate) write: WritePath,
     /// The `tessera_id` blinding permutation's key, read from the bundle's manifest and held for
     /// the process lifetime. It never leaves the server; `IdentityKey`'s `Debug` is redacted.
@@ -433,7 +433,6 @@ pub(crate) struct PrefixReaders {
     pub(crate) dict: Arc<Dict>,
     pub(crate) postings: Arc<PostingsReader>,
     pub(crate) delta_postings: Vec<Arc<DeltaTier>>,
-    pub(crate) external_index: Arc<ExternalIdIndex>,
     /// The deployment's `tessera_id` key. `IdentityKey::from_hex` rejects a degenerate key,
     /// refusing a bundle rather than blinding identities with a collapsed round schedule.
     pub(crate) identity_key: IdentityKey,
@@ -491,13 +490,6 @@ impl PrefixReaders {
             ));
         }
 
-        // Lazy for real: nothing here is opened, mapped or verified. The constructor only reads
-        // already-parsed JSON manifest data (paths and digests), never the filesystem.
-        let external_index = Arc::new(
-            ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
-                .map_err(EngineError::Store)?,
-        );
-
         let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
             .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
         let cursor_key = crate::records::CursorKey::of(&bundle.manifest.identity.key);
@@ -511,7 +503,6 @@ impl PrefixReaders {
             dict,
             postings,
             delta_postings,
-            external_index,
             identity_key,
             cursor_key,
         })
@@ -848,7 +839,6 @@ fn first_generation(
             dict: Arc::clone(&readers.dict),
             postings: Arc::clone(&readers.postings),
             fragments,
-            external_index: Arc::clone(&readers.external_index),
             unique: Arc::new(unique),
             unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
             edited: Arc::new(edited),
@@ -1103,7 +1093,7 @@ impl Engine {
     /// read it see every real security-state change and no false ones.
     ///
     /// Swaps everything a [`GeometryPublication`] names, plus, with a `PrefixRotation`, the base
-    /// postings, bundle identity, fragment cache and external-id sidecar; without one those four
+    /// postings, bundle identity and fragment cache; without one those three
     /// carry forward unchanged. Runs on the write executor, so there is one publisher, and blocks
     /// until the swap is done.
     pub fn publish_geometry(
@@ -1276,11 +1266,6 @@ pub(crate) fn open_rotation(
 
     let postings = open_postings(&prefix_dir, &phash)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
-    let external_index = Arc::new(
-        ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
-            .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
-    );
-
     // Rotated from the live one, never freshly constructed: `FragmentCache::rotate` carries the
     // configured byte bound across, and `FragmentCache::new` here would silently unbound it.
     let fragments = Arc::new(live_fragments.rotate(bundle_identity));
@@ -1316,7 +1301,6 @@ pub(crate) fn open_rotation(
         crate::geometry::PrefixRotation {
             postings,
             fragments,
-            external_index,
             filter_columns,
             unique,
             edited,
@@ -1349,166 +1333,4 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
-}
-
-/// Resolve an external id to an [`EntityId`] via `tessera_store::ExternalIdSidecar`, a thin
-/// wrapper so callers in this crate keep using `EntityId`. Per-extent lazy. This is the seam
-/// `/control/changes` resolves an external id through at admission, and it is authorisation
-/// bearing: the endpoint denies whichever entity it resolves to, so a wrong resolution denies the
-/// wrong entity and leaves the intended target visible.
-pub(crate) struct ExternalIdIndex(pub(crate) tessera_store::ExternalIdSidecar);
-
-impl ExternalIdIndex {
-    pub(crate) fn open(
-        bundle_manifest: &tessera_store::manifest::Manifest,
-        partition_manifest: &tessera_store::manifest::SegmentsManifest,
-        prefix_dir: &Path,
-    ) -> std::result::Result<Self, StoreError> {
-        tessera_store::ExternalIdSidecar::deferred_from_manifest(
-            bundle_manifest,
-            partition_manifest,
-            prefix_dir,
-        )
-        .map(ExternalIdIndex)
-    }
-
-    /// Fallible: a corrupt extent, a digest mismatch or a shuffled extent list propagates as
-    /// `Err(StoreError::InvalidSidecar)` through `Engine::resolve_external_id` to the handler
-    /// rather than panicking, still fail-closed in effect.
-    pub(crate) fn resolve(&self, external_id: &[u8]) -> std::result::Result<Option<EntityId>, StoreError> {
-        self.0.resolve(external_id)
-    }
-
-    /// Batched form of [`Self::resolve`]: one sorted pass over `external_ids`, each extent opened
-    /// at most once rather than one open per row.
-    pub(crate) fn resolve_many(
-        &self,
-        external_ids: &[Vec<u8>],
-    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        self.0.resolve_many(external_ids)
-    }
-
-    /// `entity -> external_id`, distinguishing "genuinely has none" from "an inconsistency".
-    pub(crate) fn external_id_of_checked(
-        &self,
-        entity: EntityId,
-        high_water: u64,
-    ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
-        self.0.external_id_of_checked(entity, high_water)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    /// Pins that a panic inside `install`/`par_iter` propagates to the caller rather than being
-    /// swallowed: `Engine::viewport`'s tile sweep relies on that to turn a panicking tile into a
-    /// 500 rather than a truncated 200. Builds its own pool, using [`super::build_compute_pool`]
-    /// as `Engine::open` does, since `Engine::pool` is `pub(crate)` and unreachable from an
-    /// integration test. Says nothing about `pool.spawn`, pinned instead by
-    /// [`a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts`].
-    #[test]
-    fn a_panic_inside_the_shared_pool_propagates_to_the_caller() {
-        let pool = super::build_compute_pool(2).expect("pool should build");
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pool.install(|| {
-                panic!("synthetic worker-thread panic");
-            })
-        }));
-
-        assert!(
-            result.is_err(),
-            "a panic inside install() must propagate to the caller, not be swallowed"
-        );
-    }
-
-    /// Pins that a panic in a task spawned on the shared pool leaves a record naming what
-    /// panicked, before the process aborts. Runs the child as a subprocess, gated on
-    /// `POOL_PANIC_CHILD`, and asserts its stderr, since `libtest` captures the print macros and
-    /// drops what it captured when the process dies.
-    /// Mutations this kills: dropping the `panic_handler` from [`super::build_compute_pool`] — the
-    /// child aborts with rayon's own line and no payload; writing the record through `eprintln!`
-    /// rather than to `stderr` directly — the child aborts with nothing; dropping the payload or
-    /// the thread from [`super::describe_pool_panic`] — the assertion fails.
-    #[cfg(unix)]
-    #[test]
-    fn a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts() {
-        use std::os::unix::process::ExitStatusExt;
-
-        let exe = std::env::current_exe().expect("the test binary knows its own path");
-        let out = std::process::Command::new(exe)
-            // A substring filter, not `--exact`: the module path of a unit test is not something
-            // this test should have to restate correctly.
-            .args(["--ignored", "--nocapture", "the_pool_panic_child"])
-            .env(POOL_PANIC_CHILD, "1")
-            .output()
-            .expect("the test binary re-executes");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-
-        assert!(
-            !out.status.success(),
-            "a panicked pooled task must not leave the process healthy: {out:?}"
-        );
-        assert_eq!(
-            out.status.signal(),
-            Some(libc::SIGABRT),
-            "the behaviour is unchanged — the process still aborts; only the record is new: \
-             {stderr}"
-        );
-        assert!(
-            stderr.contains("spawned on the shared compute pool panicked"),
-            "the record names the subsystem: {stderr}"
-        );
-        assert!(
-            stderr.contains("synthetic pooled-task panic"),
-            "the record carries the payload, which is what makes it a diagnosis: {stderr}"
-        );
-        assert!(
-            stderr.contains("worker thread:"),
-            "and the thread it happened on: {stderr}"
-        );
-    }
-
-    /// The child half of
-    /// [`a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts`]. Aborts the process
-    /// by design, and does nothing at all unless that parent set `POOL_PANIC_CHILD` — an
-    /// `--ignored` sweep must not take a test binary down with it.
-    #[test]
-    #[ignore = "child half of the pool-panic test: inert unless the parent set POOL_PANIC_CHILD"]
-    fn the_pool_panic_child() {
-        if std::env::var_os(POOL_PANIC_CHILD).is_none() {
-            return;
-        }
-        let pool = super::build_compute_pool(1).expect("pool should build");
-        pool.spawn(|| panic!("synthetic pooled-task panic"));
-        // The abort arrives on the worker thread; this one only has to still be here for it.
-        std::thread::sleep(std::time::Duration::from_secs(30));
-        unreachable!("the panic handler aborts long before this");
-    }
-
-    const POOL_PANIC_CHILD: &str = "TESSERA_POOL_PANIC_CHILD";
-
-    /// Pins that the record carries the payload for both shapes a panic can leave it in
-    /// (`&'static str` or `String`), and says so plainly when it is neither.
-    /// Mutations this kills: downcasting to only one of the two types; dropping the payload from
-    /// the record; dropping the backtrace.
-    #[test]
-    fn the_pool_panic_record_carries_every_payload_shape() {
-        let from_literal: Box<dyn std::any::Any + Send> = Box::new("a literal payload");
-        let from_format: Box<dyn std::any::Any + Send> =
-            Box::new("a formatted payload".to_string());
-        let from_neither: Box<dyn std::any::Any + Send> = Box::new(7u32);
-
-        let literal = super::describe_pool_panic(from_literal.as_ref());
-        assert!(literal.contains("a literal payload"), "{literal}");
-        assert!(
-            literal.contains("backtrace"),
-            "the record carries a backtrace, which is the half a one-line abort never had: \
-             {literal}"
-        );
-        assert!(super::describe_pool_panic(from_format.as_ref()).contains("a formatted payload"));
-        assert!(
-            super::describe_pool_panic(from_neither.as_ref()).contains("neither &str nor String")
-        );
-    }
 }

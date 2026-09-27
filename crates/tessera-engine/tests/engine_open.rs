@@ -1,5 +1,5 @@
 //! What `Engine::open` does, and what it refuses: the allocator seed it takes from durable
-//! state, the plugin and manifest it insists agree, the sidecar it must not read, and the
+//! state, the plugin and manifest it insists agree, the key runs it must not read, and the
 //! `EngineConfig` values it will not serve under.
 
 mod common;
@@ -14,7 +14,6 @@ use tessera_lifecycle::{ChangeOp, IngestRow};
 use tessera_types::TesseraId;
 use tessera_lifecycle::wal::{Wal, WalRecord};
 use tessera_plugin::{Passthrough, Plugin};
-use tessera_store::StoreError;
 
 use common::*;
 
@@ -67,7 +66,6 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
             batch_id: "over-the-top".to_string(),
             body_hash: [0u8; 32],
             rows: vec![tessera_lifecycle::WalRow {
-                external_id: None,
                 entity_id: tessera_types::EntityId::new(u32::MAX as u64 - 1),
                 view: "s0".to_string(),
                 join: false,
@@ -247,17 +245,13 @@ fn engine_open_refuses_a_manifest_whose_data_plugin_hash_is_empty() {
     );
 }
 
-/// Residency proxy: `Engine::open` must never touch the external-id sidecar (the per-extent
-/// laziness guarantee, contracts §0.3 deviation 9) — this is a proxy, not the memory-residency
-/// measurement itself.
+/// Residency proxy: `Engine::open` must never read a unique column's key runs, which open on the
+/// first lookup that needs them.
 ///
-/// **The files are removed from disk before the engine opens**, and `is_open()` alone would not be
-/// a test of this: it reports only the sidecar's own `OnceLock` state, which a `verify_files` pass
-/// reading and SHA-256'ing every extent and the locator — the whole 18.9 GB sequential read the
-/// deviation exists to remove — never sets. Deleting the files makes any read of them, at any layer,
-/// a hard failure of `Engine::open`, which is the property actually claimed.
+/// **The files are removed from disk before the engine opens**, so any read of them, at any layer,
+/// is a hard failure of `Engine::open`, which is the property claimed.
 #[test]
-fn engine_open_does_not_touch_the_sidecar() {
+fn engine_open_does_not_touch_the_key_runs() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -266,36 +260,22 @@ fn engine_open_does_not_touch_the_sidecar() {
         &tmp.path().join("pairs.parquet"),
     );
 
-    // Every sidecar file the build wrote, named from MANIFEST's own `files` map rather than
-    // guessed, so this cannot silently check nothing if the layout moves.
+    // Every key run the build wrote, named from MANIFEST's own `files` map rather than guessed, so
+    // this cannot silently check nothing if the layout moves.
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bundle_root.join("CURRENT")).unwrap()).unwrap();
     let prefix_dir = bundle_root.join(current["prefix"].as_str().unwrap());
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(prefix_dir.join("MANIFEST.json")).unwrap()).unwrap();
-    let sidecar_files: Vec<PathBuf> = manifest["files"]
+    let runs: Vec<PathBuf> = manifest["files"]
         .as_object()
         .unwrap()
         .keys()
-        // The external-ID sidecar's own files, not everything under `entities/`: the entity→term
-        // transpose lives there too (contracts §2.4) and is deliberately opened *at* `Engine::open`
-        // like the record blob, so deleting it would make this test assert the opposite posture for
-        // an artefact it is not about.
-        .filter(|rel| rel.contains("/entities/external-ids") || rel.contains("/entities/ext-locator"))
+        .filter(|rel| rel.ends_with(".keys"))
         .map(|rel| prefix_dir.join(rel))
         .collect();
-    assert!(
-        sidecar_files.len() >= 2,
-        "fixture must write at least an extent and the locator, found {sidecar_files:?}"
-    );
-    // The digests stay in MANIFEST — the deviation defers verification, it does not drop it.
-    for path in &sidecar_files {
-        let rel = path.strip_prefix(&prefix_dir).unwrap().to_string_lossy();
-        let rel = rel.replace('\\', "/");
-        assert!(
-            manifest["files"][&rel]["sha256"].is_string(),
-            "{rel} must keep its digest in MANIFEST so the sidecar can verify it at first touch"
-        );
+    assert!(!runs.is_empty(), "the fixture's unique `id` writes key runs");
+    for path in &runs {
         std::fs::remove_file(path).unwrap();
     }
 
@@ -304,22 +284,12 @@ fn engine_open_does_not_touch_the_sidecar() {
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
     );
-    assert!(
-        !engine.external_id_sidecar_is_open(),
-        "Engine::open must not touch the external-id sidecar"
-    );
 
-    // Deferred, not dropped: the first resolution *does* reach for the file, and fails closed
-    // because it is gone.
-    let err = engine
-        .resolve_external_id(&source_id_key(0))
-        .expect_err("the first resolution must reach the (now absent) extent and fail closed");
+    // Deferred, not dropped: the first lookup *does* reach for a run, and fails closed because it
+    // is gone.
     assert!(
-        matches!(
-            err,
-            StoreError::InvalidSidecar { .. } | StoreError::Io { .. }
-        ),
-        "expected a typed sidecar/IO error, got {err:?}"
+        item_of_id(&engine, 0).is_err(),
+        "the first lookup must reach the (now absent) run and fail closed"
     );
 }
 
@@ -375,17 +345,17 @@ fn serving(root: &Path) -> Engine {
     engine
 }
 
-/// Create one item per name in view `s0`, as one batch, and answer their `tessera_id`s.
+/// Create one item per name in view `s0`, each holding the `id` of its name, as one batch, and
+/// answer their `tessera_id`s.
 fn create(engine: &Engine, batch: &str, names: &[&str]) -> Vec<TesseraId> {
     let rows = names
         .iter()
         .enumerate()
         .map(|(i, name)| IngestRow {
             tessera_id: None,
-            external_id: Some(name.as_bytes().to_vec()),
             labels: Some(vec![b"0".to_vec()]),
             position: Some((1.0 + i as f64, 1.0)),
-            scalars: Vec::new(),
+            scalars: keyed(name),
             scoped: Vec::new(),
             omitted: Vec::new(),
         })

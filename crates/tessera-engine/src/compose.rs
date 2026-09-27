@@ -901,7 +901,6 @@ mod walk_tests {
         terms: Vec<TermId>,
     ) {
         let row = WalRow {
-            external_id: Some(entity.to_le_bytes().to_vec()),
             entity_id: EntityId::new(entity),
             view: view.to_string(),
             join,

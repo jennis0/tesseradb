@@ -11,8 +11,7 @@ pub const DECLARABLE_TYPES: &str = "bool, u8, u16, u32, u64, i8, i16, i32, i64, 
 /// Columns every segment carries.
 const FIXED_COLUMNS: [&str; 2] = ["tessera_id", "residual"];
 /// Columns of an ingest batch that are not attributes.
-const INGEST_COLUMNS: [&str; 6] = [
-    "external_id",
+const INGEST_COLUMNS: [&str; 5] = [
     "x",
     "y",
     "access",

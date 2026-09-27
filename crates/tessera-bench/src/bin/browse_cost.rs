@@ -45,7 +45,6 @@ use tessera_engine::browse::{BrowseForm, BrowseRequest};
 use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
-use tessera_store::read::open_bundle;
 
 fn main() {
     let mut bundle: Option<PathBuf> = None;
@@ -238,14 +237,12 @@ fn measure_scan(rows: u64, repeat: usize) {
         true,
     );
     // One artifact over the whole corpus: the scan is the cost under test, and a level of many
-    // artifacts would put the gate's own pass beside it.
-    let map = source_to_entity(&bundle, rows);
+    // artifacts would put the gate's own pass beside it. The build numbers its entities `0..rows`.
     engine
         .register_layer(scan_layer())
         .expect("the layer registers");
-    let members: Vec<tessera_types::EntityId> = (0..rows)
-        .map(|s| tessera_types::EntityId::new(map[s as usize]))
-        .collect();
+    let members: Vec<tessera_types::EntityId> =
+        (0..rows).map(tessera_types::EntityId::new).collect();
     engine
         .publish_artifacts(
             "bench/all".into(),
@@ -453,36 +450,4 @@ fn write_pairs(path: &Path, rows: u64) {
         at += n;
     }
     writer.close().unwrap();
-}
-
-/// Source id → entity id, from the build's own external-id extent — the same read the engine's
-/// own fixtures take, so the bench addresses artifacts the way every other caller does.
-fn source_to_entity(bundle: &Path, rows: u64) -> Vec<u64> {
-    let opened = open_bundle(bundle).expect("the bundle opens");
-    let part = &opened.partitions["default"];
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(bundle.join("CURRENT")).unwrap()).unwrap();
-    let prefix = current["prefix"].as_str().expect("a prefix");
-    let path = bundle.join(prefix).join(&part.manifest.external_id_runs[0]);
-    let reader =
-        arrow::ipc::reader::FileReader::try_new(std::fs::File::open(&path).unwrap(), None).unwrap();
-    let mut map = vec![0u64; rows as usize];
-    for batch in reader {
-        let batch = batch.unwrap();
-        let ext = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::BinaryArray>()
-            .unwrap();
-        let ent = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
-            map[source as usize] = ent.value(i) as u64;
-        }
-    }
-    map
 }

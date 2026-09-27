@@ -958,7 +958,6 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
         engine
             .ingest_rows(
                 vec![UnallocatedRow {
-                    external_id: Some(format!("runtime-{n}").into_bytes()),
                     view: runtime_view.to_string(),
                     join: None,
                     x: (n * 13 % 1000) as f64,
@@ -1098,7 +1097,6 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
         engine
             .ingest_rows(
                 vec![UnallocatedRow {
-                    external_id: Some(format!("runtime-{n}").into_bytes()),
                     view: runtime_view.to_string(),
                     join: None,
                     x: (n * 13 % 1000) as f64,
@@ -1180,7 +1178,6 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
 fn ingest(engine: &Engine, external_id: &str, terms: &[u32], x: f64) {
     let descriptors: Vec<Vec<u8>> = terms.iter().copied().map(label).collect();
     let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: VIEW.to_string(),
         join: None,
         x,
