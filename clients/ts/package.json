@@ -10,6 +10,7 @@
     "react",
     "viewer",
     "harness",
+    "gallery",
     "wire-example",
     "examples/plain-html",
     "examples/react-explorer",

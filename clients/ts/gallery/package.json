@@ -1,0 +1,27 @@
+{
+  "name": "@tesseradb/gallery",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "shoot": "node scripts/shoot.mjs",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@deck.gl/core": "^9.3.7",
+    "@deck.gl/layers": "^9.3.7",
+    "@luma.gl/core": "^9.3.6",
+    "@tesseradb/client": "*",
+    "@tesseradb/components": "*",
+    "@tesseradb/deck": "*",
+    "lit": "^3.3.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1",
+    "typescript": "^5.9.0",
+    "vite": "^8.2.0",
+    "vitest": "^3.2.0"
+  }
+}
