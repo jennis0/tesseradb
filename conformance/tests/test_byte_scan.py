@@ -311,7 +311,7 @@ UNDERLAY_OFFSET = 2
 # per-element-aligned entity-id scan of `tessera_id` needs no floor at all (see the same section).
 SAFE_ID_FLOOR = 100_000
 ITEM_SAMPLE_SIZE = 25  # tessera ids sampled for the /v1/items/{tessera_id} textual scan
-# `POST /v1/items`: every declared field, the three system fields, and pages small enough that a
+# `POST /v1/items`: every declared field, the two system fields, and pages small enough that a
 # read spans several responses carried by the cursor.
 ITEMS_FIELDS = [
     "serial", "fx_key", "department", "archive", "title", "shelf", "submitter", "abstract", "note",
@@ -504,6 +504,8 @@ class RecordsScan(NamedTuple):
     #: 8-byte windows of the `tessera:x` and `tessera:y` value buffers, at their own stride.
     position_windows: set[int]
     tessera_ids: list[int]
+    #: Each row's `serial`, in row order beside `tessera_ids`.
+    serials: list[int]
     labels: list[str]
 
 
@@ -517,13 +519,14 @@ def _value_buffer(column, width: int) -> bytes:
 def _records_scan(payload: bytes) -> RecordsScan:
     """One records frame's swept columns, decoded from the Arrow stream rather than read from the
     framed bytes, for the reason the points sweep gives."""
-    scan = RecordsScan(set(), set(), [], [])
+    scan = RecordsScan(set(), set(), [], [], [])
     with ipc.open_stream(io.BytesIO(payload)) as reader:
         for batch in reader:
             names = batch.schema.names
             ids = batch.column("tessera_id")
             scan.tessera_windows.update(_le_windows(_value_buffer(ids, 8), 8, stride=8))
             scan.tessera_ids.extend(ids.to_pylist())
+            scan.serials.extend(batch.column("serial").to_pylist())
             for name in ("tessera:x", "tessera:y"):
                 if name in names:
                     scan.position_windows.update(
@@ -1073,6 +1076,8 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     items_cursor_windows: set[int] = set()
     items_json = b""
     items_labels: list[str] = []
+    entity_of_source = catalogue.entities_by_source(oracle_bundle)
+    serials_checked = 0
     read_sets = []
     for order in ("map", "stored"):
         body = {
@@ -1101,6 +1106,15 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
                 items_tessera_windows |= scan.tessera_windows
                 items_position_windows |= scan.position_windows
                 items_labels.extend(scan.labels)
+                assert len(scan.serials) == len(scan.tessera_ids)
+                # A row's label names the item its tessera_id names.
+                for tessera_id, serial in zip(scan.tessera_ids, scan.serials):
+                    _shard, entity = identity_mod.invert(identity_key, tessera_id)
+                    assert entity_of_source[serial - catalogue.PLANTED_ID_BASE] == entity, (
+                        f"the row for tessera_id {tessera_id} carries serial {serial}, which is "
+                        "not its item's"
+                    )
+                    serials_checked += 1
                 rows.extend(scan.tessera_ids)
             next_cursor = decoded.trailer["next"]
             if next_cursor is None:
@@ -1113,6 +1127,7 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
         )
         read_sets.append(set(rows))
     assert read_sets[0] == read_sets[1], "the two orders returned different rows"
+    assert serials_checked > 0, "no items row carried a serial to check against its tessera_id"
 
     # The scan finds a real identifier where one was sent, or its silence proves nothing.
     assert next(iter(read_sets[0])) in items_tessera_windows
