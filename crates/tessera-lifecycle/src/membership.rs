@@ -1781,13 +1781,14 @@ impl ArtifactStore {
     /// ## How this stands to the two removal rules
     ///
     /// It does not touch them, and that is the whole of its relationship to them. Write-path §5.4's
-    /// rules govern *retirement* — a suppression retires only on unsuppress and never touches a
-    /// stored structure (Rule S); a deletion retires only at the compaction fold that executes it
-    /// (Rule F) — and the hazard they exist against is a second route by which a bit **leaves** a
-    /// membership. This adds bits. A member added here is retired by exactly the routes every other
-    /// member is retired by, having no separate provenance once it is in the set: [`Self::retire`]
-    /// and [`Self::repack_all`] cannot tell it from a declared one, which is the property that keeps
-    /// growth from becoming a third removal rule by the back door.
+    /// rules govern *retirement* — a suppression retires on unsuppress, or with its entity at the
+    /// fold that removes it, and never touches a stored structure (Rule S); a deletion retires
+    /// only at the compaction fold that executes it (Rule F) — and the hazard they exist against
+    /// is a second route by which a bit **leaves** a membership. This adds bits. A member added
+    /// here is retired by exactly the routes every other member is retired by, having no separate
+    /// provenance once it is in the set: [`Self::retire`] and [`Self::repack_all`] cannot tell it
+    /// from a declared one, which is the property that keeps growth from becoming a third removal
+    /// rule by the back door.
     ///
     /// What it must not become is a second *entry* route with its own rules, which is why it is one
     /// method and not one per caller: an unsuppress that restored a member by re-growing it, say,
@@ -2450,9 +2451,8 @@ impl ArtifactStore {
     /// existence criterion divides by.
     ///
     /// **`retired` is the fold's executed deletions and nothing else.** A *suppressed* member stays
-    /// in the set: a suppression retires only on unsuppress and never touches a stored structure
-    /// (Rule S), so dropping its bit here would give it a second retirement route, which is
-    /// fail-open.
+    /// in the set: a suppression never touches a stored structure (Rule S), so dropping its bit
+    /// here would give a live item's suppression a second retirement route, which is fail-open.
     ///
     /// A content whose generating set lost a retired member is **dropped whole**, content and set
     /// together ([`withdraw_content_of_retired_members`], decision 0135): containment is

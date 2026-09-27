@@ -328,8 +328,14 @@ impl ViewRoster {
         })
     }
 
-    /// The record a `DELETE /control/views/{group}/{key}` appends, or the refusal.
-    pub fn prepare_drop(&self, group: &str, key: &str) -> Result<WalRecord, RosterError> {
+    /// The record a `DELETE /control/views/{group}/{key}` appends, deleting `deleted`, or the
+    /// refusal.
+    pub fn prepare_drop(
+        &self,
+        group: &str,
+        key: &str,
+        deleted: Vec<tessera_types::EntityId>,
+    ) -> Result<WalRecord, RosterError> {
         let Some(incarnation) = self.incarnation_of(group, key) else {
             // A dropped key and a key that never existed are the same answer, and deliberately:
             // the drop's own 404 is what a request naming the view gets from then on.
@@ -348,6 +354,7 @@ impl ViewRoster {
                 key: key.to_string(),
                 incarnation,
             },
+            deleted,
         })
     }
 
@@ -359,7 +366,7 @@ impl ViewRoster {
     pub fn apply(&mut self, record: &WalRecord) {
         match record {
             WalRecord::ViewCreate { view } => self.admit(view.clone()),
-            WalRecord::ViewDrop { view } => self.retire(view.clone()),
+            WalRecord::ViewDrop { view, .. } => self.retire(view.clone()),
             _ => {}
         }
     }
@@ -392,7 +399,7 @@ mod tests {
 
         // A drop removes its own record and leaves the rest in the order they were made: creation
         // order is what `/v1/meta` serves, and there is no number to re-derive (decision 0113).
-        let drop = roster.prepare_drop("quarter", "2026-Q2").unwrap();
+        let drop = roster.prepare_drop("quarter", "2026-Q2", Vec::new()).unwrap();
         roster.apply(&drop);
         create(&mut roster, "quarter", "2026-Q4").unwrap();
         let order: Vec<&str> = roster.created().iter().map(|v| v.key.as_str()).collect();
@@ -410,10 +417,10 @@ mod tests {
             create(&mut roster, "quarter", "2026-Q2"),
             Err(RosterError::Exists { .. })
         ));
-        let drop = roster.prepare_drop("quarter", "2026-Q2").unwrap();
+        let drop = roster.prepare_drop("quarter", "2026-Q2", Vec::new()).unwrap();
         roster.apply(&drop);
         assert!(matches!(
-            roster.prepare_drop("quarter", "2026-Q2"),
+            roster.prepare_drop("quarter", "2026-Q2", Vec::new()),
             Err(RosterError::Unknown { .. })
         ));
         assert_eq!(roster.incarnation_of("quarter", "2026-Q2"), None);
@@ -479,6 +486,7 @@ mod tests {
                 key: "2026-Q1".to_string(),
                 incarnation: DECLARED_INCARNATION,
             },
+            deleted: Vec::new(),
         });
         assert!(!roster.is_live("quarter", "2026-Q1"));
         // And the key is free again, at an incarnation above the build's.

@@ -178,10 +178,11 @@ pub struct WalRow {
     pub scoped: Vec<WalScalar>,
 }
 
-/// The disposition change carried by each entry of a [`WalRecord::ChangeBatch`] record. The two removal rules
-/// (write-path §5.4; ruled 2026-08-03) are distinct and must not be conflated: suppressions retire
-/// only on `Unsuppress` (never touching postings — Rule S); deletions retire at the compaction fold
-/// that executes them (Rule F).
+/// The disposition change carried by each entry of a [`WalRecord::ChangeBatch`] record. The two
+/// removal rules (write-path §5.4) are distinct and must not be conflated: a suppression retires on
+/// `Unsuppress`, or with an entity an edit moved its item away from at the fold that removes its
+/// rows, and never touches postings (Rule S); a deletion retires at the compaction fold that
+/// executes it (Rule F). A fold logs the suppressions it retires as `Unsuppress` entries.
 ///
 /// A fourth variant, `Predicate`, was deleted with `WAL_VERSION` 5: decision 0047 withdrew the op
 /// at the boundary (an edit is a delete plus a re-ingest) and decision 0048 deleted the machinery
@@ -347,12 +348,13 @@ pub enum WalRecord {
     /// rotation: a death that did not say which incarnation died could not be told apart from a
     /// death of the one created after it.
     ///
-    /// **This record removes no entity.** An entity whose only view was dropped still exists, with
-    /// its label, its attributes and its memberships, in no view; `delete_dangling` submits
-    /// ordinary deletions through the deny lane and is not a second retirement route
-    /// (`views.md` §3.4, write-path §5.4).
+    /// **It deletes the items it leaves in no view**, in the same record as the drop, so the log
+    /// never holds a drop without its deletions. Each is an ordinary deletion: replay applies it to
+    /// the overlay as a `ChangeBatch` delete would be, and the fold that executes it retires it.
     ViewDrop {
         view: tessera_types::view::DeadIncarnation,
+        /// The entities the drop left with a row in no view, flushed or buffered.
+        deleted: Vec<EntityId>,
     },
     /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
     /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
@@ -1061,7 +1063,8 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // request's changes whole, replaced `ChangeByEntity`. A log at 26 is refused.
 // **28**: `IngestBatch` gained `edits`, the items it moved to new entities, `RowOutcome` gained
 // `Edited`, and `ValuesBatch` left the variant table. A log at 27 is refused.
-const WAL_VERSION: u16 = 28;
+// **29**: `ViewDrop` gained `deleted`, the items the drop left in no view. A log at 28 is refused.
+const WAL_VERSION: u16 = 29;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1730,8 +1733,9 @@ impl Wal {
     ///
     /// **The snapshot is durable before anything is deleted**, because the overlay's only durable
     /// home is the WAL: the `Change` records inside the members about to go are the sole record
-    /// that an item was suppressed, and a suppression retires only on unsuppress. Deleting first
-    /// and snapshotting after would re-expose every denied item on the next restart.
+    /// that an item was suppressed, and a live item's suppression retires only on unsuppress.
+    /// Deleting first and snapshotting after would re-expose every denied item on the next
+    /// restart.
     ///
     /// **Deletion is oldest-first**, because a crash midway through an unordered deletion leaves a
     /// *gap* in the sequence, and [`Wal::open`] fails closed on a gap — turning a benign crash into

@@ -951,13 +951,11 @@ async fn recreate(server: &TestServer, key: &str) {
     create_key(server, key).await;
 }
 
-/// Drop a view of the group, leaving its items undeleted.
+/// Drop a view of the group.
 async fn drop_key(server: &TestServer, key: &str) {
     let dropped = server
         .client
-        .delete(server.control_url(&format!(
-            "/control/views/quarter/{key}?delete_dangling=false"
-        )))
+        .delete(server.control_url(&format!("/control/views/quarter/{key}")))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .send()
         .await

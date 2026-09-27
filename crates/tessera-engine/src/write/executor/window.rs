@@ -479,11 +479,6 @@ impl Executor {
             || rows.iter().any(|row| match row.join {
                 Some(entity) => {
                     generation.overlay.is_deleted(entity)
-                        || !crate::write::joined::joins_in_place(&generation, entity, &row.view)
-                        || self.flush.outstanding()
-                            && self.flush_flight.as_ref().is_some_and(|(view, floor)| {
-                                *view == row.view && entity.raw() < *floor
-                            })
                         || generation.bundle.partitions.values().any(|partition| {
                             partition
                                 .views
@@ -917,9 +912,10 @@ impl Executor {
             );
             unique_live
         });
+        // An old entity's pair stays until the fold that removes the entity, which reads it to tell
+        // an entity an edit made from an item's number.
         let edited_live = (!pairs.is_empty()).then(|| {
             let mut edited_live = (*generation.edited_live).clone();
-            edited_live.remove(deleted.iter().map(|e| e.raw() as u32));
             edited_live.add(&pairs);
             edited_live
         });

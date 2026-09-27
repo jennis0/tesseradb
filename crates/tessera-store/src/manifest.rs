@@ -891,9 +891,9 @@ impl Manifest {
     /// **One definition, because a key is not one view.** A create lands on every sharing group at
     /// the same moment and a drop takes it off every one of them, so anything that acts on "the
     /// views of this key" — [`Self::with_roster`]'s death loop, the drop's buffer prune, its
-    /// `delete_dangling` probe, and the WAL replay's own prune — must expand the same way. Three
-    /// copies of the expansion is how one of them comes to prune a single spelling and leave the
-    /// other's rows to be adopted by whatever takes the key next
+    /// probe for the items it leaves in no view, and the WAL replay's own prune — must expand the
+    /// same way. Three copies of the expansion is how one of them comes to prune a single spelling
+    /// and leave the other's rows to be adopted by whatever takes the key next
     /// ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
     ///
     /// The caller passes the **owner**: `owner_of_group` is what turns the group a request named

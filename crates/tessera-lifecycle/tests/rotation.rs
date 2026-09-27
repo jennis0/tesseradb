@@ -180,7 +180,7 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     );
     assert!(
         overlay.is_suppressed(entity),
-        "a suppression retires only on unsuppress — reclaiming its record must not retire it"
+        "a live item's suppression retires only on unsuppress; reclaiming its record does not"
     );
 }
 

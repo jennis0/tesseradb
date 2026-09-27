@@ -84,12 +84,12 @@ pub(super) struct FoldDerived<'a> {
     pub(super) freed: &'a tessera_store::manifest::HeldEntities,
 }
 
-/// The entities of `executed` the allocator may issue again: each one an edit moved an item away
-/// from, which is therefore no item's number, and against which no suppression stands.
+/// The entities of `executed` the allocator may issue again: each one whose number, the entity
+/// its item was first given, is another. An item's number is never freed, so a `tessera_id` a
+/// client holds never comes to name another item.
 fn freed_by(
     live: &Generation,
     executed: &croaring::Bitmap,
-    overlay: &tessera_lifecycle::Overlay,
 ) -> Result<croaring::Bitmap, tessera_store::StoreError> {
     const CHUNK: usize = 1 << 16;
     let mut freed = croaring::Bitmap::new();
@@ -104,7 +104,7 @@ fn freed_by(
         );
         let numbers = crate::edited::numbers_of(live, &entities)?;
         for (entity, number) in entities.iter().zip(numbers) {
-            if number != *entity && !overlay.is_suppressed(*entity) {
+            if number != *entity {
                 freed.add(entity.raw() as u32);
             }
         }
@@ -1182,23 +1182,45 @@ impl Executor {
         external_id_runs.extend(completed.external_id_run.clone());
         external_id_runs.extend(forward.runs.iter().cloned());
 
-        // `tombstones` must leave the overlay in the same commit as the manifest, or a manifest
-        // carrying what the swap is about to retire would re-seed the overlay at the next restart.
-        let mut published_overlay = (*live.overlay).clone();
-        published_overlay.retire(&executed);
         // Read before the swap, while the edited-items map still holds the retired entities'
-        // pairs, and at the log position no later record can name them at.
-        let freed = match freed_by(&live, &executed, &published_overlay) {
-            Ok(freed) => tessera_store::manifest::HeldEntities {
-                position: self.log.wal.position(),
-                entities: tessera_store::manifest::EntitySet::of(&freed),
-            },
+        // pairs.
+        let freed = match freed_by(&live, &executed) {
+            Ok(freed) => freed,
             Err(e) => {
                 discard(&format!(
                     "the entities it retires could not be told apart from items' numbers ({e})"
                 ));
                 return;
             }
+        };
+        // The suppressions leaving with their entities are logged before the manifest omits
+        // them, so a replay of the suppressions the log still holds ends without them. Each entity
+        // is deleted until this fold's swap, so the record hides nothing less even if the fold is
+        // then discarded.
+        let unsuppressed = live.overlay.suppressions_retired_by(&executed);
+        if !unsuppressed.is_empty() {
+            let record = WalRecord::ChangeBatch {
+                changes: unsuppressed
+                    .iter()
+                    .map(|entity| (EntityId::new(u64::from(entity)), ChangeOp::Unsuppress))
+                    .collect(),
+            };
+            if let Err(failure) = self.append_and_sync(&[&record], None) {
+                discard(&format!(
+                    "the suppressions leaving with its entities could not be logged ({})",
+                    failure.into_error()
+                ));
+                return;
+            }
+        }
+        // `tombstones` must leave the overlay in the same commit as the manifest, or a manifest
+        // carrying what the swap is about to retire would re-seed the overlay at the next restart.
+        let mut published_overlay = (*live.overlay).clone();
+        published_overlay.retire(&executed);
+        // At the log position no later record can name the freed ids at.
+        let freed = tessera_store::manifest::HeldEntities {
+            position: self.log.wal.position(),
+            entities: tessera_store::manifest::EntitySet::of(&freed),
         };
 
         let (runtime_attributes, runtime_scoped_attributes) =

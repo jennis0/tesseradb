@@ -3284,7 +3284,7 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
     assert_eq!(
         engine.overlay_depth(),
         1,
-        "Rule S: a suppression never retires, and the fold does not execute one"
+        "Rule S: a live item's suppression retires only on unsuppress, and no fold executes it"
     );
 
     assert_eq!(

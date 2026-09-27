@@ -2259,28 +2259,20 @@ async fn declarations_match_the_description() {
         .unwrap();
     assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
 
-    let resp = control(
-        &f.server,
-        &delete,
-        "/control/views/quarter/2026-Q3?delete_dangling=true",
-    )
-    .send()
-    .await
-    .unwrap();
+    let resp = control(&f.server, &delete, "/control/views/quarter/2026-Q3")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(assert_answer(&doc, &delete, resp, 200).await["deleted"], 0);
     let resp = control(&f.server, &delete, "/control/views/quarter/2026-Q3")
         .send()
         .await
         .unwrap();
     assert_refusal_to(&doc, Some(&delete), resp, 404, "unknown").await;
-    let resp = control(
-        &f.server,
-        &delete,
-        "/control/views/quarter/2026-Q3?delete_dangling=maybe",
-    )
-    .send()
-    .await
-    .unwrap();
+    let resp = control(&f.server, &delete, "/control/views/quarter/2026-Q3?cascade=true")
+        .send()
+        .await
+        .unwrap();
     assert_refusal_to(&doc, Some(&delete), resp, 422, "contract").await;
 
     // A plain view, whose name shares a namespace with the groups'.

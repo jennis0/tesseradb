@@ -38,8 +38,8 @@ use tessera_build::{
 };
 
 const ENTITIES: u64 = 20;
-/// The plain view holds every entity; the group's one declared view holds the first half. The
-/// overlap is what makes `delete_dangling` a question with two answers.
+/// The plain view holds every entity; the group's one declared view holds the first half, so
+/// dropping it leaves every declared item in a view and deletes none.
 const WORLD: std::ops::Range<u64> = 0..ENTITIES;
 const Q1: std::ops::Range<u64> = 0..10;
 
@@ -202,13 +202,11 @@ fn q_record(label: &str, starts: i64) -> Value {
     json!({ "metadata": { "label": label, "starts": starts } })
 }
 
-async fn drop_view(served: &Served, group: &str, key: &str, delete_dangling: bool) -> Value {
+async fn drop_view(served: &Served, group: &str, key: &str) -> Value {
     let resp = served
         .server
         .client
-        .delete(served.server.control_url(&format!(
-            "/control/views/{group}/{key}?delete_dangling={delete_dangling}"
-        )))
+        .delete(served.server.control_url(&format!("/control/views/{group}/{key}")))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .send()
         .await
@@ -661,8 +659,8 @@ async fn a_drop_frees_the_key_and_the_drop_survives_a_restart() {
     let created = create(&served, "quarter", "2026-Q5", q_record("Q5", 1)).await;
     assert_eq!(created.status(), 201);
 
-    let body = drop_view(&served, "quarter", "2026-Q5", false).await;
-    assert_eq!(body["deleted"], 0, "dropping a view deletes no entity");
+    let body = drop_view(&served, "quarter", "2026-Q5").await;
+    assert_eq!(body["deleted"], 0, "an empty view's drop deletes nothing");
 
     let document = meta(&served).await;
     assert!(
@@ -697,7 +695,7 @@ async fn a_drop_frees_the_key_and_the_drop_survives_a_restart() {
         "the recreated key carries its own record, not its predecessor's"
     );
     // And drop it again, so the restart below is over a key with two dead incarnations behind it.
-    drop_view(&served, "quarter", "2026-Q5", false).await;
+    drop_view(&served, "quarter", "2026-Q5").await;
 
     // A different key still creates: a drop touches the key it named and nothing else.
     let resp = create(&served, "quarter", "2026-Q6", q_record("Q6", 2)).await;
@@ -718,10 +716,10 @@ async fn a_drop_frees_the_key_and_the_drop_survives_a_restart() {
         201,
         "the drop survives the restart as an absence, and the key is still free"
     );
-    drop_view(&served, "quarter", "2026-Q5", false).await;
+    drop_view(&served, "quarter", "2026-Q5").await;
     // A declared view can be dropped too, and the same rules hold for it.
     assert!(view_ids(&document).contains(&"quarter:2026-Q1".to_string()));
-    drop_view(&served, "quarter", "2026-Q1", false).await;
+    drop_view(&served, "quarter", "2026-Q1").await;
     assert_eq!(viewport(&served, "quarter:2026-Q1").await.status(), 404);
 }
 
@@ -973,16 +971,12 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
     );
 }
 
-/// **`delete_dangling` is sugar over the ordinary deletion path** (`views.md` §3.4): at the drop,
-/// the entities of the dropped view that hold a row in no other view — the buffer included — are
-/// submitted as ordinary deletions, which enter the overlay and retire at the fold like any
-/// deletion. It is not a second retirement route, and everything asserted below is an ordinary
-/// deletion's observable.
-///
-/// An entity that is *also* somewhere else survives, which is the half that makes the option a
-/// question rather than a shorthand for "delete everything this view could see".
+/// **A drop deletes the items it leaves in no view**, flushed and buffered alike, as ordinary
+/// deletions: they enter the overlay and retire at the fold like any deletion, and a deleted
+/// item's external id names nothing afterwards. An item that also has a row in another view, even
+/// one still buffered, stays.
 #[tokio::test]
-async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
+async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
     let served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
@@ -1021,8 +1015,8 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
     );
     drain(&served.server).await;
 
-    // A third entity, still in the buffer when the drop runs: the probe counts the buffer as this
-    // view's rows, or it would call an entity dangling that a caller was told had landed.
+    // A third item, still in the buffer when the drop runs: its only row is the one the drop
+    // discards, so it is deleted with the flushed one.
     let buffered = b"buffered".to_vec();
     assert_eq!(
         ingest(
@@ -1036,11 +1030,11 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         200
     );
 
-    let body = drop_view(&served, "quarter", "2026-Q5", true).await;
+    let body = drop_view(&served, "quarter", "2026-Q5").await;
     assert_eq!(
         body["deleted"], 2,
-        "the two entities this view alone held — the flushed one and the buffered one — and not \
-         the one that also sits in `world`: {body}"
+        "the two items this view alone held, the flushed one and the buffered one, and not the \
+         one that also sits in `world`: {body}"
     );
 
     // The ordinary deletion observables. A deleted holder is forgotten at the interchange boundary
@@ -1085,7 +1079,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         "the buffered row's entity was deleted with the rest"
     );
 
-    // **A buffered join row goes with the view it named, and its entity does not.** The row is
+    // **A buffered row goes with the view it named, and its item does not.** The row is
     // geometry for a coordinate system that no longer exists, so nothing would ever give it a
     // place; left in the buffer it would pin the WAL's reclaim bound for the life of the process.
     assert_eq!(
@@ -1123,10 +1117,10 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         buffered_before + 2,
         "one row per (entity, view), both awaiting a flush"
     );
-    let body = drop_view(&served, "quarter", "2026-Q7", true).await;
+    let body = drop_view(&served, "quarter", "2026-Q7").await;
     assert_eq!(
         body["deleted"], 0,
-        "the entity holds a row in `world`, so it is not dangling: {body}"
+        "the item holds a row in `world`, so the drop leaves it: {body}"
     );
     assert_eq!(
         served.server.state.engine.buffered_items(),
@@ -1146,7 +1140,8 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
     .await;
     assert_eq!(again["edited"], 1, "and the entity is alive, in `world`: {again}");
 
-    // And the drop without the option deletes nothing at all, which is the default.
+    // An item flushed into one view alone, dropped with it: after a restart, which replays the
+    // deletion from the drop's own record, a row carrying its external id creates a new item.
     assert_eq!(
         create(&served, "quarter", "2026-Q6", q_record("Q6", 2))
             .await
@@ -1164,25 +1159,24 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
     assert_eq!(resp.status(), 200);
     let before = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
-    let body = drop_view(&served, "quarter", "2026-Q6", false).await;
-    assert_eq!(body["deleted"], 0);
-
-    // **Dropping a view deletes no entity.** The item still exists, with its label and its
-    // identity, in no view at all, and a later batch into another view adds it there by
-    // `external_id`, which is the ordinary shape of a corpus whose items come and go between
-    // slices. Its rendered `score` lived in the dropped view's rows, so the row leaves it out.
-    let resp = ingest_json(
-        &served,
-        "reingest-solitary",
-        "world",
-        json!([located(&solitary, 50.0, 50.0)]),
+    let body = drop_view(&served, "quarter", "2026-Q6").await;
+    assert_eq!(body["deleted"], 1, "{body}");
+    let served = served.restart().await;
+    let again = accepted(
+        ingest_json(
+            &served,
+            "reingest-solitary",
+            "world",
+            json!([located(&solitary, 50.0, 50.0)]),
+        )
+        .await,
     )
     .await;
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        ingested_ids(&resp.json::<Value>().await.unwrap())[0],
+    assert_eq!(again["created"], 1, "a deleted item names nothing: {again}");
+    assert_ne!(
+        ingested_ids(&again)[0],
         before,
-        "the same identity, joined to a new view — not a fresh entity, which is what a deletion          would have made of it"
+        "the new item has a new tessera_id"
     );
 }
 
@@ -1357,7 +1351,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     assert_eq!(moved["edited"], 1, "the entity is in `world` already, so the row edits it");
 
     // **Drop**, and the key is freed — on a minted view exactly as on a declared one.
-    let body = drop_view(&served, "quarter", "2026-Q1", false).await;
+    let body = drop_view(&served, "quarter", "2026-Q1").await;
     assert_eq!(body["deleted"], 0);
     served.reauthorise().await;
     assert!(!view_ids(&meta(&served).await).contains(&"quarter:2026-Q1".to_string()));
@@ -1450,9 +1444,9 @@ fn view_dirs(root: &Path, group: &str, key: &str) -> Vec<std::path::PathBuf> {
 /// - **A restart serves the survivors**, so the omission took the dropped view and nothing else.
 /// - **The drop outlives the fold.** The fold rewrites the manifest; a key the manifest no longer
 ///   carries must not come back as a view of it, record and rows and all.
-/// - **And the two removal rules compose.** A second drop, this one with `delete_dangling`, puts
-///   ordinary deletions on the deny lane; the fold that omits the view's segments is also the fold
-///   that executes them, and their overlay entries retire there (Rule F) rather than at the drop.
+/// - **And the two removal rules compose.** A second drop leaves items in no view and deletes them;
+///   the fold that omits the view's segments is also the fold that executes the deletions, and
+///   their overlay entries retire there (Rule F) rather than at the drop.
 #[tokio::test]
 async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_nothing() {
     let mut served = Served::build(build_fixture_bundle).await;
@@ -1498,8 +1492,8 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
         "before the drop the bundle carries a segment for every view"
     );
 
-    let body = drop_view(&served, "quarter", "2026-Q1", false).await;
-    assert_eq!(body["deleted"], 0, "a drop by itself deletes no entity");
+    let body = drop_view(&served, "quarter", "2026-Q1").await;
+    assert_eq!(body["deleted"], 0, "every item of the view is in `world` too");
 
     fold(&served.server).await;
     let (folded, folded_dir) = live_prefix(&served);
@@ -1572,21 +1566,18 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
         0,
         "the recreated key is an empty view, not the build's own rows under a new record"
     );
-    drop_view(&served, "quarter", "2026-Q1", false).await;
+    drop_view(&served, "quarter", "2026-Q1").await;
     served.reauthorise().await;
 
-    // (e) **`delete_dangling`'s deletions retire at the fold that omits their view's segments**
-    // (`views.md` §3.4, Rule F, write-path §5.4). The two removal rules meet here and only here:
-    // the *view* goes by omission at the publication, and the *entities* the drop submitted go the
-    // ordinary way, through the overlay, at the fold that executes them. Nothing else in this file
-    // reaches the second half — a drop's own test ends at the acknowledgement — and the reasoning
-    // that they compose is exactly the reasoning that has been wrong twice.
+    // (e) **A drop's deletions retire at the fold that omits their view's segments** (Rule F).
+    // The *view* goes by omission at the publication, and the *items* the drop deleted go the
+    // ordinary way, through the overlay, at the fold that executes them.
     //
-    // The four entities ingested into `2026-Q2` hold a row in that view and nowhere else: they
-    // were minted by that batch, and `quarter_map:2026-Q2` was created empty beside it. So the
-    // drop's probe finds all four dangling.
+    // The four items ingested into `2026-Q2` hold a row in that view and nowhere else: they were
+    // created by that batch, and `quarter_map:2026-Q2` was created empty beside it. So the drop
+    // deletes all four.
     let before = served.server.state.engine.retirable_deletions();
-    let body = drop_view(&served, "quarter", "2026-Q2", true).await;
+    let body = drop_view(&served, "quarter", "2026-Q2").await;
     assert_eq!(
         body["deleted"], 4,
         "every entity of the view was in no other: {body}"
@@ -1594,7 +1585,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     assert_eq!(
         served.server.state.engine.retirable_deletions(),
         before + 4,
-        "the dangling entities are ordinary deletions and enter the overlay"
+        "the drop's deletions are ordinary deletions and enter the overlay"
     );
 
     fold(&served.server).await;
@@ -2280,10 +2271,11 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
         200
     );
 
-    // **Drop and recreate in one window** — no flush, no fold, no publication between them.
+    // **Drop and recreate in one window** — no flush, no fold, no publication between them. The
+    // drop deletes the nine items it leaves in no view, flushed and buffered alike.
     assert_eq!(
-        drop_view(&served, "quarter", "2026-Q5", false).await["deleted"],
-        0
+        drop_view(&served, "quarter", "2026-Q5").await["deleted"],
+        9
     );
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5 second", 2))
@@ -2408,9 +2400,11 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
     );
 
     // Dropped by the **owner's** name, which is the spelling the live prune used to build from.
+    // The five items buffered under the other spelling are in no other view, so the drop deletes
+    // them.
     assert_eq!(
-        drop_view(&served, "quarter", "2026-Q5", false).await["deleted"],
-        0
+        drop_view(&served, "quarter", "2026-Q5").await["deleted"],
+        5
     );
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5 second", 2))
@@ -2442,7 +2436,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
     }
 
     // ---- (B) the replay arm: rows buffered under the sharing group, and no flush ------------
-    drop_view(&served, "quarter", "2026-Q5", false).await;
+    drop_view(&served, "quarter", "2026-Q5").await;
     assert_eq!(
         create(&served, "quarter", "2026-Q6", q_record("Q6 first", 3))
             .await
@@ -2471,8 +2465,8 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
     // `ViewDrop` always carries the owner, so a replay prune built from the record alone looks
     // under `quarter:2026-Q6` and never under the id these rows are actually in.
     assert_eq!(
-        drop_view(&served, "quarter_map", "2026-Q6", false).await["deleted"],
-        0
+        drop_view(&served, "quarter_map", "2026-Q6").await["deleted"],
+        5
     );
     assert_eq!(
         create(&served, "quarter", "2026-Q6", q_record("Q6 second", 4))
@@ -2678,7 +2672,7 @@ async fn an_edit_in_a_view_dropped_before_the_tick_is_still_written() {
     )
     .await;
     assert_eq!(edited["edited"], 1, "{edited}");
-    drop_view(&served, "quarter", "2026-Q5", false).await;
+    drop_view(&served, "quarter", "2026-Q5").await;
     served.reauthorise().await;
     drain(&served.server).await;
 

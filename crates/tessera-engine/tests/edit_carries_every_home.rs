@@ -534,7 +534,7 @@ fn a_view_dropped_behind_an_edit_in_one_window_keeps_the_item() {
         );
         let dropped = scope.spawn(|| {
             engine
-                .drop_view("quarter".to_string(), "q1".to_string(), false)
+                .drop_view("quarter".to_string(), "q1".to_string())
                 .expect("the drop is accepted")
         });
         wait_until(

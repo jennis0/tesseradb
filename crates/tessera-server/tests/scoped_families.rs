@@ -1603,11 +1603,7 @@ async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
     let dropped = served
         .server
         .client
-        .delete(
-            served
-                .server
-                .control_url("/control/views/quarter/2026-Q4?delete_dangling=false"),
-        )
+        .delete(served.server.control_url("/control/views/quarter/2026-Q4"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .send()
         .await

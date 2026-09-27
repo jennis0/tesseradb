@@ -1095,10 +1095,6 @@ impl Executor {
         let Some((view, plan)) = plan_to_dispatch(plans) else {
             return false;
         };
-        self.flush_flight = plan
-            .items
-            .last()
-            .map(|(entity, _)| (view.clone(), entity.raw() + 1));
 
         let context = {
             let Some(view_data) = partition_data.views.get(&view) else {

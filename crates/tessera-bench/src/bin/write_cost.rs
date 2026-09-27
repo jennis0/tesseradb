@@ -485,7 +485,10 @@ fn experiment_b(
     rounds: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n== B: one deny window, against overlay depth ==");
-    println!("(min of {rounds} rounds; suppressions, which never retire, so the depth only grows)");
+    println!(
+        "(min of {rounds} rounds; suppressions of items never edited, which retire only on \
+         unsuppress, so the depth only grows)"
+    );
     if let Some(deepest) = depths.last() {
         if *deepest as u64 > fx.high_water {
             println!(

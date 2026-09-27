@@ -301,17 +301,6 @@ pub(crate) fn held_scoped_value(
     }
 }
 
-/// Whether `entity` can be added to `view` in place: where it is at or above the view's entity
-/// floor. An item older than that is added to the view by moving it to a new entity.
-pub(crate) fn joins_in_place(generation: &Generation, entity: EntityId, view: &str) -> bool {
-    generation.bundle.partitions.values().all(|partition| {
-        partition
-            .views
-            .get(view)
-            .is_none_or(|data| entity.raw() >= data.row_space.entity_floor())
-    })
-}
-
 /// Every view `entity` holds a row in, flushed or buffered, sorted: what an edit carries, and
 /// what the executor compares with what the handler read.
 pub(crate) fn views_holding(generation: &Generation, entity: EntityId) -> Vec<String> {

@@ -14,8 +14,8 @@
 //! by it.
 //!
 //! Only an entity that is no item's number is freed. A deleted item's number stays reserved, so a
-//! `tessera_id` a caller holds never comes to name another item. A suppressed entity is not freed
-//! either: its suppression stands until it is lifted.
+//! `tessera_id` a caller holds never comes to name another item. A suppressed entity is freed like
+//! any other: the fold that removes it drops its suppression with it.
 //!
 //! A fold's freed ids are held back until the log keeps no record older than the fold's
 //! publication ([`Allocator::release_after`], [`Allocator::promote`]). Replay applies every record
@@ -387,6 +387,11 @@ pub fn entities_named(records: &[WalRecord]) -> Bitmap {
             }
             WalRecord::ChangeBatch { changes } => {
                 for (entity, _) in changes {
+                    add(*entity);
+                }
+            }
+            WalRecord::ViewDrop { deleted, .. } => {
+                for entity in deleted {
                     add(*entity);
                 }
             }

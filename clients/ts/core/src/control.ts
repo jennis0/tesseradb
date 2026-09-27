@@ -468,14 +468,11 @@ export class Control {
 
   /**
    * `DELETE /control/views/{group}/{key}`: drops a view that `createView` made, and frees its key.
-   * It deletes no item unless `deleteDangling` is set, which deletes the view's items that have a
-   * row in no other view and reports how many in the answer's `deleted`.
+   * It deletes the items it leaves with a row in no view and reports how many in the answer's
+   * `deleted`.
    */
-  dropView(group: string, key: string, options: WriteOptions & {deleteDangling?: boolean} = {}): Promise<Answer> {
-    const path = withQuery(`/control/views/${segment(group)}/${segment(key)}`, {
-      delete_dangling: options.deleteDangling ? 'true' : undefined,
-      ...waiting(options)
-    });
+  dropView(group: string, key: string, options: WriteOptions = {}): Promise<Answer> {
+    const path = withQuery(`/control/views/${segment(group)}/${segment(key)}`, waiting(options));
     return this.send('DELETE', path, options);
   }
 
