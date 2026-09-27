@@ -74,9 +74,9 @@ flowchart TB
 
 A deny is in force from the moment it is acknowledged. It is recorded in the **overlay**, the
 in-memory record of what is hidden. A deletion leaves the overlay at the compaction that drops its
-rows. A suppression leaves it at an unsuppress, which lifts the item's suppression, or, on an entity
-an edit moved the item away from, at the compaction that drops that entity's rows, while the item
-stays suppressed through the entity it holds.
+rows. A suppression leaves it at an unsuppress, which lifts the item's suppression, or at the
+compaction that removes the entity it names. A compaction removes only deleted entities, so an item
+that still exists stays suppressed through the entity it holds.
 
 ## Generations
 
@@ -212,7 +212,7 @@ append:
 - every generating set of a supplied content, which the new entity joins and the old one leaves,
   so the content is still served while its generating items are visible;
 - a suppression standing against the old entity, copied to the new one; the old entity keeps its
-  own until the compaction that removes its rows;
+  own until the compaction that removes it;
 - the unique values and the external id, which name the new entity from the acknowledgement.
 
 A change, a growth or a publication resolved before an edit moved an item it names reaches the
@@ -356,7 +356,7 @@ An entry **retires** when it leaves the overlay. Each store has exactly one rout
 
 | Applies to | Removed by | Why only one route |
 |---|---|---|
-| A suppression (Rule S) | An explicit unsuppress. On an entity an edit moved the item away from, also the compaction that removes that entity's rows and retires its deletion, since the item's suppression continues on the entity it holds | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. The compaction removes only the record of an entity with no row left, whose item the record of its new entity still hides |
+| A suppression (Rule S) | An explicit unsuppress, or the compaction that removes the entity it names | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. A compaction removes only deleted entities, whose rows are gone with it; an item that still exists keeps its suppression on its current entity |
 | A deletion (Rule F) | The compaction that removes the item's row and its term-index entries, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
 
 The mask a request subtracts from its answer, `denied[view]`, is derived from the union of the two
@@ -505,26 +505,28 @@ row and no term-index entries left for any request to find, so what a viewer see
 The next fold clears the entry again, at little further cost, because there is nothing left for it
 to remove.
 
-A suppression is carried through a compaction unchanged, with one exception. An entity an edit
-moved its item away from is deleted, and the compaction that removes its rows and retires its
-deletion also drops its suppression: the item stays suppressed through the entity it holds, and no
-record of a suppression is left naming an entity that no longer exists. The compaction appends the
-unsuppression of those entities to the WAL before it publishes, so a restart that replays their
-suppression from records the log still holds ends without it. Only an explicit unsuppress lifts an
-item's suppression (Rule S).
+A compaction drops the suppression of every entity it removes, with the entity's deletion: no
+record of a suppression is left naming an entity that no longer exists. An item that still exists
+is not deleted, so its current entity is not removed and its suppression stands; an edited item's
+old entities are removed while the item stays suppressed through the entity it holds. The
+compaction appends the unsuppression of the entities it removes to the WAL before it publishes, so
+a restart that replays their suppression from records the log still holds ends without it. Only
+an explicit unsuppress lifts the suppression of an item that exists (Rule S).
 
 ### Freed entity ids
 
-A compaction also frees entity ids. An edit leaves its item's old entity deleted, and once a
-compaction has removed that entity's rows and retired its deletion, the id can be given to a new
-entity. An id is freed only where it is no item's number. An item's first entity id is its number,
-from which its `tessera_id` is derived, and it stays reserved after the item is deleted, so a
-`tessera_id` a client holds never comes to name another item. An entity a suppression stands
-against is freed like any other, since the compaction drops its suppression with its rows, and the
-item that takes the id is not suppressed. An item edited again and again therefore holds its
-number and at most two other ids: the entity it is in, and the one its last edit left, until a
-compaction frees it. Under repeated edits of the same items the
-high point of the id space stops rising after the second compaction.
+A compaction also frees entity ids. Every entity it removes is freed, so its id can be given to a
+new entity, except an item's number. An item's first entity id is its number, from which its
+`tessera_id` is derived, and it stays reserved after the item is deleted, so a `tessera_id` a
+client holds never comes to name another item. The entities an edit leaves are removed and freed,
+including one an edit made and a later edit or deletion left before any flush placed it: the
+edited-items map keeps its pair until the compaction that removes it, which is how the compaction
+tells it from a number. A restart restores such a pair from the log, and where the log no longer
+holds the edit the entity is removed without being freed. An entity a suppression stood against is freed like any other, since the
+compaction drops its suppression with it, and the item that takes the id is not suppressed. An item
+edited again and again therefore holds its number and at most two other ids: the entity it is in,
+and the one its last edit left, until a compaction frees it. Under repeated edits of the same items
+the high point of the id space stops rising after the second compaction.
 
 A freed id is held back until the WAL has rotated past the compaction's publication. Until then a
 restart would replay records naming the id's previous holder, its rows, its deletion and its

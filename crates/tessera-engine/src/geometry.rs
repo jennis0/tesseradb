@@ -128,9 +128,6 @@ pub(crate) struct PrefixRotation {
     /// publication demonstrably removed, derived from what it carried forward and never from what
     /// the plan predicted.
     pub(crate) retired: Bitmap,
-    /// The suppressions leaving `suppressed` with `retired` entities that edits moved items away
-    /// from: each item's suppression continues on the entity it holds now.
-    pub(crate) unsuppressed: Bitmap,
 }
 
 impl GeometryPublication {

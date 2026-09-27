@@ -1144,7 +1144,7 @@ fn a_suppression_survives_the_fold_and_an_unsuppress_afterwards_reveals_its_item
     assert_eq!(
         engine.overlay_depth(),
         1,
-        "Rule S: a suppression never retires"
+        "Rule S: a live item's suppression retires only on unsuppress"
     );
     let after = engine.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(visible(&engine, &after), baseline - 1, "still hidden");
@@ -2361,8 +2361,8 @@ fn tick(engine: &Engine) {
 /// makes this case able to tell the two gauges apart. At one suppression and two deletions the
 /// overlay's *depth* is already 3 and its *retirable* part is 2 — so a trigger keyed on
 /// `Overlay::len()` fires here and the correct one does not. That is r3's memory F5 in its exact
-/// shape: a suppression never retires, so a `len`-keyed trigger dispatches a full fold that
-/// retires nothing, every interval, for ever.
+/// shape: a live item's suppression never leaves at a fold, so a `len`-keyed trigger dispatches a
+/// full fold that retires nothing, every interval, for ever.
 ///
 /// **Mutations this kills:** never consulting the schedule (no fold happens at all); keying the
 /// gauge on `Overlay::len()` rather than `deleted_len()` (the fold fires one deletion early, at the

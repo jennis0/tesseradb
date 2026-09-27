@@ -277,7 +277,6 @@ impl Engine {
             prefix,
             &self.generation.load().fragments,
             retired_bitmap,
-            croaring::Bitmap::new(),
         )?;
 
         self.write.publish_geometry(

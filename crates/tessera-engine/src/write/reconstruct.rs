@@ -475,7 +475,7 @@ impl WritePath {
                 }
             }
         }
-        let edited_live = crate::edited::EditedLive::derive(&records, &buffer);
+        let edited_live = crate::edited::EditedLive::derive(&records, &buffer, &overlay);
 
         let established_inverse: FxHashMap<EntityId, Vec<u8>> = established
             .iter()

@@ -7,9 +7,9 @@
 //! served as absent. Both look like a clustering that failed its existence criterion.
 //!
 //! The distinction these cases exist to hold is the one this corpus has caught twice: **a deletion
-//! retires at the fold that executes it, and a suppression retires only on unsuppress.** A pass that
-//! dropped a suppressed member's bit while it was at it would give a suppression a second
-//! retirement route, and the member would not come back at the unsuppress — fail-open, and
+//! retires at the fold that executes it, and a live member's suppression only on unsuppress.**
+//! A pass that dropped a suppressed member's bit while it was at it would give a suppression a
+//! second retirement route, and the member would not come back at the unsuppress — fail-open, and
 //! indistinguishable from a cluster that had always been that size.
 //!
 //! A test of decision 0107's rule for a generating set the fold emptied was removed with the
@@ -239,8 +239,8 @@ fn a_fold_rewrites_the_memberships_into_the_prefix_it_publishes() {
 ///
 /// Deleting a member and suppressing another moves the served count by two, both at the ack. What
 /// the fold changes is which of those is *structural*: the deletion is executed and its bit goes,
-/// so the count stays down; the suppression retires only on unsuppress, so its bit is still there
-/// and the member comes back.
+/// so the count stays down; the live member's suppression retires only on unsuppress, so its bit
+/// is still there and the member comes back.
 #[test]
 fn a_deleted_member_is_gone_after_the_fold_and_a_suppressed_one_comes_back() {
     let fx = fixture();

@@ -7,7 +7,8 @@
 //! The freed id is the edited item's middle entity: its first is its number, which stays reserved
 //! so its `tessera_id` never names another item, and its last is the one it holds. A suppressed
 //! item's old entities lose their suppression at the fold that removes their rows, while the item
-//! stays suppressed through the entity it holds, so the item that takes one is not suppressed. An
+//! stays suppressed through the entity it holds, so the item that takes one is not suppressed. So
+//! does an entity an edit made and a deletion removed before any flush placed it. An
 //! id a record the log kept names is not issued when the service restarts, since the replay has
 //! applied that record to it; nor does an edit resolved to the entity before it was freed reach the
 //! item that took it.
@@ -715,6 +716,53 @@ fn a_fold_discarded_after_logging_the_unsuppression_hides_nothing_less() {
     assert!(overlay.is_suppressed(holds));
     let full = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(!served(&engine, &full, "s0", None).contains(&w.raw()), "w stays suppressed");
+}
+
+/// **An edit's new entity deleted before its flush is freed without its suppression.** A
+/// suppressed item is edited, and deleted before a flush places the entity the edit gave it. The
+/// fold removes both entities and drops both suppressions; it frees the new entity, which is no
+/// item's number, and keeps the item's number reserved. The item that takes the freed id is served.
+#[test]
+fn a_new_entity_deleted_before_its_flush_is_freed_without_its_suppression() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let engine = open(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    publish(&engine, &root);
+    let number = EntityId::new(source_to_new_map(&root, "v00000")[&W]);
+    let w = engine.tessera_id_of(number).unwrap();
+    engine.accept_change(number, ChangeOp::Suppress).unwrap();
+    send(&engine, "w1", "s0", vec![rescore(w, 601)]);
+    let unflushed = entity_of(&engine, w);
+    engine.accept_change(unflushed, ChangeOp::Delete).unwrap();
+    assert_eq!(engine.overlay_depth(), 2, "both entities deleted and suppressed");
+
+    let high_water = engine.allocator_high_water();
+    fold(&engine);
+    publish_buffered(&engine);
+    assert_eq!(
+        engine.overlay_depth(),
+        0,
+        "the fold removes both entities and every deny record naming them"
+    );
+    let made = send(
+        &engine,
+        "new",
+        Q1,
+        vec![create("z", "1", (901.0, 902.0)), create("z2", "1", (903.0, 904.0))],
+    );
+    let entities: Vec<EntityId> = made.iter().map(|t| entity_of(&engine, *t)).collect();
+    assert!(entities.contains(&unflushed), "a new item takes the freed id: {entities:?}");
+    assert!(!entities.contains(&number), "no item takes w's number: {entities:?}");
+    assert_eq!(engine.allocator_high_water(), high_water + 1);
+    publish_buffered(&engine);
+    let subset = engine.authorise(&subset_credential()).unwrap();
+    let seen = served(&engine, &subset, Q1, None);
+    assert!(
+        made.iter().all(|t| seen.contains(&t.raw())),
+        "the item on the freed id is served"
+    );
+    assert!(engine.resolve_tessera_ids(&[w]).unwrap()[0].is_none(), "w names nothing");
 }
 
 /// **An edit resolved to an entity before it was freed does not reach the item that took it.**

@@ -84,25 +84,15 @@ pub(super) struct FoldDerived<'a> {
     pub(super) freed: &'a tessera_store::manifest::HeldEntities,
 }
 
-/// What a fold does with the entities of `executed` that edits moved items away from.
-struct MovedAway {
-    /// The ones the allocator may issue again: each is no item's number.
-    freed: croaring::Bitmap,
-    /// The suppressed ones, whose suppression leaves with their rows: each item's suppression
-    /// continues on the entity it holds now.
-    suppressed: croaring::Bitmap,
-}
-
-/// The entities of `executed` edits moved items away from: an entity whose number is another, and
-/// a suppressed item's number the edited-items map holds a later entity for.
-fn moved_away(
+/// The entities of `executed` the allocator may issue again: each one whose number, the entity
+/// its item was first given, is another. An item's number is never freed, so a `tessera_id` a
+/// client holds never comes to name another item.
+fn freed_by(
     live: &Generation,
     executed: &croaring::Bitmap,
-) -> Result<MovedAway, tessera_store::StoreError> {
+) -> Result<croaring::Bitmap, tessera_store::StoreError> {
     const CHUNK: usize = 1 << 16;
-    let overlay = &live.overlay;
     let mut freed = croaring::Bitmap::new();
-    let mut suppressed = croaring::Bitmap::new();
     let mut entities: Vec<EntityId> = Vec::with_capacity(CHUNK);
     let mut iter = executed.iter().peekable();
     while iter.peek().is_some() {
@@ -113,26 +103,13 @@ fn moved_away(
                 .map(|entity| EntityId::new(u64::from(entity))),
         );
         let numbers = crate::edited::numbers_of(live, &entities)?;
-        let mut suppressed_numbers: Vec<u32> = Vec::new();
         for (entity, number) in entities.iter().zip(numbers) {
-            let raw = entity.raw() as u32;
             if number != *entity {
-                freed.add(raw);
-            } else if overlay.is_suppressed(*entity) {
-                suppressed_numbers.push(raw);
-            }
-        }
-        for (number, entries) in suppressed_numbers
-            .iter()
-            .zip(crate::edited::entries_of(live, &suppressed_numbers)?)
-        {
-            if !entries.is_empty() {
-                suppressed.add(*number);
+                freed.add(entity.raw() as u32);
             }
         }
     }
-    suppressed.or_inplace(&freed.and(overlay.suppressed_set()));
-    Ok(MovedAway { freed, suppressed })
+    Ok(freed)
 }
 
 /// The fold-written files whose stamped version is the level's now, after the fold's retirement
@@ -1207,8 +1184,8 @@ impl Executor {
 
         // Read before the swap, while the edited-items map still holds the retired entities'
         // pairs.
-        let away = match moved_away(&live, &executed) {
-            Ok(away) => away,
+        let freed = match freed_by(&live, &executed) {
+            Ok(freed) => freed,
             Err(e) => {
                 discard(&format!(
                     "the entities it retires could not be told apart from items' numbers ({e})"
@@ -1220,10 +1197,10 @@ impl Executor {
         // them, so a replay of the suppressions the log still holds ends without them. Each entity
         // is deleted until this fold's swap, so the record hides nothing less even if the fold is
         // then discarded.
-        if !away.suppressed.is_empty() {
+        let unsuppressed = executed.and(live.overlay.suppressed_set());
+        if !unsuppressed.is_empty() {
             let record = WalRecord::ChangeBatch {
-                changes: away
-                    .suppressed
+                changes: unsuppressed
                     .iter()
                     .map(|entity| (EntityId::new(u64::from(entity)), ChangeOp::Unsuppress))
                     .collect(),
@@ -1239,11 +1216,11 @@ impl Executor {
         // `tombstones` must leave the overlay in the same commit as the manifest, or a manifest
         // carrying what the swap is about to retire would re-seed the overlay at the next restart.
         let mut published_overlay = (*live.overlay).clone();
-        published_overlay.retire(&executed, &away.suppressed);
+        published_overlay.retire(&executed);
         // At the log position no later record can name the freed ids at.
         let freed = tessera_store::manifest::HeldEntities {
             position: self.log.wal.position(),
-            entities: tessera_store::manifest::EntitySet::of(&away.freed),
+            entities: tessera_store::manifest::EntitySet::of(&freed),
         };
 
         let (runtime_attributes, runtime_scoped_attributes) =
@@ -1467,7 +1444,6 @@ impl Executor {
             &live_manifest.deltas,
             &segments_manifest.deltas,
             executed,
-            away.suppressed,
         ) {
             self.diverge_from_current(&completed.prefix, &reason);
             return;
@@ -1661,16 +1637,10 @@ impl Executor {
         live_tiers: &[String],
         folded_tiers: &[String],
         retired: croaring::Bitmap,
-        unsuppressed: croaring::Bitmap,
     ) -> Result<(), String> {
-        let (bundle, rotation) = crate::engine::open_rotation(
-            &self.deps.bundle_root,
-            prefix,
-            &live.fragments,
-            retired,
-            unsuppressed,
-        )
-        .map_err(|e| format!("the folded prefix would not open ({e})"))?;
+        let (bundle, rotation) =
+            crate::engine::open_rotation(&self.deps.bundle_root, prefix, &live.fragments, retired)
+                .map_err(|e| format!("the folded prefix would not open ({e})"))?;
         let delta_postings = folded_tiers
             .iter()
             .map(|rel| {
