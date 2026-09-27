@@ -30,9 +30,9 @@ stateDiagram-v2
 
 *The stages an item and a deny pass through. Each arrow is the event that causes the transition.*
 
-An item has one entity id for life, permanent from the moment it is allocated: this is its
-position in entity space, the corpus-wide record of its identity and access label, shared by every
-view. It also has one row per view, its position in that view's file layout, called row space; a
+An item has an entity id: its position in entity space, the corpus-wide record of its identity
+and access label, shared by every view. An edit moves the item to a new entity id and keeps its
+`tessera_id` ([edits](#edits)). It also has one row per view, its position in that view's file layout, called row space; a
 row's position can move when files are rewritten, at a merge or a compaction, though never at a
 flush, which only appends.
 
@@ -243,7 +243,9 @@ the executor rather than per request.
 Within one window, entity ids are assigned in order of each item's signature, its sorted,
 deduplicated list of terms, and then by external id. This groups the items carrying a term into
 contiguous runs of ids, which the term index stores far more compactly than scattered ids. Nothing
-repairs this ordering later: a wider window produces longer runs, and a narrower one does not.
+repairs this ordering later: a wider window produces longer runs, and a narrower one does not. Ids
+a compaction freed are assigned first, lowest first, so they land among other terms' runs rather
+than in a run of their own ([freed entity ids](#freed-entity-ids)).
 
 The window closes when it reaches a configured row count, or when the server's incoming work is
 observed empty, whichever comes first. It also closes before admitting a batch that touches what a
@@ -504,6 +506,45 @@ to remove.
 A suppression is carried through a compaction unchanged. Only an explicit unsuppress removes one
 (Rule S).
 
+### Freed entity ids
+
+A compaction also frees entity ids. An edit leaves its item's old entity deleted, and once a
+compaction has removed that entity's rows and retired its deletion, the id can be given to a new
+entity. An id is freed only where it is no item's number. An item's first entity id is its number,
+from which its `tessera_id` is derived, and it stays reserved after the item is deleted, so a
+`tessera_id` a client holds never comes to name another item. An entity a suppression stands
+against is not freed either, since a suppression is removed only when it is lifted. An item edited
+again and again therefore holds its number and at most two other ids: the entity it is in, and the
+one its last edit left, until a compaction frees it. Under repeated edits of the same items the
+high point of the id space stops rising after the second compaction.
+
+A freed id is held back until the WAL has rotated past the compaction's publication. Until then a
+restart would replay records naming the id's previous holder, its rows, its deletion and its
+memberships, onto whatever took the id. Once the log keeps no such record, the id is free, and the
+allocator issues free ids, lowest first, before any id from its high point.
+
+Every side-manifest records the free ids and the held-back ones, each set with the WAL position it
+waits for. A restart takes both from the newest manifest it serves, frees the sets whose position
+the log has passed, and removes every id a replayed record or the overlay names: such an id was
+issued after the manifest was written, and a later manifest records it taken. A partition serving
+an older manifest after a step-down issues no freed id, since the manifest it serves can list an
+id issued since.
+
+A freed id is lower than the entities a view already has rows for, so a flush cannot place its row
+by extending the segment's range of entities without widening that range across the whole view.
+The segment lists the rows of such entities beside its range instead, and a lookup that finds no
+row in the base or a range reads the lists; the external-id locator a flush writes does the same.
+A merge keeps the listed rows, and the compaction folds them into the base like any other.
+
+Measured on the GeoNames rung (13.5 million items), over five rounds that each send a
+673,193-row hold-out again with the same 6,748 items moved, then flush and compact: the first two
+rounds took 6,748 new ids each and every later round none, so the high point stayed at 13,477,353.
+Freed ids land among other terms' runs in the term index rather than in a run of their own, and
+the compacted base postings measured 82,866 bytes after each of the two rounds on new ids and
+82,674 to 82,930 bytes after the rounds on freed ones; they were 52,018 bytes before the first
+edit. Ingest ran at 128,000 to 139,000 rows a second, a flush took 2.0 s and a compaction 146 to
+149 s in every round.
+
 A compaction runs off the request path, over files a viewport is also reading. Its duration
 is not bounded: nothing observes it directly, so the compaction is designed to disturb a live viewport
 as little as possible rather than to finish quickly. The one moment a compaction is visible to a client
@@ -551,10 +592,12 @@ a server that runs out of manifests to step to refuses to serve that partition r
 reaching for one old enough to have forgotten a deny.
 
 The entity id allocator resumes from whichever is larger, the manifest's recorded high point or
-the value replay reaches, so an id already issued is never issued again. Every side-manifest
+the value replay reaches, so an id above the high point is never issued twice. Every side-manifest
 records the allocator's own high point, not only the highest entity a segment holds: an item
 deleted before its flush holds no row, and once the log records naming it are reclaimed, the
-manifest is what keeps its entity id, and so its `tessera_id`, from being issued to a new item. The buffer of rows
+manifest is what keeps its entity id, and so its `tessera_id`, from being issued to a new item.
+Freed ids are restored from the newest manifest less every id the replay names
+([freed entity ids](#freed-entity-ids)). The buffer of rows
 awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in any segment,
 rather than compared against a watermark. This predicate stays correct regardless of how flush and
 allocation order have diverged from each other.
@@ -581,9 +624,6 @@ allocation order have diverged from each other.
   tracked on the session, but a client has no way to read it.
 - **Cell-granular staleness.** A content key reports only that something has changed, never which
   cells. A protocol narrowing that to the affected regions has not been designed.
-- **Entity id reuse.** Ruled, not built: an entity id a compaction frees by dropping its row
-  is never reissued to a later item. The allocator only grows, and an id once retired stays
-  retired.
 
 ## Where this is tested and where it lives
 
@@ -593,8 +633,12 @@ crates:
 
 - random sequences of ingest batches, changes, flushes, compactions, restarts, resent batches
   and `unique` declared on and off, checked after every step against a model of the items:
-  every view's points for two principals, `in` over every unique value, and every item's card
-  (`tessera-engine`'s `identity_model`);
+  every view's points for two principals, `in` over every unique value, every item's card, and
+  that no two items name one entity; long sequences that edit the same items again and again, so
+  compactions free ids and later edits take them (`tessera-engine`'s `identity_model`);
+- an item on a freed id carrying nothing of the item that held it, in any home, across a flush, a
+  merge, a restart and a compaction, and freed ids restored at a restart less those issued since
+  (`freed_ids_carry_nothing`);
 - a re-bound external id across a flush and a restart;
 - a row deleted before its first flush;
 - a unique value found and refused across a flush, a merge, a compaction and a restart, by
