@@ -27,8 +27,10 @@ pub(crate) struct EditedLive {
 
 impl EditedLive {
     /// The `(number, new entity)` pairs of the replayed edits whose new entity `buffer` still
-    /// holds a row of, or `overlay` deletes before a flush wrote its pair: what a restart starts
-    /// from.
+    /// holds a row of, or `overlay` deletes: what a restart starts from.
+    ///
+    /// The caller passes only the edits whose first row no flush has written. A flushed edit's
+    /// pair is in a run, so an entity flushed and then deleted keeps no pair here.
     pub(crate) fn derive(
         edits: &[(EntityId, EntityId)],
         buffer: &tessera_lifecycle::IngestBuffer,
