@@ -32,6 +32,9 @@ def declare_notebook(db, corpus: Path) -> None:
     db.declare_vocabulary(
         "primary_category", closed=True, width="u16", title="arXiv subject class"
     )
+    # The join field, filled from the points' `entity_id` column by the insert's `id=`.
+    db.declare_attribute("id", type="u64", unique=True)
+    db.declare_join_field("id")
     db.declare_attribute(
         "archive", type="category", vocabulary="archive", render=True, index=True, title="Archive"
     )
@@ -279,6 +282,8 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
     db.declare_attribute("abstract", type="text", index=True)
     db.declare_attribute("authors", type="text", index=True, title="Authors")
     db.declare_attribute("arxiv_id", type="keyword", index=True, title="arXiv ID")
+    db.declare_attribute("entity_id", type="u64", unique=True)
+    db.declare_join_field("entity_id")
     for name, kind, requirement in [
         ("clusters/kmeans", "flat", {"count": 50}),
         ("clusters/hdbscan", "nested", {"fraction": 0.05}),
@@ -343,7 +348,7 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
     assert read_schema_lines(report.log) == read_schema_lines(committed)
 
 
-def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
+def test_the_first_commit_builds_a_bundle(tmp_path):
     binary()
     corpus = notebook_corpus()
     db = create(tmp_path / "db")
@@ -355,12 +360,6 @@ def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
         db.close()
     bundle = db.path / "bundle"
     assert (bundle / "CURRENT").exists()
-    entities = bundle / "v00000" / "partitions" / "default" / "entities"
-    # The points file names its rows by an integer `entity_id`, which the build writes the
-    # external-id sidecar from when it is asked to: so every built row is addressable afterwards,
-    # on the ingest and values routes and in `remove()` (§3, configuration.md §8).
-    assert (entities / "ext-locator.u32").exists()
-    assert list(entities.glob("external-ids-*.arrow"))
     # The regeneration proved through the build: the bundle's own disclosure report, which carries
     # no path, is what the committed declaration's build writes.
     built = build_committed(binary(), corpus / "schema.toml", tmp_path / "committed")
@@ -378,7 +377,6 @@ def build_committed(tessera: str, declaration: Path, directory: Path) -> Path:
             "build",
             "--deployment",
             str(directory / "tessera.toml"),
-            "--mint-external-ids",
         ],
         capture_output=True,
         text=True,
@@ -421,6 +419,7 @@ def test_the_committed_database_is_served_and_close_stops_the_child(tmp_path):
             "title",
             "abstract",
             "arxiv_id",
+            "id",
         }
         # The render flags the first commit froze, and the vocabulary a category names.
         assert [c for c in columns.values() if c["render"]] and columns["title"]["render"] is False

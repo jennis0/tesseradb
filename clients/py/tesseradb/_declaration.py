@@ -4,7 +4,8 @@ Each `declare_*` verb builds one block of the declaration and appends it here.
 The SDK writes the TOML and `tessera check` reads that file, so the mapping from verb to block is
 checked by the binary rather than mirrored in Python.
 
-What the TOML always says: every source name on every block, the allocation view, the value
+What the TOML always says: every source name on every block, the allocation view, the join
+field where one is declared, the value
 set on every layer, and the disclosure controls on every layer and vocabulary, whether the user
 said them or a default did. A reader of `schema.toml` sees the whole declaration without knowing
 the SDK's defaults.
@@ -28,6 +29,10 @@ VIEWS_ALL = "__views_all__"
 #: `anchor=True` on a view, kept beside the block and never written: the TOML says
 #: `allocation_view` instead.
 ANCHOR = "__anchor__"
+
+#: `declare_join_field` on an attribute, kept beside the block and never written: the TOML says
+#: `[defaults].join_field` instead.
+JOIN = "__join_field__"
 
 #: An attribute declared at a running service, kept beside the block and never written. Such a
 #: column has no acquisition half: its values arrive on rows of `POST /control/ingest` rather than
@@ -126,6 +131,10 @@ class Declaration:
         names = self.view_names()
         return names[0] if names else None
 
+    def join_field(self) -> str | None:
+        """The attribute `declare_join_field` named, or `None`."""
+        return next((b["name"] for b in self.blocks["attribute"] if b.get(JOIN)), None)
+
     def document(self, sources: dict[str, str]) -> dict[str, Any]:
         """The declaration as TOML's own shape.
 
@@ -141,6 +150,9 @@ class Declaration:
         allocation_view = self.allocation_view()
         if allocation_view is not None:
             defaults["allocation_view"] = allocation_view
+        join_field = self.join_field()
+        if join_field is not None:
+            defaults["join_field"] = join_field
         if defaults:
             document["defaults"] = defaults
 
@@ -160,7 +172,7 @@ class Declaration:
             # never written: such a block names no source, its values arriving on ingested rows
             # rather than from a file.
             document["attribute"] = [
-                {k: v for k, v in block.items() if k != FILLED}
+                {k: v for k, v in block.items() if k not in (FILLED, JOIN)}
                 for block in self.blocks["attribute"]
             ]
         layers = []
@@ -665,10 +677,7 @@ def _level(entry: Any) -> dict:
 # ------------------------------------------------------------------ what the inserts wrote
 
 
-#: What the declaration's own defaults call the identity column in each place one is read: a
-#: view's `fields.entity_id` and an attribute's `entity_id_field`, and a member row's
-#: `fields.entity`.
-CANONICAL_ENTITY_ID = "entity_id"
+#: What a members file calls the column naming each member when its `fields` say nothing.
 CANONICAL_MEMBER_ENTITY = "entity"
 
 
@@ -692,6 +701,34 @@ def bind(document: dict, inserts: Sequence[Any]) -> None:
         getattr(_Bind, f"{insert.kind}_{insert.role}")(block, insert)
         for name, column in insert.named_attributes.items():
             _attribute_of_a_view(document, name, column, insert)
+    _bind_join(document, inserts)
+
+
+def _bind_join(document: dict, inserts: Sequence[Any]) -> None:
+    """Where each file keeps the join field, on every block whose insert named `id=`.
+
+    A file carries the join field in the join attribute's own column unless its block's `fields`
+    say otherwise, so an `id=` naming another column is written under the join field's name. A
+    members file names its members under `entity` instead, which `layer_members` writes.
+    """
+    join = document.get("defaults", {}).get("join_field")
+    if join is None:
+        return
+    attribute = next((b for b in document.get("attribute", []) if b.get("name") == join), {})
+    column = attribute.get("field", join)
+    for insert in inserts:
+        identity = insert.columns.get("id")
+        if identity is None or identity == column or insert.role not in ("rows", "values"):
+            continue
+        block = _block_for(document, insert)
+        if block is not None and block is not attribute:
+            _fields(block, {join: identity})
+        for name in insert.named_attributes:
+            if name == join:
+                continue
+            filled = next((b for b in document.get("attribute", []) if b.get("name") == name), None)
+            if filled is not None:
+                _fields(filled, {join: identity})
 
 
 def bind_value_sets(document: dict, inserts: Sequence[Any]) -> None:
@@ -795,7 +832,6 @@ class _Bind:
             _fields(block, {"x": columns.get("x"), "y": columns.get("y")})
         else:
             _fields(block, {"lon": columns.get("lon"), "lat": columns.get("lat")})
-        _fields(block, {"entity_id": columns.get("id")})
         if columns.get("access"):
             block["point_visibility"] = Inline(
                 {**dict(block.get("point_visibility") or {}), "field": columns["access"]}
@@ -816,8 +852,6 @@ class _Bind:
         block["source"] = insert.source
         if insert.columns["value"] != block["name"]:
             block["field"] = insert.columns["value"]
-        if insert.columns["id"] != CANONICAL_ENTITY_ID:
-            block["entity_id_field"] = insert.columns["id"]
         if insert.columns.get("view"):
             _fields(block, {"view": insert.columns["view"]})
 
@@ -882,9 +916,6 @@ def _attribute_of_a_view(document: dict, name: str, column: str, insert: Any) ->
         block["source"] = insert.source
         if column != name:
             block["field"] = column
-        identity = insert.columns.get("id")
-        if identity is not None and identity != CANONICAL_ENTITY_ID:
-            block["entity_id_field"] = identity
 
 
 def _settle_value_set(block: dict, inserts: Sequence[Any]) -> None:

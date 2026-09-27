@@ -55,6 +55,8 @@ def parquet(db, name: str, columns) -> str:
 def database(tmp_path: Path):
     db = create(tmp_path / "db")
     db.files = tmp_path / "files"
+    db.declare_attribute("entity_id", type="i64", unique=True)
+    db.declare_join_field("entity_id")
     return db
 
 

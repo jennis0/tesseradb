@@ -28,6 +28,8 @@ def members():
 def db(tmp_path):
     database = create(tmp_path / "db")
     database.declare_view("s0")
+    database.declare_attribute("entity", type="keyword", unique=True)
+    database.declare_join_field("entity")
     return database
 
 
@@ -79,6 +81,8 @@ def test_an_attribute_membership_is_a_predicate_over_a_declared_column(db, check
 
 def test_a_layer_scoped_to_a_view_group_keys_its_artifacts_per_view(tmp_path, checked):
     db = create(tmp_path / "db")
+    db.declare_attribute("id", type="keyword", unique=True)
+    db.declare_join_field("id")
     db.declare_view_group("quarter", extent={"x": [0.0, 1.0], "y": [0.0, 1.0]})
     db.declare_layer(
         "quarter_clusters", kind="flat", views=["quarter"], scope={"group": "quarter"}

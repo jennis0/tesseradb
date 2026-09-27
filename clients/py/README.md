@@ -65,6 +65,8 @@ import tesseradb as td
 db = td.create()                                   # a temporary directory, on /dev/shm where there is one
 db.declare_view("map")
 db.declare_columns(df, skip=["paper", "x", "y", "cluster"], index=["title"])
+db.declare_attribute("paper", type="keyword", unique=True)
+db.declare_join_field("paper")                     # the column every table names a row by
 db.declare_layer("clusters", kind="flat")
 db.insert("map", df, id="paper", x="x", y="y")     # title is read by name
 db.insert("clusters", df, id="paper", key="cluster")
@@ -167,21 +169,26 @@ insert it as a frame.
 
 ## How a row is named
 
-`id=` names the column that names the rows. Its bytes are that row's external id at every door: a
-string's UTF-8, binary as it stands, and an integer's eight little-endian bytes, so a negative id
-and its two's-complement unsigned value are the same id. That is what the build reads and what
-`/control/ingest` and `/control/changes` take. The declaration is what says
-where identity is: a view's `fields.entity_id`, an attribute's `entity_id_field`, a members
-table's `fields.entity`. The SDK rewrites no column to say it.
+An item is named by its `tessera_id`, which the server hands back, or by its value of a unique
+attribute: one declared `unique=True`, a keyword or an integer, whose each value one item holds at
+most. `declare_join_field(name)` makes one of them the **join field**, `[defaults].join_field` in
+the declaration, and every table inserted with `id=` names its rows by it: `id=` is the column
+holding each row's value of the join field. The allocation view's `id=` column fills the join
+attribute itself. A file that calls the column something else says so in its block's `fields`
+under the join field's name, and a members table in its `fields.entity`; the SDK rewrites no
+column to say it. On a later commit the `id=` column travels as the join field's column on
+`/control/ingest`, and a row whose value names an item the database holds edits that item.
 
-An insert that names no `id=` is the other route: the build writes no external id, and a row is
-addressed by the `tessera_id` a pick or the ingest route hands back, which is what `remove()` then
-sends.
+`id=` is refused where no join field is declared. An insert that names no `id=` is the other
+route: each row of the points is an item of its own, addressed by the `tessera_id` a pick or the
+ingest route hands back. Such a database takes one view and no members table, the build having
+nothing to join them on.
 
 The SDK holds nothing about what the database contains. A re-run of a cell is a re-run: the same
-frame is inserted again and sent again, and what happens then is the database's answer: a `409` on
-the page where the ids are ones it holds, and rows with no id loaded a second time. Databases are
-stateful, and this one says so rather than guessing.
+frame is inserted again and sent again, and what happens then is the database's answer: rows
+naming items it holds edit them, or change nothing where they carry what the items hold, and rows
+with no id are loaded a second time. Databases are stateful, and this one says so rather than
+guessing.
 
 Every declaration is made at any commit, and the next commit sends it to the running service: a
 vocabulary, an attribute, a layer, a label set, a plain view and a view group. Two of them are
@@ -249,10 +256,10 @@ counting rows it did not land. That is what a retry inside one commit gets.
 A page carries a fresh random batch id, made once when the request is built, and a retry of that
 request carries it again: a `429` is backpressure and is retried after its `Retry-After` with the
 same id and identical bytes. Nothing is kept beyond the commit, and no id is derived from what a
-page contains, so the same frame inserted and committed five times is five loads — rows carrying an
-id column are refused as duplicates on the second, and rows without one are loaded again. A request
-that reached no server is a refusal of that page; whether it landed is the database's to say. A value that changed is a `409` on that part, reported and not retried, because
-an edit is a delete and a re-ingest.
+page contains, so the same frame inserted and committed five times is five loads: on the second,
+rows carrying an id name the items the first created and change nothing, and rows without one are
+loaded again. A request that reached no server is a refusal of that page; whether it landed is the
+database's to say.
 
 The pre-flight runs before a byte is sent and it sends nothing while a finding stands: `check()`
 reports the finding and `commit()` raises with it, and neither drops or rewrites a row. Rows
@@ -262,10 +269,11 @@ the artifacts-table route as the remedy, a label insert whose clustering is neit
 inserted is named, and a polygon inserted after the first commit as WKB is named with both
 encodings: the build reads a `geometry` column as WKB and the publication route takes WKT text.
 
-`remove(ids)`, `suppress(ids)` and `unsuppress(ids)` take the ids the id column holds, or the
-`tessera_id`s where no insert named one; a removed id inserted again goes as a point row.
-`leave(layer, key, ids, rank)` shrinks a content's generating set, which is the one set that may
-shrink.
+`remove(ids, field=None)`, `suppress(ids, field=None)` and `unsuppress(ids, field=None)` take
+`tessera_id`s, or with `field=`, values of that unique attribute; a removed item names nothing
+after, so its value inserted again creates a new item. `leave(layer, key, ids, rank, field=None)`
+shrinks a content's generating set, which is the one set that may shrink, and names its items the
+same way.
 
 The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
 directory, release before debug; `create()` names the one it found. The database directory keeps
@@ -362,7 +370,7 @@ value, over the whole of what the reader may see.
 ### Every row: `items` and `artifacts`
 
 ```python
-papers = db.items("s0", ["title", "primary_category"], system_fields=["external_id"])
+papers = db.items("s0", ["title", "primary_category"], system_fields=["position"])
 papers.to_pandas()                            # every paper, as one DataFrame
 cs = db.viewer(["cs.LG"]).items("s0", ["title"], filters={"archive": {"eq": "cs"}})
 topics = db.artifacts("s0", "clusters/kmeans", ["key", "masked_count", "centroid"])
@@ -377,9 +385,8 @@ named, as one pyarrow table. The server answers a page at a time, several pages 
 and ends each response with a cursor for the next. `items` asks for responses until no row
 remains and joins their pages. The columns are `tessera_id`, the fields in the order named, then
 the `system_fields` asked for: `position` as `tessera:x` and `tessera:y`, in the view's
-coordinates; `external_id` as `tessera:external_id`, the id each item was inserted with; and
-`labels` as `tessera:labels`. From a `Database` an id comes back as the type its id column had, as
-`item()` gives it, and from `connect()` as bytes. A category column holds each value's key as a
+coordinates, and `labels` as `tessera:labels`. A unique attribute, the join field among them, is
+a field like any other. A category column holds each value's key as a
 dictionary column, and a missing value is null. `filters` narrows the rows as `Selection.filter` does, and `keep_unmatched=True`
 keeps every row and adds a `tessera:matched` column. The table's schema metadata `tessera.head`
 holds the page size and order the server used, and with `count=True` the numbers of items
@@ -450,8 +457,8 @@ be combined. A column declared for a view group holds different values in each v
 takes `view=`.
 
 `item()` returns `fields` by column name, `labels` (the item's labels that the reader also
-holds), `views`, and `external_id` where the item was inserted with one: on a `Database` it comes
-back as the type its id column had, and from `connect()` as bytes.
+holds) and `views`. `lookup(view, field, values, fields=())` finds the items holding values of a
+unique attribute, as a table with their `tessera_id`s.
 
 An annotation, or artifact, is one member of a layer: a cluster, a region, a node in a taxonomy.
 `browse_artifacts()` returns one page of a layer's annotations with `next` for the page after,

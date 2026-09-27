@@ -24,6 +24,11 @@ def papers(ids, x=None, labels="public"):
     )
 
 
+def declare_the_id(db) -> None:
+    db.declare_attribute("id", type="keyword", unique=True)
+    db.declare_join_field("id")
+
+
 def unscored(ids, x):
     """Rows inserted after the first commit, carrying the declared `score` with no value."""
     rows = papers(ids, x=x)
@@ -32,6 +37,7 @@ def unscored(ids, x):
 
 def small(db) -> None:
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    declare_the_id(db)
     db.declare_attribute("score", type="f64", index=True, render=False)
     db.insert("map", papers([f"p{i}" for i in range(20)]), id="id", x="x", y="y",
               access="labels")
@@ -65,6 +71,7 @@ def test_declare_columns_reports_every_column_and_prints_nothing(tmp_path, capsy
 def test_an_insert_reports_its_rows_and_columns_and_prints_nothing(tmp_path, capsys):
     db = create(tmp_path / "db")
     db.declare_view("map")
+    declare_the_id(db)
     insert = db.insert("map", papers([f"p{i}" for i in range(1500)]), id="id", x="x", y="y")
     summary = str(insert)
     assert insert.rows == 1500 and f"{insert.rows:,}" in summary
@@ -78,6 +85,7 @@ def test_an_insert_reports_its_rows_and_columns_and_prints_nothing(tmp_path, cap
 def test_a_check_before_the_first_commit_reports_its_rows_and_every_finding(tmp_path, capsys):
     db = create(tmp_path / "db")
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    declare_the_id(db)
     db.insert("map", pa.table({"id": pa.array(["p", None], pa.string()), "x": [0.0, 1.0],
                                "y": [0.0, 0.0]}), id="id", x="x", y="y")
     report = db.check()
@@ -93,6 +101,7 @@ def test_a_check_names_a_declared_column_nothing_fills_and_the_commit_shows_its_
 ):
     db = create(tmp_path / "db")
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    declare_the_id(db)
     db.declare_attribute("score", type="f64", index=True)
     db.insert("map", papers(["p0", "p1"]), id="id", x="x", y="y", access="labels")
     report = db.check()
@@ -179,6 +188,7 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
 def test_a_change_reports_how_many_ids_it_was_given(served, corpus, capsys):
     db = served(small)
     capsys.readouterr()
-    for report in (db.suppress(["p1", "p2", "p3"]), db.unsuppress(["p1", "p2", "p3"])):
+    for report in (db.suppress(["p1", "p2", "p3"], field="id"),
+                   db.unsuppress(["p1", "p2", "p3"], field="id")):
         assert report.ok and report.requested == 3 and "3 ids" in str(report)
     assert capsys.readouterr().out == ""

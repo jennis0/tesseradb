@@ -31,8 +31,8 @@ from . import _commit as C
 from . import _declaration as D
 from . import _inserts, _instance
 from ._auth import Token, authorise, revoke
-from ._control import Control, addressed
-from ._inserts import Insert, is_integer_type
+from ._control import Control
+from ._inserts import Insert
 from ._refusal import Refusal
 from ._reports import (
     ChangeReport,
@@ -367,6 +367,30 @@ class Database:
                 return self._declared(block)
         raise Refusal(f"declare_unique: no attribute named {name!r} is declared")
 
+    def declare_join_field(self, name: str) -> dict:
+        """Name the attribute the build joins its files on, and return its block.
+
+        This is `[defaults].join_field`. Every table inserted with `id=` names its items by this
+        attribute's values: a view's points, an attribute's values, a layer's members and key
+        column. The attribute is declared `unique=True`, as a `"keyword"` or an integer; the
+        declaration check refuses any other. The `id=` column of the allocation view's frame fills
+        it. Without a join field, `id=` is refused, and each row of the points is an item of its
+        own, named by the `tessera_id` the server hands back.
+
+            db.declare_attribute("paper", type="keyword", unique=True)
+            db.declare_join_field("paper")
+        """
+        found = next((b for b in self.blocks.blocks["attribute"] if b.get("name") == name), None)
+        if found is None:
+            raise Refusal(
+                f"declare_join_field: no attribute named {name!r} is declared. Declare it with "
+                f"declare_attribute({name!r}, type=..., unique=True) first"
+            )
+        for block in self.blocks.blocks["attribute"]:
+            block.pop(D.JOIN, None)
+        found[D.JOIN] = True
+        return self._declared(found)
+
     def declare_columns(
         self,
         frame: Any,
@@ -643,7 +667,9 @@ class Database:
         - `columns`: `{attribute: column}` for an attribute filled from a column with another
           name, on the anchor view's insert, and after the first commit on any view's.
         - the other keywords: which column of the table holds each thing the target needs, such as
-          `id=`, `x=`, `y=` and `access=` for a view.
+          `id=`, `x=`, `y=` and `access=` for a view. `id=` is the column holding each row's value
+          of the join field, which names its item; it is refused where `declare_join_field` has
+          named none.
 
         A categorical column (a pandas `Categorical` or an Arrow dictionary column) is read as the
         values it holds, wherever a column of those values is read. A column the call does not
@@ -661,6 +687,12 @@ class Database:
         """
         kind, block = self._target(target, named, roster, artifacts, members)
         role, data = self._role(target, kind, table, roster, artifacts, members, named)
+        if named.get("id") is not None and self.blocks.join_field() is None:
+            raise Refusal(
+                f"insert into {kind} {target!r}: id= names the column holding each row's value of "
+                f"the join field, and no join field is declared. Declare one with "
+                f"declare_join_field(<a unique attribute>), or drop id="
+            )
         if _inserts.is_path(data) and not Path(data).expanduser().exists():
             raise Refusal(f"insert into {target!r}: {Path(data).expanduser()} does not exist")
         if (kind, role) not in _inserts.CONTRACTS:
@@ -908,13 +940,18 @@ class Database:
             groups = {target, self.blocks.group(target).get("members")} - {None}
         schema = _inserts.schema_of(data)
         matched = {}
+        join = self.blocks.join_field()
         for block in self.blocks.blocks["attribute"]:
             group = C._scoped_to(block)
             if group is not None and (not self.built or group not in groups):
                 continue
             name = block["name"]
+            if name == join and named.get("id") is not None:
+                matched[name] = named["id"]
+                continue
             column = (columns or {}).get(name, name)
-            # The id and view columns never fill an attribute. A coordinate or label column can.
+            # The id column fills the join field alone, and the view column none. A coordinate or
+            # label column can fill one.
             if column in schema and column not in (named.get("id"), named.get("view")):
                 matched[name] = column
         for name, column in (columns or {}).items():
@@ -1247,7 +1284,6 @@ class Database:
                 "build",
                 "--deployment",
                 str(self.path / "tessera.toml"),
-                *self._id_arguments(),
             ]
         )
         report = CommitReport(
@@ -1457,63 +1493,24 @@ class Database:
 
         - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
 
-        The record has `fields`, `labels` and `views` as `Viewer.item` describes, and
-        `external_id`, the id the item was inserted with, as the type its id column had: an integer
-        column gives an integer and a string column a string.
+        The record has `fields`, `labels` and `views` as `Viewer.item` describes.
 
             db.item(db.view("papers").sample(k=1).column("tessera_id")[0].as_py())
         """
         self._refuse_before_the_first_commit("item")
-        record = self.viewer().item(tessera_id)
-        if record.get("external_id") is not None:
-            record["external_id"] = self._inserted_id(record["external_id"])
-        return record
-
-    def _inserted_id(self, raw: bytes):
-        """External-id bytes read back as the type the id column had."""
-        read, _ = self._id_reader()
-        return read(raw)
-
-    def _id_reader(self):
-        """How external-id bytes read back as the type the id column had, and that type: an
-        integer column's eight little-endian bytes, signed where the column was, a string
-        column's UTF-8, and any other column's bytes as they are."""
-        insert = self._identity_insert()
-        dtype = None if insert is None else insert.id_type
-        if is_integer_type(dtype):
-            signed = str(dtype).startswith("int")
-            return (lambda raw: int.from_bytes(raw, "little", signed=signed)), dtype
-        if dtype is not None and (pa.types.is_string(dtype) or pa.types.is_large_string(dtype)):
-            return (lambda raw: raw.decode()), dtype
-        return (lambda raw: raw), pa.binary()
-
-    def _with_inserted_ids(self, batch: pa.RecordBatch) -> pa.RecordBatch:
-        """`batch` with its `tessera:external_id` column read back as `item` reads one."""
-        at = batch.schema.get_field_index("tessera:external_id")
-        if at < 0:
-            return batch
-        read, dtype = self._id_reader()
-        raw = batch.column(at).to_pylist()
-        ids = pa.array([None if one is None else read(one) for one in raw], type=dtype)
-        columns = [ids if i == at else column for i, column in enumerate(batch.columns)]
-        schema = batch.schema.set(at, pa.field("tessera:external_id", dtype))
-        return pa.RecordBatch.from_arrays(columns, schema=schema)
+        return self.viewer().item(tessera_id)
 
     def items(self, view: str, fields: Sequence[str], **options):
         """Every item in `view`, with the fields named, as one pyarrow table.
 
         This is `Viewer.items` as this database's own reader, which sees every item; `options`
-        are its keywords. `batches=True` returns the pages one at a time instead. The
-        `tessera:external_id` column holds each id as the type the id column had, as `item`
-        gives it.
+        are its keywords. `batches=True` returns the pages one at a time instead.
 
             db.items("papers", ["title", "year"]).to_pandas()
             db.items("papers", ["title"], filters={"year": {"eq": 2023}}, order="stored")
         """
         self._refuse_before_the_first_commit("items")
-        read = self.viewer().items(view, fields, **{**options, "batches": True})
-        read._page = self._with_inserted_ids
-        return read if options.get("batches") else read.read_all()
+        return self.viewer().items(view, fields, **options)
 
     def lookup(self, view: str, field: str, values: Iterable[Any], fields: Sequence[str] = ()):
         """The items in `view` holding `values` in the unique column `field`, as a pyarrow table.
@@ -1570,39 +1567,15 @@ class Database:
         self._refuse_before_the_first_commit("categories")
         return self.viewer().categories(column, prefix, view, codes)
 
-    def _id_arguments(self) -> list[str]:
-        """The build's `--mint-external-ids` flag, where the id column is an integer.
-
-        A string or binary id column is written as the external id without a flag. An integer one
-        needs the flag, and every later commit addresses rows by it.
-        """
-        insert = self._identity_insert()
-        if insert is None or insert.id_column is None:
-            return []
-        return ["--mint-external-ids"] if is_integer_type(insert.id_type) else []
-
-    def _identity_insert(self) -> Insert | None:
-        """The rows insert this declaration reads identity from: the allocation view's."""
-        anchor = self.blocks.allocation_view()
-        rows = [one for one in self.inserts + self.pending if one.role == "rows"]
-        for insert in rows:
-            if insert.target == anchor:
-                return insert
-        return rows[0] if rows else None
-
     def _identity_in_words(self) -> str:
         """How this database names a row, for the commit report."""
-        insert = self._identity_insert()
-        if insert is None or insert.id_column is None:
+        join = self.blocks.join_field()
+        if join is None:
             return (
-                "the points name no id column, so every row is named by its tessera_id and the "
-                "bundle writes no external id"
+                "no join field is declared, so each row of the points is an item of its own, "
+                "named by its tessera_id"
             )
-        kind = "an integer" if is_integer_type(insert.id_type) else "bytes"
-        return (
-            f"rows are named by '{insert.id_column}' on the insert into "
-            f"{insert.target!r}, read as {kind}"
-        )
+        return f"the files join on '{join}', and a row names its item by that field's value"
 
     def _record_label_columns(self, layers: Iterable[dict]) -> None:
         """Write onto the SDK's own layer blocks the label column each layer was committed with,
@@ -1640,49 +1613,50 @@ class Database:
 
     # ------------------------------------------------------------------ verbs that are not inserts
 
-    def remove(self, ids: Iterable[Hashable]) -> ChangeReport:
-        """Delete items by the ids their id column holds, and return a report.
+    def remove(self, ids: Iterable[Hashable], field: str | None = None) -> ChangeReport:
+        """Delete items, and return a report.
 
-        - `ids`: the ids, or the `tessera_id`s where the rows were inserted without an id column.
+        - `ids`: the items' `tessera_id`s, or with `field`, their values of that field.
+        - `field`: a unique attribute, whose values `ids` then are.
 
         The items stop being served at once. Their rows are removed from disk at the next
-        compaction; `compact()` asks for one. To change an item, remove it and insert it again.
+        compaction; `compact()` asks for one.
 
-            db.remove(["paper-17", "paper-23"])
+            db.remove([tessera_id])
+            db.remove(["paper-17", "paper-23"], field="paper")
         """
-        return self._changes(ids, "delete")
+        return self._changes(ids, field, "delete")
 
-    def suppress(self, ids: Iterable[Hashable]) -> ChangeReport:
-        """Hide items by their ids until `unsuppress` lifts it, and return a report.
+    def suppress(self, ids: Iterable[Hashable], field: str | None = None) -> ChangeReport:
+        """Hide items until `unsuppress` lifts it, and return a report.
 
-        - `ids`: as for `remove`.
+        - `ids`, `field`: as for `remove`.
 
         A hidden item is left out of every answer from the moment the call returns.
         """
-        return self._changes(ids, "suppress")
+        return self._changes(ids, field, "suppress")
 
-    def unsuppress(self, ids: Iterable[Hashable]) -> ChangeReport:
+    def unsuppress(self, ids: Iterable[Hashable], field: str | None = None) -> ChangeReport:
         """Show items hidden by `suppress` again, and return a report.
 
-        - `ids`: as for `remove`.
+        - `ids`, `field`: as for `remove`.
         """
-        return self._changes(ids, "unsuppress")
+        return self._changes(ids, field, "unsuppress")
 
-    def addresses(self, ids: Iterable[Hashable]) -> list[dict]:
+    @staticmethod
+    def addresses(ids: Iterable[Hashable], field: str | None = None) -> list[dict]:
         """The ids given, in the form the server's change requests take them.
 
-        Where the rows were inserted with an id column, each is `{"external_id": ...}`: the bytes
-        that column held, base64-encoded. A string is its UTF-8 and an integer its eight
-        little-endian bytes. Otherwise each is `{"tessera_id": ...}`.
+        Each is `{"tessera_id": ...}`, or with `field`, `{"field": field, "value": ...}`. Both
+        travel as text: an integer in decimal digits, and a string as itself.
         """
-        insert = self._identity_insert()
-        if insert is not None and insert.id_column is not None:
-            return [{"external_id": addressed(one)} for one in ids]
-        return [{"tessera_id": str(one)} for one in ids]
+        if field is None:
+            return [{"tessera_id": C.text(one)} for one in ids]
+        return [{"field": field, "value": C.text(one)} for one in ids]
 
-    def _changes(self, ids: Iterable[Hashable], op: str) -> ChangeReport:
+    def _changes(self, ids: Iterable[Hashable], field: str | None, op: str) -> ChangeReport:
         self._refuse_before_the_first_commit(op)
-        addresses = self.addresses(ids)
+        addresses = self.addresses(ids, field)
         report = ChangeReport(op=op, requested=len(addresses))
         control = self.control
         for answer in C.changes(control, addresses, op, control.limits()):
@@ -1698,6 +1672,7 @@ class Database:
         rank: int = 0,
         level: int = 0,
         view: str | None = None,
+        field: str | None = None,
     ) -> ChangeReport:
         """Take items out of the set a label's text was written from, and return a report.
 
@@ -1706,17 +1681,18 @@ class Database:
 
         - `layer`: the label set.
         - `key`: the label's key.
-        - `ids`: the items to take out, by the ids their id column holds.
+        - `ids`: the items to take out, by `tessera_id`, or with `field`, by their values of it.
         - `rank`: which of the label's texts, where it has several. The default is 0, the first.
         - `level`: the level the label is at. The default is 0.
         - `view`: the view the label belongs to, on a layer scoped to a group.
+        - `field`: a unique attribute, whose values `ids` then are.
 
         Taking out every item withdraws the text; insert it again to replace it.
         """
         self._refuse_before_the_first_commit("leave")
         wanted = list(ids)
         report = ChangeReport(op=f"leave {layer}/{key} rank {rank}", requested=len(wanted))
-        answer = C.leave(self.control, layer, key, wanted, rank, level, view)
+        answer = C.leave(self.control, layer, key, wanted, rank, level, view, field)
         if not answer.ok:
             report.refusals.append({"status": answer.status, "detail": answer.detail[:1000]})
         return report
@@ -1868,7 +1844,7 @@ class Database:
         if rows.columns.get("id") == name:
             return (
                 f"the frame inserted into '{rows.target}' carries a column of that name and it is "
-                f"the id column, which is that frame's identity rather than one of its values"
+                f"the id column, which fills the join field alone"
             )
         if name in rows.schema:
             return (

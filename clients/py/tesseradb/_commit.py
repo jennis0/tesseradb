@@ -11,8 +11,8 @@ two therefore cannot disagree about what would be sent.
 
 **The plan is built from what was inserted and what the database says it holds.** The SDK keeps no
 record of what it sent: a table goes as it was inserted. A row naming by its id an item the
-database holds, and carrying what the item stores, changes nothing and is counted as already
-present; one that would change the item is a `409` on that page which the report carries. What
+database holds, and carrying what the item stores, changes nothing and is counted unchanged; one
+that differs edits the item. What
 the database has already been told is read from `/v1/meta` rather than from a log: its views,
 its groups and its layers. A re-run of a cell is a re-run.
 
@@ -38,13 +38,13 @@ what it wrote can be read after the next cycle.
 from __future__ import annotations
 
 import json
+import numbers
 from dataclasses import dataclass
 from typing import Any, Sequence
 
 import pyarrow as pa
 
-from . import _control
-from ._control import Answer, Control, addressed, arrow_body, batch_id
+from ._control import Answer, Control, arrow_body, batch_id
 from . import _declaration as _D
 from ._declaration import rows_of
 from ._inserts import SHAPE_COLUMNS, SHAPE_FIELDS, SHAPE_RECORD_FIELD
@@ -161,8 +161,9 @@ def rows_with_no_id(inserts: Sequence[Any], findings: list[Finding]) -> None:
                     "rows with no id",
                     f"the insert into {insert.kind} '{insert.target}' names id='{column}', and "
                     f"{empty} of its {insert.rows} row(s) carry no value there. A row's id is its "
-                    f"address at every door, and the SDK mints none. Fill the column, or insert "
-                    f"the rows with no id= at all, which names them by their tessera_id",
+                    f"value of the join field, which names its item, and the SDK makes none up. "
+                    f"Fill the column, or insert the rows with no id= at all, each of which is "
+                    f"then an item of its own",
                 )
             )
 
@@ -530,7 +531,8 @@ class Planner:
         )
 
     def _point_columns(self, insert, block: dict, table: pa.Table) -> list[tuple[str, Any]]:
-        """The wire's columns for one points page: geometry, labels, the id, and the values.
+        """The wire's columns for one points page: geometry, labels, and the values, the join
+        field's among them where the insert named `id=`.
 
         A column no target reads is not here: what travels is what the insert named, which is
         what the declaration says this view reads.
@@ -544,9 +546,6 @@ class Planner:
         access = insert.columns.get("access")
         if access:
             columns.append(("access", _label_lists(table[access])))
-        identity = insert.columns.get("id")
-        if identity:
-            columns.append(("external_id", _external_ids(table[identity])))
         for name, column in insert.named_attributes.items():
             columns.append((name, table[column]))
         return columns
@@ -601,10 +600,10 @@ class Planner:
         """One page sequence of rows without coordinates, over the rows this insert named."""
         if not rows:
             return
-        columns = [
-            ("external_id", _external_ids(table[insert.columns["id"]])),
-            (insert.target, table[column]),
-        ]
+        columns = [(insert.target, table[column])]
+        join = self.db.blocks.join_field()
+        if join != insert.target:
+            columns.insert(0, (join, table[insert.columns["id"]]))
         where = "" if view is None else f" of view '{view}'"
         self._page_rows(
             kind="values",
@@ -765,7 +764,7 @@ class Planner:
             )
             for batch in _batched(ordered, cap, most):
                 blocks, artifacts, members = batch
-                body = _publish_body(level, blocks)
+                body = _publish_body(level, blocks, self.db.blocks.join_field())
                 self._artifact_page(
                     "publish",
                     layer,
@@ -824,7 +823,9 @@ class Planner:
         per_page = max(1, min((cap - 512) // 16, most))
         for start in range(0, len(members), per_page):
             slice_ = list(members[start : start + per_page])
-            body = patch_body(level, key, joining=slice_, rank=rank, view=view)
+            body = patch_body(
+                level, key, joining=slice_, rank=rank, view=view, field=self.db.blocks.join_field()
+            )
             what = "members" if rank is None else f"the generating set at rank {rank}"
             self._artifact_page(
                 "grow",
@@ -839,9 +840,13 @@ class Planner:
 # ---------------------------------------------------------------------------- helpers
 
 
-def _external_ids(column) -> pa.Array:
-    """One id column as the wire's `external_id`: the bytes each value holds."""
-    return pa.array([_control.external_id(v) for v in column.to_pylist()], pa.binary())
+def text(value: Any) -> str:
+    """An item's address as a JSON route carries it: an integer in decimal digits, anything else
+    as its text. Any integer, not only Python's, so a frame's numpy and pyarrow scalars read as the
+    numbers they hold."""
+    if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+        return str(int(value))
+    return str(value)
 
 
 def _selected(table: pa.Table, rows: list[int], columns: list[tuple[str, Any]]) -> pa.Table:
@@ -930,7 +935,7 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
         record["content"] = [
             {
                 "values": list(values),
-                "generated_from": [addressed(e) for e in (sets[rank] if rank < len(sets) else [])],
+                "generated_from": [text(e) for e in (sets[rank] if rank < len(sets) else [])],
             }
             for rank, values in enumerate(contents)
         ]
@@ -938,7 +943,7 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
         # A membership spelled by exclusion travels whole: the executor complements the list
         # against the view's entities as of that step, so a second page would name a different
         # set. The route's count bound is checked before the plan is built.
-        record["excluding"] = [addressed(e) for e in row["excluding"]]
+        record["excluding"] = [text(e) for e in row["excluding"]]
     elif not members and record.get("attached_to"):
         # An attached artifact with no members of its own is served over its target's
         # membership, so it sends no `members` field.
@@ -946,7 +951,7 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
     else:
         # The route refuses a record with neither `members` nor `excluding` that attaches to
         # nothing, a shape included, so a spatial record sends an empty list beside its shape.
-        record["members"] = [addressed(e) for e in members]
+        record["members"] = [text(e) for e in members]
     body = json.dumps(record).encode()
     # A membership spelled by exclusion travels whole. Every other record pages its membership
     # and then its generating sets, including an attached record with no `members` field.
@@ -957,13 +962,13 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
             keep = len(members) // 2
             remainders.append((None, members[keep:]))
             members = members[:keep]
-            record["members"] = [addressed(e) for e in members]
+            record["members"] = [text(e) for e in members]
         elif any(len(one) > 1 for one in sets):
             rank = max(i for i, one in enumerate(sets) if len(one) > 1)
             keep = len(sets[rank]) // 2
             remainders.append((rank, sets[rank][keep:]))
             sets[rank] = sets[rank][:keep]
-            record["content"][rank]["generated_from"] = [addressed(e) for e in sets[rank]]
+            record["content"][rank]["generated_from"] = [text(e) for e in sets[rank]]
         else:
             break
         body = json.dumps(record).encode()
@@ -998,13 +1003,15 @@ def patch_body(
     leaving: Sequence[Any] = (),
     rank: int | None = None,
     view: str | None = None,
+    field: str | None = None,
 ) -> bytes:
     """One `PATCH` row: the set this page moves, and the members joining or leaving it.
 
     `rank` absent names the membership and present names the generating set of the content at that
     rank. Only a generating set may shrink, so `leaving` without a rank is a refusal
     the route makes and this function does not pre-empt. `view` is the artifact's view on a layer
-    scoped to a group.
+    scoped to a group. The members are `tessera_id`s, or with `field`, values of that unique
+    attribute.
     """
     row: dict[str, Any] = {"key": key}
     if view is not None:
@@ -1012,20 +1019,18 @@ def patch_body(
     if rank is not None:
         row["rank"] = rank
     if joining:
-        row["members"] = [addressed(i) for i in joining]
+        row["members"] = [text(i) for i in joining]
     if leaving:
-        row["leaving"] = [addressed(i) for i in leaving]
-    return json.dumps({"level": level, "addressing": "external", "artifacts": [row]}).encode()
+        row["leaving"] = [text(i) for i in leaving]
+    body: dict[str, Any] = {"level": level, "artifacts": [row]}
+    if field is not None:
+        body["field"] = field
+    return json.dumps(body).encode()
 
 
-def _publish_body(level: int, blocks: list[bytes]) -> bytes:
-    return (
-        b'{"level":'
-        + str(level).encode()
-        + b',"addressing":"external","artifacts":['
-        + b",".join(blocks)
-        + b"]}"
-    )
+def _publish_body(level: int, blocks: list[bytes], field: str | None) -> bytes:
+    named = b"" if field is None else b',"field":' + json.dumps(field).encode()
+    return b'{"level":' + str(level).encode() + named + b',"artifacts":[' + b",".join(blocks) + b"]}"
 
 
 def _flush(what: str, why: str) -> Page:
@@ -1330,6 +1335,8 @@ def changes(control: Control, items: Sequence[dict], op: str, limits: dict) -> l
 
 
 def leave(control: Control, layer: str, key: str, ids: Sequence[Any], rank: int,
-          level: int = 0, view: str | None = None) -> Answer:
+          level: int = 0, view: str | None = None, field: str | None = None) -> Answer:
     """`PATCH` a generating set at a rank, the one set that may shrink."""
-    return control.grow(layer, patch_body(level, key, leaving=ids, rank=rank, view=view))
+    return control.grow(
+        layer, patch_body(level, key, leaving=ids, rank=rank, view=view, field=field)
+    )

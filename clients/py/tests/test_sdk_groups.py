@@ -115,6 +115,8 @@ def grouped(tmp_path, corpus):
     `corpus` is here for the binary it finds; no file of the notebook corpus is read.
     """
     db = create(tmp_path / "db")
+    db.declare_attribute("entity_id", type="u64", unique=True)
+    db.declare_join_field("entity_id")
     db.declare_view_group(
         "slices",
         title="Slices",
@@ -130,6 +132,14 @@ def grouped(tmp_path, corpus):
         y="y",
         access="access",
         view="slice",
+    )
+    # A group's rows fill no attribute at the first commit, the join field included, so its
+    # values are an insert of their own.
+    db.insert(
+        "entity_id",
+        pa.table({"entity_id": pa.array(IDS, pa.uint64())}),
+        id="entity_id",
+        value="entity_id",
     )
     # A scoped family: one value per view of the group, so every insert names the view column.
     db.declare_attribute("quality", type="f32", scope={"group": "slices"}, index=True)

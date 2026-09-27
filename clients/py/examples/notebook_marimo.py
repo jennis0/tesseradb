@@ -138,6 +138,10 @@ def _(mo):
       the frame. `skip` leaves out the columns that the view and the clustering use in their
       own way. `index=["title"]` makes titles searchable and filterable. A column that is not
       indexed is stored with the paper and shown when you open it.
+    - `declare_attribute("entity_id", type="u64", unique=True)` declares the papers' own id as
+      a **unique** column: no two papers hold one value, so a value names one paper.
+      `declare_join_field("entity_id")` makes it the column that ties the tables together: a
+      row of any table names its paper by this value.
     - `declare_layer("topics", kind="flat")` declares a **layer**: a set of groups of points
       drawn over the map, here a clustering. `kind="flat"` means one level of clusters with no
       hierarchy. Section 2 has layers of the other kinds, whose clusters sit inside larger ones.
@@ -147,8 +151,9 @@ def _(mo):
     The inserts then give it the data, and each names the frame's columns it uses:
 
     - `insert("map", frame, id="entity_id", x="x", y="y")` makes each row a point. `id` names
-      the column that identifies each paper, and `x` and `y` the columns holding its position.
-      The view also takes `title`, because a column of that name was declared.
+      the column holding each paper's value of the join field, and `x` and `y` the columns
+      holding its position. The view also takes `title`, because a column of that name was
+      declared.
     - `insert("topics", frame, id="entity_id", key="cluster")` puts each paper in a cluster.
       `key` names the column that says which cluster, and each distinct key becomes one
       cluster. A paper with no cluster is in none.
@@ -168,6 +173,8 @@ def _(frame, td, topic_names):
     simple = td.create()
     simple.declare_view("map")
     simple.declare_columns(frame, skip=["entity_id", "x", "y", "cluster"], index=["title"])
+    simple.declare_attribute("entity_id", type="u64", unique=True)
+    simple.declare_join_field("entity_id")
     simple.declare_layer("topics", kind="flat")
     simple.declare_labels("names", of="topics")
 
@@ -321,7 +328,8 @@ def _(mo):
     `category` takes its values from a vocabulary. `text` is searched word by word. A `keyword`
     is matched exactly, as an arXiv ID is. `render=True` keeps the value with each point, so the
     map can colour and filter by it. `index=True` makes the column searchable or filterable. A
-    column with neither is stored with the paper and shown when you open it.
+    column with neither is stored with the paper and shown when you open it. `entity_id` is
+    unique and the join field, as in section 1.
 
     The clustering is a layer. `views` says which views it is drawn on. `kind="tiered"` means
     fixed levels, from coarse to fine, which `levels` names.
@@ -350,6 +358,8 @@ def _(SCALE, td):
     db.declare_attribute("title", type="text", index=True)
     db.declare_attribute("abstract", type="text", index=True)
     db.declare_attribute("arxiv_id", type="keyword", index=True, title="arXiv ID")
+    db.declare_attribute("entity_id", type="u64", unique=True, title="Paper id")
+    db.declare_join_field("entity_id")
 
     # How many of a topic's papers a reader must see before the topic is shown to them.
     _floor = {"whole": 50, "sample": 5}[SCALE]
@@ -744,7 +754,8 @@ def _(before_week, db, pd, visible, week_report):
 def _(mo):
     mo.md("""
     `suppress()` hides papers from every reader from the moment it is accepted, without
-    deleting them, and `unsuppress()` shows them again. `remove()` deletes. The cell below
+    deleting them, and `unsuppress()` shows them again. `remove()` deletes. Each takes papers by
+    their `tessera_id`, or with `field=`, by their values of a unique column. The cell below
     suppresses five of the new machine-learning papers and counts what the database and the
     machine-learning reader see at each step.
     """)
@@ -761,9 +772,9 @@ def _(db, learning, pd, visible, week, week_report):
         return {"database": visible(db)["papers"], "cs.LG + stat.ML": visible(learning)["papers"]}
 
     _before = both()
-    print(db.suppress(hidden))
+    print(db.suppress(hidden, field="entity_id"))
     _suppressed = both()
-    print(db.unsuppress(hidden))
+    print(db.unsuppress(hidden, field="entity_id"))
     suppression = pd.DataFrame(
         {"before": _before, "suppressed": _suppressed, "unsuppressed": both()}
     )

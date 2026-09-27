@@ -21,9 +21,16 @@ def frame(n=3, **columns):
     return pd.DataFrame({"x": [float(i) for i in range(n)], "y": [0.0] * n, **columns})
 
 
-def mapped(tmp_path, name="db"):
+def joined(db, name="id", type="keyword"):
+    """The frames' id column, declared the join field."""
+    db.declare_attribute(name, type=type, unique=True)
+    db.declare_join_field(name)
+
+
+def mapped(tmp_path, name="db", join="id", type="keyword"):
     db = create(tmp_path / name)
     db.declare_view("map")
+    joined(db, join, type)
     return db
 
 
@@ -36,11 +43,12 @@ def test_a_frame_is_written_as_it_was_given_and_the_declaration_names_the_column
     assert table.column_names == ["x", "y", "id"]
     assert table["id"].to_pylist() == ["p", "q", "r"]
     assert insert.columns == {"id": "id", "x": "x", "y": "y"}
-    assert 'entity_id = "id"' in db.declaration
+    assert 'join_field = "id"' in db.declaration
 
 
 def test_every_insert_returns_the_columns_it_read_and_the_columns_it_ignored(tmp_path):
-    db = mapped(tmp_path)
+    db = create(tmp_path / "db")
+    db.declare_view("map")
     insert = db.insert("map", frame(id=["p", "q", "r"], note=["a", "b", "c"]), x="x", y="y")
     assert insert.read == ["x", "y"]
     assert insert.ignored == ["id", "note"]
@@ -73,24 +81,24 @@ def test_an_insert_on_something_undeclared_names_the_verb_that_declares_it(tmp_p
 def test_a_frame_with_no_id_is_the_tessera_id_route(tmp_path):
     """A row position names a row only while the frame is the whole corpus.
 
-    A frame inserted with no `id=` is the Tessera-id route: the build writes no external id and a
-    row is addressable by the `tessera_id` a pick or the ingest route hands back.
+    A frame inserted with no `id=` is the Tessera-id route: each row is an item of its own,
+    addressable by the `tessera_id` a pick or the ingest route hands back.
     """
-    db = mapped(tmp_path)
+    db = create(tmp_path / "db")
+    db.declare_view("map")
     insert = db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")
     assert insert.id_column is None
-    assert "entity_id" not in db.declaration
-    assert db._id_arguments() == []
+    assert "join_field" not in db.declaration
 
 
 def test_a_file_is_read_where_it_lies_whatever_its_id_column_holds(tmp_path):
-    for column, values in (
-        ("entity_id", pa.array([7, 8], pa.uint64())),
-        ("paper", pa.array(["p", "q"], pa.string())),
+    for column, values, type in (
+        ("entity_id", pa.array([7, 8], pa.uint64()), "u64"),
+        ("paper", pa.array(["p", "q"], pa.string()), "keyword"),
     ):
         path = tmp_path / f"{column}.parquet"
         pq.write_table(pa.table({column: values, "x": [1.0, 2.0], "y": [0.0, 0.0]}), path)
-        db = mapped(tmp_path, f"db-{column}")
+        db = mapped(tmp_path, f"db-{column}", column, type)
         insert = db.insert("map", str(path), id=column, x="x", y="y")
         assert insert.in_place and insert.path == path
         assert insert.id_column == column
@@ -145,8 +153,7 @@ def test_two_tables_in_one_call_are_refused_naming_the_two_calls(tmp_path):
 
 
 def test_a_layers_two_tables_are_two_inserts_with_their_own_column_names(tmp_path):
-    db = create(tmp_path / "db")
-    db.declare_view("map")
+    db = mapped(tmp_path)
     db.declare_layer("clusters", kind="flat")
     db.insert("map", frame(id=["p", "q", "r"]), id="id", x="x", y="y")
     db.insert("clusters", artifacts=pd.DataFrame({"k": ["a"]}), key="k")
@@ -222,6 +229,7 @@ def test_a_temporary_database_goes_on_a_ram_backed_filesystem_and_close_removes_
 def test_save_copies_a_temporary_database_out(tmp_path):
     db = create()
     db.declare_view("map")
+    joined(db)
     db.insert("map", frame(id=["p", "q", "r"]), id="id", x="x", y="y")
     db.write()
     target = db.save(tmp_path / "kept")
@@ -310,6 +318,7 @@ def test_a_second_views_insert_without_the_access_column_is_refused_naming_it(tm
     )
     db.declare_view("knn")
     db.declare_view("pca")
+    joined(db)
     db.insert("knn", first, id="id", x="x", y="y", access="terms")
     with pytest.raises(Refusal):
         db.insert("pca", first.drop(columns=["terms"]), id="id", x="x", y="y")
@@ -319,11 +328,13 @@ def test_a_first_commit_with_no_rows_refuses_every_fitted_frame(tmp_path):
     for extent in (None, "auto", {"auto": True, "margin": 0.1}):
         db = create(tmp_path / f"db{extent!s:.6}", replace=True)
         db.declare_view("s0", extent=extent)
+        joined(db)
         db.insert("s0", pd.DataFrame({"id": [], "x": [], "y": []}), id="id", x="x", y="y")
         with pytest.raises(Refusal):
             db.commit()
     db = create(tmp_path / "stated")
     db.declare_view("s0", extent={"x": [0.0, 1.0], "y": [0.0, 1.0]})
+    joined(db)
     db.insert("s0", pd.DataFrame({"id": [], "x": [], "y": []}), id="id", x="x", y="y")
     db._refuse_an_empty_build(db._document())
 
@@ -334,8 +345,7 @@ def test_one_name_held_by_two_kinds_is_told_apart_by_the_columns_the_call_names(
     An attribute reads `id=` and `value=`; a vocabulary reads `key=`, `title=` and `code=`. The
     columns the call names are what say which of the two the table is for.
     """
-    db = create(tmp_path / "db")
-    db.declare_view("map")
+    db = mapped(tmp_path)
     db.declare_vocabulary("venue", closed=True, width="u8")
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     values = db.insert(
@@ -363,6 +373,7 @@ def test_a_committed_database_reopens_and_takes_the_next_commit(tmp_path):
     binary()
     db = create(tmp_path / "db")
     db.declare_view("map", extent={"min": 0.0, "max": 8.0})
+    joined(db, type="i64")
     db.insert("map", frame(id=[1, 2, 3], access=["public"] * 3),
               id="id", x="x", y="y", access="access")
     first = db.commit()
@@ -402,6 +413,7 @@ def test_a_padded_label_serves_trimmed_and_a_control_character_is_kept_at_each_c
 
     def first_commit(db):
         db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]}, default_label=" sealed ")
+        joined(db)
         db.insert("map", labelled(0), id="id", x="x", y="y", access="access")
 
     db = served(first_commit)

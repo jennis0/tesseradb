@@ -63,6 +63,8 @@ def test_a_sample_serves_a_null_where_an_item_has_no_rendered_value(served, corp
 
     def declare(db):
         db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+        db.declare_attribute("paper", type="keyword", unique=True)
+        db.declare_join_field("paper")
         db.declare_attribute("heat", type="f64", render=True)
         db.declare_attribute("n", type="u32", render=True)
         table = papers([f"p{i}" for i in range(20)])
@@ -149,7 +151,7 @@ def test_status_is_read_from_the_database(db):
 
 def test_compact_is_accepted(db):
     """A deletion leaves the overlay at the fold, and this is how one is asked for."""
-    db.remove(["p0"])
+    assert db.remove(["p0"], field="paper").ok
     assert db.compact() == {}
 
 

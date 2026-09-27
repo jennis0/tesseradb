@@ -33,23 +33,25 @@ PAPERS = [f"p{i}" for i in range(20)]
 #: takes seven responses.
 PAGED = {
     "view": "map",
-    "fields": ["venue", "n", "title"],
-    "system_fields": ["external_id"],
+    "fields": ["paper", "venue", "n", "title"],
+    "system_fields": ["position"],
     "order": "map",
     "page_rows": 3,
     "pages": 1,
 }
 #: Three pages of three rows to a response: 9 rows in the first response, 9 in the second and 2
 #: in the third.
-IDS = {"view": "map", "fields": [], "system_fields": ["external_id"], "page_rows": 3, "pages": 3}
+IDS = {"view": "map", "fields": ["paper"], "page_rows": 3, "pages": 3}
 FRAME_RECORDS, FRAME_TRAILER, FRAME_PAGE_END = 7, 4, 8
 
 
 def papers(db) -> None:
-    """Twenty papers in a line, five to a venue, with a rendered number, a keyword held only in
-    the records, and five clusters of four."""
+    """Twenty papers in a line, named by the join field `paper`, five to a venue, with a
+    rendered number, a keyword held only in the records, and five clusters of four."""
     ids = list(PAPERS)
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.declare_attribute("paper", type="keyword", unique=True)
+    db.declare_join_field("paper")
     db.declare_vocabulary("venue")
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     db.declare_attribute("n", type="u32", render=True)
@@ -271,20 +273,10 @@ def following(body: dict, cursor: str) -> dict:
 
 
 def papers_read(rows) -> list:
-    """The external ids of `rows`, a table or batches, in order, as the strings inserted: a
-    database reads them back so, and any other reader gives their bytes."""
+    """The `paper` of each of `rows`, a table or batches, in order."""
     if isinstance(rows, list):
         return [paper for batch in rows for paper in papers_read(batch)]
-    ids = rows.column("tessera:external_id").to_pylist()
-    return [one.decode() if isinstance(one, bytes) else one for one in ids]
-
-
-def as_inserted(table):
-    """`table` with its external ids decoded from the bytes the server sends to the strings a
-    database reads them back as."""
-    at = table.schema.get_field_index("tessera:external_id")
-    ids = pa.array(papers_read(table), pa.string())
-    return table.set_column(at, pa.field("tessera:external_id", pa.string()), ids)
+    return rows.column("paper").to_pylist()
 
 
 def read_until_stopped(viewer, batches: bool, **request):
@@ -315,9 +307,9 @@ def test_a_whole_read_is_every_page_of_the_read_in_order(db, sent):
 
     by_page = http_pages(db, "items", PAGED)
     assert len(by_page) >= 7
-    assert table.to_pylist() == as_inserted(pa.concat_tables(by_page)).to_pylist()
+    assert table.to_pylist() == pa.concat_tables(by_page).to_pylist()
     whole = {key: value for key, value in PAGED.items() if key not in ("page_rows", "pages")}
-    one = as_inserted(pa.concat_tables(http_pages(db, "items", whole)))
+    one = pa.concat_tables(http_pages(db, "items", whole))
     assert table.to_pylist() == one.to_pylist()
 
 
@@ -373,7 +365,7 @@ def test_the_pages_taken_one_at_a_time_are_the_whole_read(db):
 def test_the_values_read_are_the_values_inserted(db):
     """Each paper's category key, number and keyword, whatever page it arrived on."""
     rows = db.items(**PAGED).to_pylist()
-    got = {row["tessera:external_id"]: (row["venue"], row["n"], row["title"]) for row in rows}
+    got = {row["paper"]: (row["venue"], row["n"], row["title"]) for row in rows}
     assert got == {paper: (VENUES[i // 5], i, f"title {i}") for i, paper in enumerate(PAPERS)}
 
 
@@ -431,9 +423,7 @@ def test_a_compressed_read_equals_an_uncompressed_one(db):
 def test_pages_are_requested_only_as_they_are_taken_and_close_ends_the_read(db, sent):
     """The first response is requested at once and each later one when it is needed. `close()`
     closes the response being read, and the cursor after the pages taken reads the rest."""
-    pages = db.viewer().items(
-        "map", [], system_fields=["external_id"], page_rows=3, pages=1, batches=True
-    )
+    pages = db.viewer().items("map", ["paper"], page_rows=3, pages=1, batches=True)
     assert len(sent.bodies) == 1
     taken = [next(pages), next(pages)]
     assert len(sent.bodies) == 2
@@ -444,7 +434,7 @@ def test_pages_are_requested_only_as_they_are_taken_and_close_ends_the_read(db, 
     assert len(sent.bodies) == 2
     assert not pages.done
 
-    rest = db.items("map", [], system_fields=["external_id"], cursor=pages.next)
+    rest = db.items("map", ["paper"], cursor=pages.next)
     assert sorted(papers_read(taken) + papers_read(rest)) == sorted(PAPERS)
 
     unread = db.items(**IDS, batches=True)
@@ -504,9 +494,7 @@ def test_a_cut_read_gives_its_whole_pages_and_the_cursor_to_read_on_from(proxy, 
 def test_a_read_cut_after_its_last_page_says_every_row_arrived(proxy, batches):
     through, viewer = proxy
     through.plan = [("cut", lambda body: end_of(body, FRAME_PAGE_END, 1))]
-    read, stopped = read_until_stopped(
-        viewer, batches, view="map", fields=[], system_fields=["external_id"]
-    )
+    read, stopped = read_until_stopped(viewer, batches, view="map", fields=["paper"])
     assert sorted(read) == sorted(PAPERS)
     assert stopped.done and stopped.cursor is None
 
@@ -557,7 +545,7 @@ def test_a_refused_read_raises_a_refusal(db):
 def test_a_read_that_returns_no_row_has_the_columns_asked_for(db):
     """A table of no rows, typed as a read with rows types it; from `batches=True`, one batch of
     no rows."""
-    asked = {"view": "map", "fields": ["venue", "n", "title"], "system_fields": ["external_id"]}
+    asked = {"view": "map", "fields": ["paper", "venue", "n", "title"], "system_fields": ["labels"]}
     schema = db.items(**asked).schema
     nothing = {**asked, "filters": {"venue": {"eq": "absent"}}}
     table = db.items(**nothing)
@@ -571,20 +559,11 @@ def test_a_read_that_returns_no_row_has_the_columns_asked_for(db):
     assert (empty.num_rows, empty.column_names) == (0, ["tessera_id", "key", "masked_count"])
 
 
-def test_external_ids_come_back_as_item_gives_them(db):
-    """From the database, as the string the id column held; from any other reader, as bytes."""
-    table = db.items("map", [], system_fields=["external_id"])
-    assert table.schema.field("tessera:external_id").type == pa.string()
-    for tessera_id, paper in zip(table.column("tessera_id").to_pylist(), papers_read(table)):
-        assert db.item(tessera_id)["external_id"] == paper
-    assert sorted(papers_read(table)) == sorted(PAPERS)
-    raw = db.viewer().items("map", [], system_fields=["external_id"])
-    assert raw.schema.field("tessera:external_id").type == pa.binary()
-
-
 def numbered(db) -> None:
-    """Four papers named by a signed integer column."""
+    """Four papers named by a signed integer join field."""
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.declare_attribute("paper", type="i64", unique=True)
+    db.declare_join_field("paper")
     db.insert(
         "map",
         pa.table(
@@ -602,15 +581,15 @@ def numbered(db) -> None:
     )
 
 
-def test_an_integer_id_comes_back_as_the_integer_inserted(served, corpus):
+def test_an_integer_join_value_comes_back_as_the_integer_inserted(served, corpus):
     one = served(numbered)
-    table = one.items("map", [], system_fields=["external_id"], page_rows=1)
-    assert table.schema.field("tessera:external_id").type == pa.int64()
-    ids = table.column("tessera:external_id").to_pylist()
+    table = one.items("map", ["paper"], page_rows=1)
+    assert table.schema.field("paper").type == pa.int64()
+    ids = table.column("paper").to_pylist()
     assert sorted(ids) == [-3, 0, 7, 2**40]
     for tessera_id, inserted in zip(table.column("tessera_id").to_pylist(), ids):
-        assert one.item(tessera_id)["external_id"] == inserted
-    pages = one.items("map", [], system_fields=["external_id"], page_rows=1, batches=True)
+        assert one.item(tessera_id)["fields"]["paper"] == inserted
+    pages = one.items("map", ["paper"], page_rows=1, batches=True)
     assert sorted(i for page in pages for i in page.column(1).to_pylist()) == sorted(ids)
 
 
@@ -620,14 +599,13 @@ def test_an_integer_id_comes_back_as_the_integer_inserted(served, corpus):
 def test_a_selection_reads_the_items_it_counts(db, sent):
     """Its filters and its box go as the read's filters, and nothing else is added."""
     selection = db.view("map").filter({"venue": {"in": ["icml", "iclr"]}}).within((0, -1, 12.5, 2))
-    table = selection.items(["n"], system_fields=["external_id"], page_rows=2)
+    table = selection.items(["n", "paper"], page_rows=2)
     assert table.num_rows == selection.count() == 8
     assert sorted(table.column("n").to_pylist()) == list(range(5, 13))
     assert sorted(papers_read(table)) == sorted(f"p{i}" for i in range(5, 13))
     assert sent.bodies[0] == {
         "view": "map",
-        "fields": ["n"],
-        "system_fields": ["external_id"],
+        "fields": ["n", "paper"],
         "page_rows": 2,
         "filters": {
             "all_of": [

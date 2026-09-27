@@ -39,7 +39,10 @@ def rows(keys):
 
 @pytest.fixture
 def db(tmp_path):
-    return create(tmp_path / "db")
+    database = create(tmp_path / "db")
+    database.declare_attribute("entity_id", type="u64", unique=True)
+    database.declare_join_field("entity_id")
+    return database
 
 
 # ---------------------------------------------------------------------------- the two rosters

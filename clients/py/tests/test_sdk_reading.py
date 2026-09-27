@@ -142,32 +142,19 @@ def test_a_sample_that_serves_no_point_still_has_the_two_fixed_columns(db):
     assert json.loads(empty.schema.metadata[b"tessera.counts"])["matched"] == 0
 
 
-def test_the_external_id_comes_back_as_the_column_that_carried_it(db):
-    """The wire says base64 bytes; the SDK knows which column those bytes came from.
-
-    The notebook corpus names its rows by an integer column, so the database reads the eight
-    little-endian bytes back as that integer. A `connect()` viewer has no declaration to read and
-    answers with the bytes.
-    """
+def test_an_items_join_value_is_one_of_its_fields_and_finds_it_again(db):
+    """The notebook corpus joins on its integer `id`, which the item card carries as a field and
+    a lookup by value answers with the same item, from the database and from `connect()`
+    alike."""
     table = db.view("s0").sample(k=8)
     one = table.column("tessera_id")[0].as_py()
-    carried = db.item(one)["external_id"]
+    carried = db.item(one)["fields"]["id"]
     assert isinstance(carried, int)
+    found = db.lookup("s0", "id", [carried])
+    assert found.column("tessera_id").to_pylist() == [one]
 
     token = authorise(db.session_url, db.session_credential, db.terms)
-    raw = connect(db.viewer_url, token).item(one)["external_id"]
-    assert isinstance(raw, bytes)
-    assert int.from_bytes(raw, "little") == carried
-
-
-def test_a_string_id_column_comes_back_as_the_string_it_carried(served):
-    """The other arm: a database whose rows are named by a string column."""
-    from test_sdk_pages import small
-
-    one = served(small)
-    table = one.view("map").sample(k=8)
-    picked = one.item(table.column("tessera_id")[0].as_py())["external_id"]
-    assert isinstance(picked, str) and picked.startswith("p")
+    assert connect(db.viewer_url, token).item(one)["fields"]["id"] == carried
 
 
 # ---------------------------------------------------------------------------- connect()
