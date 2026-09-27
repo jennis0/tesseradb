@@ -176,11 +176,12 @@ impl Overlay {
     }
 
     /// Withdraw `executed` from `deleted`, **Rule F's only retirement route** (write-path §5.4),
-    /// and from `suppressed`.
+    /// and withdraw [`Self::suppressions_retired_by`] from `suppressed`.
     ///
     /// An executed entity has no row left anywhere, so its suppression hides nothing more, and an
     /// id a fold frees must carry none to the item that takes it. An item that still exists holds
-    /// its suppression on its current entity, which is not deleted and so never in `executed`.
+    /// its suppression on its current entity, which is not deleted, so a suppression of an entity
+    /// in `executed` that this overlay does not delete stands.
     ///
     /// # The caller's obligation, which nothing here can check
     ///
@@ -199,10 +200,16 @@ impl Overlay {
     /// Returns how many entries were retired, which is what makes "this fold retired nothing"
     /// distinguishable from "this fold was not asked to".
     pub fn retire(&mut self, executed: &Bitmap) -> u64 {
-        let before = self.deleted.cardinality();
-        self.deleted.andnot_inplace(executed);
-        self.suppressed.andnot_inplace(executed);
-        before - self.deleted.cardinality()
+        let retiring = executed.and(&self.deleted);
+        self.suppressed.andnot_inplace(&retiring);
+        self.deleted.andnot_inplace(&retiring);
+        retiring.cardinality()
+    }
+
+    /// The suppressions [`Self::retire`] withdraws for `executed`: those of the entities in it
+    /// that this overlay deletes.
+    pub fn suppressions_retired_by(&self, executed: &Bitmap) -> Bitmap {
+        executed.and(&self.deleted).and(&self.suppressed)
     }
 
     /// Re-state this overlay as WAL records, so the `ChangeBatch` records it was accumulated
@@ -479,8 +486,8 @@ mod tests {
     }
 
     /// **Rule F's route takes the executed entities' deletions and suppressions, and nothing
-    /// else.** A suppression of an entity the fold did not execute stands, and so does a deletion
-    /// outside the set.
+    /// else.** A suppression of an entity the overlay does not delete stands even where the set
+    /// names it, and so does a deletion outside the set.
     #[test]
     fn retirement_takes_the_executed_entities_and_leaves_every_other_deny_standing() {
         let mut overlay = Overlay::new();
@@ -495,13 +502,17 @@ mod tests {
         overlay.apply(suppressed_only, ChangeOp::Suppress);
         overlay.apply(untouched_delete, ChangeOp::Delete);
 
-        let executed = Bitmap::of(&[as_u32(both), as_u32(deleted_only)]);
+        let executed = Bitmap::of(&[as_u32(both), as_u32(deleted_only), as_u32(suppressed_only)]);
+        assert_eq!(
+            overlay.suppressions_retired_by(&executed),
+            Bitmap::of(&[as_u32(both)])
+        );
         assert_eq!(overlay.retire(&executed), 2, "the count is deletions withdrawn");
         assert!(!overlay.touches(both), "an executed entity leaves both stores");
         assert!(!overlay.touches(deleted_only));
         assert!(
             overlay.is_suppressed(suppressed_only),
-            "a suppression of an entity the fold did not execute stands"
+            "a suppression of an entity the overlay does not delete stands, though the set names it"
         );
         assert!(
             overlay.is_deleted(untouched_delete),

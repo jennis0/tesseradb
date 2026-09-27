@@ -517,16 +517,16 @@ an explicit unsuppress lifts the suppression of an item that exists (Rule S).
 
 A compaction also frees entity ids. Every entity it removes is freed, so its id can be given to a
 new entity, except an item's number. An item's first entity id is its number, from which its
-`tessera_id` is derived, and it stays reserved after the item is deleted, so a `tessera_id` a
-client holds never comes to name another item. The entities an edit leaves are removed and freed,
-including one an edit made and a later edit or deletion left before any flush placed it: the
-edited-items map keeps its pair until the compaction that removes it, which is how the compaction
-tells it from a number. A restart restores such a pair from the log, and where the log no longer
-holds the edit the entity is removed without being freed. An entity a suppression stood against is freed like any other, since the
-compaction drops its suppression with it, and the item that takes the id is not suppressed. An item
-edited again and again therefore holds its number and at most two other ids: the entity it is in,
-and the one its last edit left, until a compaction frees it. Under repeated edits of the same items
-the high point of the id space stops rising after the second compaction.
+`tessera_id` is derived, and it stays reserved after the item is deleted, so a `tessera_id` a client
+holds never comes to name another item. The entities an edit leaves are removed and freed, including
+one an edit made and a later edit or deletion left before any flush placed it: the edited-items map
+keeps its pair until the compaction that removes it, which is how the compaction tells it from a
+number. A restart restores such a pair from the log, and where the log no longer holds the edit the
+entity is removed without being freed. An entity a suppression stood against is freed like any
+other, since the compaction drops its suppression with it, and the item that takes the id is not
+suppressed. An item edited again and again therefore holds its number and at most two other ids: the
+entity it is in, and the one its last edit left, until a compaction frees it. Under repeated edits
+of the same items the high point of the id space stops rising after the second compaction.
 
 A freed id is held back until the WAL has rotated past the compaction's publication. Until then a
 restart would replay records naming the id's previous holder, its rows, its deletion and its

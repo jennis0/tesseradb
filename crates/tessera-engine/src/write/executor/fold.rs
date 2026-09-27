@@ -1197,7 +1197,7 @@ impl Executor {
         // them, so a replay of the suppressions the log still holds ends without them. Each entity
         // is deleted until this fold's swap, so the record hides nothing less even if the fold is
         // then discarded.
-        let unsuppressed = executed.and(live.overlay.suppressed_set());
+        let unsuppressed = live.overlay.suppressions_retired_by(&executed);
         if !unsuppressed.is_empty() {
             let record = WalRecord::ChangeBatch {
                 changes: unsuppressed

@@ -1781,8 +1781,8 @@ impl ArtifactStore {
     /// ## How this stands to the two removal rules
     ///
     /// It does not touch them, and that is the whole of its relationship to them. Write-path §5.4's
-    /// rules govern *retirement* — a suppression retires on unsuppress, or with a moved-away
-    /// entity's rows at a fold, and never touches a stored structure (Rule S); a deletion retires
+    /// rules govern *retirement* — a suppression retires on unsuppress, or with its entity at the
+    /// fold that removes it, and never touches a stored structure (Rule S); a deletion retires
     /// only at the compaction fold that executes it (Rule F) — and the hazard they exist against
     /// is a second route by which a bit **leaves** a membership. This adds bits. A member added
     /// here is retired by exactly the routes every other member is retired by, having no separate

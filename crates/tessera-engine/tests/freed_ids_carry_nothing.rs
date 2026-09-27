@@ -765,6 +765,70 @@ fn a_new_entity_deleted_before_its_flush_is_freed_without_its_suppression() {
     assert!(engine.resolve_tessera_ids(&[w]).unwrap()[0].is_none(), "w names nothing");
 }
 
+/// **The pair of an edit's new entity deleted before its flush survives a restart.** The restart
+/// restores the pair from the edit's record, so the fold after it still tells the entity from an
+/// item's number and frees it without its suppression.
+#[test]
+fn a_new_entity_deleted_before_its_flush_is_freed_after_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let engine = open(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    publish(&engine, &root);
+    let number = EntityId::new(source_to_new_map(&root, "v00000")[&W]);
+    let w = engine.tessera_id_of(number).unwrap();
+    engine.accept_change(number, ChangeOp::Suppress).unwrap();
+    send(&engine, "w1", "s0", vec![rescore(w, 601)]);
+    let unflushed = entity_of(&engine, w);
+    engine.accept_change(unflushed, ChangeOp::Delete).unwrap();
+    drop(engine);
+
+    let engine = open(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    fold(&engine);
+    publish_buffered(&engine);
+    assert_eq!(engine.overlay_depth(), 0, "the fold removes both entities and their denies");
+    let made = send(&engine, "new", Q1, vec![create("z", "1", (901.0, 902.0))]);
+    assert_eq!(entity_of(&engine, made[0]), unflushed, "the new item takes the freed id");
+    publish_buffered(&engine);
+    let subset = engine.authorise(&subset_credential()).unwrap();
+    assert!(served(&engine, &subset, Q1, None).contains(&made[0].raw()));
+}
+
+/// **An entity edited away before its flush is freed without its suppression.** A suppressed item
+/// is edited twice with no flush between, so its middle entity never has a row. The fold frees the
+/// middle entity and drops its suppression, and the item stays suppressed through the entity it
+/// holds.
+#[test]
+fn an_entity_edited_away_before_its_flush_is_freed_without_its_suppression() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let engine = open(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    publish(&engine, &root);
+    let number = EntityId::new(source_to_new_map(&root, "v00000")[&W]);
+    let w = engine.tessera_id_of(number).unwrap();
+    engine.accept_change(number, ChangeOp::Suppress).unwrap();
+    send(&engine, "w1", "s0", vec![rescore(w, 601)]);
+    let middle = entity_of(&engine, w);
+    send(&engine, "w2", "s0", vec![rescore(w, 602)]);
+    let holds = entity_of(&engine, w);
+    publish_buffered(&engine);
+
+    fold(&engine);
+    publish_buffered(&engine);
+    let overlay = Arc::clone(&engine.generation().overlay);
+    assert!(!overlay.touches(number) && !overlay.touches(middle));
+    assert!(overlay.is_suppressed(holds), "w stays suppressed through the entity it holds");
+    let made = send(&engine, "new", Q1, vec![create("z", "1", (901.0, 902.0))]);
+    assert_eq!(entity_of(&engine, made[0]), middle, "the new item takes the middle entity's id");
+    publish_buffered(&engine);
+    let subset = engine.authorise(&subset_credential()).unwrap();
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    assert!(served(&engine, &subset, Q1, None).contains(&made[0].raw()), "z is served");
+    assert!(!served(&engine, &full, "s0", None).contains(&w.raw()), "w stays hidden");
+}
+
 /// **An edit resolved to an entity before it was freed does not reach the item that took it.**
 /// The edit is held after its handler resolved the item to its entity; the item moves on, a fold
 /// frees the entity, and a new item in the same views takes it. Released, the edit is decided
