@@ -244,19 +244,21 @@ impl ExtentColumn {
 ///
 /// What an open extent costs the merge **per extent** is one uncompressed block,
 /// [`RECORD_BLOCK_TARGET`], and the share allowed for them is a sixty-fourth of the budget: 32 MB
-/// of blocks, 1,024 extents, at the smallest budget a build is run under, and 10,252 at the
+/// of blocks, 1,024 extents, at the smallest budget a build is run under, and 10,251 at the
 /// 21.5 GB rung 6 was built under, which is past the 964 extents that build's widest column
 /// spilled. The extent count rises with the corpus and the budget does not, so the bound is what
 /// keeps the merge's memory off the corpus; the fold below it is the cost of that bound and is paid
 /// only where the bound bites.
 ///
-/// **A block buffer is the whole of what an open extent costs.** It used to bring in a has-row
-/// bitmap and a live set as well, and neither fell with the fan-in: a join chunk is a run of the
-/// attribute source's own order, scattered over entity space rather than a contiguous run of it,
-/// so every extent's bitmap spanned the column and folding two extents into one left the entity
-/// set the same size. That is why the term is gone rather than bounded —
-/// [`ExtentColumn::open`] reads the has-row files one at a time into [`DuplicateMap`], whose two
-/// whole-column bitmaps are a cost of the column and not of the extent count.
+/// **A block buffer is most of what an open extent costs.** It used to bring in a has-row bitmap
+/// and a live set as well, and neither fell with the fan-in: a join chunk is a run of the attribute
+/// source's own order, scattered over entity space rather than a contiguous run of it, so every
+/// extent's bitmap spanned the column and folding two extents into one left the entity set the
+/// same size. That is why the term is gone rather than bounded — [`ExtentColumn::open`] reads the
+/// has-row files one at a time into [`DuplicateMap`], whose two whole-column bitmaps are a cost of
+/// the column and not of the extent count. Merging 1,024 extents of 19,000 GBIF names each, at
+/// 32 KiB blocks, peaked at 48 MiB of anonymous memory, 47 KiB an extent, and took 8.0 s against
+/// 12.0 s for folding them to eight first.
 pub(crate) fn merge_fan_in(budget: u64) -> usize {
     let share = budget / 64;
     usize::try_from(share / RECORD_BLOCK_TARGET as u64)

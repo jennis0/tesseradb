@@ -53,12 +53,17 @@
 //!
 //! The target sets what one row costs: the read decompresses the whole block, walks every row's
 //! length to prove the rows tile it (below), and walks to the row it wants. On GeoNames, whose
-//! rows are a name and an integer id at about 33 bytes, one warm row costs about 50 µs at 32 KiB
-//! (39 to decompress, 10 for the header and the tiling walk, 4 to reach and decode the row)
-//! against 500 µs at 256 KiB, and a bulk read of 1,000 random items asking for a stored field
-//! 51 ms against 266 ms. A read that touches every block (a walk of the whole store, or an `in`
-//! of 10⁵ values) costs the same at either size. The price is compression: 2.77× there against
-//! 3.03×, a store 10% larger and a bundle 0.9% larger, with eight times the directory entries.
+//! rows are a name and an integer id at about 33 bytes, one warm row read in-process costs about
+//! 50 µs at 32 KiB (39 to decompress, 10 for the header and the tiling walk, 4 to reach and decode
+//! the row) against 500 µs at 256 KiB, both on a loaded machine. Served, a bulk read of 1,000
+//! random items asking for a stored field took 51 ms against 266 ms, which is about 53 and 355 µs
+//! for each of the roughly 960 and 750 blocks it touched.
+//!
+//! Reads that touch nearly every block measured the same at both sizes, within the noise of a
+//! loaded machine: an `in` of 10⁵ values asking for a stored field took about 1.35 s, and a read of
+//! the whole view about 4.4 s at 32 KiB against 4.7 s at 256 KiB. The price is compression: 2.77×
+//! there against 3.03×, a store 10% larger and a bundle 0.9% larger, with eight times the
+//! directory entries.
 //!
 //! # Addressing is has-row rank (records §3, review B5)
 //!

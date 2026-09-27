@@ -80,8 +80,8 @@ const ZSTD_LEVEL: i32 = 3;
 /// and handed from one extent's writer to the next ([`BlockPool`]), not started per writer; a
 /// producer that seals no block starts no thread at all.
 ///
-/// **160 KiB follows the target, which is not a cap.** A row larger than the target gets an oversized block of
-/// its own (records §3), so a corpus with a 4 MB row has up to five of those in flight instead.
+/// **The target is not a cap.** A row larger than the target gets an oversized block of its own
+/// (records §3), so a corpus with a 4 MB row has up to five of those in flight instead.
 /// The bound in bytes is five times the largest row, and the target is what it is for every
 /// corpus whose rows are ordinary.
 ///
