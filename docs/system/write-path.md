@@ -150,8 +150,7 @@ against a newer one.
 | No item, and the row carries a position | The row creates an item, labelled as the row says or with the view's `point_visibility.default` |
 | No item, and no position | Refused with `422`: an item is created in a view |
 | One item, and every value the row carries is the one stored | The row changes nothing. It is counted `unchanged` and writes nothing |
-| One item with no row in the batch's view, newer than the view's newest flushed item, the row carrying a position there and changing nothing else | The row adds the item to the view, counted `added` |
-| One item with no row in the batch's view, older than the view's newest flushed item | The row edits the item, counted `edited`: a flush places rows only above a view's newest, so the item moves to join it |
+| One item with no row in the batch's view, the row carrying a position there and changing nothing else | The row adds the item to the view in place, counted `added`: the item keeps its entity and stays served in its other views, and the next flush places the row |
 | One item, and the row's one change is placing it in artifacts that do not hold it | A change to the artifacts, not the item: the item joins them and keeps its entity, the row is counted `unchanged` and the memberships in `joined` |
 | One item, and the row changes a value, the label, the external id or a position | The row edits the item, counted `edited` |
 | Two items | Refused with `409`, naming the values and the items' `tessera_id`s |
@@ -181,8 +180,6 @@ check them. It checks what can have moved since the handler's generation, from m
 - an item a row edits that has since been deleted, added to or dropped from a view, or whose
   external id has since been given to another item;
 - the unique columns, declared or withdrawn since, where the batch creates items;
-- an item a row adds to a view that a newer item's flush, published or in flight, has since
-  passed;
 - a value a created row sets that has since been given to an item;
 - an external id since bound.
 
@@ -543,11 +540,12 @@ snapshots. A partition serving
 an older manifest after a step-down issues no freed id, since the manifest it serves can list an
 id issued since.
 
-A freed id is lower than the entities a view already has rows for, so a flush cannot place its row
-by extending the segment's range of entities without widening that range across the whole view.
-The segment lists the rows of such entities beside its range instead, and a lookup that finds no
-row in the base or a range reads the lists; the external-id locator a flush writes does the same.
-A merge keeps the listed rows, and the compaction folds them into the base like any other.
+A freed id is lower than the entities a view already has rows for, and so is an older item added to
+a view in place, so a flush cannot place such a row by extending the segment's range of entities
+without widening that range across the whole view. The segment lists the rows of such entities
+beside its range instead, and a lookup that finds no row in the base or a range reads the lists;
+the external-id locator a flush writes does the same. A merge keeps the listed rows, and the
+compaction folds them into the base like any other.
 
 Measured on the GeoNames corpus (13.5 million items), over five rounds that each send a
 673,193-row hold-out again with the same 6,748 items moved, then flush and compact: the first two

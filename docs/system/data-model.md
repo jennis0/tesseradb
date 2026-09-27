@@ -81,12 +81,13 @@ group returns that view's own value. Reading it from anywhere else requires nami
 explicitly, because the field holds no single value outside one.
 
 An ingest row names an item by its `tessera_id`, its external id or the value of a unique field.
-A row naming an item that has no row in the batch's view, carrying a position there, adds the item
-to that view under its existing identity, keeping its label and every value declared once for the
-whole item. This is how one item comes to exist in more than one view. A row that names an item
-and carries what the item stores changes nothing. Any other row naming an item edits it: it changes
-a value, the label, the external id or a position, or adds the item to a view whose newest flushed
-item is newer than it. An edit keeps the item's `tessera_id`, the views it is in, its layer
+A row naming an item that has no row in the batch's view, carrying a position there and changing
+nothing else, adds the item to that view under its existing identity and entity, keeping its label
+and every value declared once for the whole item. The item stays served in its other views, and
+is served in the new one from the next flush. This is how one item comes to exist in more than one
+view. A row that names an item and carries what the item stores changes nothing. Any other row
+naming an item edits it: it changes a value, the label, the external id or a position. An edit
+keeps the item's `tessera_id`, the views it is in, its layer
 memberships, the contents generated from it and a suppression standing against it
 ([the write path](write-path.md#edits)). A row that places an item in a layer's artifact changes
 the artifact, not the item: the item is not edited and keeps its entity.

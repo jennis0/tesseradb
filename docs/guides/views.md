@@ -229,14 +229,14 @@ first-batch-creates route.
 
 A row that names an item the service holds, by its `tessera_id`, its `external_id` or a unique
 value, and carries a position in a view the item is not in, adds the item to that view. The item
-keeps its label and its values, and the row lands in the view at its next flush. The receipt counts
-it as `added` and answers the item's `tessera_id`.
+keeps its label and its values, stays served in its other views throughout, and is served in the
+new view from its next flush. The receipt counts it as `added` and answers the item's
+`tessera_id`.
 
 The row may leave out any field, which keeps what the item stores. A row that carries something
 else, a value, the label, the external id or a position in a view the item is already in, edits
-the item. So does adding an item older than the newest item a flush has written into the view,
-since a flush places rows above those. The receipt counts an edit as `edited` and answers the
-item's `tessera_id`, which an edit never changes.
+the item. The receipt counts an edit as `edited` and answers the item's `tessera_id`, which an edit
+never changes.
 
 An edited item moves to a new entity, carrying every view it is in, every value, its layer
 memberships, the contents generated from it, its group-scoped values under every key and any

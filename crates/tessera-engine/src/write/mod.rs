@@ -531,7 +531,6 @@ impl WritePath {
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     pending_forms: std::collections::BTreeMap::new(),
-                    flush_flight: None,
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };

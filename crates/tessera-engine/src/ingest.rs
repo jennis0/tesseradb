@@ -8,8 +8,8 @@
 //! - a row naming no item creates one, in the batch's view, at the row's position;
 //! - a row naming an item and changing nothing stored writes nothing and is counted unchanged;
 //! - a row naming an item that has no row in the batch's view, carrying a position there and
-//!   changing nothing else, adds the item to the view in place where the item is newer than every
-//!   row the view has flushed;
+//!   changing nothing else, adds the item to the view in place: the item keeps its entity, and the
+//!   flush places the row below the view's newest rows where the item is older than them;
 //! - any other row edits the item: its entity is deleted and a new one carries everything the item
 //!   holds, the row's values over the stored ones, in every view the item is in. The item keeps its
 //!   number and so its `tessera_id`.
@@ -374,7 +374,7 @@ impl Engine {
                         written_from.push(at);
                         rows.push(*join);
                     }
-                    Decided::Edited { added } => {
+                    Decided::Edited => {
                         let blob = match &stored.blobs {
                             Some(blobs) => BlobRow::of(blobs.get(entity).cloned()),
                             None => BlobRow::default(),
@@ -392,7 +392,6 @@ impl Engine {
                         keys.extend(identities[at].unique.iter().copied());
                         slots.push(Slot::Edited {
                             edit: edits.len() as u32,
-                            added,
                             tessera_id: tid_of(entity)?,
                         });
                         edited_from.push(at);
@@ -746,7 +745,7 @@ impl Engine {
                 _ => false,
             };
             if !same {
-                return Ok(Decided::Edited { added: false });
+                return Ok(Decided::Edited);
             }
         }
 
@@ -754,7 +753,7 @@ impl Engine {
         // batch would have been refused as naming two.
         if let Some(external_id) = &row.external_id {
             if !stored.bound.contains(external_id) {
-                return Ok(Decided::Edited { added: false });
+                return Ok(Decided::Edited);
             }
         }
 
@@ -774,7 +773,7 @@ impl Engine {
                 _ => false,
             };
             if !same {
-                return Ok(Decided::Edited { added: false });
+                return Ok(Decided::Edited);
             }
         }
 
@@ -784,7 +783,7 @@ impl Engine {
                 if scoped_against_held(generation, entity, row, scoped_families, owner_view, false)?
                     .is_none()
                 {
-                    return Ok(Decided::Edited { added: false });
+                    return Ok(Decided::Edited);
                 }
             }
             return Ok(membership());
@@ -793,7 +792,7 @@ impl Engine {
         let adding = match self.stored_position(generation, entity, view)? {
             Some(held) => {
                 if held != fixed(view.quantisation, x, y) {
-                    return Ok(Decided::Edited { added: false });
+                    return Ok(Decided::Edited);
                 }
                 false
             }
@@ -802,14 +801,10 @@ impl Engine {
         let Some(repeated) =
             scoped_against_held(generation, entity, row, scoped_families, owner_view, adding)?
         else {
-            return Ok(Decided::Edited { added: false });
+            return Ok(Decided::Edited);
         };
         if !adding {
             return Ok(membership());
-        }
-        // An item below the view's entity floor moves to a new entity to join the view.
-        if !joined::joins_in_place(generation, entity, &view.id) {
-            return Ok(Decided::Edited { added: true });
         }
         // The row a view gains carries the item's values. A rendered value is read from the item
         // where the row leaves it out, so the view renders what the item's other views do.
@@ -1108,11 +1103,8 @@ enum Decided {
     Joined,
     /// The row adds the item to the batch's view in place, as this row.
     Added(Box<UnallocatedRow>),
-    /// The row changes the item, which moves to a new entity. `added` where adding it to the
-    /// batch's view is the one change.
-    Edited {
-        added: bool,
-    },
+    /// The row changes the item, which moves to a new entity.
+    Edited,
 }
 
 /// The unique values a row carries, as the resolver takes them. A null never identifies an item.

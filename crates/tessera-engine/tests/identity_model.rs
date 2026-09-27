@@ -12,9 +12,10 @@
 //! any of the item's fields, its label and a position in the batch's view. The model decides each
 //! row the way the service must: a row naming nothing creates an item, one naming an item it
 //! leaves unchanged is counted unchanged, one adding the item to a view it is not in is added, and
-//! one that changes the item edits it. An edit keeps the item's `tessera_id` and its suppression,
-//! and hides the item in every view from its acknowledgement until a flush places it again; an
-//! item added to a view older than it moves the same way. A batch naming two items in one row,
+//! one that changes the item edits it. An item added to a view keeps its entity and stays served in
+//! its other views, and is served in the new one from the next flush. An edit keeps the item's
+//! `tessera_id` and its suppression, and hides the item in every view from its acknowledgement
+//! until a flush places it again. A batch naming two items in one row,
 //! one item in two rows, one value in two rows or a `tessera_id` nobody holds is refused whole.
 //! A fold runs with whatever the buffer holds, so it can fall between an edit and its flush.
 //!
@@ -470,9 +471,6 @@ struct Model {
     group: bool,
     /// Items made so far, built ones included.
     made: u64,
-    /// Per view, one past the newest item a flush has given a row there. An item older than that
-    /// is added to the view by moving it, which is refused as an edit.
-    floors: BTreeMap<String, u64>,
     /// Each view's `point_visibility.default`, the label of an item created without one.
     defaults: BTreeMap<String, Option<String>>,
     /// The items the artifact's content was generated from.
@@ -501,12 +499,8 @@ struct Row {
 enum Expect {
     Create,
     Unchanged(u64),
-    /// The item joins the batch's view; `moved` where it is older than the view's newest rows
-    /// and so moves to a new entity.
-    Added {
-        tid: u64,
-        moved: bool,
-    },
+    /// The item joins the batch's view, keeping its entity.
+    Added(u64),
     Edited(u64),
 }
 
@@ -522,11 +516,6 @@ impl Model {
                 .map(|v| (v.id.clone(), v.point_default.clone()))
                 .collect(),
             made: BUILT,
-            floors: VIEWS
-                .iter()
-                .chain([&GROUP_VIEW])
-                .map(|v| (v.to_string(), BUILT))
-                .collect(),
             ..Model::default()
         };
         for (source, entity) in source_to_new_map(root, "v00000") {
@@ -654,27 +643,24 @@ impl Model {
                         (Some(sent), held) => !same(sent, held),
                     });
             let differs = differs || scoped_differs;
-            let mut joins = None;
+            let mut joins = false;
             let mut moves = false;
             if let (Some(view), Some(position)) = (view, row.position) {
                 match item.views.get(view) {
                     Some(held) if *held == position => {}
                     Some(_) => moves = true,
-                    None => joins = Some(item.made < self.floors[view]),
+                    None => joins = true,
                 }
             }
-            // An edit places the item's new entity in every view it is in, so an item in none
-            // needs a position in the batch's view; and a scoped value needs a row in the view.
-            let unplaced = view.is_none_or(|v| !item.views.contains_key(v)) && joins.is_none();
-            if (differs || moves) && item.views.is_empty() && joins.is_none()
-                || (differs && unplaced && row.scoped.iter().any(|v| matches!(v, Some(Some(_)))))
-            {
+            // A scoped value needs a row in the view.
+            let unplaced = view.is_none_or(|v| !item.views.contains_key(v)) && !joins;
+            if differs && unplaced && row.scoped.iter().any(|v| matches!(v, Some(Some(_)))) {
                 return None;
             }
             expect.push(match (differs || moves, joins) {
                 (true, _) => Expect::Edited(*tid),
-                (false, Some(moved)) => Expect::Added { tid: *tid, moved },
-                (false, None) => Expect::Unchanged(*tid),
+                (false, true) => Expect::Added(*tid),
+                (false, false) => Expect::Unchanged(*tid),
             });
         }
         Some(expect)
@@ -711,7 +697,7 @@ impl Model {
                     self.items.insert(*tid, item);
                 }
                 Expect::Unchanged(named) => assert_eq!(tid, named),
-                Expect::Added { tid: named, moved } => {
+                Expect::Added(named) => {
                     assert_eq!(tid, named, "a row adding an item answers its tessera_id");
                     let view = view.expect("a row adding an item names a view").to_string();
                     let item = self.items.get_mut(named).unwrap();
@@ -720,9 +706,6 @@ impl Model {
                         if let Some(Some(sent)) = sent {
                             *held = Some(sent.clone());
                         }
-                    }
-                    if *moved {
-                        self.moved(*named);
                     }
                 }
                 Expect::Edited(named) => {
@@ -1175,12 +1158,7 @@ impl Run {
         let moved: Vec<u64> = expect
             .iter()
             .zip(tessera_ids)
-            .filter(|(e, _)| {
-                matches!(
-                    e,
-                    Expect::Create | Expect::Edited(_) | Expect::Added { moved: true, .. }
-                )
-            })
+            .filter(|(e, _)| matches!(e, Expect::Create | Expect::Edited(_)))
             .map(|(_, tid)| *tid)
             .collect();
         let ids: Vec<TesseraId> = moved.iter().map(|t| TesseraId::new(*t)).collect();
@@ -1214,7 +1192,7 @@ impl Run {
         );
         assert_eq!(
             receipt.added,
-            count(|e| matches!(e, Expect::Added { .. })),
+            count(|e| matches!(e, Expect::Added(_))),
             "{batch_id}"
         );
         assert_eq!(
@@ -1228,9 +1206,7 @@ impl Run {
             "{batch_id}"
         );
         for (expect, tid) in expect.iter().zip(&receipt.tessera_ids) {
-            if let Expect::Unchanged(named)
-            | Expect::Added { tid: named, .. }
-            | Expect::Edited(named) = expect
+            if let Expect::Unchanged(named) | Expect::Added(named) | Expect::Edited(named) = expect
             {
                 assert_eq!(
                     tid.raw(),
@@ -1343,8 +1319,6 @@ impl Run {
         for item in self.model.items.values() {
             for view in item.views.keys() {
                 self.model.flushed.insert((item.tid, view.clone()));
-                let floor = self.model.floors.get_mut(view).expect("a declared view");
-                *floor = (*floor).max(item.made + 1);
             }
         }
     }
@@ -1422,7 +1396,6 @@ impl Run {
             item.scoped = Default::default();
         }
         self.model.flushed.retain(|(_, view)| view != GROUP_VIEW);
-        self.model.floors.remove(GROUP_VIEW);
     }
 
     // ---- what is served ----------------------------------------------------------------------
@@ -1495,9 +1468,8 @@ impl Run {
                         .collect();
                     panic!(
                         "{view} for {labels:?}, after {after}: served {served:?}, expected \
-                         {visible:?}; differing (tid, model item, flushed): {differ:#?}; \
-                         floors {:?}, made {}",
-                        model.floors, model.made
+                         {visible:?}; differing (tid, model item, flushed): {differ:#?}; made {}",
+                        model.made
                     );
                 }
                 let with_gid: BTreeSet<u64> = visible
@@ -2172,13 +2144,14 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
     run(&ops);
 }
 
-/// **An item is added to a view in place only when it is newer than the view's newest rows.** A
-/// flush places rows above those, so an older item moves to a new entity to join the view, keeping
-/// its `tessera_id` and its row in the view it was in; a newer one is added where it is.
+/// **An item older than a view's newest rows joins it in place.** The item keeps its entity and its
+/// row in the view it was in, and is served there throughout. The flush lists its new row beside a
+/// segment whose range of entities spans it with no row, and it is served there from then on,
+/// through a restart, a merge that takes that segment, a fold and a restart after the fold.
 #[test]
-fn an_item_older_than_a_views_newest_rows_moves_to_join_it() {
+fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     let fx = fixture();
-    let engine = open(&fx);
+    let mut engine = open(&fx);
     engine.set_merge_for_test(false);
     let row = |external: &[u8], position: (f64, f64)| IngestRow {
         tessera_id: None,
@@ -2189,64 +2162,89 @@ fn an_item_older_than_a_views_newest_rows_moves_to_join_it() {
         scoped: Vec::new(),
         omitted: vec![0, 1, 2],
     };
-    let send = |batch: &str, view: &str, rows: Vec<IngestRow>| {
-        engine.ingest(IngestRequest {
-            batch_id: batch.to_string(),
-            body_hash: hash_of(batch),
-            view: Some(view.to_string()),
-            rows,
-            artifacts: Default::default(),
-        })
-    };
-    let flush = || publish_buffered(&engine);
-    let older = send("older", VIEWS[0], vec![row(b"older", (10.0, 10.0))])
-        .expect("a new item is created")
-        .tessera_ids[0];
-    send("newer", VIEWS[1], vec![row(b"newer", (20.0, 20.0))]).expect("a new item is created");
-    flush();
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let card_views = |tid: TesseraId| -> BTreeSet<String> {
+    let send = |engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>| {
         engine
-            .item(&session, tid)
+            .ingest(IngestRequest {
+                batch_id: batch.to_string(),
+                body_hash: hash_of(batch),
+                view: Some(view.to_string()),
+                rows,
+                artifacts: Default::default(),
+            })
+            .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
+    };
+    // `older` is given an entity between two items of the other view, so that view's segment spans
+    // it with no row.
+    send(&engine, "before", VIEWS[1], vec![row(b"before", (20.0, 20.0))]);
+    let older = send(&engine, "older", VIEWS[0], vec![row(b"older", (10.0, 10.0))]).tessera_ids[0];
+    send(&engine, "after", VIEWS[1], vec![row(b"after", (25.0, 25.0))]);
+    publish_buffered(&engine);
+    let entity = |engine: &Engine| engine.resolve_tessera_ids(&[older]).unwrap()[0];
+    let first = entity(&engine);
+    // Where the item is served, and at what position in each view.
+    let placed = |engine: &Engine| -> BTreeMap<String, (u32, u32)> {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        let card: BTreeMap<String, (u32, u32)> = engine
+            .item(&session, older)
             .unwrap()
-            .map(|card| card.views.iter().map(|v| v.id.clone()).collect())
-            .unwrap_or_default()
+            .map(|card| card.views.iter().map(|v| (v.id.clone(), (v.x, v.y))).collect())
+            .unwrap_or_default();
+        for view in VIEWS {
+            let out = engine
+                .viewport(&session, ViewportRequest::new(view, 0, VIEWPORT, 10_000))
+                .unwrap();
+            assert_eq!(
+                out.points.iter().any(|(id, _)| id == older),
+                card.contains_key(view),
+                "{view}'s points and the item's card agree"
+            );
+        }
+        card
+    };
+    let at = |x: f64, y: f64| {
+        (
+            tessera_spatial::fixed32(x, 0.0, 1000.0),
+            tessera_spatial::fixed32(y, 0.0, 1000.0),
+        )
     };
 
-    let moved = send("add-older", VIEWS[1], vec![row(b"older", (30.0, 30.0))])
-        .expect("an item older than the view's newest rows is added by moving it");
-    assert_eq!((moved.added, moved.edited), (1, 0));
+    let added = send(&engine, "add-older", VIEWS[1], vec![row(b"older", (30.0, 30.0))]);
+    assert_eq!((added.added, added.edited), (1, 0));
+    assert_eq!(added.tessera_ids, vec![older], "the item keeps its tessera_id");
+    assert_eq!(entity(&engine), first, "and its entity");
     assert_eq!(
-        moved.tessera_ids,
-        vec![older],
-        "the item keeps its tessera_id"
+        placed(&engine),
+        BTreeMap::from([(VIEWS[0].to_string(), at(10.0, 10.0))]),
+        "the item stays served in the view it was in while the join is buffered"
     );
-    assert!(
-        card_views(older).is_empty(),
-        "the moved item is hidden until its flush"
-    );
-    flush();
-    assert_eq!(
-        card_views(older),
-        VIEWS.iter().map(|v| v.to_string()).collect(),
-        "the flush places it in the view it joined and the one it was in"
-    );
+    let both = BTreeMap::from([
+        (VIEWS[0].to_string(), at(10.0, 10.0)),
+        (VIEWS[1].to_string(), at(30.0, 30.0)),
+    ]);
+    publish_buffered(&engine);
+    assert_eq!(placed(&engine), both, "the flush places it in the view it joined");
+    drop(engine);
+    engine = open(&fx);
+    assert_eq!(placed(&engine), both, "after a restart");
 
-    let newest = send("newest", VIEWS[0], vec![row(b"newest", (40.0, 40.0))])
-        .expect("a new item is created")
-        .tessera_ids[0];
-    flush();
-    let added = send("add-newest", VIEWS[1], vec![row(b"newest", (50.0, 50.0))])
-        .expect("an item newer than the view's newest rows is added");
-    assert_eq!(added.added, 1);
-    assert_eq!(
-        card_views(newest),
-        BTreeSet::from([VIEWS[0].to_string()]),
-        "added in place, it stays in the view it was in while the join is buffered"
-    );
-    flush();
-    assert_eq!(
-        card_views(newest),
-        VIEWS.iter().map(|v| v.to_string()).collect()
-    );
+    engine.set_merge_for_test(true);
+    let merges = engine.write_executor_stats().merges;
+    for i in 0..4 {
+        let key = format!("more{i}");
+        send(&engine, &key, VIEWS[1], vec![row(key.as_bytes(), (40.0 + f64::from(i), 40.0))]);
+        publish_buffered(&engine);
+    }
+    tick_until(&engine, "a merge", Duration::from_secs(60), || {
+        engine.write_executor_stats().merges > merges
+    });
+    assert_eq!(placed(&engine), both, "after a merge");
+    tessera_build::verify_deep(&fx.root, &tessera_build::VerifyOpts::default())
+        .expect("the merged bundle verifies");
+
+    fold(&engine);
+    assert_eq!(placed(&engine), both, "after a fold");
+    drop(engine);
+    let engine = open(&fx);
+    assert_eq!(placed(&engine), both, "after a restart past the fold");
+    assert_eq!(entity(&engine), first, "the item's entity never changed");
 }

@@ -479,11 +479,6 @@ impl Executor {
             || rows.iter().any(|row| match row.join {
                 Some(entity) => {
                     generation.overlay.is_deleted(entity)
-                        || !crate::write::joined::joins_in_place(&generation, entity, &row.view)
-                        || self.flush.outstanding()
-                            && self.flush_flight.as_ref().is_some_and(|(view, floor)| {
-                                *view == row.view && entity.raw() < *floor
-                            })
                         || generation.bundle.partitions.values().any(|partition| {
                             partition
                                 .views

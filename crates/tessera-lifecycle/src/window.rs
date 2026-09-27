@@ -156,13 +156,8 @@ pub enum Slot {
     /// The row places this item in artifacts that do not hold it and changes nothing else: a
     /// change to the artifacts, not the item, which keeps its entity and is answered unchanged.
     Joined { entity: EntityId, tessera_id: u64 },
-    /// The row moves its item to a new entity as the entry's edit at this position. `added` is a
-    /// row whose one change was adding the item to a view, which the receipt counts as added.
-    Edited {
-        edit: u32,
-        added: bool,
-        tessera_id: u64,
-    },
+    /// The row moves its item to a new entity as the entry's edit at this position.
+    Edited { edit: u32, tessera_id: u64 },
 }
 
 /// What an entry's rows touch that a later entry's rows must not touch in the same window: the
@@ -819,14 +814,8 @@ impl<W> CommitWindow<W> {
                         tessera_id,
                         over_bound: false,
                     },
-                    Slot::Edited {
-                        added, tessera_id, ..
-                    } => RowReceipt {
-                        outcome: if added {
-                            RowOutcome::Added
-                        } else {
-                            RowOutcome::Edited
-                        },
+                    Slot::Edited { tessera_id, .. } => RowReceipt {
+                        outcome: RowOutcome::Edited,
                         tessera_id,
                         over_bound: entry.over_bound.contains(&(i as u32)),
                     },

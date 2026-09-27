@@ -1037,11 +1037,11 @@ paths:
         the value of every unique column it carries that is not null. A row whose values name no
         item creates one. A row whose values name one item addresses it: where every value the
         row carries is the one the item stores, the row changes nothing and is counted in
-        `unchanged`; where the item has no row in the batch's view, is newer than the newest item a
-        flush has written into it, and the row carries a position there and changes nothing else,
-        the row adds the item to the view, counted in `added`. Any other row edits the item and
-        is counted in `edited`: it changes a value, the label, the external id or a position, or
-        adds the item to a view it is older than the newest item of. An edited item keeps its
+        `unchanged`; where the item has no row in the batch's view, and the row carries a position
+        there and changes nothing else, the row adds the item to the view, counted in `added`: the
+        item stays served in its other views and is served in this one from the next flush. Any
+        other row edits the item and is counted in `edited`: it changes a value, the label, the
+        external id or a position. An edited item keeps its
         `tessera_id`, its views, its layer memberships and a suppression; a label the edit narrows
         applies from the answer on. A row whose one change is placing the item in artifacts that
         do not hold it changes the artifacts, not the item: it is counted in `unchanged`, and the
