@@ -87,7 +87,9 @@ compaction; until then they are removed from the visible set the same way a supp
 
 An edit moves an item to a new entity and deletes the old one, and none of it can widen what a
 viewer sees. A suppression standing against the old entity is copied to the new one in the same
-WAL record and never removed from the old. The item's label is the edit's from the
+WAL record. An unsuppress lifts an item's suppression. The compaction that removes the old
+entity's rows also drops the old entity's suppression, while the item's continues on its new
+entity, so an id freed there and issued to another item carries no suppression. The item's label is the edit's from the
 acknowledgement: until a flush places the new entity's rows the item is in no view, and once
 placed it is served under the new label only. A content generated from the item keeps it among
 its generating items, so the content stays served, and still only to a viewer who can see every

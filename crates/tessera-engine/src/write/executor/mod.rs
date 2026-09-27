@@ -325,12 +325,16 @@ impl Executor {
         // Cloned and retired against here, never mutated on the shared `Arc` the read path holds.
         // Cache keys read `overlay_version` as the security state, so a geometry-only swap must
         // not move it.
-        let (overlay, overlay_version) = match rotation.as_ref().map(|r| &r.retired) {
-            Some(retired) if !retired.is_empty() => {
+        let (overlay, overlay_version) = match rotation.as_ref() {
+            Some(crate::geometry::PrefixRotation {
+                retired,
+                unsuppressed,
+                ..
+            }) if !retired.is_empty() => {
                 // The live external-id map loses the retired bindings first.
                 let forgotten = self.live.forget_established(retired);
                 let mut overlay = (*previous.overlay).clone();
-                let count = overlay.retire(retired);
+                let count = overlay.retire(retired, unsuppressed);
                 tracing::info!(
                     retired = count,
                     forgotten_external_ids = forgotten,

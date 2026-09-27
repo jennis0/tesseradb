@@ -1229,6 +1229,7 @@ pub(crate) fn open_rotation(
     prefix: &str,
     live_fragments: &FragmentCache,
     retired: croaring::Bitmap,
+    unsuppressed: croaring::Bitmap,
 ) -> std::result::Result<(Arc<Bundle>, crate::geometry::PrefixRotation), PublishGeometryError> {
     let current = read_current(bundle_root)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
@@ -1321,6 +1322,7 @@ pub(crate) fn open_rotation(
             unique,
             edited,
             retired,
+            unsuppressed,
         },
     ))
 }

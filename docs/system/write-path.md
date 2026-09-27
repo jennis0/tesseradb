@@ -73,8 +73,10 @@ flowchart TB
 *What tessera build writes and tessera serve reads, and what the write path adds while serving.*
 
 A deny is in force from the moment it is acknowledged. It is recorded in the **overlay**, the
-in-memory record of what is hidden, and leaves the overlay on exactly one event: an unsuppress for
-a suppression, or the compaction that drops the rows for a deletion.
+in-memory record of what is hidden. A deletion leaves the overlay at the compaction that drops its
+rows. A suppression leaves it at an unsuppress, which lifts the item's suppression, or, on an entity
+an edit moved the item away from, at the compaction that drops that entity's rows, while the item
+stays suppressed through the entity it holds.
 
 ## Generations
 
@@ -212,8 +214,8 @@ append:
 - every membership of an enumerated layer's artifact, which the new entity joins;
 - every generating set of a supplied content, which the new entity joins and the old one leaves,
   so the content is still served while its generating items are visible;
-- a suppression standing against the old entity, copied to the new one and never removed from the
-  old one;
+- a suppression standing against the old entity, copied to the new one; the old entity keeps its
+  own until the compaction that removes its rows;
 - the unique values and the external id, which name the new entity from the acknowledgement.
 
 A change, a growth or a publication resolved before an edit moved an item it names reaches the
@@ -357,7 +359,7 @@ An entry **retires** when it leaves the overlay. Each store has exactly one rout
 
 | Applies to | Removed by | Why only one route |
 |---|---|---|
-| A suppression (Rule S) | An explicit unsuppress, and nothing else | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. Any other removal route would let the item become visible again with no unsuppress ever issued |
+| A suppression (Rule S) | An explicit unsuppress. On an entity an edit moved the item away from, also the compaction that removes that entity's rows and retires its deletion, since the item's suppression continues on the entity it holds | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. The compaction removes only the record of an entity with no row left, whose item the record of its new entity still hides |
 | A deletion (Rule F) | The compaction that removes the item's row and its term-index entries, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
 
 The mask a request subtracts from its answer, `denied[view]`, is derived from the union of the two
@@ -506,8 +508,13 @@ row and no term-index entries left for any request to find, so what a viewer see
 The next fold clears the entry again, at little further cost, because there is nothing left for it
 to remove.
 
-A suppression is carried through a compaction unchanged. Only an explicit unsuppress removes one
-(Rule S).
+A suppression is carried through a compaction unchanged, with one exception. An entity an edit
+moved its item away from is deleted, and the compaction that removes its rows and retires its
+deletion also drops its suppression: the item stays suppressed through the entity it holds, and no
+record of a suppression is left naming an entity that no longer exists. The compaction appends the
+unsuppression of those entities to the WAL before it publishes, so a restart that replays their
+suppression from records the log still holds ends without it. Only an explicit unsuppress lifts an
+item's suppression (Rule S).
 
 ### Freed entity ids
 
@@ -516,8 +523,8 @@ compaction has removed that entity's rows and retired its deletion, the id can b
 entity. An id is freed only where it is no item's number. An item's first entity id is its number,
 from which its `tessera_id` is derived, and it stays reserved after the item is deleted, so a
 `tessera_id` a client holds never comes to name another item. An entity a suppression stands
-against is not freed either, since a suppression is removed only when it is lifted. An item edited
-again and again therefore holds its number and at most two other ids: the entity it is in, and the
+against is freed like any other, since the compaction drops its suppression with its rows, and the
+item that takes the id is not suppressed. An item edited again and again therefore holds its number and at most two other ids: the entity it is in, and the
 one its last edit left, until a compaction frees it. Under repeated edits of the same items the
 high point of the id space stops rising after the second compaction.
 

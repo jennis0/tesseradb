@@ -909,6 +909,10 @@ struct Run {
     highest: u64,
     /// How many times an item was given an entity below `highest`: an id a fold freed.
     reused: u64,
+    /// Every entity a suppressed item has held.
+    held_suppressed: BTreeSet<u64>,
+    /// How many times an item not suppressed was given an id a suppressed item held before.
+    reused_suppressed: u64,
 }
 
 fn hash_of(batch_id: &str) -> [u8; 32] {
@@ -1184,9 +1188,16 @@ impl Run {
         let highest = self.highest;
         for (tid, entity) in moved.iter().zip(entities) {
             let entity = entity.expect("an accepted row's item is named by its tessera_id");
-            self.model.items.get_mut(tid).unwrap().made = entity.raw();
+            let item = self.model.items.get_mut(tid).unwrap();
+            item.made = entity.raw();
             if entity.raw() < highest {
                 self.reused += 1;
+                if !item.suppressed && self.held_suppressed.contains(&entity.raw()) {
+                    self.reused_suppressed += 1;
+                }
+            }
+            if item.suppressed {
+                self.held_suppressed.insert(entity.raw());
             }
             self.highest = self.highest.max(entity.raw() + 1);
         }
@@ -1313,6 +1324,9 @@ impl Run {
                 ChangeOp::Suppress | ChangeOp::Unsuppress => {
                     if let Some(item) = self.model.items.get_mut(&tid) {
                         item.suppressed = op == ChangeOp::Suppress;
+                        if item.suppressed {
+                            self.held_suppressed.insert(item.made);
+                        }
                     }
                 }
             }
@@ -1867,6 +1881,8 @@ fn run(ops: &[Op]) -> Run {
         batches: 0,
         highest,
         reused: 0,
+        held_suppressed: BTreeSet::new(),
+        reused_suppressed: 0,
     };
     run.check("the build");
     for op in ops {
@@ -1963,8 +1979,10 @@ fn edit_heavy_op() -> impl Strategy<Value = Op> {
 
 /// **The id space stops growing under repeated edits.** Every item is edited in every round, with
 /// a flush and a fold between rounds and restarts among them. An item's first edit takes a new
-/// id, and each later one takes the id its edit before last left, which the fold between freed:
-/// after the second round no round takes an id from the high-water.
+/// id, and each later one takes an id an edit before left, which the fold between freed: after the
+/// second round no round takes an id from the high-water. Two items are suppressed for the first
+/// four rounds, so the ids their edits leave are freed too; lifted, they take those ids again and
+/// are served on them.
 #[test]
 fn repeated_edits_and_folds_stop_the_id_space_growing() {
     let edit_everything = |seed: u16, position: u8| Op::Ingest {
@@ -1998,9 +2016,15 @@ fn repeated_edits_and_folds_stop_the_id_space_growing() {
         batches: 0,
         highest,
         reused: 0,
+        held_suppressed: BTreeSet::new(),
+        reused_suppressed: 0,
     };
+    run.step(&Op::Changes(vec![(1, 1), (4, 1)]));
     let mut high_waters = Vec::new();
     for round in 0..8u16 {
+        if round == 4 {
+            run.step(&Op::Changes(vec![(1, 2), (4, 2)]));
+        }
         run.step(&edit_everything(round * 100, (round % 2) as u8 * 2));
         run.step(&Op::Flush);
         if round % 3 == 2 {
@@ -2021,6 +2045,10 @@ fn repeated_edits_and_folds_stop_the_id_space_growing() {
         run.reused >= 6 * BUILT,
         "every edit after the second round takes a freed id; {} did",
         run.reused
+    );
+    assert!(
+        run.reused_suppressed > 0,
+        "no item that is not suppressed took an id a suppressed item left"
     );
 }
 

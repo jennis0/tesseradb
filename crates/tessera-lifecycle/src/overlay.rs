@@ -2,19 +2,17 @@
 //! (`write-path.md` §5.4's two removal rules).
 //!
 //! The overlay is **two independent stores**, never one overwritable disposition: deletions and
-//! suppressions are separate facts that leave on different triggers. **Rule S** — an entry leaves
-//! `suppressed` only by its unsuppress. **Rule F** — an entry leaves `deleted` only at the
+//! suppressions are separate facts that leave on different triggers. **Rule S**: an entry leaves
+//! `suppressed` by its unsuppress, or with its entity's rows at the compaction fold that executes
+//! the deletion of an entity an edit moved its item away from, since the item's suppression
+//! continues on the entity it holds now. **Rule F**: an entry leaves `deleted` only at the
 //! compaction fold that *executes* it.
-//!
-//! *(Owner-ruled 2026-08-03, replacing lifecycle §3.2's stamp ledger. That document is not yet
-//! rewritten — a reader who finds it describing per-deny retirement stamps has found the stale
-//! text, not a second mechanism.)*
 //!
 //! **A deletion retires at the fold that executes it.** [`Overlay::retire`] is Rule F's only route
 //! out of `deleted`, and its caller is the fold's own publication, which derives the executed set
 //! from what it demonstrably removed (`tessera_engine`'s `compact`, compaction §5). Rule F's safety
-//! is the identity match the publication seam builds (`write-path.md` §5.4, compaction §4), not a
-//! stamp ordering.
+//! is the identity match the publication builds (`write-path.md` §5.4, compaction §4), not a stamp
+//! ordering.
 //!
 //! Collapsing the two into a single enum ("last write wins") is fail-open, and has been caught
 //! twice: the sequence `delete → suppress → unsuppress` must not re-expose a deleted item. Two
@@ -34,10 +32,10 @@ use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
 
 /// Per-entity deny state, held as **two independent stores**.
 ///
-/// The two facts leave on different triggers — a suppression *only* by its unsuppress (Rule S), a
-/// deletion only at the compaction fold that executes it (Rule F, `write-path.md` §5.4) — and the
-/// rejected single rule (r1: one retirement stamp for every deny) is fail-open precisely for
-/// suppression, because any stamp eventually retires the entry and re-exposes the item.
+/// The two facts leave on different triggers: a suppression by its unsuppress, or with a moved-away
+/// entity's rows (Rule S), a deletion only at the compaction fold that executes it (Rule F,
+/// `write-path.md` §5.4). One retirement stamp for every deny would be fail-open for suppression,
+/// because any stamp eventually retires the entry and re-exposes the item.
 ///
 /// **Two stores rather than two fields in one struct, and the difference is not cosmetic.**
 /// Collapsing the facts into one last-write-wins disposition was caught fail-open twice in review;
@@ -45,7 +43,8 @@ use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
 /// could still break while compiling. Two containers, mutated in two places, cannot be collapsed by
 /// any refactor that still type-checks. It also makes r1 *unexpressible* rather than merely
 /// rejected: [`Overlay::suppressed`] is a bitmap of entity ids and carries no stamp field for a
-/// retirement rule to act on at all. Its only removal path is an `Unsuppress`.
+/// retirement rule to act on at all. It leaves by an `Unsuppress`, or with an executed deletion
+/// in [`Overlay::retire`].
 ///
 /// Both sets are Roaring bitmaps because that is what they are — sets of entity ids, in entity
 /// space, where a set is the whole content.
@@ -53,8 +52,9 @@ use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
 pub struct Overlay {
     /// Set by `Delete`, and removed from **only** by [`Overlay::retire`] — Rule F's single route.
     deleted: Bitmap,
-    /// Set by `Suppress`, cleared **only** by `Unsuppress`. Never touched by `Delete`, which is
-    /// true by construction rather than by discipline.
+    /// Set by `Suppress`, cleared by `Unsuppress` and, for an entity whose deletion it retires and
+    /// whose item an edit moved to another entity, by [`Overlay::retire`]. Never touched by
+    /// `Delete`, which is true by construction rather than by discipline.
     suppressed: Bitmap,
 }
 
@@ -96,7 +96,7 @@ impl Overlay {
     /// as it stands rather than enumerating.
     ///
     /// Separate from [`Self::deleted_set`] because the two manifest fields mean different
-    /// things and leave under different rules (`write-path.md` §5.4): a suppression only by its
+    /// things and leave under different rules (`write-path.md` §5.4): a suppression by its
     /// unsuppress (Rule S), a tombstone only at the fold that executes it (Rule F).
     /// [`Self::denied`] deliberately
     /// hands out only the union, which is right for the row mask and wrong here — a writer that
@@ -138,8 +138,8 @@ impl Overlay {
     /// How many deletions stand — **the gauge a compaction trigger keys on**, and not the same
     /// number as [`Self::len`].
     ///
-    /// `len` is `|deleted ∪ suppressed|`, and Rule S says a suppression never retires, so a
-    /// deployment holding 500,000 standing suppressions is permanently over any limit expressed in
+    /// `len` is `|deleted ∪ suppressed|`, and a standing suppression leaves only by its unsuppress,
+    /// so a deployment holding 500,000 standing suppressions is permanently over any limit expressed in
     /// those terms — and a trigger reading it would dispatch a **full no-op fold every interval,
     /// for ever**, rewriting the corpus to retire nothing (compaction §9; r3, memory F5). A
     /// trigger keys on what a fold can actually reduce; the *alarm* stays on total depth, which is
@@ -176,14 +176,14 @@ impl Overlay {
         }
     }
 
-    /// Withdraw `executed` from `deleted` — **Rule F's only retirement route, and it takes only
-    /// deletions** (write-path §5.4).
+    /// Withdraw `executed` from `deleted`, **Rule F's only retirement route** (write-path §5.4),
+    /// and withdraw from `suppressed` the entities of `moved` it retires.
     ///
-    /// `suppressed` is not an operand and there is no sibling for it: a suppression's invisibility
-    /// rests on its overlay entry for as long as it stands, so any retirement route at all is
-    /// fail-open — *"any stamp eventually retires the entry and re-exposes the item"*. That is why
-    /// this takes one bitmap and subtracts it from one store rather than taking a set of entities
-    /// and asking which store they are in.
+    /// `moved` is the entities edits moved items away from. Each item's suppression continues on
+    /// the entity it holds now, and the entity itself has no row left once its deletion executes,
+    /// so its suppression hides nothing more. A suppression of any other entity has no route here:
+    /// its invisibility rests on its entry for as long as it stands, and only `executed` entities
+    /// of `moved` leave, so no row is exposed.
     ///
     /// # The caller's obligation, which nothing here can check
     ///
@@ -201,9 +201,10 @@ impl Overlay {
     ///
     /// Returns how many entries were retired, which is what makes "this fold retired nothing"
     /// distinguishable from "this fold was not asked to".
-    pub fn retire(&mut self, executed: &Bitmap) -> u64 {
+    pub fn retire(&mut self, executed: &Bitmap, moved: &Bitmap) -> u64 {
         let before = self.deleted.cardinality();
         self.deleted.andnot_inplace(executed);
+        self.suppressed.andnot_inplace(&moved.and(executed));
         before - self.deleted.cardinality()
     }
 
@@ -480,14 +481,11 @@ mod tests {
         );
     }
 
-    /// **Rule F's route takes deletions and cannot reach a suppression** — the fail-open caught
-    /// twice in review, in its most direct form.
+    /// **Rule F's route takes deletions and leaves every suppression outside `moved` standing.**
     ///
     /// A retirement set is entities, not dispositions, so an entity that is both deleted and
     /// suppressed is the case that matters: the deletion retires and the suppression stands, and
-    /// the item is still hidden afterwards. There is no sibling of this method for `suppressed`
-    /// and there must not be one — a suppression's invisibility rests on its entry for as long as
-    /// it stands, so any retirement route at all re-exposes the item.
+    /// the item is still hidden afterwards.
     #[test]
     fn retirement_takes_deletions_and_leaves_every_suppression_standing() {
         let mut overlay = Overlay::new();
@@ -507,7 +505,7 @@ mod tests {
             executed.add(as_u32(entity));
         }
         assert_eq!(
-            overlay.retire(&executed),
+            overlay.retire(&executed, &Bitmap::new()),
             2,
             "the count is deletions withdrawn — the suppressed-only entity was in the set and \
              contributed nothing"
@@ -521,7 +519,7 @@ mod tests {
         assert!(!overlay.is_deleted(deleted_only));
         assert!(
             overlay.is_suppressed(suppressed_only),
-            "a suppression named in a retirement set is not retired — it has no route at all"
+            "a suppression named in a retirement set and not moved is not retired"
         );
         assert!(
             overlay.is_deleted(untouched_delete),
@@ -537,8 +535,29 @@ mod tests {
     fn retiring_nothing_withdraws_nothing() {
         let mut overlay = Overlay::new();
         overlay.apply(EntityId::new(9), ChangeOp::Delete);
-        assert_eq!(overlay.retire(&Bitmap::new()), 0);
+        assert_eq!(overlay.retire(&Bitmap::new(), &Bitmap::new()), 0);
         assert!(overlay.is_deleted(EntityId::new(9)));
+    }
+
+    /// A moved-away entity's suppression leaves with its executed deletion, and one whose deletion
+    /// the fold did not execute stands, as does every suppression of an entity not moved.
+    #[test]
+    fn a_moved_entitys_suppression_leaves_only_with_its_executed_deletion() {
+        let mut overlay = Overlay::new();
+        let moved_executed = EntityId::new(1);
+        let moved_kept = EntityId::new(2);
+        let item = EntityId::new(3);
+        for entity in [moved_executed, moved_kept] {
+            overlay.apply(entity, ChangeOp::Delete);
+            overlay.apply(entity, ChangeOp::Suppress);
+        }
+        overlay.apply(item, ChangeOp::Suppress);
+        let executed = Bitmap::of(&[as_u32(moved_executed)]);
+        let moved = Bitmap::of(&[as_u32(moved_executed), as_u32(moved_kept), as_u32(item)]);
+        assert_eq!(overlay.retire(&executed, &moved), 1);
+        assert!(!overlay.touches(moved_executed));
+        assert!(overlay.is_deleted(moved_kept) && overlay.is_suppressed(moved_kept));
+        assert!(overlay.is_suppressed(item));
     }
 
     #[test]
