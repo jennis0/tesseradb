@@ -533,21 +533,6 @@ build_scale() {
   mkdir -p "$DEMO"
   write_deployment "$scale"
 
-  # **Minting is dropped above 10⁸ items, and the reason is a pass the memory budget cannot
-  # reach.** `pipeline.rs`' own table bounds three passes by the corpus rather than by the plan:
-  # `source_ids` at 8N, minted external ids at 20N, and geometry + tiler + segment at 28N. Only
-  # the per-batch and per-band rows answer to `--memory-budget`, so at 250,000,000 items the
-  # minting pass alone is ~5 GB on top of the ~7 GB the geometry pass needs, and no batch size
-  # moves either — measured, by four builds at four budgets all dying at the same 4.8 GB of
-  # output. Minting is off by default in the binary for an unrelated and better reason
-  # (contracts §2.4: an external id is not manufactured for an item whose caller supplied none),
-  # and the demo wants none of it — the viewer addresses items by `tessera_id`. It stays on at
-  # the small scales only to keep those bundles comparable with the bench fixtures.
-  local mint_external="--mint-external-ids"
-  if [[ "$(items_of "$scale")" -gt 100000000 ]]; then
-    mint_external=""
-    echo "minting no external ids at this scale (the 20N pass; see build_scale)"
-  fi
   # Timed, and the peak RSS kept alongside the wall clock. A build that runs for hours at the
   # upper scales should say how long it took without the operator having to have watched it, and
   # peak RSS is the figure that decides whether the *next* scale fits on the machine at all —
@@ -599,7 +584,7 @@ build_scale() {
     --deployment "$(deployment_of "$scale")" \
     "${limit[@]}" \
     ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
-    $mint_external --no-oracle-pairs
+    --no-oracle-pairs
   local peak
   peak=$(awk '/Maximum resident set size/ {printf "%.1f GiB", $NF / 1048576}' "$DEMO/build-$scale.time")
   printf 'built %s in %dm%02ds, peak %s, %s on disk\n' \
