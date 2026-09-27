@@ -17,6 +17,13 @@
 //! Every leaf is evaluated on the row route wherever the column affords one, in both orders, so
 //! the two orders test each row by the same rule and return the same rows. A region past the
 //! cell budget is answered by the same cover in both, from the one decomposition cache.
+//!
+//! A filter whose matches an index names, a unique field's `eq` or `in` or a `member_of`, bounds
+//! the rows it can match. Where they are no more than a stretch at the ceiling spans, the walk is
+//! driven from them: one stretch runs to the end of the view and holds those rows alone, so the
+//! read costs the matches the viewer can see rather than the view. The rows are taken, tested and
+//! resumed from exactly as a stretch over the view's rows would take them, so either route
+//! returns the same rows, pages and positions.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -28,6 +35,8 @@ use croaring::Bitmap;
 use tessera_store::read::SegmentData;
 use tessera_types::EntityId;
 
+use std::sync::atomic::Ordering;
+
 use super::cursor::{Key, Position};
 use super::{RecordsOrder, ResponseEndedBy};
 use crate::cancel::CancelToken;
@@ -37,7 +46,10 @@ use crate::error::Result;
 use crate::filter::FilterExpr;
 use crate::histogram::MaskIdentity;
 use crate::region::RegionVerdict;
-use crate::viewport::{crossing_domain, segment_holding, OpenView, ResolvedLeaves, RoutedRows};
+use crate::viewport::{
+    crossing_domain, filter_refusal, segment_holding, unique_holders, OpenView, ResolvedLeaves,
+    RoutedRows,
+};
 use crate::Generation;
 
 /// The first stretch spans at least this many rows, or candidate items in stored order, whatever
@@ -49,7 +61,8 @@ const STRETCH_GROWTH: u32 = 4;
 /// the stretch's rows, their ranges and the filter's rows beside them: about 16.3 bytes a row at
 /// its peak. A map stretch keeps its items, one `u32` a row while it is evaluated, and their
 /// bitmap: about 4.2. Seventeen bytes a row bounds either, so a stretch holds no more than the
-/// page ceiling it is derived from.
+/// page ceiling it is derived from. A driven stretch holds what a stored one does for each of its
+/// rows: the item with its row, the rows, their ranges and the filter's rows.
 const STRETCH_BYTES_PER_ROW: usize = 17;
 
 /// What one page is walked in: the engine, the view resolved and its mask composed for the page,
@@ -161,7 +174,10 @@ pub(super) struct Walk {
     /// The rows the next stretch spans, across every segment.
     pub(super) target: u32,
     /// The rows a stretch may span, from the byte ceiling a stretch is held to.
-    ceiling: u32,
+    pub(super) ceiling: u32,
+    /// Whether the next stretch may be driven from the filter's matches: cleared once the filter
+    /// is found to bound none, or more than a stretch at the ceiling spans.
+    driving: bool,
     stretch: Option<Stretch>,
     pub(super) position: Position,
     /// The scan position the response started from: a stop is honoured only past it.
@@ -185,6 +201,9 @@ struct Stretch {
     /// In stored order, the candidate items of the stretch that hold a row in the view,
     /// ascending, with that row. Empty in map order, whose rows are the segments' own.
     items: Vec<(u32, u32)>,
+    /// Whether the stretch holds only the rows its filter bounds, so a map-order take gathers
+    /// from the filter's rows rather than the mask's.
+    driven: bool,
 }
 
 /// Whether two generations share the row positions and the deny state a stretch was evaluated
@@ -290,6 +309,7 @@ impl Walk {
             keep_unmatched,
             target: stretch.clamp(STRETCH_MIN, ceiling),
             ceiling,
+            driving: true,
             stretch: None,
             origin: position.scan,
             position,
@@ -322,9 +342,16 @@ impl Walk {
                         break Walked::Stopped(reason);
                     }
                 }
-                let opened = match order {
-                    RecordsOrder::Map => self.open_map_stretch(cx, scan, &clock.cancel)?,
-                    RecordsOrder::Stored => self.open_stored_stretch(cx, scan, &clock.cancel)?,
+                let opened = match self.driving_rows(cx)? {
+                    Some((rows, candidate)) => {
+                        self.open_driven_stretch(cx, scan, &rows, &candidate, &clock.cancel)?
+                    }
+                    None => match order {
+                        RecordsOrder::Map => self.open_map_stretch(cx, scan, &clock.cancel)?,
+                        RecordsOrder::Stored => {
+                            self.open_stored_stretch(cx, scan, &clock.cancel)?
+                        }
+                    },
                 };
                 match opened {
                     Some(stretch) => self.stretch = Some(stretch),
@@ -463,6 +490,7 @@ impl Walk {
             until,
             filter,
             items: Vec::new(),
+            driven: false,
         }))
     }
 
@@ -529,8 +557,160 @@ impl Walk {
             until: until.map(|entity| (entity, 0)),
             filter,
             items,
+            driven: false,
         }))
     }
+
+    /// The rows the next stretch is driven from, with the viewer's candidate set, or `None`
+    /// where it walks the view: under `keep_unmatched`, which serves every visible row, and
+    /// wherever [`driving_rows`] declines.
+    fn driving_rows(&mut self, cx: &PageCx<'_>) -> Result<Option<(Bitmap, Bitmap)>> {
+        let Some(expr) = self.filter.as_ref().filter(|_| self.driving && !self.keep_unmatched)
+        else {
+            return Ok(None);
+        };
+        let candidate = cx
+            .engine
+            .filter_candidate(cx.open.served.session, cx.generation)?;
+        let rows = driving_rows(cx, expr, &candidate, self.ceiling)?;
+        self.driving = rows.is_some();
+        Ok(rows.map(|rows| (rows, candidate)))
+    }
+
+    /// The driven stretch past `scan`: every row of `rows` whose item is in `candidate` and
+    /// whose key lies past `scan`, running to the end of the view, with the filter evaluated
+    /// over those rows alone under their items. `None` where no row lies past `scan`.
+    fn open_driven_stretch(
+        &mut self,
+        cx: &PageCx<'_>,
+        scan: Option<Key>,
+        rows: &Bitmap,
+        candidate: &Bitmap,
+        cancel: &Option<CancelToken>,
+    ) -> Result<Option<Stretch>> {
+        cx.engine
+            .counters
+            .driven_stretches
+            .fetch_add(1, Ordering::Relaxed);
+        let order = self.position.order;
+        let segments = cx.segments();
+        let mut ahead = Bitmap::new();
+        let mut items: Vec<(u32, u32)> = Vec::new();
+        for row in rows.iter() {
+            let (seg, local) =
+                segment_holding(segments, row).expect("the first segment's rows begin at 0");
+            let (segment, _) = segments[seg];
+            let entity = cx.entity_of(segment, local);
+            if !candidate.contains(entity) {
+                continue;
+            }
+            let key = match order {
+                RecordsOrder::Map => (
+                    segment.morton.u32()[local as usize],
+                    segment.columns.tessera_id()[local as usize],
+                ),
+                RecordsOrder::Stored => (entity, 0),
+            };
+            if scan.is_some_and(|scan| key <= scan) {
+                continue;
+            }
+            ahead.add(row);
+            items.push((entity, row));
+        }
+        if items.is_empty() {
+            return Ok(None);
+        }
+        items.sort_unstable();
+        let entities = Bitmap::of(&items.iter().map(|&(entity, _)| entity).collect::<Vec<_>>());
+        let total = u32::try_from(cx.open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
+        let mut domain: Vec<Range<u32>> = Vec::new();
+        for_each_run_in(&ahead, 0..total, &mut |run| domain.push(run));
+        let expr = self.filter.as_ref().expect("only a filter drives a stretch");
+        let routed = filter_rows(cx, expr, Some(&entities), &domain, true, cancel)?;
+        self.region = RegionVerdict::coarsest(self.region, routed.region);
+        if order == RecordsOrder::Map {
+            items = Vec::new();
+        }
+        Ok(Some(Stretch {
+            under: Arc::clone(cx.generation),
+            mask: cx.open.served.mask_identity,
+            from: scan,
+            until: None,
+            filter: Some(routed.rows),
+            items,
+            driven: true,
+        }))
+    }
+}
+
+/// The rows of the view `expr` can match, where they are no more than `most`, or `None` where
+/// the filter's matches must be found by walking the view. This is the one rule that decides
+/// between the two routes: a walk costs the visible rows it passes, and a driven read costs the
+/// rows returned here, so a read is driven wherever an index bounds its matches to what one
+/// stretch at the ceiling may hold. Each bound is taken inside the viewer's visible set before it
+/// is counted, so which route answers depends only on what the viewer can see.
+pub(super) fn driving_rows(
+    cx: &PageCx<'_>,
+    expr: &FilterExpr,
+    candidate: &Bitmap,
+    most: u32,
+) -> Result<Option<Bitmap>> {
+    if !cx.engine.switches.driven_reads_enabled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    Ok(bounded_rows(cx, expr, candidate)?.filter(|rows| rows.cardinality() <= u64::from(most)))
+}
+
+/// The rows of the view an index says `expr` can match at most, or `None` where no index bounds
+/// them: a unique field's `eq` or `in`, as the rows of the items in `candidate` holding the values
+/// named; a `member_of`, as the artifact's members the page's mask admits; an `all_of`, as the
+/// rows every bounded kid admits; and an `any_of` whose every kid is bounded, as their union.
+fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr, candidate: &Bitmap) -> Result<Option<Bitmap>> {
+    Ok(match expr {
+        FilterExpr::Leaf { column, operand } => {
+            let Some(keys) = cx.generation.filter_columns.unique_keys(column, operand) else {
+                return Ok(None);
+            };
+            let row_space = &cx.open.served.data.row_space;
+            let mut rows = Bitmap::new();
+            for entity in unique_holders(cx.generation, column, &keys).map_err(filter_refusal)? {
+                if candidate.contains(entity) {
+                    if let Some(row) = row_space.row_of(EntityId::new(u64::from(entity))) {
+                        rows.add(row.raw());
+                    }
+                }
+            }
+            Some(rows)
+        }
+        FilterExpr::MemberOf(leaf) => Some(
+            cx.engine
+                .member_rows(leaf, &cx.open.served, &cx.open.mask, &cx.resolved)
+                .map_err(filter_refusal)?,
+        ),
+        FilterExpr::AllOf(kids) => {
+            let mut out: Option<Bitmap> = None;
+            for kid in kids {
+                if let Some(rows) = bounded_rows(cx, kid, candidate)? {
+                    out = Some(match out {
+                        Some(held) => held.and(&rows),
+                        None => rows,
+                    });
+                }
+            }
+            out
+        }
+        FilterExpr::AnyOf(kids) => {
+            let mut out = Bitmap::new();
+            for kid in kids {
+                match bounded_rows(cx, kid, candidate)? {
+                    Some(rows) => out.or_inplace(&rows),
+                    None => return Ok(None),
+                }
+            }
+            Some(out)
+        }
+        FilterExpr::NoneOf(_) | FilterExpr::Region(_) => None,
+    })
 }
 
 /// One segment's rows in a map stretch, gathered through the page's mask a chunk at a time: the
@@ -553,12 +733,23 @@ impl SegmentRun<'_> {
     /// The next chunk of this segment's part of the stretch, through the page's mask.
     fn gather(&mut self, cx: &PageCx<'_>, stretch: &Stretch, keep_unmatched: bool) {
         let hi = self.end.min(self.next.saturating_add(self.chunk));
-        let visible = cx
-            .open
-            .mask
-            .rows_in_range(self.base + self.next..self.base + hi);
+        let range = self.base + self.next..self.base + hi;
         self.buffered.clear();
         self.at = 0;
+        self.next = hi;
+        self.chunk = self.chunk.saturating_mul(2);
+        if let (true, Some(filter)) = (stretch.driven, &stretch.filter) {
+            let base = self.base;
+            let buffered = &mut self.buffered;
+            for_each_run_in(filter.rows(), range, &mut |run| {
+                buffered.extend(
+                    run.filter(|&row| cx.open.mask.contains_row(row))
+                        .map(|row| (row - base, true)),
+                );
+            });
+            return;
+        }
+        let visible = cx.open.mask.rows_in_range(range);
         match &stretch.filter {
             None => self
                 .buffered
@@ -578,8 +769,6 @@ impl SegmentRun<'_> {
                     .map(|row| (row - self.base, true)),
             ),
         }
-        self.next = hi;
-        self.chunk = self.chunk.saturating_mul(2);
     }
 
     fn key(&self, local: u32) -> Key {

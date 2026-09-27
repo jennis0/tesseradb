@@ -123,6 +123,11 @@ index = true
 name   = "flag"
 type   = "bool"
 render = true
+
+[[attribute]]
+name   = "serial"
+type   = "i64"
+unique = true
 "#;
 
 // ---------------------------------------------------------------------------------------------
@@ -192,6 +197,11 @@ fn sentiment(slot: usize, s: u64) -> Option<f32> {
     (!(s + slot as u64).is_multiple_of(3)).then(|| ((s * 7 + slot as u64 * 11) % 10) as f32 / 10.0)
 }
 
+/// A unique value per source, held only in the record store and the unique index.
+fn serial_of(s: u64) -> i64 {
+    1_000_003 + 7 * s as i64
+}
+
 fn hush(s: u64) -> i32 {
     s as i32 * 2
 }
@@ -252,6 +262,10 @@ fn write_world(path: &Path) {
     columns.push(column(
         "flag",
         Arc::new(BooleanArray::from(ids.iter().map(|&s| flag_of(s)).collect::<Vec<_>>())),
+    ));
+    columns.push(column(
+        "serial",
+        Arc::new(Int64Array::from_iter_values(ids.iter().map(|&s| serial_of(s)))),
     ));
     write_parquet(path, columns);
 }
@@ -543,6 +557,7 @@ fn scalars_of(s: u64) -> Vec<WalScalar> {
         WalScalar::Utf8(prose_of(s)),
         when_of(s).map_or(WalScalar::Null, WalScalar::TimestampUs),
         flag_of(s).map_or(WalScalar::Null, WalScalar::Bool),
+        WalScalar::I64(serial_of(s)),
     ]
 }
 
@@ -732,17 +747,9 @@ fn viewport_counts(
     )
 }
 
-// ---------------------------------------------------------------------------------------------
-// Order and completeness
-// ---------------------------------------------------------------------------------------------
-
-/// **Both orders return the same rows, each once, in their own order**, for every kind of leaf
-/// and several page sizes, across responses that each carry a few pages.
-#[test]
-fn both_orders_return_the_same_rows_once_for_every_leaf_and_page_size() {
-    let fx = Fx::new();
-    let layer = "clusters/a";
-    let members: Range<u64> = 100..400;
+/// Publish one artifact of `members` in a new flat layer `layer` over `s0`, and answer its
+/// `tessera_id`.
+fn publish_cluster(fx: &Fx, layer: &str, members: Range<u64>) -> TesseraId {
     fx.engine
         .register_layer(LayerDeclaration {
             scope: Default::default(),
@@ -774,21 +781,35 @@ fn both_orders_return_the_same_rows_once_for_every_leaf_and_page_size() {
             0,
             vec![IncomingArtifact::from_entities(
                 Some("c0".into()),
-                members.clone().map(|s| EntityId::new(fx.entity[&s])).collect::<Vec<_>>(),
+                members.map(|s| EntityId::new(fx.entity[&s])).collect::<Vec<_>>(),
             )],
         )
         .unwrap();
     tick(&fx.engine);
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
-    let artifact: TesseraId = fx
-        .engine
+    fx.engine
         .viewport(
             &session,
             ViewportRequest::new("s0", 0, WHOLE_MAP, 10).layers(LayerSelection::All),
         )
         .unwrap()
         .artifacts[0]
-        .tessera_id;
+        .tessera_id
+}
+
+// ---------------------------------------------------------------------------------------------
+// Order and completeness
+// ---------------------------------------------------------------------------------------------
+
+/// **Both orders return the same rows, each once, in their own order**, for every kind of leaf
+/// and several page sizes, across responses that each carry a few pages.
+#[test]
+fn both_orders_return_the_same_rows_once_for_every_leaf_and_page_size() {
+    let fx = Fx::new();
+    let layer = "clusters/a";
+    let members: Range<u64> = 100..400;
+    let artifact = publish_cluster(&fx, layer, members.clone());
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
 
     let all: Vec<u64> = (0..N).collect();
     // Each case's name, filter, and the sources it admits where the generator can say.
@@ -1701,10 +1722,10 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
             .expect("the ingest is accepted")[0]
     };
     // "anchor" holds the lower entity id, so the geographic view's plan is dispatched first.
-    ingest_into("b-anchor", GEO, "anchor", 0.25, 0.25, scalars_of(3));
-    let joiner = ingest_into("b-own", "s0", "joiner", 5.0, 5.0, scalars_of(3));
+    ingest_into("b-anchor", GEO, "anchor", 0.25, 0.25, scalars_of(N + 1));
+    let joiner = ingest_into("b-own", "s0", "joiner", 5.0, 5.0, scalars_of(N + 3));
     // A joining row carries the entity's attributes as it stores them, one value per entity.
-    ingest_into("b-join", GEO, "joiner", 0.75, 0.75, scalars_of(3));
+    ingest_into("b-join", GEO, "joiner", 0.75, 0.75, scalars_of(N + 3));
     faults.arm_pause_after(PauseSite::BeforeManifestPublish, PauseAction::Stall, 1);
     engine.request_flush();
     faults.await_arrivals(PauseSite::BeforeManifestPublish, 2, Duration::from_secs(30));
@@ -2831,5 +2852,267 @@ fn a_cell_larger_than_a_stretch_is_read_whole() {
         let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
         assert_each_once(&ids);
         assert_eq!(ids.len() as u64, visible, "{order:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reads driven by their matches
+// ---------------------------------------------------------------------------------------------
+
+/// `serial in` the serials of `sources`, and of `extra` values nobody holds.
+fn serials_in(sources: impl IntoIterator<Item = u64>, extra: &[i64]) -> FilterExpr {
+    let mut values: Vec<Scalar> = sources
+        .into_iter()
+        .map(|s| Scalar::Int(serial_of(s).into()))
+        .collect();
+    values.extend(extra.iter().map(|&v| Scalar::Int(v.into())));
+    leaf("serial", FilterOperand::NumIn(values))
+}
+
+/// What one response sent, less its cursors' bytes, which differ between any two cursors for
+/// one position: whether each page end and the trailer carried one.
+#[derive(Debug, PartialEq)]
+struct Sent {
+    head: RecordsHead,
+    pages: Vec<(RecordBatch, PageEndedBy, usize, bool)>,
+    trailer: (u64, u64, ResponseEndedBy, bool),
+}
+
+fn sent(sink: Collect, trailer: &RecordsTrailer) -> Sent {
+    Sent {
+        head: sink.head.expect("a head"),
+        pages: sink
+            .pages
+            .into_iter()
+            .map(|(batch, end)| (batch, end.ended_by, end.bytes, end.next.is_some()))
+            .collect(),
+        trailer: (
+            trailer.pages,
+            trailer.rows,
+            trailer.ended_by,
+            trailer.next.is_some(),
+        ),
+    }
+}
+
+/// Two reads' responses are the same, compared response by response so a failure names the first
+/// that differs.
+fn assert_same(driven: &[Sent], walked: &[Sent], what: &str) {
+    let shape = |r: &Sent| {
+        let pages: Vec<_> = r
+            .pages
+            .iter()
+            .map(|(b, ended, bytes, next)| (b.num_rows(), *ended, *bytes, *next))
+            .collect();
+        (r.head.clone(), pages, r.trailer)
+    };
+    for (i, (d, w)) in driven.iter().zip(walked).enumerate() {
+        assert_eq!(shape(d), shape(w), "{what}: response {i}");
+        assert!(d == w, "{what}: response {i}'s rows differ");
+    }
+    assert_eq!(driven.len(), walked.len(), "{what}: the number of responses");
+}
+
+/// Every response of a read from no cursor to its end.
+fn transcript(engine: &Engine, session: &Session, base: &ItemsRequest<'_>) -> Vec<Sent> {
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut req = base.clone();
+        req.count = cursor.is_none() && base.count;
+        req.cursor = cursor.as_deref();
+        let (sink, trailer) = respond(engine, session, req).expect("a response");
+        out.push(sent(sink, &trailer));
+        cursor = trailer.next;
+        if cursor.is_none() {
+            return out;
+        }
+    }
+}
+
+/// **A read driven by its filter's matches sends what the walk over the view sends**: the same
+/// heads and counts, the same rows in the same pages, the same page ends and trailers, in both
+/// orders, for a narrower viewer, for a unique field's `eq` and `in`, a `member_of`, and either
+/// combined with a leaf no index answers. A value held only by an item the viewer cannot see
+/// answers exactly as a value nobody holds.
+#[test]
+fn a_read_driven_by_its_matches_sends_what_the_walk_sends() {
+    let fx = Fx::new();
+    let artifact = publish_cluster(&fx, "clusters/a", 100..400);
+    let unseen = (0..N).find(|&s| !subset_sees(s)).unwrap();
+    let cases: Vec<(&str, FilterExpr)> = vec![
+        (
+            "eq",
+            leaf("serial", FilterOperand::NumEquals(Scalar::Int(serial_of(1234).into()))),
+        ),
+        ("in", serials_in((0..N).step_by(3), &[-1, 5, 1_000_000_007])),
+        (
+            "in and a category",
+            FilterExpr::AllOf(vec![
+                serials_in((0..N).step_by(2), &[]),
+                leaf(
+                    "band",
+                    FilterOperand::In(vec![AttrLocalId::new(1), AttrLocalId::new(3)]),
+                ),
+            ]),
+        ),
+        (
+            "in or member_of",
+            FilterExpr::AnyOf(vec![
+                serials_in(1500..1600, &[]),
+                FilterExpr::MemberOf(MemberOfLeaf {
+                    layer: "clusters/a".into(),
+                    artifact,
+                }),
+            ]),
+        ),
+        (
+            "an unseen holder",
+            leaf("serial", FilterOperand::NumEquals(Scalar::Int(serial_of(unseen).into()))),
+        ),
+        ("no holder", leaf("serial", FilterOperand::NumEquals(Scalar::Int(7.into())))),
+    ];
+    let fields = names(&["serial", "band"]);
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let session = fx.engine.authorise(&credential).unwrap();
+        for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+            let mut unseen_and_absent = Vec::new();
+            for (name, filter) in &cases {
+                for page_rows in [7u32, 250] {
+                    let mut base = request("s0", &fields);
+                    base.filter = Some(filter.clone());
+                    base.order = Some(order);
+                    base.page_rows = Some(page_rows);
+                    base.pages = Some(3);
+                    base.count = true;
+                    let before = fx.engine.driven_stretches();
+                    let driven = transcript(&fx.engine, &session, &base);
+                    assert!(
+                        fx.engine.driven_stretches() > before,
+                        "{name} {order:?}: the read was not driven by its matches"
+                    );
+                    fx.engine.set_driven_reads_for_test(false);
+                    let walked = transcript(&fx.engine, &session, &base);
+                    fx.engine.set_driven_reads_for_test(true);
+                    assert_same(&driven, &walked, &format!("{name} {order:?} at {page_rows}"));
+                    let ids: Vec<u64> = driven
+                        .iter()
+                        .flat_map(|r| r.pages.iter().flat_map(|(b, ..)| ids_of(b)))
+                        .collect();
+                    assert_each_once(&ids);
+                    let counts = driven[0].head.counts.expect("counts");
+                    assert_eq!(counts.matched, ids.len() as u64, "{name} {order:?}");
+                    if name.contains("holder") && page_rows == 7 {
+                        unseen_and_absent.push(driven);
+                    }
+                }
+            }
+            if credential == subset_credential() {
+                assert_same(&unseen_and_absent[0], &unseen_and_absent[1], &format!("{order:?}"));
+            }
+        }
+    }
+}
+
+impl Fx {
+    /// This fixture's engine closed and opened again over the same bundle, cache and log.
+    fn restarted(self) -> Fx {
+        let Fx {
+            _tmp,
+            engine,
+            entity,
+        } = self;
+        drop(engine);
+        let engine = engine_at(_tmp.path(), &_tmp.path().join("bundle"), 3600);
+        engine.set_background_refresh_for_test(false);
+        Fx {
+            _tmp,
+            engine,
+            entity,
+        }
+    }
+}
+
+/// One read of `serial in` every other source, in `order`, with a suppression and a deletion
+/// accepted between its first two responses, a suppression between two pages of its second, and
+/// a restart before the rest; driven by its matches or walked over the view.
+fn read_across_denies_and_a_restart(order: RecordsOrder, driven: bool) -> Vec<Sent> {
+    let fx = Fx::new();
+    fx.engine.set_driven_reads_for_test(driven);
+    let fields = names(&["serial"]);
+    let matching: Vec<u64> = match order {
+        RecordsOrder::Map => fx.map_order((0..N).step_by(2), "s0"),
+        RecordsOrder::Stored => fx.stored_order((0..N).step_by(2)),
+    };
+    let mut ahead = matching.iter().rev().copied();
+    let hidden: Vec<u64> = ahead.by_ref().take(3).collect();
+    let mut base = request("s0", &fields);
+    base.filter = Some(serials_in((0..N).step_by(2), &[]));
+    base.order = Some(order);
+    base.page_rows = Some(50);
+    base.pages = Some(2);
+    let entity = |fx: &Fx, s: u64| EntityId::new(fx.entity[&s]);
+    let mut out = Vec::new();
+
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let mut first = base.clone();
+    first.count = true;
+    let (sink, trailer) = respond(&fx.engine, &session, first).unwrap();
+    out.push(sent(sink, &trailer));
+    fx.engine
+        .accept_change(entity(&fx, hidden[0]), ChangeOp::Suppress)
+        .unwrap();
+    fx.engine
+        .accept_change(entity(&fx, hidden[1]), ChangeOp::Delete)
+        .unwrap();
+
+    let held = trailer.next.expect("the read goes on");
+    let mut second = base.clone();
+    second.cursor = Some(&held);
+    let engine = &fx.engine;
+    let suppressed = entity(&fx, hidden[2]);
+    let (sink, trailer) = respond_between(engine, &session, second, || {
+        engine.accept_change(suppressed, ChangeOp::Suppress).unwrap();
+    });
+    out.push(sent(sink, &trailer));
+
+    let fx = fx.restarted();
+    fx.engine.set_driven_reads_for_test(driven);
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let mut cursor = trailer.next;
+    while let Some(held) = cursor.take() {
+        let mut req = base.clone();
+        req.cursor = Some(&held);
+        let (sink, trailer) = respond(&fx.engine, &session, req).unwrap();
+        out.push(sent(sink, &trailer));
+        cursor = trailer.next;
+    }
+    let ids: Vec<u64> = out
+        .iter()
+        .flat_map(|r| r.pages.iter().flat_map(|(b, ..)| ids_of(b)))
+        .collect();
+    assert_each_once(&ids);
+    let expected: Vec<u64> = matching
+        .iter()
+        .filter(|s| !hidden.contains(s))
+        .map(|&s| fx.tid(s))
+        .collect();
+    assert_eq!(ids, expected, "{order:?} driven={driven}");
+    // Each build draws its own identity coordinate, so two fixtures' heads differ in it alone.
+    for response in &mut out {
+        response.head.identity_key = None;
+    }
+    out
+}
+
+/// **A driven read and a walked one send the same across denies and a restart**: a suppression
+/// and a deletion accepted between two responses, a suppression accepted between two pages of one
+/// response, and a restart before the rest of the read.
+#[test]
+fn a_driven_read_sends_what_the_walk_sends_across_denies_and_a_restart() {
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let driven = read_across_denies_and_a_restart(order, true);
+        let walked = read_across_denies_and_a_restart(order, false);
+        assert_same(&driven, &walked, &format!("{order:?}"));
     }
 }

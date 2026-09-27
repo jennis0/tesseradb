@@ -185,6 +185,13 @@ the visible set again, an item's labels are the ones the viewer holds, as on the
 artifact is served on its layer's terms, as on the viewport. An item's external id is returned only
 on request, in that item's own row.
 
+A read of items whose filter bounds its matches through a unique field's index or an artifact's
+membership is driven from those matches ([queries](queries.md#filters-across-pages)). The bound is
+intersected with the viewer's visible set before it is counted or read, and the choice of route
+follows its size, so a value held only by an item the viewer cannot see drives the read exactly as
+a value nobody holds, with the same rows, counts and pages. The index lookup's own time can differ
+between a value that is held and one that is not, which the timing row below covers.
+
 **Stored order shows which items share a full set of terms.** A read of items in stored order
 returns a viewer's items in the order of their entity ids. Within each build batch and each ingest
 window, entity ids are assigned in order of each item's full set of access terms, the units its

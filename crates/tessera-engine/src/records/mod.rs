@@ -21,12 +21,14 @@ mod cursor;
 mod plan;
 mod walk;
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::record_batch::RecordBatch;
 
 use crate::cancel::CancelToken;
+use crate::compose::{for_each_run_in, MaskedSet};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::filter::FilterExpr;
@@ -41,7 +43,7 @@ pub(crate) use cursor::CursorKey;
 use cursor::{Binding, ItemsCursor, Position, Route};
 use columns::{empty_page, read_page};
 use plan::FieldPlan;
-use walk::{filter_rows, Clock, Collected, PageCx, Walk, Walked};
+use walk::{driving_rows, filter_rows, Clock, Collected, PageCx, Walk, Walked};
 
 /// The order a read returns its rows in. Both return the same rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -610,7 +612,8 @@ impl Engine {
 
 impl Pager for ItemsPager<'_> {
     /// The view's visible items, and of them the ones the filter matches, by one evaluation of
-    /// the filter over the whole view on the route every page takes, under the first page's mask.
+    /// the filter on the route every page takes, under the first page's mask: over the rows that
+    /// drive the read where [`driving_rows`] gives them, and over the whole view otherwise.
     fn count(
         &mut self,
         engine: &Engine,
@@ -630,12 +633,16 @@ impl Pager for ItemsPager<'_> {
             ));
         };
         let total = u32::try_from(open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
-        let whole_view = std::iter::once(0..total).collect::<Vec<_>>();
-        let routed = filter_rows(&cx, expr, None, &whole_view, false, &req.cancel)?;
-        let matched = open
-            .mask
-            .rows_in_range(0..total)
-            .and_cardinality(routed.rows.rows());
+        let candidate = engine.filter_candidate(open.served.session, generation)?;
+        let routed = match driving_rows(&cx, expr, &candidate, self.walk.ceiling)? {
+            Some(rows) => {
+                let mut domain: Vec<Range<u32>> = Vec::new();
+                for_each_run_in(&rows, 0..total, &mut |run| domain.push(run));
+                filter_rows(&cx, expr, Some(&candidate), &domain, true, &req.cancel)?
+            }
+            None => filter_rows(&cx, expr, Some(&candidate), &[0..total], false, &req.cancel)?,
+        };
+        let matched = open.mask.count_intersection(routed.rows.rows());
         Ok((
             RecordsCounts {
                 served: visible,

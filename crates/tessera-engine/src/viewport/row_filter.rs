@@ -1053,28 +1053,11 @@ impl Engine {
             resolved.regions.borrow_mut().push((leaf.clone(), rows.clone()));
             Ok(rows)
         };
-        let members = |leaf: &crate::filter::MemberOfLeaf| {
-            let held = resolved
-                .members
-                .borrow()
-                .iter()
-                .find(|(held, _)| held == leaf)
-                .map(|(_, rows)| rows.clone());
-            if let Some(rows) = held {
-                return Ok(rows);
-            }
-            let rows = self.resolve_member_of(leaf, served, mask)?;
-            resolved.members.borrow_mut().push((leaf.clone(), rows.clone()));
-            Ok(rows)
-        };
+        let members =
+            |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, mask, resolved);
         let layers = |layer: &str| self.reaches_layer(served.session, layer);
         let unique = |column: &str, keys: &[tessera_store::unique::UniqueKey]| {
-            crate::unique::holders(served.generation, column, keys)
-                .map(|found| found.into_iter().map(|(_, entity)| entity.raw() as u32).collect())
-                .map_err(|e| crate::filter::FilterError::UniqueUnreadable {
-                    column: column.to_string(),
-                    detail: e.to_string(),
-                })
+            unique_holders(served.generation, column, keys)
         };
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
@@ -1089,6 +1072,29 @@ impl Engine {
                 .evaluate_routed(expr, candidate, prefer_row, &resolvers)
                 .map_err(filter_refusal)
         })
+    }
+
+    /// A `member_of` leaf's rows under `mask`, from `resolved` where it holds them, and resolved
+    /// and kept there otherwise.
+    pub(crate) fn member_rows(
+        &self,
+        leaf: &crate::filter::MemberOfLeaf,
+        served: &ServedView<'_>,
+        mask: &EffectiveMask,
+        resolved: &ResolvedLeaves,
+    ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
+        let held = resolved
+            .members
+            .borrow()
+            .iter()
+            .find(|(held, _)| held == leaf)
+            .map(|(_, rows)| rows.clone());
+        if let Some(rows) = held {
+            return Ok(rows);
+        }
+        let rows = self.resolve_member_of(leaf, served, mask)?;
+        resolved.members.borrow_mut().push((leaf.clone(), rows.clone()));
+        Ok(rows)
     }
 
     /// Whether `session` reaches `layer`: whether a `member_of` may name it.
@@ -1210,6 +1216,21 @@ impl Engine {
 pub(crate) struct ResolvedLeaves {
     regions: std::cell::RefCell<Vec<(crate::filter::RegionLeaf, crate::region::RegionRows)>>,
     members: std::cell::RefCell<Vec<(crate::filter::MemberOfLeaf, croaring::Bitmap)>>,
+}
+
+/// The entities holding `keys` in a unique column, by the column's index and the live entries
+/// beside it, deleted entities dropped. Visibility is the caller's.
+pub(crate) fn unique_holders(
+    generation: &Generation,
+    column: &str,
+    keys: &[tessera_store::unique::UniqueKey],
+) -> std::result::Result<Vec<u32>, crate::filter::FilterError> {
+    crate::unique::holders(generation, column, keys)
+        .map(|found| found.into_iter().map(|(_, entity)| entity.raw() as u32).collect())
+        .map_err(|e| crate::filter::FilterError::UniqueUnreadable {
+            column: column.to_string(),
+            detail: e.to_string(),
+        })
 }
 
 /// A filter's refusal as the engine's: the caller's fault or the deployment's, as [`FilterError`]

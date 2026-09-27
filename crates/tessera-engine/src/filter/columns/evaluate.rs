@@ -128,7 +128,11 @@ impl FilterColumns {
 
     /// The keys a leaf names where its column's unique index answers it: `eq` or `in` on a unique
     /// column. A number the column's type cannot hold names no key, so it matches nothing.
-    fn unique_keys(&self, column: &str, operand: &FilterOperand) -> Option<Vec<UniqueKey>> {
+    pub(crate) fn unique_keys(
+        &self,
+        column: &str,
+        operand: &FilterOperand,
+    ) -> Option<Vec<UniqueKey>> {
         let ty = *self.unique.get(column)?;
         let number = |value: &crate::filter::Scalar| match *value {
             crate::filter::Scalar::Int(i) => key_of_integer(ty, i),
