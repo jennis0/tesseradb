@@ -2048,23 +2048,21 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
 
 
 
-/// **A row that stops being a join keeps its label** (`views.md` §4, decision 0116).
+/// **A row whose item is deleted under it creates a fresh item that keeps its label.**
 ///
-/// The demotion direction of the same race. The handler resolves an external id to a live holder
-/// and stamps the row a join; between that pass and the apply the holder is deleted, so
-/// `established_collisions` clears the stamp and the row allocates a **fresh** entity. It must
-/// arrive still carrying its descriptors, or that fresh entity is written with no label at all —
-/// visible to no principal, and reachable by no deny either. Dropping them in the handler, as the
-/// code did until the arms moved, is what would have produced that.
+/// The handler resolves an external id to a live item and plans an edit. If the item is deleted
+/// between that plan and the apply, the executor answers stale, the handler plans again against a
+/// generation without the item, and the row creates a fresh item. It must still carry its
+/// descriptors, or the fresh item is written with no label at all: visible to no principal, and
+/// reachable by no deny either.
 ///
-/// **Two halves, and the first does not reach the writer's demotion.** Sequentially the handler
-/// sees the deleted holder itself and never stamps the row, so what the first half asserts is the
-/// *property* — a re-ingest past a delete is served under the label it carried — and not the
-/// ordering. The second half submits the delete and the re-ingest together, which is the only way
-/// this deployment reaches the ordering at all; the executor decides which lands first, so each
-/// round asserts what holds either way: the row is taken and labelled, or it is refused.
+/// The first half runs the two in sequence, so the handler sees the deleted item itself; it
+/// asserts the property, not the ordering. The second half sends the delete and the re-ingest
+/// together, which is the only way to reach the ordering over HTTP, and the executor decides which
+/// lands first. A row that created an item is served under its label. A row that edited the live
+/// item was applied before the delete, which then removed the item, so it is not served.
 #[tokio::test]
-async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label() {
+async fn a_row_whose_item_is_deleted_under_it_creates_a_fresh_item_that_keeps_its_label() {
     let mut served = Served::build(build_fixture_bundle).await;
     let id = b"demoted".to_vec();
     let resp = ingest(
@@ -2078,8 +2076,8 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
     let first = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
 
-    // The holder is deleted, so the binding is dead bookkeeping: the re-ingest below allocates
-    // rather than answering 409, and it is no longer a join.
+    // The item is deleted, so the re-ingest below names no live item and creates one, where a
+    // live item would have been edited.
     let body = json!([{ "tessera_id": first.to_string(), "op": "delete" }]);
     let resp = served
         .server
@@ -2090,7 +2088,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "the holder is deleted");
+    assert_eq!(resp.status(), 200, "the item is deleted");
 
     // The same external id again, under a label this principal holds.
     let resp = ingest(
@@ -2100,15 +2098,15 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         &[(id, 800.0, 300.0, &["1"][..], Some(7))],
     )
     .await;
-    assert_eq!(resp.status(), 200, "a deleted holder does not collide");
+    assert_eq!(resp.status(), 200, "a deleted item does not collide");
     let second = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
-    assert_ne!(second, first, "a fresh entity, not the dead binding's");
+    assert_ne!(second, first, "a fresh item, not the deleted one");
     drain(&served.server).await;
     served.reauthorise().await;
 
-    // The whole point: the fresh entity carries the label the batch named, so a principal that
-    // satisfies it is served the row. A row that had arrived with its descriptors already dropped
-    // would be here with an empty term set and visible to nobody.
+    // The fresh item carries the label the batch named, so a principal that satisfies it is
+    // served the row. A row that had lost its descriptors would be stored with no label and be
+    // visible to nobody.
     assert!(
         points(&served, "quarter:2026-Q1")
             .await
@@ -2117,10 +2115,10 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         "the re-ingested row is served under the label it carried"
     );
 
-    // The concurrent half. The deny lane has priority over the work queue, so a delete submitted
-    // beside an ingest can apply between that ingest's handler pass and its admit — which is the
-    // demotion the writer has to survive.
-    let mut taken = Vec::new();
+    // The concurrent half. The deny lane has priority over the work queue, so a delete sent beside
+    // an ingest can apply between that ingest's plan and its apply.
+    let mut created = Vec::new();
+    let mut deleted_after_edit = Vec::new();
     for round in 0..8u32 {
         let id = format!("demote-race-{round}").into_bytes();
         let seed = ingest(
@@ -2133,8 +2131,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         assert_eq!(seed.status(), 200);
         let holder = ingested_ids(&seed.json::<Value>().await.unwrap())[0];
 
-        let body =
-            json!([{ "tessera_id": holder.to_string(), "op": "delete" }]);
+        let body = json!([{ "tessera_id": holder.to_string(), "op": "delete" }]);
         let batch_id = format!("demote-race-again-{round}");
         let rows = [(id, 800.0, 300.0, &["1"][..], Some(7))];
         let (deleted, again) = tokio::join!(
@@ -2155,13 +2152,19 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         let status = again.status().as_u16();
         let text = again.text().await.unwrap();
         match status {
-            // Taken: whether it joined the still-live holder or allocated past the delete, it must
-            // carry a label — the fresh-entity case is the one the demotion produces.
-            200 => taken.push(
-                ingested_ids(&serde_json::from_str::<Value>(&text).unwrap())[0],
-            ),
-            // Refused: the holder was still live at the admit and the labels differ, which is the
-            // label arm doing its job.
+            200 => {
+                let resp: Value = serde_json::from_str(&text).unwrap();
+                let taken = ingested_ids(&resp)[0];
+                if resp["created"] == 1 {
+                    assert_ne!(taken, holder, "round {round}: a fresh item: {text}");
+                    created.push(taken);
+                } else {
+                    assert_eq!(resp["edited"], 1, "round {round}: {text}");
+                    assert_eq!(taken, holder, "round {round}: the edit names the item: {text}");
+                    deleted_after_edit.push(taken);
+                }
+            }
+            // Planned twice against an item that moved each time.
             409 => assert!(
                 text.contains("\"conflict\""),
                 "round {round}: the only lawful refusal here is a conflict: {text}"
@@ -2170,22 +2173,25 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         }
     }
     drain(&served.server).await;
-    // A fresh session, as the first half takes one: the session authorised before the race holds
-    // a projection built at the previous generation, and until the pool's refresh lands it is
-    // served from that entry — every pre-race row, none of the flush's — with no header to say
-    // so (see `points`). Under load that read landed first and the rows below looked lost; they
-    // were published, and a session built at the live generation sees them.
+    // A session authorised before the flush can be answered from its projection at the previous
+    // generation until the background refresh replaces it; a fresh session is built at the live one.
     served.reauthorise().await;
     let served_ids: Vec<u64> = points(&served, "quarter:2026-Q1")
         .await
         .iter()
         .map(|p| p.0)
         .collect();
-    for id in taken {
+    for id in created {
         assert!(
             served_ids.contains(&id),
-            "every row the executor took is served under the label it carried; {id} is not in \
+            "every item a row created is served under the label it carried; {id} is not in \
              {served_ids:?}"
+        );
+    }
+    for id in deleted_after_edit {
+        assert!(
+            !served_ids.contains(&id),
+            "an item deleted after its edit is not served; {id} is in {served_ids:?}"
         );
     }
 }
