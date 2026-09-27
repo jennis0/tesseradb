@@ -43,8 +43,9 @@ pub const NO_SOURCE_ID: u64 = u64::MAX;
 /// How this build's declaration names a row.
 #[derive(Debug)]
 pub enum IdSpace {
-    /// The join column holds an integer, which is the row's source id.
-    Integer,
+    /// The join column holds an integer, which is the row's source id. `signed` where the column
+    /// is a signed type, whose values the source ids hold as their two's-complement bits.
+    Integer { signed: bool },
     /// The join column holds strings. A row's source id is its key's rank.
     Supplied(SuppliedIds),
     /// **The declaration names no join field.** A row's source id is its position in the points
@@ -156,8 +157,14 @@ impl IdSpace {
                 _ => spelling = Some((view, found, kind)),
             }
         }
-        let Some((_, spelled, IdKind::Bytes)) = spelling else {
-            return Ok(IdSpace::Integer);
+        let spelled = match spelling {
+            Some((_, spelled, IdKind::Bytes)) => spelled,
+            Some((_, found, IdKind::Integer)) => {
+                return Ok(IdSpace::Integer {
+                    signed: found.is_signed_integer(),
+                })
+            }
+            None => return Ok(IdSpace::Integer { signed: false }),
         };
         // **`--limit` selects on an integer id and there is no integer here.** It keeps the rows
         // whose identity is below it, and a supplied key has no order a caller would recognise it
@@ -189,7 +196,7 @@ impl IdSpace {
     /// The supplied keys, or `None` on the integer and positional routes.
     pub fn supplied(&self) -> Option<&SuppliedIds> {
         match self {
-            IdSpace::Integer | IdSpace::Positional => None,
+            IdSpace::Integer { .. } | IdSpace::Positional => None,
             IdSpace::Supplied(keys) => Some(keys),
         }
     }
@@ -203,7 +210,8 @@ impl IdSpace {
     /// or the row it sits at.
     pub fn display(&self, source_id: u64) -> String {
         match self {
-            IdSpace::Integer => source_id.to_string(),
+            IdSpace::Integer { signed: false } => source_id.to_string(),
+            IdSpace::Integer { signed: true } => (source_id as i64).to_string(),
             IdSpace::Supplied(keys) => String::from_utf8_lossy(keys.key(source_id)).into_owned(),
             IdSpace::Positional => format!("at row {source_id}"),
         }
@@ -213,7 +221,7 @@ impl IdSpace {
     /// row. The supplied route's ranks are `0..n`, so its span is exact.
     pub fn rank_bounds(&self) -> Option<(u64, u64)> {
         match self {
-            IdSpace::Integer | IdSpace::Positional => None,
+            IdSpace::Integer { .. } | IdSpace::Positional => None,
             IdSpace::Supplied(keys) if keys.is_empty() => None,
             IdSpace::Supplied(keys) => Some((0, keys.len() as u64 - 1)),
         }

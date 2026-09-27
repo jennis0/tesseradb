@@ -4271,7 +4271,7 @@ mod tests {
         let plan = read(
             &declarations,
             &sources,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world", projection, extent,
@@ -4382,7 +4382,7 @@ mod tests {
         let mut plan = read(
             std::slice::from_ref(&declaration),
             &sources,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world",
@@ -4439,7 +4439,7 @@ mod tests {
         let error = read(
             &declarations,
             &sources,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
             &BTreeMap::new(),
             &[
                 tessera_store::derived::ViewFrame::new(
@@ -4481,7 +4481,7 @@ mod tests {
         read(
             &declarations,
             &sources,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world", projection, extent,

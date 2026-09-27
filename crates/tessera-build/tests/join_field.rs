@@ -337,6 +337,23 @@ fn one_value_twice_in_one_view_is_refused_naming_the_count_and_the_values() {
     assert_eq!(listed, 10, "up to ten values: {said}");
 }
 
+/// **A signed value held twice is named as it is written**, not as its two's-complement bits.
+#[test]
+fn a_negative_value_held_twice_is_named_as_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let mut ids: Vec<i64> = (0..N as i64).map(|i| i - 5).collect();
+    ids[N - 1] = -1;
+    write_points(
+        &dir.join("points.parquet"),
+        Some(Arc::new(Int64Array::from(ids))),
+    );
+    let said = build(&args(dir, &joined("i64"), &dir.join("bundle")))
+        .expect_err("a value held twice is refused")
+        .to_string();
+    assert!(said.contains(": -1."), "{said}");
+}
+
 /// **A member naming a value the points file does not carry is refused.**
 #[test]
 fn a_member_naming_an_unknown_value_is_refused() {

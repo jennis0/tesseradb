@@ -36,7 +36,7 @@ fn id_attributes(
 }
 
 /// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
+static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer { signed: false };
 
 /// A fixed, non-degenerate test key shared by every fixture in this file.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";

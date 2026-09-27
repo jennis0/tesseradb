@@ -26,7 +26,7 @@ use tessera_store::read::open_bundle;
 use tessera_types::IdentityKey;
 
 /// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
+static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer { signed: false };
 
 /// That fixture's points file, as a reader of it needs it.
 fn source<'a>(path: &'a std::path::Path, fields: &'a Fields) -> tessera_build::input::Source<'a> {

@@ -621,7 +621,7 @@ fn the_space_of_an_inline_row_defaults_to_the_one_the_page_states() {
         crate::layers::read(
             &config.layers,
             &inputs,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
             &BTreeMap::new(),
             std::slice::from_ref(&frame),
             tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,

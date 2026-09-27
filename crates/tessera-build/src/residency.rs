@@ -3294,7 +3294,7 @@ mod tests {
             IdShape::dense(n),
             &payloads,
             free,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
         );
         disk(
             args,
@@ -3841,7 +3841,7 @@ require_member_visibility = "none"
             IdShape::dense(20_000),
             &payloads_per_item(&args),
             None,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
         )
         .1
     }
@@ -4015,7 +4015,7 @@ require_member_visibility = "none"
                 IdShape::dense(N),
                 &payloads_per_item(&args),
                 free,
-                &crate::ids::IdSpace::Integer,
+                &crate::ids::IdSpace::Integer { signed: false },
             );
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();
