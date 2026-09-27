@@ -40,7 +40,7 @@ describe('<tessera-item-card>', () => {
     expect(deep(host, '[part="headline"]')?.getAttribute('data-name')).toBe('title');
     expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['submitted_at', 'note', 'tessera_id']);
     expect(deep(host, '[part="field"][data-name="tessera_id"] [part="value"]')?.textContent).toBe('12345678901234567890');
-    expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('2023-11-14T22:13:20.000Z');
+    expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('14 November 2023');
     expect(deep(host, 'slot[name="field-title"]')).not.toBeNull();
     expect(host.textContent).toContain('my link');
     expect(deep(host, '[part="field"][data-name="archive"]')).toBeNull();
@@ -412,7 +412,7 @@ describe('<tessera-filter-panel>', () => {
     // One chip, naming the column and the chosen key.
     const chips = deepAll(host, '[part="chip"]');
     expect(chips).toHaveLength(1);
-    expect(chips[0]!.textContent).toContain('archive');
+    expect(chips[0]!.getAttribute('data-column')).toBe('archive');
     expect(chips[0]!.textContent).toContain('cs');
     expect(deepAll(host, '[part="verb"]').map((v) => v.getAttribute('data-verb'))).toEqual(['filter']);
     const before = filters[0];

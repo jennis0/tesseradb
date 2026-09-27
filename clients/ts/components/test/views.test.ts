@@ -210,7 +210,7 @@ describe('<tessera-key-picker>', () => {
     expect(parts('step').map((b) => b.getAttribute('data-direction'))).toEqual(['prev', 'next']);
     const view = await picker('tessera-view-picker', 'quarter:2026-Q3');
     expect(deepAll(view.host, '[part="select"]')).toHaveLength(1);
-    expect(deepAll(view.host, '[part="label"]')).toHaveLength(1);
+    expect(deepAll(view.host, '[part="field"]')).toHaveLength(1);
   });
 
   it('renders nothing for a plain view, which is in no group', async () => {

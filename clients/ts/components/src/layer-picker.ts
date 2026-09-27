@@ -18,9 +18,9 @@ import {chrome, tokens} from './tokens.js';
  *   changed, with the layers now drawn.
  * @csspart title - The heading.
  * @csspart state - The state line, with `data-state`.
- * @csspart refusal - A refusal's code and detail, in the refused state.
+ * @csspart refusal - The words "View refused", with `data-code`, in the refused state.
  * @csspart entry - One layer, with `data-layer`, and `data-filter-layer` on a filter layer.
- * @csspart name - A layer's name.
+ * @csspart name - A layer's title, or its name where it declares none.
  * @csspart group - The heading of the filter layers.
  */
 export class TesseraLayerPicker extends TesseraElement {
@@ -35,20 +35,17 @@ export class TesseraLayerPicker extends TesseraElement {
         display: flex;
         align-items: center;
         gap: 8px;
-        height: 26px;
+        min-height: 28px;
         cursor: pointer;
       }
       [part='group'] {
-        margin: 10px 0 2px;
+        margin: 12px 0 2px;
       }
       [part='entry'][data-filter-layer] {
         cursor: default;
         color: var(--_tessera-ink-2);
-        padding-left: 22px;
       }
       [part='name'] {
-        font-family: var(--_tessera-font-mono);
-        font-size: 12px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -92,16 +89,16 @@ export class TesseraLayerPicker extends TesseraElement {
         ${drawn.map(
           (e) => html`<label part="entry" class="check" data-layer=${e.root.name} title=${e.closure.length > 1 ? e.closure.join(' + ') : nothing}>
             <input type="checkbox" .checked=${on.has(e.root.name)} @change=${(ev: Event) => this.toggle(e, (ev.target as HTMLInputElement).checked)} />
-            <span part="name">${e.root.name}</span>
+            <span part="name">${e.root.title || e.root.name}</span>
           </label>`
         )}
       </div>
       ${filters.length > 0
-        ? html`<div part="group" class="xs muted">Filter layers</div>
+        ? html`<div part="group" class="hd">Used as filters</div>
             <div class="col">
               ${filters.map(
-                (e) => html`<div part="entry" data-layer=${e.root.name} data-filter-layer title="Listed, not drawn. Reached through the hierarchy panel and applied as a clause">
-                  <span part="name">${e.root.name}</span>
+                (e) => html`<div part="entry" data-layer=${e.root.name} data-filter-layer title="Not drawn: choose from it in the hierarchy to filter">
+                  <span part="name">${e.root.title || e.root.name}</span>
                 </div>`
               )}
             </div>`

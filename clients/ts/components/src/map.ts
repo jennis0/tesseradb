@@ -134,7 +134,9 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * @csspart canvas - The deck.gl canvas's container.
  * @csspart overlay - The state drawn over the canvas when refused, expired or empty.
  * @csspart state - The state line inside the overlay, with `data-state`.
- * @csspart refusal - The refusal's code and detail, inside the overlay.
+ * @csspart retry - The Retry button in the overlay, when the view was refused.
+ * @csspart refusal - The words "View refused" inside the overlay, with `data-code` set to the
+ *   refusal's code.
  * @csspart controls - The toolbar.
  * @csspart tooltip - The hover tooltip.
  * @cssprop --tessera-map-height - The map's height.
@@ -170,7 +172,7 @@ export class TesseraMap extends TesseraElement {
         z-index: 2;
         display: flex;
         flex-direction: column;
-        gap: var(--_tessera-space);
+        gap: calc(var(--_tessera-space) / 2);
         max-width: 46%;
         pointer-events: none;
       }
@@ -195,35 +197,31 @@ export class TesseraMap extends TesseraElement {
         align-items: flex-end;
       }
       [part='controls'] {
+        align-self: flex-start;
         display: flex;
         flex-direction: column;
+        gap: 2px;
+        padding: 3px;
         background: var(--_tessera-surface);
         border: 1px solid var(--_tessera-line);
         border-radius: var(--_tessera-radius);
         box-shadow: var(--_tessera-shadow);
-        overflow: hidden;
         pointer-events: auto;
       }
       [part='controls'] button {
-        width: 36px;
-        height: 36px;
+        width: 32px;
+        height: 32px;
         display: grid;
         place-items: center;
-        color: var(--_tessera-ink-2);
-        border-bottom: 1px solid var(--_tessera-line-2);
-        border-radius: 0;
+        color: color-mix(in srgb, var(--_tessera-ink) 82%, var(--_tessera-surface));
+        border-radius: var(--_tessera-radius-control);
       }
-      [part='controls'] button:last-child {
-        border-bottom: 0;
+      [part='controls'] button:hover {
+        background: var(--_tessera-surface-2);
       }
       [part='controls'] button[aria-pressed='true'] {
-        background: var(--_tessera-accent-soft);
-        color: var(--_tessera-accent);
-      }
-      [part='controls'] .sep {
-        height: 6px;
-        background: var(--_tessera-surface-2);
-        border-bottom: 1px solid var(--_tessera-line-2);
+        background: var(--_tessera-accent);
+        color: var(--_tessera-accent-ink);
       }
       [part='tooltip'] {
         position: absolute;
@@ -258,17 +256,18 @@ export class TesseraMap extends TesseraElement {
       }
       [part='overlay'] [part='state'] {
         pointer-events: auto;
-        padding: 10px 14px;
+        min-height: 40px;
+        padding: 6px 8px 6px 14px;
         background: var(--_tessera-surface);
         border: 1px solid var(--_tessera-line);
         border-radius: var(--_tessera-radius);
         box-shadow: var(--_tessera-shadow);
         font-size: 13px;
-        font-weight: 600;
+        font-weight: 500;
+        color: var(--_tessera-ink);
       }
-      [part='overlay'] [part='state'][data-state='refused'],
-      [part='overlay'] [part='state'][data-state='expired'] {
-        background: var(--_tessera-refuse-soft);
+      [part='overlay'] [part='state']:not(:has(button)) {
+        padding-right: 14px;
       }
     `
   ];
@@ -1078,15 +1077,15 @@ export class TesseraMap extends TesseraElement {
     const state: PanelState = stateOf(status);
     // Loading and retrying are the status strip's; the map draws the states that could otherwise
     // read as an empty corpus.
-    const overlay = state === 'refused' || state === 'expired' || state === 'empty' ? html`<div part="overlay">${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh()})}</div>` : nothing;
+    const refresh = () => this.resolvedStore?.refresh();
+    const overlay = state === 'refused' || state === 'expired' || state === 'empty' ? html`<div part="overlay">${renderState(state, status, {onRefresh: refresh, onRetry: refresh})}</div>` : nothing;
     const controls = this.noControls
       ? nothing
       : html`<div part="controls" role="toolbar" aria-label="Map tools">
-          <button type="button" aria-label="Pan" aria-pressed=${this.mode === 'pan'} title="Pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>${icon('pan')}</button>
-          <button type="button" aria-label="Box select" aria-pressed=${this.mode === 'box'} title="Box select" @click=${() => (this.mode = 'box')}>${icon('box')}</button>
-          <button type="button" aria-label="Lasso select" aria-pressed=${this.mode === 'lasso'} title="Lasso select" @click=${() => (this.mode = 'lasso')}>${icon('lasso')}</button>
-          <div class="sep"></div>
-          <button type="button" aria-label="Fit to extent" title="Fit to extent" @click=${() => this.fit()}>${icon('fit')}</button>
+          <button type="button" aria-label="Pan" aria-pressed=${this.mode === 'pan'} title="Pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>${icon('pan', 16, 1.2)}</button>
+          <button type="button" aria-label="Box select" aria-pressed=${this.mode === 'box'} title="Box select" @click=${() => (this.mode = 'box')}>${icon('box', 16, 1.2)}</button>
+          <button type="button" aria-label="Lasso select" aria-pressed=${this.mode === 'lasso'} title="Lasso select" @click=${() => (this.mode = 'lasso')}>${icon('lasso', 16, 1.2)}</button>
+          <button type="button" aria-label="Fit to extent" title="Fit to extent" @click=${() => this.fit()}>${icon('fit', 16, 1.2)}</button>
         </div>`;
     return html`<div
         part="canvas"
@@ -1119,7 +1118,7 @@ export class TesseraMap extends TesseraElement {
   }
 }
 
-/** A value as the hover shows it; a timestamp in full, as an ISO date-time. */
+/** A value as the hover shows it; a timestamp as a date. */
 function hoverText(value: unknown, arrowType: string | null): string {
   if (arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return timestampText(value);
   return String(value);

@@ -204,9 +204,30 @@ export function idString(id: bigint): string {
   return id.toString(10);
 }
 
-/** A `timestamp_us` value in full, as an ISO date-time. */
+/**
+ * A column's caption: `submitted_at` reads as "Submitted at". A column declares no title, so its
+ * name is written out as words.
+ */
+export function columnCaption(name: string): string {
+  const words = name.replace(/_/g, ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * A category key's title where the store has one, from the legend's names or a suggestion page,
+ * else the key.
+ */
+export function keyTitle(store: Store | null, column: string, key: string): string {
+  if (!store) return key;
+  const named = store.get('legend').categories[column]?.find((v) => v.key === key) ?? store.get('filters').suggestions[column]?.values.find((v) => v.key === key);
+  return named?.title ?? key;
+}
+
+const DATE = new Intl.DateTimeFormat('en-GB', {day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC'});
+
+/** A `timestamp_us` value as a date, such as `14 March 2024`, in UTC. */
 export function timestampText(value: number | bigint): string {
-  return new Date(Number(value) / 1000).toISOString();
+  return DATE.format(new Date(Number(value) / 1000));
 }
 
 /** What the map's pick resolved to where it found no item: a miss, or a broken pick. */

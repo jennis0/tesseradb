@@ -5,10 +5,10 @@ import {attachContextRoot, defineOnce} from './define.js';
 import {tokens} from './tokens.js';
 
 /**
- * Renders a `Count` or a `Masked` through the client's `formatCount` and `formatMasked`. A sample
- * (`count`) shows both figures, as `4,812 of 12,465`, or neither when the count is inexact; a
- * scalar (`masked`) shows one figure, marked `≈` when inexact. Nothing is rendered while `stale` is
- * set. With both properties set, `count` is rendered.
+ * Renders a `Count` or a `Masked` through the client's `formatCount` and `formatMasked`, in the text
+ * face with tabular figures. A sample (`count`) shows both figures, as `4,812 of 12,465`, or neither
+ * when the count is inexact; a scalar (`masked`) shows one figure, marked `≈` when inexact. Nothing
+ * is rendered while `stale` is set. With both properties set, `count` is rendered.
  *
  * This element takes no store; the host or another element sets its properties.
  *
@@ -29,7 +29,6 @@ export class TesseraCount extends LitElement {
       }
       [part='count'] {
         color: var(--_tessera-ink);
-        font-family: var(--_tessera-font-mono);
         font-variant-numeric: tabular-nums;
         font-weight: 500;
       }
@@ -53,10 +52,13 @@ export class TesseraCount extends LitElement {
    * the total on the part's `data-total`. The figure is empty exactly when the pair would be.
    */
   @property() accessor figure: 'both' | 'shown' = 'both';
+  /** Shortens figures of a thousand or more to one decimal, as `16.8M`, where room is short. */
+  @property({type: Boolean}) accessor compact = false;
 
   override render(): TemplateResult | typeof nothing {
     const kind = this.count ? 'sample' : this.masked ? 'scalar' : 'none';
-    const pair = this.count ? formatCount(this.count, {stale: this.stale}) : this.masked ? formatMasked(this.masked, {stale: this.stale}) : '';
+    const opts = {stale: this.stale, compact: this.compact};
+    const pair = this.count ? formatCount(this.count, opts) : this.masked ? formatMasked(this.masked, opts) : '';
     const text = this.count && this.figure === 'shown' && pair !== '' ? pair.split(' of ')[0]! : pair;
     const total = this.count && this.figure === 'shown' && pair !== '' ? pair.split(' of ')[1] : undefined;
     const exact = this.count ? this.count.exact : this.masked ? this.masked.exact : false;

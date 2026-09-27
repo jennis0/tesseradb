@@ -24,6 +24,10 @@ describe('formatCount: a served sample shows both figures or neither', () => {
   it('honours a locale', () => {
     expect(formatCount(shown, {locale: 'en-US'})).toBe('221 of 1,994,089');
   });
+
+  it('shortens both figures where asked', () => {
+    expect(formatCount({shown: 5_390, total: 21_406_522, exact: true}, {compact: true})).toBe('5.4K of 21.4M');
+  });
 });
 
 describe('formatMasked: a number-channel scalar shows one figure or none', () => {

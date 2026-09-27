@@ -1,6 +1,5 @@
 import {html, nothing, type TemplateResult} from 'lit';
 import type {StatusProjection} from '@tesseradb/client';
-import {icon} from './icons.js';
 
 /**
  * The eight panel states. Every panel shows its state in one `part="state"` region, with
@@ -47,31 +46,42 @@ export function showsContent(state: PanelState): boolean {
 }
 
 export type StateActions = {
-  /** The refresh control, present when stale. */
+  /** The Refresh button, present when stale. */
   onRefresh?: (() => void) | null;
-  /** Renewal, shown on expiry when the host gave the map an `authorise` property. */
+  /** The Retry button, present when refused. */
+  onRetry?: (() => void) | null;
+  /** The Sign in button, shown on expiry when the host gave the element a renewal. */
   onReauthorise?: (() => void) | null;
 };
 
-/** The word for a state, as the strip's badge says it. */
+/**
+ * The words for a state as the status strip says it: two or three plain words. What went wrong in
+ * detail stays in `status.refusal`, which a host reads, and is not put on screen.
+ */
 export function stateWord(state: PanelState, status: StatusProjection | null | undefined): string {
   switch (state) {
     case 'detached':
-      return 'No data';
+      return 'Not connected';
     case 'loading':
-      return status && !status.sessionWarm ? 'Starting session…' : 'Loading';
+      return status && !status.sessionWarm ? 'Connecting' : 'Updating';
     case 'retrying':
-      return 'Retrying';
+      return 'Reconnecting';
     case 'shown':
+      return 'Up to date';
     case 'empty':
-      return 'Current';
+      return 'Nothing in view';
     case 'refused':
-      return 'Refused';
+      return 'View refused';
     case 'expired':
       return 'Session expired';
     case 'stale':
-      return 'Corpus updated';
+      return 'Data updated';
   }
+}
+
+/** The refusal's words, with its code on `data-code` for a host's rules and tests. */
+export function refusalText(words: string, code: string | null | undefined): TemplateResult {
+  return html`<span part="refusal" data-code=${code ?? nothing}>${words}</span>`;
 }
 
 /**
@@ -91,18 +101,20 @@ export function renderState(
     case 'loading':
       return html`<span part="state" data-state="loading"><span class="dot quiet"></span>${stateWord(state, status)}${status && !status.sessionWarm ? nothing : html`<span class="skel" aria-hidden="true"></span>`}</span>`;
     case 'retrying':
-      return html`<span part="state" data-state="retrying"><span class="dot warn"></span>Retrying<span class="skel" aria-hidden="true"></span></span>`;
+      return html`<span part="state" data-state="retrying"><span class="dot warn"></span>${stateWord(state, status)}</span>`;
     case 'shown':
       return html`<span part="state" data-state="shown"></span>`;
     case 'empty':
-      return html`<span part="state" data-state="empty">Nothing here</span>`;
+      return html`<span part="state" data-state="empty">${stateWord(state, status)}</span>`;
     case 'refused':
-      return html`<span part="state" data-state="refused">${icon('warn', 14)}Refused<span part="refusal" class="mono">${refusal ? `${refusal.code}${refusal.detail ? ' · ' + refusal.detail : ''}` : ''}</span></span>`;
+      return html`<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText(stateWord(state, status), refusal?.code)}${actions.onRetry
+          ? html`<button part="retry" class="btn small" type="button" @click=${actions.onRetry}>Retry</button>`
+          : nothing}</span>`;
     case 'expired':
-      return html`<span part="state" data-state="expired">${icon('lock', 14)}Session expired${actions.onReauthorise
-          ? html`<button part="reauthorise" class="btn primary" type="button" @click=${actions.onReauthorise}>Sign in again</button>`
+      return html`<span part="state" data-state="expired"><span class="dot refuse"></span>${stateWord(state, status)}${actions.onReauthorise
+          ? html`<button part="reauthorise" class="btn small" type="button" @click=${actions.onReauthorise}>Sign in</button>`
           : nothing}</span>`;
     case 'stale':
-      return html`<span part="state" data-state="stale">${icon('clock', 14)}Corpus updated<button part="refresh" class="btn primary" type="button" @click=${actions.onRefresh ?? undefined}>${icon('refresh', 13)}Refresh</button></span>`;
+      return html`<span part="state" data-state="stale"><span class="dot warn"></span>${stateWord(state, status)}<button part="refresh" class="btn small" type="button" @click=${actions.onRefresh ?? undefined}>Refresh</button></span>`;
   }
 }

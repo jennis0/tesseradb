@@ -5,7 +5,7 @@ import {attachedTopics, displayName} from '@tesseradb/deck/internal';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
-import {renderState} from './states.js';
+import {refusalText, renderState} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
@@ -18,9 +18,9 @@ const onKeys = (press: () => void) => (e: KeyboardEvent) => {
 
 /** What each kind of drawn shape says on the card. */
 const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
-  derived: 'derived: the hull of the members you can see',
-  predicate: 'boundary: the same for every viewer',
-  authored: 'authored: the same for every viewer'
+  derived: 'Drawn around the members you can see',
+  predicate: 'The same for everyone',
+  authored: 'The same for everyone'
 };
 
 /**
@@ -45,10 +45,11 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
  *   button put a `member_of` clause on or took it off.
  * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - The close button was
  *   pressed, with `what` set to `artifact`.
- * @csspart title - The heading: the level's or the layer's title, holding the close button.
+ * @csspart title - The heading: the level's or the layer's title, holding the close button while
+ *   the card shows an artifact or a refusal.
  * @csspart close - The close button.
  * @csspart state - The state line, with `data-state`.
- * @csspart refusal - A refusal's code and detail.
+ * @csspart refusal - The words "Not available", with `data-code` set to the refusal's code.
  * @csspart headline - The artifact's name.
  * @csspart count - The masked count.
  * @csspart content - The artifact's description, or its attached topic.
@@ -86,22 +87,17 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='count'] tessera-count::part(count) {
         font-size: 20px;
-        font-weight: 500;
-        font-family: var(--_tessera-font-mono);
+        font-weight: 600;
       }
       [part='count'] tessera-count::part(label) {
         font-size: 13px;
-        margin-left: 0;
       }
       [part='content'] {
         margin: 0 0 10px;
         font-size: 12px;
         color: var(--_tessera-ink-2);
       }
-      .field .v {
-        font-family: var(--_tessera-font-mono);
-        font-size: 12px;
-      }
+
       .children-label {
         margin: 12px 0 4px;
       }
@@ -127,6 +123,7 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='verbs'] .btn[aria-pressed='true'] {
         border-color: currentColor;
+        background: var(--_tessera-surface-2);
       }
       [part='verbs'] [data-verb='highlight'][aria-pressed='true'] {
         background: var(--_tessera-highlight-soft);
@@ -147,8 +144,16 @@ export class TesseraArtifactCard extends TesseraElement {
         font-weight: 400;
       }
       [part='close'] {
-        display: inline-flex;
-        color: var(--_tessera-ink-3);
+        width: 24px;
+        height: 24px;
+        margin: -4px -4px -4px 0;
+        display: grid;
+        place-items: center;
+        border-radius: 5px;
+        color: var(--_tessera-ink-2);
+      }
+      [part='close']:hover {
+        background: var(--_tessera-surface-2);
       }
     `
   ];
@@ -198,7 +203,7 @@ export class TesseraArtifactCard extends TesseraElement {
         emit(this, 'tessera-clausechange', {id: idString(artifact), layer, outside, verb, on: !on});
       }}
     >
-      ${icon(verb === 'filter' ? 'filter' : 'highlight', 14)}${label}
+      ${icon(outside ? 'outside' : verb === 'filter' ? 'filter' : 'highlight', 14)}${label}
     </button>`;
   }
 
@@ -211,14 +216,16 @@ export class TesseraArtifactCard extends TesseraElement {
     // otherwise the card would offer Fit on a layer with nothing drawn.
     const declaredLayer = row?.layer ?? artifact?.detail.layer;
     const decl = declaredLayer === undefined ? undefined : metaLayers.find((l) => l.name === declaredLayer);
-    const what = (row && decl?.levels.find((lv) => lv.level === row.rung)?.title) || decl?.title || 'Artifact';
-    const heading = html`<h2 part="title">${what}<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button></h2>`;
+    const what = (row && decl?.levels.find((lv) => lv.level === row.rung)?.title) || decl?.title || decl?.name || 'Selected';
+    // The close button appears only while the card shows something to close.
+    const heading = (closable: boolean) =>
+      html`<h2 part="title">${what}${closable ? html`<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button>` : nothing}</h2>`;
     if (refusal) {
-      return html`<div class="panel">${heading}<span part="state" data-state="refused"><span part="refusal">${refusal.code}: ${refusal.detail}</span></span></div>`;
+      return html`<div class="panel">${heading(true)}<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText('Not available', refusal.code)}</span></div>`;
     }
     if (!artifact) {
-      if (!this.resolvedStore) return html`<div class="panel">${heading}${renderState('detached', null)}</div>`;
-      return html`<div class="panel">${heading}<span part="state" data-state="empty">No cluster selected</span></div>`;
+      if (!this.resolvedStore) return html`<div class="panel">${heading(false)}${renderState('detached', null)}</div>`;
+      return html`<div class="panel">${heading(false)}<span part="state" data-state="empty">Nothing selected</span></div>`;
     }
     const s = this.resolvedStore;
     const artifacts = s?.get('artifacts');
@@ -239,15 +246,15 @@ export class TesseraArtifactCard extends TesseraElement {
     const shape = decl?.shape ? {kind: decl.shape, text: SHAPE_TEXT[decl.shape]} : null;
     // A clause made here carries the drawn name as its label, since nothing downstream can resolve it.
     const clauseName = here ? displayName(here, topics) : null;
-    return html`<div class="panel">${heading}
+    return html`<div class="panel">${heading(true)}
       <span part="state" data-state="shown"></span>
       <div part="headline" class="card-title">${(here ? displayName(here, topics) : null) ?? UNNAMED}</div>
-      <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members visible to you"></tessera-count></div>
+      <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members"></tessera-count></div>
       ${here && here.content.length > 0 && topics.has(here.tesseraId) ? html`<p part="content">${topics.get(here.tesseraId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
       <div class="field">
-        <div class="k">layer</div><div part="value" class="v">${artifact.detail.layer}</div>
-        ${artifact.detail.key ? html`<div class="k">key</div><div part="value" class="v">${artifact.detail.key}</div>` : nothing}
-        ${shape ? html`<div class="k">shape</div><div part="shape" class="v" data-kind=${shape.kind}>${shape.text}</div>` : nothing}
+        <div class="k">Layer</div><div part="value" class="v">${decl?.title || artifact.detail.layer}</div>
+        ${artifact.detail.key ? html`<div class="k">Key</div><div part="value" class="v mono">${artifact.detail.key}</div>` : nothing}
+        ${shape ? html`<div class="k">Shape</div><div part="shape" class="v" data-kind=${shape.kind}>${shape.text}</div>` : nothing}
       </div>
       ${parents.length > 0
         ? html`<div part="label" class="xs muted parents-label">Parents</div>

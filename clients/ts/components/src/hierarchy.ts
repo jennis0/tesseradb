@@ -49,7 +49,7 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  *   button was pressed.
  * @csspart title - The heading.
  * @csspart state - The state line, with `data-state`.
- * @csspart refusal - A refusal's code and detail.
+ * @csspart refusal - The words "Layer unavailable", with `data-code` set to the refusal's code.
  * @csspart layer - The layer select, shown where there are several layers.
  * @csspart search - The search box.
  * @csspart tree - The tree of rows.
@@ -64,7 +64,8 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * @csspart highlight - A row's highlight button, with `aria-pressed`.
  * @csspart filter - A row's filter button, with `aria-pressed`.
  * @csspart fit - A row's Fit button, on a layer that draws.
- * @csspart also - The other parents a row is served under, or a refusal of its children.
+ * @csspart also - The other parents a row is served under, or "Children unavailable" with
+ *   `data-code` where its children were refused.
  * @csspart children - An expanded row's children.
  * @csspart more - The More button that fetches the next page.
  */
@@ -91,12 +92,13 @@ export class TesseraHierarchy extends TesseraElement {
         overflow-y: auto;
       }
       [part='row'] {
+        position: relative;
         display: flex;
         align-items: center;
         gap: 6px;
         min-height: 28px;
         padding: 0 4px 0 calc(2px + var(--depth, 0) * 14px);
-        border-radius: 3px;
+        border-radius: var(--_tessera-radius-control);
       }
       [part='row']:hover {
         background: var(--_tessera-surface-2);
@@ -107,7 +109,7 @@ export class TesseraHierarchy extends TesseraElement {
       }
       [part='row'][data-clause='filter'] {
         background: var(--_tessera-accent-soft);
-        color: var(--_tessera-accent);
+        font-weight: 500;
       }
       [part='expander'] {
         display: inline-flex;
@@ -134,20 +136,30 @@ export class TesseraHierarchy extends TesseraElement {
         font-size: 12px;
         color: var(--_tessera-ink-2);
       }
+      /* Over the counts, so hidden buttons take no width from the name; still reachable by Tab. */
       [part='actions'] {
+        position: absolute;
+        right: 2px;
+        top: 50%;
+        transform: translateY(-50%);
         display: inline-flex;
         gap: 2px;
+        padding-left: 6px;
+        background: var(--_tessera-surface-2);
+        border-radius: var(--_tessera-radius-control);
         opacity: 0;
+        pointer-events: none;
       }
       [part='row']:hover [part='actions'],
       [part='row']:focus-within [part='actions'] {
         opacity: 1;
+        pointer-events: auto;
       }
       [part='actions'] button {
         display: inline-flex;
-        padding: 2px;
-        color: var(--_tessera-ink-3);
-        border-radius: 2px;
+        padding: 3px;
+        color: var(--_tessera-ink-2);
+        border-radius: 4px;
       }
       [part='actions'] button:hover {
         color: var(--_tessera-ink);
@@ -159,9 +171,13 @@ export class TesseraHierarchy extends TesseraElement {
         color: var(--_tessera-ink-3);
       }
       [part='more'] {
-        padding-left: calc(18px + var(--depth, 0) * 14px);
+        margin: 4px 0 4px calc(18px + var(--depth, 0) * 14px);
+      }
+      [part='refusal'] {
+        display: flex;
+        align-items: center;
+        gap: 8px;
         font-size: 12px;
-        color: var(--_tessera-accent);
       }
       [part='lineage'] {
         font-size: 11px;
@@ -409,25 +425,25 @@ export class TesseraHierarchy extends TesseraElement {
             this.searching = null;
             this.open = new Set();
           }}>
-            ${offered.map((l) => html`<option value=${l.name} ?selected=${l.name === layer.name}>${l.title || l.name}${isFilterLayer(l) ? ' (filter layer)' : ''}</option>`)}
+            ${offered.map((l) => html`<option value=${l.name} ?selected=${l.name === layer.name}>${l.title || l.name}</option>`)}
           </select>`
         : nothing}
       <div part="search" class="input">${icon('search', 14)}<input
         type="search"
-        aria-label=${`Search ${layer.name}`}
+        aria-label=${`Search ${layer.title || layer.name}`}
         .value=${this.query}
         placeholder="Search names"
         autocomplete="off"
         @input=${(e: Event) => this.search((e.target as HTMLInputElement).value)}
       /></div>
-      ${this.refusal ? html`<span part="refusal">${this.refusal.code}: ${this.refusal.detail}</span>` : nothing}
-      ${rows === null
+      ${this.refusal ? html`<span part="refusal" data-code=${this.refusal.code}><span class="dot refuse"></span>Layer unavailable</span>` : nothing}
+      ${rows === null || (this.refusal && rows.length === 0)
         ? nothing
         : rows.length === 0
           ? html`<span part="state" data-state="empty">${this.searching ? 'No match' : 'Nothing here'}</span>`
           : html`<ul part="tree">${rows.map((n) => this.renderNode(n, 0, layer, filtered))}</ul>`}
       ${this.searching === null && this.rootsNext
-        ? html`<button part="more" type="button" @click=${() => void this.loadRoots(this.rootsNext ?? undefined)}>More…</button>`
+        ? html`<button part="more" class="more-link" type="button" @click=${() => void this.loadRoots(this.rootsNext ?? undefined)}>More</button>`
         : nothing}
     </div>`;
   }
@@ -446,7 +462,7 @@ export class TesseraHierarchy extends TesseraElement {
           aria-label=${open ? `Collapse ${name ?? 'row'}` : `Expand ${name ?? 'row'}`}
           @click=${() => this.toggle(node)}>${icon(open ? 'chev' : 'chevr', 12)}</button>
         <button part="name" type="button" data-unnamed=${name === null ? '' : nothing}
-          title="Highlight this: the map stays and its members are lit"
+          title="Highlight"
           @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${name ?? UNNAMED}</button>
         <span part="counts">
           ${filtered && node.row.matchedCount !== null
@@ -461,19 +477,19 @@ export class TesseraHierarchy extends TesseraElement {
           ${
             // A filter layer draws nothing, so there is nothing to fit to.
             drawn
-              ? html`<button part="fit" type="button" title="Fit the map to this"
+              ? html`<button part="fit" type="button" title="Fit the map to it"
                   @click=${() => emit(this, 'tessera-artifactfit', {id: idString(node.row.tesseraId)})}>${icon('fit', 13)}</button>`
               : nothing
           }
         </span>
       </div>
       ${also.length > 0 ? html`<div part="also" style=${`--depth:${depth}`}>also under ${also.map((p) => this.nameOf(p)).join(', ')}</div>` : nothing}
-      ${node.refusal ? html`<div part="also" style=${`--depth:${depth}`}>${node.refusal.code}: ${node.refusal.detail}</div>` : nothing}
+      ${node.refusal ? html`<div part="also" style=${`--depth:${depth}`} data-code=${node.refusal.code}>Children unavailable</div>` : nothing}
       ${open && node.children
         ? html`<ul part="children" class="list" style="list-style:none;margin:0;padding:0">
             ${node.children.map((c) => this.renderNode(c, depth + 1, layer, filtered))}
             ${node.next
-              ? html`<li><button part="more" style=${`--depth:${depth + 1}`} type="button" @click=${() => void this.expand(node, true)}>More…</button></li>`
+              ? html`<li><button part="more" class="more-link" style=${`--depth:${depth + 1}`} type="button" @click=${() => void this.expand(node, true)}>More</button></li>`
               : nothing}
           </ul>`
         : nothing}

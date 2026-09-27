@@ -6,7 +6,7 @@
  */
 
 /** What `renderState` draws, in every element that shows a state. */
-const STATE = ['state', 'refusal', 'refresh', 'reauthorise'];
+const STATE = ['state', 'refusal', 'refresh', 'retry', 'reauthorise'];
 
 /**
  * The parts each element may render, by element name without `tessera-`, as the lists an element
@@ -17,7 +17,7 @@ const STATE = ['state', 'refusal', 'refresh', 'reauthorise'];
 export const PARTS = {
   map: ['canvas', 'controls', 'overlay', 'tooltip', ...STATE],
   status: ['card', 'strip', 'count-shown', 'count-matched', 'count-highlighted', 'count-visible', ...STATE],
-  'view-picker': ['field', 'label', 'select'],
+  'view-picker': ['field', 'select'],
   'key-picker': ['entry', 'field', 'label', 'select', 'step'],
   legend: ['cluster-option', 'label', 'layers-select', 'level-select', 'ramp', 'select', 'swatch', 'swatches', 'title', 'value', ...STATE],
   'layer-picker': ['entry', 'group', 'name', 'title', ...STATE],

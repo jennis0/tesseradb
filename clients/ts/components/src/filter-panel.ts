@@ -1,7 +1,7 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {repeat} from 'lit/directives/repeat.js';
 import {activeCount, emptyDraft, isPopulated, memberKey, withVerb, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
-import {TesseraElement, UNNAMED, emit} from './base.js';
+import {TesseraElement, UNNAMED, columnCaption, emit, keyTitle, timestampText} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {exportparts} from './parts.js';
@@ -29,10 +29,10 @@ const FILTER_PARTS = exportparts('filter');
  *   column's chip moved between filter and highlight (with `verb`), a column's chip was removed
  *   (with `expr` null), or Clear all was pressed (with `column` and `expr` null). Moving or removing
  *   a `member_of` chip fires nothing. Each inner control fires its own as well.
- * @csspart title - The heading, holding Clear all.
+ * @csspart title - The heading, holding Clear all at its right.
  * @csspart clear - The Clear all button, shown while any clause is applied.
  * @csspart state - The state line, with `data-state`.
- * @csspart refusal - A refusal's code and detail, in the refused state.
+ * @csspart refusal - The words "View refused", with `data-code`, in the refused state.
  * @csspart chips - The applied clauses.
  * @csspart chip - One applied clause, with `data-verb` (`filter` or `highlight`) and `data-column`
  *   or `data-artifact`.
@@ -54,29 +54,30 @@ export class TesseraFilterPanel extends TesseraElement {
         gap: 6px;
         margin-bottom: 12px;
       }
-      [part='clear'] {
-        text-transform: none;
-        letter-spacing: 0;
-        color: var(--_tessera-accent);
-        font-weight: 500;
-        font-size: 12px;
+      [part='chips']:last-child {
+        margin-bottom: 0;
+      }
+      tessera-filter {
+        padding: 12px 0 14px;
+        border-top: 1px solid var(--_tessera-line-2);
       }
     `
   ];
 
   private chipText(column: string, draft: ColumnDraft): string {
+    const caption = columnCaption(column);
     switch (draft.family) {
       case 'text':
-        return `${column}: ${draft.mode === 'phrase' ? '“' + draft.query + '”' : draft.query}`;
+        return `${caption}: ${draft.mode === 'phrase' ? '“' + draft.query + '”' : draft.query}`;
       case 'keyword':
-        return `${column} ${draft.op} ${draft.needle}`;
+        return `${caption} ${draft.op === 'eq' ? 'is' : draft.op === 'prefix' ? 'starts with' : 'contains'} ${draft.needle}`;
       case 'category':
-        return `${column}: ${draft.keys.join(', ')}`;
+        return `${caption}: ${draft.keys.map((k) => keyTitle(this.resolvedStore, column, k)).join(', ')}`;
       case 'numeric': {
         const meta = this.resolvedStore?.get('meta');
         const date = meta?.declaredScalars.find((c) => c.name === column)?.arrowType === 'timestamp_us';
-        const f = (v: number | null) => (v === null ? '…' : date ? new Date(v / 1000).toISOString().slice(0, 10) : String(v));
-        return `${column}: ${f(draft.gte)} – ${f(draft.lte)}`;
+        const f = (v: number | null) => (v === null ? '…' : date ? timestampText(v) : v.toLocaleString('en-GB'));
+        return `${caption}: ${f(draft.gte)} – ${f(draft.lte)}`;
       }
     }
   }
@@ -90,7 +91,7 @@ export class TesseraFilterPanel extends TesseraElement {
       type="button"
       data-verb=${verb}
       aria-label=${`${label}; ${other} instead`}
-      title=${verb === 'filter' ? 'Filtering: the map narrows to the matches. Highlight instead' : 'Highlighting: the map stays and the matches are lit. Filter instead'}
+      title=${verb === 'filter' ? 'Filtering. Press to highlight instead' : 'Highlighting. Press to filter instead'}
       @click=${move}
     >
       ${icon(verb === 'filter' ? 'filter' : 'highlight', 11)}${verb}
@@ -124,7 +125,7 @@ export class TesseraFilterPanel extends TesseraElement {
   private memberText(clause: MemberClause): string {
     const served = this.resolvedStore?.get('artifacts').served.find((a) => a.tesseraId === clause.artifact && a.layer === clause.layer);
     const name = clause.label ?? served?.content[0] ?? UNNAMED;
-    return clause.outside ? `outside ${name}` : name;
+    return clause.outside ? `Outside ${name}` : name;
   }
 
   private clear(column: string | null): void {
@@ -151,7 +152,7 @@ export class TesseraFilterPanel extends TesseraElement {
     const {draft, members} = s.get('filters');
     const active = activeCount(draft);
     const chips = Object.entries(draft).filter(([, d]) => isPopulated(d));
-    return html`<div class="panel"><h2 part="title">Filters${active > 0 || members.length > 0 ? html`<button part="clear" type="button" @click=${() => this.clear(null)}>Clear all</button>` : nothing}</h2>
+    return html`<div class="panel"><h2 part="title">Filters${active > 0 || members.length > 0 ? html`<button part="clear" class="quiet" type="button" @click=${() => this.clear(null)}>Clear all</button>` : nothing}</h2>
       <span part="state" data-state="shown"></span>
       ${chips.length > 0 || members.length > 0
         ? html`<div part="chips">

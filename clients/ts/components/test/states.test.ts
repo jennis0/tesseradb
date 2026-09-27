@@ -43,15 +43,16 @@ describe('stateOf maps status onto the eight states exactly as the table says', 
 });
 
 describe('<tessera-status> renders every state through part="state"', () => {
-  const cases: [string, Parameters<typeof status>[0] | null, {count: boolean; refresh: boolean}][] = [
-    ['detached', null, {count: false, refresh: false}],
-    ['loading', {status: 'loading', sessionWarm: false}, {count: false, refresh: false}],
-    ['retrying', {status: 'retrying'}, {count: false, refresh: false}],
-    ['shown', {status: 'shown'}, {count: true, refresh: false}],
-    ['empty', {status: 'empty'}, {count: false, refresh: false}],
-    ['refused', {status: 'refused', refusal: {code: 'unauthorised', detail: 'no'}}, {count: false, refresh: false}],
-    ['expired', {status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}, {count: false, refresh: false}],
-    ['stale', {status: 'shown', stale: true}, {count: false, refresh: true}]
+  // `count`: figures are rendered, current or greyed out. `action`: the one button the state offers.
+  const cases: [string, Parameters<typeof status>[0] | null, {count: boolean; action: string | null}][] = [
+    ['detached', null, {count: false, action: null}],
+    ['loading', {status: 'loading', sessionWarm: false}, {count: false, action: null}],
+    ['retrying', {status: 'retrying'}, {count: true, action: null}],
+    ['shown', {status: 'shown'}, {count: true, action: null}],
+    ['empty', {status: 'empty'}, {count: false, action: null}],
+    ['refused', {status: 'refused', refusal: {code: 'unauthorised', detail: 'no'}}, {count: true, action: 'retry'}],
+    ['expired', {status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}, {count: true, action: null}],
+    ['stale', {status: 'shown', stale: true}, {count: false, action: 'refresh'}]
   ];
   for (const [name, over, want] of cases) {
     it(`renders ${name}`, async () => {
@@ -66,19 +67,40 @@ describe('<tessera-status> renders every state through part="state"', () => {
       expect(state.getAttribute('data-state')).toBe(name);
       const counts = deepAll(host, '[part="count"]').filter((c) => c.getAttribute('data-empty') === 'false');
       expect(counts.length > 0).toBe(want.count);
-      expect(deep(host, '[part="refresh"]') !== null).toBe(want.refresh);
-      if (name === 'refused') expect(deep(host, '[part="refusal"]')).not.toBeNull();
+      for (const action of ['refresh', 'retry', 'reauthorise']) expect(deep(host, `[part="${action}"]`) !== null, action).toBe(want.action === action);
+      if (name === 'refused') expect(deep(host, '[part="refusal"]')?.getAttribute('data-code')).toBe('unauthorised');
     });
   }
 
-  it('shows the three counts in the order shown · matched · visible, both figures for the sample', async () => {
+  it('names the up-to-date state only in the dot’s accessible name, and the others on screen', async () => {
+    const host = await mount('<tessera-status></tessera-status>');
+    const el = host.querySelector('tessera-status') as TesseraStatus;
+    const store = fakeStore({status: status({}), view});
+    el.store = store;
+    await settle(host);
+    expect(deep(host, '[part="state"] [role="img"]')?.getAttribute('aria-label')).toBeTruthy();
+    expect(deep(host, '[part="state"]')!.textContent!.trim()).toBe('');
+    store.set('status', status({status: 'retrying'}));
+    await settle(host);
+    expect(deep(host, '[part="state"]')!.textContent!.trim()).not.toBe('');
+  });
+
+  it('shows the matched count out of the visible count, then the shown count', async () => {
     const host = await mount('<tessera-status></tessera-status>');
     (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status({}), view});
     await settle(host);
     const counts = deepAll(host, '[part="count"]');
-    expect(counts.map((c) => c.textContent)).toEqual(['500', '3,210', '12,040']);
-    // The sample's total is the visible cell beside it, and the cell carries it: both figures.
-    expect(counts[0]!.getAttribute('data-total')).toBe('12,040');
+    expect(counts.map((c) => c.textContent)).toEqual(['3,210', '12,040', '500']);
+    // The shown cell carries the sample's total for a host to read.
+    expect(counts[2]!.getAttribute('data-total')).toBe('12,040');
+  });
+
+  it('shortens the figures and drops the shown count when compact', async () => {
+    const host = await mount('<tessera-status compact></tessera-status>');
+    (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status({}), view: {...view, matched: {value: 16_822_190, exact: true}, visible: {value: 21_406_522, exact: true}}});
+    await settle(host);
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['16.8M', '21.4M']);
+    expect(deep(host, '[part="count-shown"]')).toBeNull();
   });
 
   /**
@@ -94,8 +116,24 @@ describe('<tessera-status> renders every state through part="state"', () => {
 
     el.store = fakeStore({status: status({}), view: {...view, highlighted: {value: 812, exact: true}, highlighting: true}});
     await settle(host);
-    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['500', '3,210', '812', '12,040']);
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['3,210', '12,040', '812', '500']);
     expect(deep(host, '[part="count-highlighted"]')).not.toBeNull();
+  });
+
+  it('retries a refused view and signs in again on expiry through the host’s renewal', async () => {
+    const host = await mount('<tessera-status></tessera-status>');
+    const el = host.querySelector('tessera-status') as TesseraStatus;
+    const store = fakeStore({status: status({status: 'refused', refusal: {code: 'unauthorised', detail: ''}}), view});
+    el.store = store;
+    await settle(host);
+    (deep(host, '[part="retry"]') as HTMLButtonElement).click();
+    expect(store.calls.filter((c) => c.name === 'refresh')).toHaveLength(1);
+    let renewed = 0;
+    el.reauthorise = () => renewed++;
+    store.set('status', status({status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}));
+    await settle(host);
+    (deep(host, '[part="reauthorise"]') as HTMLButtonElement).click();
+    expect(renewed).toBe(1);
   });
 
   it('fires tessera-expired once, composed, on the expired transition', async () => {
