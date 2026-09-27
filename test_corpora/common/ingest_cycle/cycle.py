@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import concurrent.futures
 import datetime
 import json
@@ -38,6 +37,7 @@ from .split import (
     declared_entities,
     declared_layers,
     declared_views,
+    join_field,
     ranks_for,
     read_view_rows,
     split_entities,
@@ -152,6 +152,8 @@ class Cycle:
         self.served: Deployment | None = None
         self.session_cred = ""
         self.all_terms: list[str] = []
+        #: The rung's join field, which every row, change and membership names its item by.
+        self.join = join_field(self.rung)
 
     @property
     def view_names(self) -> list[str]:
@@ -208,14 +210,13 @@ class Cycle:
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(base_dir / "corpus.toml", self.all_in)
             self.log(f"stated the all-in frame in the base declaration: {self.result['stated_extent']}")
-        # At f = 1.0 this is `tessera build` over an empty points file. `--mint-external-ids`,
-        # since published artifacts name their members that way.
+        # At f = 1.0 this is `tessera build` over an empty points file.
         self.result["build"] = build_bundle(
             self.binary,
             base_dir,
             bundle,
             base_dir / "stage-timings.json",
-            extra=["--mint-external-ids", "--deployment", str(base_dir / "tessera.toml")],
+            extra=["--deployment", str(base_dir / "tessera.toml")],
         )
         if self.result["build"]["returncode"] != 0:
             self.result["blocked"] = {
@@ -639,6 +640,7 @@ class Cycle:
             self.args.publish_max_bytes,
             self.args.publish_bucket_rows,
             self.limits,
+            self.join["name"],
             view_column=layer.get("view_column"),
             access_column=layer.get("access_column"),
         )
@@ -1054,10 +1056,14 @@ class Cycle:
             wall += page_wall
         return r, wall
 
-    def change_and_wait(self, control, op: str, ids: list[str], start_visible: int) -> dict:
-        """One change op over `ids`, and the wait for the count it takes the deployment to."""
-        r, wall = self.send_changes(control, [{"external_id": e, "op": op} for e in ids])
-        target = start_visible - len(ids)
+    def change_and_wait(self, control, op: str, values: list[str], start_visible: int) -> dict:
+        """One change op over the items the join field's `values` name, and the wait for the count
+        it takes the deployment to."""
+        field = self.join["name"]
+        r, wall = self.send_changes(
+            control, [{"field": field, "value": value, "op": op} for value in values]
+        )
+        target = start_visible - len(values)
         reached, visibility_s = wait_for(
             lambda: self.visible() <= target, timeout=120, interval=0.25
         )
@@ -1072,15 +1078,15 @@ class Cycle:
 
     def do_write_cycle(self, control, hold) -> dict:
         """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, 1,000 edits, a fold, and the count
-        again in every view, addressed by `external_id` since a deleted holder never blocks a
-        re-ingest of it. A re-ingest sends the item's rows in every view it was in, the anchor's
-        first, and each view must end at its count less the suppressed items it holds. An edit
-        sends a live item's anchor row once as it is, which changes nothing, and once moved, which
-        edits it: both answer the item's own tessera_id, and no count moves."""
+        again in every view, each item named by its join field value, which a deleted holder never
+        blocks a re-ingest of. A re-ingest sends the item's rows in every view it was in, the
+        anchor's first, and each view must end at its count less the suppressed items it holds. An
+        edit sends a live item's anchor row once as it is, which changes nothing, and once moved,
+        which edits it: both answer the item's own tessera_id, and no count moves."""
         if hold.head is None or hold.head.num_rows < 2:
             return {"skipped": "hold-out too small for a write cycle"}
         entities = hold.head.column("entity_id").to_numpy()
-        ids = [base64.b64encode(int(e).to_bytes(8, "little")).decode() for e in entities]
+        ids = [str(int(e)) for e in entities]
         n = min(self.args.write_cycle_n, len(ids) // 3)
         if n == 0:
             return {"skipped": "hold-out too small for a write cycle"}
@@ -1120,7 +1126,7 @@ class Cycle:
         for figures in passes:
             for status, count in figures["statuses"].items():
                 out["reingest"]["statuses"][status] = out["reingest"]["statuses"].get(status, 0) + count
-        # One external id is one entity: every view's pass answers it with one tessera_id.
+        # One join value is one entity: every view's pass answers it with one tessera_id.
         out["reingest"]["items_with_several_ids"] = sum(1 for tids in answered.values() if len(tids) > 1)
 
         # The third n items, live and neither deleted nor suppressed, restated and then moved in

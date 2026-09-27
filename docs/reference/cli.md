@@ -24,10 +24,9 @@ The other flags override `tessera.toml` or tune the build.
 | --- | --- | --- | --- |
 | `--deployment` | `PATH` |  | Read this `tessera.toml` instead of searching for one upward from the working directory. |
 | `--out` | `PATH` |  | Write the bundle to this directory instead of `[bundle] path` in `tessera.toml`. `tessera serve` opens `[bundle] path`, so it does not serve a bundle written elsewhere. |
-| `--limit` | `ID` |  | Build only the rows whose identity column's value is an integer below this value. A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit drops it. Refused when the identity column holds strings or bytes, and when rows have no identity column. Layer member files are read whole: a member row naming a row the limit dropped is refused, so limit the member file to the same values. |
+| `--limit` | `ID` |  | Build only the rows whose join field's value is an integer below this value. A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit drops it. Refused when the join field holds strings, and when the declaration names no join field. Layer member files are read whole: a member row naming a row the limit dropped is refused, so limit the member file to the same values. |
 | `--config` | `PATH` |  | Read this corpus declaration instead of `[build] schema` in `tessera.toml`. The declaration is compiled into the bundle's `MANIFEST.json`, and the server reads it from there. |
 | `--file` | `NAME=PATH` |  | Read the source NAME in the declaration's `[sources]` from PATH instead. Repeatable. A relative PATH is read from the working directory, not from the declaration's directory. Every block that reads the source reads PATH. Refused when `[sources]` has no source called NAME (the message lists the names it has), and when NAME is given twice. The flag replaces a source's path and cannot add a source. |
-| `--mint-external-ids` |  |  | Write an external id for every item, made from its identity column's integer value. An identity column of strings or bytes writes external ids without this flag. Rows with no identity column get no external ids, with or without it. |
 | `--no-oracle-pairs` |  |  | Do not write `pairs.parquet`. The server does not read the file. The conformance suite and `tessera verify --deep` do, and `verify --deep` passes a bundle without one. |
 | `--batch-items` | `ITEMS` | derived | Assign internal ids in batches of this many items. Default: the largest batch the memory budget allows, which is the whole corpus when it fits. Refused when the batch does not fit the budget, or when it is less than half the size the budget allows. A build of more than one batch records the size in the bundle. |
 | `--memory-budget` | `SIZE` | derived | Peak memory for the build's own structures, in bytes or with a `k`, `m` or `g` suffix, such as `24g`. Default: 80% of the available memory or of the process's cgroup limit, whichever is lower, kept between 2 GiB and 1 TiB, and 24 GiB where available memory cannot be read. Batch and band sizes follow from it. A build that would not fit is refused before it assigns internal ids, with the arithmetic in the message. |
@@ -61,16 +60,16 @@ It cannot check anything that needs a row: whether a closed vocabulary covers th
 tessera verify [OPTIONS] <BUNDLE>
 ```
 
-Verify a bundle's files and its identity column.
+Verify a bundle's files and every row's `tessera_id`.
 
-It opens the bundle as the server does. That checks every manifest digest, the size and SHA-256 of every file except the external-id files and their locator, and that each segment's permutation maps one-to-one onto its rows. `--deep` hashes the external-id files too. It then confirms that the row space holds exactly the rows the segments claim, and computes each row's `tessera_id` again from the identity key, failing on the first row that differs.
+It opens the bundle as the server does. That checks every manifest digest, the size and SHA-256 of every file except the unique indexes' runs, and that each segment's permutation maps one-to-one onto its rows. `--deep` hashes those runs too. It then confirms that the row space holds exactly the rows the segments claim, and computes each row's `tessera_id` again from the identity key, failing on the first row that differs.
 
 It also prints to stderr each indexed keyword column's count of distinct values against its rows, with a warning for a column whose values are unique per row. A warning does not fail the verify.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `BUNDLE` |  |  | The bundle directory, the one holding `CURRENT`. |
-| `--deep` |  |  | Also check the bundle's internal structures. The external-id files and their locator are hashed against the manifest. The term lists must be sorted, free of duplicates and in range; the external-id index and its locator must agree in both directions; dictionary records must not repeat; record blobs and Morton cells must agree with their indexes; each group-scoped render column must be present in every segment; each unique column's index must be hashed against the manifest, name at most one live item for a value and agree with the column's values in both directions; and `pairs.parquet`, when present, must match the term lists it was written with. Run it on a bundle no running server is writing to. |
+| `--deep` |  |  | Also check the bundle's internal structures. The term lists must be sorted, free of duplicates and in range; dictionary records must not repeat; record blobs and Morton cells must agree with their indexes; each group-scoped render column must be present in every segment; each unique column's index must be hashed against the manifest, name at most one live item for a value and agree with the column's values in both directions; and `pairs.parquet`, when present, must match the term lists it was written with. Run it on a bundle no running server is writing to. |
 
 ## `tessera tokenise`
 
@@ -123,13 +122,13 @@ The columns are `tessera_id`, the fields in the order named, the system fields i
 
 A read cut short leaves the whole pages read before it in the output, exits 1 and prints the cursor to read the rest with. The first response's head, with the counts under `--count`, is printed on stderr at the end.
 
-For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields title,year --system-fields external_id --out papers.parquet`.
+For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields title,year --system-fields labels --out papers.parquet`.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--view` | `VIEW` |  | The view to read, as `/v1/meta` names it. An item with no position in it is not returned. |
 | `--fields` | `NAMES` |  | The declared fields to return, comma-separated, in the order wanted. `--fields ''` returns `tessera_id` alone. A field declared for a view group, read under a view outside that group, is named `<field>@<key>`. An undeclared or repeated field is refused. |
-| `--system-fields` | `NAMES` |  | Any of `position`, `external_id` and `labels`, comma-separated, in the order wanted: the columns `tessera:x` and `tessera:y`, `tessera:external_id` and `tessera:labels`. Any other name is refused. |
+| `--system-fields` | `NAMES` |  | Any of `position` and `labels`, comma-separated, in the order wanted: the columns `tessera:x` and `tessera:y`, and `tessera:labels`. Any other name is refused. |
 | `--filters` | `JSON` |  | A filter expression as JSON, such as `{"year": {"range": {"gte": 2020}}}`. Only the items that match are returned. |
 | `--keep-unmatched` |  |  | Return every item, with a `tessera:matched` column saying whether it matches `--filters`. |
 | `--count` |  |  | Count the items the token may see in the view and those that match. The counts are printed on stderr at the end. Refused with `--cursor`. |

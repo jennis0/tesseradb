@@ -593,9 +593,7 @@ paths:
         null. `position` is two `float64` columns, `tessera:x` and `tessera:y`: the centre of the
         step of the view's 32-bit grid the item is stored in, converted back through the view's
         projection and frame, so degrees on a geographic view, and within half a step of the
-        position the item was given. `external_id` is `binary` as `tessera:external_id`, null
-        where the item has none. `labels` is `list<utf8>` as
-        `tessera:labels`: the item's labels this principal holds, sorted. A rendered field is read
+        position the item was given. `labels` is `list<utf8>` as `tessera:labels`: the item's labels this principal holds, sorted. A rendered field is read
         from `view`, where the item card reads the first view the principal can reach, so the two
         can differ. An item joined into `view` before its own ingest is flushed has null record
         fields until that flush.
@@ -713,9 +711,7 @@ paths:
       description: |
         The record is keyed by declared column name. A category appears as its vocabulary's key,
         and every number as a JSON number. A field the item has no value in is absent from
-        `fields`, not `null`. `external_id` is the caller's own, in base64, present only where the
-        item has one. This route and `POST /v1/items`, under `system_fields` holding
-        `external_id`, are the only routes on this plane that serve an external id.
+        `fields`, not `null`.
 
         `views` names every view the item is in that this principal may reach, each with the
         position that view places it at, and `scoped` carries the group-scoped values by the
@@ -1033,16 +1029,15 @@ paths:
         deployment with one view takes that view, and one with several gives the batch no view,
         whose rows carry no coordinates and change only what is stored in no view.
 
-        **Which item a row names.** A row names an item by its `tessera_id`, its `external_id` and
-        the value of every unique column it carries that is not null. A row whose values name no
+        **Which item a row names.** A row names an item by its `tessera_id` and the value of every
+        unique column it carries that is not null. A row whose values name no
         item creates one. A row whose values name one item addresses it: where every value the
         row carries is the one the item stores, the row changes nothing and is counted in
         `unchanged`; where the item has no row in the batch's view, and the row carries a position
         there and changes nothing else, the row adds the item to the view, counted in `added`: the
         item stays served in its other views and is served in this one from the next flush. Any
-        other row edits the item and is counted in `edited`: it changes a value, the label, the
-        external id or a position. An edited item keeps its
-        `tessera_id`, its views, its layer memberships and a suppression; a label the edit narrows
+        other row edits the item and is counted in `edited`: it changes a value, the label or a
+        position. An edited item keeps its `tessera_id`, its views, its layer memberships and a suppression; a label the edit narrows
         applies from the answer on. A row whose one change is placing the item in artifacts that
         do not hold it changes the artifacts, not the item: it is counted in `unchanged`, and the
         memberships it adds in `joined`.
@@ -1060,8 +1055,7 @@ paths:
         list, and a label empty once trimmed, is the view's default; a new item with no label on a
         view with no default is `422`. `tessera_id` is a string of decimal digits and names an
         item; one that names no live or suppressed item is `409`, since a new item is given its
-        `tessera_id` when it is created. `external_id` is base64 in JSON and `binary` in Arrow, at
-        most 64 bytes. `node_id` is accepted and not stored. Every other column is a declared
+        `tessera_id` when it is created. `node_id` is accepted and not stored. Every other column is a declared
         attribute, a group-scoped attribute of the view's group, or an enumerated layer; any other
         name is `422`. A category takes its vocabulary's key: under a `closed` vocabulary an
         unknown key is `422`, and under an `open` one it is added. An integer is read exactly,
@@ -1077,7 +1071,7 @@ paths:
 
         **Refusals.** The batch is `409`, naming rows by position, values as sent and items by
         `tessera_id`, where a row's values name more than one item, a `tessera_id` names no item,
-        two rows name one item, or two rows set one unique value or one external id. A deleted
+        two rows name one item, or two rows set one unique value. A deleted
         item names nothing, so its values may be given to a new item. A null is no value.
 
         **Retries.** `x-tessera-batch-id` names the batch. The same bytes sent again under the same
@@ -1136,8 +1130,8 @@ paths:
             - The batch id was used for a different body
             - A row's values name more than one item, as when a row gives an item a unique value another item holds
             - A row's `tessera_id` names no live or suppressed item
-            - Two rows name one item, or set one unique value or one external id
-            - An item a row edits changed while the batch was checked, or its external id was given to another item; sending it again answers
+            - Two rows name one item, or set one unique value
+            - An item a row edits changed while the batch was checked; sending it again answers
             - The items the batch names changed while it was checked twice; sending it again answers
           content:
             application/json:
@@ -1145,7 +1139,7 @@ paths:
                 $ref: "#/components/schemas/Error"
         "422":
           description: |
-            The detail names a row by its index, never by its external id. Nothing was written.
+            The detail names a row by its index. Nothing was written.
 
             - The body is over the byte cap or cannot be read
             - `x-tessera-batch-id` is missing
@@ -1181,12 +1175,14 @@ paths:
       description: |
         `delete` removes an item from every view and every count; the compaction fold removes its
         rows from disc. `suppress` hides an item from every viewer until `unsuppress` lifts it.
-        There is no edit: to change an item's access labels, delete it and ingest it again under
-        the same external id, and `op: "predicate"` is refused with that advice.
+        There is no edit here: an item's access labels change by an ingest row naming the item with
+        the new labels, and `op: "predicate"` is refused with that advice.
 
-        Every item is checked and its address resolved before any is applied, so a request with one
-        bad item applies nothing. An unknown `tessera_id` is answered ahead of an unknown external
-        id. The request is then written as one record: it is durable whole or not at all. A request
+        A change names its item by `tessera_id`, a string of decimal digits, or by `field` and
+        `value`: a field declared unique and one value of it, as text (a keyword itself, an integer
+        or a timestamp in decimal digits). Every item is checked and its address resolved before
+        any is applied, so a request with one bad item applies nothing. An unknown `tessera_id` is
+        answered ahead of a value naming nothing. The request is then written as one record: it is durable whole or not at all. A request
         carries at most 10,000 items in at most 2 MiB; over either is `422`, and `/control/status`
         publishes both under `limits.changes`.
 
@@ -1216,7 +1212,7 @@ paths:
         "401":
           $ref: "#/components/responses/OperatorBadCredential"
         "404":
-          description: An external id or a `tessera_id` names nothing the deployment holds. Nothing was applied. For a `tessera_id` the detail names the item by its index in the request; for an external id it is a fixed detail naming neither.
+          description: A `tessera_id` or a unique value names nothing the deployment holds. Nothing was applied. The detail names the item by its index in the request.
           content:
             application/json:
               schema:
@@ -1227,9 +1223,9 @@ paths:
 
             - The body is not a JSON array of change items, is over 2 MiB or carries more than 10,000 items
             - An unknown `op`
-            - An item naming neither or both of `external_id` and `tessera_id`
-            - An external id that is not base64
+            - An item that gives neither `tessera_id` nor `field` with `value`, gives both, or gives `field` or `value` alone
             - A `tessera_id` that is not a decimal string
+            - A `field` that is not declared unique, or a `value` that is not one of its values' text
           content:
             application/json:
               schema:
@@ -1770,8 +1766,8 @@ paths:
 
         Every item the drop leaves with a row in no view, flushed or buffered, is deleted, as
         `POST /control/changes` deletes it, and `deleted` counts them. A deleted item names
-        nothing afterwards: a later row carrying its external id or one of its unique values creates
-        a new item, and one carrying its `tessera_id` is refused.
+        nothing afterwards: a later row carrying one of its unique values creates a new item, and
+        one carrying its `tessera_id` is refused.
       security:
         - operatorCredential: []
       parameters:
@@ -1924,9 +1920,9 @@ paths:
       description: |
         The body is JSON only; `application/vnd.apache.arrow.stream` is `422`. Each artifact names
         its members by `members`, or by `excluding`, the view's items it leaves out. Members are
-        addressed as the batch's `addressing` says: base64 external ids, or `tessera_id` decimal
-        strings. A member that names nothing is `404`, and a deleted one
-        is `422`.
+        `tessera_id`s as strings of decimal digits, or, where the batch names a `field` declared
+        unique, values of that field as text. A member that names nothing, a deleted item
+        included, is `404`.
 
         An artifact whose `key` the level already holds is not created again: its members are
         added to the held membership, and a part it lacks (its parents, attachment, contents,
@@ -1991,9 +1987,9 @@ paths:
             - An artifact with neither `members` nor `excluding` that attaches to nothing, or with both
             - An exclusion list over its cap
             - `view` missing on a layer scoped to a group or present on another
-            - A member that is not base64 or not a decimal string
-            - A deleted member, or one that names no item with a row
-            - An external-id member where the deployment carries no external ids
+            - A member that is not a decimal string, or with `field`, not one of its values' text
+            - A `field` that is not declared unique
+            - A member deleted after it was resolved, or one that names no item with a row
             - An unknown layer or level, or a layer whose membership is an attribute
             - A shape on a layer that declares none, none on one that does, the wrong kind, or one over the vertex cap
             - Labels the layer does not take, or none where it requires them
@@ -2023,7 +2019,7 @@ paths:
         The body is JSON, or an Arrow IPC stream as `application/vnd.apache.arrow.stream`. The
         Arrow form carries one row per artifact: `key` as `utf8`, `members` as `list<utf8>` or
         `large_list<utf8>`, and optionally `view` as `utf8` and `access` in any form ingest's
-        `access` takes, with `addressing` and `level` in the schema's metadata as strings.
+        `access` takes, with `field` (optional) and `level` in the schema's metadata as strings.
         It carries joining members and access labels only; every other part travels as JSON. Any
         other column or metadata key is `422`.
 
@@ -2080,9 +2076,9 @@ paths:
             - A layer whose membership is not `enumerated`
             - `leaving` without a `rank`
             - `view` missing on a layer scoped to a group or present on another
-            - A member that is not base64 or not a decimal string
-            - A deleted member, or one that names no item with a row
-            - An external-id member where the deployment carries no external ids
+            - A member that is not a decimal string, or with `field`, not one of its values' text
+            - A `field` that is not declared unique
+            - A member deleted after it was resolved, or one that names no item with a row
             - A shape the layer does not take
             - A content without a generating set on a layer whose content requires every member visible
           content:
@@ -2284,7 +2280,7 @@ components:
             - not-ready
         detail:
           type: string
-          description: Human-readable. On the viewer plane a `404`'s detail is the same for every reason, so it tells a caller nothing about what exists. On the control plane it says what was refused. It may name the caller's own batch id or external ids, as the ingest route's `409`s do, and otherwise names a row or member by its position in the batch.
+          description: Human-readable. On the viewer plane a `404`'s detail is the same for every reason, so it tells a caller nothing about what exists. On the control plane it says what was refused. It may name the caller's own batch id or values, as the ingest route's `409`s do, and otherwise names a row or member by its position in the batch.
         retry_after_s:
           type: integer
           minimum: 0
@@ -3239,7 +3235,7 @@ components:
           type: array
           items:
             type: string
-            enum: [position, external_id, labels]
+            enum: [position, labels]
           description: System columns to return, in this order. Absent is none.
         filters:
           $ref: "#/components/schemas/FilterExpr"
@@ -3421,10 +3417,6 @@ components:
           description: The record by declared column name. Values are JSON numbers, of every width, strings (a keyword, a text, or a category's key) or booleans. A field with no value is absent, not `null`.
           additionalProperties:
             type: [number, string, boolean]
-        external_id:
-          type: string
-          contentEncoding: base64
-          description: The caller's own external id, present only where the item has one.
         labels:
           type: array
           items:
@@ -3550,10 +3542,6 @@ components:
           type: [string, "null"]
           pattern: "^[0-9]+$"
           description: The item the row names, as a string of decimal digits. It must name a live or suppressed item.
-        external_id:
-          type: [string, "null"]
-          contentEncoding: base64
-          description: The caller's identifier for the item, at most 64 bytes. It names the item that holds it; on a new item it is the item's own.
         x:
           type: [number, "null"]
           description: The horizontal coordinate, on a view whose projection is `none`. A row carries both coordinates or neither.
@@ -3587,7 +3575,7 @@ components:
     IngestResponse:
       type: object
       additionalProperties: false
-      required: [rows, created, edited, added, unchanged, over_bound, over_bound_ids, clipped, clamped, tessera_ids, minted, joined, publication]
+      required: [rows, created, edited, added, unchanged, over_bound, over_bound_rows, clipped, clamped, tessera_ids, minted, joined, publication]
       properties:
         rows:
           type: integer
@@ -3613,13 +3601,13 @@ components:
           type: integer
           minimum: 0
           description: Rows creating an item whose labels resolve to more terms than the auth plugin's per-item bound. They are stored, not refused. A replay answers the first acceptance's count.
-        over_bound_ids:
+        over_bound_rows:
           type: array
           maxItems: 100
-          description: The external ids of the first 100 of those rows that carry one, in base64.
+          description: The positions in the batch, from 0, of the first 100 of those rows.
           items:
-            type: string
-            contentEncoding: base64
+            type: integer
+            minimum: 0
         clipped:
           type: integer
           minimum: 0
@@ -3657,27 +3645,31 @@ components:
       type: object
       additionalProperties: false
       required: [op]
-      description: One change. It names its item by exactly one of `external_id` and `tessera_id`.
+      description: One change. It names its item by `tessera_id`, or by `field` and `value`.
       properties:
         op:
           type: string
           enum: [delete, suppress, unsuppress]
           description: "`delete` removes the item; `suppress` hides it; `unsuppress` lifts a suppression."
-        external_id:
-          type: string
-          contentEncoding: base64
-          description: The item's external id.
         tessera_id:
           type: string
           pattern: "^[0-9]+$"
           description: The item's `tessera_id`, as a string of decimal digits; a JSON number is `422`.
+        field:
+          type: string
+          description: A field declared unique, whose `value` names the item.
+        value:
+          type: string
+          description: The value the item holds in `field`, as text. A keyword is itself; an integer or a timestamp is its decimal digits.
       oneOf:
-        - required: [external_id]
-          not:
-            required: [tessera_id]
         - required: [tessera_id]
           not:
-            required: [external_id]
+            anyOf:
+              - required: [field]
+              - required: [value]
+        - required: [field, value]
+          not:
+            required: [tessera_id]
 
     AttributeDeclaration:
       type: object
@@ -4254,17 +4246,16 @@ components:
     PublishRequest:
       type: object
       additionalProperties: false
-      required: [addressing, artifacts]
+      required: [artifacts]
       properties:
         level:
           type: integer
           minimum: 0
           default: 0
           description: The level the artifacts go into. Absent is 0, the only level of a layer that declares none.
-        addressing:
+        field:
           type: string
-          enum: [external, tessera]
-          description: How every member in the batch is written. `external` is a base64 external id; `tessera` is a `tessera_id` as a string of decimal digits.
+          description: A field declared unique. Present, every member in the batch is a value of it as text; absent, every member is a `tessera_id` as a string of decimal digits.
         default_space:
           type: string
           enum: [view, wgs84]
@@ -4289,7 +4280,7 @@ components:
         members:
           type: [array, "null"]
           items: { type: string }
-          description: The members, addressed as the batch's `addressing` says. `[]` is a membership that holds nobody.
+          description: The members, as `tessera_id`s or as values of the batch's `field`. `[]` is a membership that holds nobody.
         excluding:
           type: [array, "null"]
           items: { type: string }
@@ -4470,16 +4461,15 @@ components:
     GrowRequest:
       type: object
       additionalProperties: false
-      required: [addressing, artifacts]
-      description: "`level`, `addressing` and `default_space` are `PublishRequest`'s."
+      required: [artifacts]
+      description: "`level`, `field` and `default_space` are `PublishRequest`'s."
       properties:
         level:
           type: integer
           minimum: 0
           default: 0
-        addressing:
+        field:
           type: string
-          enum: [external, tessera]
         default_space:
           type: string
           enum: [view, wgs84]
@@ -4510,7 +4500,7 @@ components:
           type: array
           default: []
           items: { type: string }
-          description: Members joining, addressed as the batch's `addressing` says.
+          description: Members joining, as `tessera_id`s or as values of the batch's `field`.
         leaving:
           type: array
           default: []

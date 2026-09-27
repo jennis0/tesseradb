@@ -30,9 +30,8 @@ pub(crate) struct ItemsArgs {
     /// that group, is named `<field>@<key>`. An undeclared or repeated field is refused.
     #[arg(long, value_name = "NAMES")]
     fields: String,
-    /// Any of `position`, `external_id` and `labels`, comma-separated, in the order wanted: the
-    /// columns `tessera:x` and `tessera:y`, `tessera:external_id` and `tessera:labels`. Any other
-    /// name is refused.
+    /// Any of `position` and `labels`, comma-separated, in the order wanted: the columns
+    /// `tessera:x` and `tessera:y`, and `tessera:labels`. Any other name is refused.
     #[arg(long, value_name = "NAMES")]
     system_fields: Option<String>,
     /// A filter expression as JSON, such as `{"year": {"range": {"gte": 2020}}}`. Only the items

@@ -56,7 +56,7 @@ def browse_server(tmp_path_factory):
     bundle = work / "bundle-gated"
     deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
     subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle), "--mint-external-ids"],
+        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
         cwd=REPO_ROOT,
         check=True,
     )

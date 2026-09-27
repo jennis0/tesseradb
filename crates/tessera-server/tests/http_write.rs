@@ -1,6 +1,7 @@
 //! The control plane's **write path**, end to end: `/control/ingest`, `/control/changes`,
-//! `/control/status`, batch-id idempotency, external-id duplicate detection, entity allocation,
-//! WAL behaviour and the health/readiness endpoints.
+//! `/control/status`, batch-id idempotency, rows naming items by a unique value, entity
+//! allocation, WAL behaviour and the health/readiness endpoints. The fixture declares the unique
+//! `id` ([`id_schema`]), so a row or a change names a built item by its source id.
 //!
 //! The viewer and session planes are in `tests/http.rs`, and pins and session revocation in
 //! `tests/http_engine_state.rs`. Shared fixtures live in [`common`]; a few doc comments below refer
@@ -10,11 +11,10 @@ mod common;
 
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float32Array, Float64Array};
+use arrow::array::{Float32Array, Float64Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use base64::Engine as _;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
@@ -23,44 +23,19 @@ use tessera_plugin::Passthrough;
 
 use common::*;
 
+/// An Arrow ingest batch of `(id, x, y, access label)` rows, every row carrying its `id`.
 fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
-    let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access_array),
-    ]));
-    let ext: Vec<Vec<u8>> = rows
+    let rows: Vec<_> = rows
         .iter()
-        .map(|(id, _, _, _)| external_id_of(*id))
+        .map(|&(id, x, y, access)| (Some(id), x, y, access))
         .collect();
-    let ext_array = BinaryArray::from_iter_values(ext.iter().map(|v| v.as_slice()));
-    let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
-    let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(ext_array),
-            Arc::new(x_array),
-            Arc::new(y_array),
-            Arc::new(access_array),
-        ],
-    )
-    .unwrap();
-
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    writer.into_inner().unwrap()
+    build_ingest_batch_optional(&rows)
 }
 
-/// One row under a raw external id carrying **several** labels — the list's whole point
-/// (decision 0129): each element is one label, however many there are.
-fn build_ingest_batch_labels(external_id: &[u8], labels: &[&str]) -> Vec<u8> {
-    let access_array = access_lists(&[labels]);
+/// A batch of one new item per entry of `rows`, each carrying that entry's labels, however many.
+fn build_ingest_batch_labels(rows: &[&[&str]]) -> Vec<u8> {
+    let access_array = access_lists(rows);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access_array),
@@ -68,9 +43,8 @@ fn build_ingest_batch_labels(external_id: &[u8], labels: &[&str]) -> Vec<u8> {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values([external_id])),
-            Arc::new(Float32Array::from_iter_values([10.0])),
-            Arc::new(Float32Array::from_iter_values([10.0])),
+            Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 10.0))),
+            Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 10.0))),
             Arc::new(access_array),
         ],
     )
@@ -82,27 +56,22 @@ fn build_ingest_batch_labels(external_id: &[u8], labels: &[&str]) -> Vec<u8> {
 
 /// [`build_ingest_batch`] with the coordinate columns at the **wider** width.
 ///
-/// Contracts §3.4: an ingest batch's `x`/`y` are `float32` **or** `float64` and the narrower is
-/// widened, which is the rule a points file's coordinate columns are read by — so a corpus
-/// buildable at either width is ingestable at either width (decision 0091). Every other builder
-/// here writes `float32`, which is what keeps that half of the schema exercised too.
+/// An ingest batch's `x`/`y` are `float32` **or** `float64` and the narrower is widened, which is
+/// the rule a points file's coordinate columns are read by, so a corpus buildable at either width
+/// is ingestable at either width. Every other builder here writes `float32`.
 fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
     let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         access_field(&access_array),
     ]));
-    let ext: Vec<Vec<u8>> = rows
-        .iter()
-        .map(|(id, _, _, _)| external_id_of(*id))
-        .collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values(
-                ext.iter().map(|v| v.as_slice()),
+            Arc::new(UInt64Array::from_iter_values(
+                rows.iter().map(|(id, _, _, _)| *id),
             )),
             Arc::new(Float64Array::from_iter_values(
                 rows.iter().map(|(_, x, _, _)| *x),
@@ -119,42 +88,10 @@ fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-/// Like [`build_ingest_batch`], but takes the raw `external_id` bytes directly rather than
-/// deriving them from a source id — needed for the duplicate-detection and cap tests, which
-/// must construct exact byte strings (repeats across rows, or a specific length) that
-/// `external_id_of`'s 8-byte little-endian convention cannot express.
-fn build_ingest_batch_raw(rows: &[(&[u8], f32, f32, &str)]) -> Vec<u8> {
-    let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access_array),
-    ]));
-    let ext_array = BinaryArray::from_iter_values(rows.iter().map(|(id, _, _, _)| *id));
-    let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
-    let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(ext_array),
-            Arc::new(x_array),
-            Arc::new(y_array),
-            Arc::new(access_array),
-        ],
-    )
-    .unwrap();
-
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    writer.into_inner().unwrap()
+/// A `/control/changes` item applying `op` to the built item whose `id` is `source_id`.
+fn change(source_id: u64, op: &str) -> serde_json::Value {
+    serde_json::json!({ "field": "id", "value": member(source_id), "op": op })
 }
-
-/// Like [`build_ingest_batch_raw`], but `external_id` is `Option<&[u8]>` per row — contracts §3.4
-/// r6: an ingested item may carry no external id at all, in which case it is addressable only by
-/// the `tessera_id` `/control/ingest`'s response returns for it. The column is declared nullable
-/// here (unlike the other two builders, which happen to always supply a value): this is the
 
 #[tokio::test]
 async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
@@ -178,12 +115,11 @@ async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
     let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
 
     const SUPPRESS_SOURCE_ID: u64 = 5;
-    let external_id = member(SUPPRESS_SOURCE_ID);
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .json(&serde_json::json!([change(SUPPRESS_SOURCE_ID, "suppress")]))
         .send()
         .await
         .unwrap();
@@ -252,19 +188,19 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
     assert_eq!(resp.status(), 409);
 }
 
-/// Contracts §3.1: duplicate external ids *within* one batch are `409 conflict`, and the batch
-/// has NO effect at all -- not even the non-duplicate rows are accepted.
+/// Two rows carrying one `id` value *within* one batch are `409 conflict`, and the batch has NO
+/// effect at all -- not even the other rows are accepted.
 #[tokio::test]
-async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
+async fn ingest_rejects_one_id_value_twice_within_one_batch() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
-    let body = build_ingest_batch_raw(&[
-        (b"a".as_slice(), 1.0, 1.0, "0"),
-        (b"b".as_slice(), 2.0, 2.0, "0"),
-        (b"a".as_slice(), 3.0, 3.0, "0"),
+    let body = build_ingest_batch(&[
+        (N_ITEMS + 1, 1.0, 1.0, "0"),
+        (N_ITEMS + 2, 2.0, 2.0, "0"),
+        (N_ITEMS + 1, 3.0, 3.0, "0"),
     ]);
     let resp = server
         .client
@@ -303,17 +239,17 @@ async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, 
     (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
-/// A second row for an external id ingested at the running service edits that item: it keeps its
-/// `tessera_id` and takes one new entity id.
+/// A second row carrying the `id` of an item ingested at the running service edits that item: it
+/// keeps its `tessera_id` and takes one new entity id.
 #[tokio::test]
-async fn a_second_row_for_an_ingested_external_id_edits_its_item() {
+async fn a_second_row_for_an_ingested_id_edits_its_item() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
     let (status, first) = post_body(
         &server,
         "z-batch-1",
-        build_ingest_batch_raw(&[(b"z".as_slice(), 1.0, 1.0, "0")]),
+        build_ingest_batch(&[(N_ITEMS + 1, 1.0, 1.0, "0")]),
     )
     .await;
     assert_eq!(status, 200, "{first}");
@@ -324,7 +260,7 @@ async fn a_second_row_for_an_ingested_external_id_edits_its_item() {
     let (status, second) = post_body(
         &server,
         "z-batch-2",
-        build_ingest_batch_raw(&[(b"z".as_slice(), 9.0, 9.0, "0")]),
+        build_ingest_batch(&[(N_ITEMS + 1, 9.0, 9.0, "0")]),
     )
     .await;
     assert_eq!(status, 200, "{second}");
@@ -345,16 +281,16 @@ async fn a_second_row_for_an_ingested_external_id_edits_its_item() {
     );
 }
 
-/// A row for an external id the build stored edits that item, as one ingested at the service does.
+/// A row carrying the `id` of an item the build stored edits that item, as one ingested at the
+/// service does.
 #[tokio::test]
-async fn a_row_for_an_external_id_in_the_bundle_edits_its_item() {
+async fn a_row_for_an_id_in_the_bundle_edits_its_item() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let high_water = control_status(&server).await["entity_id_high_water"]
         .as_u64()
         .unwrap();
 
-    // `external_id_of(0)` names an item the build stored.
     let (status, answer) = post_body(
         &server,
         "bundle-edit",
@@ -373,99 +309,8 @@ async fn a_row_for_an_external_id_in_the_bundle_edits_its_item() {
     );
 }
 
-/// Ordering matters and is not incidental: the batch-id replay check stays FIRST. An idempotent
-/// retry of an already-accepted batch id + body is a 200 no-op, even though the external id it
-/// carries is (correctly) "already known" by the time the duplicate check would run.
-#[tokio::test]
-async fn an_idempotent_retry_of_an_accepted_batch_is_a_200_not_a_409() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let body = build_ingest_batch_raw(&[(b"replay-me".as_slice(), 1.0, 1.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "replay-batch")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "replay-batch")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        200,
-        "a byte-identical replay of an already-acked batch id must stay a 200, never be caught \
-         by the duplicate-external-id check"
-    );
-}
-
-/// Contracts §1 (r6): external ids are capped at ≤ 64 bytes. Off-by-one is the whole point: 64
-/// bytes exactly is accepted, 65 is a typed error, never a silent truncation.
-#[tokio::test]
-async fn ingest_external_id_cap_is_64_bytes_exactly() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let exactly_64 = vec![b'x'; 64];
-    let body = build_ingest_batch_raw(&[(exactly_64.as_slice(), 1.0, 1.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "cap-64")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "exactly 64 bytes must be accepted");
-
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
-
-    let sixty_five = vec![b'y'; 65];
-    let body = build_ingest_batch_raw(&[(sixty_five.as_slice(), 2.0, 2.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "cap-65")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        422,
-        "65 bytes must be a typed contract error, never truncated to 64"
-    );
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "contract");
-
-    assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_before,
-        "a rejected over-length batch must have no effect"
-    );
-}
-
-/// The point of batching resolution: a large batch must open each bundle extent at most once,
-/// not once per row. The fixture bundle has one external-id extent (built with `N_ITEMS` rows),
-/// so a batch of many distinct, never-before-seen external ids must resolve against it without
-/// the sidecar opening more than that one extent.
+/// A large batch of distinct `id` values no item holds resolves as one batch against the bundle's
+/// unique index and creates an item per row.
 #[tokio::test]
 async fn a_batch_resolution_opens_each_extent_at_most_once() {
     let tmp = TempDir::new().unwrap();
@@ -490,10 +335,10 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
     assert_eq!(json["created"], 2_000);
 }
 
-/// A `/control/changes` batch whose *later* item fails validation (unknown external
-/// id) must leave every earlier item in the same batch unapplied — validate-first, not
-/// apply-then-abort. Suppresses a real item first in the batch, then names a nonexistent external
-/// id second; the whole request must 404, and the real item's count must be unaffected.
+/// A `/control/changes` batch whose *later* item fails validation (an `id` no item holds) must
+/// leave every earlier item in the same batch unapplied — validate-first, not apply-then-abort.
+/// Suppresses a real item first in the batch, then names a nonexistent one second; the whole
+/// request must 404, and the real item's count must be unaffected.
 #[tokio::test]
 async fn changes_batch_validates_before_applying_anything() {
     let tmp = TempDir::new().unwrap();
@@ -515,18 +360,16 @@ async fn changes_batch_validates_before_applying_anything() {
     let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
 
     const REAL_SOURCE_ID: u64 = 9;
-    let real_external_id = member(REAL_SOURCE_ID);
-    // Not a real external id (never ingested/built) — must 404 during validation.
-    let bogus_external_id =
-        base64::engine::general_purpose::STANDARD.encode(b"this-external-id-does-not-exist");
+    // No item holds this `id` (never ingested or built), so it must 404 during validation.
+    const BOGUS_SOURCE_ID: u64 = N_ITEMS + 1;
 
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": real_external_id, "op": "suppress" },
-            { "external_id": bogus_external_id, "op": "suppress" },
+            change(REAL_SOURCE_ID, "suppress"),
+            change(BOGUS_SOURCE_ID, "suppress"),
         ]))
         .send()
         .await
@@ -602,8 +445,8 @@ fn concurrent_ingest_and_change_both_survive() {
 
     const SUPPRESS_SOURCE_ID: u64 = 3;
     let suppress_entity = engine
-        .resolve_external_id(&external_id_of(SUPPRESS_SOURCE_ID))
-        .expect("resolve_external_id should not fail for a healthy bundle")
+        .resolve_unique_values("id", &[member(SUPPRESS_SOURCE_ID)])
+        .expect("resolve_unique_values should not fail for a healthy bundle")[0]
         .expect("fixture item must resolve");
 
     let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -620,11 +463,9 @@ fn concurrent_ingest_and_change_both_survive() {
     let engine_b = Arc::clone(&engine);
     let barrier_b = Arc::clone(&barrier);
     let ingest_thread = std::thread::spawn(move || {
-        let new_external_id = external_id_of(N_ITEMS + 100);
         // A caller does not name the entity id at all: the executor assigns it.
         let row = tessera_lifecycle::IngestRow {
             tessera_id: None,
-            external_id: Some(new_external_id.clone()),
             labels: Some(vec![b"0".to_vec()]),
             position: Some((5.0, 5.0)),
             scalars: Vec::new(),
@@ -641,18 +482,21 @@ fn concurrent_ingest_and_change_both_survive() {
                 artifacts: Default::default(),
             })
             .expect("ingest should be accepted");
-        engine_b.resolve_tessera_ids(&receipt.tessera_ids).unwrap()[0].expect("the item it created")
+        let tessera_id = receipt.tessera_ids[0];
+        let entity = engine_b.resolve_tessera_ids(&[tessera_id]).unwrap()[0];
+        (tessera_id, entity.expect("the item it created"))
     });
 
     change_thread.join().unwrap();
     // The id the EXECUTOR assigned, not one this test chose: assignment is off the caller, so the
     // identity to assert against is the one that comes back.
-    let ingested_entity = ingest_thread.join().unwrap();
+    let (ingested_tessera_id, ingested_entity) = ingest_thread.join().unwrap();
 
     // The suppression's effect: a viewport count one lower than the full-coverage baseline.
     // (A buffered item has no row geometry — there is no flush — so the ingested
     // item contributes nothing to any tile's count regardless of correctness; its effect is
-    // checked separately below, via the established external-id map a lost swap would revert.)
+    // checked separately below, by resolving the `tessera_id` it was given, which a lost swap would
+    // leave naming nothing.)
     let session = engine
         .authorise(br#"{"terms": ["0"]}"#)
         .expect("authorise should succeed");
@@ -670,25 +514,24 @@ fn concurrent_ingest_and_change_both_survive() {
          unchanged"
     );
 
-    // The ingest's effect: the newly-accepted external id must resolve to its assigned entity —
-    // a lost update (the ingest's generation swap silently reverted by a racing change, or vice
-    // versa) would make this `None`.
-    let new_external_id = external_id_of(N_ITEMS + 100);
+    // The ingest's effect: the newly-accepted item's `tessera_id` must resolve to its assigned
+    // entity — a lost update (the ingest's generation swap silently reverted by a racing change, or
+    // vice versa) would make this `None`.
     assert_eq!(
         engine
-            .resolve_external_id(&new_external_id)
-            .expect("resolve_external_id should not fail for a healthy bundle"),
+            .resolve_tessera_ids(&[ingested_tessera_id])
+            .expect("resolve_tessera_ids should not fail for a healthy bundle")[0],
         Some(ingested_entity),
         "the concurrent ingest must have survived — a lost update would drop it from the live \
          buffer/established state"
     );
 }
 
-/// An item ingested with no external id is accepted, and the `tessera_id` the answer gives it is
-/// its only address. Inverting that id with the bundle's key yields the fixture's shard and a
+/// An item ingested with no `id` is accepted, and the `tessera_id` the answer gives it is its only
+/// address. Inverting that id with the bundle's key yields the fixture's shard and a
 /// freshly allocated entity, and once the row is published the viewer serves it under that id.
 #[tokio::test]
-async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_id() {
+async fn ingest_without_an_id_returns_a_genuinely_resolvable_tessera_id() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
@@ -697,7 +540,7 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "null-ext-batch")
+        .header("x-tessera-batch-id", "null-id-batch")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -735,18 +578,18 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
     assert_eq!(served, [tessera_id]);
 }
 
-/// A batch mixing items with and without an external id is accepted whole, and only the supplied
-/// ids name an item: the rows without one have nothing to collide on.
+/// A batch mixing items with and without an `id` is accepted whole, and only the supplied ids name
+/// an item: the rows without one have nothing to collide on.
 #[tokio::test]
-async fn ingest_mixed_batch_only_supplied_external_ids_name_an_item() {
+async fn ingest_mixed_batch_only_supplied_ids_name_an_item() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
     let body = build_ingest_batch_optional(&[
-        (Some(b"mixed-a".as_slice()), 1.0, 1.0, "0"),
+        (Some(N_ITEMS + 1), 1.0, 1.0, "0"),
         (None, 2.0, 2.0, "0"),
         (None, 3.0, 3.0, "0"),
-        (Some(b"mixed-b".as_slice()), 4.0, 4.0, "0"),
+        (Some(N_ITEMS + 2), 4.0, 4.0, "0"),
     ]);
     let resp = server
         .client
@@ -761,17 +604,17 @@ async fn ingest_mixed_batch_only_supplied_external_ids_name_an_item() {
     assert_eq!(
         resp.status(),
         200,
-        "two null external ids in one batch must not be treated as duplicates of each other"
+        "two rows without an id in one batch must not be treated as duplicates of each other"
     );
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["created"], 4);
     assert_eq!(ingested_ids(&json).len(), 4);
 
-    // A follow-up batch re-using one of the supplied external ids names that item.
+    // A follow-up batch re-using one of the supplied ids names that item.
     let (status, again) = post_body(
         &server,
         "mixed-batch-again",
-        build_ingest_batch_optional(&[(Some(b"mixed-a".as_slice()), 9.0, 9.0, "0")]),
+        build_ingest_batch_optional(&[(Some(N_ITEMS + 1), 9.0, 9.0, "0")]),
     )
     .await;
     assert_eq!(status, 200, "{again}");
@@ -779,10 +622,10 @@ async fn ingest_mixed_batch_only_supplied_external_ids_name_an_item() {
     assert_eq!(ingested_ids(&again)[0], ingested_ids(&json)[0]);
 }
 
-/// Contracts §3.4 (r6): two items with no external id in the *same* batch must not collide with
-/// each other — `null` is not a key that can be duplicated.
+/// Two items with no `id` in the *same* batch must not collide with each other — `null` is not a
+/// value that can be duplicated.
 #[tokio::test]
-async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
+async fn ingest_two_rows_without_an_id_in_one_batch_do_not_collide() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
@@ -804,7 +647,7 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
     assert_eq!(tessera_ids.len(), 2);
     assert_ne!(
         tessera_ids[0], tessera_ids[1],
-        "two null-external-id items must still get distinct entities/tessera_ids"
+        "two items without an id must still get distinct entities/tessera_ids"
     );
 }
 
@@ -817,9 +660,9 @@ async fn ingest_answers_each_rows_tessera_id_as_the_string_the_viewer_serves() {
 
     // The fixture's points sit on whole coordinates, so this box holds only these rows.
     let body = build_ingest_batch_optional(&[
-        (Some(b"string-a".as_slice()), 10.4, 10.4, "0"),
+        (Some(N_ITEMS + 1), 10.4, 10.4, "0"),
         (None, 10.5, 10.5, "0"),
-        (Some(b"string-b".as_slice()), 10.6, 10.6, "0"),
+        (Some(N_ITEMS + 2), 10.6, 10.6, "0"),
     ]);
     let resp = server
         .client
@@ -970,10 +813,8 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     );
 }
 
-/// `/control/ingest`'s external ids for [`concurrent_ingests_do_not_delay_a_control_changes_suppress`],
-/// chosen well clear of every other test's ranges in this file (`N_ITEMS`, and the `N_ITEMS +
-/// 10_000 ..` range `a_batch_resolution_opens_each_extent_at_most_once` uses) so a shared-fixture
-/// mistake would show up as a collision 409 rather than silently aliasing another test's ids.
+/// The first `id` [`concurrent_ingests_do_not_delay_a_control_changes_suppress`] ingests, well
+/// clear of the built items' `0..N_ITEMS`, so every row creates an item.
 const CONCURRENT_INGEST_BASE_ID: u64 = 50_000_000;
 const CONCURRENT_INGEST_BATCHES: u64 = 8;
 const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
@@ -1063,13 +904,12 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
     tokio::task::yield_now().await;
 
     const SUPPRESS_SOURCE_ID: u64 = 7;
-    let external_id = member(SUPPRESS_SOURCE_ID);
     let suppress_start = std::time::Instant::now();
     let suppress_resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .json(&serde_json::json!([change(SUPPRESS_SOURCE_ID, "suppress")]))
         .send()
         .await
         .unwrap();
@@ -1402,12 +1242,11 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
     let suppress = |id: u64| {
         let client = server.client.clone();
         let url = server.control_url("/control/changes");
-        let external_id = member(id);
         async move {
             client
                 .post(url)
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+                .json(&serde_json::json!([change(id, "suppress")]))
                 .send()
                 .await
                 .unwrap()
@@ -1541,9 +1380,9 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": member(5),  "op": "suppress" },
-            { "external_id": member(9),  "op": "unsuppress" },
-            { "external_id": member(11), "op": "suppress" },
+            change(5, "suppress"),
+            change(9, "unsuppress"),
+            change(11, "suppress"),
         ]))
         .send()
         .await
@@ -1591,8 +1430,7 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
 /// identity in every respect but its willingness to block.
 ///
 /// `armed` is a switch rather than a permanent block because the fixture has to *use* the plugin
-/// before it can saturate anything: `/session/authorise` resolves auth terms, and a
-/// `/control/changes` item can only name an external id that ingest already established.
+/// before it can saturate anything: `/session/authorise` resolves auth terms.
 struct ParkingPlugin {
     inner: tessera_plugin::Passthrough,
     armed: Arc<std::sync::atomic::AtomicBool>,
@@ -1783,8 +1621,8 @@ fn in_extent(i: u64) -> f32 {
     (i % 1000) as f32
 }
 
-/// Fresh source ids for the bound fixtures below. Offset well clear of `N_ITEMS`, or every batch here
-/// collides with the bundle's own external ids and answers 409 before any bound is consulted.
+/// Fresh `id` values for the bound fixtures below, offset well clear of `N_ITEMS` so every row
+/// creates an item rather than editing one the build stored.
 fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
     const INGEST_BOUND_ID_BASE: u64 = 1_000_000;
     (0..n)
@@ -2544,7 +2382,7 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
 /// unbounded lane by `Command::is_never_shed`, and `map_change_batch_error` contains no route from
 /// that lane to a 429 at all.
 ///
-/// The suppression is deliberately a bare `{external_id, op}` with **no `access` field**, so
+/// The suppression is deliberately a bare `{field, value, op}` with **no `access` field**, so
 /// `run_changes` makes no `terms_of_labels` call and the parking plugin cannot block it. That is a
 /// property of the fixture, not of the deny lane, and it is stated here so a later reader does not
 /// mistake it for part of what is being proved.
@@ -2608,14 +2446,13 @@ fn changes_never_429s() {
         assert_eq!(body["error"], "backpressure");
 
         const SUPPRESS_SOURCE_ID: u64 = 5;
-        let external_id = member(SUPPRESS_SOURCE_ID);
         let resp = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             fx.server
                 .client
                 .post(fx.server.control_url("/control/changes"))
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+                .json(&serde_json::json!([change(SUPPRESS_SOURCE_ID, "suppress")]))
                 .send(),
         )
         .await
@@ -2751,12 +2588,11 @@ async fn ingest_429s_when_the_queue_is_full() {
 
     // And the never-shed lane is unaffected in the very same state.
     const SUPPRESS_SOURCE_ID: u64 = 6;
-    let external_id = member(SUPPRESS_SOURCE_ID);
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .json(&serde_json::json!([change(SUPPRESS_SOURCE_ID, "suppress")]))
         .send()
         .await
         .unwrap();
@@ -3149,12 +2985,11 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
     let server = mount_server(engine, 200, generous_test_gate()).await;
 
     let suppress = |id: u64| {
-        let external_id = member(id);
         server
             .client
             .post(server.control_url("/control/changes"))
             .bearer_auth(OPERATOR_CREDENTIAL)
-            .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+            .json(&serde_json::json!([change(id, "suppress")]))
             .send()
     };
 
@@ -3247,14 +3082,13 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
     engine.start_write_executor(1024).unwrap();
     let server = mount_server(engine, 200, generous_test_gate()).await;
 
-    // A syntactically valid change array well past the 2 MiB cap. Every item names a real external
-    // id, so nothing but the size can be what refuses it.
-    let external_id = member(SUPPRESS_SOURCE_ID);
+    // A syntactically valid change array well past the 2 MiB cap. Every item names a real item, so
+    // nothing but the size can be what refuses it.
     const SUPPRESS_SOURCE_ID: u64 = 7;
     let mut items = Vec::new();
     while serde_json::to_vec(&items).unwrap().len() < 3 * 1024 * 1024 {
         for _ in 0..10_000 {
-            items.push(serde_json::json!({ "external_id": external_id, "op": "suppress" }));
+            items.push(change(SUPPRESS_SOURCE_ID, "suppress"));
         }
     }
     let oversized = serde_json::to_vec(&items).unwrap();
@@ -3288,7 +3122,7 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("content-type", "application/json")
-        .body("[{\"external_id\": ")
+        .body("[{\"field\": ")
         .send()
         .await
         .unwrap();
@@ -3399,7 +3233,6 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
     let (server, _faults) = serve_with_faults(&tmp).await;
 
     let wrong_shape = serde_json::json!({ "unexpected": 1 });
-    let unseen = base64::engine::general_purpose::STANDARD.encode(b"never-ingested");
     let routes = [
         ("PUT", "/control/layers", wrong_shape.clone()),
         ("PUT", "/control/attributes", wrong_shape.clone()),
@@ -3413,7 +3246,9 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
         (
             "POST",
             "/control/changes",
-            serde_json::json!([{ "external_id": unseen, "op": "suppress", "unknown_field": 1 }]),
+            serde_json::json!([{
+                "field": "id", "value": "999999", "op": "suppress", "unknown_field": 1
+            }]),
         ),
         (
             "POST",
@@ -3470,7 +3305,7 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .timeout(std::time::Duration::from_secs(30))
-        .json(&serde_json::json!([{ "external_id": member(9), "op": "suppress" }]))
+        .json(&serde_json::json!([change(9, "suppress")]))
         .send()
         .await
         .expect("the suppression is acknowledged, not parked at a site the refused arm armed");
@@ -3574,7 +3409,7 @@ async fn a_change_batch_of_n_costs_one_fsync() {
 
     let before = control_status(&server).await;
     let items: Vec<serde_json::Value> = (0..N)
-        .map(|i| serde_json::json!({ "external_id": member(i), "op": "suppress" }))
+        .map(|i| change(i, "suppress"))
         .collect();
 
     let resp = server
@@ -3666,7 +3501,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": member(9), "op": "suppress" }]))
+        .json(&serde_json::json!([change(9, "suppress")]))
         .send()
         .await
         .unwrap();
@@ -3684,9 +3519,9 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": member(5),  "op": "suppress" },
-            { "external_id": member(9),  "op": "unsuppress" },
-            { "external_id": member(11), "op": "suppress" },
+            change(5, "suppress"),
+            change(9, "unsuppress"),
+            change(11, "suppress"),
         ]))
         .send()
         .await
@@ -3973,8 +3808,6 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/write_executor/ready", "bool"),
     ("/write_executor/stage_nanos", "object"),
     ("/write_executor/stage_nanos/.buf_insert", "integer"),
-    ("/write_executor/stage_nanos/.est_fwd", "integer"),
-    ("/write_executor/stage_nanos/.est_inv", "integer"),
     ("/write_executor/stage_nanos/.wal_pos", "integer"),
     ("/write_executor/stage_nanos/admit", "integer"),
     ("/write_executor/stage_nanos/allocate", "integer"),
@@ -4070,7 +3903,7 @@ async fn control_status_serves_its_pinned_shape() {
         .put(&artifacts_url)
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "a", "members": members(0..100) }]
         }))
         .send()
@@ -4083,7 +3916,7 @@ async fn control_status_serves_its_pinned_shape() {
         .patch(&artifacts_url)
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "a", "members": members(100..200) }]
         }))
         .send()
@@ -4135,7 +3968,7 @@ async fn control_status_serves_its_pinned_shape() {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": member(5), "op": "suppress" }]))
+        .json(&serde_json::json!([change(5, "suppress")]))
         .send()
         .await
         .unwrap();
@@ -4372,8 +4205,7 @@ async fn control_status_publishes_the_live_segment_count_per_view() {
 /// one while answering 200. The column **name** must reach the caller: "your batch was rejected" is
 /// not actionable against a wide schema.
 ///
-/// The fixture bundle declares no scalars at all (`tessera-build` writes the array empty —
-/// contracts §2.2), so here every non-reserved column is undeclared.
+/// The fixture bundle declares only `id`, so here every other non-reserved column is undeclared.
 #[tokio::test]
 async fn an_undeclared_ingest_column_is_422_naming_the_column() {
     let tmp = TempDir::new().unwrap();
@@ -4384,7 +4216,6 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
     // not about the type.
     let access = access_column(["0"]);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -4394,11 +4225,10 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values([external_id_of(N_ITEMS + 1)])),
             Arc::new(Float32Array::from_iter_values([10.0])),
             Arc::new(Float32Array::from_iter_values([10.0])),
             Arc::new(access),
-            Arc::new(arrow::array::UInt64Array::from_iter_values([7u64])),
+            Arc::new(UInt64Array::from_iter_values([7u64])),
             Arc::new(arrow::array::Date32Array::from_iter_values([19_000i32])),
         ],
     )
@@ -4436,8 +4266,7 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
 
 /// `x-tessera-view` (contracts §3.4): a known view is accepted, an unknown one is `404`.
 ///
-/// **404, not 422**, because §3.1's code list is closed and its 404 row says "unknown `tessera_id`,
-/// node, external ID **or view**" — which is already what the viewer plane answers. §3.4's 422 is
+/// **404, not 422**: an unknown view is an unknown name, as the viewer plane answers it. A 422 is
 /// for *ambiguity*: a bundle with two or more views and no header. This fixture has one view, so
 /// the ambiguous case is unreachable here and the omitted header is accepted.
 #[tokio::test]
@@ -4503,26 +4332,16 @@ async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
     );
 }
 
-/// `over_bound_ids` is **base64**, like every other external-ID surface on this plane.
-///
-/// External ids are arbitrary bytes (contracts §1) and JSON has no binary type. `from_utf8_lossy`
-/// replaces every byte that is not valid UTF-8 with U+FFFD, so an operator investigating a
-/// data-quality warning was handed replacement characters instead of an id they could look up —
-/// and identity is the whole of what makes bounds-warn-never-exclude (§6.2 r16) usable.
-///
-/// The id here contains `0xFF`, which is not valid UTF-8 in any position, so the lossy encoding is
-/// demonstrably lossy rather than merely differently spelled.
+/// `over_bound_rows` names each row whose labels resolve past the plugin's bound by its position in
+/// the batch, and bounds warn, never exclude: the batch is accepted, the over-bound row included.
 #[tokio::test]
-async fn over_bound_ids_are_base64_not_lossy_utf8() {
-    use base64::Engine as _;
-
+async fn over_bound_rows_names_each_over_bound_row_by_its_position() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
     // Passthrough declares `max_terms_per_item = 4096`; one more descriptor than that is the warn.
     let labels = (0..4_097).map(|i| format!("t{i}")).collect::<Vec<_>>();
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let external_id: &[u8] = &[0xFF, 0x01, 0xFE, 0x02, 0x00, 0x00, 0x00, 0x00];
 
     let resp = server
         .client
@@ -4530,32 +4349,19 @@ async fn over_bound_ids_are_base64_not_lossy_utf8() {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "over-bound-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_labels(external_id, &labels))
+        .body(build_ingest_batch_labels(&[&["0"], &labels, &["0"]]))
         .send()
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
         200,
-        "bounds warn, never exclude — the item is indexed regardless (§6.2 r16)"
+        "bounds warn, never exclude — the item is indexed regardless"
     );
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["over_bound"], 1);
-
-    let listed = json["over_bound_ids"][0].as_str().unwrap();
-    assert_eq!(
-        listed,
-        base64::engine::general_purpose::STANDARD.encode(external_id),
-        "the id must round-trip: an operator has to be able to decode it back to the bytes they \
-         sent. Got {listed}"
-    );
-    assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(listed)
-            .unwrap(),
-        external_id,
-        "and it must decode to exactly those bytes — 0xFF has no lossy encoding that survives"
-    );
+    assert_eq!(json["created"], 3, "{json}");
+    assert_eq!(json["over_bound"], 1, "{json}");
+    assert_eq!(json["over_bound_rows"], serde_json::json!([1]), "{json}");
 }
 
 /// A change naming the `predicate` op, which does not exist, is a 422.
@@ -4569,7 +4375,7 @@ async fn the_predicate_op_is_refused_with_a_422() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": member(3), "op": "predicate", "access": "0" },
+            { "field": "id", "value": member(3), "op": "predicate", "access": "0" },
         ]))
         .send()
         .await
@@ -4579,10 +4385,9 @@ async fn the_predicate_op_is_refused_with_a_422() {
     assert_eq!(body["error"], "contract");
 }
 
-/// **A deleted holder does not block re-ingest; a suppressed one does** (decision 0047, at the
-/// handler's own duplicate check). Deletion forgets the binding — our retention of it must never
-/// refuse a user's write — while suppression is temporary hiding, and re-ingesting a
-/// byte-identical copy past one is the copy-no-deny-can-reach hole the check exists to close.
+/// **A deleted holder of an `id` names nothing; a suppressed one is named.** Deletion forgets the
+/// item, so a row carrying its `id` creates a new one, while suppression is temporary hiding, and a
+/// byte-identical row past one names the suppressed item rather than making a copy no deny reaches.
 #[tokio::test]
 async fn a_deleted_holder_names_nothing_and_a_suppressed_one_is_named() {
     let tmp = TempDir::new().unwrap();
@@ -4607,15 +4412,15 @@ async fn a_deleted_holder_names_nothing_and_a_suppressed_one_is_named() {
                 .unwrap()
         }
     };
-    let change = |op: &'static str, id: u64| {
+    let apply = |op: &'static str, id: u64| {
         let client = server.client.clone();
         let url = server.control_url("/control/changes");
-        let ext = member(id);
+        let item = change(id, op);
         async move {
             client
                 .post(url)
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .json(&serde_json::json!([{ "external_id": ext, "op": op }]))
+                .json(&serde_json::json!([item]))
                 .send()
                 .await
                 .unwrap()
@@ -4627,21 +4432,21 @@ async fn a_deleted_holder_names_nothing_and_a_suppressed_one_is_named() {
     assert_eq!(first.status(), 200);
     let first: serde_json::Value = first.json().await.unwrap();
 
-    // Suppressed: the item still holds its external id, so the same row names it and changes
+    // Suppressed: the item still holds its `id`, so the same row names it and changes
     // nothing. Suppression is temporary hiding, not deletion, and no copy is made past it.
-    assert_eq!(change("suppress", fresh).await.status(), 200);
+    assert_eq!(apply("suppress", fresh).await.status(), 200);
     let again: serde_json::Value = ingest("rebind-2", vec![fresh]).await.json().await.unwrap();
     assert_eq!(again["unchanged"], 1, "{again}");
     assert_eq!(again["tessera_ids"], first["tessera_ids"], "{again}");
 
     // Deleted: forgotten, so the same row creates a new item.
-    assert_eq!(change("delete", fresh).await.status(), 200);
+    assert_eq!(apply("delete", fresh).await.status(), 200);
     let reborn: serde_json::Value = ingest("rebind-3", vec![fresh]).await.json().await.unwrap();
     assert_eq!(reborn["created"], 1, "a deleted holder names nothing: {reborn}");
     assert_ne!(reborn["tessera_ids"], first["tessera_ids"], "{reborn}");
 
-    // And the re-bound id is operable: a suppress addresses the new life, answered 200.
-    assert_eq!(change("suppress", fresh).await.status(), 200);
+    // And the `id` names the new item: a suppress addresses it, answered 200.
+    assert_eq!(apply("suppress", fresh).await.status(), 200);
 }
 
 /// Every declarable plain scalar type, by the manifest spelling `contracts §2.6` admits it under.
@@ -4793,14 +4598,11 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
 fn build_scalar_tail_ingest_batch() -> Vec<u8> {
     let access = access_column(["0"]);
     let mut fields = vec![
-        Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
     ];
-    let external_id = external_id_of(9_600_001);
     let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
-        Arc::new(BinaryArray::from_iter_values([external_id.as_slice()])),
         Arc::new(Float32Array::from(vec![5.0f32])),
         Arc::new(Float32Array::from(vec![5.0f32])),
         Arc::new(access),

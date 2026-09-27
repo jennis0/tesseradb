@@ -349,7 +349,7 @@ struct RawServe {
     /// Default: not set, and the server merges up to 268435456 bytes (256 MiB).
     max_merged_segment_bytes: Option<u64>,
     /// How many small files of one size tier, which flushes write for attribute values, records,
-    /// text indexes and access terms, are combined into one. External-id files are combined four
+    /// text indexes and access terms, are combined into one. Unique index runs are combined four
     /// at a time whatever this says. `tessera serve` refuses to start with a value below 2.
     ///
     /// Default: `8`.

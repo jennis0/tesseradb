@@ -57,7 +57,6 @@ clock would silently start expecting the item back.
 
 from __future__ import annotations
 
-import base64
 import time
 from dataclasses import dataclass
 
@@ -140,32 +139,33 @@ class AckedJournal:
         op: str,
         *,
         term_ids: set[int] | None = None,
-        external_id_b64: str | None = None,
+        tessera_id: int | None = None,
     ) -> requests.Response:
         """Submit one `/control/changes` item, journalling it **iff** the service returns 200.
 
         `predicate` takes `term_ids`, the item's *new* term set, which the journal records if the
         service accepts it; the request carries only the fields the server defines.
 
-        `external_id_b64` overrides the bundle lookup, for the one case a test needs it: naming an
-        external ID the deployment has never seen, which must be refused. A refusal has no entity
-        to journal, so nothing is journalled — but a *200* to such a call would leave this object
-        with an operation it cannot attribute, so it raises rather than recording a fiction.
+        The item is addressed by its `tessera_id`, computed from `entity_id` under the bundle's
+        key. `tessera_id` overrides that, for the one case a test needs it: naming an item the
+        deployment has never held, which must be refused. A refusal has no entity to journal, so
+        nothing is journalled — but a *200* to such a call would leave this object with an
+        operation it cannot attribute, so it raises rather than recording a fiction.
         """
         if op not in CHANGE_OPS:
             raise ValueError(f"unknown change op {op!r}; expected one of {CHANGE_OPS}")
         if op == "predicate" and term_ids is None:
             raise ValueError("a predicate change must state the item's new term set")
 
-        supplied = external_id_b64
+        supplied = tessera_id
         if supplied is None:
-            supplied = base64.b64encode(self.bundle.external_id_of(entity_id)).decode()
+            supplied = self.bundle.tessera_id_of(entity_id)
         response = self.server.change(supplied, op)
 
-        if response.status_code == 200 and external_id_b64 is not None:
+        if response.status_code == 200 and tessera_id is not None:
             raise AssertionError(
-                f"the service accepted a {op} against external id {external_id_b64!r}, which this "
-                "journal has no entity for; it cannot be composed and must not be silently dropped"
+                f"the service accepted a {op} against tessera_id {tessera_id}, which this journal "
+                "has no entity for; it cannot be composed and must not be silently dropped"
             )
 
         self._sequence += 1
@@ -183,8 +183,8 @@ class AckedJournal:
                 Refusal(
                     sequence=self._sequence,
                     what=(
-                        f"{op} external id {external_id_b64}"
-                        if external_id_b64 is not None
+                        f"{op} tessera_id {tessera_id}"
+                        if tessera_id is not None
                         else f"{op} entity {entity_id}"
                     ),
                     status=response.status_code,
@@ -204,10 +204,7 @@ class AckedJournal:
         payload = []
         for entity_id, op, _term_ids in items:
             payload.append(
-                {
-                    "external_id": base64.b64encode(self.bundle.external_id_of(entity_id)).decode(),
-                    "op": op,
-                }
+                {"tessera_id": str(self.bundle.tessera_id_of(entity_id)), "op": op}
             )
 
         response = self.server.changes(payload)

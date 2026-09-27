@@ -136,7 +136,6 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -156,7 +155,6 @@ fn text_extents(root: &Path) -> Vec<tessera_store::manifest::TextExtent> {
 /// Ingest one item carrying `prose` and flush it, returning the entity it was allocated.
 fn ingest_and_flush(engine: &Engine, root: &Path, tag: &str, prose: String) -> u32 {
     let row = UnallocatedRow {
-        external_id: Some(tag.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],

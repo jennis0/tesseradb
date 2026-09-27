@@ -23,8 +23,8 @@ pub struct TilerItem {
 
 /// Sort `items` into segment (row) order: `(morton, tessera_id)` ascending. `tessera_id` is a
 /// bijection over 2^64 with one row per entity, so no further tiebreak is needed. The entity ID
-/// is not a sort key; it is passed alongside to keep `permutation.bin` and the external-ID
-/// sidecars aligned with the new row order.
+/// is not a sort key; it is passed alongside to keep `permutation.bin` aligned with the new row
+/// order.
 ///
 /// Returns the sorted items' Morton codes as `u32`s: the high half of each item's fixed-point
 /// position ([`split32`]), already computed against the build extent, so this does not

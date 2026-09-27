@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, Float32Array, Float64Array, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
@@ -165,8 +165,9 @@ pub fn write_lon_lat(path: &Path, places: &[(f64, f64)]) {
     );
 }
 
-/// The standard fixture: `n` items placed by [`scatter`], with the terms [`terms_of`] gives them,
-/// built into `dir/bundle` from points and pairs files written beside it in `dir`.
+/// The standard fixture: `n` items placed by [`scatter`], with the terms [`terms_of`] gives them
+/// and the unique `id` [`id_schema`] declares, built into `dir/bundle` from points and pairs files
+/// written beside it in `dir`.
 pub fn build_fixture(dir: &Path, n: u64) -> std::path::PathBuf {
     build_fixture_with_access(dir, n, AccessInput::relation(dir.join("pairs.parquet")))
 }
@@ -180,8 +181,42 @@ pub fn build_fixture_with_access(dir: &Path, n: u64, access: AccessInput) -> std
     write_pairs_n(&dir.join("pairs.parquet"), n);
     let out = dir.join("bundle");
     let view = view_args("s0", &points, access);
-    build(&build_args(&out, vec![view])).expect("fixture build should succeed");
+    build(&with_id(build_args(&out, vec![view]), &points)).expect("fixture build should succeed");
     out
+}
+
+/// A declaration of one attribute: `id`, a unique `u64` read from the points file's `entity_id`,
+/// so a test names a built item by `{"field": "id", "value": "<source id>"}` or a row's `id`.
+pub fn id_schema() -> tessera_build::config::Schema {
+    tessera_build::config::Schema {
+        attributes: vec![tessera_build::config::Attribute {
+            field: Some("entity_id".to_string()),
+            name: "id".to_string(),
+            title: None,
+            ty: tessera_spatial::tiler::ScalarType::U64,
+            analyser: None,
+            vocabulary: None,
+            value_set: None,
+            index: false,
+            render: false,
+            unique: true,
+        }],
+        vocabularies: Default::default(),
+    }
+}
+
+/// [`id_schema`] as a corpus declaration's `[[attribute]]` block, for a schema written in TOML.
+pub const ID_ATTRIBUTE: &str =
+    "[[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n";
+
+/// `args` declaring [`id_schema`], read from the points file at `points`.
+pub fn with_id(args: BuildArgs, points: &Path) -> BuildArgs {
+    let schema = id_schema();
+    BuildArgs {
+        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        schema,
+        ..args
+    }
 }
 
 /// Copy the bundle `build` writes into a directory's `bundle` to `dir/bundle`, building it on the
@@ -311,8 +346,7 @@ pub async fn serve_with_faults_and_config(
     (server, faults)
 }
 
-/// A build of `views` into `out` under the test identity key, minting external ids and writing no
-/// oracle pairs, with every other input empty. A test sets what it varies with struct update
+/// A build of `views` into `out` under the test identity key, writing no oracle pairs, with every other input empty. A test sets what it varies with struct update
 /// syntax.
 pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
     BuildArgs {
@@ -328,7 +362,6 @@ pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -383,12 +416,6 @@ pub fn build_scored(dir: &Path, n: u64, schema_toml: &str) -> std::path::PathBuf
     let out = dir.join("bundle");
     build_declared(&out, &points, &pairs, schema_toml);
     out
-}
-
-/// `tessera_build`'s external-id convention (see its `write_external_ids` doc): the source
-/// corpus's numeric id, 8 bytes little-endian.
-pub fn external_id_of(source_id: u64) -> Vec<u8> {
-    source_id.to_le_bytes().to_vec()
 }
 
 pub struct TestServer {
@@ -1074,14 +1101,21 @@ pub async fn refused(resp: reqwest::Response, status: u16) -> String {
     error_code(&resp.text().await.unwrap())
 }
 
-/// `bytes` in standard base64, the way the wire carries an external id.
-pub fn b64(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+/// A built item's member address in a batch whose `field` is `id` ([`id_schema`]): its source id
+/// as text.
+pub fn member(source_id: u64) -> String {
+    source_id.to_string()
 }
 
-/// A built item's member address: its external id ([`external_id_of`]) in base64.
-pub fn member(source_id: u64) -> String {
-    b64(&external_id_of(source_id))
+/// The `tessera_id` of the live item holding `id` ([`id_schema`]) `source_id`: what a client
+/// reads off an ingest answer or a viewport, read here from the engine.
+pub fn tessera_id_of(server: &TestServer, source_id: u64) -> u64 {
+    let engine = &server.state.engine;
+    let entity = engine
+        .resolve_unique_values("id", &[source_id.to_string()])
+        .unwrap()[0]
+        .unwrap_or_else(|| panic!("no live item holds id {source_id}"));
+    engine.tessera_id_of(entity).unwrap().raw()
 }
 
 /// [`member`] for each of `range`.
@@ -1327,7 +1361,6 @@ pub async fn fold(server: &TestServer) {
 /// Ingest one point, into `view` where the bundle holds several, then [`tick`] and [`fold`]. A
 /// flush with nothing buffered publishes nothing, so the point gives the fold something to fold.
 pub async fn flush_and_fold(server: &TestServer, view: Option<&str>) {
-    let ingested = external_id_of(9_001);
     let mut request = server
         .client
         .post(server.control_url("/control/ingest"))
@@ -1338,12 +1371,7 @@ pub async fn flush_and_fold(server: &TestServer, view: Option<&str>) {
         request = request.header("x-tessera-view", view);
     }
     let resp = request
-        .body(build_ingest_batch_optional(&[(
-            Some(&ingested[..]),
-            10.0,
-            10.0,
-            "0",
-        )]))
+        .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
         .await
         .unwrap();
@@ -1856,30 +1884,31 @@ pub fn access_column<'a>(labels: impl IntoIterator<Item = &'a str>) -> arrow::ar
     builder.finish()
 }
 
-/// An Arrow ingest batch of `(external_id, x, y, access label)` rows, where a row may carry no
-/// external id.
-pub fn build_ingest_batch_optional(rows: &[(Option<&[u8]>, f32, f32, &str)]) -> Vec<u8> {
+/// An Arrow ingest batch of `(id, x, y, access label)` rows. A row's `id` ([`id_schema`]) names
+/// the item holding it, or gives a new item that value; the column is sent only where some row
+/// carries one, so a bundle declaring no `id` takes a batch of new items.
+pub fn build_ingest_batch_optional(rows: &[(Option<u64>, f32, f32, &str)]) -> Vec<u8> {
     let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access_array),
-    ]));
-    let ext_array = BinaryArray::from_iter(rows.iter().map(|(id, _, _, _)| *id));
-    let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
-    let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(ext_array),
-            Arc::new(x_array),
-            Arc::new(y_array),
-            Arc::new(access_array),
-        ],
-    )
-    .unwrap();
+    let mut fields = Vec::new();
+    let mut columns: Vec<ArrayRef> = Vec::new();
+    if rows.iter().any(|(id, _, _, _)| id.is_some()) {
+        fields.push(Field::new("id", DataType::UInt64, true));
+        columns.push(Arc::new(UInt64Array::from_iter(
+            rows.iter().map(|(id, _, _, _)| *id),
+        )));
+    }
+    fields.push(Field::new("x", DataType::Float32, false));
+    fields.push(Field::new("y", DataType::Float32, false));
+    fields.push(access_field(&access_array));
+    columns.push(Arc::new(Float32Array::from_iter_values(
+        rows.iter().map(|(_, x, _, _)| *x),
+    )));
+    columns.push(Arc::new(Float32Array::from_iter_values(
+        rows.iter().map(|(_, _, y, _)| *y),
+    )));
+    columns.push(Arc::new(access_array));
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
 
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();

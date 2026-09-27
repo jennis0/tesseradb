@@ -6,7 +6,7 @@
 //! two more serves the union of the three, masked per principal; an unknown key and a deleted
 //! member each refuse the whole batch with nothing applied; a suppressed member joins and stays
 //! outside every mask; a suppressed artifact grows and stays suppressed; the growth comes back from
-//! a restart and survives a fold; the same under `tessera` addressing;
+//! a restart and survives a fold; the same with members named by `tessera_id`;
 //! and the body takes keys, members and the fixed parts and nothing else (the fills are
 //! `artifact_fill.rs`'s subject). The response carries a `tessera_id` and the count that joined,
 //! and never an ordinal or a membership size (C8).
@@ -38,7 +38,7 @@ async fn publish(server: &TestServer, key: &str, body_members: Vec<String>) -> S
         .put(artifacts_url(server))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": key, "members": body_members }]
         }))
         .send()
@@ -74,11 +74,11 @@ async fn grow_raw(server: &TestServer, body: serde_json::Value) -> (u16, serde_j
     (status, body)
 }
 
-/// Grow under external addressing, one or more artifacts.
+/// Grow one or more artifacts, members named by their `id`.
 async fn grow(server: &TestServer, artifacts: serde_json::Value) -> (u16, serde_json::Value) {
     grow_raw(
         server,
-        json!({ "addressing": "external", "artifacts": artifacts }),
+        json!({ "field": "id", "artifacts": artifacts }),
     )
     .await
 }
@@ -227,8 +227,8 @@ async fn an_unknown_key_refuses_the_whole_batch() {
     );
 }
 
-/// A deleted member refuses the batch; a suppressed member joins and stays outside every mask
-/// until the suppression is lifted (`artifacts-from-points.md` §6.1's two refusals).
+/// A deleted member names nothing, by its `id` or by its `tessera_id`, and refuses the batch; a
+/// suppressed member joins and stays outside every mask until the suppression is lifted.
 #[tokio::test]
 async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
     let tmp = TempDir::new().unwrap();
@@ -236,24 +236,31 @@ async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
     register(&server, flat_layer(LAYER)).await;
     publish(&server, "a", members(0..10)).await;
 
+    let by_tessera: Vec<String> = (10..20)
+        .map(|s| tessera_id_of(&server, s).to_string())
+        .collect();
     change(
         &server,
-        json!({ "external_id": member(15), "op": "delete" }),
+        json!({ "field": "id", "value": member(15), "op": "delete" }),
     )
     .await;
-    let (status, body) = grow(&server, json!([{ "key": "a", "members": members(10..20) }])).await;
-    assert_eq!(status, 422, "{body}");
-    assert_eq!(body["error"], "contract", "{body}");
-    let detail = body["detail"].as_str().expect("the envelope's detail");
-    // The body carries a count and the key, never an entity id (I10): the only number in it is
-    // the one deleted member.
-    assert_eq!(numbers_in(detail), vec!["1"], "{detail}");
+    for body in [
+        json!({ "field": "id", "artifacts": [{ "key": "a", "members": members(10..20) }] }),
+        json!({ "artifacts": [{ "key": "a", "members": by_tessera }] }),
+    ] {
+        let (status, answer) = grow_raw(&server, body).await;
+        assert_eq!(status, 404, "{answer}");
+        assert_eq!(answer["error"], "unknown", "{answer}");
+        // Member 5 of artifact 0, and no other number.
+        let detail = answer["detail"].as_str().expect("the envelope's detail");
+        assert_eq!(numbers_in(detail), vec!["5", "0"], "{detail}");
+    }
     assert_eq!(count(&server, &["0"]).await, 10, "nothing joined");
 
     // 16 is suppressed: it joins, and is not counted until the suppression is lifted.
     change(
         &server,
-        json!({ "external_id": member(16), "op": "suppress" }),
+        json!({ "field": "id", "value": member(16), "op": "suppress" }),
     )
     .await;
     let (status, body) = grow(&server, json!([{ "key": "a", "members": members(16..20) }])).await;
@@ -267,7 +274,7 @@ async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
 
     change(
         &server,
-        json!({ "external_id": member(16), "op": "unsuppress" }),
+        json!({ "field": "id", "value": member(16), "op": "unsuppress" }),
     )
     .await;
     assert_eq!(
@@ -363,9 +370,9 @@ async fn growth_survives_a_restart_and_a_fold() {
     assert_eq!(count(&server, &["0"]).await, 40);
 }
 
-/// `tessera` addressing: the identifiers a viewer holds.
+/// A batch naming no `field` names its members by `tessera_id`: the identifiers a viewer holds.
 #[tokio::test]
-async fn tessera_addressing_grows_by_the_identifiers_a_viewer_holds() {
+async fn members_named_by_tessera_id_grow_by_the_identifiers_a_viewer_holds() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register(&server, flat_layer(LAYER)).await;
@@ -405,7 +412,6 @@ async fn tessera_addressing_grows_by_the_identifiers_a_viewer_holds() {
         .put(artifacts_url(&server))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "addressing": "tessera",
             "artifacts": [{ "key": "a", "members": first }]
         }))
         .send()
@@ -422,7 +428,6 @@ async fn tessera_addressing_grows_by_the_identifiers_a_viewer_holds() {
     let (status, body) = grow_raw(
         &server,
         json!({
-            "addressing": "tessera",
             "artifacts": [{ "key": "a", "members": second }]
         }),
     )
@@ -435,7 +440,6 @@ async fn tessera_addressing_grows_by_the_identifiers_a_viewer_holds() {
     let (status, body) = grow_raw(
         &server,
         json!({
-            "addressing": "tessera",
             "artifacts": [{ "key": "a", "members": ids[..100].to_vec() }]
         }),
     )
@@ -476,6 +480,13 @@ async fn a_growth_body_carries_keys_members_and_the_fixed_parts_and_nothing_else
     )
     .await;
     assert_eq!(status, 422, "a field outside the body: {body}");
+    let (status, body) = grow_raw(
+        &server,
+        json!({ "addressing": "field", "field": "id",
+                "artifacts": [{ "key": "a", "members": members(10..20) }] }),
+    )
+    .await;
+    assert_eq!(status, 422, "a key outside the envelope: {body}");
     let (status, body) = grow(&server, json!([{ "members": members(10..20) }])).await;
     assert_eq!(status, 422, "a growth without a key: {body}");
     let (status, body) = grow(&server, json!([])).await;

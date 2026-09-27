@@ -841,7 +841,7 @@ pub(crate) fn entity_order_residency(
     let mut terms = vec![
         // **A file under `.build-tmp/` where there is one at all**, and so charged to the disk
         // rather than to memory. The ids are read sequentially by every pass but one — the join's
-        // merge sweep, the external-id write, the ordinal walks — and the exception is
+        // merge sweep, the ordinal walks — and the exception is
         // `layers::publish`'s binary search, which is the random-access case `MappedArray` was
         // written for. They are released at the layer publication, so they are on the disk for
         // every phase of the pre-flight but the assembly.
@@ -1722,7 +1722,6 @@ pub(crate) fn disk(
     corpus: Corpus<'_>,
     payloads: &[f64],
     tail: &Residency,
-    id_space: &crate::ids::IdSpace,
 ) -> Residency {
     let Corpus {
         n,
@@ -1920,34 +1919,6 @@ pub(crate) fn disk(
                 ORACLE_BYTES_PER_PAIR_TENTHS % 10
             ),
             (p.saturating_mul(ORACLE_BYTES_PER_PAIR_TENTHS)) / 10,
-            Phases::BANDS.onwards(),
-        );
-    }
-    if crate::ids::writes_external_ids(args, id_space) {
-        // The sidecar is an Arrow `binary` column beside a `u32` entity — a 4 B offset a row and
-        // one more at the end, an 8 B `external_id` payload and the entity — and the locator
-        // beside it (`ext-locator.u32`) is a `u32` an item. That is 20 B/item of buffer, and the
-        // two files measure **20.25** on both bundles that mint them, 26× apart in `n`
-        // (`docs/evidence/memos/2026-09-10-disk-bundle-payload.md` §1), so the quarter byte an
-        // item the Arrow framing adds is charged with them. ⊘ What is left out is about a
-        // kilobyte of schema and footer a file, which is a constant and not a rate.
-        //
-        // A supplied key's payload is the key's own bytes rather than eight, charged at the mean
-        // over the keys this build interned (`crate::ids`). Modelled from the corpus rather than
-        // measured, and exact where the keys are a fixed width.
-        let payload = match id_space.supplied() {
-            None => 8,
-            Some(keys) => keys.mean_key_len(),
-        };
-        push(
-            format!(
-                "the external-id sidecar and its locator, at {} B/item: a 4 B Arrow offset, a {} \
-                 B id and a 4 B entity in the sidecar, a 4 B locator, and a quarter byte an item \
-                 of Arrow framing",
-                12 + payload,
-                payload
-            ),
-            4 * (n + 1) + (8 + payload) * n + n.div_ceil(4),
             Phases::BANDS.onwards(),
         );
     }
@@ -3323,7 +3294,7 @@ mod tests {
             IdShape::dense(n),
             &payloads,
             free,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
         );
         disk(
             args,
@@ -3336,7 +3307,6 @@ mod tests {
             },
             &payloads,
             &tail,
-            &crate::ids::IdSpace::Integer,
         )
     }
 
@@ -3445,33 +3415,6 @@ mod tests {
         assert_eq!(
             term.bytes,
             characters + 2_000 * DICT_BYTES_PER_KEY_TENTHS / 10
-        );
-    }
-
-    /// **The external-id sidecar is four components over two files**, and the locator is one of
-    /// them. A term that charged three was 4 B/item short, which is 14 GB at the 3.50×10⁹-row
-    /// rung.
-    #[test]
-    fn the_external_id_sidecar_is_charged_at_the_figure_it_measures() {
-        let (mut args, _temp) = fixture(2_000);
-        args.mint_external_ids = true;
-        // The term is arithmetic over `n` alone, so the model is taken at the row count the
-        // measurement was made at rather than the fixture's.
-        let n = 1_000_000;
-        let disk = fixture_disk(&args, n);
-        let term = disk
-            .terms
-            .iter()
-            .find(|t| t.what.contains("the external-id sidecar"))
-            .expect("a minting build carries the sidecar as a term of its own");
-        // `medcpt-1m` built with `--mint-external-ids` writes 16,251,010 B of
-        // `external-ids-0.arrow` and 4,000,000 of `ext-locator.u32` at this `n` — 20,251,010, of
-        // which the schema and footer are about a kilobyte (measured,
-        // `probes/2026-09-11-disk-forecast/`).
-        assert_eq!(term.bytes, 20_250_004);
-        assert!(
-            term.bytes > 20 * n,
-            "the Arrow framing is a quarter byte an item on top of the four buffers"
         );
     }
 
@@ -3727,6 +3670,7 @@ members = "{members}"
 
 [defaults]
 source = "points"
+join_field = "id"
 
 [[view]]
 name = "s0"
@@ -3748,6 +3692,12 @@ analyser = "unicode"
 name = "code"
 type = "keyword"
 index = true
+
+[[attribute]]
+name = "id"
+type = "u64"
+unique = true
+field = "entity_id"
 
 [[layer]]
 name = "fixture/flat"
@@ -3798,7 +3748,6 @@ require_member_visibility = "none"
             layers: parsed.layers.clone(),
             layer_inputs: parsed.layer_sources.clone(),
             scoped_layers: Default::default(),
-            mint_external_ids: false,
             emit_oracle_pairs: false,
             batch_items: None,
             memory_budget: None,
@@ -3892,7 +3841,7 @@ require_member_visibility = "none"
             IdShape::dense(20_000),
             &payloads_per_item(&args),
             None,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
         )
         .1
     }
@@ -4066,7 +4015,7 @@ require_member_visibility = "none"
                 IdShape::dense(N),
                 &payloads_per_item(&args),
                 free,
-                &crate::ids::IdSpace::Integer,
+                &crate::ids::IdSpace::Integer { signed: false },
             );
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();

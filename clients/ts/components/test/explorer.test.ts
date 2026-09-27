@@ -64,7 +64,7 @@ describe('<tessera-explorer> parts', () => {
     };
     await check();
     // Each state below renders an element or a part the one before did not.
-    store.set('selection', {item: {id: 5n, detail: {fields: {author: 'Ada'}, externalId: null, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
+    store.set('selection', {item: {id: 5n, detail: {fields: {author: 'Ada'}, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
     await check();
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'mesh', key: 'k-1', maskedCount: 9n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await check();
@@ -99,7 +99,7 @@ describe('<tessera-explorer> parts', () => {
 describe('<tessera-explorer title-field>', () => {
   it('reaches the map’s hover and the default item card', async () => {
     const {host, shadow, store} = await explorer('<tessera-explorer title-field="author"></tessera-explorer>');
-    store.set('selection', {item: {id: 5n, detail: {fields: {author: 'Ada'}, externalId: null, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
+    store.set('selection', {item: {id: 5n, detail: {fields: {author: 'Ada'}, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
     await settle(host);
     expect((shadow.querySelector('tessera-map') as unknown as {titleField: string}).titleField).toBe('author');
     const card = shadow.querySelector('tessera-item-card')!;
@@ -151,7 +151,7 @@ describe('<tessera-explorer> narrow layout', () => {
 describe('<tessera-explorer> detail', () => {
   it('drops the selection when the card is closed', async () => {
     const {host, shadow, store} = await explorer();
-    store.set('selection', {item: {id: 5n, detail: {fields: {}, externalId: null, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
+    store.set('selection', {item: {id: 5n, detail: {fields: {}, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
     await settle(host);
     (shadow.querySelector('tessera-item-card')!.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);

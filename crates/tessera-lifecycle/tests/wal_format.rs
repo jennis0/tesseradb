@@ -14,7 +14,6 @@ fn a_wal_row_round_trips_its_view() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal.log");
     let row = WalRow {
-        external_id: Some(b"ext-1".to_vec()),
         entity_id: EntityId::new(7),
         view: "default".to_string(),
         join: false,
@@ -95,7 +94,6 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
     assert_ne!(f64::from(y as f32), y);
 
     let row = WalRow {
-        external_id: Some(b"ext-1".to_vec()),
         entity_id: EntityId::new(7),
         view: "default".to_string(),
         join: false,
@@ -157,11 +155,12 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// read at 27 takes the next record's leading bytes for the receipt it does not carry. **27** is
 /// the version before an ingest batch carried its edits: a 27 batch read at 28 takes its receipt's
 /// length for the edits'. **28** is the version before a view drop carried its deletions: a 28 drop
-/// read at 29 takes the next record's leading bytes for them.
+/// read at 29 takes the next record's leading bytes for them. **29** is the version before a row
+/// lost its external id: a 29 row read at 30 takes the external id's tag for its entity.
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
-    for (index, version) in [15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+    for (index, version) in [15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
         .into_iter()
         .enumerate()
     {
@@ -178,7 +177,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
-    std::fs::write(other.join("wal-000001.log"), header_at_version(29, 1, 0)).unwrap();
+    std::fs::write(other.join("wal-000001.log"), header_at_version(30, 1, 0)).unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
 
@@ -241,7 +240,6 @@ fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal.log");
     let row = WalRow {
-        external_id: Some(b"e".to_vec()),
         entity_id: EntityId::new(3),
         view: "v".to_string(),
         join: false,
@@ -282,9 +280,9 @@ fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(
         hex,
-        "5457414c1d0001000000000000000000000000000000890000000101620000000000000000000000000000\
-         000000000000000000000000000000000000010101650301760000000000000000e03f000000000000d03f\
-         0e000101ab02cdd702038486880804ffffffffffffffffff0105fe06d70407dfc50808ffffffffffffffffff\
-         01090000c03f0a00000000000002c00b8080f281838985060c016b0d0101010000778dca01"
+        "5457414c1e000100000000000000000000000000000086000000010162000000000000000000000000000000\
+         0000000000000000000000000000000000010301760000000000000000e03f000000000000d03f0e000101ab\
+         02cdd702038486880804ffffffffffffffffff0105fe06d70407dfc50808ffffffffffffffffff01090000c0\
+         3f0a00000000000002c00b8080f281838985060c016b0d0101010000a8d5d049"
     );
 }

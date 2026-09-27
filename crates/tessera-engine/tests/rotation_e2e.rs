@@ -195,18 +195,16 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
     );
 }
 
-/// One row for `external_id` in `view`, for a batch of its own. A second view of an item already
-/// ingested is a join: admission resolves the external id to the entity it already names.
-fn ingest_into(engine: &Engine, batch: &str, external_id: &str, view: &str) -> EntityId {
+/// One row in `view`, for a batch of its own, adding `item` to the view where one is named.
+fn ingest_into(engine: &Engine, batch: &str, item: Option<EntityId>, view: &str) -> EntityId {
     let descriptors = vec![b"0".to_vec()];
     let mut hash = [0u8; 32];
     for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
     let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: view.to_string(),
-        join: None,
+        join: item,
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,
@@ -243,7 +241,7 @@ fn create_second_view(engine: &Engine) {
 /// A rotation reclaims below the buffer's oldest position, so a member holding a record nothing
 /// will ever consume stays for the life of the process, and so does every member after it.
 fn inherited_members_reclaimed(engine: &Engine, tmp: &std::path::Path, inherited: &[String]) {
-    ingest_into(engine, "wake", "ext-wake", "s0");
+    ingest_into(engine, "wake", None, "s0");
     publish_buffered(engine);
     wait_until("the inherited members to be reclaimed", WAIT, || {
         let now = members(tmp);
@@ -266,11 +264,11 @@ fn a_deleted_entitys_join_row_is_not_rebuilt_at_a_restart() {
     let (deleted, inherited) = {
         let engine = engine_at(tmp.path(), &root, 3600);
         create_second_view(&engine);
-        let id = ingest_into(&engine, "b1", "ext-1", "s0");
+        let id = ingest_into(&engine, "b1", None, "s0");
         publish_buffered(&engine);
 
         // A row in the second view, unflushed, and then the delete that takes both.
-        assert_eq!(ingest_into(&engine, "b2", "ext-1", "s1"), id);
+        assert_eq!(ingest_into(&engine, "b2", Some(id), "s1"), id);
         assert!(engine.generation().buffer.contains(id));
         engine
             .accept_change(id, ChangeOp::Delete)
@@ -306,16 +304,15 @@ fn a_deleted_edits_rows_are_not_rebuilt_at_a_restart() {
 
     let (edited, inherited) = {
         let engine = engine_at(tmp.path(), &root, 3600);
-        let first = ingest_into(&engine, "b1", "ext-1", "s0");
+        let first = ingest_into(&engine, "b1", None, "s0");
         publish_buffered(&engine);
         assert!(!engine.generation().buffer.contains(first));
 
         let mut hash = [2u8; 32];
         hash[0] = b'e';
         let row = UnallocatedRow {
-            external_id: Some(b"ext-1".to_vec()),
             view: "s0".to_string(),
-            join: None,
+            join: Some(first),
             descriptors: vec![b"0".to_vec()],
             x: 7.0,
             y: 7.0,

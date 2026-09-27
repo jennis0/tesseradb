@@ -1115,8 +1115,6 @@ export type ItemDetail = {
    * item has no value for is absent.
    */
   fields: Record<string, unknown>;
-  /** The item's external id, base64-encoded, or `null` where it has none. */
-  externalId: string | null;
   /**
    * The views this item is in that this principal may reach, sorted by id, each with the item's
    * position in it. A view this principal cannot reach is absent, as an undeclared one is, so an
@@ -1297,11 +1295,10 @@ export type ItemsRequest = {
   fields: string[];
   /**
    * System columns, after the fields, in this order. `position` is `tessera:x` and `tessera:y`
-   * (`float64`) in the view's coordinates, so degrees on a geographic view. `external_id` is
-   * `tessera:external_id` (`binary`), null where the item has none. `labels` is `tessera:labels`
-   * (`list<utf8>`), the item's labels this principal holds, sorted.
+   * (`float64`) in the view's coordinates, so degrees on a geographic view. `labels` is
+   * `tessera:labels` (`list<utf8>`), the item's labels this principal holds, sorted.
    */
-  systemFields?: ('position' | 'external_id' | 'labels')[];
+  systemFields?: ('position' | 'labels')[];
   /** The viewport's filter. Only the items matching it are returned, unless `keepUnmatched` is set. */
   filters?: FilterExpr;
   /**

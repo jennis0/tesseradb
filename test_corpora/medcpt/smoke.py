@@ -122,8 +122,8 @@ def write_corpus_toml(out: Path) -> None:
 points                = "points.parquet"
 {SOURCES_TOML}
 [defaults]
-source          = "points"
-entity_id_field = "entity_id"
+source     = "points"
+join_field = "id"
 
 # One view. `extent = "auto"` fits the box to the coordinates as they are; the PCA output spans a
 # few units either side of zero and a stated frame would put the whole chunk in one corner of the
@@ -142,6 +142,13 @@ point_visibility = {{ field = "branches", default = "public" }}
 # ladder uses. An article with no resolved descriptor carries the single term `unindexed` rather
 # than an empty list, so `default = "public"` never fires: a point falling through to the default
 # is one nothing states a policy for, and 13% of this chunk would have done so.
+
+# The join field: the row number `smoke.py` gives each article (`entity` in the member files).
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 [[attribute]]
 name  = "pmid"

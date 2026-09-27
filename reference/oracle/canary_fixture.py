@@ -61,7 +61,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
+from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, join_toml, write_deployment
 
 N_BASE_ITEMS = 400
 N_TERMS = 6
@@ -172,7 +172,8 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
         f'[[view]]\nname = "{VIEW_ID}"\n'
         f"extent = {{ x = [{x_min}, {x_max}], y = [{y_min}, {y_max}] }}\n"
         'source = "points"\n'
-        'point_visibility = { source = "pairs", default = "public" }\n'
+        'point_visibility = { source = "pairs", default = "public" }\n\n'
+        + join_toml("points")
     )
 
     for points_path, pairs_path, out_dir in (

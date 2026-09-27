@@ -5,7 +5,7 @@
 //! carries and which terms it holds are functions of its source id, restated here and never read
 //! back from the bundle. Map order is `(cell, tessera_id)`, with the cell computed from the
 //! generator's position through the build's own quantisation, and stored order is ascending item
-//! number, read from the build's external-id sidecar.
+//! number, read from the index of the unique `id` the build joins on.
 
 mod common;
 
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, Float32Array, Float64Array,
+    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array,
     Int32Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Int32Type, Schema, TimeUnit};
@@ -429,7 +429,7 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
             scoped("blurb", ScalarType::Text, Some("unicode"), "quarter", quarter_views),
             scoped("hush", ScalarType::I32, None, "secret", vec![secret_view]),
         ],
-        attribute_sources: tessera_build::config::AttributeSource::over(world.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(world.clone(), &with_id(schema.clone())),
         out: out.clone(),
         limit: None,
         identity_key: key,
@@ -437,12 +437,11 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("the records fixture builds");
     out
@@ -537,7 +536,6 @@ fn ingest_sources(engine: &Engine, batch: &str, sources: &[u64]) -> Vec<EntityId
                 .map(|t| t.to_string().into_bytes())
                 .collect();
             UnallocatedRow {
-                external_id: Some(s.to_le_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 x,
@@ -1329,15 +1327,15 @@ fn a_sparse_filter_under_no_time_budget_still_advances_and_completes() {
 fn a_read_that_finds_no_row_gives_one_typed_page_of_no_rows() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
-    let fields = names(&["band", "score", "heat", "tag", "note", "prose", "when", "flag"]);
-    let system = names(&["position", "external_id", "labels"]);
+    let fields = names(&["band", "score", "heat", "tag", "note", "prose", "when", "flag", "id"]);
+    let system = names(&["position", "labels"]);
     let mut base = request("s0", &fields);
     base.system_fields = &system;
     base.page_rows = Some(10);
     base.pages = Some(1);
     let (full, _) = respond(&fx.engine, &session, base.clone()).unwrap();
     let schema = full.pages[0].0.schema();
-    assert_eq!(schema.fields().len(), 1 + fields.len() + 4);
+    assert_eq!(schema.fields().len(), 1 + fields.len() + 3);
 
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
         let mut none = base.clone();
@@ -1449,7 +1447,6 @@ fn a_viewport_point_is_null_where_its_item_has_no_rendered_value() {
     const ZERO: u64 = N + 100;
     let (x, y) = position(ZERO);
     let zero = UnallocatedRow {
-        external_id: Some(ZERO.to_le_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         x,
@@ -1572,20 +1569,20 @@ fn positions_come_back_within_one_grid_step() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
     let by_tid = sources_by_tid(&fx);
-    let system = names(&["position", "external_id"]);
-    let fields: Vec<String> = Vec::new();
+    let system = names(&["position"]);
+    let fields = names(&["id"]);
     let step = 1000.0 / 4_294_967_296.0;
     let mut checked = 0;
     for batch in pages_of(&fx, &session, "s0", &fields, &system) {
         let x = col::<Float64Array>(&batch, "tessera:x");
         let y = col::<Float64Array>(&batch, "tessera:y");
-        let external = col::<BinaryArray>(&batch, "tessera:external_id");
+        let held = col::<UInt64Array>(&batch, "id");
         for (i, tid) in ids_of(&batch).into_iter().enumerate() {
             let s = by_tid[&tid];
             let (px, py) = position(s);
             assert!((x.value(i) - px).abs() <= step, "x of {s}: {} against {px}", x.value(i));
             assert!((y.value(i) - py).abs() <= step, "y of {s}: {} against {py}", y.value(i));
-            assert_eq!(external.value(i), s.to_le_bytes());
+            assert_eq!(held.value(i), s);
             checked += 1;
         }
     }
@@ -1714,12 +1711,11 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
     engine
         .start_write_executor_with_faults(64, Arc::clone(&faults))
         .unwrap();
-    let ingest_into = |batch: &str, view: &str, external_id: &str, x: f64, y: f64, scalars| {
+    let ingest_into = |batch: &str, view: &str, join: Option<EntityId>, x: f64, y: f64, scalars| {
         let descriptors = vec![b"0".to_vec(), b"1".to_vec()];
         let row = UnallocatedRow {
-            external_id: Some(external_id.as_bytes().to_vec()),
             view: view.to_string(),
-            join: None,
+            join,
             x,
             y,
             scalars,
@@ -1732,10 +1728,10 @@ fn a_joined_item_whose_own_record_is_unflushed_has_null_record_fields() {
             .expect("the ingest is accepted")[0]
     };
     // "anchor" holds the lower entity id, so the geographic view's plan is dispatched first.
-    ingest_into("b-anchor", GEO, "anchor", 0.25, 0.25, scalars_of(N + 1));
-    let joiner = ingest_into("b-own", "s0", "joiner", 5.0, 5.0, scalars_of(N + 3));
+    ingest_into("b-anchor", GEO, None, 0.25, 0.25, scalars_of(N + 1));
+    let joiner = ingest_into("b-own", "s0", None, 5.0, 5.0, scalars_of(N + 3));
     // A joining row carries the entity's attributes as it stores them, one value per entity.
-    ingest_into("b-join", GEO, "joiner", 0.75, 0.75, scalars_of(N + 3));
+    ingest_into("b-join", GEO, Some(joiner), 0.75, 0.75, scalars_of(N + 3));
     faults.arm_pause_after(PauseSite::BeforeManifestPublish, PauseAction::Stall, 1);
     engine.request_flush();
     faults.await_arrivals(PauseSite::BeforeManifestPublish, 2, Duration::from_secs(30));
@@ -2347,7 +2343,6 @@ fn thirty_thousand(batches: u64) -> (tempfile::TempDir, Engine) {
             .map(|i| {
                 let s = n + batch * 700 + i;
                 UnallocatedRow {
-                    external_id: Some(s.to_le_bytes().to_vec()),
                     view: "s0".to_string(),
                     join: None,
                     x: ((s * 37) % 1000) as f64 + 0.5,
@@ -2641,8 +2636,8 @@ fn encoded_bytes(batch: &RecordBatch) -> usize {
 fn a_pages_bytes_are_its_buffers_and_the_ceiling_holds_on_them() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&both_credential()).unwrap();
-    let fields = names(&["note", "prose", "tag", "band", "score", "when"]);
-    let system = names(&["labels", "external_id", "position"]);
+    let fields = names(&["note", "prose", "tag", "band", "score", "when", "id"]);
+    let system = names(&["labels", "position"]);
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
         let mut req = request("s0", &fields);
         req.system_fields = &system;
@@ -2685,7 +2680,6 @@ fn a_columns_first_null_is_counted_against_the_ceiling() {
             scalars[7] = WalScalar::TimestampUs(base + s as i64);
             let (x, y) = position(s);
             UnallocatedRow {
-                external_id: Some(s.to_le_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 x,
@@ -2828,8 +2822,7 @@ fn a_cell_larger_than_a_stretch_is_read_whole() {
     let engine = engine_at(tmp.path(), &root, 3600);
     engine.set_background_refresh_for_test(false);
     let rows: Vec<UnallocatedRow> = (0..10_000u64)
-        .map(|i| UnallocatedRow {
-            external_id: Some(format!("crowd-{i}").into_bytes()),
+        .map(|_| UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             x: 5.0,

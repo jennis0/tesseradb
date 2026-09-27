@@ -315,7 +315,7 @@ impl ComputeGate {
 }
 
 /// Bounds concurrent `/control/ingest` handlers, each of which holds a blocking-pool thread
-/// through decoding, term resolution, sidecar IO and the receipt wait. Unbounded, ingest could
+/// through decoding, term resolution, index reads and the receipt wait. Unbounded, ingest could
 /// fill the pool and hang admitted viewports. The deny lane never shares that pool with ingest:
 /// it has its own runtime. No queue and no timeout, so a refusal costs nothing. Per server rather
 /// than process-global, since tests run many servers in one process.

@@ -205,15 +205,15 @@ fn body_hash(seed: &str) -> [u8; 32] {
     hash
 }
 
-fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
+/// A new item at `(x, y)` holding the `id` of `key`.
+fn row(engine: &Engine, key: &str, x: f64, y: f64) -> UnallocatedRow {
     let descriptors = vec![b"0".to_vec()];
     UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         x,
         y,
-        scalars: Vec::new(),
+        scalars: keyed(key),
         terms: engine.resolve_terms(&descriptors),
         descriptors,
         scoped: Vec::new(),
@@ -841,10 +841,7 @@ fn a_batchs_rows_and_its_joins_are_durable_together_and_applied_together() {
                 "the mint record is durable and the level does not hold it yet"
             );
             assert!(
-                engine
-                    .resolve_external_id(b"b1")
-                    .expect("the lookup answers")
-                    .is_none(),
+                item_of_key(&engine, "b1").is_none(),
                 "and the row it was appended beside is not in force either"
             );
 
@@ -863,10 +860,7 @@ fn a_batchs_rows_and_its_joins_are_durable_together_and_applied_together() {
         "the mint replayed from the log"
     );
     assert!(
-        engine
-            .resolve_external_id(b"b1")
-            .expect("the lookup answers")
-            .is_some(),
+        item_of_key(&engine, "b1").is_some(),
         "and so did the row that named it — one fsync covered both"
     );
     settle(&engine);
@@ -930,10 +924,7 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
         "and none replayed: the record was never written"
     );
     assert!(
-        engine
-            .resolve_external_id(b"b1")
-            .expect("the lookup answers")
-            .is_none(),
+        item_of_key(&engine, "b1").is_none(),
         "nor did the row, which is the half that would otherwise be a point with no membership"
     );
 }
@@ -1167,7 +1158,7 @@ fn built_fixture() -> Fixture {
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
-            points,
+            points: points.clone(),
             point_fields: Default::default(),
             select: None,
             access: tessera_build::config::AccessInput::relation(pairs),
@@ -1175,7 +1166,7 @@ fn built_fixture() -> Fixture {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points, &id_schema()),
         out: root.clone(),
         limit: None,
         identity_key: test_key(),
@@ -1183,12 +1174,11 @@ fn built_fixture() -> Fixture {
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: id_schema(),
     })
     .expect("a build carrying its layer");
 

@@ -210,12 +210,6 @@ class Insert(Summarised):
         """The column the call named with `id=`, or `None`."""
         return self.columns.get("id")
 
-    @property
-    def id_type(self) -> Any:
-        """The Arrow type of the id column, or `None` where the call named none."""
-        column = self.id_column
-        return None if column is None else self.schema.get(column)
-
     def table(self) -> pa.Table:
         """The rows, read back from `path`."""
         return pq.read_table(self.path)
@@ -233,18 +227,6 @@ class Insert(Summarised):
             f"{into}: {_count(self.rows, 'row')} "
             f"(read {', '.join(self.read) or 'nothing'}{ignored})"
         ]
-
-
-#: The integer types an id column may be read as, by the name `str(type)` gives them. The build
-#: reads an id column at 32 or 64 bits and refuses the narrower widths.
-INTEGER_TYPES = {f"{sign}int{width}" for sign in ("", "u") for width in (32, 64)}
-
-
-def is_integer_type(dtype: Any) -> bool:
-    """Whether an id column of this type is read as an integer, at the widths the build takes."""
-    if dtype is None:
-        return False
-    return str(dtype) in INTEGER_TYPES
 
 
 def is_path(data: Any) -> bool:

@@ -35,8 +35,8 @@
 //! # Layout
 //!
 //! Headerless: `row_count` little-endian `u32`s, the entity at each row, indexed by row id. No
-//! magic and no version, on the precedent contracts §0.2 sets for `morton.u32` and
-//! `ext-locator.u32` — the length is the file's, and the manifest's digest is what makes a
+//! magic and no version, on the precedent contracts §0.2 sets for `morton.u32` — the length is
+//! the file's, and the manifest's digest is what makes a
 //! truncated or substituted file a refusal rather than a misread. **There is no sentinel and no
 //! hole**: a row exists only because an entity occupies it, so every slot is meaningful, which is
 //! the asymmetry with `permutation.bin` (an entity may have no row; a row always has an entity).

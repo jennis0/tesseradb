@@ -62,8 +62,14 @@ def expected(first: int, count: int) -> dict:
     }
 
 
+def declare_the_join_field(db) -> None:
+    db.declare_attribute("id", type="keyword", unique=True)
+    db.declare_join_field("id")
+
+
 def declare(db, frame: pa.Table) -> None:
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]}, default_label=None)
+    declare_the_join_field(db)
     db.declare_vocabulary("venue")
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     db.declare_layer("clusters", kind="flat")
@@ -105,6 +111,7 @@ def test_declare_columns_declares_a_categorical_column_a_category(served, corpus
 
     def declare_from_the_frame(db):
         db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]}, default_label=None)
+        declare_the_join_field(db)
         db.declare_columns(frame, skip=["id", "x", "y", "cluster", "label"], index=["venue"])
         db.insert("map", frame, id="id", x="x", y="y", access="label")
 

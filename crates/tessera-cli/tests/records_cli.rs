@@ -374,9 +374,9 @@ fn items_args(pages: &'static str) -> Vec<&'static str> {
         "--view",
         "s0",
         "--fields",
-        "fx_key,bay,tag,seen_at,weight",
+        "fx_key,bay,tag,seen_at,weight,id",
         "--system-fields",
-        "position,external_id,labels",
+        "position,labels",
         "--order",
         "map",
         "--page-rows",
@@ -390,8 +390,8 @@ fn items_args(pages: &'static str) -> Vec<&'static str> {
 fn items_body(pages: u32) -> Value {
     json!({
         "view": "s0",
-        "fields": ["fx_key", "bay", "tag", "seen_at", "weight"],
-        "system_fields": ["position", "external_id", "labels"],
+        "fields": ["fx_key", "bay", "tag", "seen_at", "weight", "id"],
+        "system_fields": ["position", "labels"],
         "order": "map",
         "page_rows": 97,
         "pages": pages,
@@ -411,7 +411,7 @@ fn an_items_read_written_as_ipc_and_as_parquet_is_the_read_over_http() {
     assert!(rows(&paged) > 1000);
     // Every column holds values, so an equality below is not an equality of nulls.
     let values = plain(&paged);
-    for name in ["fx_key", "bay", "tag", "seen_at", "weight", "tessera:external_id"] {
+    for name in ["fx_key", "bay", "tag", "seen_at", "weight", "id"] {
         let column = values.column_by_name(name).unwrap();
         assert!(column.null_count() < column.len(), "{name} holds values");
     }

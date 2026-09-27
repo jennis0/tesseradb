@@ -129,7 +129,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -137,12 +137,11 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("a bundle with an indexed text column builds");
 }
@@ -168,7 +167,6 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
     for i in 0..FLUSHED {
         let external = format!("fresh-{i}");
         let row = UnallocatedRow {
-            external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -494,7 +492,6 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
     let second = {
         let external = "flight-0".to_string();
         let row = UnallocatedRow {
-            external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -567,7 +564,6 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
 
     let ingest = |engine: &Engine, name: &str, value: WalScalar| {
         let row = UnallocatedRow {
-            external_id: Some(name.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],

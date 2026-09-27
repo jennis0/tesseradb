@@ -113,7 +113,8 @@ Owner ruling, 2026-09-09. Distinct and null figures are the census's, over its 2
 | utf8 | `scientificname` | — | 0.0% | neither flag: blob-resident, returned on drill-down |
 | u64 | `gbifid` | one a row | 0.0% | `unique = true`, neither flag: its unique index answers `eq` and `in` |
 
-`gbifid` is GBIF's key for a record, a string of digits on the share, declared a unique `u64`. Its
+`gbifid` is GBIF's key for a record, a string of digits on the share, declared a unique `u64`, and
+it is the declaration's `join_field`: the points and the member file both name a record by it. Its
 index is 42.1 GB over the placed rows
 ([`probes/2026-09-26-identity-gbif-scale/`](../../probes/2026-09-26-identity-gbif-scale/README.md)).
 
@@ -129,9 +130,10 @@ to `duplicates.parquet`, each setting a `gbifid` an item holds.
 
 **Reusing the taxonomy.** `--reuse-taxonomy` keeps the member file and the kingdom vocabulary
 already in the output directory, and saves reading the three rank columns and writing 23 GB. The
-member file names each row by its position in the part sequence, so the run refuses before it
-starts unless the manifest beside the files names the same dataset, the same number of parts and
-the same selection. It refuses at the end unless it placed as many rows as that manifest and the
+member file names each row by its `gbifid`, so the run refuses before it starts unless the
+manifest beside the files names the same dataset, the same number of parts, the same selection and
+a member file keyed by `gbifid`; one written before the member file was keyed that way named rows
+by their position in the part sequence. It refuses at the end unless it placed as many rows as that manifest and the
 member file hold, and the kept vocabulary names every kingdom it saw. The new manifest carries the
 old one's `taxonomy` block.
 

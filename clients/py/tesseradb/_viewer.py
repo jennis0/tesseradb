@@ -8,7 +8,6 @@ the same data.
 
 from __future__ import annotations
 
-import base64
 import http.client
 import io
 import json
@@ -619,8 +618,7 @@ class Selection:
 
         The selection's filters and box are sent as the read's `filters`, so the rows are the
         items `count()` counts. `options` are `items`'s other keywords, such as `system_fields`,
-        `order`, `page_rows` and `batches`, each sent only when given. From a database's
-        selection, `tessera:external_id` holds each id as the type the id column had.
+        `order`, `page_rows` and `batches`, each sent only when given.
 
             db.view("papers").filter({"year": {"eq": 2023}}).items(["title"]).to_pandas()
         """
@@ -791,15 +789,12 @@ class Viewer:
 
         The record has `fields` (the item's values by column name, missing where it has none),
         `labels` (the item's access labels that this reader also holds), `views` (the views
-        this reader can find it in) and, where the item was inserted with one, `external_id`, as
-        bytes. An item this reader may not see is refused exactly as one that does not exist.
+        this reader can find it in). An item this reader may not see is refused exactly as one that
+        does not exist.
 
             v.item(sample.column("tessera_id")[0].as_py())
         """
-        record = json.loads(self._request("POST", f"/v1/items/{tessera_id}", {}))
-        if record.get("external_id") is not None:
-            record["external_id"] = base64.b64decode(record["external_id"])
-        return record
+        return json.loads(self._request("POST", f"/v1/items/{tessera_id}", {}))
 
     def items(
         self,
@@ -830,11 +825,8 @@ class Viewer:
           alone. A column declared for a view group, read under a view outside that group, is
           named `"<column>@<key>"` to say which of the group's views to read it in.
         - `system_fields`: any of `"position"`, the columns `tessera:x` and `tessera:y` in the
-          view's coordinates (degrees for a geographic view); `"external_id"`, the column
-          `tessera:external_id` holding the id each item was inserted with, as bytes here and
-          as the type the id column had from a `Database`; and
-          `"labels"`, the column `tessera:labels` holding the item's labels this reader also
-          holds.
+          view's coordinates (degrees for a geographic view), and `"labels"`, the column
+          `tessera:labels` holding the item's labels this reader also holds.
         - `filters`: a filter expression, as `Selection.filter` takes one. Only the items that
           match are returned.
         - `keep_unmatched`: return every item, with a `tessera:matched` column saying whether it
@@ -863,7 +855,7 @@ class Viewer:
         refused, raises a `PartialRead` whose `rows` are the rows read before it and whose
         `cursor` reads the rest.
 
-            papers = db.items("papers", ["title", "year"], system_fields=["external_id"])
+            papers = db.items("papers", ["title", "year"], system_fields=["position"])
             papers.to_pandas()
             recent = db.items("papers", ["title"], filters={"year": {"range": {"gte": 2020}}})
         """

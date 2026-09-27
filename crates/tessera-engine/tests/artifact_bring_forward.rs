@@ -207,14 +207,13 @@ fn page(engine: &Engine, fx: &Fixture, key: &str, rank: u16, joining: Vec<u64>, 
 
 /// One ingested point, under a batch key used once — a second ingest under a key already seen is
 /// *replayed* rather than accepted, so a fixed key would silently ingest nothing the second time.
-fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
+fn ingest(engine: &Engine, batch: &[u8]) -> EntityId {
     let descriptors = vec![b"0".to_vec()];
     let mut key = [0u8; 32];
-    for (slot, byte) in key.iter_mut().zip(external_id) {
+    for (slot, byte) in key.iter_mut().zip(batch) {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -227,7 +226,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
     engine
         .ingest_rows(
             vec![row],
-            String::from_utf8_lossy(external_id).into_owned(),
+            String::from_utf8_lossy(batch).into_owned(),
             key,
         )
         .expect("the ingest is accepted")[0]
@@ -243,9 +242,7 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
     }
     let rows: Vec<_> = names
         .iter()
-        .enumerate()
-        .map(|(i, _)| tessera_lifecycle::command::UnallocatedRow {
-            external_id: Some(format!("{batch}-{i}").into_bytes()),
+        .map(|_| tessera_lifecycle::command::UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: descriptors.clone(),
@@ -1406,7 +1403,6 @@ fn flush_interleaved(
             .map(|t| {
                 let descriptors = descriptors_of(s, t);
                 tessera_lifecycle::command::UnallocatedRow {
-                    external_id: Some(format!("interleaved-{s}-{t}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
                     x: ((t * TIER_WIDTH + s) * 20) as f64,

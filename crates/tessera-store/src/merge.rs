@@ -174,9 +174,6 @@ pub struct MergeSpec<'a> {
 }
 
 /// What a merge produced: the merged segment's descriptor and extent, and its files.
-///
-/// It writes no external-id run and no locator extent. Those of the consumed segments stay listed,
-/// and only the entity-space coalesce merges them.
 #[derive(Debug)]
 pub struct MergeOutput {
     pub segment: SegmentDescriptor,
@@ -436,7 +433,6 @@ mod tests {
             .map(|(entity, x, score)| FlushRow {
                 entity_id: EntityId::new(*entity),
                 number: EntityId::new(*entity),
-                external_id: Some(format!("e-{entity}").into_bytes()),
                 x: *x,
                 y: 0.0,
                 scalars: vec![score.clone()],
@@ -461,7 +457,7 @@ mod tests {
                 scalar_schema: &schema(),
                 row_base: 0,
                 entity_floor: 0,
-            }, &[],
+            },
         )
         .expect("flush");
         MergeInput {

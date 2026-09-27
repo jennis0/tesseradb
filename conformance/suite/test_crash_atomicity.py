@@ -229,7 +229,7 @@ def merge_seam(tmp_path_factory, private_catalogue_bundle):
     output segment on disc, the inputs untouched and nothing committed. The orphan output is discarded and a
     recovery tick merges the untouched inputs.
 
-    The width is three because the coalesce takes external-id runs four at a time, one per
+    The width is three because the coalesce takes unique-index key runs four at a time, one per
     flush: at the default merge width of four both come due on the same tick, and the coalesce
     publishes while the merge is parked. At three the merge is alone on its tick and on the
     recovery tick."""

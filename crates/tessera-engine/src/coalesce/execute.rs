@@ -1,16 +1,13 @@
 //! Each merged output is reopened, or its counts checked, before the manifest can name it, so a
-//! merge defect fails the pass instead of being published. For an external-id run, the store
-//! checks the rows it wrote against the rows the merge emitted.
+//! merge defect fails the pass instead of being published.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tessera_authz::{coalesce_delta_tiers, coalesce_dict_extents, DeltaTier};
-use tessera_store::coalesce_external_id_runs;
 use tessera_store::manifest::{
-    AttrExtent, DictExtent, EntityTermsExtent, FileDigest, LocatorExtent, RecordExtent,
-    TextExtent,
+    AttrExtent, DictExtent, EntityTermsExtent, FileDigest, RecordExtent, TextExtent,
 };
 
 use super::{coalesced_column_rel, CoalesceContext, ColumnWindow, OpenedTier};
@@ -42,50 +39,6 @@ pub(super) fn coalesce_tiers(
     digest_outputs(files, ctx, [rel.as_str()])?;
     let reader = DeltaTier::open(&path).map_err(failed("coalesced tier"))?;
     Ok((rel, Arc::new(reader)))
-}
-
-/// The external-id runs merged into one, with a locator extent over their union span. The spans
-/// may overlap; each entity's slot comes from the newest run binding it.
-pub(super) fn coalesce_runs(
-    locators: &[LocatorExtent],
-    ctx: &CoalesceContext,
-    files: &mut BTreeMap<String, FileDigest>,
-) -> Result<LocatorExtent, MaintenanceFailed> {
-    let inputs: Vec<PathBuf> = locators
-        .iter()
-        .map(|e| ctx.prefix_dir.join(&e.external_id_run))
-        .collect();
-    let entity_lo = locators.iter().map(|e| e.entity_lo).min().expect("a window has extents");
-    let entity_hi = locators
-        .iter()
-        .map(|e| e.entity_hi)
-        .max()
-        .expect("a window has extents")
-        .max(entity_lo.saturating_sub(1));
-    // An entity an input lists at or above the window's span takes a slot in it; one below stays
-    // listed, holding its external id or the absent marker as it did.
-    let mut below: Vec<u32> = Vec::new();
-    for locator in locators {
-        below.extend(
-            tessera_store::listed_entities(&ctx.prefix_dir, locator)
-                .map_err(failed("external-id runs"))?
-                .into_iter()
-                .filter(|&entity| u64::from(entity) < entity_lo),
-        );
-    }
-    let out_dir = ctx.prefix_dir.join(&ctx.out_rel);
-    let (_, listed) =
-        coalesce_external_id_runs(&inputs, entity_lo, entity_hi, &below, &out_dir)
-            .map_err(failed("external-id runs"))?;
-    let extent = LocatorExtent {
-        path: format!("{}/ext-locator.u32", ctx.out_rel),
-        entity_lo,
-        entity_hi,
-        listed,
-        external_id_run: format!("{}/external-ids.arrow", ctx.out_rel),
-    };
-    digest_outputs(files, ctx, extent.files())?;
-    Ok(extent)
 }
 
 pub(super) fn coalesce_dicts(

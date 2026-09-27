@@ -21,9 +21,7 @@ pyarrow.
 
 from __future__ import annotations
 
-import base64
 import json
-import numbers
 import time
 import urllib.error
 import urllib.parse
@@ -45,29 +43,6 @@ MAX_ATTEMPTS = 600
 #: The status an answer carries when the request reached no server at all. Not an HTTP status: the
 #: request was never answered, so there is none to report.
 UNANSWERED = 0
-
-
-def external_id(value: Any) -> bytes:
-    """The external id of a row: the bytes its id column holds.
-
-    A string's UTF-8, an integer's eight little-endian bytes, binary as it stands. The build reads
-    the same column and takes the same bytes, so one row is one address at both doors.
-
-    Any integer, not only Python's: a frame's own ids arrive as numpy or pyarrow scalars, and one
-    of those spelled as text would address a row nobody wrote. A boolean is not an integer here,
-    having no id space of its own.
-    """
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
-        return str(value).encode()
-    number = int(value)
-    return number.to_bytes(8, "little", signed=number < 0)
-
-
-def addressed(value: Any) -> str:
-    """The same id where a JSON route carries it: base64, external ids being bytes and not text."""
-    return base64.b64encode(external_id(value)).decode()
 
 
 def batch_id(source: str, index: int) -> str:
@@ -205,7 +180,7 @@ class Control:
     def ingest(self, body: bytes, batch: str, view: str | None = None) -> Answer:
         """`POST /control/ingest`: create items, edit them, or add them to a view.
 
-        A row names an item by its `tessera_id`, its `external_id` or a unique column's value. A
+        A row names an item by its `tessera_id` or a unique column's value. A
         row naming none creates an item at its position; one carrying what the item stores
         changes nothing; one naming an item with no row in the view adds it there; any other
         edits the item, which keeps its `tessera_id`. A row without coordinates changes only what

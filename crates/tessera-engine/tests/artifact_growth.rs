@@ -694,7 +694,6 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -813,7 +812,6 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
     let before = engine.allocator_high_water();
     let descriptors = vec![b"0".to_vec()];
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(b"p1".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -857,20 +855,23 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
 // Restating a membership: the join that names an artifact its entity is already in
 // ---------------------------------------------------------------------------------------------
 
-/// One ingest batch of one point in `view`, joining whatever entity the external id already names
-/// and carrying the artifact the point belongs to. The join is the server's own: `/control/ingest`
-/// resolves an established external id to its entity and the executor settles it, so a second view
-/// of one item arrives here exactly like this.
-fn ingest_into_view(engine: &Engine, batch: &str, view: &str, external_id: &str, key: &str) {
+/// One ingest batch of one point in `view`, adding `item` to it where one is named, and carrying
+/// the artifact the point belongs to. A second view of one item arrives here exactly like this.
+fn ingest_into_view(
+    engine: &Engine,
+    batch: &str,
+    view: &str,
+    item: Option<EntityId>,
+    key: &str,
+) -> EntityId {
     let descriptors = vec![b"0".to_vec()];
     let mut hash = [0u8; 32];
     for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: view.to_string(),
-        join: None,
+        join: item,
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,
@@ -894,13 +895,14 @@ fn ingest_into_view(engine: &Engine, batch: &str, view: &str, external_id: &str,
                 edges: Vec::new(),
             },
         )
-        .expect("a point naming an artifact of an open layer is an ordinary write");
+        .expect("a point naming an artifact of an open layer is an ordinary write")
+        .0[0]
 }
 
 /// **A join that restates a membership the artifact already holds appends nothing.**
 ///
-/// A second view of one item is a join: it carries the entity the external id already names, and
-/// its membership column names the artifact that entity is already in. The growth that would be
+/// A second view of one item is a join: it names the item by its `tessera_id`, and its membership
+/// column names the artifact that entity is already in. The growth that would be
 /// written for it adds no member, so it changes nothing — and a record that changes nothing still
 /// pins the log at itself until a fold rewrites the level, which is the one thing a pin costs.
 /// `POST /control/values` subtracts what the artifact already holds for this reason; the question
@@ -934,7 +936,7 @@ fn a_joining_row_restating_its_membership_appends_no_growth() {
         })
         .expect("the layer is declared over both views");
 
-    ingest_into_view(&engine, "b1", "s0", "p1", "c9");
+    let p1 = ingest_into_view(&engine, "b1", "s0", None, "c9");
     publish_buffered(&engine);
     fold(&engine);
     assert_eq!(
@@ -943,7 +945,7 @@ fn a_joining_row_restating_its_membership_appends_no_growth() {
         "the fold rewrote the level whole, so nothing pins the log going in"
     );
 
-    ingest_into_view(&engine, "b2", "s1", "p1", "c9");
+    ingest_into_view(&engine, "b2", "s1", Some(p1), "c9");
 
     assert_eq!(
         engine.published_artifacts(),
@@ -987,13 +989,13 @@ fn a_joining_row_naming_another_artifact_still_grows_it() {
         })
         .expect("the layer is declared over both views");
 
-    ingest_into_view(&engine, "b1", "s0", "p1", "c8");
-    ingest_into_view(&engine, "b2", "s0", "p2", "c9");
+    let p1 = ingest_into_view(&engine, "b1", "s0", None, "c8");
+    ingest_into_view(&engine, "b2", "s0", None, "c9");
     publish_buffered(&engine);
     fold(&engine);
 
     // A second view of p1, naming the cluster p2 created and p1 is in no part of.
-    ingest_into_view(&engine, "b3", "s1", "p1", "c9");
+    ingest_into_view(&engine, "b3", "s1", Some(p1), "c9");
     publish_buffered(&engine);
     fold(&engine);
 

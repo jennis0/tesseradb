@@ -792,14 +792,12 @@ export class TesseraClient {
     if (!response.ok) await fail(response);
     const body = (await response.json()) as {
       fields: Record<string, unknown>;
-      external_id?: string;
       labels: string[];
       views: {id: string; x: number; y: number}[];
       scoped: Record<string, Record<string, unknown>>;
     };
     return {
       fields: body.fields ?? {},
-      externalId: body.external_id ?? null,
       // Required by the response schema and read as given: an empty list is an answer.
       views: body.views,
       scoped: body.scoped,

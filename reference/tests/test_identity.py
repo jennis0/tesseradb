@@ -373,8 +373,8 @@ def test_row_order_is_morton_then_tessera_id_ascending(canonical_key):
 
 # --- End to end, against a real fixture bundle --------------------------------------------
 #
-# S4/S5: `Bundle.derive_row_order`, `Bundle.verify_identity_cross_check` and
-# `Bundle.sidecar_round_trips` were all written and none was ever called against a bundle.
+# S4/S5: `Bundle.derive_row_order` and `Bundle.verify_identity_cross_check` were both written and
+# neither was ever called against a bundle.
 # The row-order check is the only thing that asserts a *real* bundle's stored order is the
 # contract order `(source-recomputed morton, forward(key, shard, entity))`; the cross-check is cited by
 # name in `conformance/tests/test_byte_scan.py`'s residual-gap argument, which was therefore
@@ -416,9 +416,3 @@ def test_fixture_bundle_identity_column_agrees_with_the_key(fixture_bundle):
     that catches a key/column disagreement — and the one `test_byte_scan.py` cites."""
     view_id = fixture_bundle.segments_manifest["segments"][0]["view"]
     fixture_bundle.verify_identity_cross_check(view_id)
-
-
-def test_fixture_bundle_sidecar_round_trips_through_the_locator(fixture_bundle):
-    """`entity -> ext-locator ordinal -> concatenated sorted extents` names the same key the
-    sorted extents do. Raises on any disagreement; nothing to assert beyond it returning."""
-    fixture_bundle.sidecar_round_trips()

@@ -141,7 +141,15 @@ topics           = "topics.parquet"
 topic_members    = "topic-members.parquet"
 
 [defaults]
-source = "points"
+source     = "points"
+join_field = "id"
+
+# The points file's `entity_id`, which every file names its item by.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 [[view]]
 name             = "s0"

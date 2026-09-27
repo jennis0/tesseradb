@@ -163,9 +163,8 @@ LEFT_OPEN = """
     where = json.loads(sys.argv[1])
     db = td.create(where)
     db.declare_view("map", extent={"x": [0, 10], "y": [0, 10]})
-    rows = pa.table({"id": ["a", "b"], "x": [1.0, 2.0], "y": [1.0, 2.0],
-                     "access": [["public"], ["public"]]})
-    db.insert("map", rows, id="id", x="x", y="y", access="access")
+    rows = pa.table({"x": [1.0, 2.0], "y": [1.0, 2.0], "access": [["public"], ["public"]]})
+    db.insert("map", rows, x="x", y="y", access="access")
     db.commit()
     saved = json.loads(sys.argv[2])
     if saved is not None:

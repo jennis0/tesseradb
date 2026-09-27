@@ -23,19 +23,69 @@ impl Engine {
             .resolve_terms(&self.generation.load().dict, descriptors)
     }
 
-    /// Resolve an external id to its `EntityId`, checking every item established live before
-    /// falling back to the bundle's own sidecar extent. A sidecar failure (digest mismatch,
-    /// out-of-order extent, corruption) returns `Err` rather than panicking.
-    pub fn resolve_external_id(
+    /// The item each of `values` names in the unique column `field`, `None` for a value naming
+    /// none, deleted items left out: how a change or a membership addresses an item by a unique
+    /// value. A value is written as the column's text: a keyword as itself, and an integer or a
+    /// timestamp in decimal digits. An integer the column cannot hold names nothing.
+    pub fn resolve_unique_values(
         &self,
-        external_id: &[u8],
-    ) -> std::result::Result<Option<EntityId>, StoreError> {
-        if let Some(entity) = self.write.live().established_entity(external_id) {
-            return Ok(Some(entity));
-        }
-        self.generation.load().external_index.resolve(external_id)
+        field: &str,
+        values: &[String],
+    ) -> std::result::Result<Vec<Option<EntityId>>, crate::EngineError> {
+        resolve_unique_values_in(&self.generation.load(), field, values)
     }
+}
 
+/// [`Engine::resolve_unique_values`] against `generation`.
+pub(crate) fn resolve_unique_values_in(
+    generation: &Generation,
+    field: &str,
+    values: &[String],
+) -> std::result::Result<Vec<Option<EntityId>>, crate::EngineError> {
+    let declared = generation
+        .bundle
+        .manifest
+        .declared_scalars
+        .iter()
+        .find(|d| d.name == field)
+        .filter(|_| generation.unique.get(field).is_some());
+    let Some(declared) = declared else {
+        return Err(crate::EngineError::AddressMalformed(format!(
+            "'{field}' is not a unique field. Address an item by its tessera_id, or by a \
+             field declared unique"
+        )));
+    };
+    let keyword = declared.arrow_type == tessera_spatial::tiler::ScalarType::Keyword;
+    let mut keys = Vec::with_capacity(values.len());
+    let mut from = Vec::with_capacity(values.len());
+    for (at, value) in values.iter().enumerate() {
+        let key = match keyword {
+            true => Some(tessera_store::unique::UniqueKey::keyword(value)),
+            false => {
+                let integer: i128 = value.parse().map_err(|_| {
+                    crate::EngineError::AddressMalformed(format!(
+                        "'{value}' is not a value of '{field}', which holds integers. Write \
+                         it in decimal digits"
+                    ))
+                })?;
+                tessera_store::unique::key_of_integer(declared.arrow_type, integer)
+            }
+        };
+        if let Some(key) = key {
+            keys.push(key);
+            from.push(at);
+        }
+    }
+    let mut named = vec![None; values.len()];
+    for (at, entity) in crate::unique::holders(generation, field, &keys)
+        .map_err(crate::EngineError::Store)?
+    {
+        named[from[at]] = Some(entity);
+    }
+    Ok(named)
+}
+
+impl Engine {
     /// Resolve `tessera_id`s to the entities holding them for the admin plane: `None` per
     /// position for an identifier that names nothing. Points sit below the high-water mark;
     /// row-less entities sit at or above the low-water mark, so testing only `entity < high_water`
@@ -100,73 +150,6 @@ impl Engine {
     /// artefact and not the entity.
     pub fn flushed_terms(&self, entity: EntityId) -> Option<Vec<TermId>> {
         flushed_terms_of(&self.generation(), entity)
-    }
-
-    /// Batch form of [`Self::resolve_external_id`] for `/control/ingest`'s duplicate check: the
-    /// live map first for the whole batch, then one batched, sorted sidecar call for whatever
-    /// residual keys it didn't resolve — each bundle extent opened at most once regardless of
-    /// batch size. Returns one `Option<EntityId>` per input, in the caller's given order.
-    pub fn resolve_external_ids(
-        &self,
-        external_ids: &[Vec<u8>],
-    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        self.external_ids_in(&self.generation.load(), external_ids)
-    }
-
-    /// [`Self::resolve_external_ids`], reading the bound runs of `generation`.
-    pub(crate) fn external_ids_in(
-        &self,
-        generation: &Generation,
-        external_ids: &[Vec<u8>],
-    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        let mut results: Vec<Option<EntityId>> = self.write.live().established_entities(external_ids);
-
-        let residual_positions: Vec<usize> = results
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| if r.is_none() { Some(i) } else { None })
-            .collect();
-        if residual_positions.is_empty() {
-            return Ok(results);
-        }
-        let residual_keys: Vec<Vec<u8>> = residual_positions
-            .iter()
-            .map(|&i| external_ids[i].clone())
-            .collect();
-        let residual_results = generation.external_index.resolve_many(&residual_keys)?;
-        for (pos, resolved) in residual_positions.into_iter().zip(residual_results) {
-            results[pos] = resolved;
-        }
-        Ok(results)
-    }
-
-    /// `entity -> external_id` for drill-down. The live map is consulted first: post-build
-    /// ingest has no locator slot and no extent entry. `Ok(None)` means no external id; it must
-    /// never mean "could not find out". An entity below
-    /// the live high-water and unknown to both sources fails closed as
-    /// `Err(StoreError::InvalidSidecar)`.
-    pub fn external_id_of(
-        &self,
-        entity: EntityId,
-    ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
-        self.external_id_of_in(&self.generation.load(), entity)
-    }
-
-    /// [`Self::external_id_of`] against a generation the caller already loaded. `Engine::item`
-    /// must not take a second `load()`: the sidecar is per-generation, so
-    /// resolving a row against one generation and its external id against another would mix
-    /// generations within one request.
-    pub(crate) fn external_id_of_in(
-        &self,
-        generation: &Generation,
-        entity: EntityId,
-    ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
-        if let Some(external_id) = self.write.live().established_external_id(entity) {
-            return Ok(Some(external_id));
-        }
-        generation
-            .external_index
-            .external_id_of_checked(entity, self.allocator_high_water())
     }
 
     /// The body hash a batch id was accepted with, if it was: a batch replayed with the same

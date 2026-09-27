@@ -1,13 +1,12 @@
 use tessera_store::manifest::{
-    AttrExtent, DictExtent, EntityTermsExtent, LocatorExtent, RecordExtent, SegmentsManifest,
-    TextExtent,
+    AttrExtent, DictExtent, EntityTermsExtent, RecordExtent, SegmentsManifest, TextExtent,
 };
 
 use super::{ColumnExtent, CompletedCoalesce};
 
 /// `manifest` with `completed` applied, or `None` if a consumed window has moved and the pass is
-/// discarded. Each replacement takes its window's position, never the end, which keeps run
-/// recency, every dictionary ordinal, and manifest bytes independent of timing.
+/// discarded. Each replacement takes its window's position, never the end, which keeps every
+/// dictionary ordinal, and manifest bytes, independent of timing.
 pub(crate) fn rebased(
     manifest: &SegmentsManifest,
     completed: &CompletedCoalesce,
@@ -16,13 +15,6 @@ pub(crate) fn rebased(
     if let Some(m) = &completed.tier {
         let tier = m.output.0.clone();
         replace_window(&mut next.deltas, &m.consumed, tier, |rel| rel, all)?;
-    }
-    if let Some(m) = &completed.run {
-        let runs: Vec<String> = m.consumed.iter().map(|e| e.external_id_run.clone()).collect();
-        let run = m.output.external_id_run.clone();
-        replace_window(&mut next.external_id_runs, &runs, run, |rel| rel, all)?;
-        let locator = m.output.clone();
-        replace_window(&mut next.locator_extents, &m.consumed, locator, |e| &e.path, all)?;
     }
     if let Some(m) = &completed.dict {
         let dict = m.output.clone();
@@ -118,7 +110,6 @@ fn all<T>(_: &T) -> bool {
 impl CompletedCoalesce {
     fn consumed_files(&self) -> impl Iterator<Item = &str> {
         let tiers = self.tier.iter().flat_map(|m| m.consumed.iter().map(String::as_str));
-        let runs = self.run.iter().flat_map(|m| &m.consumed);
         let dicts = self.dict.iter().flat_map(|m| &m.consumed);
         let attrs = self.attrs.iter().flat_map(|m| &m.consumed.extents);
         let records = self.record.iter().flat_map(|m| &m.consumed);
@@ -135,7 +126,6 @@ impl CompletedCoalesce {
         tiers
             .chain(unique)
             .chain(edited)
-            .chain(runs.flat_map(LocatorExtent::files))
             .chain(dicts.flat_map(DictExtent::files))
             .chain(attrs.flat_map(AttrExtent::files))
             .chain(records.flat_map(RecordExtent::files))

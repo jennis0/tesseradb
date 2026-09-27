@@ -410,9 +410,16 @@ def test_a_key_column_into_a_layer_the_database_holds_joins_its_artifacts(served
 # ---------------------------------------------------------------------------- values
 
 
+def joined(db) -> None:
+    """The frames' `id` column, a string, declared the join field."""
+    db.declare_attribute("id", type="keyword", unique=True)
+    db.declare_join_field("id")
+
+
 def small(db) -> None:
     """A database with one indexed column, so an insert into it fills values."""
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    joined(db)
     db.declare_attribute("score", type="f64", index=True, render=False)
     db.insert(
         "map",
@@ -703,11 +710,11 @@ def test_remove_stops_a_row_being_served_and_a_removed_id_is_inserted_as_a_point
     frame = whole_frame(db)
     before = viewport(db, "s0", frame)["counts"]["visible"]
 
-    report = db.remove([7])
+    report = db.remove([7], field="id")
     assert report.ok, report
     assert viewport(db, "s0", frame)["counts"]["visible"] == before - 1
 
-    # A removed id inserted again goes as a point row, which decision 0047 allows.
+    # A deleted item names nothing, so its value inserted again creates a new item.
     insert_the_new_papers(db, ids=[7])
     plan = db.check()
     assert any(line.startswith("points") for line in plan.plan), plan
@@ -721,9 +728,11 @@ def test_suppress_hides_a_row_and_unsuppress_returns_it(served, corpus):
     db = notebook(served, corpus)
     frame = whole_frame(db)
     before = viewport(db, "s0", frame)["counts"]["visible"]
-    assert db.suppress([8]).ok
+    [held] = db.lookup("s0", "id", [8]).column("tessera_id").to_pylist()
+    assert db.suppress([8], field="id").ok
     assert viewport(db, "s0", frame)["counts"]["visible"] == before - 1
-    assert db.unsuppress([8]).ok
+    # The same item, named by the `tessera_id` it was served under.
+    assert db.unsuppress([held]).ok
     assert viewport(db, "s0", frame)["counts"]["visible"] == before
 
 
@@ -750,11 +759,11 @@ def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(se
 
     # Three of the five leave: the content is served against the two that remain. The generating
     # set shrinks; the membership the count is taken over does not.
-    assert db.leave("topics", "l0", ["p0", "p1", "p2"], rank=0).ok
+    assert db.leave("topics", "l0", ["p0", "p1", "p2"], rank=0, field="id").ok
     assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
 
     # The page that empties the set withdraws the content, and it does not come back on its own.
-    assert db.leave("topics", "l0", ["p3", "p4"], rank=0).ok
+    assert db.leave("topics", "l0", ["p3", "p4"], rank=0, field="id").ok
     assert not [row for row in artifact_rows_of(db) if row[0] == "topics" and row[2]]
 
 
@@ -809,6 +818,7 @@ def test_a_rendered_column_set_after_the_first_commit_edits_the_item(served, cor
 
     def with_a_rendered_score(db) -> None:
         db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+        joined(db)
         db.declare_attribute("note", type="f64", render=True)
         db.insert(
             "map",
@@ -907,6 +917,7 @@ def test_a_key_column_inserted_into_a_layer_with_supplied_content_is_refused(tmp
 
     db = create(tmp_path / "db")
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    joined(db)
     db.declare_layer(
         "topics/inline", kind="flat", supplied=[("topic", "text", "inherited")]
     )
@@ -936,6 +947,7 @@ def clustering(db) -> None:
     """A small database with one clustering, so a label set can be declared over it later."""
     n = 20
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    joined(db)
     db.declare_layer("clusters", kind="flat")
     db.insert(
         "map",

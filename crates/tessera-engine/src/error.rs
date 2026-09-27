@@ -18,6 +18,9 @@ pub enum EngineError {
     /// column's existence and family are published schema, safe to name back unlike a failed
     /// read. An unknown value is neither of these; it is an empty operand, never an error.
     FilterMalformed(String),
+    /// A change or a membership addressed items by a field that is not unique, or by a value the
+    /// field cannot hold. Always the caller's fault, and the detail names only what it sent.
+    AddressMalformed(String),
     /// A browse request named a layer, level or page this deployment does not publish to this
     /// principal. Always the caller's fault: every arm names schema off `/v1/meta`, never an
     /// artefact, which returns an empty page instead.
@@ -107,6 +110,7 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::FilterRefused(why) => write!(f, "filter refused: {why}"),
             EngineError::FilterMalformed(why) => write!(f, "filter refused: {why}"),
+            EngineError::AddressMalformed(why) => write!(f, "{why}"),
             EngineError::BrowseRefused(why) => write!(f, "browse refused: {why}"),
             EngineError::Store(e) => write!(f, "store error: {e}"),
             EngineError::Wal(e) => write!(f, "wal error: {e}"),

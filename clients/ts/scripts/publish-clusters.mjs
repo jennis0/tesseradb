@@ -10,7 +10,7 @@
 // is absent for the narrow one.
 //
 // Members are published by `tessera_id`, since the ids come back from the server in the same
-// response as the positions clustered on, and external ids would need the source corpus.
+// response as the positions clustered on.
 //
 // The viewer draws a cluster from the geometry the server derives per principal (`centroid`,
 // `box`, `hull`) and from the per-point membership column. The centroids computed here, over the
@@ -251,8 +251,6 @@ const publish = async () => {
   if (batch.length === 0) return;
   const answer = await control.publish(layerName, {
     level: 0,
-    // Addressing is per request; a per-member tag would be most of the body.
-    addressing: 'tessera',
     artifacts: batch.map((c) => ({
       key: c.key,
       members: c.members.map((id) => id.toString())
@@ -323,8 +321,7 @@ if (labelLayer) {
     if (pending.length === 0) return;
     const answer = await control.publish(labelLayer, {
       level: 0,
-      addressing: 'tessera',
-        artifacts: pending.map((l) => ({
+      artifacts: pending.map((l) => ({
         key: l.key,
         members: l.members.map((id) => id.toString()),
         content: l.variations.map((v) => ({

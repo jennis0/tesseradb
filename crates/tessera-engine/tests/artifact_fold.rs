@@ -379,8 +379,8 @@ fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
     {
         let engine = fx.open();
         publish(&fx, &engine, 0..300);
-        // Resolved before the fold: the external-id map is read from the prefix the fold is about
-        // to reclaim.
+        // Resolved before the fold: the `id` index is read from the prefix the fold is about to
+        // reclaim.
         let joining = fx.members(300..320);
         fold(&engine);
         assert_eq!(fx.containment_files(&engine).len(), 1);
@@ -512,8 +512,8 @@ fn a_growth_after_the_fold_leaves_the_tile_index_unadopted() {
     {
         let engine = fx.open();
         publish(&fx, &engine, 0..300);
-        // Resolved before the fold: the external-id map is read from the prefix the fold is about
-        // to reclaim.
+        // Resolved before the fold: the `id` index is read from the prefix the fold is about to
+        // reclaim.
         let joining = fx.members(300..320);
         fold(&engine);
         assert_eq!(fx.tile_index_files(&engine).len(), 1);
@@ -700,18 +700,17 @@ fn a_second_fold_rewrites_what_the_first_one_wrote() {
 
 /// Ingest one item at the fixture's origin, carrying the term every principal here holds.
 ///
-/// **The batch name and the idempotency key are derived from `external_id`**, and that is not
+/// **The batch name and the idempotency key are derived from `name`**, and that is not
 /// tidiness: a second ingest under a batch key already seen is *replayed* rather than accepted, so
 /// a helper with a fixed key silently ingests nothing the second time it is called and every flush
 /// after the first has nothing to publish.
-fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
+fn ingest(engine: &Engine, name: &[u8]) -> EntityId {
     let descriptors = vec![b"0".to_vec()];
     let mut key = [0u8; 32];
-    for (slot, byte) in key.iter_mut().zip(external_id) {
+    for (slot, byte) in key.iter_mut().zip(name) {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -724,7 +723,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
     engine
         .ingest_rows(
             vec![row],
-            String::from_utf8_lossy(external_id).into_owned(),
+            String::from_utf8_lossy(name).into_owned(),
             key,
         )
         .expect("the ingest is accepted")[0]
@@ -1385,7 +1384,7 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
 #[test]
 fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_publication() {
     let fx = fixture();
-    // Resolved before the fold: `members` reads the built prefix's external-id run, and the fold
+    // Resolved before the fold: `members` reads the built prefix's `id` index, and the fold
     // reclaims that prefix. Entities are stable across it, so the set is still the right one.
     let later_members = fx.members(200..300);
     let deleted_entity = {

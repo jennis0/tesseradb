@@ -412,10 +412,6 @@ impl Executor {
                 let claims = tessera_lifecycle::WindowClaims::of(
                     &submission.rows,
                     submission.edits.iter().map(|e| e.edit.old).chain(joined),
-                    submission
-                        .edits
-                        .iter()
-                        .filter_map(|e| e.edit.rows.first()?.external_id.as_deref()),
                     submission.keys.clone(),
                 );
                 if window.conflicts(&claims) {
@@ -454,20 +450,11 @@ impl Executor {
         } = submission;
         let generation = self.generation.load();
         let creates = rows.iter().any(|row| row.join.is_none()) || !edits.is_empty();
-        let bound_elsewhere = |id: &[u8], item: Option<EntityId>| {
-            self.live.established_entity(id).is_some_and(|holder| {
-                Some(holder) != item && !generation.overlay.is_deleted(holder)
-            })
-        };
         let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
             || edits.iter().any(|submitted| {
                 let old = submitted.edit.old;
                 generation.overlay.is_deleted(old)
                     || crate::write::joined::views_holding(&generation, old) != submitted.held_views
-                    || submitted.edit.rows[0]
-                        .external_id
-                        .as_deref()
-                        .is_some_and(|id| bound_elsewhere(id, Some(old)))
             })
             || slots.iter().any(|slot| match slot {
                 tessera_lifecycle::Slot::Unchanged { entity, .. }
@@ -487,10 +474,7 @@ impl Executor {
                         })
                         || generation.buffer.contains_in_view(entity, &row.view)
                 }
-                None => row
-                    .external_id
-                    .as_deref()
-                    .is_some_and(|id| bound_elsewhere(id, None)),
+                None => false,
             });
         // An entity the handler resolved can since have been retired by a fold, freed, and issued
         // to another item: each must still hold the item the handler resolved it to.
@@ -842,9 +826,6 @@ impl Executor {
         let mut deleted: Vec<EntityId> = Vec::new();
         let mut newly_denied: Vec<EntityId> = Vec::new();
         let mut pairs: Vec<(u32, u32)> = Vec::new();
-        let mut established = lock_recover(&self.live.established);
-        // Updated together in one critical section, so the two can never disagree about an item.
-        let mut established_inverse = lock_recover(&self.live.established_inverse);
         for (entry, wal_pos) in closed.iter_mut().zip(positions) {
             let terms = std::mem::take(&mut entry.terms);
             let edit_terms = std::mem::take(&mut entry.edit_terms);
@@ -860,14 +841,7 @@ impl Executor {
                         .map(move |row| (row, terms.take().unwrap_or_default()))
                 });
             for (row, row_terms) in rows.chain(edit_rows) {
-                // No external id means nothing to establish.
-                let mut m = StageMark::now();
-                if let Some(external_id) = &row.external_id {
-                    established.insert(external_id.clone(), row.entity_id);
-                    m = self.health.lap(WriteStage::RowEstablished, m);
-                    established_inverse.insert(row.entity_id, external_id.clone());
-                    m = self.health.lap(WriteStage::RowEstablishedInv, m);
-                }
+                let m = StageMark::now();
                 buffer.insert_row_with_terms(row, row_terms);
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);
                 buffer.set_wal_pos(row.entity_id, &row.view, *wal_pos);
@@ -888,8 +862,6 @@ impl Executor {
                 pairs.push((edit.number.raw() as u32, new.raw() as u32));
             }
         }
-        drop(established);
-        drop(established_inverse);
         // A joining row's values are its item's, whose entries are held already. An edited item's
         // old entity names nothing, so its entries go.
         let unique_live = unique.then(|| {

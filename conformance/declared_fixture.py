@@ -27,7 +27,6 @@ pins as a known difference.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import re
@@ -88,12 +87,6 @@ def access_of(i: int) -> str:
     return "pb" if r >= 10 else "pa"
 
 
-def external_id(i: int) -> str:
-    """The id `--mint-external-ids` gives an item built with entity id `i`, base64 as JSON carries
-    it."""
-    return base64.b64encode(i.to_bytes(8, "little")).decode()
-
-
 def position(view_seed: int, i: int, extent=WORLD_EXTENT) -> tuple[float, float]:
     """A position inside the frame with a margin, as a multiple of 1/64 so every reader holds it
     exactly."""
@@ -125,6 +118,7 @@ class Column:
     value: Callable[[int], object]
     index: bool = False
     render: bool = False
+    unique: bool = False
     vocabulary: str | None = None
     scope: str | None = None
 
@@ -136,12 +130,16 @@ class Column:
             lines.append("index = true")
         if self.render:
             lines.append("render = true")
+        if self.unique:
+            lines.append("unique = true")
         if self.scope:
             lines.append(f'scope = {{ group = "{self.scope}" }}')
         return "\n".join(lines) + "\n"
 
     def payload(self) -> dict:
         body = {"name": self.name, "type": self.type, "index": self.index, "render": self.render}
+        if self.unique:
+            body["unique"] = True
         if self.vocabulary:
             body["vocabulary"] = self.vocabulary
         if self.scope:
@@ -192,8 +190,9 @@ class Vocabulary:
 
 def fx_column() -> Column:
     """The join column every deployment carries from its build: the source id, rendered, so a
-    served point names its item without a second request."""
-    return Column("fx", "u64", pa.uint64(), lambda i: i, render=True)
+    served point names its item without a second request, and unique, so every file and every row
+    a test writes names its item by it."""
+    return Column("fx", "u64", pa.uint64(), lambda i: i, render=True, unique=True)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -207,7 +206,8 @@ class Corpus:
     vocabularies, and any other source file by name.
 
     `points` maps a source name to `(source ids, columns, position seed, frame)`. Every points
-    file carries `entity_id`, `x`, `y` and `access`, and then the columns given for it.
+    file carries `fx`, `x`, `y` and `access`, and then the columns given for it. The declaration
+    joins its files on `fx`, which a deployment's blocks must declare ([`fx_column`]).
     """
 
     blocks: list[str]
@@ -222,7 +222,7 @@ class Corpus:
             sources.append(f'{name} = "{name}.parquet"')
             xs, ys = zip(*(position(seed, i, extent) for i in ids)) if ids else ((), ())
             data = {
-                "entity_id": pa.array(ids, type=pa.uint64()),
+                "fx": pa.array(ids, type=pa.uint64()),
                 "x": pa.array(xs, type=pa.float64()),
                 "y": pa.array(ys, type=pa.float64()),
                 "access": pa.array([access_of(i) for i in ids], type=pa.string()),
@@ -238,7 +238,7 @@ class Corpus:
             sources.append(f'{name} = "{name}.parquet"')
             pq.write_table(table, work / f"{name}.parquet")
         text = "[sources]\n" + "\n".join(sources) + "\n\n"
-        text += f'[defaults]\nsource = "{WORLD}"\nentity_id_field = "entity_id"\n'
+        text += f'[defaults]\nsource = "{WORLD}"\njoin_field = "fx"\n'
         text += f'allocation_view = "{WORLD}"\n\n'
         text += "\n".join(v.toml() for v in self.vocabularies) + "\n"
         text += "\n".join(self.blocks)
@@ -287,7 +287,6 @@ class Deployment:
                 str(CLI_BIN), "build",
                 "--deployment", str(deployment),
                 "--out", str(self.bundle),
-                "--mint-external-ids",
             ],
             cwd=REPO_ROOT,
             check=True,
@@ -377,12 +376,13 @@ class Deployment:
 
 
 def point_rows(ids, columns: list[Column], seed: int = 0, extent=WORLD_EXTENT) -> list[dict]:
-    """Ingest rows for items `ids`: the fixed columns and one per column given, null where the
-    item has no value, since a column a batch carries is on every row of it."""
+    """Ingest rows for items `ids`: the fixed columns, the item named by its `fx`, and one per
+    column given, null where the item has no value, since a column a batch carries is on every row
+    of it."""
     out = []
     for i in ids:
         x, y = position(seed, i, extent)
-        row = {"external_id": external_id(i), "x": x, "y": y, "access": [access_of(i)]}
+        row = {"fx": i, "x": x, "y": y, "access": [access_of(i)]}
         for column in columns:
             row[column.name] = column.value(i)
         out.append(row)
@@ -390,11 +390,11 @@ def point_rows(ids, columns: list[Column], seed: int = 0, extent=WORLD_EXTENT) -
 
 
 def value_rows(ids, columns: list[Column]) -> list[dict]:
-    """Rows without coordinates for items `ids`: the address, then one value per column, null
+    """Rows without coordinates for items `ids`: the item's `fx`, then one value per column, null
     where the item has no value."""
     out = []
     for i in ids:
-        row = {"external_id": external_id(i)}
+        row = {"fx": i}
         for column in columns:
             row[column.name] = column.value(i)
         out.append(row)
@@ -769,7 +769,6 @@ __all__ = [
     "Difference",
     "differences",
     "split",
-    "external_id",
     "fx_column",
     "observe",
     "point_rows",

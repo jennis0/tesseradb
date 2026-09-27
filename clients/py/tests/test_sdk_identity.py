@@ -1,14 +1,13 @@
-"""How a row is named, from the frame to the served answer (python-sdk.md §3).
+"""How a row is named, from the frame to the served answer.
 
-Two routes and no third. An insert names its rows with `id=`, whose bytes are the external id at
-the build and on every later route; or it names none, and a row is addressable by the
-`tessera_id` the server hands back. The SDK keeps no map between them: what is inserted is what is
-written, and what is sent is what the column holds.
+Two routes and no third. An insert names its rows with `id=`, the column holding each row's value
+of the join field the user declared, at the build and on every later route; or it names none, and
+each row is an item of its own, addressable by the `tessera_id` the server hands back. The SDK
+keeps no map between them: what is inserted is what is written, and what is sent is what the
+column holds.
 """
 
 from __future__ import annotations
-
-import base64
 
 import pyarrow as pa
 import pytest
@@ -35,6 +34,8 @@ def string_ids(db) -> None:
     """A corpus named by a string column, with a clustering whose members name the same keys."""
     keys = [f"p{i}" for i in range(20)]
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.declare_attribute("paper", type="keyword", unique=True)
+    db.declare_join_field("paper")
     db.declare_layer("clusters", kind="flat")
     db.insert("map", papers(keys), id="paper", x="x", y="y", access="labels")
     db.insert(
@@ -63,10 +64,10 @@ def string_ids(db) -> None:
 def test_a_string_id_column_names_the_rows_the_members_name_and_reaches_the_drill_down(
     served, corpus
 ):
-    """§3: the column's bytes are the external id, and the members table joins on the same bytes."""
+    """The column is the join field's value, and the members table joins on the same values."""
     db = served(string_ids)
     # The declaration is what says where identity is; nothing was rewritten to say it.
-    assert 'entity_id = "paper"' in db.declaration
+    assert 'join_field = "paper"' in db.declaration
     assert 'entity = "paper"' in db.declaration
 
     answer = viewport(db, "map", FRAME)
@@ -74,7 +75,7 @@ def test_a_string_id_column_names_the_rows_the_members_name_and_reaches_the_dril
     assert browse(db, "map", "clusters")["artifacts"][0]["masked_count"] == 20
 
     record = item(db, answer["ids"][0])
-    assert base64.b64decode(record["external_id"]).decode().startswith("p")
+    assert record["fields"]["paper"].startswith("p")
 
 
 def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_edits_them(served, corpus):
@@ -132,17 +133,14 @@ def unnamed(db) -> None:
 
 
 def test_an_unnamed_index_is_the_tessera_id_route_and_remove_addresses_by_it(served, corpus):
-    """§3: no external id is written, and a row is addressed by the id the server hands back."""
+    """No join field is declared, and a row is addressed by the id the server hands back."""
     pytest.importorskip("pandas")
     db = served(unnamed)
-    entities = db.path / "bundle" / "v00000" / "partitions" / "default" / "entities"
-    assert not list(entities.glob("external-ids-*.arrow"))
-    assert not (entities / "ext-locator.u32").exists()
+    assert "join_field" not in db.declaration
 
     answer = viewport(db, "map", FRAME)
     assert answer["counts"]["visible"] == 20
     picked = answer["ids"][0]
-    assert "external_id" not in item(db, picked)
 
     report = db.remove([picked])
     assert report.ok, report

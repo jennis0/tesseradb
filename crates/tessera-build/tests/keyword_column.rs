@@ -13,7 +13,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -24,6 +24,8 @@ use tessera_filter::{Access, Codes, SortedDict, ValueColumn, DICT_FILE};
 use tessera_spatial::Bounds;
 use tessera_store::open_bundle;
 use tessera_types::IdentityKey;
+
+mod common;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
@@ -116,6 +118,7 @@ fn parse_schema(text: &str) -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
+    let schema = common::with_id(schema);
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -141,7 +144,6 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -176,38 +178,6 @@ fn column_dir(out: &Path, column: &str) -> PathBuf {
         .join(phash)
         .join("attrs")
         .join(column)
-}
-
-/// Source id → entity id, through the external-id sidecar. Entity ids are signature-sorted, so a
-/// source id is emphatically not its own entity id.
-fn source_to_entity(out: &Path) -> HashMap<u64, u32> {
-    let bundle = open_bundle(out).unwrap();
-    let part = bundle.partitions.values().next().unwrap();
-    let prefix = current_prefix(out);
-    let mut map = HashMap::new();
-    for rel in &part.manifest.external_id_runs {
-        let path = out.join(&prefix).join(rel);
-        let reader =
-            arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
-        for batch in reader {
-            let batch = batch.unwrap();
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap();
-            let ent = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
-                map.insert(source, ent.value(i));
-            }
-        }
-    }
-    map
 }
 
 fn build_keyword_bundle(dir: &Path, doi: &dyn Fn(u64) -> Option<String>) -> PathBuf {
@@ -267,7 +237,7 @@ fn a_keyword_column_writes_a_dictionary_and_an_ordinal_column() {
 fn an_entitys_ordinal_resolves_to_the_value_it_carried() {
     let dir = tempfile::tempdir().unwrap();
     let out = build_keyword_bundle(dir.path(), &doi_of);
-    let entity_of = source_to_entity(&out);
+    let entity_of = common::entities_of(&out, "id", 0..N);
 
     for (column, expected) in [
         ("doi", &doi_of as &dyn Fn(u64) -> Option<String>),

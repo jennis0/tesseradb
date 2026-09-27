@@ -6,7 +6,7 @@
 //! - **The segment count comes down**, which is the axis the entity-space coalesce cannot bound
 //!   and the whole reason this half exists.
 //! - **No item is lost.** A merge is row-count preserving and drops no posting: every item stays
-//!   visible, at the same coordinates, and every external id still resolves to the same entity.
+//!   visible, at the same coordinates, and every unique value still names the same entity.
 //!   Dropping a row would be the compaction *fold*, which is invariant-bearing work this layer
 //!   must not do.
 //! - **Row space is permuted, so a projection that spans it cannot be served stale**, and the
@@ -205,25 +205,24 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<Vec<(EntityId, String)>> {
         let mut rows = Vec::new();
         let mut items = Vec::new();
         for t in 0..ROWS_EACH {
-            let external_id = format!("ext-{s}-{t}");
+            let key = format!("ext-{s}-{t}");
             let descriptors = if t.is_multiple_of(2) {
                 vec![b"0".to_vec(), b"1".to_vec()]
             } else {
                 vec![b"0".to_vec()]
             };
             rows.push(UnallocatedRow {
-                external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 // x ≡ s (mod TIER_WIDTH), scaled to distinct cells inside the extent.
                 x: ((t * TIER_WIDTH + s) * 20) as f64,
                 y: 5.0,
-                scalars: Vec::new(),
+                scalars: keyed(&key),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
                 scoped: Vec::new(),
             });
-            items.push(external_id);
+            items.push(key);
         }
         let entities = engine
             .ingest_rows(rows, format!("batch-{s}"), [s as u8; 32])
@@ -656,20 +655,9 @@ fn a_merge_collapses_segments_and_loses_no_item() {
          the Morton code, never through a dequantise-and-requantise"
     );
 
-    // Every binding still answers: the merge leaves the runs and locator extents as they were.
-    for (entity, external_id) in &items {
-        assert_eq!(
-            engine
-                .resolve_external_id(external_id.as_bytes())
-                .expect("resolvable"),
-            Some(*entity),
-            "external id {external_id} lost its binding to the merge"
-        );
-        assert_eq!(
-            engine.external_id_of(*entity).expect("no inconsistency"),
-            Some(external_id.as_bytes().to_vec()),
-            "and the reverse direction still answers for it"
-        );
+    // Every value still names its item: the merge leaves the key runs as they were.
+    for (entity, key) in &items {
+        assert_eq!(item_of_key(&engine, key), Some(*entity), "{key} lost its item to the merge");
     }
 }
 
@@ -758,7 +746,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
         (64 + TIER_WIDTH * ROWS_EACH) as u64,
         "every item survives the merge and the restart"
     );
-    for (entity, external_id) in &items {
+    for (entity, key) in &items {
         assert!(
             generation.bundle.partitions["default"].views["s0"]
                 .row_space
@@ -767,12 +755,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
             "entity {} lost its row across the merge and the restart",
             entity.raw()
         );
-        assert_eq!(
-            reopened
-                .resolve_external_id(external_id.as_bytes())
-                .expect("resolvable"),
-            Some(*entity)
-        );
+        assert_eq!(item_of_key(&reopened, key), Some(*entity));
     }
 }
 
@@ -819,7 +802,6 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
             .map(|t| {
                 let descriptors = vec![b"0".to_vec()];
                 UnallocatedRow {
-                    external_id: Some(format!("late-{t}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
                     x: ((t * TIER_WIDTH) * 20) as f64,
@@ -989,14 +971,12 @@ fn a_session_established_inside_a_merges_refresh_window_is_served_rather_than_sh
 // against that exact defect.
 // ---------------------------------------------------------------------------------------------
 
-/// One flushed segment of `rows` items, at unique external ids namespaced by `tag`.
+/// One flushed segment of `rows` items.
 fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> {
     let mut batch = Vec::new();
     for t in 0..rows {
-        let external_id = format!("cfg-{tag}-{t}");
         let descriptors = vec![b"0".to_vec()];
         batch.push(UnallocatedRow {
-            external_id: Some(external_id.into_bytes()),
             view: "s0".to_string(),
             join: None,
             x: ((t % 47) * 20) as f64,
@@ -1288,7 +1268,6 @@ fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
         .map(|i| {
             let descriptors = vec![b"0".to_vec()];
             UnallocatedRow {
-                external_id: Some(format!("late-{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
                 x: (10 + i * 40) as f64,

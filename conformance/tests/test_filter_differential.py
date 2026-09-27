@@ -158,7 +158,7 @@ def test_the_filter_columns_are_decorrelated_from_the_grant_structure(
     assert "hollow" not in members
     # `DEPARTMENT_SOLO_ID` is the **source** id the value was planted on; `members` is keyed by
     # entity, so the comparison crosses the two spaces and has to say so.
-    assert members["solo"] == {catalogue_bundle.entity_of_source(cat.DEPARTMENT_SOLO_ID)}
+    assert members["solo"] == {cat.entity_of_source(catalogue_bundle, cat.DEPARTMENT_SOLO_ID)}
     # Its block, in either space: a block's source range and entity range hold the same items,
     # which `verify()`'s check 3b asserts item by item.
     assert cat.DEPARTMENT_SOLO_ID in cat.BLOCKS["cross_lo"].entities
@@ -416,7 +416,7 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
     solo = catalogue_server.viewport(
         token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters={"department": {"eq": "solo"}}
     )
-    solo_entity = catalogue_bundle.entity_of_source(cat.DEPARTMENT_SOLO_ID)
+    solo_entity = cat.entity_of_source(catalogue_bundle, cat.DEPARTMENT_SOLO_ID)
     assert _served_entities(solo, entity_of_fx) == {solo_entity}, (
         "the solo control failed — a single-member value was not served, so the five empty "
         "bodies above may just be a filter that matches nothing"

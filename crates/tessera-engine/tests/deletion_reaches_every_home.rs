@@ -4,8 +4,8 @@
 //! An item's data does not live in one place. Records §3 gives every declared field exactly one of
 //! three homes — the hot column in row space (`render`), the family's entity-space structure
 //! (`index`), or the per-entity record blob (neither key set) — and beside those an item has a row
-//! in row space, a bit in the render presence bitmap decision 0064 added, a binding in the
-//! external-id sidecar, and the access-control postings that decide whether it is reachable at all.
+//! in row space, a bit in the render presence bitmap decision 0064 added, and the access-control
+//! postings that decide whether it is reachable at all.
 //! The compaction fold rewrites all of them.
 //!
 //! Each of those rewrites is covered where it lives, and **nothing asserted that they agree**.
@@ -31,7 +31,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, Int32Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, Int32Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -56,7 +56,7 @@ use homes::Home;
 const N: u64 = 64;
 
 /// The item deleted. It carries a value in every home: a band, a score, the keyword no other item
-/// carries, a blob row, an external id and both terms' postings.
+/// carries, a blob row and both terms' postings.
 const DELETED_SOURCE: u64 = 9;
 
 /// The item **suppressed**, and therefore the one every home assertion checks the survivors
@@ -121,6 +121,14 @@ name     = "prose"
 type     = "text"
 index    = true
 analyser = "unicode"
+
+# The points file's `entity_id`, declared unique, which is how the test finds the item a source
+# row became.
+[[attribute]]
+name   = "id"
+type   = "u64"
+field  = "entity_id"
+unique = true
 "#;
 
 fn band_of(source: u64) -> &'static str {
@@ -258,7 +266,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -266,12 +274,11 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build carrying all three homes succeeds");
 }
@@ -379,7 +386,6 @@ impl Files for Home {
                 attrs.join("prose/postings.arrow"),
             ],
             Home::RecordBlob => files_under(&attrs.join("record")),
-            Home::ExternalIdSidecar => files_under(&partition.join("entities")),
             Home::TermPostings => vec![partition.join("terms/postings.arrow")],
             // Homes this fixture does not have: the second test, over the fixture that has every
             // home, reaches them. A suppression is not a file; it is asserted below, on the
@@ -547,40 +553,6 @@ fn record_blob(root: &Path) -> tessera_filter::RecordBlob {
     .expect("the record blob opens")
 }
 
-/// `Home::ExternalIdSidecar`: source id → entity, decoded from **every** run the manifest names.
-///
-/// `common::source_to_new_map` reads only the first run. Asserting that a key is *gone* has to
-/// look at all of them or it asserts nothing.
-fn sidecar_bindings(root: &Path) -> BTreeMap<u64, u64> {
-    let bundle = open_bundle(root).expect("the bundle opens");
-    let prefix = root.join(current_prefix(root));
-    let mut map = BTreeMap::new();
-    for rel in &bundle.partitions["default"].manifest.external_id_runs {
-        let file = File::open(prefix.join(rel)).expect("an external-id run opens");
-        let reader = arrow::ipc::reader::FileReader::try_new(file, None).expect("the run reads");
-        for batch in reader {
-            let batch = batch.expect("a run batch reads");
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .expect("the key column is binary");
-            let entity = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .expect("the entity column is u32");
-            for i in 0..batch.num_rows() {
-                map.insert(
-                    u64::from_le_bytes(ext.value(i).try_into().unwrap()),
-                    u64::from(entity.value(i)),
-                );
-            }
-        }
-    }
-    map
-}
-
 /// `Home::TermPostings`: whether the base term index still names `entity` under `term`.
 /// The term id `ALL_TERM`'s descriptor was interned at, read from the bundle's own dictionary.
 ///
@@ -633,7 +605,7 @@ fn term_names(root: &Path, term: TermId, entity: EntityId) -> bool {
 ///
 /// **What this kills that the per-home cases do not:** a home the fold forgets. Every existing
 /// case tests one artefact, so a value column rewritten without its postings, a blob rewritten
-/// without the sidecar, or a render bitmap carried across the renumbering unchanged all leave the
+/// without its postings, or a render bitmap carried across the renumbering unchanged all leave the
 /// suite green while a deleted item's bytes stay in the bundle.
 #[test]
 fn a_deletion_reaches_every_home() {
@@ -648,20 +620,18 @@ fn a_deletion_reaches_every_home() {
     let deleted = EntityId::new(entity_of_source[&DELETED_SOURCE]);
     let survivor = EntityId::new(entity_of_source[&SUPPRESSED_SOURCE]);
 
-    // **Addressed the way a caller addresses a change.** The control plane takes exactly one of
-    // `external_id` or `tessera_id` (contracts §3.1) and resolves both to an `EntityId` before the
-    // deny lane sees anything, so the engine's change path takes only the entity — there is no
-    // delete-by-external-id route below this line to drive. What is checkable here is that the two
-    // resolutions name the same item, and the delete goes through the `tessera_id` one.
-    let by_external = engine
-        .resolve_external_id(&source_id_key(DELETED_SOURCE))
-        .expect("the sidecar reads")
-        .expect("the deleted item's external id resolves before the fold");
+    // **Addressed the way a caller addresses a change.** The control plane takes a `tessera_id` or
+    // a unique field and value and resolves either to an `EntityId` before the deny lane sees
+    // anything, so the engine's change path takes only the entity. What is checkable here is that
+    // the two resolutions name the same item, and the delete goes through the `tessera_id` one.
+    let by_value = item_of_id(&engine, DELETED_SOURCE)
+        .expect("the index reads")
+        .expect("the deleted item's `id` names it before the delete");
     let by_tessera = engine
         .resolve_tessera_ids(&[engine.tessera_id_of(deleted).expect("a wire identifier")])
         .unwrap()[0]
         .expect("the identifier names a live item");
-    assert_eq!(by_external, deleted, "the external-id route names the item");
+    assert_eq!(by_value, deleted, "the unique-field route names the item");
     assert_eq!(by_tessera, deleted, "and so does the tessera_id route");
 
     let baseline = {
@@ -726,11 +696,6 @@ fn a_deletion_reaches_every_home() {
             .expect("a served blob holds its has-row bitmap"),
         "Home::RecordBlob"
     );
-    assert_eq!(
-        sidecar_bindings(&root).get(&DELETED_SOURCE),
-        Some(&deleted.raw()),
-        "Home::ExternalIdSidecar"
-    );
     assert!(
         term_names(&root, all_term(&root), deleted),
         "Home::TermPostings"
@@ -766,13 +731,6 @@ fn a_deletion_reaches_every_home() {
         every_home_byte(&root),
         "an accepted change rewrote an artefact: Rule S touches nothing ever, and Rule F touches \
          nothing until the fold"
-    );
-    assert!(
-        engine
-            .resolve_external_id(&source_id_key(DELETED_SOURCE))
-            .expect("the sidecar reads")
-            .is_some(),
-        "and the binding is still there to resolve, which is what the fold has to remove"
     );
 
     // ---- Phase 3: the fold executes it, everywhere -------------------------------------------
@@ -1011,8 +969,8 @@ fn a_deletion_reaches_every_home() {
         let source = source_of_entity[&u64::from(entity)];
         assert_eq!(
             fields.len(),
-            2,
-            "Home::RecordBlob: source {source}'s row is not its two blob-resident fields"
+            3,
+            "Home::RecordBlob: source {source}'s row is not its three blob-resident fields"
         );
         assert_eq!(
             fields[0].value,
@@ -1026,6 +984,11 @@ fn a_deletion_reaches_every_home() {
             fields[1].value,
             tessera_filter::RecordValue::Utf8(prose_of(source)),
             "Home::RecordBlob: source {source}'s prose"
+        );
+        assert_eq!(
+            fields[2].value,
+            tessera_filter::RecordValue::U64(source),
+            "Home::RecordBlob: source {source}'s id"
         );
         walked += 1;
         Ok(())
@@ -1046,32 +1009,6 @@ fn a_deletion_reaches_every_home() {
     assert!(
         !blocks.windows(needle.len()).any(|w| w == needle),
         "Home::RecordBlob: the deleted prose is in the folded file verbatim"
-    );
-
-    // Home::ExternalIdSidecar — the key resolves to nothing, through the live engine and in the
-    // run the fold wrote. Leaving it standing 409s a lawful re-ingest of that key for ever
-    // (decision 0047: edit is delete plus re-ingest).
-    assert_eq!(
-        engine
-            .resolve_external_id(&source_id_key(DELETED_SOURCE))
-            .expect("the sidecar reads"),
-        None,
-        "Home::ExternalIdSidecar: the deleted item's key still resolves"
-    );
-    let bindings = sidecar_bindings(&root);
-    assert!(
-        !bindings.contains_key(&DELETED_SOURCE),
-        "Home::ExternalIdSidecar: the folded run still binds the deleted key"
-    );
-    assert_eq!(
-        bindings.get(&SUPPRESSED_SOURCE),
-        Some(&survivor.raw()),
-        "Home::ExternalIdSidecar: a suppressed item's binding folds through intact"
-    );
-    assert_eq!(
-        bindings.len() as u64,
-        N - 1,
-        "Home::ExternalIdSidecar: the fold dropped more than the executed key"
     );
 
     // Home::TermPostings — the access-control half. Both halves or neither: a row dropped with the
@@ -1188,9 +1125,8 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
     let first = EntityId::new(source_to_new_map(&root, "v00000")[&every::X]);
     let tid = engine.tessera_id_of(first).unwrap();
 
-    let blank = |tessera_id, external_id| IngestRow {
+    let blank = |tessera_id| IngestRow {
         tessera_id,
-        external_id,
         labels: None,
         position: None,
         scalars: vec![WalScalar::Null; every::DECLARED],
@@ -1210,7 +1146,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
             })
             .expect("the batch is accepted")
     };
-    let mut edit = blank(Some(tid), None);
+    let mut edit = blank(Some(tid));
     edit.scalars[every::SCORE_AT] = WalScalar::I32(555);
     edit.omitted.retain(|at| *at != every::SCORE_AT);
     assert_eq!(send(&engine, "edit", edit).edited, 1);
@@ -1322,13 +1258,6 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                 !named(&after.rows).contains("record"),
                 "{home:?}: the record still holds the item"
             ),
-            Home::ExternalIdSidecar => assert_eq!(
-                engine
-                    .resolve_external_id(&source_id_key(every::X))
-                    .unwrap(),
-                None,
-                "{home:?}: the external id still names the item"
-            ),
             Home::TermPostings => {
                 for entity in entities {
                     assert!(
@@ -1348,11 +1277,11 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                     served("s0", ident(every::ident_of(every::X))).is_empty(),
                     "{home:?}"
                 );
-                let mut fresh = blank(None, Some(b"fresh".to_vec()));
+                let mut fresh = blank(None);
                 fresh.labels = Some(vec![ALL_TERM.to_string().into_bytes()]);
                 fresh.position = Some((500.0, 500.0));
-                fresh.scalars[every::DECLARED - 1] = WalScalar::U64(every::ident_of(every::X));
-                fresh.omitted.retain(|at| *at != every::DECLARED - 1);
+                fresh.scalars[every::IDENT_AT] = WalScalar::U64(every::ident_of(every::X));
+                fresh.omitted.retain(|at| *at != every::IDENT_AT);
                 let receipt = send(&engine, "fresh", fresh);
                 assert_eq!(
                     receipt.created, 1,

@@ -101,12 +101,11 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
     let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
 
     const SUPPRESS_SOURCE_ID: u64 = 7;
-    let external_id = member(SUPPRESS_SOURCE_ID);
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .json(&serde_json::json!([{ "field": "id", "value": member(SUPPRESS_SOURCE_ID), "op": "suppress" }]))
         .send()
         .await
         .unwrap();

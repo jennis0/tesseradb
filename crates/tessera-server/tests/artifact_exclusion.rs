@@ -54,7 +54,7 @@ async fn put(
         .client
         .put(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -71,7 +71,7 @@ async fn patch(
         .client
         .patch(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -240,12 +240,7 @@ async fn the_complement_holds_a_point_that_is_buffered_and_not_yet_flushed() {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "one-more-point")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&external_id_of(new_id)),
-            20.0,
-            20.0,
-            "0",
-        )]))
+        .body(build_ingest_batch_optional(&[(Some(new_id), 20.0, 20.0, "0")]))
         .send()
         .await
         .unwrap();
@@ -302,7 +297,7 @@ async fn the_complement_leaves_out_a_deleted_entity() {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(
             &(0..deleted)
-                .map(|id| json!({ "external_id": member(id), "op": "delete" }))
+                .map(|id| json!({ "field": "id", "value": member(id), "op": "delete" }))
                 .collect::<Vec<_>>(),
         )
         .send()

@@ -19,8 +19,8 @@ reads it. You never see or supply the key.
 
 So a rebuild gives every item a new `tessera_id`, even when the sources have not changed, and a
 `tessera_id` saved from the old bundle does not name an item in the new one. A client that holds
-`tessera_id`s has to read those items again after the swap, by external id or with a fresh read. A
-copy of a bundle, such as one restored from a backup, keeps its key and so keeps every
+`tessera_id`s has to read those items again after the swap, by a unique field's values or with a
+fresh read. A copy of a bundle, such as one restored from a backup, keeps its key and so keeps every
 `tessera_id`.
 
 ## Build the new bundle

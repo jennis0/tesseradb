@@ -955,7 +955,6 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                 {
                     buffer.insert_row_with_terms(
                         &tessera_lifecycle::WalRow {
-                            external_id: None,
                             entity_id: EntityId::new(row as u64),
                             view: "s0".to_string(),
                             join: false,
@@ -1291,7 +1290,6 @@ fn the_occupied_tile_count_is_exact_with_a_composed_mask() {
     for row in (0..n).filter(|r| !vis.contains(r)).step_by(5) {
         buffer.insert_row_with_terms(
             &tessera_lifecycle::WalRow {
-                external_id: None,
                 entity_id: EntityId::new(u64::from(row)),
                 view: "s0".to_string(),
                 join: false,

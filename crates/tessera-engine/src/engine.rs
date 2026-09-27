@@ -14,8 +14,8 @@ use tessera_plugin::Plugin;
 use tessera_store::manifest::{CurrentPointer, Declarations};
 use tessera_store::read::open_bundle;
 use tessera_store::vocabulary::Vocabularies;
-use tessera_store::{Bundle, StoreError};
-use tessera_types::{EntityId, IdentityKey};
+use tessera_store::Bundle;
+use tessera_types::IdentityKey;
 
 use crate::cache::RowProjectionCache;
 use crate::config::{coalesce_policy, merge_policy, EngineConfig};
@@ -75,8 +75,8 @@ fn describe_pool_panic(payload: &(dyn std::any::Any + Send)) -> String {
 /// The request-serving engine: one immutable [`Generation`] behind an atomically-swappable
 /// pointer, plus the state that is genuinely process-lifetime — the plugin, the compute pool, the
 /// `tessera_id` key, the row-projection cache and the bundle root. The dictionary, postings
-/// reader, fragment cache and external-id sidecar live in [`Generation`] instead, since each
-/// changes on its own publication.
+/// reader and fragment cache live in [`Generation`] instead, since each changes on its own
+/// publication.
 pub struct Engine {
     /// The live generation pointer, shared with [`WritePath`]: the write path publishes every
     /// swap through this exact pointer and read paths load it, so a copy elsewhere would hide a
@@ -137,8 +137,8 @@ pub struct Engine {
     pub(crate) suggest_dir: std::path::PathBuf,
     pub(crate) config: EngineConfig,
     pub(crate) next_token_id: AtomicU64,
-    /// The write path: the WAL, the entity-id allocator, the live external-id maps, the resolver's
-    /// extension state and the idempotency index.
+    /// The write path: the WAL, the entity-id allocator, the resolver's extension state and the
+    /// idempotency index.
     pub(crate) write: WritePath,
     /// The `tessera_id` blinding permutation's key, read from the bundle's manifest and held for
     /// the process lifetime. It never leaves the server; `IdentityKey`'s `Debug` is redacted.
@@ -433,7 +433,6 @@ pub(crate) struct PrefixReaders {
     pub(crate) dict: Arc<Dict>,
     pub(crate) postings: Arc<PostingsReader>,
     pub(crate) delta_postings: Vec<Arc<DeltaTier>>,
-    pub(crate) external_index: Arc<ExternalIdIndex>,
     /// The deployment's `tessera_id` key. `IdentityKey::from_hex` rejects a degenerate key,
     /// refusing a bundle rather than blinding identities with a collapsed round schedule.
     pub(crate) identity_key: IdentityKey,
@@ -491,13 +490,6 @@ impl PrefixReaders {
             ));
         }
 
-        // Lazy for real: nothing here is opened, mapped or verified. The constructor only reads
-        // already-parsed JSON manifest data (paths and digests), never the filesystem.
-        let external_index = Arc::new(
-            ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
-                .map_err(EngineError::Store)?,
-        );
-
         let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
             .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
         let cursor_key = crate::records::CursorKey::of(&bundle.manifest.identity.key);
@@ -511,7 +503,6 @@ impl PrefixReaders {
             dict,
             postings,
             delta_postings,
-            external_index,
             identity_key,
             cursor_key,
         })
@@ -848,7 +839,6 @@ fn first_generation(
             dict: Arc::clone(&readers.dict),
             postings: Arc::clone(&readers.postings),
             fragments,
-            external_index: Arc::clone(&readers.external_index),
             unique: Arc::new(unique),
             unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
             edited: Arc::new(edited),
@@ -1103,7 +1093,7 @@ impl Engine {
     /// read it see every real security-state change and no false ones.
     ///
     /// Swaps everything a [`GeometryPublication`] names, plus, with a `PrefixRotation`, the base
-    /// postings, bundle identity, fragment cache and external-id sidecar; without one those four
+    /// postings, bundle identity and fragment cache; without one those three
     /// carry forward unchanged. Runs on the write executor, so there is one publisher, and blocks
     /// until the swap is done.
     pub fn publish_geometry(
@@ -1276,11 +1266,6 @@ pub(crate) fn open_rotation(
 
     let postings = open_postings(&prefix_dir, &phash)
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
-    let external_index = Arc::new(
-        ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
-            .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
-    );
-
     // Rotated from the live one, never freshly constructed: `FragmentCache::rotate` carries the
     // configured byte bound across, and `FragmentCache::new` here would silently unbound it.
     let fragments = Arc::new(live_fragments.rotate(bundle_identity));
@@ -1316,7 +1301,6 @@ pub(crate) fn open_rotation(
         crate::geometry::PrefixRotation {
             postings,
             fragments,
-            external_index,
             filter_columns,
             unique,
             edited,
@@ -1349,53 +1333,6 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
-}
-
-/// Resolve an external id to an [`EntityId`] via `tessera_store::ExternalIdSidecar`, a thin
-/// wrapper so callers in this crate keep using `EntityId`. Per-extent lazy. This is the seam
-/// `/control/changes` resolves an external id through at admission, and it is authorisation
-/// bearing: the endpoint denies whichever entity it resolves to, so a wrong resolution denies the
-/// wrong entity and leaves the intended target visible.
-pub(crate) struct ExternalIdIndex(pub(crate) tessera_store::ExternalIdSidecar);
-
-impl ExternalIdIndex {
-    pub(crate) fn open(
-        bundle_manifest: &tessera_store::manifest::Manifest,
-        partition_manifest: &tessera_store::manifest::SegmentsManifest,
-        prefix_dir: &Path,
-    ) -> std::result::Result<Self, StoreError> {
-        tessera_store::ExternalIdSidecar::deferred_from_manifest(
-            bundle_manifest,
-            partition_manifest,
-            prefix_dir,
-        )
-        .map(ExternalIdIndex)
-    }
-
-    /// Fallible: a corrupt extent, a digest mismatch or a shuffled extent list propagates as
-    /// `Err(StoreError::InvalidSidecar)` through `Engine::resolve_external_id` to the handler
-    /// rather than panicking, still fail-closed in effect.
-    pub(crate) fn resolve(&self, external_id: &[u8]) -> std::result::Result<Option<EntityId>, StoreError> {
-        self.0.resolve(external_id)
-    }
-
-    /// Batched form of [`Self::resolve`]: one sorted pass over `external_ids`, each extent opened
-    /// at most once rather than one open per row.
-    pub(crate) fn resolve_many(
-        &self,
-        external_ids: &[Vec<u8>],
-    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        self.0.resolve_many(external_ids)
-    }
-
-    /// `entity -> external_id`, distinguishing "genuinely has none" from "an inconsistency".
-    pub(crate) fn external_id_of_checked(
-        &self,
-        entity: EntityId,
-        high_water: u64,
-    ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
-        self.0.external_id_of_checked(entity, high_water)
-    }
 }
 
 #[cfg(test)]

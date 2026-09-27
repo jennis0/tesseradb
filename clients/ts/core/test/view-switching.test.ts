@@ -108,7 +108,7 @@ function open(opts: {
   const client = {
     meta: async () => META,
     viewport,
-    item: async () => ({fields: {}, externalId: null}),
+    item: async () => ({fields: {}}),
     artifact: async () => ({layer: 'l', key: 'k', maskedCount: 42n, centroid: null, box: null, shape: null}),
     categories: async () => [],
     suggest: async (_token: string, column: string, q: string) => ({status: 'ok' as const, column, q, values: [], more: false}),

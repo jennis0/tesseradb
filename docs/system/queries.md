@@ -280,9 +280,9 @@ corpus. Rows returned before a flush and rows returned after it come from differ
 
 ### What a read of items returns
 
-A page holds `tessera_id`, then the named fields in the order named, then any of three system
-fields: `position`; `external_id`, the id the item was inserted with; and `labels`, the item's
-labels that this viewer also holds. Under `keep_unmatched` every visible item is returned, with a
+A page holds `tessera_id`, then the named fields in the order named, then either or both of two
+system fields: `position`, and `labels`, the item's labels that this viewer also holds. A unique
+field is named like any other. Under `keep_unmatched` every visible item is returned, with a
 `tessera:matched` column. Every named field is present whether or not an item holds a value, and a
 value it does not hold is a null. A category arrives as its value keys, and each page's dictionary
 holds only the keys its own rows carry.

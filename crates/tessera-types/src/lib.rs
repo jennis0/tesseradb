@@ -205,9 +205,12 @@ pub struct GenerationStamp {
 // refused as malformed.
 // 27: record blobs are cut into 32 KiB blocks rather than 256 KiB. A 26 bundle reads correctly
 // but is refused, so that every bundle carries the one block size.
+// 28: a side-manifest carries no `external_id_runs` or `locator_extents`, and a bundle holds no
+// external-id runs or locator; the build joins its files on `[defaults].join_field`. A 27 bundle
+// is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 27;
+pub const BUNDLE_FORMAT: u32 = 28;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

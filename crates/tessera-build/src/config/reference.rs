@@ -621,7 +621,7 @@ fn the_space_of_an_inline_row_defaults_to_the_one_the_page_states() {
         crate::layers::read(
             &config.layers,
             &inputs,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::IdSpace::Integer { signed: false },
             &BTreeMap::new(),
             std::slice::from_ref(&frame),
             tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
@@ -639,11 +639,10 @@ fn the_space_of_an_inline_row_defaults_to_the_one_the_page_states() {
 }
 
 /// The keys whose default the page states in words, each checked by the test below.
-const WORDED: [&str; 7] = [
+const WORDED: [&str; 6] = [
     "view.source",
     "attribute.field",
     "attribute.source",
-    "attribute.entity_id_field",
     "layer.layout",
     "layer.levels.zoom",
     "layer.labels.visibility",
@@ -684,9 +683,6 @@ fn each_default_stated_in_words_is_the_one_the_parser_applies() {
     for attribute in &config.schema.attributes {
         assert_eq!(attribute.column(), attribute.name);
     }
-    let renamed = with_line(FIXTURE, "defaults", "entity_id_field = \"id\"");
-    let renamed = parsed(&renamed).expect("the declaration compiles");
-    assert_eq!(renamed.attribute_sources[0].fields.of(ENTITY_ID), "id");
     assert!(config.layers.iter().all(|layer| layer.layout.is_none()));
     let topics = config.layers.iter().find(|l| l.name == "topics").unwrap();
     assert!(topics.levels.iter().all(|level| level.zoom.is_none()));

@@ -320,8 +320,6 @@ pub(crate) struct FlushPlan {
     /// Ascending by entity id, deleted entities already removed; its ends give the segment's
     /// entity range.
     pub(crate) items: Vec<(EntityId, BufferedItem)>,
-    /// The joins whose key a published run already records, ascending: they write no binding.
-    pub(crate) recorded_joins: Vec<EntityId>,
 }
 
 impl FlushPlan {
@@ -406,27 +404,7 @@ pub(crate) fn plan_flush(
     // ascending entity id.
     items.sort_unstable_by_key(|(entity, _)| entity.raw());
 
-    // The first flush to give an entity a row writes its binding, whether that row is the
-    // entity's own or a join: a dropped view can take the own row with it before it flushes. So
-    // a join whose entity already has a row in some view finds its key recorded.
-    let rowed = |entity: EntityId| {
-        generation.bundle.partitions.values().any(|partition| {
-            partition
-                .views
-                .values()
-                .any(|data| data.row_space.row_of(entity).is_some())
-        })
-    };
-    let recorded_joins = items
-        .iter()
-        .filter(|(entity, item)| item.join && rowed(*entity))
-        .map(|(entity, _)| *entity)
-        .collect();
-
-    Ok(FlushPlan {
-        items,
-        recorded_joins,
-    })
+    Ok(FlushPlan { items })
 }
 
 /// Everything the background pool needs to turn a [`FlushPlan`] into durable files. Taken from
@@ -545,8 +523,6 @@ pub(crate) struct SegmentFlush {
     pub(crate) descriptor: tessera_store::manifest::SegmentDescriptor,
     pub(crate) watermark: u64,
     pub(crate) entity_id_high_water: u64,
-    /// The locator extent over the rows that bind an entity, and the run it indexes; `None` where every row is a join.
-    pub(crate) locator_extent: Option<tessera_store::manifest::LocatorExtent>,
     pub(crate) tier: Arc<DeltaTier>,
     /// The tier's prefix-relative path; carried rather than re-derived, since a coalesce moves it.
     pub(crate) tier_path: String,
@@ -619,7 +595,6 @@ fn execute_flush_stages(
         rows.push(FlushRow {
             entity_id: *entity,
             number: *number,
-            external_id: item.external_id.clone(),
             x: item.x,
             y: item.y,
             scalars,
@@ -645,7 +620,6 @@ fn execute_flush_stages(
                     row_base: ctx.row_base,
                     entity_floor: ctx.entity_floor,
                 },
-                &plan.recorded_joins,
             )
             .map_err(|e| MaintenanceFailed(format!("segment: {e}")))?,
         )
@@ -847,7 +821,6 @@ fn execute_flush_stages(
             descriptor: out.segment,
             watermark: out.watermark,
             entity_id_high_water: out.entity_id_high_water,
-            locator_extent: out.locator_extent,
             tier,
             tier_path,
             tier_tally,
@@ -2126,7 +2099,6 @@ mod tests {
             y: 0.5,
             scalars: vec![WalScalar::U64(1)],
             scoped: Vec::new(),
-            external_id: None,
             wal_pos: None,
         }
     }
@@ -2135,7 +2107,6 @@ mod tests {
         let mut buffer = IngestBuffer::new();
         for (entity, item) in buffered {
             let row = WalRow {
-                external_id: Some(format!("ext-{entity}").into_bytes()),
                 entity_id: EntityId::new(*entity),
                 view: item.view.clone(),
                 join: false,

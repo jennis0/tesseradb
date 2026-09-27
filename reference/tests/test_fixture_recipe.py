@@ -4,7 +4,7 @@ A fixture bundle is built once per `tessera` binary under `/tmp` and reused acro
 "may this one be reused?" is answered on every run of both suites. Answering it by *inspecting the
 bundle* is an allowlist — it has to be extended in step with every new build input, and the input
 nobody adds is the one that then goes wrong silently. It failed that way on MANIFEST's `identity`
-object, again on `--mint-external-ids`, and the catalogue builder had reintroduced it a third time
+object, again on a build flag, and the catalogue builder had reintroduced it a third time
 with a `CURRENT`-plus-`identity` predicate over inputs it shares none of.
 
 The receipt inverts it: the builder stamps the whole input set beside the bundle, and reuse is
@@ -286,10 +286,6 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
     """`ensure_fixture_bundle`'s inputs are all `tessera build` arguments, so the argv is the
     recipe — with `--out` and the binary path dropped, since neither is a property of the fixture
     and both differ per worktree.
-
-    `--mint-external-ids` is in it because every `/control/changes` test needs an external id to
-    address an item *by*; a bundle built without it, reused, fails as a `KeyError` deep inside the
-    oracle.
     """
     def recipe_for(*, limit: int | None, extent: str = "0,65536,0,65536") -> dict:
         return harness.fixture_recipe(
@@ -315,7 +311,6 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
         "points=p.parquet",
         "pairs=q.parquet",
         "250000",
-        "--mint-external-ids",
     ):
         assert expected in recipe, f"{expected} is not in the recipe, so a change to it is silent"
 

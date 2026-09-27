@@ -39,7 +39,6 @@ declaration would misname every column after it.
 
 from __future__ import annotations
 
-import base64
 import dataclasses
 import time
 from types import SimpleNamespace
@@ -149,16 +148,14 @@ def run(tmp_path_factory) -> SimpleNamespace:
             raise TimeoutError("the background refresh never replaced the resident projection")
 
         # The denies: suppress, delete, and suppress/unsuppress (module doc). Targets are battery
-        # items, addressed by the fixture's external-id convention — the source id's
-        # little-endian bytes, which is both what the build minted and what the ingest batch
-        # carried.
+        # items, addressed by the join field `id`, which is the item's `e` both in the built
+        # files and in the ingest batch.
         battery_fx = [fx_of_tessera[t] for t in item_ids]
         battery_expected = expected_items(SEED, battery_fx)
 
         def change(op: str, fx: int) -> None:
-            e = battery_expected[fx].e
-            external = base64.b64encode(e.to_bytes(8, "little")).decode()
-            resp = server.change(external, op)
+            item = {"field": "id", "value": str(battery_expected[fx].e), "op": op}
+            resp = server.changes([item])
             assert resp.status_code == 200, f"{op} refused: {resp.text}"
 
         change("suppress", battery_fx[0])

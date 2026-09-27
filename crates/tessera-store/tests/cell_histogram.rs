@@ -119,8 +119,6 @@ fn build_bundle(root: &Path) {
         }],
         deltas: vec![],
         dict_extents: vec![],
-        external_id_runs: vec![],
-        locator_extents: vec![],
         tombstones: EntitySet::default(),
         deny: EntitySet::default(),
         files: segments_files,

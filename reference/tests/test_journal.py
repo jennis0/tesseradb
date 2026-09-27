@@ -15,8 +15,6 @@ implementation of the thing the journal exists to observe.
 
 from __future__ import annotations
 
-import base64
-
 import pytest
 
 from oracle.journal import AckedJournal, IngestOp
@@ -47,8 +45,8 @@ class _StubServer:
     def status(self):
         return {"entity_id_high_water": self.high_water}
 
-    def change(self, external_id_b64, op):
-        self.change_calls.append((external_id_b64, op))
+    def change(self, tessera_id, op):
+        self.change_calls.append((tessera_id, op))
         return self.next_change
 
     def changes(self, items):
@@ -61,13 +59,13 @@ class _StubServer:
 
 
 class _StubBundle:
-    """Just enough `Bundle` for the journal: external ids and a term dictionary."""
+    """Just enough `Bundle` for the journal: tessera ids and a term dictionary."""
 
     dictionary = {0: b"term-zero", 1: b"term-one"}
 
     @staticmethod
-    def external_id_of(entity_id: int) -> bytes:
-        return f"ext-{entity_id}".encode()
+    def tessera_id_of(entity_id: int) -> int:
+        return 1000 + entity_id
 
 
 @pytest.fixture
@@ -85,7 +83,7 @@ def test_a_refused_batch_journals_nothing_at_all(stub):
     the differential would go red, and the engine would be blamed for it.
     """
     server, journal = stub
-    server.next_batch = _Response(409, text='{"duplicate": ["ext-7"]}')
+    server.next_batch = _Response(409, text='{"duplicate": ["1007"]}')
 
     response = journal.changes([(7, "delete", None), (8, "suppress", None)])
 
@@ -115,8 +113,8 @@ def test_an_acked_batch_journals_every_item_in_order(stub):
     assert not journal.refused
 
     sent = server.batch_calls[0]
-    assert sent[0]["external_id"] == base64.b64encode(b"ext-7").decode()
-    assert all(set(item) == {"external_id", "op"} for item in sent)
+    assert sent[0]["tessera_id"] == "1007"
+    assert all(set(item) == {"tessera_id", "op"} for item in sent)
 
     # `predicate` with an empty term set removes the item from any session's mask via `L`, which is
     # the `\\ L` arm — not a deny, and not the same code path.

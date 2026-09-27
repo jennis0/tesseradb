@@ -1,10 +1,10 @@
 //! `tessera verify --deep` — the structural verifier's deep mode (correctness-suite §11, §12.4).
 //!
 //! [`verify_deep`] runs the whole of [`crate::verify`] — the read protocol, bijectivity over the
-//! full row space, the identity column — and then one linear pass over the structures identity
-//! says nothing about: postings, the external-id sidecar, the dictionary extents and the oracle's
-//! `pairs.parquet`. It needs no fixture, no generator and no oracle, which is what lets it run
-//! against a bundle whose data came from somewhere real.
+//! full row space, the identity column — and then one linear pass over the structures identity says
+//! nothing about: postings, the dictionary extents and the oracle's `pairs.parquet`. It needs no
+//! fixture, no generator and no oracle, which is what lets it run against a bundle whose data came
+//! from somewhere real.
 //!
 //! ## What the open already refuses, and why this module does not re-check it
 //!
@@ -18,22 +18,6 @@
 //! instead of a comment is the deliberate-damage pair in `tests/verify_deep.rs` (§18 obligation
 //! 9): if the loader's refusals are ever relaxed, those tests fail, and the checks move here.
 //!
-//! ## The external-id agreement is newest-binding-first, NOT a bijection
-//!
-//! Delete plus re-ingest re-binds an external id (decision 0047): the newest run holding a key
-//! carries the live binding, and the superseded row — a forgotten, deleted holder — is retained
-//! until the compaction fold executes the deletion. A bijection check (each key exactly one row)
-//! would therefore refuse every bundle that has taken a re-ingest. What *is* invariant, in every
-//! state every producer leaves (build, flush, coalesce, fold), is row↔slot exactness in both
-//! directions: a locator slot addresses a run row bound to exactly that entity, and every run
-//! row is addressed back by its own entity's one covering slot. A key appearing in several runs
-//! is the accepted 0047 state, not a defect.
-//!
-//! The sidecar family is also the one exemption from the open-time digest sweep (contracts §0.3
-//! deviation 9 — verified lazily, at first touch), so this pass digests each run and locator
-//! against the manifest before reading it: a deep verify of a bundle at rest must not leave the
-//! only undigested family undigested.
-//!
 //! ## The pairs check is scoped to the base, deliberately
 //!
 //! `terms/pairs.parquet` is written by the build and rewritten by the fold, and by nothing else —
@@ -43,13 +27,8 @@
 //!
 //! ## Cost model, and what this pass must not be pointed at
 //!
-//! One linear pass, and it re-hashes the sidecar family, streaming each file rather than reading
-//! it whole. Every structure the two agreement directions cross is read through a mapping: the
-//! locators from the bundle, the runs' entity columns from one scratch file this pass writes and
-//! unlinks. What it holds is a row count and a name per run, and one span per flush extent. The
-//! base locator is four bytes for every entity in the corpus and a run carries the corpus's own
-//! ids, neither of which a verifier can put in the heap. Cadence is the suite's concern (§11:
-//! per-stage at the small tiers, per-run above).
+//! One linear pass. Cadence is the suite's concern (§11: per-stage at the small tiers, per-run
+//! above).
 //!
 //! ⊘ **At rest only, for now.** This resolves `CURRENT` through `open_bundle`, so a fold flipping
 //! `CURRENT` mid-pass could swap the prefix under it. §12.4's answer — name the prefix once and
@@ -59,16 +38,13 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, BinaryArray, UInt32Array, UInt64Array};
-use arrow::ipc::reader::FileReader as ArrowFileReader;
+use arrow::array::{Array, UInt32Array, UInt64Array};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
-use sha2::{Digest, Sha256};
 
 use tessera_authz::{DeltaTier, PostingRef, PostingsReader};
-use tessera_store::manifest::{FileDigest, Manifest, SegmentsManifest};
+use tessera_store::manifest::{Manifest, SegmentsManifest};
 
 use tessera_types::{IdentityKey, TesseraId};
 
@@ -114,9 +90,6 @@ pub struct VerifyDeepReport {
     pub pairs_rows: u64,
     /// Dictionary records parsed across the extent lists, none repeated (decision 0042).
     pub dict_records: u64,
-    /// External-id run rows confirmed to agree with the locator side in both directions; 0 where
-    /// the deployment minted no external ids — the ordinary case, not a degraded one.
-    pub external_id_bindings: u64,
     /// Record-blob rows walked across the base blob and every extent of every partition, each
     /// one's identity checked against the block that holds it and against the has-row bitmap's
     /// member at its rank ([`check_record_blobs`]); 0 where no column is blob-resident.
@@ -139,8 +112,8 @@ pub struct VerifyDeepReport {
 }
 
 /// Deep-verify the bundle at `root`: the shallow [`crate::verify`] pass, then §11's structural
-/// checks over postings, dictionary extents, the external-id sidecar and `pairs.parquet`. See the
-/// module doc for what each check accepts on purpose.
+/// checks over postings, dictionary extents and `pairs.parquet`. See the module doc for what each
+/// check accepts on purpose.
 pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
     if opts.source.is_some() {
         return Err(BuildError::Invalid(
@@ -161,7 +134,6 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         delta_tiers: 0,
         pairs_rows: 0,
         dict_records: 0,
-        external_id_bindings: 0,
         record_rows: 0,
         scoped_render_lanes: 0,
         cells: 0,
@@ -182,13 +154,6 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             &mut report,
         )?;
         check_dict_extents(&prefix_dir, &partition.manifest, &mut report)?;
-        check_external_ids(
-            root,
-            &prefix_dir,
-            &bundle.manifest,
-            &partition.manifest,
-            &mut report,
-        )?;
         check_record_blobs(
             &prefix_dir,
             phash,
@@ -1103,12 +1068,11 @@ fn check_record_blobs(
 /// (`Dict::load`) tolerates a repeat by skipping it, deliberately; this is the artefact-side
 /// statement that no correct writer produces one.
 ///
-/// **This is the pass's remaining unbounded arm.** It reads each extent whole and holds a
-/// `HashSet` of every descriptor it has seen, so its memory is the term vocabulary's — not the
-/// corpus's, which is why it survived the bounding of the row space, the record blob and the
-/// external-id sidecar, but a deployment whose vocabulary is itself corpus-scale would find it
-/// here. Bounding it needs the descriptors sorted rather than hashed, which is a partition pass
-/// like the identity check's.
+/// **This is the pass's remaining unbounded arm.** It reads each extent whole and holds a `HashSet`
+/// of every descriptor it has seen, so its memory is the term vocabulary's — not the corpus's,
+/// which is why it survived the bounding of the row space and the record blob, but a deployment
+/// whose vocabulary is itself corpus-scale would find it here. Bounding it needs the descriptors
+/// sorted rather than hashed, which is a partition pass like the identity check's.
 fn check_dict_extents(
     prefix_dir: &Path,
     partition_manifest: &SegmentsManifest,
@@ -1159,431 +1123,4 @@ fn check_dict_extents(
         report.dict_records += records;
     }
     Ok(())
-}
-
-/// The locator sentinel for "this entity has no caller-supplied external id" (contracts §2.4
-/// r6) — the ordinary case, never a missing value.
-const LOCATOR_NONE: u32 = 0xFFFF_FFFF;
-
-/// One external-id run: its name, how many rows it holds, and where those rows begin in the
-/// concatenation a base-locator ordinal addresses.
-struct RunRows {
-    rel: String,
-    rows: u64,
-    offset: u64,
-}
-
-/// One locator, mapped: the base file over `[0, len)`, or a flush extent over its own span, with
-/// the run its ordinals index.
-struct ExtentSlots {
-    rel: String,
-    entity_lo: u64,
-    entity_hi: u64,
-    /// How many `(entity, slot)` pairs follow the dense slots.
-    listed: u64,
-    run: usize,
-    slots: Slots,
-}
-
-impl ExtentSlots {
-    fn span(&self) -> usize {
-        (self.entity_hi + 1).saturating_sub(self.entity_lo) as usize
-    }
-
-    /// The `i`th listed pair.
-    fn listed_pair(&self, i: usize) -> (u64, u32) {
-        let at = self.span() + 2 * i;
-        (u64::from(self.slots.get(at)), self.slots.get(at + 1))
-    }
-
-    /// The slot `entity` has here, where the extent covers it.
-    fn slot_of(&self, entity: u64) -> Option<u32> {
-        if entity >= self.entity_lo && entity <= self.entity_hi {
-            return Some(self.slots.get((entity - self.entity_lo) as usize));
-        }
-        let (mut lo, mut hi) = (0usize, self.listed as usize);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let (held, slot) = self.listed_pair(mid);
-            match held.cmp(&entity) {
-                std::cmp::Ordering::Less => lo = mid + 1,
-                std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => return Some(slot),
-            }
-        }
-        None
-    }
-
-    /// Every `(entity, slot)` the extent covers.
-    fn slots(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
-        (0..self.span())
-            .map(|i| (self.entity_lo + i as u64, self.slots.get(i)))
-            .chain((0..self.listed as usize).map(|i| self.listed_pair(i)))
-    }
-}
-
-/// One file of the sidecar family, mapped.
-///
-/// **The bytes are checked through the mapping the pass then reads from.** This family is the one
-/// exemption from the open-time digest sweep (contracts §0.3 deviation 9), so a deep verify is the
-/// only place its bytes are checked at all; hashing a file, closing it and opening it again would
-/// leave a same-length rewrite between the two used unverified. There is one mapping, the digest is
-/// taken over it, and every read below comes out of it.
-struct Mapped {
-    map: Option<memmap2::Mmap>,
-    len: u64,
-}
-
-impl Mapped {
-    /// Map `path`. A zero-length file maps to nothing, which `memmap2` refuses and which has no
-    /// bytes to read anyway.
-    fn open(path: &Path) -> Result<Mapped> {
-        let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-        let len = file.metadata().map_err(|e| BuildError::io(path, e))?.len();
-        if len == 0 {
-            return Ok(Mapped { map: None, len: 0 });
-        }
-        // SAFETY: the mapping is read-only and no reference into it outlives it. A bundle file
-        // rewritten under a running verify is the race §12.4 records for the whole pass; this
-        // mapping neither adds to it nor is shared with another process.
-        let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| BuildError::io(path, e))?;
-        Ok(Mapped {
-            map: Some(map),
-            len,
-        })
-    }
-
-    fn bytes(&self) -> &[u8] {
-        self.map.as_ref().map(|map| &map[..]).unwrap_or(&[])
-    }
-}
-
-/// A little-endian `u32` array over a mapping: a locator from the bundle, or the concatenated run
-/// entity columns this pass writes beside it.
-///
-/// Both are addressed at an index the *other* side hands over — a locator at an entity a run row
-/// names, a run row at an ordinal a locator slot names — so neither can be streamed, and both are
-/// four bytes for every entity or every binding in the corpus. A mapping gives the random access
-/// without the heap.
-struct Slots {
-    bytes: Mapped,
-    len: usize,
-}
-
-impl Slots {
-    /// Read `bytes` as exactly `declared_len` slots.
-    fn over(rel: &str, bytes: Mapped, declared_len: u64) -> Result<Slots> {
-        let expected = declared_len.saturating_mul(4);
-        if bytes.len != expected {
-            return Err(BuildError::Invalid(format!(
-                "{rel}: {} bytes where the manifest-implied length is {declared_len} u32 slots \
-                 ({expected} bytes)",
-                bytes.len
-            )));
-        }
-        Ok(Slots {
-            bytes,
-            len: declared_len as usize,
-        })
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Slot `i`. Four bytes read and assembled rather than a cast: the mapping's alignment is the
-    /// page's, but a file's contents are not this code's to make claims about.
-    fn get(&self, i: usize) -> u32 {
-        let at = i * 4;
-        u32::from_le_bytes(
-            self.bytes.bytes()[at..at + 4]
-                .try_into()
-                .expect("four bytes"),
-        )
-    }
-}
-
-/// The external-id locator and its sidecar agreeing in both directions, newest binding first —
-/// see the module doc for the exact invariant and for why a repeated key across runs is the
-/// accepted state rather than a defect.
-fn check_external_ids(
-    root: &Path,
-    prefix_dir: &Path,
-    bundle_manifest: &Manifest,
-    partition_manifest: &SegmentsManifest,
-    report: &mut VerifyDeepReport,
-) -> Result<()> {
-    let runs_rel = &partition_manifest.external_id_runs;
-    if runs_rel.is_empty() {
-        // No sidecar at all: the ordinary state for a deployment whose callers supplied no
-        // external ids (contracts §2.4 r6), not a degraded one.
-        return Ok(());
-    }
-    let high_water = partition_manifest.entity_id_high_water;
-
-    // Map each file and digest it against the manifest through that mapping, which is what the
-    // reads below then come out of ([`Mapped`]). Nothing is read into the heap: the base locator
-    // is four bytes an entity.
-    let verified_map = |rel: &str| -> Result<Mapped> {
-        let digest: &FileDigest = partition_manifest
-            .files
-            .get(rel)
-            .or_else(|| bundle_manifest.files.get(rel))
-            .ok_or_else(|| {
-                BuildError::Invalid(format!(
-                    "{rel}: named by the sidecar lists but digested by neither files map"
-                ))
-            })?;
-        let path = join_rel(prefix_dir, rel)?;
-        let mapped = Mapped::open(&path)?;
-        if mapped.len != digest.size
-            || crate::hex_digest(Sha256::digest(mapped.bytes()).as_slice()) != digest.sha256
-        {
-            return Err(BuildError::Invalid(format!(
-                "{rel}: bytes do not match the manifest digest — this family is exempt from the \
-                 open-time sweep (contracts §0.3 deviation 9), so the deep pass is where a \
-                 corrupt sidecar file is caught at rest"
-            )));
-        }
-        Ok(mapped)
-    };
-
-    // One pass over the runs: each one's keys ascend, each one's entities are below the high
-    // water, and the entity column is copied out to a single scratch file in listed order. That
-    // file is what a base-locator ordinal addresses, and what direction two reads back in run
-    // order.
-    let scratch = crate::VerifyTmp::create(root)?;
-    let bound_path = scratch.path().join("ext-run-entities.u32");
-    let mut runs: Vec<RunRows> = Vec::with_capacity(runs_rel.len());
-    let mut total = 0u64;
-    {
-        let file = File::create(&bound_path).map_err(|e| BuildError::io(&bound_path, e))?;
-        let mut out = BufWriter::with_capacity(1 << 20, file);
-        for rel in runs_rel {
-            let rows = scan_run(
-                rel,
-                verified_map(rel)?.bytes(),
-                high_water,
-                &mut out,
-                &bound_path,
-            )?;
-            runs.push(RunRows {
-                rel: rel.clone(),
-                rows,
-                offset: total,
-            });
-            total += rows;
-        }
-        out.flush().map_err(|e| BuildError::io(&bound_path, e))?;
-    }
-    let bound = Slots::over("the run entity columns", Mapped::open(&bound_path)?, total)?;
-
-    // The base locator lives beside the first run under the same derivation the sidecar uses.
-    let locator_rel = match runs_rel[0].rsplit_once('/') {
-        Some((dir, _)) => format!("{dir}/ext-locator.u32"),
-        None => "ext-locator.u32".to_string(),
-    };
-    let base_len = bundle_manifest.entity_id_high_water;
-    let base = Slots::over(&locator_rel, verified_map(&locator_rel)?, base_len)?;
-
-    let mut extents: Vec<ExtentSlots> =
-        Vec::with_capacity(partition_manifest.locator_extents.len());
-    for extent in &partition_manifest.locator_extents {
-        if extent.entity_hi + 1 < extent.entity_lo {
-            return Err(BuildError::Invalid(format!(
-                "{}: entity span {}..={} is inverted",
-                extent.path, extent.entity_lo, extent.entity_hi
-            )));
-        }
-        let run = runs_rel
-            .iter()
-            .position(|rel| rel == &extent.external_id_run)
-            .ok_or_else(|| {
-                BuildError::Invalid(format!(
-                    "{}: indexes run '{}', which the manifest does not list — its ordinals \
-                     cannot be resolved",
-                    extent.path, extent.external_id_run
-                ))
-            })?;
-        let span = extent.entity_hi + 1 - extent.entity_lo;
-        let slots = Slots::over(
-            &extent.path,
-            verified_map(&extent.path)?,
-            span + 2 * extent.listed,
-        )?;
-        let slots = ExtentSlots {
-            rel: extent.path.clone(),
-            entity_lo: extent.entity_lo,
-            entity_hi: extent.entity_hi,
-            listed: extent.listed,
-            run,
-            slots,
-        };
-        let listed: Vec<u64> = (0..slots.listed as usize)
-            .map(|i| slots.listed_pair(i).0)
-            .collect();
-        if !listed.windows(2).all(|w| w[0] < w[1])
-            || listed.last().is_some_and(|&e| e >= slots.entity_lo)
-        {
-            return Err(BuildError::Invalid(format!(
-                "{}: its listed entities do not ascend below the span beginning at {}, so a \
-                 lookup could miss one",
-                slots.rel, slots.entity_lo
-            )));
-        }
-        extents.push(slots);
-    }
-
-    // Direction one: every locator slot addresses a row bound to exactly its entity.
-    for entity in 0..base.len() {
-        let slot = base.get(entity);
-        if slot == LOCATOR_NONE {
-            continue;
-        }
-        let global = slot as u64;
-        if global >= total {
-            return Err(BuildError::Invalid(format!(
-                "{locator_rel}: entity {entity}'s ordinal {global} is past the {total} \
-                 concatenated run rows"
-            )));
-        }
-        let run = runs.partition_point(|run| run.offset <= global) - 1;
-        let claims = bound.get(global as usize) as u64;
-        if claims != entity as u64 {
-            return Err(BuildError::Invalid(format!(
-                "{locator_rel}: entity {entity}'s slot addresses a row of '{}' bound to entity \
-                 {claims} — the locator and the runs disagree",
-                runs[run].rel
-            )));
-        }
-    }
-    for extent in &extents {
-        for (entity, slot) in extent.slots() {
-            if slot == LOCATOR_NONE {
-                continue;
-            }
-            let run = &runs[extent.run];
-            if slot as u64 >= run.rows {
-                return Err(BuildError::Invalid(format!(
-                    "{}: entity {entity}'s ordinal {slot} is past the end of run '{}' ({} rows)",
-                    extent.rel, run.rel, run.rows
-                )));
-            }
-            let claims = bound.get((run.offset + slot as u64) as usize) as u64;
-            if claims != entity {
-                return Err(BuildError::Invalid(format!(
-                    "{}: entity {entity}'s slot addresses a row of '{}' bound to entity {claims} \
-                     — the locator and the runs disagree",
-                    extent.rel, run.rel
-                )));
-            }
-        }
-    }
-
-    // Direction two: every run row is addressed back by a slot of its own entity, among the
-    // locators the sidecar asks for that entity. This is what refuses a dangling binding (a row
-    // no locator can reach) and, with direction one, two slots claiming one row. A key bound in
-    // several runs passes both directions: each of its rows has its own entity, and each entity a
-    // slot in the locator beside that row's run.
-    for (r, run) in runs.iter().enumerate() {
-        for i in 0..run.rows {
-            let entity = bound.get((run.offset + i) as usize) as u64;
-            let mut covered = false;
-            let agrees = tessera_store::locators_covering(entity, base_len, &extents, |x| {
-                (x.entity_lo, x.entity_hi, x.listed)
-            })
-            .any(|locator| match locator {
-                tessera_store::Locator::Base => {
-                    covered = true;
-                    let slot = base.get(entity as usize);
-                    slot != LOCATOR_NONE && slot as u64 == run.offset + i
-                }
-                tessera_store::Locator::Extent(x) => {
-                    let extent = &extents[x];
-                    let Some(slot) = extent.slot_of(entity) else {
-                        return false;
-                    };
-                    covered = true;
-                    extent.run == r && slot as u64 == i
-                }
-            });
-            if !covered {
-                return Err(BuildError::Invalid(format!(
-                    "{}: row {i} binds entity {entity}, which no locator covers — the reverse \
-                     direction could never answer for it",
-                    run.rel
-                )));
-            }
-            if !agrees {
-                return Err(BuildError::Invalid(format!(
-                    "{}: row {i} binds entity {entity}, but the locator side does not point \
-                     back at it — the two directions must agree",
-                    run.rel
-                )));
-            }
-        }
-    }
-
-    report.external_id_bindings += total;
-    Ok(())
-}
-
-/// Scan one external-id run: `(external_id: Binary, entity_id: UInt32)`, keys strictly ascending
-/// within the run (a duplicate inside one run would make a binding unreachable to the sidecar's
-/// binary search — across runs is the accepted 0047 state), entities below `high_water`. Each
-/// row's entity is appended to `out` as four little-endian bytes; the row count is returned.
-///
-/// **Only the previous key is held.** The ascent is a comparison between neighbours, and a run's
-/// keys are the caller's own ids: holding them all is what made this pass's memory the corpus's.
-/// The high-water fault is carried to the end of the run rather than raised where it is found, so
-/// a run with both faults still reports the ordering one, which is the first a reader can act on.
-fn scan_run(
-    rel: &str,
-    bytes: &[u8],
-    high_water: u64,
-    out: &mut BufWriter<File>,
-    out_path: &Path,
-) -> Result<u64> {
-    let arrow_err = |detail: String| BuildError::Invalid(format!("{rel}: {detail}"));
-    let reader = ArrowFileReader::try_new(std::io::Cursor::new(bytes), None)
-        .map_err(|e| arrow_err(e.to_string()))?;
-    let mut rows = 0u64;
-    let mut previous: Vec<u8> = Vec::new();
-    let mut first_over_water: Option<(u64, u32)> = None;
-    for batch in reader {
-        let batch = batch.map_err(|e| arrow_err(e.to_string()))?;
-        let key_col = batch
-            .column_by_name("external_id")
-            .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
-            .ok_or_else(|| arrow_err("no binary 'external_id' column".to_string()))?;
-        let entity_col = batch
-            .column_by_name("entity_id")
-            .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
-            .ok_or_else(|| arrow_err("no uint32 'entity_id' column".to_string()))?;
-        for i in 0..batch.num_rows() {
-            let key = key_col.value(i);
-            if rows > 0 && previous.as_slice() >= key {
-                return Err(BuildError::Invalid(format!(
-                    "{rel}: external ids are not strictly ascending at row {rows} — the sidecar \
-                     binary-searches each run, and an unsorted or duplicated key makes a binding \
-                     unreachable"
-                )));
-            }
-            previous.clear();
-            previous.extend_from_slice(key);
-            let entity = entity_col.value(i);
-            if entity as u64 >= high_water && first_over_water.is_none() {
-                first_over_water = Some((rows, entity));
-            }
-            out.write_all(&entity.to_le_bytes())
-                .map_err(|e| BuildError::io(out_path, e))?;
-            rows += 1;
-        }
-    }
-    if let Some((i, entity)) = first_over_water {
-        return Err(BuildError::Invalid(format!(
-            "{rel}: row {i} binds entity {entity}, at or past entity_id_high_water {high_water}"
-        )));
-    }
-    Ok(rows)
 }

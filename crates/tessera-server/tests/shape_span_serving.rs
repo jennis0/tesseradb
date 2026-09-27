@@ -185,7 +185,6 @@ async fn one_wgs84_shape_is_canonicalised_per_view_and_served_per_view() {
         &server,
         "regions/uk",
         json!({
-            "addressing": "external",
             "default_space": "wgs84",
             "artifacts": [{ "key": "uk", "members": [], "bbox": [-8.0, 50.0, 2.0, 58.0] }]
         }),
@@ -238,7 +237,6 @@ async fn a_shape_outside_one_views_extent_is_published_and_reported_not_refused(
         &server,
         "regions/nz",
         json!({
-            "addressing": "external",
             "default_space": "wgs84",
             "artifacts": [{ "key": "nz", "members": [], "bbox": [166.0, -47.0, 179.0, -34.0] }]
         }),
@@ -301,7 +299,6 @@ async fn a_view_space_shape_over_two_frames_is_refused_at_the_row() {
         &server,
         "regions/vs",
         json!({
-            "addressing": "external",
             "artifacts": [{ "key": "uk", "members": [], "bbox": [0.4, 0.2, 0.5, 0.3] }]
         }),
     )

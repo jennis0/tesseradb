@@ -259,7 +259,7 @@ def _extent_body(extent) -> dict:
 
 class PlainView(Case):
     """A plain view created live over items the corpus already holds, which join it by their
-    external ids."""
+    `fx`."""
 
     name = "plain-view"
     plan = Plan(
@@ -488,7 +488,7 @@ def _members_table(members: dict[str, list[int]]) -> pa.Table:
 
 
 def _halves(ids: list[int]) -> tuple[list[str], list[str]]:
-    addressed = [fx.external_id(i) for i in ids]
+    addressed = [str(i) for i in ids]
     return addressed[: len(addressed) // 2], addressed[len(addressed) // 2 :]
 
 
@@ -550,18 +550,18 @@ class Layers(Case):
         ]
         d.control(
             "PUT", "/control/layers/topics/artifacts",
-            json={"addressing": "external", "artifacts": artifacts}, expect=(201,),
+            json={"field": "fx", "artifacts": artifacts}, expect=(201,),
         )
         strict_first = [{"key": k, "members": _halves(ids)[0]} for k, ids in STRICT_MEMBERS.items()]
         d.control(
             "PUT", "/control/layers/strict/artifacts",
-            json={"addressing": "external", "artifacts": strict_first}, expect=(201,),
+            json={"field": "fx", "artifacts": strict_first}, expect=(201,),
         )
         for layer, members in (("topics", TOPIC_MEMBERS), ("strict", STRICT_MEMBERS)):
             rest = [{"key": k, "members": _halves(ids)[1]} for k, ids in members.items()]
             d.control(
                 "PATCH", f"/control/layers/{layer}/artifacts",
-                json={"addressing": "external", "artifacts": rest}, expect=(200,),
+                json={"field": "fx", "artifacts": rest}, expect=(200,),
             )
         d.publish()
         return d

@@ -509,12 +509,6 @@ pub fn allocator_floor(bundle_high_water: u64, side_manifest_high_waters: &[u64]
 /// assigns to novel descriptors (see `tessera_lifecycle::wal`'s module docs). Resolution happens
 /// in the caller, not here, so this module stays free of the dictionary/interning machinery.
 pub struct PendingItem {
-    /// Optional (contracts §3.4 r6): `None` when the caller supplied no external id, in which
-    /// case the item is addressable only by its `tessera_id`. Used here only as (part of) the
-    /// tie-break in [`assign_sorted`]'s sort key — `None` sorts before every `Some`, which is
-    /// fine because it is only a tie-break within an already-equal signature, never itself a
-    /// visibility-bearing order.
-    pub external_id: Option<Vec<u8>>,
     pub terms: Vec<TermId>,
     /// Filled in by [`assign_sorted`]; `None` beforehand.
     pub entity_id: Option<EntityId>,
@@ -535,16 +529,15 @@ fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
     key
 }
 
-/// Assigns entity IDs to `items` in ascending order of `(signature_sort_key, external_id)` — the
-/// same total order the batch build uses (§11.1). Items with identical signatures take adjacent
-/// ids from the high-water, which is what makes their postings compress as runs; freed ids come
+/// Assigns entity IDs to `items` in ascending order of `signature_sort_key`, ties in batch order.
+/// Items with identical signatures take adjacent ids from the high-water, which is what makes their postings compress as runs; freed ids come
 /// first and scatter among other signatures' runs.
 ///
 /// Fallible: propagates [`AllocError::Exhausted`] from the underlying
 /// `Allocator::allocate` rather than swallowing it — a batch that would exhaust the entity-ID
 /// space has no effect, exactly as `allocate` leaves the allocator unchanged on that error.
 pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result<(), AllocError> {
-    // Compute each item's (signature, external_id) sort key once, up front, rather than inside
+    // Compute each item's signature sort key once, up front, rather than inside
     // the comparator — `sort_by`'s comparator can be called O(n log n) times, and
     // `signature_sort_key` allocates, so recomputing it per-comparison would be O(n log n)
     // allocations instead of O(n).
@@ -554,10 +547,8 @@ pub fn assign_sorted(items: &mut [PendingItem], alloc: &mut Allocator) -> Result
         .filter(|(_, item)| item.entity_id.is_none())
         .map(|(i, item)| (i, signature_sort_key(&item.terms)))
         .collect();
-    order.sort_by(|(a, ka), (b, kb)| {
-        ka.cmp(kb)
-            .then_with(|| items[*a].external_id.cmp(&items[*b].external_id))
-    });
+    // Stable, so items with one signature keep their order in the batch.
+    order.sort_by(|(_, ka), (_, kb)| ka.cmp(kb));
 
     // **A row that arrives with an entity is a join** (`views.md` §4): the same document in a
     // second view, whose identity was decided when it was first ingested. It takes no id and no
@@ -842,7 +833,6 @@ mod tests {
             batch_id: "b".into(),
             body_hash: [0u8; 32],
             rows: vec![crate::wal::WalRow {
-                external_id: Some(entity_id.to_le_bytes().to_vec()),
                 entity_id: EntityId::new(entity_id),
                 view: "default".to_string(),
                 join: false,

@@ -251,6 +251,12 @@ vocabulary = "archive"
 name     = "score"
 type     = "f32"
 render   = true
+
+[[attribute]]
+name     = "id"
+type     = "u64"
+unique   = true
+field    = "entity_id"
 "#;
 
 fn build_bundle(dir: &Path) {
@@ -283,7 +289,7 @@ fn copy_bundle(tmp: &TempDir) -> std::path::PathBuf {
 
 const LAYER: &str = "clusters/a";
 
-/// A flat, enumerated layer over the fixture's external ids, holding two artifacts: one every
+/// A flat, enumerated layer over the fixture's `id`s, holding two artifacts: one every
 /// principal clears, one only the broad principal does (`terms_of` grants term `1` on
 /// `source_id % 3 == 0`). Registered and published over the control plane, so the test brings up
 /// the server exactly as a deployment would and adds nothing to the build.
@@ -316,7 +322,6 @@ async fn publish_layer(server: &TestServer) -> Vec<String> {
         resp.text().await.unwrap()
     );
 
-    let member = |source_id: u64| member(source_id);
     let members_all: Vec<String> = (0..12u64).map(member).collect();
     let members_broad: Vec<String> = (12..24u64).filter(|s| s % 3 != 0).map(member).collect();
     let resp = server
@@ -327,7 +332,7 @@ async fn publish_layer(server: &TestServer) -> Vec<String> {
         )))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [
                 { "key": "c0", "members": members_all },
                 { "key": "c1", "members": members_broad },
@@ -1114,10 +1119,6 @@ async fn items_match_the_description_with_every_refusal() {
             .is_some_and(|k| !k.is_empty()),
         "a category arrives as its key: {item}"
     );
-    assert!(
-        item["external_id"].is_string(),
-        "the fixture mints external ids"
-    );
 
     // Refusals: an item nobody with zero terms may see is a 404 (identical to nonexistence).
     let nobody = authorise_checked(&doc, &f.server, &[]).await;
@@ -1126,7 +1127,7 @@ async fn items_match_the_description_with_every_refusal() {
         .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
     // The request schema refuses what the server refuses: an unknown field.
-    assert_invalid(&doc, "ItemRequest", &json!({ "external_id": "x" }));
+    assert_invalid(&doc, "ItemRequest", &json!({ "unknown": 1 }));
 }
 
 /// `POST /v1/artifacts`: the request shape, the described headers, the three JSON frames against
@@ -1240,7 +1241,7 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
     let body = json!({
         "view": "s0",
         "fields": ["archive", "score"],
-        "system_fields": ["position", "external_id", "labels"],
+        "system_fields": ["position", "labels"],
         "filters": { "score": { "range": { "gte": 5 } } },
         "keep_unmatched": true,
         "count": true,
@@ -1818,9 +1819,9 @@ async fn ingest_matches_the_description() {
         control(&f.server, &post, "/control/ingest").header("x-tessera-batch-id", batch_id)
     };
 
-    // JSON, with a category and a number, and one row with no external id.
+    // JSON, with a category and a number, and one row with no `id`.
     let rows = json!([
-        { "external_id": b64(b"openapi-1"), "x": 10.0, "y": 20.0, "access": ["0"],
+        { "id": 1001, "x": 10.0, "y": 20.0, "access": ["0"],
           "archive": "astro", "score": 1.5 },
         { "x": 30.0, "y": 40.0, "access": "0", "archive": "hep", "score": null },
     ]);
@@ -1859,12 +1860,7 @@ async fn ingest_matches_the_description() {
     let resp = control(&f.server, &post, "/control/ingest")
         .header("x-tessera-batch-id", "openapi-arrow")
         .header("content-type", ARROW)
-        .body(build_ingest_batch_optional(&[(
-            Some(&b"openapi-2"[..]),
-            50.0,
-            60.0,
-            "0",
-        )]))
+        .body(build_ingest_batch_optional(&[(Some(1002), 50.0, 60.0, "0")]))
         .send()
         .await
         .unwrap();
@@ -1894,7 +1890,7 @@ async fn ingest_matches_the_description() {
     // Waiting for the rows to be visible.
     let resp = control(&f.server, &post, "/control/ingest?wait=visible")
         .header("x-tessera-batch-id", "openapi-visible")
-        .json(&json!([{ "external_id": b64(b"openapi-3"), "x": 50.0, "y": 60.0,
+        .json(&json!([{ "id": 1003, "x": 50.0, "y": 60.0,
                          "access": "0", "archive": "astro", "score": null }]))
         .send()
         .await
@@ -1951,7 +1947,7 @@ async fn ingest_matches_the_description() {
         .await
         .unwrap();
     assert_answer(&doc, &put, resp, 201).await;
-    let rows = json!([{ "external_id": member(3), "rating": 4.5 }]);
+    let rows = json!([{ "id": 3, "rating": 4.5 }]);
     assert_valid(&doc, "IngestRecords", &rows);
     let resp = ingest("openapi-edit").json(&rows).send().await.unwrap();
     let answer = assert_answer(&doc, &post, resp, 200).await;
@@ -1984,7 +1980,7 @@ async fn changes_match_the_description() {
 
     let tessera_id = answer_id(&f.server).await;
     let body = json!([
-        { "external_id": member(5), "op": "suppress" },
+        { "field": "id", "value": member(5), "op": "suppress" },
         { "tessera_id": tessera_id, "op": "suppress" },
     ]);
     for item in body.as_array().unwrap() {
@@ -1993,8 +1989,8 @@ async fn changes_match_the_description() {
     let resp = changes(&body).await.unwrap();
     assert_answer(&doc, &post, resp, 200).await;
     let resp = control(&f.server, &post, "/control/changes?wait=visible")
-        .json(&json!([{ "external_id": member(5), "op": "unsuppress" },
-                      { "external_id": member(6), "op": "delete" }]))
+        .json(&json!([{ "field": "id", "value": member(5), "op": "unsuppress" },
+                      { "field": "id", "value": member(6), "op": "delete" }]))
         .send()
         .await
         .unwrap();
@@ -2002,15 +1998,16 @@ async fn changes_match_the_description() {
     assert!(answer["visible"].is_boolean());
 
     // Refusals. The schema refuses the shapes the server refuses.
-    let resp = changes(&json!([{ "external_id": b64(b"nobody"), "op": "suppress" }]))
+    let resp = changes(&json!([{ "field": "id", "value": "1000000", "op": "suppress" }]))
         .await
         .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 404, "unknown").await;
     for item in [
-        json!({ "external_id": member(5), "op": "predicate" }),
-        json!({ "external_id": member(5), "tessera_id": tessera_id, "op": "suppress" }),
+        json!({ "field": "id", "value": member(5), "op": "predicate" }),
+        json!({ "field": "id", "value": member(5), "tessera_id": tessera_id, "op": "suppress" }),
+        json!({ "field": "id", "op": "suppress" }),
         json!({ "tessera_id": 12345, "op": "suppress" }),
-        json!({ "external_id": member(5), "op": "suppress", "unknown": 1 }),
+        json!({ "field": "id", "value": member(5), "op": "suppress", "unknown": 1 }),
     ] {
         assert_invalid(&doc, "ChangeItem", &item);
         let resp = changes(&json!([item])).await.unwrap();
@@ -2311,7 +2308,7 @@ fn grow_arrow(key: &str, members: &[String]) -> Vec<u8> {
             Field::new("key", DataType::Utf8, false),
             Field::new("members", lists.data_type().clone(), true),
         ])
-        .with_metadata([("addressing".to_string(), "external".to_string())].into()),
+        .with_metadata([("field".to_string(), "id".to_string())].into()),
     );
     let batch = arrow::record_batch::RecordBatch::try_new(
         schema.clone(),
@@ -2384,7 +2381,7 @@ async fn layers_and_artifacts_match_the_description() {
     assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
 
     // A publication, and the same again, which creates nothing.
-    let publication = json!({ "addressing": "external",
+    let publication = json!({ "field": "id",
                               "artifacts": [{ "key": "k0", "members": members(0..4) }] });
     assert_valid(&doc, "PublishRequest", &publication);
     let resp = control(&f.server, &put, &artifacts)
@@ -2403,10 +2400,10 @@ async fn layers_and_artifacts_match_the_description() {
     assert_eq!(again["created"], 0);
     assert_eq!(again["artifacts"], published["artifacts"]);
 
-    // Refusals: a member that names nothing, Arrow, and no artifacts.
+    // Refusals: a member that names nothing, Arrow, no artifacts, and a key the envelope lacks.
     let resp = control(&f.server, &put, &artifacts)
-        .json(&json!({ "addressing": "external",
-                       "artifacts": [{ "key": "k1", "members": [b64(b"nobody")] }] }))
+        .json(&json!({ "field": "id",
+                       "artifacts": [{ "key": "k1", "members": [member(1_000_000)] }] }))
         .send()
         .await
         .unwrap();
@@ -2418,17 +2415,21 @@ async fn layers_and_artifacts_match_the_description() {
         .await
         .unwrap();
     assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
-    let empty = json!({ "addressing": "external", "artifacts": [] });
-    assert_invalid(&doc, "PublishRequest", &empty);
-    let resp = control(&f.server, &put, &artifacts)
-        .json(&empty)
-        .send()
-        .await
-        .unwrap();
-    assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+    let empty = json!({ "field": "id", "artifacts": [] });
+    let addressed = json!({ "addressing": "field", "field": "id",
+                            "artifacts": [{ "key": "k1", "members": members(0..1) }] });
+    for body in [empty, addressed] {
+        assert_invalid(&doc, "PublishRequest", &body);
+        let resp = control(&f.server, &put, &artifacts)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+    }
 
     // Growth, as JSON and as Arrow.
-    let growth = json!({ "addressing": "external",
+    let growth = json!({ "field": "id",
                          "artifacts": [{ "key": "k0", "members": members(4..6) }] });
     assert_valid(&doc, "GrowRequest", &growth);
     let resp = control(&f.server, &patch, &artifacts)
@@ -2447,15 +2448,15 @@ async fn layers_and_artifacts_match_the_description() {
     let grown = assert_answer(&doc, &patch, resp, 200).await;
     assert_eq!(grown["artifacts"][0]["joined"], 3);
     let resp = control(&f.server, &patch, &artifacts)
-        .json(&json!({ "addressing": "external",
+        .json(&json!({ "field": "id",
                        "artifacts": [{ "key": "no-such-key", "members": members(0..1) }] }))
         .send()
         .await
         .unwrap();
     assert_refusal_to(&doc, Some(&patch), resp, 422, "contract").await;
     let resp = control(&f.server, &patch, &artifacts)
-        .json(&json!({ "addressing": "external",
-                       "artifacts": [{ "key": "k0", "members": [b64(b"nobody")] }] }))
+        .json(&json!({ "field": "id",
+                       "artifacts": [{ "key": "k0", "members": [member(1_000_000)] }] }))
         .send()
         .await
         .unwrap();
@@ -2499,8 +2500,7 @@ async fn shape_reports_and_withdrawals_match_the_description() {
         .unwrap();
     assert_answer(&doc, &put, resp, 201).await;
     let url = "/control/layers/regions%2Fboxes/artifacts";
-    let publication = json!({ "addressing": "external",
-                              "artifacts": [{ "key": "west", "members": [],
+    let publication = json!({ "artifacts": [{ "key": "west", "members": [],
                                               "bbox": [0.0, 0.0, 500.0, 1000.0] }] });
     assert_valid(&doc, "PublishRequest", &publication);
     let resp = control(&f.server, &put, url)
@@ -2519,7 +2519,7 @@ async fn shape_reports_and_withdrawals_match_the_description() {
 
     // A spatial layer's artifacts are not grown.
     let resp = control(&f.server, &patch, url)
-        .json(&json!({ "addressing": "external",
+        .json(&json!({ "field": "id",
                        "artifacts": [{ "key": "west", "members": members(0..1) }] }))
         .send()
         .await
@@ -2544,7 +2544,7 @@ async fn shape_reports_and_withdrawals_match_the_description() {
     assert_answer(&doc, &put, resp, 201).await;
     let url = "/control/layers/outlines%2Fa/artifacts";
     let resp = control(&f.server, &put, url)
-        .json(&json!({ "addressing": "external",
+        .json(&json!({ "field": "id",
                        "artifacts": [{ "key": "o0", "members": members(0..5) }] }))
         .send()
         .await
@@ -2553,8 +2553,7 @@ async fn shape_reports_and_withdrawals_match_the_description() {
         assert_answer(&doc, &put, resp, 201).await["without_content"],
         1
     );
-    let fill = json!({ "addressing": "external",
-                       "artifacts": [{ "key": "o0",
+    let fill = json!({ "artifacts": [{ "key": "o0",
                                        "content": [{ "rank": 0, "values": ["500 500 100"] }] }] });
     assert_valid(&doc, "GrowRequest", &fill);
     let resp = control(&f.server, &patch, url)
@@ -2585,7 +2584,7 @@ async fn shape_reports_and_withdrawals_match_the_description() {
     assert_answer(&doc, &put, resp, 201).await;
     let url = "/control/layers/topics%2Fa/artifacts";
     let resp = control(&f.server, &put, url)
-        .json(&json!({ "addressing": "external",
+        .json(&json!({ "field": "id",
                        "artifacts": [{ "key": "t0", "members": members(0..10),
                                        "content": [{ "values": ["a topic"],
                                                      "generated_from": members(0..4) }] }] }))
@@ -2593,7 +2592,7 @@ async fn shape_reports_and_withdrawals_match_the_description() {
         .await
         .unwrap();
     assert_answer(&doc, &put, resp, 201).await;
-    let page = json!({ "addressing": "external",
+    let page = json!({ "field": "id",
                        "artifacts": [{ "key": "t0", "rank": 0, "leaving": members(0..4) }] });
     assert_valid(&doc, "GrowRequest", &page);
     let resp = control(&f.server, &patch, url)

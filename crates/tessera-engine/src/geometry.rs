@@ -47,7 +47,6 @@ use croaring::Bitmap;
 use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_store::Bundle;
 
-use crate::engine::ExternalIdIndex;
 use crate::Generation;
 
 /// One geometry publication, whole — **the single seam a generation swap may go through**, and the
@@ -86,18 +85,16 @@ pub struct GeometryPublication {
     pub(crate) rotation: Option<PrefixRotation>,
 }
 
-/// The four things a publication into a **new prefix** must carry, and they travel together
-/// because separating them is the fail-open.
+/// The things a publication into a **new prefix** must carry, and they travel together because
+/// separating them is the fail-open.
 ///
-/// A fold rewrites the term index, the fragment identity and the external-id runs, and retires the
-/// deletions it executed. Each of those alone is wrong:
+/// A fold rewrites the term index and the fragment identity, and retires the deletions it
+/// executed. Each of those alone is wrong:
 ///
 /// - new postings with the old fragment identity serves every session a mask built from a term
 ///   index that no longer exists, under a key nothing invalidates — a fold advances no watermark;
 /// - a rotated identity with the old postings makes every fragment rebuild from the superseded
 ///   prefix's file;
-/// - a new prefix with the old external-id sidecar resolves through files reclamation is about to
-///   delete, and answers for keys the fold dropped;
 /// - and **retirement without the identity rotation is Rule F's fail-open in its pure form**
 ///   (write-path §5.4): withdrawing the tombstone while a pre-fold fragment is still reachable
 ///   re-exposes the item the deletion hid. That is why `retired` lives *here* rather than beside
@@ -107,14 +104,12 @@ pub(crate) struct PrefixRotation {
     pub(crate) postings: Arc<PostingsReader>,
     /// The fragment cache under the new prefix's MANIFEST digest — [`FragmentCache::rotate`].
     pub(crate) fragments: Arc<FragmentCache>,
-    /// The new prefix's external-id sidecar.
-    pub(crate) external_index: Arc<ExternalIdIndex>,
     /// The new prefix's filter columns — **opened over it, never cloned from the live
     /// generation**, whose mappings are of the superseded prefix's files. A fold rewrites this
     /// artefact: it blanks the deleted entities' slots, folds every snapshot extent into the base
     /// and rebuilds the derived postings (`filter-index.md` §6.2), so a cloned column would serve
     /// pre-fold values out of files the reclamation is about to unlink — safe to hold on POSIX,
-    /// wrong to serve. It travels with the other three for the reason they travel together: a
+    /// wrong to serve. It travels with the others for the reason they travel together: a
     /// request must never see a geometry from one publication and an artefact from another.
     pub(crate) filter_columns: Arc<crate::filter::FilterColumns>,
     /// The new prefix's unique indexes, opened over its own manifest for the filter columns'
@@ -131,9 +126,8 @@ pub(crate) struct PrefixRotation {
 }
 
 impl GeometryPublication {
-    /// A publication **within the live prefix** — what a flush and a merge make. The term index,
-    /// the fragment identity and the external-id sidecar all carry forward from the live
-    /// generation.
+    /// A publication **within the live prefix** — what a flush and a merge make. The term index and
+    /// the fragment identity carry forward from the live generation.
     pub fn within_prefix(
         prefix: String,
         segments_version: u64,

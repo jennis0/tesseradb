@@ -222,7 +222,8 @@ fn the_corpus_schema_parses_under_the_builds_parser() {
             "bay",
             "tag",
             "blurb",
-            "partition"
+            "partition",
+            "id"
         ]
     );
     let fx = &schema.attributes[0];

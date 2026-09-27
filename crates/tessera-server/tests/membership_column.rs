@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float32Array, Int64Array, ListArray, StringArray, UInt32Array,
+    Array, ArrayRef, Float32Array, Int64Array, ListArray, StringArray, UInt32Array,
     UInt64Array,
 };
 use arrow::buffer::OffsetBuffer;
@@ -119,6 +119,12 @@ points = "points.parquet"
 name             = "s0"
 extent           = { min = 0.0, max = 1000.0 }
 point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 "#;
 
 /// The layer both sides declare, at the hierarchy kind the case is about. `value_set = "open"` so a
@@ -242,8 +248,8 @@ fn build_side_with(rows: &[u64], layer: &str, with_levels: bool) -> Built {
 // The wire: an ingest batch carrying a column named for a layer
 // ---------------------------------------------------------------------------------------------
 
-/// One ingest batch: the reserved geometry columns, and a column **named for the layer** carrying
-/// each point's artifacts.
+/// One ingest batch: each point's `id`, the reserved geometry columns, and a column **named for
+/// the layer** carrying each point's artifacts.
 fn ingest_batch(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
     ingest_batch_with(rows, vec![(column, keys)])
 }
@@ -258,16 +264,13 @@ fn ingest_batch_with(rows: &[u64], columns: Vec<(&str, ArrayRef)>) -> Vec<u8> {
     let labels: Vec<&[&str]> = labels.iter().map(Vec::as_slice).collect();
     let access = access_lists(&labels);
     let mut fields = vec![
-        Field::new("external_id", DataType::Binary, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
     ];
-    let ext: Vec<Vec<u8>> = rows.iter().map(|e| external_id_of(*e)).collect();
     let mut arrays: Vec<ArrayRef> = vec![
-        Arc::new(BinaryArray::from_iter_values(
-            ext.iter().map(|v| v.as_slice()),
-        )),
+        Arc::new(UInt64Array::from(rows.to_vec())),
         Arc::new(Float32Array::from_iter_values(
             rows.iter().map(|e| x_of(*e) as f32),
         )),
@@ -352,7 +355,7 @@ async fn publish_artifacts(
         .client
         .put(server.control_url(&format!("/control/layers/{encoded}/artifacts")))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -982,12 +985,11 @@ async fn sorted_artifacts(server: &TestServer, terms: &[&str]) -> Vec<ClientArti
 
 /// One JSON ingest body carrying `rows`' cluster keys and their levels.
 fn levelled_json(rows: &[u64]) -> Vec<u8> {
-    use base64::Engine as _;
     let records: Vec<serde_json::Value> = rows
         .iter()
         .map(|e| {
             json!({
-                "external_id": base64::engine::general_purpose::STANDARD.encode(external_id_of(*e)),
+                "id": e,
                 "x": x_of(*e),
                 "y": y_of(*e),
                 "access": access_of(*e),
@@ -1409,8 +1411,7 @@ async fn a_layer_reading_labels_refuses_to_mint() {
         .client
         .put(server.control_url("/control/layers/teams%2Fx/artifacts"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external",
-                       "artifacts": [{ "key": "unlabelled", "members": [], "access": null }] }))
+        .json(&json!({ "artifacts": [{ "key": "unlabelled", "members": [], "access": null }] }))
         .send()
         .await
         .unwrap();
@@ -1575,7 +1576,7 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_records_it() {
         .put(server.control_url("/control/layers/tree%2Fx/artifacts"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [
                 { "key": "root", "members": members.clone() },
                 { "key": "leaf", "members": members },

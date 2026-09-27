@@ -44,7 +44,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use arrow::array::{Float32Array, StringArray};
+use arrow::array::{Float32Array, StringArray, UInt64Array};
 use common::*;
 use serde_json::{json, Value};
 use tessera_build::config::{AccessInput, AccessSource, Attribute, ValueSet};
@@ -227,6 +227,15 @@ fn roster(views: &[(&str, Option<&[&str]>)]) -> Vec<GroupViewDescriptor> {
         .collect()
 }
 
+/// A file of every entity `ids` names, in `entity_id`, from which a fixture reads each item's
+/// `id` ([`id_schema`]).
+fn write_ids(dir: &Path, ids: impl Iterator<Item = u64>) -> std::path::PathBuf {
+    let path = dir.join("ids.parquet");
+    let ids: Vec<u64> = ids.collect();
+    write_parquet(&path, vec![column("entity_id", false, UInt64Array::from(ids))]);
+    path
+}
+
 /// The bundle: two plain views (one public, one gated disjunctively), a public group with one
 /// gated view in it, and a gated group carrying a scoped attribute.
 fn build_gated(dir: &Path) -> std::path::PathBuf {
@@ -378,8 +387,12 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 family_views.clone(),
             ),
         ],
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            write_ids(dir, (0..30).chain(LEDGER)),
+            &id_schema(),
+        ),
         schema: tessera_build::config::Schema {
-            attributes: Vec::new(),
+            attributes: id_schema().attributes,
             // The value set `mood`'s codes index. `public`, so the list is authored and
             // `/v1/categories` filters nothing — which is what makes the gate the *only* thing
             // that can withhold it from the outsider below.
@@ -1199,8 +1212,8 @@ async fn point_ids(served: &Served, token: &str, view: &str) -> Vec<u64> {
     points.into_iter().map(|(id, _)| id).collect()
 }
 
-/// The `tessera_id` one source entity is served under — found through the drill-down's external
-/// id, the identity permutation being the server's alone (I10).
+/// The `tessera_id` one source entity is served under in `view`, found through the drill-down's
+/// `id`, the identity permutation being the server's alone.
 async fn id_of(served: &Served, token: &str, view: &str, entity: u64) -> u64 {
     for id in point_ids(served, token, view).await {
         let body: Value = post_item(&served.server, token, id)
@@ -1208,11 +1221,7 @@ async fn id_of(served: &Served, token: &str, view: &str, entity: u64) -> u64 {
             .json()
             .await
             .unwrap();
-        use base64::Engine as _;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(body["external_id"].as_str().expect("an external id"))
-            .unwrap();
-        if u64::from_le_bytes(bytes.try_into().expect("eight bytes")) == entity {
+        if body["fields"]["id"] == entity {
             return id;
         }
     }
@@ -1424,7 +1433,7 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
             },
             family_views,
         )],
-        ..build_args(&out, views)
+        ..with_id(build_args(&out, views), &write_ids(dir, 0..30))
     })
     .expect("a sealed owner shared under a public roster builds");
     out

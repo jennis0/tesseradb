@@ -87,7 +87,7 @@ pub struct ItemsRequest<'a> {
     /// Declared fields, by name, in the order their columns are wanted. A group-scoped field may
     /// be pinned as `<field>@<key>`.
     pub fields: &'a [String],
-    /// Any of `position`, `external_id` and `labels`, in the order their columns are wanted.
+    /// Any of `position` and `labels`, in the order their columns are wanted.
     pub system_fields: &'a [String],
     /// The viewport's filter, resolved as it resolves one. `None` is every visible item.
     pub filter: Option<FilterExpr>,
@@ -270,8 +270,7 @@ impl std::fmt::Display for RecordsRefused {
             ),
             RecordsRefused::UnknownSystemField(name) => write!(
                 f,
-                "system field '{name}' is none of position, external_id or labels; name one of \
-                 those"
+                "system field '{name}' is neither position nor labels; name one of those"
             ),
             RecordsRefused::ZeroPageRows => write!(
                 f,

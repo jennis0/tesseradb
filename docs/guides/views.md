@@ -49,9 +49,18 @@ unprojected embedding.
 ```toml
 [defaults]
 source          = "world"
-entity_id_field = "entity_id"
+join_field      = "geonameid"
 allocation_view = "world"     # breaks entity-id ties within a signature group at build time
+
+[[attribute]]
+name   = "geonameid"
+type   = "i64"
+unique = true
 ```
+
+`join_field` names the unique attribute every file names its place by: each view's points, each
+attribute file and each layer's members. One `geonameid` in two views' points is one item in both
+views.
 
 Entity ids are permanent, so the tie-break is a declaration rather than a default that could
 silently re-key a rebuild if the file's block order changed (decision 0112).
@@ -102,7 +111,7 @@ title            = "By quarter, geographic"
 members          = "quarter"
 projection       = "web_mercator"
 extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
-source           = "quarter_alt_pts"      # entity_id, quarter, lon, lat, access
+source           = "quarter_alt_pts"      # geonameid, quarter, lon, lat, access
 fields           = { view = "quarter" }
 point_visibility = { field = "access", default = "public" }
 ```
@@ -204,7 +213,7 @@ the fold deletes them.
 `quarter:2026-Q1` and in another view keeps that other row and everything it holds. An item whose
 only row was in `quarter:2026-Q1`, flushed or still waiting for a flush, is deleted as
 `POST /control/changes` deletes one: its `tessera_id` stops naming anything at once, and its rows,
-values and layer memberships leave at the next fold. A later batch carrying its `external_id`
+values and layer memberships leave at the next fold. A later batch carrying its `geonameid`
 creates a new item with a new `tessera_id`. The response's `deleted` counts the items the drop
 deleted.
 
@@ -217,24 +226,24 @@ POST /control/ingest
 x-tessera-view: quarter:2026-Q4
 x-tessera-batch-id: <uuid>
 
-(external_id, x, y, access, sentiment, mood, note, coverage)   # Arrow, application/vnd.apache.arrow.stream
+(geonameid, x, y, access, sentiment, mood, note, coverage)   # Arrow, application/vnd.apache.arrow.stream
 ```
 
 A row belongs to one view; a point that belongs to several is several batches, one per view, one
-`external_id`. Getting the key wrong is a plain 404 — creation is explicit precisely so a typo
+`geonameid`. Getting the key wrong is a plain 404 — creation is explicit precisely so a typo
 cannot mint a view around the mistake, ever since `views.md` r19 withdrew the earlier
 first-batch-creates route.
 
 ## Add an item already known to a second view, or change it
 
-A row that names an item the service holds, by its `tessera_id`, its `external_id` or a unique
-value, and carries a position in a view the item is not in, adds the item to that view. The item
+A row that names an item the service holds, by its `tessera_id` or a unique value such as its
+`geonameid`, and carries a position in a view the item is not in, adds the item to that view. The item
 keeps its label and its values, stays served in its other views throughout, and is served in the
 new view from its next flush. The receipt counts it as `added` and answers the item's
 `tessera_id`.
 
 The row may leave out any field, which keeps what the item stores. A row that carries something
-else, a value, the label, the external id or a position in a view the item is already in, edits
+else, a value, the label or a position in a view the item is already in, edits
 the item. The receipt counts an edit as `edited` and answers the item's `tessera_id`, which an edit
 never changes.
 
@@ -255,7 +264,7 @@ changes nothing, and one carrying another value edits the item.
 
 The handler decides a batch against one snapshot of what is stored. Before anything is written, the
 write executor checks again what can have moved since: an item deleted, already added to the view,
-passed by a newer item's flush, or given another view or external id since. Where something has,
+passed by a newer item's flush, or given another view since. Where something has,
 the batch is decided once more against what is stored then; if it has moved again, it is refused
 with `409` and nothing is written.
 
@@ -292,7 +301,7 @@ name   = "coverage"
 type   = "f32"
 scope  = { group = "quarter" }
 index  = true
-source = "attrs_scoped"      # entity_id, quarter, coverage — one row per (entity, view)
+source = "attrs_scoped"      # geonameid, quarter, coverage — one row per (entity, view)
 fields = { view = "quarter" }
 ```
 
@@ -362,7 +371,7 @@ qualified and the view decides which of the family's columns the value lands in:
 POST /control/ingest
 x-tessera-view: quarter:2026-Q3
 
-external_id | x | y | access | kind | sentiment
+geonameid | x | y | access | kind | sentiment
 ```
 
 Nulls are absences and a category arrives as its **key** (never a code). Every row into a view of
@@ -500,7 +509,7 @@ This also creates `quarter_alt:2026-Q5`, empty, immediately. Ingest its points:
 ```
 POST /control/ingest
 x-tessera-view: quarter:2026-Q5
-(external_id, x, y, access, sentiment, mood, note, coverage)
+(geonameid, x, y, access, sentiment, mood, note, coverage)
 ```
 
 An item already seen in `world` or an earlier quarter that also appears in this batch is added to

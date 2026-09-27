@@ -31,7 +31,7 @@ use tessera_spatial::{
 };
 
 /// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
+static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer { signed: false };
 
 /// A frame 16 units wide out of a 65,536-unit coordinate range — 1/4096 of it, zoom offset 12 —
 /// placed at the far end of the range, where an `f32`'s exponent is largest and its step coarsest.

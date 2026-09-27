@@ -223,7 +223,6 @@ impl Engine {
             }
             identities.push(RowIdentity {
                 tessera_id: row.tessera_id,
-                external_id: row.external_id.clone(),
                 unique: carried_keys(declared, row),
             });
         }
@@ -232,7 +231,6 @@ impl Engine {
             engine: self,
             generation,
             declared,
-            bound: Default::default(),
         };
         let named = match resolve::resolve(&identities, &holdings)? {
             Ok(named) => named,
@@ -264,7 +262,6 @@ impl Engine {
             .collect();
         order.sort_unstable();
         let mut stored = Stored {
-            bound: holdings.bound.into_inner(),
             blobs: Self::read_blobs(generation, request, &order, false)?,
             not_members: self.memberships_not_held(request, &named),
         };
@@ -341,7 +338,6 @@ impl Engine {
                     });
                     written_from.push(at);
                     rows.push(UnallocatedRow {
-                        external_id: row.external_id.clone(),
                         view: view.id.clone(),
                         join: None,
                         descriptors,
@@ -483,10 +479,6 @@ impl Engine {
                 }
             })
             .collect();
-        let external_id = match &row.external_id {
-            Some(id) => Some(id.clone()),
-            None => self.stored_external_id(generation, old)?,
-        };
         // The batch's view's owner addresses the row's group-scoped values; every other view's
         // cells are carried.
         let batch_owner = view.map(|v| crate::write::scoped_owner_view_of(manifest, &v.id));
@@ -562,7 +554,6 @@ impl Engine {
                     .collect(),
             };
             rows.push(UnallocatedRow {
-                external_id: if first { external_id.clone() } else { None },
                 view: view_id.clone(),
                 join: None,
                 descriptors: if first {
@@ -749,14 +740,6 @@ impl Engine {
             }
         }
 
-        // The row's external id named an item or nothing; an item it named is this one, or the
-        // batch would have been refused as naming two.
-        if let Some(external_id) = &row.external_id {
-            if !stored.bound.contains(external_id) {
-                return Ok(Decided::Edited);
-            }
-        }
-
         // Each carried value against the stored one; a null is compared as no value.
         for (position, d) in declared.iter().enumerate() {
             let Some(value) = row.scalars.get(position).filter(|_| carried(position)) else {
@@ -825,12 +808,7 @@ impl Engine {
         for position in repeated {
             scoped[position] = WalScalar::Null;
         }
-        let external_id = match &row.external_id {
-            Some(id) => Some(id.clone()),
-            None => self.stored_external_id(generation, entity)?,
-        };
         Ok(Decided::Added(Box::new(UnallocatedRow {
-            external_id,
             view: view.id.clone(),
             join: Some(entity),
             descriptors: Vec::new(),
@@ -935,19 +913,6 @@ impl Engine {
         })
     }
 
-    /// The item's external id: its own buffered row's, or the one a flush bound.
-    fn stored_external_id(
-        &self,
-        generation: &Generation,
-        entity: EntityId,
-    ) -> Result<Option<Vec<u8>>, AcceptError> {
-        if let Some(item) = generation.buffer.get(entity) {
-            return Ok(item.external_id.clone());
-        }
-        self.external_id_of_in(generation, entity)
-            .map_err(|e| AcceptError::Unreadable(e.to_string()))
-    }
-
     /// The item's position in `view`, quantised, or `None` where it has no row there.
     fn stored_position(
         &self,
@@ -1029,7 +994,6 @@ impl Engine {
         let tid = |entity: EntityId| crate::unique::tessera_id_text(self, generation, entity);
         let value = |row: usize, field: Identifier| match field {
             Identifier::TesseraId => "its tessera_id".to_string(),
-            Identifier::ExternalId => "its external_id".to_string(),
             Identifier::Unique(at) => {
                 let at = usize::from(at);
                 let text = request.rows[row]
@@ -1088,8 +1052,6 @@ impl Engine {
 
 /// What a batch's named items store, read once for the whole batch rather than per row.
 struct Stored {
-    /// The external ids the batch's rows carry that name an item.
-    bound: FxHashSet<Vec<u8>>,
     /// Each named item's record-blob row, where a row carries a column stored there.
     blobs: Option<FxHashMap<EntityId, Vec<tessera_filter::RecordField>>>,
     /// The rows whose membership columns name an artifact that does not hold their item.
@@ -1165,14 +1127,12 @@ fn scoped_against_held(
     Ok(Some(repeated))
 }
 
-/// Who holds what in one generation: the unique indexes and their live entries, the external ids
-/// bound, and the `tessera_id`s issued, deleted items left out of each.
+/// Who holds what in one generation: the unique indexes and their live entries, and the
+/// `tessera_id`s issued, deleted items left out of each.
 struct Held<'a> {
     engine: &'a Engine,
     generation: &'a Generation,
     declared: &'a [DeclaredScalar],
-    /// The external ids found to name an item, as the resolver asked about them.
-    bound: std::cell::RefCell<FxHashSet<Vec<u8>>>,
 }
 
 impl resolve::Holdings for Held<'_> {
@@ -1190,32 +1150,6 @@ impl resolve::Holdings for Held<'_> {
         let mut out = vec![Vec::new(); keys.len()];
         for (at, entity) in found {
             out[at].push(entity);
-        }
-        Ok(out)
-    }
-
-    /// An external id bound since this generation was taken names an item it does not hold yet,
-    /// which is answered as stale so the batch is resolved again against a newer one.
-    fn external_holders(&self, ids: &[&[u8]]) -> Result<Vec<Option<EntityId>>, AcceptError> {
-        let owned: Vec<Vec<u8>> = ids.iter().map(|id| id.to_vec()).collect();
-        let found = self
-            .engine
-            .external_ids_in(self.generation, &owned)
-            .map_err(|e| AcceptError::Unreadable(e.to_string()))?;
-        let mut out = Vec::with_capacity(found.len());
-        let mut bound = self.bound.borrow_mut();
-        for (id, entity) in owned.into_iter().zip(found) {
-            match entity {
-                Some(e) if self.generation.overlay.is_deleted(e) => out.push(None),
-                Some(e) if !crate::control::holds_item(self.generation, e) => {
-                    return Err(AcceptError::Exec(ExecError::Stale))
-                }
-                Some(e) => {
-                    bound.insert(id);
-                    out.push(Some(e));
-                }
-                None => out.push(None),
-            }
         }
         Ok(out)
     }

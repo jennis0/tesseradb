@@ -182,7 +182,7 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -190,12 +190,11 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build with a declared schema should succeed");
 }
@@ -291,7 +290,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     let declared = &bundle.manifest.declared_scalars;
     assert_eq!(
         declared.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
-        vec!["band", "ingested_at", "score"],
+        vec!["band", "ingested_at", "score", "id"],
         "declaration order is the column order and must survive compilation verbatim"
     );
     assert_eq!(
@@ -299,7 +298,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
             .iter()
             .map(|d| d.arrow_type.arrow_type_name())
             .collect::<Vec<_>>(),
-        vec!["u8", "i64", "f32"]
+        vec!["u8", "i64", "f32", "u64"]
     );
     // The category names its vocabulary; the two plain scalars name none.
     assert_eq!(declared[0].vocabulary.as_deref(), Some("band"));
@@ -329,8 +328,8 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     // against a build that gave every item another item's attributes.** Entity ids are assigned
     // in signature-sorted order (§11.1), so the map is a permutation with no fixed points to
     // speak of — but a fixture whose items all carry one signature has an *identity* permutation,
-    // which is what let the wrong assertion look right. It is read from the external-id sidecar,
-    // which is the bundle's own record of the assignment rather than a second guess at it.
+    // which is what let the wrong assertion look right. It is read from the index of the unique
+    // `id` the build joins on, which is the bundle's own record of the assignment rather than a second guess at it.
     let tail = tail_by_identity(&root);
     assert_eq!(tail.len(), N_ITEMS as usize);
     let entity_of_source = source_to_new_map(&root, "v00000");
@@ -377,7 +376,7 @@ fn both_build_implementations_write_the_same_tail() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -385,12 +384,11 @@ fn both_build_implementations_write_the_same_tail() {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: schema.clone(),
+        schema: with_id(schema.clone()),
     };
 
     let streamed = tmp.path().join("streamed");
@@ -428,7 +426,6 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
     let entity = engine
         .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"ingested-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -492,7 +489,6 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
         let entity = engine
             .ingest_rows(
                 vec![UnallocatedRow {
-                    external_id: Some(format!("merged-{batch}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
                     descriptors: vec![b"0".to_vec()],
@@ -578,7 +574,6 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
     let ingested = engine
         .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"folded-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -645,7 +640,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["band", "ingested_at", "score"],
+        vec!["band", "ingested_at", "score", "id"],
         "the tail's declared order survives the fold — it is what every reader reads by position"
     );
 }
@@ -678,7 +673,6 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
     let ingested = engine
         .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"ingested-read-path".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -801,7 +795,6 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
             .into_iter()
             .enumerate()
             .map(|(i, ((x, y), score))| UnallocatedRow {
-                external_id: Some(format!("{batch}-{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -1098,7 +1091,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -1106,12 +1099,11 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build whose render set is not a declaration prefix succeeds");
 }
@@ -1120,7 +1112,6 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
 /// (the ingest plane's shape); the flush narrows to the render columns before it writes.
 fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(b"non-prefix-flushed".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -1304,7 +1295,13 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
             .item(&session, id)
             .expect("drill-down succeeds")
             .unwrap_or_else(|| panic!("{label} is visible to full coverage"));
-        let names: Vec<&str> = served.fields.iter().map(|f| f.name.as_str()).collect();
+        // `id` only finds the built items; the columns under test are the others.
+        let names: Vec<&str> = served
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|name| *name != "id")
+            .collect();
         assert_eq!(
             names,
             ["audit", "band", "score"],
@@ -1435,6 +1432,10 @@ fn record_fields_of(source: u64) -> Vec<tessera_filter::RecordField> {
             tag: 3,
             value: tessera_filter::RecordValue::U8(tier_code_of(source)),
         },
+        tessera_filter::RecordField {
+            tag: 4,
+            value: tessera_filter::RecordValue::U64(source),
+        },
     ]
 }
 
@@ -1507,7 +1508,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -1515,12 +1516,11 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build with blob-resident columns succeeds");
 }
@@ -1551,9 +1551,8 @@ fn record_stack(root: &Path) -> tessera_filter::RecordStack {
 }
 
 /// One ingest row for the record fixture: `band` code, blob-resident `note` and `revision`.
-fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> UnallocatedRow {
+fn record_row(engine: &Engine, note: &str, revision: i64) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -1596,7 +1595,7 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
 
     let entity = engine
         .ingest_rows(
-            vec![record_row(&engine, "flushed-1", "the-flushed-note", 77)],
+            vec![record_row(&engine, "the-flushed-note", 77)],
             "batch-record-1".to_string(),
             [0u8; 32],
         )
@@ -1693,9 +1692,9 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     let entities = engine
         .ingest_rows(
             vec![
-                record_row(&engine, "s", "the-suppressed-prose", 1),
-                record_row(&engine, "d", "the-deleted-prose", 2),
-                record_row(&engine, "c", "the-kept-prose", 3),
+                record_row(&engine, "the-suppressed-prose", 1),
+                record_row(&engine, "the-deleted-prose", 2),
+                record_row(&engine, "the-kept-prose", 3),
             ],
             "batch-deny".to_string(),
             [1u8; 32],
@@ -1733,7 +1732,7 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     // An unrelated publication leaves the extent alone too: a flush appends its own layer.
     engine
         .ingest_rows(
-            vec![record_row(&engine, "later", "a-later-note", 4)],
+            vec![record_row(&engine, "a-later-note", 4)],
             "batch-later".to_string(),
             [2u8; 32],
         )
@@ -1843,7 +1842,6 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
             .ingest_rows(
                 vec![record_row(
                     &engine,
-                    &format!("co-{i}"),
                     &format!("coalesced-note-{i}"),
                     i as i64,
                 )],

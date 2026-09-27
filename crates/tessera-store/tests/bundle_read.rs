@@ -130,8 +130,6 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         }],
         deltas: vec![],
         dict_extents: vec![],
-        external_id_runs: vec![],
-        locator_extents: vec![],
         tombstones: EntitySet::default(),
         deny: EntitySet::default(),
         files: segments_files,

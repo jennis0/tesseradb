@@ -41,7 +41,7 @@ const N: u64 = 600;
 ///
 /// Row groups small enough that the file holds several of them, so the statistics fold below has
 /// more than one bound to fold.
-fn write_points(path: &Path, statistics: EnabledStatistics) {
+fn write_points(path: &Path, statistics: EnabledStatistics, stride: u64) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
@@ -49,7 +49,7 @@ fn write_points(path: &Path, statistics: EnabledStatistics) {
         Field::new("note", DataType::Utf8, true),
         Field::new("flag", DataType::Int64, false),
     ]));
-    let ids: Vec<u64> = (0..N).collect();
+    let ids: Vec<u64> = (0..N).map(|i| i * stride).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -83,7 +83,7 @@ fn write_points(path: &Path, statistics: EnabledStatistics) {
 
 /// The access relation: every item in two of four terms, so the dictionary pass, the packed
 /// relation and the postings all resolve ordinals rather than counting an empty file.
-fn write_pairs(path: &Path) {
+fn write_pairs(path: &Path, stride: u64) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("term_id", DataType::UInt32, false),
@@ -92,7 +92,7 @@ fn write_pairs(path: &Path) {
     let mut terms = Vec::new();
     for entity in 0..N {
         for term in [entity % 4, (entity / 4) % 4] {
-            entities.push(entity);
+            entities.push(entity * stride);
             terms.push(term as u32);
         }
     }
@@ -142,11 +142,16 @@ fn schema() -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
+    args_over(points, pairs, out, &["s0"])
+}
+
+/// The build of `views`, each over the whole points file.
+fn args_over(points: &Path, pairs: &Path, out: PathBuf, views: &[&str]) -> BuildArgs {
     let schema = schema();
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
+        views: views.iter().map(|view| tessera_build::ViewArgs {
             visibility: None,
-            view_id: "s0".to_string(),
+            view_id: view.to_string(),
             projection: tessera_spatial::Projection::None,
             extent: Bounds {
                 x_min: 0.0,
@@ -158,7 +163,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
             point_fields: Default::default(),
             select: None,
             access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-        }],
+        }).collect(),
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
@@ -173,7 +178,6 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -258,10 +262,10 @@ fn a_bounded_and_an_unbounded_id_column_build_the_same_bundle() {
     let dir = tempfile::tempdir().unwrap();
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
-    write_pairs(&pairs);
+    write_pairs(&pairs, 1);
 
     // Bounded: the statistics bound the span, the bitmap proves the range, no array is written.
-    write_points(&points, EnabledStatistics::Chunk);
+    write_points(&points, EnabledStatistics::Chunk, 1);
     let bounded = dir.path().join("bounded");
     let bounded_report =
         build(&args(&points, &pairs, bounded.clone())).expect("the bounded build succeeds");
@@ -273,7 +277,7 @@ fn a_bounded_and_an_unbounded_id_column_build_the_same_bundle() {
 
     // Unbounded: the same ids in a file that states nothing about them, so pass one reads them
     // into the array, sorts it and dedups it, exactly as it did before the range was provable.
-    write_points(&points, EnabledStatistics::None);
+    write_points(&points, EnabledStatistics::None, 1);
     let unbounded = dir.path().join("unbounded");
     let unbounded_report =
         build(&args(&points, &pairs, unbounded.clone())).expect("the unbounded build succeeds");
@@ -287,4 +291,37 @@ fn a_bounded_and_an_unbounded_id_column_build_the_same_bundle() {
         "the bounded build wrote a bundle to compare"
     );
     assert_bundles_identical(&bounded, &unbounded, "the two routes to the ordinal space");
+}
+
+/// **A union of spread ids still takes the bitmap**, which walks it out sorted and deduplicated.
+/// Two views over one file of ids five apart hold `N` items between them: the walk writes an array
+/// of `N` slots, where reading both views into the array takes `2N`. Both build one bundle.
+#[test]
+fn a_spread_union_is_walked_out_of_the_bitmap_into_the_same_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("points.parquet");
+    let pairs = dir.path().join("pairs.parquet");
+    write_pairs(&pairs, 5);
+    let views = ["s0", "s1"];
+
+    write_points(&points, EnabledStatistics::Chunk, 5);
+    let bounded = dir.path().join("bounded");
+    let report = build(&args_over(&points, &pairs, bounded.clone(), &views))
+        .expect("the bounded build succeeds");
+    assert_eq!(
+        report.source_id_slots, N,
+        "the walk writes one slot an item, not one a row"
+    );
+
+    write_points(&points, EnabledStatistics::None, 5);
+    let unbounded = dir.path().join("unbounded");
+    let report = build(&args_over(&points, &pairs, unbounded.clone(), &views))
+        .expect("the unbounded build succeeds");
+    assert_eq!(
+        report.source_id_slots,
+        2 * N,
+        "the array route reads every view's rows into the array"
+    );
+
+    assert_bundles_identical(&bounded, &unbounded, "the two routes over spread ids");
 }

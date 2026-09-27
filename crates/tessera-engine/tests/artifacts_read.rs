@@ -1303,9 +1303,7 @@ fn a_response_cancelled_before_it_starts_counts_nothing() {
 fn ingest_at(engine: &Engine, batch: &str, places: &[(f64, f64)]) -> Vec<EntityId> {
     let rows = places
         .iter()
-        .enumerate()
-        .map(|(i, &(x, y))| tessera_lifecycle::UnallocatedRow {
-            external_id: Some(format!("{batch}-{i}").into_bytes()),
+        .map(|&(x, y)| tessera_lifecycle::UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -1457,7 +1455,7 @@ fn authored() -> Authored {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &id_schema()),
         out: root.clone(),
         limit: None,
         identity_key: test_key(),
@@ -1465,12 +1463,11 @@ fn authored() -> Authored {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: id_schema(),
     })
     .unwrap();
     let engine =

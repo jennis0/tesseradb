@@ -1,5 +1,5 @@
 //! What one `/control/ingest` batch costs to put in the log, over a GeoNames-shaped row: eight
-//! category codes, four numbers, a name, a handful of label descriptors and an external id.
+//! category codes, four numbers, a name and a handful of label descriptors.
 //!
 //! The append is `postcard::to_allocvec` plus a framed write, and the figure it is measured
 //! against is ~80 ms for a 10,000-row batch — the window close's largest single stage. Three
@@ -16,7 +16,6 @@ use tessera_types::EntityId;
 /// the `name`. `dem` is absent often enough in the source to be worth carrying as one.
 fn row(i: u64) -> WalRow {
     WalRow {
-        external_id: Some(format!("{}", 2_000_000 + i).into_bytes()),
         entity_id: EntityId::new(i),
         view: "world".to_owned(),
         join: false,

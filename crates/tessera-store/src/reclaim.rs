@@ -3,8 +3,8 @@
 //!
 //! **Why hard links, and why that is the whole point.** A fold's snapshot folds most of the
 //! corpus into new segments, tiers and runs, but not all of it — flushes publish into the *old*
-//! prefix throughout the fold's flight (compaction §1), so post-snapshot segments, tiers,
-//! external-id runs and locator extents, plus the dictionary extents (carried **verbatim**,
+//! prefix throughout the fold's flight (compaction §1), so post-snapshot segments, tiers and
+//! runs, plus the dictionary extents (carried **verbatim**,
 //! never renumbered — compaction §3 pass 4), have to reach the new prefix unchanged.
 //! [`hard_link_forward`] does that by adding a second directory entry for the same inode rather
 //! than copying bytes. That is what makes [`reclaim_prefix`]'s later whole-tree delete safe at
@@ -42,7 +42,7 @@ use crate::read::safe_join;
 ///
 /// Used **before `CURRENT` flips** (compaction §4 step 4, and pass 5's own carry-forward
 /// linking, §3): every carry-forward category in compaction §2's table — post-snapshot
-/// segments, delta tiers, external-id runs and locator extents, and the dictionary extents — is
+/// segments, delta tiers, runs, and the dictionary extents — is
 /// linked into the new prefix by prefix-relative path, at either or both of those call sites
 /// (publication links in whatever arrived after pass 5's own pass). A hard link changes nothing
 /// about a file's content or its digest, only how many directory entries name the same inode, so

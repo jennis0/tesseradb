@@ -20,10 +20,50 @@ import pyarrow.parquet as pq
 # The split
 # ---------------------------------------------------------------------------------------------
 
+#: The Arrow type a batch sends each integer attribute type at.
+INTEGER_TYPES = {
+    "u8": pa.uint8(),
+    "u16": pa.uint16(),
+    "u32": pa.uint32(),
+    "u64": pa.uint64(),
+    "i8": pa.int8(),
+    "i16": pa.int16(),
+    "i32": pa.int32(),
+    "i64": pa.int64(),
+}
+
+
+def join_field(rung: Path) -> dict:
+    """The rung's `[defaults].join_field`: `name`, the attribute's; `column`, the column its files
+    hold it in unless a block's `fields` moves it; and `type`, the Arrow type a batch sends it at.
+    Every row, change and membership the cycle sends names its item by this field, and every
+    entity id the driver holds is a value of it."""
+    path = rung / "corpus.toml"
+    declared = tomllib.loads(path.read_text())
+    name = declared.get("defaults", {}).get("join_field")
+    if name is None:
+        raise ValueError(
+            f"{path} declares no `[defaults].join_field`, and the ingest cycle sends every row, "
+            f"change and membership by it. Declare a unique integer `[[attribute]]` over the "
+            f"entity id column and name it there"
+        )
+    attribute = next((a for a in declared.get("attribute", []) if a.get("name") == name), None)
+    if attribute is None or attribute.get("type") not in INTEGER_TYPES:
+        raise ValueError(
+            f"{path}: the join field `{name}` is not a declared integer attribute, and the ingest "
+            f"cycle holds every entity id as an integer. Name an integer attribute as the join "
+            f"field"
+        )
+    return {
+        "name": name,
+        "column": attribute.get("field", name),
+        "type": INTEGER_TYPES[attribute["type"]],
+    }
+
 
 def declared_entities(rung: Path) -> np.ndarray:
-    """Every entity id the rung's views hold: the anchor view's in file order, then each other
-    view's ids the ones before it did not hold."""
+    """Every entity id the rung's views hold, as values of the join field: the anchor view's in
+    file order, then each other view's ids the ones before it did not hold."""
     parts: list[np.ndarray] = []
     seen: np.ndarray | None = None
     files: dict[Path, str] = {}
@@ -170,13 +210,14 @@ def declared_views(rung: Path) -> list[dict]:
     """Every view the declaration names, the allocation view first: a plain view by its name and
     a group's view as `group:key`, the id the server gives it. `points` is the file its rows are
     read from, `select` the `(column, key)` picking them out of a file a group's views share, and
-    `fields` each canonical column name (`entity_id`, the coordinate pair, `view`) as that file
-    spells it. `record` is a group view's roster record under canonical names, on the group that
-    owns the keys, and `metadata` the names that group declares."""
+    `fields` each canonical column name (`entity_id`, the join field's column; the coordinate
+    pair; `view`) as that file spells it. `record` is a group view's roster record under
+    canonical names, on the group that owns the keys, and `metadata` the names that group
+    declares."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
     defaults = declared.get("defaults", {})
-    entity = defaults.get("entity_id_field", "entity_id")
+    join = join_field(rung)
     views = [
         {
             "id": view["name"],
@@ -186,7 +227,7 @@ def declared_views(rung: Path) -> list[dict]:
             "points": source_path(rung, named, view.get("source", defaults.get("source"))),
             "select": None,
             "projection": view.get("projection", "none"),
-            "fields": view_fields(view, entity),
+            "fields": view_fields(view, join),
             "point_visibility": view.get("point_visibility") or {},
             "record": None,
             "metadata": [],
@@ -196,11 +237,11 @@ def declared_views(rung: Path) -> list[dict]:
     groups = {group["name"]: group for group in declared.get("view_group", [])}
     for group in groups.values():
         owner = groups.get(group.get("members"), group)
-        fields = view_fields(group, entity)
+        fields = view_fields(group, join)
         # A group with its own `source` holds every view's rows in that file, picked out by its
         # discriminator; otherwise each view's rows are the file its roster entry names.
         shared = source_path(rung, named, group.get("source"))
-        for record, own in roster(rung, named, owner, entity):
+        for record, own in roster(rung, named, owner, join):
             views.append(
                 {
                     "id": f"{group['name']}:{record['key']}",
@@ -222,17 +263,20 @@ def declared_views(rung: Path) -> list[dict]:
     return views
 
 
-def view_fields(block: dict, entity: str) -> dict[str, str]:
-    """A view's or a group's canonical column names mapped to its file's: `entity_id`, `x`/`y`
-    for a view with no projection or `lon`/`lat` for a projected one, and the discriminator
-    `view`, each its own name unless `fields` renames it."""
+def view_fields(block: dict, join: dict) -> dict[str, str]:
+    """A view's or a group's canonical column names mapped to its file's: `entity_id`, the join
+    field's column unless `fields` moves it under the join field's name; `x`/`y` for a view with
+    no projection or `lon`/`lat` for a projected one; and the discriminator `view`, each its own
+    name unless `fields` renames it."""
     projected = block.get("projection", "none") != "none"
     renamed = block.get("fields") or {}
-    canonical = ["entity_id", *(("lon", "lat") if projected else ("x", "y")), "view"]
-    return {name: renamed.get(name, entity if name == "entity_id" else name) for name in canonical}
+    fields = {"entity_id": renamed.get(join["name"], join["column"])}
+    for name in [*(("lon", "lat") if projected else ("x", "y")), "view"]:
+        fields[name] = renamed.get(name, name)
+    return fields
 
 
-def roster(rung: Path, named: dict, owner: dict, entity: str) -> list[tuple[dict, str | None]]:
+def roster(rung: Path, named: dict, owner: dict, join: dict) -> list[tuple[dict, str | None]]:
     """A group's views as `(roster record, the view's own source)`, in the build's three forms:
     `[[view_group.view]]` blocks, a `[view_group.views]` table, or keys minted from the distinct
     values of the group's discriminator, in key order."""
@@ -262,7 +306,7 @@ def roster(rung: Path, named: dict, owner: dict, entity: str) -> list[tuple[dict
     source = source_path(rung, named, owner.get("source"))
     if source is None:
         return []
-    column = view_fields(owner, entity)["view"]
+    column = view_fields(owner, join)["view"]
     keys = pq.read_table(source, columns=[column]).column(column).unique().drop_null()
     return [({"key": key}, None) for key in sorted(keys.to_pylist())]
 
@@ -581,14 +625,15 @@ def copy_declared_inputs(
         if got is not None and got.exists():
             shutil.copy2(got, out / got.name)
             kept.setdefault("vocabularies", []).append(got.name)
-    entity = declared.get("defaults", {}).get("entity_id_field", "entity_id")
+    join = join_field(rung)
     entity_files: dict[Path, str] = {}
     for view in declared_views(rung):
         entity_files.setdefault(view["points"], view["fields"]["entity_id"])
     for attribute in declared.get("attribute", []):
         got = source_path(rung, named, attribute.get("source"))
         if got is not None:
-            entity_files.setdefault(got, (attribute.get("fields") or {}).get("entity_id", entity))
+            column = (attribute.get("fields") or {}).get(join["name"], join["column"])
+            entity_files.setdefault(got, column)
     for got, column in entity_files.items():
         dropped = [name for name in pq.ParquetFile(got).schema_arrow.names if name in set(published)]
         kept.setdefault("entity_files", {})[got.name] = {

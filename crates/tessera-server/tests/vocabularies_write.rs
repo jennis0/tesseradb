@@ -175,34 +175,30 @@ async fn meta_vocabularies(served: &Served) -> Vec<String> {
         .collect()
 }
 
-/// One ingest row: the external id, the build's `score`, and the category key where it carries
+/// One ingest row creating an item: the build's `score`, and the category key where it carries
 /// one. Each column of `nulls`, declared while the service runs, is null on every row.
 fn batch(
-    rows: &[(&'static str, f32, Option<&'static str>)],
+    rows: &[(f32, Option<&'static str>)],
     column: bool,
     nulls: &[&str],
 ) -> Vec<u8> {
     let labels: Vec<&[&str]> = rows.iter().map(|_| &["0"][..]).collect();
     let access = access_lists(&labels);
     let mut fields = vec![
-        Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
         Field::new("score", DataType::Float32, true),
     ];
     let mut columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(arrow::array::BinaryArray::from_iter(
-            rows.iter().map(|r| Some(r.0.as_bytes())),
-        )),
         Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 500.0))),
         Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 500.0))),
         Arc::new(access),
-        Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.1))),
+        Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.0))),
     ];
     if column {
         fields.push(Field::new("severity", DataType::Utf8, true));
-        columns.push(Arc::new(StringArray::from_iter(rows.iter().map(|r| r.2))));
+        columns.push(Arc::new(StringArray::from_iter(rows.iter().map(|r| r.1))));
     }
     for name in nulls {
         fields.push(Field::new(*name, DataType::Utf8, true));
@@ -450,7 +446,7 @@ async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
     let (status, body) = ingest(
         &served,
         "unknown-key",
-        batch(&[("u1", 1.0, Some("nonsense"))], true, &[]),
+        batch(&[(1.0, Some("nonsense"))], true, &[]),
     )
     .await;
     assert_eq!(status, 422, "{body}");
@@ -464,7 +460,7 @@ async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
     let (status, body) = ingest(
         &served,
         "carrying",
-        batch(&[("c1", 1.0, Some("high")), ("c2", 2.0, Some("low"))], true, &[]),
+        batch(&[(1.0, Some("high")), (2.0, Some("low"))], true, &[]),
     )
     .await;
     assert_eq!(status, 200, "{body}");
@@ -529,7 +525,7 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
 
     // A row, so the flush has something to publish and the fold something to fold.
     let (status, body) =
-        ingest(&served, "rows", batch(&[("b1", 1.0, None)], false, &["built"])).await;
+        ingest(&served, "rows", batch(&[(1.0, None)], false, &["built"])).await;
     assert_eq!(status, 200, "{body}");
     drain(&served.server).await;
     fold(&served.server).await;
@@ -638,7 +634,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
 
     // A row, so the flush has something to publish and the fold something to fold.
     assert_eq!(
-        ingest(&served, "rows", batch(&[("r1", 1.0, Some("high"))], true, &["built"]))
+        ingest(&served, "rows", batch(&[(1.0, Some("high"))], true, &["built"]))
             .await
             .0,
         200
@@ -686,7 +682,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["titles"], 1);
     assert_eq!(
-        ingest(&served, "rows-2", batch(&[("r2", 2.0, Some("low"))], true, &["built"]))
+        ingest(&served, "rows-2", batch(&[(2.0, Some("low"))], true, &["built"]))
             .await
             .0,
         200
@@ -751,7 +747,7 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
 
     // Published into a segments manifest, then replayed from it.
     assert_eq!(
-        ingest(&served, "rows", batch(&[("c1", 1.0, Some("high"))], true, &[]))
+        ingest(&served, "rows", batch(&[(1.0, Some("high"))], true, &[]))
             .await
             .0,
         200

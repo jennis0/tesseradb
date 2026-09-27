@@ -12,7 +12,7 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayBuilder, ArrayRef, BinaryBuilder, BooleanBuilder, DictionaryArray, Float32Builder,
+    Array, ArrayBuilder, ArrayRef, BooleanBuilder, DictionaryArray, Float32Builder,
     Float64Builder, Int16Builder, Int32Builder, Int64Builder, Int8Builder, ListBuilder,
     StringBuilder, TimestampMicrosecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder,
     UInt8Builder,
@@ -23,7 +23,7 @@ use rustc_hash::FxHashMap;
 use tessera_filter::RecordValue as RV;
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::unfixed;
-use tessera_types::{EntityId, MortonCode};
+use tessera_types::MortonCode;
 
 use super::plan::{FieldPlan, Home, Named, SystemField};
 use super::walk::{PageCx, Taken};
@@ -42,7 +42,6 @@ const READ_VALUES: usize = 1 << 16;
 /// One system field's values over a run, in run order.
 enum SystemValues {
     Position(Vec<(f64, f64)>),
-    ExternalId(Vec<Option<Vec<u8>>>),
     Labels(Vec<Vec<String>>),
 }
 
@@ -92,7 +91,6 @@ enum Column {
 /// A system field's column as the page builds it.
 enum SystemColumn {
     Position(Float64Builder, Float64Builder),
-    ExternalId(BinaryBuilder),
     Labels(ListBuilder<StringBuilder>),
 }
 
@@ -215,15 +213,6 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
             SystemField::Position => {
                 SystemValues::Position(positions(generation, open, rows)?)
             }
-            SystemField::ExternalId => SystemValues::ExternalId(
-                rows.iter()
-                    .map(|row| {
-                        engine
-                            .external_id_of_in(generation, EntityId::new(u64::from(row.entity)))
-                            .map_err(EngineError::Store)
-                    })
-                    .collect::<Result<_>>()?,
-            ),
             SystemField::Labels => SystemValues::Labels(
                 rows.iter()
                     .map(|row| engine.labels_for(generation, open.served.session, row.entity))
@@ -529,11 +518,6 @@ impl SystemColumn {
             SystemColumn::Position(x, y) => {
                 std::mem::size_of_val(x.values_slice()) + std::mem::size_of_val(y.values_slice())
             }
-            SystemColumn::ExternalId(b) => {
-                b.values_slice().len()
-                    + std::mem::size_of_val(b.offsets_slice())
-                    + validity(b.validity_slice())
-            }
             SystemColumn::Labels(b) => {
                 std::mem::size_of_val(b.offsets_slice()) + string_bytes(b.values_ref())
             }
@@ -560,7 +544,6 @@ impl PageValues {
                     SystemField::Position => {
                         SystemColumn::Position(Float64Builder::new(), Float64Builder::new())
                     }
-                    SystemField::ExternalId => SystemColumn::ExternalId(BinaryBuilder::new()),
                     SystemField::Labels => {
                         SystemColumn::Labels(ListBuilder::new(StringBuilder::new()))
                     }
@@ -644,18 +627,12 @@ impl PageValues {
                     }
                 }
             }
-            for (column, values) in self.system.iter().zip(&run.system) {
-                row_bytes += match (column, values) {
-                    (_, SystemValues::Position(_)) => 16,
-                    (SystemColumn::ExternalId(b), SystemValues::ExternalId(ids)) => {
-                        let held = b.validity_slice().is_some();
-                        4 + ids[i].as_ref().map_or(0, Vec::len)
-                            + validity_growth(held, ids[i].is_none(), n)
-                    }
-                    (_, SystemValues::Labels(labels)) => {
+            for values in &run.system {
+                row_bytes += match values {
+                    SystemValues::Position(_) => 16,
+                    SystemValues::Labels(labels) => {
                         4 + labels[i].iter().map(|l| 4 + l.len()).sum::<usize>()
                     }
-                    _ => unreachable!("a run's system fields are the page's, in the page's order"),
                 };
             }
             if self.rows > 0 && self.bytes + row_bytes > max_bytes {
@@ -673,9 +650,6 @@ impl PageValues {
                     (SystemColumn::Position(x, y), SystemValues::Position(run)) => {
                         x.append_value(run[i].0);
                         y.append_value(run[i].1);
-                    }
-                    (SystemColumn::ExternalId(b), SystemValues::ExternalId(run)) => {
-                        b.append_option(run[i].take())
                     }
                     (SystemColumn::Labels(b), SystemValues::Labels(run)) => {
                         for label in std::mem::take(&mut run[i]) {
@@ -709,10 +683,6 @@ impl PageValues {
                     arrays.push(Arc::new(x.finish()));
                     fields.push(Field::new("tessera:y", DataType::Float64, false));
                     arrays.push(Arc::new(y.finish()));
-                }
-                SystemColumn::ExternalId(mut b) => {
-                    fields.push(Field::new("tessera:external_id", DataType::Binary, true));
-                    arrays.push(Arc::new(b.finish()));
                 }
                 SystemColumn::Labels(mut b) => {
                     let array = b.finish();

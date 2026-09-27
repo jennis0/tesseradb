@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    Int8Array, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -38,6 +38,8 @@ use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::Bounds;
 use tessera_store::read::{ColumnsRef, ScalarSlice};
 use tessera_types::IdentityKey;
+
+mod common;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -220,7 +222,7 @@ fn schema() -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
-    let schema = schema();
+    let schema = common::with_id(schema());
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -251,7 +253,6 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -274,47 +275,16 @@ fn segment_dir(out: &Path) -> PathBuf {
     out.join("v00000/partitions/default/views/s0/segments/seg-0")
 }
 
-fn current_prefix(out: &Path) -> String {
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
-    current["prefix"].as_str().unwrap().to_string()
-}
-
-/// Entity id → source id, through the external-id sidecar.
+/// Entity id → source id, through the unique `id` column.
 fn source_of_entity(out: &Path) -> HashMap<u32, u64> {
-    let bundle = tessera_store::open_bundle(out).unwrap();
-    let part = bundle.partitions.values().next().unwrap();
-    let prefix = current_prefix(out);
-    let mut map = HashMap::new();
-    for rel in &part.manifest.external_id_runs {
-        let path = out.join(&prefix).join(rel);
-        let reader =
-            arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
-        for batch in reader {
-            let batch = batch.unwrap();
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap();
-            let ent = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                map.insert(
-                    ent.value(i),
-                    u64::from_le_bytes(ext.value(i).try_into().unwrap()),
-                );
-            }
-        }
-    }
-    map
+    common::entities_of(out, "id", 0..N)
+        .into_iter()
+        .map(|(source, entity)| (entity, source))
+        .collect()
 }
 
 /// The row → source id map: through `tessera_id` and the identity key's inverse to the entity, and
-/// through the external-id sidecar from there. **A row is not its entity and an entity is not its
+/// through the unique `id` column from there. **A row is not its entity and an entity is not its
 /// source id** (§11.1), so the values a row carries can only be checked against the item they
 /// belong to by going back through both.
 fn source_of_row(out: &Path, columns: &ColumnsRef) -> Vec<u64> {

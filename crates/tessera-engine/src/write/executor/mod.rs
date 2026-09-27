@@ -58,10 +58,12 @@ pub(super) struct Executor {
     pub(super) unique_declarations: UniqueDeclarations,
     /// When the last fold attempt started, as a unix second, so the interval can limit attempts.
     pub(super) last_fold_start_unix: Option<u64>,
-    /// Held weakly, so a `Weak` answers if one is alive; moved to [`PendingReclaim`] at a fold.
-    pub(super) superseded_sidecars: Vec<std::sync::Weak<crate::engine::ExternalIdIndex>>,
-    /// Deleted once nothing holds its generation or sidecar; a dead node leaves it to the sweep.
+    /// Deleted once nothing holds its generation; a dead node leaves it to the sweep.
     pub(super) pending_reclaim: Vec<PendingReclaim>,
+    /// Every generation replaced since the last fold's publication, held weakly. A reader holding
+    /// one may open a file under its prefix for the first time, a unique index's run among them,
+    /// so the next fold's reclamation waits for each to be released. Taken by that fold.
+    pub(super) superseded: std::sync::Mutex<Vec<std::sync::Weak<Generation>>>,
     /// So the first tick lands one period after construction, not immediately.
     pub(super) last_tick: std::time::Instant,
     /// What every accepted write since the last tick did to each level's row forms.
@@ -324,13 +326,10 @@ impl Executor {
         // not move it.
         let (overlay, overlay_version) = match rotation.as_ref().map(|r| &r.retired) {
             Some(retired) if !retired.is_empty() => {
-                // The live external-id map loses the retired bindings first.
-                let forgotten = self.live.forget_established(retired);
                 let mut overlay = (*previous.overlay).clone();
                 let count = overlay.retire(retired);
                 tracing::info!(
                     retired = count,
-                    forgotten_external_ids = forgotten,
                     prefix = %prefix,
                     "Rule F: executed deletions retired in the fold's own publication"
                 );
@@ -351,7 +350,6 @@ impl Executor {
                 g.filter_columns = Arc::clone(&r.filter_columns);
                 g.postings = Arc::clone(&r.postings);
                 g.fragments = Arc::clone(&r.fragments);
-                g.external_index = Arc::clone(&r.external_index);
                 g.unique = Arc::clone(&r.unique);
                 g.edited = Arc::clone(&r.edited);
                 // The retired entities' pairs leave the live map with their runs' entries, or an id
@@ -411,7 +409,11 @@ impl Executor {
 
     /// Like [`Self::publish`] but takes an `Arc` directly, for the caller to reuse afterwards.
     pub(super) fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) {
-        self.generation.store(next);
+        let replaced = self.generation.swap(next);
+        let mut superseded = self.superseded.lock().unwrap_or_else(|e| e.into_inner());
+        superseded.retain(|held| held.strong_count() > 0);
+        superseded.push(Arc::downgrade(&replaced));
+        drop(superseded);
         self.health
             .record_apply(started.elapsed().as_nanos() as u64);
         #[cfg(feature = "fault-injection")]

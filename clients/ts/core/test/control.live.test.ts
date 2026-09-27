@@ -1,8 +1,8 @@
-import {Binary, Field, Float64, List, Null, RecordBatch, Schema, Table, tableToIPC, Utf8, vectorFromArray} from 'apache-arrow';
+import {Field, Float64, List, Null, RecordBatch, Schema, Table, tableToIPC, Utf8, vectorFromArray} from 'apache-arrow';
 import {afterAll, beforeAll, describe, expect, it, vi, type TestContext} from 'vitest';
 import {clusterLayerDeclaration, labelLayerDeclaration} from '../../scripts/operator.js';
 import {TesseraClient} from '../src/client.js';
-import {addressed, Control} from '../src/control.js';
+import {Control} from '../src/control.js';
 import type {Meta, ViewportRequest} from '../src/types.js';
 import {start, type Served} from './served.js';
 
@@ -12,7 +12,8 @@ import {start, type Served} from './served.js';
  * notebook item carries, and a session holding only that label sees exactly them. A session resolves
  * its terms when it is authorised, so the one that reads the rows is authorised after they land.
  *
- * The tests run in order and share the rows: each one starts from what the one before it left.
+ * The rows are named by `row_key`, a unique column the first test declares. The tests run in
+ * order and share the rows: each one starts from what the one before it left.
  */
 
 const TERM = 'ts-live-control';
@@ -45,10 +46,11 @@ function live(ctx: TestContext): void {
   if (typeof served === 'string') ctx.skip(served);
 }
 
-const bytes = (id: string) => new TextEncoder().encode(id);
-
 /** The columns declared when the tests insert: the notebook's six and the `note` the first test declares. */
 const DECLARED = ['archive', 'primary_category', 'submitted_at', 'title', 'abstract', 'arxiv_id', 'note'];
+
+/** The unique column the first test declares, which names each of the four rows. */
+const KEY = 'row_key';
 
 /** Each declared column, null on every one of `rows` rows. */
 function nulls(rows: number) {
@@ -61,7 +63,7 @@ function points(): Uint8Array {
   const x = (q.xMin + q.xMax) / 2;
   const y = (q.yMin + q.yMax) / 2;
   const table = new Table({
-    external_id: vectorFromArray(IDS.map(bytes), new Binary()),
+    [KEY]: vectorFromArray(IDS, new Utf8()),
     x: vectorFromArray(IDS.map((_, i) => x + i), new Float64()),
     y: vectorFromArray(IDS.map(() => y), new Float64()),
     access: vectorFromArray(IDS.map(() => [TERM]), new List(new Field('item', new Utf8(), true))),
@@ -73,7 +75,7 @@ function points(): Uint8Array {
 /** A value for `note` on each row. */
 function notes(): Uint8Array {
   const table = new Table({
-    external_id: vectorFromArray(IDS.map(bytes), new Binary()),
+    [KEY]: vectorFromArray(IDS, new Utf8()),
     note: vectorFromArray(IDS.map((id) => `note of ${id}`), new Utf8())
   });
   return tableToIPC(table, 'stream');
@@ -87,12 +89,12 @@ async function seen(): Promise<{visible: bigint; ids: bigint[]}> {
   return {visible: result.tiles.reduce((sum, t) => sum + t.visible, 0n), ids: [...result.ids]};
 }
 
-/** The served id of each row still visible, by external id. */
-async function byExternalId(): Promise<Map<string, bigint>> {
+/** The served id of each row still visible, by its `row_key`. */
+async function byKey(): Promise<Map<string, bigint>> {
   const out = new Map<string, bigint>();
   for (const id of (await seen()).ids) {
     const item = await client.item(token, id);
-    out.set(item.externalId!, id);
+    out.set(item.fields[KEY] as string, id);
   }
   return out;
 }
@@ -107,11 +109,12 @@ describe('Control against a live server', () => {
     live(ctx);
     const declared = await control.declareAttribute({name: 'note', type: 'keyword', index: true});
     expect(declared.status).toBe(201);
+    expect((await control.declareAttribute({name: KEY, type: 'keyword', unique: true})).status).toBe(201);
     expect(await seen()).toEqual({visible: 0n, ids: []});
 
     const inserted = await control.ingest(points(), {view: 's0'});
     expect(inserted).toMatchObject({status: 200, body: {rows: 4, created: 4}});
-    // The same rows again name the items they created, by external id, and change nothing.
+    // The same rows again name the items they created, by their keys, and change nothing.
     const again = await control.ingest(points(), {view: 's0'});
     expect(again).toMatchObject({status: 200, body: {rows: 4, created: 0, unchanged: 4}});
     expect(again.body.tessera_ids).toEqual(inserted.body.tessera_ids);
@@ -120,7 +123,7 @@ describe('Control against a live server', () => {
     const after = await seen();
     expect(after.visible).toBe(4n);
     expect(after.ids).toHaveLength(4);
-    expect([...(await byExternalId()).keys()].sort()).toEqual(IDS.map(addressed).sort());
+    expect([...(await byKey()).keys()].sort()).toEqual([...IDS].sort());
   });
 
   it('replays a page resent under its batch id, and lands it again under a fresh one', async (ctx) => {
@@ -148,11 +151,10 @@ describe('Control against a live server', () => {
     const edited = await control.ingest(notes(), {view: 's0'});
     expect(edited).toMatchObject({status: 200, body: {rows: 4, edited: 4}});
     await flushed();
-    const rows = await byExternalId();
+    const rows = await byKey();
     expect(rows.size).toBe(4);
-    for (const [external, id] of rows) {
-      const expected = `note of ${new TextDecoder().decode(Uint8Array.from(atob(external), (c) => c.charCodeAt(0)))}`;
-      expect((await client.item(token, id)).fields.note).toBe(expected);
+    for (const [key, id] of rows) {
+      expect((await client.item(token, id)).fields.note).toBe(`note of ${key}`);
     }
   });
 
@@ -167,23 +169,21 @@ describe('Control against a live server', () => {
     // The declaration `publish-clusters.mjs` sends.
     const declaration = clusterLayerDeclaration({name: LAYER, title: 'picked rows', view: 's0', visibility: null, minVisible: 1, computed: ['centroid', 'box', 'hull']});
     expect((await control.declareLayer(declaration)).status).toBe(201);
-    const published = await control.publish(LAYER, {
-      level: 0,
-      addressing: 'external',
-      artifacts: [{key: 'pair', members: [addressed('row-2'), addressed('row-3')]}]
-    });
+    const published = await control.publish(LAYER, {level: 0, field: KEY, artifacts: [{key: 'pair', members: ['row-2', 'row-3']}]});
     expect(published.status).toBe(201);
     pair = BigInt((published.body.artifacts as {key: string; tessera_id: string}[])[0]!.tessera_id);
     await flushed();
     expect(await client.artifact(token, pair, {view: 's0'})).toMatchObject({layer: LAYER, key: 'pair', maskedCount: 2n});
 
-    const grown = await control.grow(LAYER, {level: 0, addressing: 'external', artifacts: [{key: 'pair', members: [addressed('row-1')]}]});
+    // By `tessera_id` where the body names no field.
+    const row1 = (await byKey()).get('row-1')!;
+    const grown = await control.grow(LAYER, {level: 0, artifacts: [{key: 'pair', members: [row1.toString()]}]});
     expect(grown.status).toBe(200);
     await flushed();
     expect((await client.artifact(token, pair, {view: 's0'})).maskedCount).toBe(3n);
 
-    const rows = new Table({key: vectorFromArray(['pair'], new Utf8()), members: vectorFromArray([[addressed('row-0')]], new List(new Field('item', new Utf8(), true)))});
-    const schema = new Schema(rows.schema.fields, new Map([['addressing', 'external'], ['level', '0']]));
+    const rows = new Table({key: vectorFromArray(['pair'], new Utf8()), members: vectorFromArray([['row-0']], new List(new Field('item', new Utf8(), true)))});
+    const schema = new Schema(rows.schema.fields, new Map([['field', KEY], ['level', '0']]));
     const arrow = tableToIPC(new Table(schema, rows.batches.map((b) => new RecordBatch(schema, b.data))), 'stream');
     expect((await control.grow(LAYER, arrow, {wait: true})).body).toMatchObject({visible: true});
     expect((await client.artifact(token, pair, {view: 's0'})).maskedCount).toBe(4n);
@@ -195,12 +195,12 @@ describe('Control against a live server', () => {
     expect((await control.declareLayer(labelLayerDeclaration({name: labels, title: 'labels', view: 's0', clusters: LAYER}))).status).toBe(201);
     const published = await control.publish(labels, {
       level: 0,
-      addressing: 'external',
+      field: KEY,
       artifacts: [
         {
           key: 'l-pair',
-          members: [addressed('row-2'), addressed('row-3')],
-          content: [{values: ['two rows'], generated_from: [addressed('row-2'), addressed('row-3')]}],
+          members: ['row-2', 'row-3'],
+          content: [{values: ['two rows'], generated_from: ['row-2', 'row-3']}],
           attached_to: {layer: LAYER, level: 0, key: 'pair'}
         }
       ]
@@ -248,8 +248,8 @@ describe('Control against a live server', () => {
 
   it('deletes a row, which the viewer no longer counts or opens', async (ctx) => {
     live(ctx);
-    const gone = (await byExternalId()).get(addressed('row-0'))!;
-    const deleted = await control.changes([{external_id: addressed('row-0'), op: 'delete'}]);
+    const gone = (await byKey()).get('row-0')!;
+    const deleted = await control.changes([{field: KEY, value: 'row-0', op: 'delete'}]);
     expect(deleted.status).toBe(200);
     const after = await seen();
     expect(after.visible).toBe(3n);
@@ -260,12 +260,12 @@ describe('Control against a live server', () => {
 
   it('suppresses a row from the moment it is accepted, and serves it again once lifted', async (ctx) => {
     live(ctx);
-    const hidden = (await byExternalId()).get(addressed('row-1'))!;
-    expect((await control.changes([{external_id: addressed('row-1'), op: 'suppress'}])).status).toBe(200);
+    const hidden = (await byKey()).get('row-1')!;
+    expect((await control.changes([{tessera_id: hidden.toString(), op: 'suppress'}])).status).toBe(200);
     expect((await seen()).visible).toBe(2n);
     await expect(client.item(token, hidden)).rejects.toMatchObject({status: 404});
 
-    expect((await control.changes([{external_id: addressed('row-1'), op: 'unsuppress'}])).status).toBe(200);
+    expect((await control.changes([{field: KEY, value: 'row-1', op: 'unsuppress'}])).status).toBe(200);
     const after = await seen();
     expect(after.visible).toBe(3n);
     expect(after.ids).toContain(hidden);
@@ -278,7 +278,7 @@ describe('Control against a live server', () => {
     expect((await control.compact()).status).toBe(202);
     await vi.waitFor(async () => expect(await folds()).toBeGreaterThan(before), {timeout: 30_000, interval: 50});
     expect((await seen()).visible).toBe(3n);
-    expect((await byExternalId()).has(addressed('row-0'))).toBe(false);
+    expect((await byKey()).has('row-0')).toBe(false);
   });
 
   it('drops the layer, which the viewer then no longer lists', async (ctx) => {

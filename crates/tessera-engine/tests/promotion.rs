@@ -116,10 +116,9 @@ fn reader_at(tmp: &Path, root: &Path) -> Engine {
 }
 
 /// Ingest one item at (5, 5) carrying exactly `descriptors`.
-fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> EntityId {
+fn ingest_with(engine: &Engine, batch: &str, descriptors: &[&[u8]]) -> EntityId {
     let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
     let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -130,7 +129,7 @@ fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> Ent
         scoped: Vec::new(),
     };
     engine
-        .ingest_rows(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0]
 }
 

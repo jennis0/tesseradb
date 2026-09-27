@@ -118,12 +118,11 @@ table = csv.read_csv(
     read_options=csv.ReadOptions(column_names=columns),
     parse_options=csv.ParseOptions(delimiter="\t", quote_char=False),
     convert_options=csv.ConvertOptions(
-        column_types={"geonameid": pa.uint64(), "population": pa.int64()},
+        column_types={"population": pa.int64()},
     ),
 )
 
 points = pa.table({
-    "entity_id": table["geonameid"],
     "lon": table["longitude"],
     "lat": table["latitude"],
     "name": table["name"],
@@ -136,11 +135,10 @@ print(f"wrote {points.num_rows} places to points.parquet")
 
 Because the file has no header, the script supplies the 19 column names itself, in the order
 `readme.txt` lists them. GeoNames doesn't quote its fields, so the script tells pyarrow not to look
-for quotes. It reads the id and the population as whole numbers, then writes six columns to
-`points.parquet` under the names we'll tell Tessera to expect.
+for quotes. It reads the population as a whole number, then writes five columns to
+`points.parquet` under the names we'll tell Tessera to expect. Each row will be one place on the
+map.
 
-- `entity_id` is a value that tells each row apart from every other. Tessera looks for a column
-  with this name, and the GeoNames id is already unique, so we use that.
 - `lon` and `lat` are the place's position in degrees.
 - `name`, `feature_class` and `population` are what we want to see, search and filter on.
 
@@ -372,7 +370,7 @@ tessera check
 
 ```
 ...
-  FAILED       attribute 'populaton': declared type 'i64', read from a column named 'populaton', which source 'points' does not carry. Its columns are: entity_id, lon, lat, name, feature_class, population
+  FAILED       attribute 'populaton': declared type 'i64', read from a column named 'populaton', which source 'points' does not carry. Its columns are: lon, lat, name, feature_class, population
 ...
 check FAILED: 1 finding(s) across 2 source(s). Nothing was read but Parquet schemas, so a clean check is not a clean build: it cannot see a value against a closed vocabulary, a member id that resolves to nothing, or where the data sits inside a view's extent
 ```

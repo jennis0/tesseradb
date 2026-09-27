@@ -373,7 +373,6 @@ mod tests {
             .map(|(entity, x, score)| FlushRow {
                 entity_id: EntityId::new(*entity),
                 number: EntityId::new(*entity),
-                external_id: None,
                 x: *x,
                 y: 0.0,
                 scalars: vec![score.clone()],
@@ -398,7 +397,7 @@ mod tests {
                 scalar_schema: &schema(),
                 row_base: 0,
                 entity_floor: 0,
-            }, &[],
+            },
         )
         .expect("flush");
         FoldSegmentInput {

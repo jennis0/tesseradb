@@ -80,20 +80,20 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str) -> Engine
     .expect("engine opens")
 }
 
-fn ingest(engine: &Engine, external_id: &str, x: f64, y: f64) {
+/// One item at `(x, y)` holding the `id` of `key`, under the batch id `key`.
+fn ingest(engine: &Engine, key: &str, x: f64, y: f64) {
     let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
         x,
         y,
-        scalars: Vec::new(),
+        scalars: keyed(key),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
         scoped: Vec::new(),
     };
     engine
-        .ingest_rows(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], key.to_string(), [0u8; 32])
         .expect("ingest is accepted");
 }
 
@@ -326,10 +326,7 @@ fn a_refresh_two_publications_late_still_patches_the_session() {
     // The session's only entry is now two generations back and kept as the refresh's base. The
     // drill-down must not answer from it: that would call the first flush's item absent while the
     // viewport, finding neither rung, rebuilds and draws it.
-    let first = engine
-        .resolve_external_id(b"ext-1")
-        .unwrap()
-        .expect("the first flush's item resolves");
+    let first = item_of_key(&engine, "ext-1").expect("the first flush's item resolves");
     let id = engine.tessera_id_of(first).unwrap();
     assert!(
         engine.item(&session, id).unwrap().is_some(),

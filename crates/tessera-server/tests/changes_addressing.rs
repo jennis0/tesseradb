@@ -1,14 +1,9 @@
-//! `/control/changes` addresses an entity two ways (contracts §3.4).
+//! `/control/changes` names an item two ways: by its `tessera_id`, or by a unique field and a
+//! value of it.
 //!
-//! **The hole this closes.** Contracts §3.4 r6 makes an external id optional at ingest, and an item
-//! that arrived without one was addressable by *nothing* on this endpoint — not deletable, not
-//! suppressible, at all. A `tessera_id` is what every client already holds for such an item, and it
-//! is what `/control/ingest` returned when the item was accepted.
-//!
-//! **Why the identifier never reaches the WAL.** A `tessera_id` is a keyed permutation of entity
-//! space, so a record carrying one would resolve under whatever key the bundle holds at replay: a
-//! rotation would silently redirect every such deny to a different entity. It is inverted once, at
-//! admission, and the entity is what is persisted (`WalRecord::ChangeBatch`).
+//! A `tessera_id` is a keyed permutation of entity space, so a record carrying one would resolve
+//! under whatever key the bundle holds at replay. It is inverted once, at admission, and the
+//! entity is what the write-ahead log keeps.
 
 mod common;
 
@@ -60,8 +55,8 @@ async fn post_changes(server: &TestServer, body: &serde_json::Value) -> reqwest:
         .unwrap()
 }
 
-/// Ingest one item **without** an external id and return the `tessera_id` the 200 carried — the
-/// only name that item will ever have.
+/// Ingest one item holding no unique value and return the `tessera_id` the 200 carried: the only
+/// name that item has.
 async fn ingest_anonymous(server: &TestServer, batch_id: &str) -> u64 {
     let body = build_ingest_batch_optional(&[(None, 20.0, 20.0, "0")]);
     let resp = server
@@ -79,10 +74,9 @@ async fn ingest_anonymous(server: &TestServer, batch_id: &str) -> u64 {
     ingested_ids(&json)[0]
 }
 
-/// **The hole this closes**: an item ingested with no external id is addressable — and therefore
-/// deniable — only by `tessera_id`. Before this it could not be denied at all.
+/// An item holding no unique value is suppressed and unsuppressed by its `tessera_id`.
 #[tokio::test]
-async fn an_item_ingested_without_an_external_id_is_suppressible_by_tessera_id() {
+async fn an_item_holding_no_unique_value_is_suppressible_by_tessera_id() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let _ = authorise(&server, &["0"]).await;
@@ -100,8 +94,7 @@ async fn an_item_ingested_without_an_external_id_is_suppressible_by_tessera_id()
     assert_eq!(
         resp.status(),
         200,
-        "an item with no external id has exactly one name, and this endpoint now takes it — \
-         before this it could not be addressed on this endpoint at all"
+        "an item holding no unique value is named by its tessera_id"
     );
 
     // **Not asserted through a viewport count, deliberately.** The item is still buffered: it has
@@ -128,14 +121,14 @@ async fn a_mixed_bulk_batch_applies_both_address_forms() {
     let token = token_for(&server, &["0"]).await;
 
     // Two different fixture items, named two different ways.
-    let by_external = member(5);
+    let by_value = member(5);
     let by_tessera = a_drawn_tessera_id(&server, &token).await;
     let before = visible(&server, &token).await;
 
     let resp = post_changes(
         &server,
         &serde_json::json!([
-            { "external_id": by_external, "op": "suppress" },
+            { "field": "id", "value": by_value, "op": "suppress" },
             { "tessera_id": by_tessera.to_string(), "op": "suppress" },
         ]),
     )
@@ -176,7 +169,8 @@ async fn an_out_of_range_tessera_id_refuses_the_whole_batch() {
     );
 }
 
-/// Exactly one address form. Every shape below is a wholesale refusal before anything is enqueued.
+/// Exactly one address form, and a `field` declared unique. Every shape below is a wholesale
+/// refusal before anything is enqueued.
 #[tokio::test]
 async fn an_element_names_exactly_one_address_form() {
     let tmp = TempDir::new().unwrap();
@@ -184,17 +178,32 @@ async fn an_element_names_exactly_one_address_form() {
     let token = token_for(&server, &["0"]).await;
 
     let id = ingest_anonymous(&server, "anon-1").await;
-    let external = member(5);
     let before = visible(&server, &token).await;
 
     for (what, body) in [
         (
             "both forms is ambiguous",
-            serde_json::json!([{ "external_id": external, "tessera_id": id.to_string(), "op": "suppress" }]),
+            serde_json::json!([{ "field": "id", "value": member(5), "tessera_id": id.to_string(), "op": "suppress" }]),
         ),
         (
             "neither form is unaddressable",
             serde_json::json!([{ "op": "suppress" }]),
+        ),
+        (
+            "a field without a value names nothing",
+            serde_json::json!([{ "field": "id", "op": "suppress" }]),
+        ),
+        (
+            "a value without a field names nothing",
+            serde_json::json!([{ "value": member(5), "op": "suppress" }]),
+        ),
+        (
+            "an undeclared field is not unique",
+            serde_json::json!([{ "field": "nothing", "value": member(5), "op": "suppress" }]),
+        ),
+        (
+            "an integer field's value is decimal digits",
+            serde_json::json!([{ "field": "id", "value": "five", "op": "suppress" }]),
         ),
         (
             "a bare number is what loses u64s past 2^53 in a browser",

@@ -23,8 +23,8 @@ mesh            = "mesh-descriptors.parquet"
 mesh_members    = "mesh-descriptors-members.parquet"
 
 [defaults]
-source          = "points"
-entity_id_field = "entity_id"
+source     = "points"
+join_field = "id"
 
 # ---------------------------------------------------------------------------------------------
 # **One view.** MedCPT was trained on 255 million query-article click pairs for *retrieval*, and
@@ -61,6 +61,13 @@ width      = "u8"
 value_set  = "closed"
 visibility = "public"
 source     = "branch"
+
+# The join field: the row number `prepare.py` gives each article (`entity` in the member files).
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 # `timestamp_us` rather than `i64`, so the unit is a fact the client reads off `/v1/meta` rather
 # than a convention it has to be told. Indexed as well as rendered: a map of forty years of

@@ -270,7 +270,6 @@ describe('<tessera-map> at a switch', () => {
 describe('<tessera-item-card> and the views it reaches', () => {
   const detail = {
     fields: {title: 'A paper'},
-    externalId: null,
     labels: ['quant-ph', '2024'],
     views: [
       {id: 'knn', x: 2 ** 31, y: 2 ** 30},

@@ -302,8 +302,6 @@ pub(crate) fn retire_dead_view_artifacts(
 pub(crate) struct WritePathState {
     wal: Wal,
     allocator: Allocator,
-    established: std::collections::HashMap<Vec<u8>, EntityId>,
-    established_inverse: FxHashMap<EntityId, Vec<u8>>,
     resolver_state: ResolverState,
     accepted_batches: AcceptedBatches,
     pub(crate) registry: LayerRegistry,
@@ -347,8 +345,6 @@ impl WritePath {
         WritePath {
             live: Arc::new(LiveState {
                 allocator: Mutex::new(state.allocator),
-                established: Mutex::new(state.established),
-                established_inverse: Mutex::new(state.established_inverse),
                 resolver_state: Mutex::new(state.resolver_state),
                 accepted_batches: Mutex::new(state.accepted_batches),
                 registry: Mutex::new(state.registry),
@@ -527,8 +523,8 @@ impl WritePath {
                         Arc::clone(&health.flush_completed_pending),
                     ),
                     last_fold_start_unix: None,
-                    superseded_sidecars: Vec::new(),
                     pending_reclaim: Vec::new(),
+                    superseded: std::sync::Mutex::new(Vec::new()),
                     last_tick: std::time::Instant::now(),
                     pending_forms: std::collections::BTreeMap::new(),
                     #[cfg(feature = "fault-injection")]
@@ -873,8 +869,8 @@ impl Drop for WritePath {
     /// Disconnect the queues, then join.
     ///
     /// Without this the executor outlives its `Engine` and keeps appending and fsyncing while the
-    /// caller's next statement is typically `TempDir::drop`, producing intermittent `ENOENT` from
-    /// the sidecar rename in tests spread across many files.
+    /// caller's next statement is typically `TempDir::drop`, producing intermittent `ENOENT` in
+    /// tests spread across many files.
     ///
     /// The join is unconditional and does not wait on background work: [`LifecycleHandle`] is not
     /// `Clone` and this type is its only owner, so dropping it below closes both queues, and the

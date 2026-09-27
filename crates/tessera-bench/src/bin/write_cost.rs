@@ -12,10 +12,10 @@
 //!   last flush. `WriteStage::ApplyBufferClone` already times it; this sweeps the buffer from
 //!   empty to a million rows and reads the stage off a fixed 100-row probe window at each depth,
 //!   so the per-window term and the per-row term are separated rather than added together.
-//!   The same sweep answers whether the **four per-row laps** inside `ApplyRows`
-//!   (`RowEstablished`, `RowEstablishedInv`, `RowBufferInsert`, `RowWalPos`) are a material share
-//!   of the per-row cost: their sum against `ApplyRows` is printed here, and the residual against
-//!   a build with those four laps removed is a second run of this same binary. `--unique`
+//!   The same sweep answers whether the **two per-row laps** inside `ApplyRows`
+//!   (`RowBufferInsert`, `RowWalPos`) are a material share of the per-row cost: their sum against
+//!   `ApplyRows` is printed here, and the residual against a build with those laps removed is a
+//!   second run of this same binary. `--unique`
 //!   declares a unique keyword column first and gives every row a value of its own, so the
 //!   window also carries the unique check and the live index entries.
 //! - **B** — `Executor::apply_changes` deep-copies the whole [`Overlay`] once per deny window, and
@@ -228,7 +228,6 @@ fn synth_rows(
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
-                external_id: Some(format!("write-cost-{n}").into_bytes()),
                 view: fx.view.clone(),
                 join: None,
                 descriptors: fx.descriptors.clone(),
@@ -295,8 +294,6 @@ impl Window {
 
     fn per_row_laps(&self) -> u64 {
         [
-            WriteStage::RowEstablished,
-            WriteStage::RowEstablishedInv,
             WriteStage::RowBufferInsert,
             WriteStage::RowWalPos,
         ]
@@ -444,31 +441,29 @@ fn experiment_a(
     }
 
     println!(
-        "\n-- suspect 3: the four per-row laps against the loop they are inside (ns per row) --\n\
-         {:>10} {:>12} {:>12} {:>9} {:>11} {:>11} {:>12} {:>10}",
-        "buffered", "apply_rows", "4 laps", "share", ".est_fwd", ".est_inv", ".buf_insert", ".wal_pos"
+        "\n-- suspect 3: the two per-row laps against the loop they are inside (ns per row) --\n\
+         {:>10} {:>12} {:>12} {:>9} {:>12} {:>10}",
+        "buffered", "apply_rows", "2 laps", "share", ".buf_insert", ".wal_pos"
     );
     for (cell, depth) in depths.iter().enumerate() {
         let w = best[cell].expect("a measured cell");
         let rows = PROBE_ROWS as f64;
         let laps = w.per_row_laps();
         println!(
-            "{:>10} {:>12.1} {:>12.1} {:>8.1}% {:>11.1} {:>11.1} {:>12.1} {:>10.1}",
+            "{:>10} {:>12.1} {:>12.1} {:>8.1}% {:>12.1} {:>10.1}",
             depth,
             w.at(WriteStage::ApplyRows) as f64 / rows,
             laps as f64 / rows,
             100.0 * laps as f64 / w.at(WriteStage::ApplyRows).max(1) as f64,
-            w.at(WriteStage::RowEstablished) as f64 / rows,
-            w.at(WriteStage::RowEstablishedInv) as f64 / rows,
             w.at(WriteStage::RowBufferInsert) as f64 / rows,
             w.at(WriteStage::RowWalPos) as f64 / rows,
         );
     }
     println!(
-        "\nThe four laps are timed by the same clock they charge, so their sum is **their own cost \
+        "\nThe two laps are timed by the same clock they charge, so their sum is **their own cost \
          plus the work**; what the sum over `apply_rows` bounds is how much of the loop the \
          instrumentation could possibly be. The residual is a second run of this binary built with \
-         those four `lap` calls removed, compared at the same depths."
+         those two `lap` calls removed, compared at the same depths."
     );
     Ok(())
 }
@@ -841,7 +836,6 @@ fn experiment_d(depths: &[usize], rounds: usize) {
         let mut buffer = IngestBuffer::new();
         for id in 0..*depth as u64 {
             let row = WalRow {
-                external_id: Some(format!("d-{id}").into_bytes()),
                 entity_id: EntityId::new(id),
                 view: "v".to_string(),
                 join: false,

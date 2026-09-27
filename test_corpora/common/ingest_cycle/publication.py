@@ -15,8 +15,9 @@ import pyarrow.parquet as pq
 # Publication — the artifacts, after their points
 # ---------------------------------------------------------------------------------------------
 
-#: The base64 alphabet, indexed by sextet.
-_B64 = np.frombuffer(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", np.uint8)
+#: The most decimal digits a `u64` takes, and each power of ten below it.
+_DIGITS = 20
+_POWERS = np.array([10**k for k in range(1, _DIGITS)], np.uint64)
 
 #: A member table's row, as the partitioning pass writes it: the artifact's ordinal in publication
 #: order, the row's rank (-1 is the membership, `k` is `contents[k]`'s generating set) and the
@@ -26,44 +27,46 @@ MEMBER_RECORD = np.dtype([("idx", "<i4"), ("rank", "<i2"), ("entity", "<u8")])
 EMPTY_ENTITIES = np.zeros(0, np.uint64)
 
 
-def external_ids_b64(entities: np.ndarray) -> np.ndarray:
-    """`(n, 12)` uint8: each entity id as eight little-endian bytes, base64, the external id a
-    publication names base rows and ingested rows alike by. Eight bytes are two full base64
-    groups and one of two bytes, so the twelfth character is always `=`.
-    """
-    raw = np.ascontiguousarray(entities, dtype="<u8").view(np.uint8).reshape(-1, 8)
-    out = np.empty((len(raw), 12), np.uint8)
-    for group in range(2):
-        b0, b1, b2 = raw[:, 3 * group], raw[:, 3 * group + 1], raw[:, 3 * group + 2]
-        out[:, 4 * group] = _B64[b0 >> 2]
-        out[:, 4 * group + 1] = _B64[((b0 & 3) << 4) | (b1 >> 4)]
-        out[:, 4 * group + 2] = _B64[((b1 & 15) << 2) | (b2 >> 6)]
-        out[:, 4 * group + 3] = _B64[b2 & 63]
-    b6, b7 = raw[:, 6], raw[:, 7]
-    out[:, 8] = _B64[b6 >> 2]
-    out[:, 9] = _B64[((b6 & 3) << 4) | (b7 >> 4)]
-    out[:, 10] = _B64[(b7 & 15) << 2]
-    out[:, 11] = ord("=")
-    return out
+def digit_counts(entities: np.ndarray) -> np.ndarray:
+    """How many decimal digits each entity id takes."""
+    values = np.asarray(entities, np.uint64)
+    return 1 + np.searchsorted(_POWERS, values, side="right")
 
 
-def json_list_bytes(count: int) -> int:
-    """The length [`json_list`] produces for `count` ids: `["` + 12 chars + `"` and a comma each."""
-    return 2 if count == 0 else 15 * count + 1
+def json_list_bytes(entities: np.ndarray) -> int:
+    """The length [`json_list`] produces for `entities`: `[` and `]`, and each id's digits, two
+    quotes and a comma, bar the last comma."""
+    if not len(entities):
+        return 2
+    return int(digit_counts(entities).sum()) + 3 * len(entities) + 1
+
+
+def cells_within(entities: np.ndarray, budget: int) -> int:
+    """How many leading `entities` [`json_list`] fits in `budget` bytes, brackets included."""
+    if budget < 2:
+        return 0
+    cumulative = np.cumsum(digit_counts(entities) + 3)
+    return int(np.searchsorted(cumulative, budget - 1, side="right"))
 
 
 def json_list(entities: np.ndarray) -> bytes:
-    """A JSON array of base64 external ids, as bytes: one `(n, 15)` byte array — quote, twelve
-    characters, quote, comma — then one copy, rather than a Python string built per member.
+    """A JSON array of entity ids as decimal strings, the join field's values, as bytes: one
+    `(n, 23)` byte array holding each id's quote, twenty digits, quote and comma, masked to the
+    digits each id takes, then one copy, rather than a Python string built per member.
     """
     if not len(entities):
         return b"[]"
-    cell = np.empty((len(entities), 15), np.uint8)
+    values = np.asarray(entities, np.uint64).copy()
+    cell = np.empty((len(values), _DIGITS + 3), np.uint8)
     cell[:, 0] = ord('"')
-    cell[:, 1:13] = external_ids_b64(entities)
-    cell[:, 13] = ord('"')
-    cell[:, 14] = ord(",")
-    return b"[" + cell.tobytes()[:-1] + b"]"
+    for at in range(_DIGITS, 0, -1):
+        cell[:, at] = (values % 10).astype(np.uint8) + ord("0")
+        values //= 10
+    cell[:, _DIGITS + 1] = ord('"')
+    cell[:, _DIGITS + 2] = ord(",")
+    keep = np.ones(cell.shape, bool)
+    keep[:, 1 : _DIGITS + 1] = np.arange(_DIGITS) >= (_DIGITS - digit_counts(entities))[:, None]
+    return b"[" + cell[keep].tobytes()[:-1] + b"]"
 
 
 def roster_table(path: Path) -> pa.Table:
@@ -215,7 +218,7 @@ def rank_groups(idx: np.ndarray, rank: np.ndarray, entity: np.ndarray):
 
 class Publication:
     """One declared layer's roster, published in batches under a byte cap. Every artifact
-    carries its whole member set, addressed by external id; one whose body would exceed
+    carries its whole member set, named by the join field `field`; one whose body would exceed
     `--publish-max-bytes` is published with as many members as fit, then grown through
     `PATCH /control/layers/{name}/artifacts`. Only an artifact whose key, content and parents
     alone do not fit is declined.
@@ -237,10 +240,13 @@ class Publication:
         max_bytes: int,
         bucket_rows: int,
         limits: dict,
+        field: str,
         view_column: str | None = None,
         access_column: str | None = None,
     ):
         self.table = in_parent_order(roster_table(roster))
+        #: The join field every member, as a decimal value, is named by.
+        self.field = field
         #: The roster column naming the view each artifact belongs to, on a group-scoped layer.
         self.view_column = view_column
         #: The roster column each artifact's own access label is read from, sent as `access`.
@@ -466,17 +472,18 @@ class Publication:
     def _grow_body(self, level: int, i: int, members: np.ndarray) -> bytes:
         """One growth of roster row `i`, naming its view on a group-scoped layer."""
         return (
-            b'{"level":' + str(level).encode() + b',"addressing":"external","artifacts":[{"key":'
-            + json.dumps(self.rows[i]["key"]).encode() + self._view(i) + b',"members":'
-            + json_list(members) + b"}]}"
+            b'{"level":' + str(level).encode() + b',"field":' + json.dumps(self.field).encode()
+            + b',"artifacts":[{"key":' + json.dumps(self.rows[i]["key"]).encode() + self._view(i)
+            + b',"members":' + json_list(members) + b"}]}"
         )
 
     def _grow_slices(self, level: int, i: int, members: np.ndarray):
         """`("grow", level, key, body, members)` for `members`, in slices under the growth
-        route's byte cap and its member count."""
+        route's byte cap and its member count, each slice sized at the widest member's width."""
         key = self.rows[i]["key"]
         fixed = len(self._grow_body(level, i, EMPTY_ENTITIES)) - 2
-        per_slice = max(1, min((self.grow_max_bytes - fixed - 1) // 15, self.max_members))
+        widest = int(digit_counts(members).max(initial=1)) + 3
+        per_slice = max(1, min((self.grow_max_bytes - fixed - 1) // widest, self.max_members))
         self.stats["grown_artifacts"] += 1
         self.stats["grown_members_sent"] += len(members)
         for start in range(0, len(members), per_slice):
@@ -520,17 +527,17 @@ class Publication:
         fixed = len(head) + len(tail) + len(self._body(0, [b""]))
         if content_heads:
             fixed += len(b',"content":[') + 1 + sum(
-                len(h) + json_list_bytes(len(g)) + 2 for h, g in content_heads
+                len(h) + json_list_bytes(g) + 2 for h, g in content_heads
             )
         budget = self.max_bytes - fixed
-        if budget < json_list_bytes(0):
-            size = fixed + json_list_bytes(len(members))
+        if budget < json_list_bytes(EMPTY_ENTITIES):
+            size = fixed + json_list_bytes(members)
             self.declined_keys.add(row["key"])
             self.stats["declined_artifacts"].append(
                 {"key": row["key"], "members": len(members), "body_bytes": size, "content_counted": True}
             )
             return None, 0, 0, None
-        fit = max(0, (budget - 1) // 15)
+        fit = cells_within(members, budget)
         remainder = None
         if fit < len(members):
             members, remainder = members[:fit], members[fit:]
@@ -544,8 +551,8 @@ class Publication:
 
     def _body(self, level: int, blocks: list[bytes]) -> bytes:
         return (
-            b'{"level":' + str(level).encode() + b',"addressing":"external","artifacts":['
-            + b",".join(blocks)
+            b'{"level":' + str(level).encode() + b',"field":' + json.dumps(self.field).encode()
+            + b',"artifacts":[' + b",".join(blocks)
             + b"]}"
         )
 

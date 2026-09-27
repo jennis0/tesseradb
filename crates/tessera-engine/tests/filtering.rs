@@ -272,7 +272,7 @@ fn fixture() -> Fixture {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: bundle.clone(),
         limit: None,
         identity_key: test_key(),
@@ -280,12 +280,11 @@ fn fixture() -> Fixture {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("the fixture builds");
 
@@ -621,7 +620,6 @@ fn ingest_and_flush_with(
 ) -> u64 {
     let flushes_before = engine.write_executor_stats().flushes;
     let row = UnallocatedRow {
-        external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -638,7 +636,7 @@ fn ingest_and_flush_with(
             // `bonus` is the nullable numeric: the default above passes `WalScalar::Null`, which is
             // how an ingested item says it carries no value for a column (decision 0064).
             bonus,
-            // The analysed column, keyed off the external id so each flushed item carries a word
+            // The analysed column, keyed off the batch name so each flushed item carries a word
             // no other item holds.
             WalScalar::Utf8(format!("shared {external}")),
         ],
@@ -1257,13 +1255,12 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
 
     let long = UnallocatedRow {
-        external_id: Some(b"long".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
-        // The schema declares six columns.
+        // The schema declares seven columns, the fixture's `id` last.
         scalars: vec![
             WalScalar::Utf8("eng".to_string()),
             WalScalar::Utf8("xx".to_string()),
@@ -1271,6 +1268,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
             WalScalar::I32(43),
             WalScalar::Null,
             WalScalar::Utf8("shared p97".to_string()),
+            WalScalar::Null,
             WalScalar::I32(1),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
@@ -1283,8 +1281,8 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         matches!(
             err,
             tessera_engine::AcceptError::ScalarArity {
-                expected: 6,
-                got: 7,
+                expected: 7,
+                got: 8,
                 ..
             }
         ),
@@ -1292,7 +1290,6 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     );
 
     let short = UnallocatedRow {
-        external_id: Some(b"short".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -1312,7 +1309,6 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     // The engine is still usable — a refusal before the submit acks nothing, burns no entity id
     // (I9) and leaves the executor running.
     let good = UnallocatedRow {
-        external_id: Some(b"good".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -1807,7 +1803,6 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
 
     // Accepted and acked, deliberately *not* flushed — so it is in the candidate and in no layer.
     let row = UnallocatedRow {
-        external_id: Some(b"buffered".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],

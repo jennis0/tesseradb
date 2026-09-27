@@ -15,7 +15,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::Engine as _;
 
 use sha2::{Digest, Sha256};
 
@@ -29,7 +28,8 @@ use crate::decode::{
     labels_col, parse_ingest_batch, Address, BodyEncoding, DecodeError, ParsedBatch,
 };
 use crate::error::{
-    map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
+    map_accept_error, map_change_batch_error, map_engine_error, map_join_error, map_store_error,
+    ApiError,
 };
 use crate::health::is_ready;
 use crate::state::{ApiJson, ApiJsonRejection, ApiQuery, AppState};
@@ -335,7 +335,8 @@ struct IngestResp {
     /// Rows that named an item and changed nothing, which cost no write.
     unchanged: u64,
     over_bound: u64,
-    over_bound_ids: Vec<String>,
+    /// The positions in the batch of the first 100 over-bound rows.
+    over_bound_rows: Vec<u64>,
     /// Rows whose coordinates fell outside the view's projection domain and were stored on the
     /// frame's edge. Always 0 under `projection = "none"`.
     clipped: u64,
@@ -477,14 +478,10 @@ fn run_ingest(
     }
 
     let rows = items.len() as u64;
-    // Kept for the over-bound report, which lists rows by the external id the caller sent.
-    let external_ids: Vec<Option<Vec<u8>>> =
-        items.iter().map(|item| item.external_id.clone()).collect();
     let rows_in: Vec<tessera_engine::IngestRow> = items
         .into_iter()
         .map(|item| tessera_engine::IngestRow {
             tessera_id: item.tessera_id,
-            external_id: item.external_id,
             labels: item.labels,
             position: item.position,
             scalars: item.scalars,
@@ -506,14 +503,12 @@ fn run_ingest(
             map_accept_error(e)
         })?;
 
-    // An over-bound row is counted and kept, never refused; one with no external id is counted
-    // but cannot be listed. External ids are arbitrary bytes, so base64 is the lossless JSON form.
-    let over_bound_ids: Vec<String> = receipt
+    // An over-bound row is counted and kept, never refused.
+    let over_bound_rows: Vec<u64> = receipt
         .over_bound
         .iter()
-        .filter_map(|at| external_ids[*at].as_deref())
         .take(100)
-        .map(|id| base64::engine::general_purpose::STANDARD.encode(id))
+        .map(|&at| at as u64)
         .collect();
     Ok(IngestResp {
         rows,
@@ -522,7 +517,7 @@ fn run_ingest(
         added: receipt.added,
         unchanged: receipt.unchanged,
         over_bound: receipt.over_bound.len() as u64,
-        over_bound_ids,
+        over_bound_rows,
         clipped,
         clamped,
         tessera_ids: receipt
@@ -593,12 +588,16 @@ async fn ingest(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChangeItem {
-    /// Base64, since external ids are arbitrary bytes. Exactly one of this and `tessera_id`.
-    #[serde(default)]
-    external_id: Option<String>,
     /// A decimal string, since a JSON number loses `u64` precision past 2^53 in JavaScript.
     #[serde(default)]
     tessera_id: Option<String>,
+    /// A unique field, with `value`: the other way to name an item.
+    #[serde(default)]
+    field: Option<String>,
+    /// One value of `field`, as its text: a keyword itself, an integer or a timestamp in decimal
+    /// digits.
+    #[serde(default)]
+    value: Option<String>,
     op: String,
 }
 
@@ -634,15 +633,8 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             }
         };
 
-        let address = match (&item.external_id, &item.tessera_id) {
-            (Some(external_id), None) => Address::External(
-                base64::engine::general_purpose::STANDARD
-                    .decode(external_id)
-                    .map_err(|e| {
-                        ApiError::Contract(format!("external_id is not valid base64: {e}"))
-                    })?,
-            ),
-            (None, Some(tessera_id)) => {
+        let address = match (&item.tessera_id, &item.field, &item.value) {
+            (Some(tessera_id), None, None) => {
                 let id: u64 = tessera_id.parse().map_err(|_| {
                     ApiError::Contract(
                         "tessera_id must be a base-10 string, such as \"12345\", not a JSON \
@@ -652,16 +644,14 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
                 })?;
                 Address::Tessera(TesseraId::new(id))
             }
-            (Some(_), Some(_)) => {
+            (None, Some(field), Some(value)) => Address::Unique {
+                field: field.clone(),
+                value: value.clone(),
+            },
+            _ => {
                 return Err(ApiError::Contract(
-                    "a change names exactly one of external_id / tessera_id, never both"
-                        .to_string(),
-                ))
-            }
-            (None, None) => {
-                return Err(ApiError::Contract(
-                    "a change names exactly one of external_id / tessera_id, and this names \
-                     neither"
+                    "a change names its item by a tessera_id, or by a unique field and a value \
+                     of it; send `tessera_id`, or `field` and `value`"
                         .to_string(),
                 ))
             }
@@ -689,69 +679,76 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
 }
 
 /// Every change's entity, in order. Resolved before anything is enqueued: an unissued
-/// `tessera_id` is answered ahead of an unknown external id, wherever each sits in the request.
+/// `tessera_id` is answered ahead of a value naming nothing, wherever each sits in the request.
 fn resolve_changes(
     state: &AppState,
     decoded: &[DecodedChange],
 ) -> Result<Vec<(EntityId, ChangeOp)>, ApiError> {
     let resolved = resolve_addresses(state, decoded.iter().map(|d| &d.address))?;
-    if let Some(index) = decoded
-        .iter()
-        .zip(&resolved)
-        .position(|(d, entity)| matches!(d.address, Address::Tessera(_)) && entity.is_none())
-    {
-        return Err(ApiError::Unknown(format!(
-            "the tessera_id of item {index} names nothing this deployment issued"
-        )));
+    for tessera_first in [true, false] {
+        let unknown = decoded.iter().zip(&resolved).position(|(d, entity)| {
+            matches!(d.address, Address::Tessera(_)) == tessera_first && entity.is_none()
+        });
+        if let Some(index) = unknown {
+            let what = match tessera_first {
+                true => "tessera_id",
+                false => "value",
+            };
+            return Err(ApiError::Unknown(format!(
+                "the {what} of item {index} names nothing this deployment holds"
+            )));
+        }
     }
-    decoded
+    Ok(decoded
         .iter()
         .zip(resolved)
-        .map(|(d, entity)| {
-            let entity =
-                entity.ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
-            Ok((entity, d.op))
-        })
-        .collect()
+        .map(|(d, entity)| (entity.expect("every address resolved above"), d.op))
+        .collect())
 }
 
-/// Resolves each address to its entity, in order, `None` where it names nothing. Each form is one
-/// batched call.
+/// Resolves each address to its entity, in order, `None` where it names nothing: one batched call
+/// for the `tessera_id`s and one for each unique field's values.
 fn resolve_addresses<'a>(
     state: &AppState,
     addresses: impl IntoIterator<Item = &'a Address>,
 ) -> Result<Vec<Option<EntityId>>, ApiError> {
     let addresses: Vec<&Address> = addresses.into_iter().collect();
-    let ids: Vec<TesseraId> = addresses
+    let mut resolved: Vec<Option<EntityId>> = vec![None; addresses.len()];
+    let tessera: Vec<(usize, TesseraId)> = addresses
         .iter()
-        .filter_map(|address| match address {
-            Address::Tessera(id) => Some(*id),
-            Address::External(_) => None,
+        .enumerate()
+        .filter_map(|(at, address)| match address {
+            Address::Tessera(id) => Some((at, *id)),
+            Address::Unique { .. } => None,
         })
         .collect();
-    let tessera = state
+    let ids: Vec<TesseraId> = tessera.iter().map(|(_, id)| *id).collect();
+    let found = state
         .engine
         .resolve_tessera_ids(&ids)
         .map_err(map_store_error)?;
-    let keys: Vec<Vec<u8>> = addresses
-        .iter()
-        .filter_map(|address| match address {
-            Address::External(key) => Some(key.clone()),
-            Address::Tessera(_) => None,
-        })
-        .collect();
-    let external = state
-        .engine
-        .resolve_external_ids(&keys)
-        .map_err(map_store_error)?;
-    let (mut tessera, mut external) = (tessera.into_iter(), external.into_iter());
-    Ok(addresses
-        .iter()
-        .map(|address| match address {
-            Address::Tessera(_) => tessera.next().flatten(),
-            Address::External(_) => external.next().flatten(),
-        })
-        .collect())
+    for ((at, _), entity) in tessera.iter().zip(found) {
+        resolved[*at] = entity;
+    }
+    let mut by_field: std::collections::BTreeMap<&str, (Vec<usize>, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for (at, address) in addresses.iter().enumerate() {
+        if let Address::Unique { field, value } = address {
+            let (positions, values) = by_field.entry(field.as_str()).or_default();
+            positions.push(at);
+            values.push(value.clone());
+        }
+    }
+    for (field, (positions, values)) in by_field {
+        let found = state
+            .engine
+            .resolve_unique_values(field, &values)
+            .map_err(map_engine_error)?;
+        for (at, entity) in positions.into_iter().zip(found) {
+            resolved[at] = entity;
+        }
+    }
+    Ok(resolved)
 }
 
 /// `POST /control/changes`: deletions, suppressions and unsuppressions. Never answers 429, and has
@@ -1472,7 +1469,7 @@ fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Res
 
 /// `PATCH /control/layers/{name}/artifacts`'s Arrow form: one row per artifact, `key: utf8` and
 /// `members: list<utf8>` or `large_list<utf8>`, with `view` and `access` optional, and
-/// `addressing` and `level` in the schema metadata. Decoded into the JSON form's body, so
+/// `field` and `level` in the schema metadata. Decoded into the JSON form's body, so
 /// the handler has one path.
 fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     use arrow::array::{LargeListArray, ListArray, StringArray};
@@ -1494,29 +1491,14 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
         }
     }
     for name in metadata.keys() {
-        if !matches!(name.as_str(), "addressing" | "level") {
+        if !matches!(name.as_str(), "field" | "level") {
             return Err(ApiError::Contract(format!(
                 "growth body: schema metadata `{name}` is not one this route takes; the envelope \
-                 is `addressing` and `level`"
+                 is `field` and `level`"
             )));
         }
     }
-    let addressing =
-        match metadata.get("addressing").map(String::as_str) {
-            Some("external") => Addressing::External,
-            Some("tessera") => Addressing::Tessera,
-            Some(other) => {
-                return Err(ApiError::Contract(format!(
-                    "growth body: schema metadata `addressing` is '{other}'; it is `external` or \
-                 `tessera`"
-                )))
-            }
-            None => return Err(ApiError::Contract(
-                "growth body: the IPC schema's metadata carries no `addressing`; the Arrow form \
-                 carries `addressing` and `level` there"
-                    .to_string(),
-            )),
-        };
+    let field = metadata.get("field").cloned();
     let level = match metadata.get("level") {
         None => 0,
         Some(text) => text.parse::<u32>().map_err(|_| {
@@ -1656,24 +1638,24 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     }
     Ok(GrowBody {
         level,
-        addressing,
+        field,
         default_space: None,
         artifacts,
     })
 }
 
-/// Resolves every member address of a batch to an entity at the boundary. `flat` holds every
-/// address and `widths` each artifact's share. An unresolvable member refuses the batch, never
-/// dropped.
+/// Resolves every member address of a batch to an entity at the boundary: a `tessera_id`, or a
+/// value of `field` where the batch names one. `flat` holds every address and `widths` each
+/// artifact's share. An unresolvable member refuses the batch, never dropped.
 fn resolve_member_addresses(
     state: &AppState,
-    addressing: Addressing,
+    field: Option<&str>,
     flat: &[&String],
     widths: &[usize],
     layout: &str,
 ) -> Result<Vec<tessera_types::EntityId>, ApiError> {
-    let resolved: Vec<Option<tessera_types::EntityId>> = match addressing {
-        Addressing::Tessera => {
+    let resolved: Vec<Option<tessera_types::EntityId>> = match field {
+        None => {
             let ids = flat
                 .iter()
                 .map(|raw| {
@@ -1687,37 +1669,14 @@ fn resolve_member_addresses(
                 .resolve_tessera_ids(&ids)
                 .map_err(map_store_error)?
         }
-        Addressing::External => {
-            let keys: Vec<Vec<u8>> = flat
-                .iter()
-                .map(|s| {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(s)
-                        .map_err(|e| {
-                            ApiError::Contract(format!("a member external_id is not base64: {e}"))
-                        })
-                })
-                .collect::<Result<_, _>>()?;
+        Some(field) => {
+            let values: Vec<String> = flat.iter().map(|value| (*value).clone()).collect();
             state
                 .engine
-                .resolve_external_ids(&keys)
-                .map_err(map_store_error)?
+                .resolve_unique_values(field, &values)
+                .map_err(map_engine_error)?
         }
     };
-
-    // When nothing resolved and the bundle carries no external ids at all, say so once rather
-    // than refusing the first member as if it were a typo.
-    if matches!(addressing, Addressing::External)
-        && !resolved.is_empty()
-        && resolved.iter().all(Option::is_none)
-        && !state.engine.bundle_carries_external_ids()
-    {
-        return Err(ApiError::Contract(
-            "this deployment carries no external ids, so no member can be addressed by one; \
-             rebuild with `--mint-external-ids`, or address members by `tessera_id`"
-                .to_string(),
-        ));
-    }
 
     if let Some(position) = resolved.iter().position(Option::is_none) {
         // Named by its position in the batch, never by the id the caller sent.
@@ -1731,22 +1690,16 @@ fn resolve_member_addresses(
     Ok(resolved.into_iter().flatten().collect())
 }
 
-/// How a batch addresses its members: one form per request rather than per member, since a
-/// per-member tag would be most of a large membership's body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Addressing {
-    External,
-    Tessera,
-}
-
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublishBody {
     /// Defaults to the layer's only level. A layer that declared none has exactly level 0.
     #[serde(default)]
     level: u32,
-    addressing: Addressing,
+    /// The unique field whose values name the members, one form per request since a per-member
+    /// tag would be most of a large membership's body. Absent, members are `tessera_id`s.
+    #[serde(default)]
+    field: Option<String>,
     /// The space of a row's shape and authored shape content where the row names none: `"view"`
     /// (the default) or `"wgs84"`, projected by the view's own transform. A view with projection
     /// `none` refuses `wgs84`.
@@ -1766,7 +1719,7 @@ struct IncomingArtifactBody {
     /// entity-scoped one. Keys are unique per view, and an edge may not cross views.
     #[serde(default)]
     view: Option<String>,
-    /// Base64 external ids or decimal `tessera_id` strings, by the batch's `addressing`. Absent
+    /// Decimal `tessera_id` strings, or values of the batch's `field` where it names one. Absent
     /// only when `excluding` is given; an empty list is a membership that holds nobody.
     #[serde(default)]
     members: Option<Vec<String>>,
@@ -2169,7 +2122,7 @@ async fn publish_artifacts(
     }
     let PublishBody {
         level,
-        addressing,
+        field,
         default_space,
         mut artifacts,
     } = artifact_json(&body, "publication")?;
@@ -2299,7 +2252,7 @@ async fn publish_artifacts(
 
             let resolved = resolve_member_addresses(
                 state,
-                addressing,
+                field.as_deref(),
                 &flat,
                 &widths,
                 "its members first, then each content's generating set",
@@ -2392,15 +2345,16 @@ async fn publish_artifacts(
     acknowledge(&state, &wait, declared(batch.created == 0), body).await
 }
 
-/// `PATCH /control/layers/{name}/artifacts`'s body. Addressing and `default_space` are
-/// as on [`PublishBody`].
+/// `PATCH /control/layers/{name}/artifacts`'s body. `field` and `default_space` are as on
+/// [`PublishBody`].
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GrowBody {
     /// Defaults to the layer's only level.
     #[serde(default)]
     level: u32,
-    addressing: Addressing,
+    #[serde(default)]
+    field: Option<String>,
     #[serde(default)]
     default_space: Option<String>,
     artifacts: Vec<GrowingArtifactBody>,
@@ -2485,7 +2439,7 @@ async fn grow_memberships(
     })?;
     let GrowBody {
         level,
-        addressing,
+        field,
         default_space,
         mut artifacts,
     } = match body_encoding(&headers)? {
@@ -2542,8 +2496,13 @@ async fn grow_memberships(
                 .iter()
                 .flat_map(|a| a.members.iter().chain(a.leaving.iter()))
                 .collect();
-            let resolved =
-                resolve_member_addresses(state, addressing, &flat, &widths, "its members")?;
+            let resolved = resolve_member_addresses(
+                state,
+                field.as_deref(),
+                &flat,
+                &widths,
+                "its members",
+            )?;
 
             let mut entities = resolved.into_iter();
             let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts

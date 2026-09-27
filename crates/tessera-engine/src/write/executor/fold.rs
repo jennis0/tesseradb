@@ -272,16 +272,6 @@ pub(super) fn fold_rebases(
         .collect();
     consumed_segments.is_subset(&listed_segments)
         && plan.tiers.iter().all(|t| live_manifest.deltas.contains(t))
-        && plan
-            .runs
-            .iter()
-            .all(|r| live_manifest.external_id_runs.contains(r))
-        && plan.locator_extents.iter().all(|path| {
-            live_manifest
-                .locator_extents
-                .iter()
-                .any(|extent| &extent.path == path)
-        })
         && plan.attr_extents.iter().all(|consumed| {
             live_manifest
                 .attr_extents
@@ -349,14 +339,12 @@ struct DerivedPass<'a> {
 /// consume, i.e. what published during its flight.
 ///
 /// Listed order is preserved: for segments it is entity order, required by
-/// `RowSpace::with_extent`; for runs it is recency, read by newest-first resolution. Nothing of a
+/// `RowSpace::with_extent`. Nothing of a
 /// dead incarnation is carried; a dropped view's segments are left behind with the superseded
 /// prefix's files instead of naming an incarnation the new manifest does not declare.
 pub(super) struct CarriedExtents<'a> {
     segments: Vec<&'a tessera_store::manifest::SegmentDescriptor>,
     tiers: Vec<String>,
-    runs: Vec<String>,
-    locators: Vec<tessera_store::manifest::LocatorExtent>,
     attrs: Vec<tessera_store::manifest::AttrExtent>,
     records: Vec<tessera_store::manifest::RecordExtent>,
     texts: Vec<tessera_store::manifest::TextExtent>,
@@ -446,18 +434,6 @@ pub(super) fn carried_forward<'a>(
             .filter(|t| !plan.tiers.contains(t))
             .cloned()
             .collect(),
-        runs: live_manifest
-            .external_id_runs
-            .iter()
-            .filter(|r| !plan.runs.contains(r))
-            .cloned()
-            .collect(),
-        locators: live_manifest
-            .locator_extents
-            .iter()
-            .filter(|extent| !plan.locator_extents.contains(&extent.path))
-            .cloned()
-            .collect(),
         attrs,
         records: not_consumed(
             &live_manifest.record_extents,
@@ -522,9 +498,8 @@ pub(super) fn carried_forward<'a>(
     }
 }
 
-/// Exactly the files the new manifest names that the fold did not write, deduplicated: a carried
-/// segment's run and locator are already in the run and locator lists, and linking one path twice
-/// is what `hard_link_forward` refuses.
+/// Exactly the files the new manifest names that the fold did not write, deduplicated: linking one
+/// path twice is what `hard_link_forward` refuses.
 pub(super) fn carried_files(
     partition: &str,
     live_manifest: &SegmentsManifest,
@@ -566,8 +541,6 @@ pub(super) fn carried_files(
             rels.insert(edited_rows);
         }
     }
-    rels.extend(forward.runs.iter().cloned());
-    rels.extend(forward.locators.iter().map(|e| e.path.clone()));
     rels.extend(forward.tiers.iter().cloned());
     for extent in &forward.attrs {
         rels.extend(extent.files().map(String::from));
@@ -992,7 +965,7 @@ impl Executor {
 
         // Every carried-forward segment must begin at or above its view's base, or the prefix will
         // not open. Checked before anything is written, since that would surface only after
-        // `CURRENT` flips. A carried locator extent may overlap the base: a lookup asks both.
+        // `CURRENT` flips.
         for descriptor in &forward.segments {
             let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
                 // A view created and flushed since the plan was taken has no base here; that is
@@ -1005,12 +978,6 @@ impl Executor {
                 return Err("a carried-forward segment begins below the fold's own base permutation".to_string());
             }
         }
-        // A run arriving during the flight would become `external_id_runs[0]`, and the sidecar
-        // would then take a flush's entity-range extent for the full-length base locator.
-        if completed.external_id_run.is_none() && !forward.runs.is_empty() {
-            return Err("the deployment gained its first external-id run during the fold's flight".to_string());
-        }
-
         // ---- retirement, evaluated here and nowhere earlier ---------------------------------------
         let mut carried = crate::compact::CarriedForward::new();
         for descriptor in &forward.segments {
@@ -1029,13 +996,6 @@ impl Executor {
                 );
             };
             carried.add_segment(extent);
-        }
-        let prefix_dir = self.prefix_dir(live);
-        for extent in &forward.locators {
-            let listed = tessera_store::listed_entities(&prefix_dir, extent).map_err(|e| {
-                format!("a carried-forward locator extent could not be read ({e})")
-            })?;
-            carried.add_locator_extent(extent, &listed);
         }
         let executed = crate::compact::executed(&plan.tombstones, &carried);
         Ok(FoldApplies {
@@ -1178,10 +1138,6 @@ impl Executor {
                     .map(|d| (*d).clone()),
             );
         }
-        let mut external_id_runs = Vec::with_capacity(1 + forward.runs.len());
-        external_id_runs.extend(completed.external_id_run.clone());
-        external_id_runs.extend(forward.runs.iter().cloned());
-
         // Read before the swap, while the edited-items map still holds the retired entities'
         // pairs.
         let freed = match freed_by(&live, &executed) {
@@ -1272,8 +1228,6 @@ impl Executor {
             attr_extents: forward.attrs.clone(),
             record_extents: forward.records.clone(),
             entity_terms_extents: forward.entity_terms.clone(),
-            external_id_runs,
-            locator_extents: forward.locators.clone(),
             unique_indexes: forward
                 .unique
                 .iter()
@@ -1448,6 +1402,12 @@ impl Executor {
             self.diverge_from_current(&completed.prefix, &reason);
             return;
         }
+        // Taken here, while every generation in it is over the prefix this fold supersedes: one
+        // published after the swap is over the new prefix, and the next fold waits for it.
+        let mut generations = std::mem::take(
+            &mut *self.superseded.lock().unwrap_or_else(|e| e.into_inner()),
+        );
+        generations.push(Arc::downgrade(&live));
         stairs.record("13 open");
 
         self.live.with_artifacts(|store| {
@@ -1497,10 +1457,10 @@ impl Executor {
             omitted_segments,
             ..
         } = forward;
+        drop(live);
         self.pending_reclaim.push(PendingReclaim {
-            generation: live,
+            generations,
             prefix_dir: from_prefix_dir,
-            superseded_sidecars: std::mem::take(&mut self.superseded_sidecars),
         });
         self.reclaim_superseded_prefixes();
         stairs.record("17 reclaim");
@@ -1546,19 +1506,16 @@ impl Executor {
             },
             dropped_view_segments = omitted_segments,
             "a compaction fold published: the bundle is one base segment per partition-view, one \
-             base postings tier, one external-id run and one locator, plus whatever landed during \
-             its flight"
+             base postings tier, plus whatever landed during its flight"
         );
     }
 
     /// The `MANIFEST.json` a fold's new prefix carries: the live one, with the schema wound back to
     /// what it was at the plan, every live vocabulary binding folded in, and the fold's own files.
     ///
-    /// `entity_id_high_water` here is where the base locator ends, the snapshot's external-id
-    /// bound: `ExternalIdSidecar::deferred_from_manifest` takes it as the base locator's declared
-    /// length.
-    /// `Engine::open` seeds the allocator's floor from the max of this and the side-manifest's
-    /// live value, so the lower value is safe for the allocator.
+    /// `entity_id_high_water` here is the snapshot's: `Engine::open` seeds the allocator's floor
+    /// from the max of this and the side-manifest's live value, so the lower value is safe for the
+    /// allocator.
     ///
     /// The vocabulary bindings fold in verbatim, never re-derived, re-sorted or re-numbered: keys
     /// and codes are byte-identical everywhere, and `columns.arrow` stores the code alone, so
@@ -1596,7 +1553,7 @@ impl Executor {
                 .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
         }
         crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
-        bundle_manifest.entity_id_high_water = plan.external_id_bound;
+        bundle_manifest.entity_id_high_water = plan.high_water;
         bundle_manifest.files = completed.files.clone();
         let carried_bindings: Vec<_> = live
             .bundle
@@ -1665,11 +1622,8 @@ impl Executor {
 
     /// Delete every superseded prefix nothing is reading any more.
     ///
-    /// Waits for a strong-count of one on the generation and its sidecar, and a zero weak count on
-    /// `superseded_sidecars`, before unlinking: the generation pointer has already moved, so no new
-    /// holder can appear, and the three counts together name every reader that could still resolve
-    /// a path under this prefix (a plain strong count misses a generation holding a sidecar a
-    /// coalesce replaced, which the weak list covers).
+    /// Waits for every generation published over the prefix to be released before unlinking: the
+    /// generation pointer has already moved, so no new holder can appear.
     ///
     /// A failure alarms once and drops the entry rather than retrying every tick; the tree stands
     /// as an orphan.
@@ -1679,23 +1633,11 @@ impl Executor {
         }
         let mut still_read = Vec::new();
         for pending in std::mem::take(&mut self.pending_reclaim) {
-            if Arc::strong_count(&pending.generation) > 1
-                || Arc::strong_count(&pending.generation.external_index) > 1
-                || pending
-                    .superseded_sidecars
-                    .iter()
-                    .any(|held| held.strong_count() > 0)
-            {
+            if pending.generations.iter().any(|held| held.strong_count() > 0) {
                 still_read.push(pending);
                 continue;
             }
-            let PendingReclaim {
-                generation,
-                prefix_dir,
-                superseded_sidecars,
-            } = pending;
-            drop(superseded_sidecars);
-            drop(generation);
+            let prefix_dir = pending.prefix_dir;
             match tessera_store::reclaim_prefix(&prefix_dir) {
                 Ok(()) => tracing::info!(
                     prefix = %prefix_dir.display(),
@@ -2593,14 +2535,11 @@ pub(super) fn fold_segments(
     out
 }
 
-/// One superseded prefix awaiting reclamation, and the two `Arc`s whose release says no thread can
-/// still resolve a path inside it. See [`Executor::pending_reclaim`].
+/// One superseded prefix awaiting reclamation, and the generations published over it, whose
+/// release says no thread can still resolve a path inside it. See [`Executor::superseded`].
 pub(in crate::write) struct PendingReclaim {
-    generation: Arc<Generation>,
+    generations: Vec<std::sync::Weak<Generation>>,
     prefix_dir: PathBuf,
-    /// Every sidecar that was live over this prefix before the one the held generation carries.
-    /// See [`Executor::superseded_sidecars`].
-    superseded_sidecars: Vec<std::sync::Weak<crate::engine::ExternalIdIndex>>,
 }
 
 /// Seconds since the Unix epoch, or `None` if the clock is before it.

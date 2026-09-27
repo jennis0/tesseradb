@@ -9,7 +9,6 @@ use axum::extract::{Path as AxumPath, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use tessera_types::{GenerationStamp, TesseraId};
@@ -1311,10 +1310,6 @@ struct ItemResp {
     /// The full record by declared column name, a category as its vocabulary key. An absent field
     /// is omitted, never `null`.
     fields: serde_json::Map<String, serde_json::Value>,
-    /// Base64, present only when the item has an external id. This is the only place one appears
-    /// on the viewer plane, so the conformance byte-scanner must exclude this response.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    external_id: Option<String>,
     /// The item's labels that this session satisfies, sorted; never the full set, so a viewer
     /// learns no compartment they do not hold. Always present, even empty.
     labels: Vec<String>,
@@ -1361,10 +1356,6 @@ fn run_item(
         .map(|f| (f.name, scalar_out_json(f.value)))
         .collect();
 
-    let external_id = item
-        .external_id
-        .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
-
         // The engine filtered both by the session's visible views; this only renames fields.
     let views = item
         .views
@@ -1390,7 +1381,6 @@ fn run_item(
 
     Ok(ItemResp {
         fields,
-        external_id,
         // The engine intersects these with the session's satisfied terms.
         labels: item.labels,
         views,

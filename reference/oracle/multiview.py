@@ -171,6 +171,11 @@ SEED = 20260831
 _FX_SEED = SEED + 1
 _GEOMETRY_SEED = SEED + 2
 
+#: The unique attribute every file names its items by, and the column each file carries it in. Its
+#: value is the item's source id.
+JOIN_FIELD = "source_id"
+JOIN_COLUMN = "entity_id"
+
 POINTS_NAME = "multiview-world.parquet"
 SCHEMA_NAME = "multiview-config.toml"
 DEPLOYMENT_NAME = "multiview-tessera.toml"
@@ -409,7 +414,7 @@ source = "{_source_name(key)}"
 
 [defaults]
 source          = "{WORLD_VIEW}"
-entity_id_field = "entity_id"
+join_field      = "{JOIN_FIELD}"
 # The anchor (decision 0112): within a signature group, entity ids order by the item's Morton code
 # in *this* view. Explicit because the declaration carries several views and the ids are permanent
 # (I9) — reordering the blocks below must not silently re-key a rebuild.
@@ -435,6 +440,14 @@ visibility       = "public"
 point_visibility = {{ field = "access", default = "public" }}
 metadata         = {{ label = "text" }}
 {quarters}
+# The item's source id, which every file names it by.
+[[attribute]]
+name   = "{JOIN_FIELD}"
+type   = "u64"
+unique = true
+field  = "{JOIN_COLUMN}"
+source = "{WORLD_VIEW}"
+
 # The handle→item join, entity-scoped and rendered (per-point-attributes §4.2).
 [[attribute]]
 name   = "fx_key"
@@ -614,12 +627,7 @@ def extent_of(view_id: str) -> tuple[float, float, float, float]:
 
 
 def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
-    """The `tessera build` invocation, in one place so [`recipe`] records what is run.
-
-    `--mint-external-ids` because every join the differential makes — planted value to served
-    point — goes through the external-id sidecar, which is the only key-independent bridge from a
-    row back to the source id the fixture planted against.
-    """
+    """The `tessera build` invocation, in one place so [`recipe`] records what is run."""
     return [
         str(CLI_BIN),
         "build",
@@ -627,7 +635,6 @@ def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
         str(work_dir / DEPLOYMENT_NAME),
         "--out",
         str(bundle_root),
-        "--mint-external-ids",
     ]
 
 
@@ -735,7 +742,7 @@ def verify(bundle: Bundle) -> VerificationReport:
     because each of them is silent when it breaks: a corpus whose compartments correlated with its
     view membership would pass every differential in the suite vacuously.
     """
-    entity_of = bundle.entities_by_source()
+    entity_of = entities_by_source(bundle)
     if len(entity_of) != N_ITEMS:
         raise ValueError(f"the bundle holds {len(entity_of)} items, not {N_ITEMS}")
 
@@ -790,16 +797,21 @@ def verify(bundle: Bundle) -> VerificationReport:
     )
 
 
+def entities_by_source(bundle: Bundle) -> dict[int, int]:
+    """`source id -> entity id`, from the bundle's index of the join field."""
+    return bundle.unique_entities(JOIN_FIELD)
+
+
 def entity_of_fx_key(bundle: Bundle) -> dict[int, int]:
     """`fx_key -> entity id` — the handle→item join's last hop, which is the bundle's to answer.
 
     The fixture planted `fx_key` against a **source** id; the build decided which entity that
-    source became. Joining through `Bundle.entities_by_source` is what makes each planted value
+    source became. Joining through [`entities_by_source`] is what makes each planted value
     the right entity's, and it is not the identity: entity ids tie-break on the anchor view's
     Morton code (decision 0073, decision 0112), so a block's entities are a permutation of its
     sources.
     """
-    entity_of = bundle.entities_by_source()
+    entity_of = entities_by_source(bundle)
     return {key: entity_of[source] for source, key in enumerate(fx_keys())}
 
 
@@ -809,7 +821,7 @@ def mood_columns(bundle: Bundle) -> dict[str, dict[int, str]]:
     [`sentiment_columns`]'s construction over the other family, and for its reason: built from
     [`mood_of`] and never from the bundle's postings, so the comparison is a differential.
     """
-    entity_of = bundle.entities_by_source()
+    entity_of = entities_by_source(bundle)
     return {
         f"{GROUP}:{key}": {
             entity_of[i]: value
@@ -827,7 +839,7 @@ def heat_columns(bundle: Bundle) -> dict[str, dict[int, float]]:
     back, so the pinned-leaf comparison behind the gate is a differential like the ones in front
     of it.
     """
-    entity_of = bundle.entities_by_source()
+    entity_of = entities_by_source(bundle)
     return {
         f"{SEALED_GROUP}:{key}": {
             entity_of[i]: value
@@ -843,7 +855,7 @@ def glow_columns(bundle: Bundle) -> dict[str, dict[int, float]]:
 
     [`sentiment_columns`]'s construction over [`glow_of`], and its reason.
     """
-    entity_of = bundle.entities_by_source()
+    entity_of = entities_by_source(bundle)
     return {
         f"{GROUP}:{key}": {
             entity_of[i]: value
@@ -862,7 +874,7 @@ def sentiment_columns(bundle: Bundle) -> dict[str, dict[int, float]]:
     module doc argues it at the class). Keyed by entity, planted by source; the join is the
     bundle's, exactly as `entity_of_fx_key`'s is.
     """
-    entity_of = bundle.entities_by_source()
+    entity_of = entities_by_source(bundle)
     columns: dict[str, dict[int, float]] = {}
     for key in QUARTER_KEYS:
         columns[f"{GROUP}:{key}"] = {

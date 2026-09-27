@@ -259,12 +259,8 @@ pub enum WriteStage {
     WalFsync,
     /// `apply_window`'s deep copy of the ingest buffer (F3's operand).
     ApplyBufferClone,
-    /// `apply_window`'s per-row loop: `established`, `established_inverse`, the buffer insert.
+    /// `apply_window`'s per-row loop: the buffer insert and its log position.
     ApplyRows,
-    /// Within [`WriteStage::ApplyRows`]: the forward `established` insert (`Vec<u8>`-keyed).
-    RowEstablished,
-    /// Within [`WriteStage::ApplyRows`]: the `established_inverse` insert (`EntityId`-keyed).
-    RowEstablishedInv,
     /// Within [`WriteStage::ApplyRows`]: `IngestBuffer::insert_row_with_terms`.
     RowBufferInsert,
     /// Within [`WriteStage::ApplyRows`]: `IngestBuffer::set_wal_pos`.
@@ -287,7 +283,7 @@ pub enum WriteStage {
 }
 
 impl WriteStage {
-    pub const COUNT: usize = 15;
+    pub const COUNT: usize = 13;
     pub const ALL: [WriteStage; Self::COUNT] = [
         WriteStage::Allocate,
         WriteStage::WalAppend,
@@ -297,8 +293,6 @@ impl WriteStage {
         WriteStage::ApplyBufferClone,
         WriteStage::ApplyRows,
         WriteStage::ApplySwap,
-        WriteStage::RowEstablished,
-        WriteStage::RowEstablishedInv,
         WriteStage::RowBufferInsert,
         WriteStage::RowWalPos,
         WriteStage::AdmitWindow,
@@ -315,8 +309,6 @@ impl WriteStage {
             WriteStage::ApplyBufferClone => "buffer_clone",
             WriteStage::ApplyRows => "apply_rows",
             WriteStage::ApplySwap => "swap",
-            WriteStage::RowEstablished => "  .est_fwd",
-            WriteStage::RowEstablishedInv => "  .est_inv",
             WriteStage::RowBufferInsert => "  .buf_insert",
             WriteStage::RowWalPos => "  .wal_pos",
             WriteStage::AdmitWindow => "admit",

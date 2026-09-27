@@ -37,8 +37,6 @@ pub enum BuildStage {
     Assignment,
     /// 6. One pass over the pairs file, writing `postings.arrow` and `pairs.parquet`.
     PostingsWrite,
-    /// 7. The external-id sidecar and its locator.
-    ExternalIds,
     /// 8. Geometry permuted from ordinal into entity order, plus the declared attribute tail. No
     ///    points-file I/O: [`BuildStage::GeometryRead`] did the reading.
     AttributeTail,
@@ -110,7 +108,6 @@ impl BuildStage {
             BuildStage::SignatureSort => "signature_sort",
             BuildStage::Assignment => "assignment",
             BuildStage::PostingsWrite => "postings_write",
-            BuildStage::ExternalIds => "external_ids",
             BuildStage::AttributeTail => "attribute_tail",
             BuildStage::FilterPostings => "filter_postings",
             BuildStage::TextIndex => "text_index",
@@ -126,7 +123,7 @@ impl BuildStage {
         }
     }
 
-    pub const ALL: [BuildStage; 20] = [
+    pub const ALL: [BuildStage; 19] = [
         BuildStage::SourceIds,
         BuildStage::Dictionary,
         BuildStage::PairsPack,
@@ -134,7 +131,6 @@ impl BuildStage {
         BuildStage::SignatureSort,
         BuildStage::Assignment,
         BuildStage::PostingsWrite,
-        BuildStage::ExternalIds,
         BuildStage::AttributeTail,
         BuildStage::Layers,
         BuildStage::UniqueIndexes,

@@ -123,7 +123,7 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points_path.to_path_buf(), &id_schema()),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -131,12 +131,11 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: id_schema(),
     })
     .expect("the deep-frame fixture builds");
 }
@@ -203,9 +202,7 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
 
     let rows: Vec<UnallocatedRow> = points
         .iter()
-        .enumerate()
-        .map(|(i, (x, y))| UnallocatedRow {
-            external_id: Some(format!("ingested-{i}").into_bytes()),
+        .map(|(x, y)| UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: vec![ALL_TERM.to_string().into_bytes()],

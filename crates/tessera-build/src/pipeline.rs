@@ -23,7 +23,6 @@
 //! | per batch | sort+dedup the bucket; per-ordinal `starts`; signature sort + refinement; entity ids; **band emit** | plan |
 //! | per band | cursor-scatter (already sorted), Roaring-encode in sub-chunks, spool + `pairs.parquet` | plan |
 //! | — | postings assembly: the spool becomes `postings.arrow`'s one record batch, zero-copy | 8(T+1) |
-//! | points ×1 | external ids (when minting) | 20N |
 //! | points ×1 | geometry, the tiler sort, and the segment | 28N |
 //!
 //! ## A column no pass reads at an entity is never permuted
@@ -59,7 +58,7 @@
 //!
 //! ## Ordinal resolution never assumes anything about the ids themselves
 //!
-//! Source entity ids are caller-supplied external identifiers: they may be dense, sparse,
+//! Source ids are the caller's join values: they may be dense, sparse,
 //! clustered, or arbitrary bit patterns, and no pass may exploit their shape. What the build
 //! *establishes* is the ordinal space ([`Ids`]): the sorted, duplicate-free union of every view's
 //! ids, and an item's ordinal is its index in it.
@@ -84,8 +83,7 @@
 //!
 //! The large sorts run under rayon (`par_sort_unstable*`). Every parallel sort site is a
 //! **total order on unique keys** — the pre-sort triple carries the ordinal, the tiler
-//! comparator refines through the full `tessera_id` bijection, external-id keys are the
-//! dup-checked source ids, and `packed`'s duplicates are bit-identical `u64`s — so an unstable,
+//! comparator refines through the full `tessera_id` bijection, and `packed`'s duplicates are bit-identical `u64`s — so an unstable,
 //! nondeterministically-scheduled sort still has exactly one output. The equivalence suite's
 //! byte-identity assertion is the oracle that keeps this true.
 //!
@@ -174,9 +172,8 @@ use crate::input;
 use crate::observer::{BuildObserver, BuildStage, StageTimer};
 use crate::spill;
 use crate::{
-    fsync_file, validate_args, write_ext_locator, write_external_id_runs, write_manifests,
-    BuildArgs, BuildReport, BundleFiles, ExternalIdRow, PairsParquetWriter,
-    EXTERNAL_ID_ROWS_PER_EXTENT, PHASH, PREFIX, SEG_ID,
+    fsync_file, validate_args, write_manifests, BuildArgs, BuildReport, BundleFiles,
+    PairsParquetWriter, PHASH, PREFIX, SEG_ID,
 };
 
 /// One item's position in the signature sort. 16 bytes, four-byte aligned — every field is a
@@ -907,7 +904,7 @@ fn plan_build(
         batches,
         bucket_in_ram,
     };
-    let disk = crate::residency::disk(args, corpus, &payloads, &tail, id_space);
+    let disk = crate::residency::disk(args, corpus, &payloads, &tail);
     let (phase, disk_need) = disk.peak();
     // **Printed whatever the free space is.** An operator sizing a corpus has no other way to ask
     // what a build will cost the disk, and the campaign's rung 6 died at hour three on a forecast
@@ -1770,40 +1767,6 @@ fn build_bundle(
 
     timer.end(BuildStage::PostingsWrite, pair_count);
 
-    // ---- 7. external ids (only when minting — see `BuildArgs::mint_external_ids`) -----
-    let mut external_ids_paths: Vec<PathBuf> = Vec::new();
-    let mut ext_locator_path: Option<PathBuf> = None;
-    let writes_external_ids = crate::ids::writes_external_ids(args, &id_space);
-    if writes_external_ids {
-        // Sorted by the external id's *bytes* (R4); `ExternalIdRow` holds each id as the sort
-        // key that makes that a plain integer comparison, in twelve bytes rather than a padded
-        // sixteen.
-        let mut external: Vec<ExternalIdRow> = (0..n as usize)
-            .map(|ordinal| {
-                ExternalIdRow::new(source_ids.ids().id_of(ordinal), entity_of_ordinal[ordinal])
-            })
-            .collect();
-        // Keys are the byte-swapped source ids on the integer route and the ranks themselves on
-        // the supplied one, dup-checked and hence unique: a total order, one output under the
-        // parallel unstable sort (`crate::external_id_order` states which and why).
-        external.par_sort_unstable_by_key(crate::external_id_order(&id_space));
-        external_ids_paths = write_external_id_runs(
-            &entities_dir,
-            &external,
-            EXTERNAL_ID_ROWS_PER_EXTENT,
-            &id_space,
-        )?;
-        // `external` is still in the concatenated extent order at this point (the extents
-        // partition it into consecutive ranges, in order) — its index *is* each row's ordinal,
-        // which is exactly what the locator addresses (contracts §2.4/§2.6 r6).
-        ext_locator_path = Some(write_ext_locator(&entities_dir, &external, n)?);
-    }
-
-    timer.end(
-        BuildStage::ExternalIds,
-        if writes_external_ids { n } else { 0 },
-    );
-
     // ---- 8. the declared attribute tail ----------------------------------------------
     // **Geometry is already in entity order**: the assignment walk placed it as it assigned, so
     // there is no geometry stage here at all — no read, and no permute. 32-bit fixed point per
@@ -2084,8 +2047,8 @@ fn build_bundle(
 
     // ---- 9/10. pass two: one row space per view (`views.md` §7) ----------------------
     // **The build below is what it always was, run once per view.** What is not one-view-at-a-
-    // time is everything above: identity, the dictionary, the postings, the external ids and the
-    // attribute columns are entity space and were built once, over the union of every view's
+    // time is everything above: identity, the dictionary, the postings and the attribute
+    // columns are entity space and were built once, over the union of every view's
     // items. Here each view transforms through its own projection, quantises against its own
     // frame (decision 0040), Morton-sorts and writes its segment, its permutation and its
     // row→entity file.
@@ -2321,7 +2284,6 @@ fn build_bundle(
     other_paths.extend(scoped_paths);
     other_paths.extend(record_paths);
     other_paths.extend(pairs_path);
-    other_paths.extend(ext_locator_path);
     other_paths.extend(published_layers.paths.iter().cloned());
     other_paths.extend(artifact_paths);
     let mut report = write_manifests(
@@ -2329,7 +2291,6 @@ fn build_bundle(
         &BundleFiles {
             dict_paths,
             dict_records: term_count,
-            external_ids_paths,
             other_paths,
             unique,
         },
@@ -3306,8 +3267,8 @@ fn read_scoped_column(
         let fields = crate::config::Fields::moved(
             format!("attribute '{}'", attribute.name),
             [(
-                crate::config::ENTITY_ID.to_string(),
-                source.entity_id.clone(),
+                crate::config::JOIN_COLUMN.to_string(),
+                source.join_column.clone(),
             )],
         );
         (source.path.clone(), fields, select)
@@ -5738,21 +5699,6 @@ fn count_source_ids(
     }
 }
 
-/// The refusal a view's own id column earns when it names an entity twice.
-///
-/// A row is unique per `(external_id, view)`; the same id in two views is the ordinary case and is
-/// collapsed into one entity. Stated once here because both routes through pass one make it.
-fn duplicate_view_ids(view: &crate::ViewArgs) -> BuildError {
-    BuildError::Invalid(format!(
-        "view '{}': {} names a row twice in its '{}' column. A row is unique per (entity, view): \
-         the same entity in several views is the ordinary case and is several files, never several \
-         rows of one (views §4)",
-        view.view_id,
-        view.points.display(),
-        view.point_fields.of(crate::config::ENTITY_ID)
-    ))
-}
-
 /// The refusal a view earns when its points file yields a different number of rows than the count
 /// pass read from it.
 ///
@@ -5826,8 +5772,7 @@ fn read_source_ids_into(
 /// ([`Ids`]), and pass one's whole cost is a bit per id in the union's span.
 ///
 /// Where it does not hold, the array is what every consumer reads, and it is read sequentially by
-/// every pass but one: the join's merge sweep ([`join_chunk`]), the external-id write and the
-/// ordinal walks. The one random reader is `layers::publish`'s binary search, which is the case
+/// every pass but one: the join's merge sweep ([`join_chunk`]) and the ordinal walks. The one random reader is `layers::publish`'s binary search, which is the case
 /// [`spill::MappedArray`] was written for. Mapped, those bytes are page cache the kernel may evict
 /// rather than memory the machine must have, which is what `entity_of_ordinal`, the declared
 /// columns, the member table and the text index's runs each became before it.
@@ -6014,19 +5959,23 @@ impl IdPresence {
     }
 }
 
+/// The widest span, in ids a row, whose two presence bitmaps are no larger than the source-ids
+/// array ([`union_id_span`]).
+const SPAN_BITS_PER_ROW: u64 = 32;
+
 /// The range the union's ids are known to lie in, where a bitmap over it is worth building.
 ///
 /// Every points file states the lowest and highest `entity_id` it holds in its own parquet
 /// statistics ([`input::id_bounds`]), and a `limit` selects `entity_id < limit`, so it bounds the
 /// selection above. The union lies inside the fold of those bounds.
 ///
-/// **The gate is `span <= total`**, `total` being the rows every view declares. A bitmap over the
-/// span is `span / 8` bytes against the `8 * total` the array costs, so the gate makes it at most
-/// a sixty-fourth of the file it stands in for, and it rejects a corpus whose ids are spread
-/// rather than numbered: the `multiview` fixture's ten views hold 21,300 items over a span of
-/// 13,463,247, which is 632 times its own row count, and a bitmap there would be 9.9 times the
-/// live array. The condition is also necessary for the union to be a range at all where the
-/// statistics are tight, a range of `n` distinct ids spanning exactly `n`.
+/// **The gate is a span of at most [`SPAN_BITS_PER_ROW`] ids a row**, over the rows every view
+/// declares. A bitmap over the span is `span / 8` bytes, and pass one holds at most two at once,
+/// the union and the view being read, so the gate keeps them within the `8 * total` bytes of the
+/// array the route stands in for. The route saves the array's sort in every case and the array itself
+/// where the union is a range, so a union of sparse ids, such as GBIF's `gbifid` at 1.8 ids a row,
+/// takes it. It rejects a corpus whose ids are spread rather than numbered: the `multiview`
+/// fixture's ten views hold 21,300 items over a span of 13,463,247, 632 ids a row.
 ///
 /// `None` where any view cannot be bounded — no statistics, or an id the statistics cannot state
 /// as a `u64` — which leaves the array as the only route. A view selecting no rows contributes
@@ -6075,7 +6024,7 @@ fn union_id_span(
     let Some(span) = high.checked_sub(low).and_then(|d| d.checked_add(1)) else {
         return Ok(None);
     };
-    Ok((span <= total).then_some((low, span)))
+    Ok((span <= total.saturating_mul(SPAN_BITS_PER_ROW)).then_some((low, span)))
 }
 
 /// Every view's ids as one presence bitmap over `[base, base + span)`, with each view's own anchor.
@@ -6132,11 +6081,9 @@ fn read_source_ids_present(
                 ControlFlow::Continue(())
             },
         )?;
-        if outside {
+        // A duplicate is counted and listed by the array route, which sorts.
+        if outside || duplicate {
             return Ok(None);
-        }
-        if duplicate {
-            return Err(duplicate_view_ids(view));
         }
         if overran || written != count {
             return Err(view_row_count_changed(view, count, written, overran));
@@ -6194,20 +6141,20 @@ fn source_ids_of_presence(present: &IdPresence, tmp: &Path) -> Result<SourceIds>
     })
 }
 
-/// **Pass one's entity space** (`views.md` §7): every view's point source, unioned by
-/// `external_id`.
+/// **Pass one's entity space** (`views.md` §7): every view's point source, unioned by join
+/// value.
 ///
-/// A row is unique per `(external_id, view)` — an id repeated *within* one view's file is the
+/// A row is unique per `(join value, view)` — a value repeated *within* one view's file is the
 /// duplicate refusal, while the same id in two views is the ordinary case and is what makes an
 /// entity's identity, label and attributes shared across the row spaces.
 ///
 /// **Two routes to the same union.** Where every view's points file bounds its own ids and the
-/// union's span is no larger than the rows the views declare ([`union_id_span`]), the ids go into
-/// a presence bitmap a sixty-fourth of the array's size, and a union that turns out to be one
+/// union's span is at most [`SPAN_BITS_PER_ROW`] ids a row ([`union_id_span`]), the ids go into a
+/// presence bitmap no larger than the array, and a union that turns out to be one
 /// unbroken range needs no array at all: an ordinal is a subtraction and pass one writes nothing.
-/// At the GBIF rung that is 28 GB of writes and one sort of 3.5×10⁹ `u64`s not made. A union that
-/// is not a range is walked out of the bitmap into an array that is already sorted and already
-/// deduplicated.
+/// Over 3.5×10⁹ numbered rows that is 28 GB of writes and one sort of 3.5×10⁹ `u64`s not made. A
+/// union that is not a range, such as GBIF's `gbifid`, is walked out of the bitmap into an array
+/// that is already sorted and already deduplicated, so only the sort is not made.
 ///
 /// Otherwise the ids go into the array directly, each view's segment sorted and duplicate-checked
 /// in place and the whole sorted and deduplicated after. **Every view is counted before any is
@@ -6238,9 +6185,7 @@ fn read_source_ids_union(
         let segment = &mut ids.as_mut_slice()[offset..offset + count];
         anchors.push(read_source_ids_into(args, view, segment, id_space)?);
         segment.par_sort_unstable();
-        if segment.windows(2).any(|w| w[0] == w[1]) {
-            return Err(duplicate_view_ids(view));
-        }
+        crate::ids::refuse_duplicates(view, id_space, segment.iter().copied())?;
         offset += count;
     }
     let all = ids.as_mut_slice();

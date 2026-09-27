@@ -2,8 +2,8 @@
 //! publication (compaction §4 step 4) needs a writer for.
 //!
 //! **A bundle artefact, so its writer lives with the others** (owner ruling, 2026-08-06;
-//! compaction §10's rule paragraph): `SegmentWriter`, `PermutationWriter`, `RunWriter`,
-//! `LocatorWriter` and `PairsParquetWriter` (see [`crate::pairs`]) all sit in this crate because
+//! compaction §10's rule paragraph): `SegmentWriter`, `PermutationWriter` and
+//! `PairsParquetWriter` (see [`crate::pairs`]) all sit in this crate because
 //! they write files contracts §2 defines, and `MANIFEST.json` wrote from `tessera-build` alone
 //! for as long as a build was the only thing that produced it. Compaction's pass 5 is the second
 //! producer, and it cannot reach `tessera-build`: the fold's driver lives in `tessera-engine`,
@@ -130,7 +130,7 @@ pub fn write_and_fsync(path: &Path, bytes: &[u8]) -> Result<()> {
 ///
 /// # Why a caller needs this at all
 ///
-/// The segment, postings and external-id writers do not sync: `write_single_batch` says so at the
+/// The segment and postings writers do not sync: `write_single_batch` says so at the
 /// site, and the reasoning has always been that a partially-written file is *detectable* — the
 /// manifest digests catch it, and the producer re-runs. That holds for a build (nothing else has
 /// been deleted yet) and for a flush (the WAL still holds the rows, and the side-manifest it was

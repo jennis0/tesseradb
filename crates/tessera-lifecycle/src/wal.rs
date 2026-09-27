@@ -111,12 +111,6 @@ pub use tessera_types::scalar::ScalarValue as WalScalar;
 /// builds has no durable ID yet. Descriptors resolve through the bundle dictionary plus a
 /// deterministic in-memory extension interned in replay order at load time.
 ///
-/// `external_id` is **optional** (contracts §3.4 r6): a caller may ingest an item with no
-/// external id at all, in which case it gets no sidecar entry and is addressable only by its
-/// `tessera_id` — a pure function of `(key, shard_id, entity_id)`, so nothing needs to be stored
-/// to make that identity durable. `None` here must never collide with `None` elsewhere, and must
-/// never be treated as "an external id happens to be empty".
-///
 /// `view` names the row space the row's future row belongs to. It is durable rather than
 /// re-derived because a flush segment covers a contiguous entity range only *within one view*:
 /// with more than one view a commit window's entity range interleaves across them, and a
@@ -144,7 +138,6 @@ pub use tessera_types::scalar::ScalarValue as WalScalar;
 /// acked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
-    pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
     pub view: String,
     /// **This row joined an existing entity to a second view** (`views.md` §4): geometry, and
@@ -201,11 +194,11 @@ pub enum ChangeOp {
 ///
 /// Two shape decisions here are not free choices, and both are load-bearing for rotation.
 ///
-/// **Keyed by [`EntityId`], never by external id.** An external-id-keyed snapshot would re-resolve
-/// each id at replay, and an entity deleted before it was ever flushed has no row and may have no
-/// extent entry — so replay could not resolve it and the node would refuse to open. A snapshot is
-/// state that was already resolved once; resolving it again can only lose. It is the same reason
-/// [`WalRecord::ChangeBatch`] is keyed by entity, arrived at from the other end.
+/// **Keyed by [`EntityId`], never by an identifier a caller holds.** A snapshot keyed by one would
+/// re-resolve it at replay, and an entity deleted before it was ever flushed may resolve to
+/// nothing — so the node would refuse to open. A snapshot is state that was already resolved once;
+/// resolving it again can only lose. It is the same reason [`WalRecord::ChangeBatch`] is keyed by
+/// entity, arrived at from the other end.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -286,7 +279,7 @@ pub enum WalRecord {
     /// all.
     ///
     /// Keyed by entity rather than by the identifier the caller supplied: the handler resolves a
-    /// `tessera_id` or an external id once, at admission, and replay applies what was decided
+    /// `tessera_id` or a unique value once, at admission, and replay applies what was decided
     /// without resolving anything.
     ChangeBatch { changes: Vec<(EntityId, ChangeOp)> },
     /// An accepted annotation-layer registration.
@@ -1064,7 +1057,8 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // **28**: `IngestBatch` gained `edits`, the items it moved to new entities, `RowOutcome` gained
 // `Edited`, and `ValuesBatch` left the variant table. A log at 27 is refused.
 // **29**: `ViewDrop` gained `deleted`, the items the drop left in no view. A log at 28 is refused.
-const WAL_VERSION: u16 = 29;
+// **30**: `WalRow` lost `external_id`. A log at 29 is refused.
+const WAL_VERSION: u16 = 30;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2376,7 +2370,6 @@ mod tests {
             batch_id: "b1".to_string(),
             body_hash: [7u8; 32],
             rows: vec![WalRow {
-                external_id: None,
                 entity_id: EntityId::new(1),
                 view: "s0".to_string(),
                 join: false,
@@ -2677,7 +2670,6 @@ mod tests {
                     suppressed: true,
                     rows: vec![
                         WalRow {
-                            external_id: None,
                             entity_id: EntityId::new(90),
                             view: "quarter:2026-Q1".into(),
                             join: false,
@@ -2688,7 +2680,6 @@ mod tests {
                             scoped: Vec::new(),
                         },
                         WalRow {
-                            external_id: None,
                             entity_id: EntityId::new(90),
                             view: "quarter:2026-Q2".into(),
                             join: true,

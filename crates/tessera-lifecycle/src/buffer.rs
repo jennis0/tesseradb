@@ -179,15 +179,6 @@ pub struct BufferedItem {
     /// view's own value here — including on a **join** row, the one thing a second view's row
     /// brings with it beyond geometry (`views.md` §4).
     pub scoped: Vec<WalScalar>,
-    /// The caller-supplied external id, or `None` for an item ingested without one (contracts
-    /// §3.4 r6) — carried because the **flush** is what writes it into the bundle's external-id
-    /// extent and locator, and the flush reads the buffer rather than the WAL.
-    ///
-    /// Without it a flushed item is addressable by its `tessera_id` alone the moment its WAL record
-    /// is reclaimed: the drill-down has nothing to answer with, and the ingest duplicate check has
-    /// nothing to collide against — which admits a byte-identical second copy that no external id
-    /// names, so no deny can ever reach it.
-    pub external_id: Option<Vec<u8>>,
     /// The sequence-global WAL position of the record this row arrived in — what a rotation
     /// reclaims below (write-path §4.5).
     ///
@@ -239,7 +230,7 @@ pub struct IngestBuffer {
     /// **Keyed by entity, one entry per view that entity has a row in** — usually exactly one.
     ///
     /// An entity may hold a row in several views at once (`views.md` §4: the same point in two
-    /// views is two batches and one `external_id`), and both of them may be awaiting the same
+    /// views is two batches and one item), and both of them may be awaiting the same
     /// flush. A map keyed by entity alone would have let the second overwrite the first, losing an
     /// acked row silently; keyed by `(entity, view)` alone, every entity-space reader here would
     /// have had to dedupe. The entity's own row — the one that carries its terms — is the first
@@ -274,7 +265,6 @@ impl IngestBuffer {
     pub fn insert_row_with_terms(&mut self, row: &WalRow, terms: Vec<TermId>) {
         let item = Arc::new(BufferedItem {
             terms,
-            external_id: row.external_id.clone(),
             view: row.view.clone(),
             join: row.join,
             x: row.x,
@@ -399,7 +389,7 @@ impl IngestBuffer {
     /// system that no longer exists, so nothing will ever give them geometry.
     ///
     /// An entity whose own row goes and which keeps a row in another view is not lost with it:
-    /// that row becomes its own, taking the label, the external id and the values the own row
+    /// that row becomes its own, taking the label and the values the own row
     /// carried, so the flush of the view it is in writes what the item holds.
     pub fn remove_views(&mut self, ids: &[String]) {
         let entities: Vec<EntityId> = self
@@ -422,7 +412,6 @@ impl IngestBuffer {
                     let first = Arc::make_mut(first);
                     first.join = false;
                     first.terms = own.terms.clone();
-                    first.external_id = own.external_id.clone();
                     first.scalars = own.scalars.clone();
                 }
             }
@@ -432,7 +421,7 @@ impl IngestBuffer {
         }
     }
 
-    /// The entity's **own** row — the one carrying its terms, its external id and its scalars —
+    /// The entity's **own** row — the one carrying its terms and its scalars —
     /// or `None` where every buffered row for it is a join (`views.md` §4).
     ///
     /// **A join is not an answer here, and that is what keeps a second view out of the
@@ -539,7 +528,6 @@ mod tests {
 
     fn row(entity: u64, view: &str, join: bool) -> WalRow {
         WalRow {
-            external_id: Some(format!("ext-{entity}-{view}").into_bytes()),
             entity_id: EntityId::new(entity),
             view: view.to_string(),
             join,
@@ -583,7 +571,6 @@ mod tests {
         assert_eq!(kept.view, "b");
         assert_eq!(kept.terms, vec![TermId::new(3)]);
         assert_eq!(kept.scalars, vec![WalScalar::U8(7)]);
-        assert_eq!(kept.external_id, own.external_id);
         assert!(!buffer.contains(EntityId::new(2)));
         assert_eq!(buffer.len(), 1);
     }

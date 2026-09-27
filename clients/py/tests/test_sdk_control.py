@@ -19,10 +19,9 @@ from tesseradb._control import (
     MAX_ATTEMPTS,
     UNANSWERED,
     Control,
-    addressed,
     batch_id,
-    external_id,
 )
+from tesseradb._database import Database
 from tesseradb._refusal import Refusal
 
 
@@ -84,18 +83,36 @@ def test_a_batch_id_is_fresh_per_request_and_never_derived_from_the_body():
     assert batch_id("points", 0).startswith("points-0-")
 
 
-def test_an_external_id_is_the_bytes_the_id_column_holds():
-    """A string's UTF-8, an integer's eight little-endian bytes, binary as it stands."""
-    assert external_id(1) == b"\x01\x00\x00\x00\x00\x00\x00\x00"
-    assert len(external_id(2**63)) == 8
-    assert external_id("p3") == b"p3"
-    assert external_id(b"\x00\xff") == b"\x00\xff"
+def test_a_change_names_an_item_by_tessera_id_or_by_a_unique_value_as_text():
+    """Without a field the ids are `tessera_id`s; with one they are its values. Both are text."""
+    assert Database.addresses([7, "8"]) == [{"tessera_id": "7"}, {"tessera_id": "8"}]
+    assert Database.addresses(["p3", 5], field="paper") == [
+        {"field": "paper", "value": "p3"},
+        {"field": "paper", "value": "5"},
+    ]
     # A frame's own ids arrive as numpy scalars, which are integers and are not `int`.
     numpy = pytest.importorskip("numpy")
-    assert external_id(numpy.int64(5)) == external_id(5)
-    assert external_id(numpy.uint32(5)) == external_id(5)
-    assert addressed(1) == "AQAAAAAAAAA="
-    assert addressed("p3") == "cDM="
+    assert Database.addresses([numpy.uint64(2**63)], field="n") == [
+        {"field": "n", "value": str(2**63)}
+    ]
+
+
+def test_a_timestamp_value_is_sent_as_its_microseconds_since_the_epoch():
+    """A timestamp field's values travel as decimal microseconds, whichever library holds them;
+    one with no time zone is UTC."""
+    import datetime
+
+    pd = pytest.importorskip("pandas")
+    numpy = pytest.importorskip("numpy")
+    micros = str(1_577_836_800_000_005)
+    naive = datetime.datetime(2020, 1, 1, 0, 0, 0, 5)
+    held = [
+        naive,
+        naive.replace(tzinfo=datetime.timezone.utc),
+        pd.Timestamp("2020-01-01 00:00:00.000005"),
+        numpy.datetime64("2020-01-01T00:00:00.000005"),
+    ]
+    assert Database.addresses(held, field="ts") == [{"field": "ts", "value": micros}] * 4
 
 
 def serving():
@@ -143,6 +160,8 @@ def test_a_commit_whose_pages_reach_no_server_reports_it_and_does_not_raise(tmp_
     binary()
     db = create(tmp_path / "db")
     db.declare_view("map", extent={"min": 0.0, "max": 8.0})
+    db.declare_attribute("id", type="i64", unique=True)
+    db.declare_join_field("id")
     rows = pd.DataFrame({"id": [1, 2], "x": [0.0, 1.0], "y": [0.0, 1.0],
                          "access": ["public", "public"]})
     db.insert("map", rows, id="id", x="x", y="y", access="access")

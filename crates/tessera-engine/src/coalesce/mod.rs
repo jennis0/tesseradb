@@ -1,5 +1,5 @@
-//! Merges small maintenance extents in entity space: delta tiers, external-id runs with their
-//! locator extents, and dictionary, attribute, record, text and entity-to-term extents. A coalesce
+//! Merges small maintenance extents in entity space: delta tiers, key runs, and dictionary,
+//! attribute, record, text and entity-to-term extents. A coalesce
 //! changes no row id, bumps no `segments_version`, invalidates no cache or projection, and retires
 //! nothing: no posting is dropped and no tombstone applied.
 //!
@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use tessera_authz::DeltaTier;
 use tessera_store::manifest::{
-    AttrExtent, DictExtent, EntityTermsExtent, FileDigest, LocatorExtent, RecordExtent,
+    AttrExtent, DictExtent, EntityTermsExtent, FileDigest, RecordExtent,
     TextExtent,
 };
 
@@ -27,7 +27,7 @@ mod rebase;
 mod tests;
 
 use execute::{
-    coalesce_attr_window, coalesce_dicts, coalesce_entity_terms, coalesce_records, coalesce_runs,
+    coalesce_attr_window, coalesce_dicts, coalesce_entity_terms, coalesce_records,
     coalesce_edited_window, coalesce_text_window, coalesce_tiers, coalesce_unique_window,
 };
 pub(crate) use plan::plan_coalesce;
@@ -42,9 +42,9 @@ pub(crate) struct CoalescePolicy {
     pub(crate) floor_bytes: u64,
     /// Input bytes one axis may take in one pass, which bounds the memory held while merging.
     pub(crate) max_input_bytes: u64,
-    /// `width` and `floor_bytes` for the external-id runs and their locator extents, fixed rather
-    /// than configured, since every ingest duplicate check and item lookup walks the run list.
-    /// Below the floor every run joins one; above it runs tier as the other axes do.
+    /// `width` and `floor_bytes` for the key runs of the unique indexes and the edited-items map,
+    /// fixed rather than configured, since every ingest resolution and item lookup walks the run
+    /// list. Below the floor every run joins one; above it runs tier as the other axes do.
     pub(crate) run_width: usize,
     pub(crate) run_floor_bytes: u64,
 }
@@ -68,7 +68,6 @@ impl Default for CoalescePolicy {
 pub(crate) struct CoalescePlan {
     pub(crate) partition: String,
     pub(crate) tiers: Vec<String>,
-    pub(crate) locators: Vec<LocatorExtent>,
     pub(crate) dicts: Vec<DictExtent>,
     pub(crate) attrs: Vec<ColumnWindow<AttrExtent>>,
     pub(crate) records: Vec<RecordExtent>,
@@ -157,7 +156,6 @@ impl CoalescePlan {
     pub(crate) fn windows(&self) -> u64 {
         let kinds = [
             !self.tiers.is_empty(),
-            !self.locators.is_empty(),
             !self.dicts.is_empty(),
             !self.records.is_empty(),
             !self.terms.is_empty(),
@@ -171,7 +169,6 @@ impl CoalescePlan {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.tiers.is_empty()
-            && self.locators.is_empty()
             && self.dicts.is_empty()
             && self.attrs.is_empty()
             && self.records.is_empty()
@@ -226,8 +223,6 @@ pub(crate) struct CompletedCoalesce {
     pub(crate) partition: String,
     pub(crate) prefix: String,
     pub(crate) tier: Option<Merged<Vec<String>, OpenedTier>>,
-    /// The consumed locator extents and one covering their union span, naming the merged run.
-    pub(crate) run: Option<Merged<Vec<LocatorExtent>, LocatorExtent>>,
     pub(crate) dict: Option<Merged<Vec<DictExtent>, DictExtent>>,
     /// Opened on the pool, so publishing is a pointer push that cannot fail on IO after the
     /// manifest edit.
@@ -248,7 +243,6 @@ impl CompletedCoalesce {
     pub(crate) fn windows(&self) -> u64 {
         let kinds = [
             self.tier.is_some(),
-            self.run.is_some(),
             self.dict.is_some(),
             self.record.is_some(),
             self.terms.is_some(),
@@ -279,8 +273,6 @@ pub(crate) fn execute_coalesce(
 
     let tier = taken(plan.tiers)
         .and_then(|w| attempt(w, f, e, |w, out| coalesce_tiers(w, &ctx, out)));
-    let run = taken(plan.locators)
-        .and_then(|w| attempt(w, f, e, |w, out| coalesce_runs(w, &ctx, out)));
     let dict = taken(plan.dicts)
         .and_then(|w| attempt(w, f, e, |w, out| coalesce_dicts(w, &ctx, out)));
     let attrs: Vec<_> = plan
@@ -309,7 +301,6 @@ pub(crate) fn execute_coalesce(
         .collect();
 
     let nothing = tier.is_none()
-        && run.is_none()
         && dict.is_none()
         && attrs.is_empty()
         && record.is_none()
@@ -325,7 +316,6 @@ pub(crate) fn execute_coalesce(
         partition: plan.partition,
         prefix: ctx.prefix,
         tier,
-        run,
         dict,
         attrs,
         record,

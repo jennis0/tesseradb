@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float32Array, LargeStringArray, ListArray, StringArray,
-    StringViewArray,
+    Array, ArrayRef, Float32Array, LargeStringArray, ListArray, StringArray, StringViewArray,
+    UInt64Array,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -84,6 +84,12 @@ points = "points.parquet"
 name             = "s0"
 extent           = { min = 0.0, max = 1000.0 }
 point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 "#;
 
 /// The layer, at the hierarchy kind the case is about. `value_set = "open"`, which is what says a
@@ -180,12 +186,12 @@ fn build_side_as(
 // The wire
 // ---------------------------------------------------------------------------------------------
 
-/// One `POST /control/ingest` batch in JSON without coordinates: an id column and a column named
-/// for the layer.
+/// One `POST /control/ingest` batch in JSON without coordinates: the `id` naming each item and a
+/// column named for the layer.
 fn rows_body(rows: &[u64], column: &str, key_of: &dyn Fn(u64) -> Value) -> Value {
     Value::Array(
         rows.iter()
-            .map(|e| json!({ "external_id": member(*e), column: key_of(*e) }))
+            .map(|e| json!({ "id": e, column: key_of(*e) }))
             .collect(),
     )
 }
@@ -209,18 +215,12 @@ async fn post_rows(server: &TestServer, batch_id: &str, body: Value) -> (u16, Va
 /// carries one key per row and a lineage is a list per row.
 fn rows_arrow(rows: &[u64], column: &str, keys: ArrayRef) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new(column, keys.data_type().clone(), true),
     ]));
-    let ext: Vec<Vec<u8>> = rows.iter().map(|e| external_id_of(*e)).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter_values(
-                ext.iter().map(|v| v.as_slice()),
-            )) as ArrayRef,
-            keys,
-        ],
+        vec![Arc::new(UInt64Array::from(rows.to_vec())) as ArrayRef, keys],
     )
     .unwrap();
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
@@ -266,8 +266,8 @@ fn chain_column_as(rows: &[u64], element: &DataType) -> ArrayRef {
     ))
 }
 
-/// One `/control/ingest` batch, for the equivalence's middle arm: the reserved geometry columns,
-/// the access list, and a column named for the layer.
+/// One `/control/ingest` batch, for the equivalence's middle arm: each item's `id`, the reserved
+/// geometry columns, the access list, and a column named for the layer.
 fn ingest_batch(rows: &[u64], column: &str) -> Vec<u8> {
     let labels: Vec<Vec<String>> = rows
         .iter()
@@ -280,19 +280,16 @@ fn ingest_batch(rows: &[u64], column: &str) -> Vec<u8> {
     let labels: Vec<&[&str]> = labels.iter().map(Vec::as_slice).collect();
     let access = access_lists(&labels);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
         Field::new(column, DataType::Utf8, true),
     ]));
-    let ext: Vec<Vec<u8>> = rows.iter().map(|e| external_id_of(*e)).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values(
-                ext.iter().map(|v| v.as_slice()),
-            )) as ArrayRef,
+            Arc::new(UInt64Array::from(rows.to_vec())) as ArrayRef,
             Arc::new(Float32Array::from_iter_values(
                 rows.iter().map(|e| x_of(*e) as f32),
             )),
@@ -880,7 +877,7 @@ async fn a_page_without_positions_records_an_edge_the_artifact_does_not_hold() {
         .put(server.control_url("/control/layers/clusters%2Fa/artifacts"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [
                 { "key": "root", "members": members.clone() },
                 { "key": "k0", "members": members },

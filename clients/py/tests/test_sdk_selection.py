@@ -186,7 +186,7 @@ def test_a_sample_carries_category_keys_for_the_items_it_drew(db, points):
     drawn = sample.to_pylist()[:12]
     by_id = points.set_index("entity_id")
     for row in drawn:
-        source = by_id.loc[db.item(row["tessera_id"])["external_id"]]
+        source = by_id.loc[db.item(row["tessera_id"])["fields"]["id"]]
         assert row["primary_category"] == source["primary_category"]
         assert row["archive"] == source["archive"]
 

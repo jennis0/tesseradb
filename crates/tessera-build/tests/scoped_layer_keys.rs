@@ -347,7 +347,6 @@ fn build_with_labels(
         layers,
         layer_inputs: config.layer_sources.clone(),
         scoped_layers: scoped_layers.into_iter().collect(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

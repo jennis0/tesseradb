@@ -9,7 +9,7 @@ two reloads and a fold — every §2 stage class the suite can currently drive.
 
 A pulled tick dispatches *everything* eligible, so isolation is arithmetic. The server
 runs at a merge width of three ([`MERGE_TIER_WIDTH`]) and a coalesce width of four
-([`COALESCE_WIDTH`]). The coalesce takes external-id runs four at a time whatever the config
+([`COALESCE_WIDTH`]). The coalesce takes unique-index key runs four at a time whatever the config
 says, so at the default merge width of four a merge and that coalesce always come due together;
 at three they come due one flush apart. Every flush adds one flushed segment and one entry on
 each entity-space axis, and a tick plans against the state before its own flush:
@@ -41,8 +41,7 @@ see is exactly what the row surfaces must catch.
 ## What this module fixes about the corpus
 
 Deny targets are battery items (so the drill-down surface flips are exercised in both
-directions), resolved to the fixture's external ids through the served `fx_key` join — the
-catalogue's entity id *is* its source id, and its external id is that id's little-endian bytes.
+directions), addressed by the `tessera_id` the battery served them under.
 Ingested rows use established vocabulary values only (`/v1/categories` must not move — the diff
 treats a vocabulary change as unexplained, and this plan is why it can), carry an access term the
 battery principal already holds, and land inside the extent, so the flush's entitlement is
@@ -51,7 +50,6 @@ observable in full.
 
 from __future__ import annotations
 
-import base64
 import dataclasses
 import io
 from typing import NamedTuple
@@ -97,13 +95,8 @@ FILTER_DEPARTMENT = sorted(cat.DEPARTMENT_CODES)[0]
 MERGE_TIER_WIDTH = 3
 COALESCE_WIDTH = 4
 
-#: fx_key -> source id for every planted item — how a served row is traced back to the external
-#: id the deny lane addresses.
-_SOURCE_OF_FX = {fx: source for source, fx in enumerate(cat.fx_keys())}
-
-
 class IngestItem(NamedTuple):
-    external_id: int
+    serial: int
     x: float
     y: float
     fx_key: int
@@ -117,19 +110,18 @@ class IngestItem(NamedTuple):
 def _ingest_body(items: list[IngestItem]) -> bytes:
     """One Arrow IPC stream in the wire shape `/control/ingest` takes.
 
-    The schema is the catalogue's declaration, and every declared column must be present
-    (contracts §2.2): the scalar tail is read back positionally, so an omitted column shifts
-    every later scalar rather than defaulting. Category values are established keys — the
-    vocabulary must not move under this plan (module doc).
+    The schema is the catalogue's declaration. Each row carries a `serial` no item holds, so each
+    row creates an item, and each flush writes a run of the `serial` index. Category values are
+    established keys: the vocabulary must not move under this plan (module doc).
     """
     schema = pa.schema(
         [
-            pa.field("external_id", pa.binary()),
+            pa.field("serial", pa.uint64()),
+            pa.field("fx_key", pa.uint64()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
             # One list of labels per row, each element one label verbatim (contracts §3.4).
             pa.field("access", pa.list_(pa.utf8())),
-            pa.field("fx_key", pa.uint64()),
             pa.field("department", pa.utf8()),
             pa.field("archive", pa.utf8()),
             pa.field("title", pa.utf8()),
@@ -142,11 +134,11 @@ def _ingest_body(items: list[IngestItem]) -> bytes:
     )
     batch = pa.record_batch(
         [
-            pa.array([i.external_id.to_bytes(8, "little") for i in items], pa.binary()),
+            pa.array([i.serial for i in items], pa.uint64()),
+            pa.array([i.fx_key for i in items], pa.uint64()),
             pa.array([i.x for i in items], pa.float32()),
             pa.array([i.y for i in items], pa.float32()),
             pa.array([[INGEST_ACCESS]] * len(items), pa.list_(pa.utf8())),
-            pa.array([i.fx_key for i in items], pa.uint64()),
             pa.array([FILTER_DEPARTMENT] * len(items), pa.utf8()),
             pa.array([sorted(cat.ARCHIVE_CODES)[0]] * len(items), pa.utf8()),
             pa.array([i.title for i in items], pa.utf8()),
@@ -167,7 +159,7 @@ def _ingest_body(items: list[IngestItem]) -> bytes:
 def _write_stage(index: int, fx_pair: list[int]) -> Write:
     items = [
         IngestItem(
-            external_id=910_000_000 + index * 100 + i,
+            serial=cat.PLANTED_ID_BASE + cat.N_ITEMS + index * 100 + i,
             # Spread across the extent, away from its edges; nothing about the checker depends
             # on where they land, only that they are inside every battery viewport.
             x=137.0 + 977.0 * (index * 2 + i),
@@ -190,14 +182,12 @@ def _write_stage(index: int, fx_pair: list[int]) -> Write:
 
 
 def _battery_item(index: int):
-    """Resolve the index-th battery item to (external_id_b64, fx) at apply time — the battery,
-    and therefore the item list, does not exist when the plan is written down."""
+    """Resolve the index-th battery item to (tessera_id, fx) at apply time — the battery, and
+    therefore the item list, does not exist when the plan is written down."""
 
     def pick(h: SuiteHarness) -> tuple[str, int]:
         tessera_id = h.item_ids[index]
-        fx = h.fx_by_tessera[tessera_id]
-        source = _SOURCE_OF_FX[fx]
-        return base64.b64encode(source.to_bytes(8, "little")).decode(), fx
+        return str(tessera_id), h.fx_by_tessera[tessera_id]
 
     return pick
 

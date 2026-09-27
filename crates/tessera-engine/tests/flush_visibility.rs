@@ -41,12 +41,11 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     .expect("engine opens")
 }
 
-/// One row for `external_id` in `view`, for a batch of its own. A second view of an item already
-/// ingested is a join: admission resolves the external id to the entity it already names.
+/// One row adding `item` to `view`, for a batch of its own.
 fn ingest_into_view(
     engine: &Engine,
     batch: &str,
-    external_id: &str,
+    item: tessera_types::EntityId,
     view: &str,
 ) -> tessera_types::EntityId {
     let descriptors = vec![b"0".to_vec()];
@@ -55,9 +54,8 @@ fn ingest_into_view(
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: view.to_string(),
-        join: None,
+        join: Some(item),
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,
@@ -99,8 +97,8 @@ fn an_idle_tick_plans_nothing() {
     assert_eq!(engine.generation().segments_version, 0);
 }
 
-/// **The whole pipeline**: the tick plans, the pool writes a segment, a tier, both external-id
-/// directions and the side-manifest, and the executor rebases and publishes.
+/// **The whole pipeline**: the tick plans, the pool writes a segment, a tier and the
+/// side-manifest, and the executor rebases and publishes.
 ///
 /// Asserted on **a fresh open of the bundle on disk**, not on the publishing process's own
 /// in-memory generation. That is the property that matters and the one a `Bundle::with_segment`
@@ -139,7 +137,6 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
         "one past the highest flushed entity, or it would be in neither fragment nor buffer"
     );
     assert_eq!(partition.manifest.deltas.len(), 1, "one delta tier");
-    assert_eq!(partition.manifest.locator_extents.len(), 1);
 
     let view = &partition.views["s0"];
     assert_eq!(view.segments.len(), 2, "both segments mapped");
@@ -361,7 +358,7 @@ fn the_backlog_gauge_counts_rows_in_every_view_whether_or_not_a_flush_is_in_flig
 
     // One item, a row in each view: the second is a join, which carries geometry and no terms.
     let entity = ingest(&engine, "ext-1");
-    assert_eq!(ingest_into_view(&engine, "b2", "ext-1", "s1"), entity);
+    assert_eq!(ingest_into_view(&engine, "b2", entity, "s1"), entity);
 
     engine.set_flush_paused_for_test(true);
     wait_until("the planning tick", WAIT, || {

@@ -84,7 +84,6 @@ visibility = "derived"
 name            = "importance"
 title           = "Importance"
 field           = "pop"
-entity_id_field = "entity_id"
 type            = "u32"
 index           = true
 

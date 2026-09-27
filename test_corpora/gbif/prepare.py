@@ -92,12 +92,12 @@ READ_AHEAD = 16
 #: plus the pending batches, so a larger number is fewer, wider folds.
 FOLD_EVERY = 32
 
-#: What `points.parquet` carries: identity, the publisher's coordinates in degrees, the access
-#: column and the five attributes. Fixed rather than inferred, because it is written a batch at a
-#: time and a batch whose `kingdom` column happened to be all-null would otherwise change it.
+#: What `points.parquet` carries: the publisher's coordinates in degrees, the access column and
+#: the five attributes, `gbifid` among them, which every file of the corpus names its item by.
+#: Fixed rather than inferred, because it is written a batch at a time and a batch whose
+#: `kingdom` column happened to be all-null would otherwise change it.
 POINTS_SCHEMA = pa.schema(
     [
-        pa.field("entity_id", pa.uint64()),
         pa.field("lon", pa.float64()),
         pa.field("lat", pa.float64()),
         pa.field("countrycode", pa.string()),
@@ -121,11 +121,15 @@ title = "Occurrence ID"
 type  = "keyword"
 """
 
-#: The taxonomy layer's member file: one row per occurrence, `key` a three-entry list whose
-#: positions are the declared levels.
+#: The taxonomy layer's member file: one row per occurrence, `entity` its `gbifid` and `key` a
+#: three-entry list whose positions are the declared levels.
 MEMBER_SCHEMA = pa.schema(
     [pa.field("entity", pa.uint64()), pa.field("key", pa.list_(pa.string()))]
 )
+
+#: What the member file's `entity` holds, written to the manifest so `--reuse-taxonomy` refuses a
+#: file keyed any other way.
+MEMBERS_KEYED_BY = "gbifid"
 
 
 def peak_gb() -> float:
@@ -146,7 +150,7 @@ def read_parts(paths: list[Path], workers: int, columns: list[str] = sources.COL
 
     The share is SMB at ~67 MB/s and a single-threaded read of one part leaves it idle between
     round trips; the census measured eight threads at 200 parts in 70.7 s. The writer downstream
-    is in order, because an entity id is the row's position in the part sequence, so the pool is
+    is in order, because the held rows are chosen by position in the part sequence, so the pool is
     consumed in submission order rather than as completions arrive.
     """
     with cf.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -264,8 +268,7 @@ class Census:
 
 
 def point_rows(batch: pa.Table, schema: pa.Schema) -> tuple[pa.Table, dict]:
-    """A batch's `points.parquet` columns, every one but `entity_id`, and what was counted while
-    they were made."""
+    """A batch's `points.parquet` columns, and what was counted while they were made."""
     m = batch.num_rows
     lat = batch.column("decimallatitude").combine_chunks().cast(pa.float64())
     lon = batch.column("decimallongitude").combine_chunks().cast(pa.float64())
@@ -304,7 +307,7 @@ def point_rows(batch: pa.Table, schema: pa.Schema) -> tuple[pa.Table, dict]:
         "named": m - scientific.null_count,
         "gbifid_null": gbifid.null_count,
     }
-    return pa.table(columns, schema=pa.schema([f for f in schema if f.name != "entity_id"])), counts
+    return pa.table(columns, schema=schema), counts
 
 
 class HeldRows:
@@ -348,9 +351,8 @@ class HeldRows:
 
     def write(self, out: Path, schema: pa.Schema) -> dict:
         written = {}
-        rows_schema = pa.schema([f for f in schema if f.name != "entity_id"])
         for name, tables in (("holdout", self.held), ("duplicates", self.copied)):
-            with pq.ParquetWriter(out / f"{name}.parquet", rows_schema, compression="zstd") as w:
+            with pq.ParquetWriter(out / f"{name}.parquet", schema, compression="zstd") as w:
                 for table in tables:
                     w.write_table(point_rows(table, schema)[0])
             written[name] = sum(t.num_rows for t in tables)
@@ -548,9 +550,10 @@ def reusable_manifest(out: Path, parts_read: int, selection: str) -> dict:
     """The manifest of the run that wrote the member file and the kingdom vocabulary in `out`,
     refused unless it read the same dataset and the same parts in the same order.
 
-    The member file's `entity` is a row's position in the part sequence, so any other selection
-    would join every row after the first difference to another row's taxon. The placed row count
-    is checked after the pass.
+    The member file names each row by its `gbifid`, and a run that read other parts would place
+    rows the kept file has no taxon for. A manifest that does not say its member file is keyed by
+    `gbifid` is refused: such a file named rows by their position in the part sequence. The placed
+    row count is checked after the pass.
     """
     for name in ("manifest.json", "members-taxonomy.parquet", "vocab-kingdom.parquet"):
         if not (out / name).exists():
@@ -560,8 +563,15 @@ def reusable_manifest(out: Path, parts_read: int, selection: str) -> dict:
         "dataset": f"{sources.DATASET}/{sources.VINTAGE}",
         "parts_read": parts_read,
         "part_selection": selection,
+        "members_keyed_by": MEMBERS_KEYED_BY,
     }
     differs = {k: (kept.get(k), v) for k, v in wanted.items() if kept.get(k) != v}
+    if "members_keyed_by" in differs:
+        raise SystemExit(
+            f"--reuse-taxonomy: the member file in {out} names each occurrence by "
+            f"{kept.get('members_keyed_by') or 'its position'}, not by {MEMBERS_KEYED_BY}; run "
+            f"without the flag"
+        )
     if differs or "taxonomy" not in kept:
         raise SystemExit(
             f"--reuse-taxonomy: the kept files in {out} were written by another selection "
@@ -573,10 +583,10 @@ def reusable_manifest(out: Path, parts_read: int, selection: str) -> dict:
 def select_parts(every: list[Path], take: int, spread: bool) -> list[Path]:
     """Which parts this run reads.
 
-    A **prefix** is the default: entity ids are then a prefix of the whole corpus's, so a fraction
-    run and the whole run agree on every row they share. ⊘ A prefix is not a uniform sample — the
-    part order is the publisher's export order, not ours — so a figure extrapolated from one
-    carries that. `--spread` takes the same number evenly spaced across all 8,369 instead, which
+    A **prefix** is the default: its rows are then a prefix of the whole corpus's, so a fraction
+    run and the whole run hold the same rows as far as the fraction reaches. ⊘ A prefix is not a
+    uniform sample — the part order is the publisher's export order, not ours — so a figure
+    extrapolated from one carries that. `--spread` takes the same number evenly spaced across all 8,369 instead, which
     is what a coverage fraction should be read off.
     """
     if take <= 0 or take >= len(every):
@@ -676,7 +686,6 @@ def main() -> None:
         """One row group of `points.parquet` and one of the member file, from a batch of parts."""
         nonlocal rows_placed
         m = batch.num_rows
-        entity = np.arange(rows_placed, rows_placed + m, dtype=np.uint64)
         rows, counts = point_rows(batch, schema)
         for key, n in counts.items():
             counted[key] += n
@@ -711,15 +720,12 @@ def main() -> None:
             for census, key in zip(level_census, keys):
                 census.add(key)
             members.write_table(
-                pa.table({"entity": pa.array(entity, pa.uint64()), "key": listed},
+                pa.table({"entity": gbifid, "key": listed},
                          schema=MEMBER_SCHEMA),
                 row_group_size=ROW_GROUP,
             )
 
-        points.write_table(
-            pa.Table.from_arrays([pa.array(entity, pa.uint64()), *rows.columns], schema=schema),
-            row_group_size=ROW_GROUP,
-        )
+        points.write_table(rows, row_group_size=ROW_GROUP)
         rows_placed += m
 
     with steps.step("read, place and write"):
@@ -842,6 +848,7 @@ def main() -> None:
         "parts_read": len(chosen),
         "parts_total": len(every),
         "part_selection": selection,
+        "members_keyed_by": MEMBERS_KEYED_BY,
         "rows_read": rows_read,
         "rows_placed": rows_placed,
         "placed_share": round(rows_placed / rows_read, 6) if rows_read else None,

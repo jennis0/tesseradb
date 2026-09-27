@@ -8,11 +8,10 @@ an item is drawn and how it is queried, never what the item is or who may see it
 ## What an item carries
 
 An item is one record in the corpus. It carries an access label, a string the operator declares
-per item and resolves to the [terms that decide who may see it](access-control.md#terms-and-access-labels);
-an external id, the identifier the operator supplied and uses to address the item again; and a
-value, present or absent, for every field the corpus declares. An external id is bytes: a
-string's UTF-8, binary as it stands, or an integer's eight little-endian bytes, so a negative
-integer id and its two's-complement unsigned value are the same id.
+per item and resolves to the [terms that decide who may see it](access-control.md#terms-and-access-labels),
+and a value, present or absent, for every field the corpus declares. The operator addresses an item
+again by its `tessera_id` or by the value of a field declared [unique](#unique-fields): a DOI, an
+accession number, a GeoNames id.
 
 ## Views and view groups
 
@@ -28,7 +27,7 @@ absent from a view's mapping has no position there.
 flowchart TB
   subgraph entity["entity space: one per corpus, shared by every view"]
     direction LR
-    ids["item identities<br/>entity id, external id, tessera_id"]
+    ids["item identities<br/>entity id, tessera_id, unique values"]
     terms["who may see it"]
     fields["field values"]
     members["membership of annotation layers"]
@@ -80,13 +79,13 @@ item: a sentiment score recomputed each quarter, for instance. Reading it under 
 group returns that view's own value. Reading it from anywhere else requires naming the view
 explicitly, because the field holds no single value outside one.
 
-An ingest row names an item by its `tessera_id`, its external id or the value of a unique field.
+An ingest row names an item by its `tessera_id` or the value of a unique field.
 A row naming an item that has no row in the batch's view, carrying a position there and changing
 nothing else, adds the item to that view under its existing identity and entity, keeping its label
 and every value declared once for the whole item. The item stays served in its other views, and
 is served in the new one from the next flush. This is how one item comes to exist in more than one
 view. A row that names an item and carries what the item stores changes nothing. Any other row
-naming an item edits it: it changes a value, the label, the external id or a position. An edit
+naming an item edits it: it changes a value, the label or a position. An edit
 keeps the item's `tessera_id`, the views it is in, its layer
 memberships, the contents generated from it and a suppression standing against it
 ([the write path](write-path.md#edits)). A row that places an item in a layer's artifact changes
@@ -104,7 +103,7 @@ Four identifiers name an item or a view, one for each party that needs to addres
 |---|---|---|---|
 | entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; the id an edit left is issued again once a compaction has removed its rows and the log has rotated past that compaction |
 | `tessera_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rebuild, which creates a new bundle with a new key |
-| external id | the operator, before ingest | the operator, and any record of a write naming it | nothing, for the item's life |
+| unique value | the operator, in a field declared `unique` | the operator, and any record of a write naming it | an edit of that field |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
 
 The entity id is the server's own internal key: a dense integer, assigned as items are committed,
@@ -243,7 +242,7 @@ itself, `level` among them.
 ### Unique fields
 
 A field declared `unique` holds each value on at most one item. It suits an identifier the
-operator's data already carries beside the external id: a DOI, an accession number, a GeoNames id.
+operator's data already carries: a DOI, an accession number, a GeoNames id.
 
 ```toml
 [[attribute]]
@@ -271,6 +270,14 @@ structure ([queries](queries.md#filters)).
 
 A build refuses a corpus in which two items hold one value of a unique field. The refusal says how
 many values are held more than once and names up to ten of them.
+
+A build joins its source files on one unique field, the one `[defaults].join_field` names, which
+must be a keyword or an integer. Each view's points, each attribute file, each layer's members and
+the access relation name their item by that field's value. One value on two rows of one view's
+points is refused, with the same count and examples; one value in two views' points is one item in
+both views. A corpus that names no join field makes each row of its points file an item of its own,
+and then refuses a second view and any file that would need a join
+([corpus reference](../reference/corpus-toml.md#defaults)).
 
 `unique` is the one part of a field's declaration that can change once the field exists, at a
 build or at a running service. Declaring it `true` at a running service builds the index over every

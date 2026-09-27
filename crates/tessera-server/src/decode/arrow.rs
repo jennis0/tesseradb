@@ -15,13 +15,11 @@ use super::json::JsonColumns;
 use super::membership::{membership_column, MembershipColumn, MembershipTally};
 use super::DecodeError;
 use super::{
-    scoped_as_declared, scoped_wire_type, BodyEncoding, Fixed, EXTERNAL_ID_MAX_LEN,
+    scoped_as_declared, scoped_wire_type, BodyEncoding, Fixed,
 };
 
 #[derive(Debug)]
 pub(crate) struct RawIngestItem {
-    /// `None` when the caller sent no external id.
-    pub(crate) external_id: Option<Vec<u8>>,
     pub(crate) tessera_id: Option<TesseraId>,
     /// In the view's frame, never longitude and latitude: the projection has already run. `None`
     /// for a row carrying no coordinates.
@@ -283,17 +281,6 @@ fn cell(
     }
 }
 
-fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
-    if external_id.len() > EXTERNAL_ID_MAX_LEN {
-        return Err(DecodeError(format!(
-            "external id is {} bytes, over the {EXTERNAL_ID_MAX_LEN}-byte limit; send at most \
-             that many",
-            external_id.len()
-        )));
-    }
-    Ok(())
-}
-
 /// Decodes a `/control/ingest` body against the view's frame, its declared scalars, its group's
 /// scoped families and the layer registry. A batch naming no view has no frame and carries no
 /// coordinates. `node_id` is accepted and not stored. Any refusal refuses the whole batch.
@@ -316,7 +303,6 @@ pub(crate) fn parse_ingest_batch(
         None => ("", ""),
     };
     let mut fixed = vec![
-        Fixed::ExternalId,
         Fixed::TesseraId,
         Fixed::Access,
         Fixed::NodeId,
@@ -351,7 +337,6 @@ pub(crate) fn parse_ingest_batch(
         // names.
         let offset = items.len();
 
-        let ext = optional_binary_col(body_name, &batch, "external_id")?;
         let tessera = tessera_id_col(body_name, &batch)?;
         let has_column = |name: &str| batch.column_by_name(name).is_some();
         let (x, y) = match &frame {
@@ -448,14 +433,6 @@ pub(crate) fn parse_ingest_batch(
             for (d, cells) in scoped_declared.iter().zip(&scoped_cells) {
                 scoped_values.push(value_of(cells, i, d)?);
             }
-            let external_id = match &ext {
-                Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
-                _ => None,
-            };
-            // Checked inside the parse, so an over-length id anywhere refuses the whole batch.
-            if let Some(external_id) = &external_id {
-                check_external_id(external_id)?;
-            }
             let tessera_id = match &tessera {
                 Some(arr) if !arr.is_null(i) => {
                     Some(parse_tessera_id(body_name, offset + i, arr.value(i))?)
@@ -472,7 +449,6 @@ pub(crate) fn parse_ingest_batch(
                 _ => None,
             };
             items.push(RawIngestItem {
-                external_id,
                 tessera_id,
                 position,
                 labels,
@@ -513,30 +489,10 @@ fn tessera_id_col<'a>(
 fn parse_tessera_id(body_name: &str, row: usize, text: &str) -> Result<TesseraId, DecodeError> {
     text.parse::<u64>().map(TesseraId::new).map_err(|_| {
         DecodeError(format!(
-            "{body_name}: row {row}'s tessera_id is not decimal digits; send it as a string of \
-             digits"
+            "{body_name}: row {row}, column 'tessera_id' is not decimal digits; send it as a \
+             string of digits"
         ))
     })
-}
-
-/// An optional binary column: `None` when absent, refused when present at another type.
-fn optional_binary_col<'a>(
-    body_name: &str,
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-) -> Result<Option<&'a arrow::array::BinaryArray>, DecodeError> {
-    match batch.column_by_name(name) {
-        None => Ok(None),
-        Some(col) => col
-            .as_any()
-            .downcast_ref::<arrow::array::BinaryArray>()
-            .map(Some)
-            .ok_or_else(|| {
-                DecodeError(format!(
-                    "{body_name}: column '{name}' present but not binary"
-                ))
-            }),
-    }
 }
 
 /// A coordinate column, read by the rule a build reads a points file's, with `None` for a row

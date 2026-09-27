@@ -378,16 +378,15 @@ fn served(engine: &Engine, grant: &str, zoom: u8, bbox: [f64; 4]) -> BTreeMap<St
 }
 
 /// Ingest one point at `(x, y)` visible to `term`.
-fn ingest_point(engine: &Engine, external_id: &str, term: u32, x: f64, y: f64) {
+fn ingest_point(engine: &Engine, batch: &str, term: u32, x: f64, y: f64) {
     let descriptors = vec![term.to_string().into_bytes()];
     let mut hash = [0u8; 32];
-    for (slot, byte) in hash.iter_mut().zip(external_id.as_bytes()) {
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
     engine
         .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: descriptors.clone(),
@@ -397,7 +396,7 @@ fn ingest_point(engine: &Engine, external_id: &str, term: u32, x: f64, y: f64) {
                 terms: engine.resolve_terms(&descriptors),
                 scoped: Vec::new(),
             }],
-            external_id.to_string(),
+            batch.to_string(),
             hash,
         )
         .expect("an ordinary point is an ordinary write");

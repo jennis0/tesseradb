@@ -502,7 +502,6 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
     use tessera_lifecycle::WalRow;
 
     let row = WalRow {
-        external_id: Some(entity.to_le_bytes().to_vec()),
         entity_id: e(entity),
         view: "s0".to_string(),
         join: false,
@@ -529,8 +528,6 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
     const ENTITY_X: u64 = 10_002;
     const ENTITY_Y: u64 = 10_003;
-    let ext_x = b"external-x".to_vec();
-    let ext_y = b"external-y".to_vec();
 
     let wal_dir = TempDir::new().unwrap();
     let wal_path = wal_dir.path().join("wal.log");
@@ -544,7 +541,6 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
             body_hash: [0u8; 32],
             rows: vec![
                 WalRow {
-                    external_id: Some(ext_x.clone()),
                     entity_id: e(ENTITY_X),
                     view: "s0".to_string(),
                     join: false,
@@ -555,7 +551,6 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
                     scoped: Vec::new(),
                 },
                 WalRow {
-                    external_id: Some(ext_y.clone()),
                     entity_id: e(ENTITY_Y),
                     view: "s0".to_string(),
                     join: false,
@@ -608,7 +603,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
     let (_wal, records) = Wal::open(&wal_path).unwrap();
-    let (overlay, buffer, _established, _resolver) = replay(
+    let (overlay, buffer, _resolver) = replay(
         &records,
         &dict,
         Overlay::new(),

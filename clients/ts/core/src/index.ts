@@ -59,7 +59,6 @@ export {inlineDecoder, setWorkerFactory, type Decoder} from './decoder.js';
 export {RecordsRead} from './records.js';
 export {
   Control,
-  addressed,
   UNANSWERED,
   type Answer,
   type CallOptions,

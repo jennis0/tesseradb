@@ -45,7 +45,7 @@ use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
 use tessera_lifecycle::ChangeOp;
 use tessera_types::EntityId;
 
-use common::{build_fixture, IngestRows, full_coverage_credential, open_engine, source_id_key, tick, N_ITEMS};
+use common::{build_fixture, IngestRows, full_coverage_credential, open_engine, item_of_id, item_of_key, keyed, tick, N_ITEMS};
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -69,15 +69,15 @@ fn engine_with_faults(tmp: &TempDir, queue_bound: usize) -> (Engine, Arc<FaultSw
     (engine, faults)
 }
 
+/// A new item at the origin holding the `id` of `key`.
 fn row(key: &str) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(key.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: Vec::new(),
         x: 0.0,
         y: 0.0,
-        scalars: Vec::new(),
+        scalars: keyed(key),
         terms: Vec::new(),
         scoped: Vec::new(),
     }
@@ -114,8 +114,7 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
 }
 
 fn entity_of(engine: &Engine, source_id: u64) -> EntityId {
-    engine
-        .resolve_external_id(&source_id_key(source_id))
+    item_of_id(engine, source_id)
         .expect("resolve")
         .expect("fixture item resolves")
 }
@@ -124,13 +123,6 @@ fn entity_of(engine: &Engine, source_id: u64) -> EntityId {
 // The migrated case, and I9
 // =================================================================================================
 
-/// An entity ingested after the build has no locator slot and no extent entry — the
-/// live map must answer first, or `external_id_of` would wrongly report "this item has no external
-/// id" for one that does.
-///
-/// **The test asserts the id it gets *back*, and that is the point.** A caller cannot choose an
-/// entity id: `Command::Ingest` carries `UnallocatedRow`, which has no id field, because the
-/// executor must be free to assign a whole window's ids in one signature-sorted run. Whatever
 /// **The extent check guards the engine's own boundary, not one HTTP handler** (§6).
 ///
 /// This is the whole reason it moved. `Engine::ingest` has more than one caller — the
@@ -180,9 +172,11 @@ fn an_out_of_extent_row_is_refused_at_the_engine_boundary_with_no_id_burned() {
         .expect("the boundary is inside");
 }
 
-/// assigns the id, the live map answers for it before the build's locator does.
+/// **The executor assigns the ids, and the item is found by its values at once.** A caller cannot
+/// choose an entity id: `Command::Ingest` carries `UnallocatedRow`, which has no id field, because
+/// the executor must be free to assign a whole window's ids in one signature-sorted run.
 #[test]
-fn the_executor_assigns_the_ids_and_the_live_map_answers_for_them() {
+fn the_executor_assigns_the_ids_and_the_live_index_answers_for_them() {
     let tmp = TempDir::new().unwrap();
     let (engine, _faults) = engine_with_faults(&tmp, 8);
 
@@ -208,10 +202,7 @@ fn the_executor_assigns_the_ids_and_the_live_map_answers_for_them() {
         "and the high-water advances by exactly the batch"
     );
 
-    let resolved = engine.resolve_external_id(b"post-build-key").unwrap();
-    assert_eq!(resolved, Some(assigned));
-    let external = engine.external_id_of(assigned).unwrap();
-    assert_eq!(external.as_deref(), Some(&b"post-build-key"[..]));
+    assert_eq!(item_of_key(&engine, "post-build-key"), Some(assigned));
 }
 
 /// I9 across commands: ids are strictly monotone and assigned in **signature-sorted** order within
@@ -510,20 +501,18 @@ fn deny_priority_survives_the_window(window_max_rows: Option<usize>) {
 
 /// **The same property on the third close path**, which the row bound does not reach.
 ///
-/// `run_work_pass` closes a window mid-drain when an entry names an external id the open window
+/// `run_work_pass` closes a window mid-drain when an entry holds a unique value the open window
 /// already claims (`CommitWindow::conflicts` — the mechanism that keeps the
 /// unreachable-duplicate hole closed). A close that *continued* draining would never trip the row
 /// bound on a conflict-heavy stream, because `window.rows()` resets with the replacement: a pass
 /// could perform an unbounded number of full `append → fsync → apply → swap` cycles without ever
 /// returning to `Executor::run`'s deny drain. That is lifecycle §1.3's prohibition verbatim — a
 /// deny queued behind work of unbounded duration — and it is reachable at the shipped defaults from
-/// a client re-ingesting an `external_id` a still-open window holds.
+/// a client re-ingesting a unique value a still-open window holds.
 ///
-/// **The workload is pairs sharing an `external_id` under different batch ids, and the choice
-/// matters.** Pairs sharing a *batch id* would assert nothing: a held batch id joins from inside
+/// **The workload is pairs sharing an `id` under different batch ids, and the choice matters.** Pairs sharing a *batch id* would assert nothing: a held batch id joins from inside
 /// the window and forces no close at all, so there would be no close, no yield, and no test in the
-/// tree for this property. Whichever member of an external-id pair the drain meets
-/// second conflicts, whatever order the submitting threads reach the queue in.
+/// tree for this property. Whichever member of an `id` pair the drain meets second conflicts, whatever order the submitting threads reach the queue in.
 ///
 /// The executor is parked at `AfterFsync` inside that first conflict-forced close, which is what
 /// lets the deny be enqueued *during* the pass rather than before it — enqueueing it before would
@@ -565,10 +554,10 @@ fn a_deny_is_never_queued_behind_a_conflict_forced_window_split() {
             let e = Arc::clone(&engine);
             let order = Arc::clone(&order);
             workers.push(std::thread::spawn(move || {
-                // Same **external id** within a pair, different batch ids: the second one 409s
-                // on `established_collisions` once the close has applied the first. (A shared
-                // *batch id* would force no close at all — the join answers it in place — which is
-                // why the workload is shaped this way.)
+                // Same `id` within a pair, different batch ids: the second is resolved again once
+                // the close has applied the first. (A shared *batch id* would force no close at
+                // all — the join answers it in place — which is why the workload is shaped this
+                // way.)
                 let _ = e.ingest_rows(
                     vec![row(&format!("c-{i}"))],
                     format!("pair-{i}-{half}"),
@@ -808,10 +797,7 @@ fn an_ingest_append_failure_applies_nothing() {
         .expect_err("an ingest whose append failed must be refused");
 
     assert!(
-        engine
-            .resolve_external_id(b"never-lands")
-            .unwrap()
-            .is_none(),
+        item_of_key(&engine, "never-lands").is_none(),
         "nothing may be applied for an ingest that was never made durable ({err})"
     );
     assert_eq!(
@@ -832,7 +818,7 @@ fn an_ingest_append_failure_applies_nothing() {
 /// identifier would then hold two.
 ///
 /// Asserted through `Engine` rather than `Wal` because the divergence is only observable as an
-/// item: `resolve_external_id` answers from state replay rebuilt.
+/// item: the unique index answers from state replay rebuilt.
 #[test]
 fn an_ingest_whose_durability_failed_stays_absent_across_a_reopen() {
     let tmp = TempDir::new().unwrap();
@@ -855,10 +841,7 @@ fn an_ingest_whose_durability_failed_stays_absent_across_a_reopen() {
         .expect("the executor starts once");
 
     assert!(
-        reopened
-            .resolve_external_id(b"never-lands")
-            .unwrap()
-            .is_none(),
+        item_of_key(&reopened, "never-lands").is_none(),
         "the caller was told this ingest was not durable; a restart must not make it so"
     );
 }
@@ -965,10 +948,7 @@ fn a_torn_wal_stays_poisoned_and_still_applies_denies() {
     assert!(engine
         .ingest_rows(vec![row("after-poison")], "after".to_string(), [4u8; 32])
         .is_err());
-    assert!(engine
-        .resolve_external_id(b"after-poison")
-        .unwrap()
-        .is_none());
+    assert!(item_of_key(&engine, "after-poison").is_none());
 
     // But a deny after the poison is still APPLIED, and still reported as failed.
     let before = visible(&engine);
@@ -1206,11 +1186,11 @@ fn an_engine_without_an_executor_refuses_writes_and_still_reads() {
     assert_eq!(visible(&engine), N_ITEMS);
 }
 
-/// A second batch naming an established external id, under a different batch id as a client retry
-/// after a timeout sends it, names the item that holds it: sent as it was, it changes nothing and
-/// answers that item, and the key stays bound to it.
+/// A second batch holding a unique value an item holds, under a different batch id as a client
+/// retry after a timeout sends it, names that item: sent as it was, it changes nothing and answers
+/// that item, and the value stays with it.
 #[test]
-fn a_row_naming_an_established_external_id_names_its_item() {
+fn a_row_holding_a_held_unique_value_names_its_item() {
     let tmp = TempDir::new().unwrap();
     let (engine, _faults) = engine_with_faults(&tmp, 8);
 
@@ -1221,7 +1201,7 @@ fn a_row_naming_an_established_external_id_names_its_item() {
         .ingest_rows(vec![row("dup")], "b2".to_string(), [8u8; 32])
         .expect("the same row again changes nothing");
     assert_eq!(again, vec![first]);
-    assert_eq!(engine.resolve_external_id(b"dup").unwrap(), Some(first));
+    assert_eq!(item_of_key(&engine, "dup"), Some(first));
 }
 
 // =================================================================================================
@@ -1240,8 +1220,8 @@ fn a_row_naming_an_established_external_id_names_its_item() {
 /// Returns each submission's result **in submission order**, and the priming submission's id.
 type Accepted = Result<Vec<EntityId>, AcceptError>;
 type Submissions = Arc<std::sync::Mutex<Vec<Option<Result<Vec<EntityId>, String>>>>>;
-/// One row's sort key material: `(submission, row, signature, external_id)`.
-type SortKey = (usize, usize, Vec<u32>, Option<Vec<u8>>);
+/// One row's sort key material: `(submission, row, signature)`.
+type SortKey = (usize, usize, Vec<u32>);
 
 struct Window {
     engine: Arc<Engine>,
@@ -1281,8 +1261,8 @@ impl Window {
         }
     }
 
-    /// Submit `batches` concurrently, wait until every one is *enqueued*, then release the executor
-    /// so they are drained into one window.
+    /// Submit `batches` one at a time, each *enqueued* before the next is sent so the drain meets
+    /// them in order, then release the executor so they are drained into one window.
     fn run(
         &self,
         batches: Vec<(String, Vec<UnallocatedRow>)>,
@@ -1300,17 +1280,16 @@ impl Window {
                     .map_err(|err| format!("{err:?}"));
                 out.lock().unwrap()[i] = Some(r);
             }));
-        }
-
-        // Every submission enqueued: +1 for the priming one already in flight.
-        let deadline = std::time::Instant::now() + WAIT;
-        while self.engine.write_executor_stats().work_submitted < (n + 1) as u64 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "submissions never reached the queue: {:?}",
-                self.engine.write_executor_stats()
-            );
-            std::thread::yield_now();
+            // This submission enqueued: +1 for the priming one already in flight.
+            let deadline = std::time::Instant::now() + WAIT;
+            while self.engine.write_executor_stats().work_submitted < (i + 2) as u64 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "submission {i} never reached the queue: {:?}",
+                    self.engine.write_executor_stats()
+                );
+                std::thread::yield_now();
+            }
         }
 
         self.faults.release();
@@ -1326,7 +1305,7 @@ impl Window {
 }
 
 /// Signature-sorted assignment over the whole window, recomputed in the test: the rows in
-/// `(submission, row)` order, ordered by `(sorted-deduplicated terms, external_id)`, assigned
+/// `(submission, row)` order, stably ordered by their sorted-deduplicated terms, assigned
 /// `lo + rank`. §11.1's rule, independently of the implementation of it.
 fn expected_assignment(batches: &[(String, Vec<UnallocatedRow>)], lo: u64) -> Vec<Vec<u64>> {
     let mut flat: Vec<SortKey> = Vec::new();
@@ -1335,19 +1314,14 @@ fn expected_assignment(batches: &[(String, Vec<UnallocatedRow>)], lo: u64) -> Ve
             let mut key: Vec<u32> = r.terms.iter().map(|t| t.raw()).collect();
             key.sort_unstable();
             key.dedup();
-            flat.push((b, i, key, r.external_id.clone()));
+            flat.push((b, i, key));
         }
     }
     let mut order: Vec<usize> = (0..flat.len()).collect();
-    order.sort_by(|a, b| {
-        flat[*a]
-            .2
-            .cmp(&flat[*b].2)
-            .then_with(|| flat[*a].3.cmp(&flat[*b].3))
-    });
+    order.sort_by(|a, b| flat[*a].2.cmp(&flat[*b].2));
     let mut out: Vec<Vec<u64>> = batches.iter().map(|(_, r)| vec![0; r.len()]).collect();
     for (rank, idx) in order.into_iter().enumerate() {
-        let (b, i, _, _) = &flat[idx];
+        let (b, i, _) = &flat[idx];
         out[*b][*i] = lo + rank as u64;
     }
     out
@@ -1549,16 +1523,13 @@ fn each_waiter_gets_its_own_ids() {
         "each waiter's ids must be its own rows', in its own row order"
     );
 
-    // And the live map agrees, which is what a later deny resolves through.
-    for (b, (_, rows)) in batches.iter().enumerate() {
-        for (i, r) in rows.iter().enumerate() {
+    // And the unique index agrees, which is what a later deny by value resolves through.
+    for ((name, _), told) in batches.iter().zip(&ids) {
+        for (i, id) in told.iter().enumerate() {
             assert_eq!(
-                engine
-                    .resolve_external_id(r.external_id.as_ref().unwrap())
-                    .unwrap()
-                    .map(|e| e.raw()),
-                Some(ids[b][i]),
-                "the external id must resolve to the id its own caller was told"
+                item_of_key(&engine, &format!("{name}-{i}")).map(|e| e.raw()),
+                Some(*id),
+                "the row's `id` must name the item its own caller was told"
             );
         }
     }
@@ -1638,12 +1609,12 @@ fn every_unacked_waiter_in_a_partially_acked_window_gets_receipt_lost() {
     assert_eq!(lost, N - 1, "and every remaining waiter is `ReceiptLost`");
 }
 
-/// Two batches naming one new external id, admitted while one window is open, make **one item**,
+/// Two batches holding one new unique value, admitted while one window is open, make **one item**,
 /// and both answer it. Neither handler saw the other's item, so both resolved their row as a
 /// create; the window closes before admitting the second, whose check then finds the first's
-/// binding, and the second is resolved again and names the item the first created.
+/// value, and the second is resolved again and names the item the first created.
 #[test]
-fn a_duplicate_external_id_across_one_window_makes_one_item() {
+fn a_duplicate_unique_value_across_one_window_makes_one_item() {
     let tmp = TempDir::new().unwrap();
     let (engine, faults) = engine_with_faults(&tmp, 64);
     let engine = Arc::new(engine);
@@ -1662,10 +1633,7 @@ fn a_duplicate_external_id_across_one_window_makes_one_item() {
         })
         .collect();
     assert_eq!(ids[0], ids[1], "both name one item");
-    assert_eq!(
-        engine.resolve_external_id(b"same-key").unwrap(),
-        Some(ids[0][0])
-    );
+    assert_eq!(item_of_key(&engine, "same-key"), Some(ids[0][0]));
 
     // The retry was answered stale and, resolved again, changed nothing, which is sent to record
     // its batch id. A job answered stale still occupied a queue slot, so it is counted completed.
@@ -1831,14 +1799,14 @@ fn an_idle_work_pass_arms_nothing() {
 // The batch-id state machine across a held window
 // =================================================================================================
 
-/// Two anonymous rows: **no external id**, so no map can catch a double-ingest and the batch-id
+/// Two anonymous rows: **no unique value**, so no index can catch a double-ingest and the batch-id
 /// path is the only thing under test. It is also the case the recorded-ids design exists for —
 /// nothing could re-derive these ids from anything a retry sends.
 fn anonymous_pair() -> Vec<UnallocatedRow> {
     (0..2)
         .map(|_| {
             let mut r = row("ignored");
-            r.external_id = None;
+            r.scalars = Vec::new();
             r
         })
         .collect()
@@ -2123,9 +2091,9 @@ fn crash_batch_ids(wal_path: &std::path::Path) -> Vec<EntityId> {
 /// Asserting only that the retry 409s would pass equally well on a build that threw the original
 /// away.
 ///
-/// "In force" for a buffered ingest is the **live external-id map**: buffered rows
-/// have no geometry, there being no flush (⊘), so `visible()` cannot see them and
-/// `resolve_external_id` is the observable.
+/// "In force" for a buffered ingest is the **live unique index**: buffered rows have no geometry,
+/// there being no flush (⊘), so `visible()` cannot see them and the `id` they hold is the
+/// observable.
 #[test]
 fn held_plus_different_bytes_409s_without_disturbing_the_original() {
     let tmp = TempDir::new().unwrap();
@@ -2157,15 +2125,12 @@ fn held_plus_different_bytes_409s_without_disturbing_the_original() {
     );
     assert_eq!(original.len(), 1);
     assert_eq!(
-        engine
-            .resolve_external_id(b"held-0")
-            .expect("resolve")
-            .expect("the original's row is established"),
+        item_of_key(&engine, "held-0").expect("the original's row is in force"),
         original[0],
         "the original is in force with the ids it was acked"
     );
     assert_eq!(
-        engine.resolve_external_id(b"held-1").expect("resolve"),
+        item_of_key(&engine, "held-1"),
         None,
         "and the refused retry's rows are not — a 409 batch has no effect"
     );
@@ -2245,22 +2210,17 @@ fn every_id_a_window_issues_is_in_the_wal() {
     }
 }
 
-/// **A window's acks follow its established-map insert** — the ingest half of
-/// `ack_follows_fsync_then_swap`, which covers a change.
+/// **A window's acks follow its swap** — the ingest half of `ack_follows_fsync_then_swap`, which
+/// covers a change.
 ///
-/// **What it asserts, exactly, and what it does not.** The witness is engine state, not a step log:
-/// the executor is parked *inside* `Executor::ack`, one statement before the send, and
-/// `resolve_external_id` answers. That reads `LiveState::established`, which `Executor::apply_window`
-/// writes *before* it calls `publish` — so what is proven is **insert-precedes-ack**, not
-/// swap-precedes-ack. **A stronger witness is unavailable**: nothing a reader can observe
-/// distinguishes the two, because buffered rows have no geometry without a flush (⊘) and
-/// `visible()` therefore cannot see the ingest at all under either ordering. When a flush lands,
-/// this leg should read the swapped-in generation instead.
+/// The witness is engine state, not a step log: the executor is parked *inside* `Executor::ack`,
+/// one statement before the send, and the unique index of the published generation answers for
+/// the row. Buffered rows have no geometry without a flush (⊘), so `visible()` cannot see the
+/// ingest under either ordering; the `id` it holds can.
 ///
-/// The fail-open it does catch: a window that acked its N waiters before establishing them. Every
-/// caller holds ids whose entities no `/control/changes` lookup can resolve yet, so a suppression
-/// issued immediately after a 200 is answered 404 for an item that exists. It is the first test in
-/// the tree to assert ingest ack-ordering at all.
+/// The fail-open it catches: a window that acked its N waiters before publishing them. Every
+/// caller holds ids whose items no `/control/changes` lookup can resolve yet, so a suppression
+/// issued immediately after a 200 is answered 404 for an item that exists.
 #[test]
 fn a_windows_acks_follow_its_swap() {
     let tmp = TempDir::new().unwrap();
@@ -2275,9 +2235,9 @@ fn a_windows_acks_follow_its_swap() {
     faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
 
     assert!(
-        engine.resolve_external_id(b"in-force").unwrap().is_some(),
+        item_of_key(&engine, "in-force").is_some(),
         "the executor is parked one statement before the ack: the window it is about to \
-         acknowledge MUST already be established. Seeing nothing here means the acks ran with the \
+         acknowledge MUST already be published. Seeing nothing here means the acks ran with the \
          apply still ahead of them — lifecycle §4's ack-ordering fail-open, one window wide"
     );
 

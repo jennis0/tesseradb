@@ -29,6 +29,8 @@ def frame():
 def db(tmp_path):
     database = create(tmp_path / "db")
     database.declare_view("map")
+    database.declare_attribute("paper", type="keyword", unique=True)
+    database.declare_join_field("paper")
     return database
 
 
@@ -104,11 +106,11 @@ def test_the_columns_a_frame_fills_are_matched_on_the_allocation_views_insert(db
     db.declare_columns(frame(), skip=["paper", "x", "y", "terms"])
     insert = db.insert("map", frame(), id="paper", x="x", y="y", access="terms")
     assert set(insert.named_attributes) == {
-        "year", "open", "submitted", "title", "archive", "arxiv_id"
+        "paper", "year", "open", "submitted", "title", "archive", "arxiv_id"
     }
     text = db.declaration
-    assert text.count('source = "map"') == 1 + 6  # the view, and the six columns it fills
-    assert 'entity_id_field = "paper"' in text
+    assert text.count('source = "map"') == 1 + 7  # the view, and the seven columns it fills
+    assert 'join_field = "paper"' in text
 
 
 def test_a_second_views_insert_fills_nothing_by_name(db):
@@ -124,4 +126,4 @@ def test_columns_names_one_attributes_value_column_explicitly(db):
     insert = db.insert(
         "map", frame(), id="paper", x="x", y="y", columns={"year": "year"}
     )
-    assert insert.named_attributes == {"year": "year"}
+    assert insert.named_attributes == {"paper": "paper", "year": "year"}

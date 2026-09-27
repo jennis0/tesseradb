@@ -41,8 +41,10 @@ import pytest
 
 from oracle.harness import (
     CLI_BIN,
+    JOIN_FIELD,
     REPO_ROOT,
     ensure_cli_built,
+    join_attribute_toml,
     spawn_server,
     stop_server,
     write_deployment,
@@ -228,7 +230,8 @@ points = "points.parquet"
 pairs  = "pairs.parquet"
 
 [defaults]
-source = "points"
+source     = "points"
+join_field = "{JOIN_FIELD}"
 
 [[view]]
 name             = "{VIEW_ID}"
@@ -236,6 +239,7 @@ extent           = {{ min = 0.0, max = {EXTENT_MAX} }}
 source           = "points"
 point_visibility = {{ source = "pairs", default = "public" }}
 
+{join_attribute_toml("points")}
 [[attribute]]
 name   = "fx_key"
 type   = "u64"
@@ -303,7 +307,7 @@ def build_bundle(work: Path, points) -> Path:
     bundle = work / "bundle"
     deployment = write_deployment(work / "tessera.toml", bundle=bundle, schema=config)
     subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle), "--mint-external-ids"],
+        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
         cwd=REPO_ROOT,
         check=True,
     )
@@ -313,7 +317,7 @@ def build_bundle(work: Path, points) -> Path:
 def ingest_body(points) -> bytes:
     schema = pa.schema(
         [
-            pa.field("external_id", pa.binary()),
+            pa.field(JOIN_FIELD, pa.uint64()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
             pa.field("access", pa.list_(pa.utf8())),
@@ -322,7 +326,7 @@ def ingest_body(points) -> bytes:
     )
     batch = pa.record_batch(
         [
-            pa.array([p[0].to_bytes(8, "little") for p in points], pa.binary()),
+            pa.array([p[0] for p in points], pa.uint64()),
             pa.array([p[1] for p in points], pa.float32()),
             pa.array([p[2] for p in points], pa.float32()),
             pa.array([[term_of(p[0])] for p in points], pa.list_(pa.utf8())),

@@ -22,7 +22,6 @@ the brief; the RNG is seeded for reproducibility.
 
 from __future__ import annotations
 
-import base64
 import os
 import random
 from collections import Counter
@@ -36,6 +35,7 @@ from oracle import viewport as vp
 import numpy as np
 
 from oracle.bundle import Bundle
+from oracle.harness import JOIN_FIELD
 
 from .wire import decode_viewport
 
@@ -77,7 +77,7 @@ def _pair_backed_descriptor(bundle: Bundle) -> bytes:
     tests that took `dictionary[0]` as "the first corpus term" predate that interning and only
     meet it on a freshly built fixture; the mask catalogue met the same shift
     (`oracle/catalogue.py`'s header). The tests that share a mask across a session-scoped server
-    (see `test_items_drilldown_returns_expected_external_id`'s comment) all derive it from this
+    (see `test_items_drilldown_returns_the_items_own_record`'s comment) all derive it from this
     one descriptor, so their disjoint-ends reservation still holds.
     """
     for descriptor in bundle.dictionary:
@@ -314,8 +314,8 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
     assert counts_before == oracle_before
 
     target_entity = min(base_mask)
-    external_id_b64 = base64.b64encode(oracle_bundle.external_id_of(target_entity)).decode()
-    resp = server.change(external_id_b64, "suppress")
+    target = oracle_bundle.tessera_id_of(target_entity)
+    resp = server.change(target, "suppress")
     assert resp.status_code == 200, resp.text
 
     changes = mask_mod.ChangeSet()
@@ -331,7 +331,7 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
     assert sum(counts_after.values()) == sum(counts_before.values()) - 1
 
     # Clean up: unsuppress so later tests in this module see the original state.
-    resp = server.change(external_id_b64, "unsuppress")
+    resp = server.change(target, "unsuppress")
     assert resp.status_code == 200, resp.text
 
 
@@ -371,8 +371,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
 
     payload = []
     for entity_id, op, terms in batch:
-        external_id_b64 = base64.b64encode(oracle_bundle.external_id_of(entity_id)).decode()
-        item = {"external_id": external_id_b64, "op": op}
+        item = {"tessera_id": str(oracle_bundle.tessera_id_of(entity_id)), "op": op}
         if op == "predicate":
             # `builtin:passthrough`'s access label is the comma-joined decimal term ids (R6);
             # the dictionary's descriptor bytes for these ids are exactly those decimal strings.
@@ -403,12 +402,11 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
     assert server_counts == oracle_counts
 
 
-def test_items_drilldown_returns_expected_external_id(server, oracle_bundle: Bundle):
-    """`/v1/items` on a visible item returns the same `external_id` the oracle derives
-    (Task 12 brief, Step 4). Requires a post-r6 bundle (`identity` in MANIFEST) so the
-    oracle can compute `tessera_id_of` -- skipped against a pre-r6 fixture, which is what
-    this repo's `tessera build` still produces as of this task (identity.rs is landing but
-    tessera-build has not yet been repointed at it)."""
+def test_items_drilldown_returns_the_items_own_record(server, oracle_bundle: Bundle):
+    """`/v1/items` on a visible item, named by the `tessera_id` the oracle computes under the
+    bundle's key, returns that item's record: its join value is the one the bundle's unique index
+    holds for the entity. Requires a post-r6 bundle (`identity` in MANIFEST) so the oracle can
+    compute `tessera_id_of`."""
     if oracle_bundle.identity_key is None:
         pytest.skip("bundle has no `identity` object in MANIFEST (pre-r6 bundle)")
 
@@ -437,10 +435,8 @@ def test_items_drilldown_returns_expected_external_id(server, oracle_bundle: Bun
     # exists to stop someone reintroducing.
     target_entity = max(base_mask)
     tessera_id = oracle_bundle.tessera_id_of(target_entity)
-    expected_external_id = oracle_bundle.external_id_of(target_entity)
+    value_of = {e: v for v, e in oracle_bundle.unique_entities(JOIN_FIELD).items()}
 
     resp = server.item(token, tessera_id)
     assert resp.status_code == 200, resp.text
-    body = resp.json()
-    got_external_id = base64.b64decode(body["external_id"])
-    assert got_external_id == expected_external_id
+    assert resp.json()["fields"][JOIN_FIELD] == value_of[target_entity]

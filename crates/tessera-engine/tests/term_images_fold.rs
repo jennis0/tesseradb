@@ -184,16 +184,15 @@ fn build_fixture(tmp: &Path, root: &Path) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &id_schema()),
         out: root.to_path_buf(),
-        schema: Default::default(),
+        schema: id_schema(),
         limit: None,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -539,7 +538,6 @@ fn a_flush_before_the_fold_is_in_the_folds_images() {
     let mut rows = Vec::new();
     for i in 0..64u64 {
         rows.push(UnallocatedRow {
-            external_id: Some(format!("flushed-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],

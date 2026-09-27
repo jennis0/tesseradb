@@ -31,7 +31,6 @@ pub(super) enum Home {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SystemField {
     Position,
-    ExternalId,
     Labels,
 }
 
@@ -39,7 +38,6 @@ impl SystemField {
     fn parse(name: &str) -> Option<SystemField> {
         match name {
             "position" => Some(SystemField::Position),
-            "external_id" => Some(SystemField::ExternalId),
             "labels" => Some(SystemField::Labels),
             _ => None,
         }
