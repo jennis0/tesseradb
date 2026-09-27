@@ -1334,3 +1334,118 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     }
     s
 }
+
+#[cfg(test)]
+mod tests {
+    /// Pins that a panic inside `install`/`par_iter` propagates to the caller rather than being
+    /// swallowed: `Engine::viewport`'s tile sweep relies on that to turn a panicking tile into a
+    /// 500 rather than a truncated 200. Builds its own pool, using [`super::build_compute_pool`]
+    /// as `Engine::open` does, since `Engine::pool` is `pub(crate)` and unreachable from an
+    /// integration test. Says nothing about `pool.spawn`, pinned instead by
+    /// [`a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts`].
+    #[test]
+    fn a_panic_inside_the_shared_pool_propagates_to_the_caller() {
+        let pool = super::build_compute_pool(2).expect("pool should build");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.install(|| {
+                panic!("synthetic worker-thread panic");
+            })
+        }));
+
+        assert!(
+            result.is_err(),
+            "a panic inside install() must propagate to the caller, not be swallowed"
+        );
+    }
+
+    /// Pins that a panic in a task spawned on the shared pool leaves a record naming what
+    /// panicked, before the process aborts. Runs the child as a subprocess, gated on
+    /// `POOL_PANIC_CHILD`, and asserts its stderr, since `libtest` captures the print macros and
+    /// drops what it captured when the process dies.
+    /// Mutations this kills: dropping the `panic_handler` from [`super::build_compute_pool`] — the
+    /// child aborts with rayon's own line and no payload; writing the record through `eprintln!`
+    /// rather than to `stderr` directly — the child aborts with nothing; dropping the payload or
+    /// the thread from [`super::describe_pool_panic`] — the assertion fails.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let exe = std::env::current_exe().expect("the test binary knows its own path");
+        let out = std::process::Command::new(exe)
+            // A substring filter, not `--exact`: the module path of a unit test is not something
+            // this test should have to restate correctly.
+            .args(["--ignored", "--nocapture", "the_pool_panic_child"])
+            .env(POOL_PANIC_CHILD, "1")
+            .output()
+            .expect("the test binary re-executes");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert!(
+            !out.status.success(),
+            "a panicked pooled task must not leave the process healthy: {out:?}"
+        );
+        assert_eq!(
+            out.status.signal(),
+            Some(libc::SIGABRT),
+            "the behaviour is unchanged — the process still aborts; only the record is new: \
+             {stderr}"
+        );
+        assert!(
+            stderr.contains("spawned on the shared compute pool panicked"),
+            "the record names the subsystem: {stderr}"
+        );
+        assert!(
+            stderr.contains("synthetic pooled-task panic"),
+            "the record carries the payload, which is what makes it a diagnosis: {stderr}"
+        );
+        assert!(
+            stderr.contains("worker thread:"),
+            "and the thread it happened on: {stderr}"
+        );
+    }
+
+    /// The child half of
+    /// [`a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts`]. Aborts the process
+    /// by design, and does nothing at all unless that parent set `POOL_PANIC_CHILD` — an
+    /// `--ignored` sweep must not take a test binary down with it.
+    #[test]
+    #[ignore = "child half of the pool-panic test: inert unless the parent set POOL_PANIC_CHILD"]
+    fn the_pool_panic_child() {
+        if std::env::var_os(POOL_PANIC_CHILD).is_none() {
+            return;
+        }
+        let pool = super::build_compute_pool(1).expect("pool should build");
+        pool.spawn(|| panic!("synthetic pooled-task panic"));
+        // The abort arrives on the worker thread; this one only has to still be here for it.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        unreachable!("the panic handler aborts long before this");
+    }
+
+    const POOL_PANIC_CHILD: &str = "TESSERA_POOL_PANIC_CHILD";
+
+    /// Pins that the record carries the payload for both shapes a panic can leave it in
+    /// (`&'static str` or `String`), and says so plainly when it is neither.
+    /// Mutations this kills: downcasting to only one of the two types; dropping the payload from
+    /// the record; dropping the backtrace.
+    #[test]
+    fn the_pool_panic_record_carries_every_payload_shape() {
+        let from_literal: Box<dyn std::any::Any + Send> = Box::new("a literal payload");
+        let from_format: Box<dyn std::any::Any + Send> =
+            Box::new("a formatted payload".to_string());
+        let from_neither: Box<dyn std::any::Any + Send> = Box::new(7u32);
+
+        let literal = super::describe_pool_panic(from_literal.as_ref());
+        assert!(literal.contains("a literal payload"), "{literal}");
+        assert!(
+            literal.contains("backtrace"),
+            "the record carries a backtrace, which is the half a one-line abort never had: \
+             {literal}"
+        );
+        assert!(super::describe_pool_panic(from_format.as_ref()).contains("a formatted payload"));
+        assert!(
+            super::describe_pool_panic(from_neither.as_ref()).contains("neither &str nor String")
+        );
+    }
+}
