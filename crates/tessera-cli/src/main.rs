@@ -52,11 +52,11 @@ enum Command {
         /// elsewhere.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Build only the rows whose identity column's value is an integer below this value.
+        /// Build only the rows whose join field's value is an integer below this value.
         ///
         /// A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit
-        /// drops it. Refused when the identity column holds strings or bytes, and when rows have
-        /// no identity column. Layer member files are read whole: a member row naming a row the
+        /// drops it. Refused when the join field holds strings, and when the declaration names no
+        /// join field. Layer member files are read whole: a member row naming a row the
         /// limit dropped is refused, so limit the member file to the same values.
         #[arg(long, value_name = "ID")]
         limit: Option<u64>,
@@ -157,7 +157,7 @@ enum Command {
         #[arg(long)]
         payloads: bool,
     },
-    /// Verify a bundle's files and its identity column.
+    /// Verify a bundle's files and every row's `tessera_id`.
     ///
     /// It opens the bundle as the server does. That checks every manifest digest, the size and
     /// SHA-256 of every file except the unique indexes' runs, and that each segment's permutation
