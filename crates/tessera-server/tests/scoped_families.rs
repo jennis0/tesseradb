@@ -326,10 +326,21 @@ fn category(name: &str) -> Attribute {
 }
 
 /// The bundle: one plain view and one group of four quarters carrying four scoped families — a
-/// `public` category, a `derived` category, a text column, and a numeric read from its own source.
+/// `public` category, a `derived` category, a text column, and a numeric read from its own source
+/// — and the unique `id` ([`id_schema`]), read from a file naming every entity, so a row names a
+/// built entity by its source id.
 fn build_families(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
+    let entities = dir.join("entities.parquet");
+    write_parquet(
+        &entities,
+        vec![column(
+            "entity_id",
+            false,
+            UInt64Array::from_iter_values(0..ENTITIES),
+        )],
+    );
     let world_points = dir.join("world.parquet");
     write_view_points(&world_points, "world", WORLD, None);
     let score_source = dir.join("score.parquet");
@@ -347,8 +358,27 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
         family_views.push(views.len());
         views.push(view_args(&id, &points, AccessInput::relation(&pairs)));
     }
+    let schema = Schema {
+        attributes: id_schema().attributes,
+        vocabularies: HashMap::from([
+            (
+                "mood".to_string(),
+                vocabulary("mood", &MOODS, Visibility::Public),
+            ),
+            (
+                "sector".to_string(),
+                vocabulary("sector", &SECTORS, Visibility::Derived),
+            ),
+            (
+                "tone".to_string(),
+                vocabulary("tone", &TONES, Visibility::Derived),
+            ),
+        ]),
+    };
     let out = dir.join("bundle");
     build(&BuildArgs {
+        attribute_sources: tessera_build::config::AttributeSource::over(&entities, &schema),
+        schema,
         groups: vec![GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
@@ -433,23 +463,6 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                 }),
             ),
         ],
-        schema: Schema {
-            attributes: Vec::new(),
-            vocabularies: HashMap::from([
-                (
-                    "mood".to_string(),
-                    vocabulary("mood", &MOODS, Visibility::Public),
-                ),
-                (
-                    "sector".to_string(),
-                    vocabulary("sector", &SECTORS, Visibility::Derived),
-                ),
-                (
-                    "tone".to_string(),
-                    vocabulary("tone", &TONES, Visibility::Derived),
-                ),
-            ]),
-        },
         ..build_args(&out, views)
     })
     .expect("a five-view build with five scoped families succeeds");
@@ -1043,8 +1056,8 @@ async fn meta_publishes_every_family_with_its_scope() {
 // runtime acquires, and of the fold's per-view merge — and every one of those branches serves a
 // **value**, so the failure they have in common is a wrong answer rather than an error.
 
-/// New entities, allocated above the build's high-water, so nothing here collides with the
-/// fixture's own and every assertion below is about rows the write path made.
+/// The `id`s of new entities, above the build's, so nothing here collides with the fixture's own
+/// and every assertion below is about rows the write path made.
 const JOINED: u64 = 9_001;
 const Q3_ONLY: u64 = 9_002;
 const IN_MINTED: u64 = 9_003;
@@ -1094,16 +1107,16 @@ const FILLER: Written = Written {
     score: 0.1,
 };
 
-/// An ingest body carrying the reserved columns and the scoped families **under their plain
-/// names** (`views.md` §5): the view comes from `x-tessera-view`, so the column is not qualified
-/// and the view decides which of each family's columns the value lands in. A category arrives as
-/// its **key**, never a code. `tone`, and each string column `nulls` names, is null on every row.
+/// An ingest body carrying the reserved columns, each row's `id`, and the scoped families **under
+/// their plain names** (`views.md` §5): the view comes from `x-tessera-view`, so the column is not
+/// qualified and the view decides which of each family's columns the value lands in. A category
+/// arrives as its **key**, never a code. `tone`, and each string column `nulls` names, is null on
+/// every row.
 fn scoped_batch(rows: &[(u64, f64, f64, Written)], nulls: &[&str]) -> Vec<u8> {
-    use arrow::array::BinaryArray;
     let access = access_column(rows.iter().map(|_| "0"));
     let nulls: Vec<&str> = std::iter::once("tone").chain(nulls.iter().copied()).collect();
     let mut fields = vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         access_field(&access),
@@ -1114,16 +1127,14 @@ fn scoped_batch(rows: &[(u64, f64, f64, Written)], nulls: &[&str]) -> Vec<u8> {
     ];
     fields.extend(nulls.iter().map(|name| Field::new(*name, DataType::Utf8, true)));
     let schema = Arc::new(ArrowSchema::new(fields));
-    let ids: Vec<Vec<u8>> = rows.iter().map(|(e, ..)| external_id_of(*e)).collect();
     let null_column = || -> arrow::array::ArrayRef {
         Arc::new(StringArray::from(vec![None::<&str>; rows.len()]))
     };
     let batch = RecordBatch::try_new(
         schema.clone(),
         [
-            Arc::new(BinaryArray::from_iter(
-                ids.iter().map(|id| Some(id.as_slice())),
-            )) as arrow::array::ArrayRef,
+            Arc::new(UInt64Array::from_iter_values(rows.iter().map(|(e, ..)| *e)))
+                as arrow::array::ArrayRef,
             Arc::new(Float64Array::from_iter_values(
                 rows.iter().map(|(_, x, ..)| *x),
             )),
@@ -1673,8 +1684,8 @@ async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
 /// An entity whose point lives in `2026-Q3` alone, for the edits below.
 const FILLED: u64 = 9_004;
 
-/// One `POST /control/ingest` JSON row without coordinates and naming no view, addressed by
-/// external id.
+/// One `POST /control/ingest` JSON row without coordinates and naming no view, naming [`FILLED`]
+/// by its `id`.
 async fn row_without_view(
     served: &Served,
     batch_id: &str,
@@ -1682,7 +1693,7 @@ async fn row_without_view(
     cells: Value,
 ) -> (u16, Value) {
     let mut row = json!({
-        "external_id": member(FILLED),
+        "id": FILLED,
     });
     for (name, value) in cells.as_object().unwrap() {
         row[name] = value.clone();
@@ -1834,7 +1845,7 @@ async fn a_row_without_coordinates_mints_a_new_key_for_a_group_scoped_family() {
     drain(&served.server).await;
 
     let row = json!([{
-        "external_id": member(FILLED),
+        "id": FILLED,
         "grade": "g7",
     }]);
     let resp = served

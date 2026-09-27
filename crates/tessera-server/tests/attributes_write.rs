@@ -22,8 +22,9 @@ use serde_json::{json, Value};
 
 const N: u64 = 60;
 
-/// One rendered, indexed `f32` at the build, and a `public` vocabulary no build column names, so
-/// a runtime category over it fixes the width at the declaration.
+/// One rendered, indexed `f32` at the build and the unique `id` rows name items by, and a
+/// `public` vocabulary no build column names, so a runtime category over it fixes the width at
+/// the declaration.
 const SCHEMA_TOML: &str = r#"
 [[vocabulary]]
 name       = "dept"
@@ -39,6 +40,12 @@ name   = "score"
 type   = "f32"
 render = true
 index  = true
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 "#;
 
 fn fixture(dir: &Path) -> std::path::PathBuf {
@@ -81,10 +88,10 @@ fn declared_names(meta: &Value) -> Vec<String> {
         .collect()
 }
 
-/// One ingest row: the external id, its position, the build's `score`, and the runtime columns
-/// where the batch carries them.
+/// One ingest row: its `id`, the build's `score`, and the runtime columns where the batch carries
+/// them.
 struct Row {
-    id: &'static str,
+    id: u64,
     score: f32,
     sentiment: Option<f32>,
     tag: Option<&'static str>,
@@ -95,15 +102,15 @@ fn batch(rows: &[Row], runtime: bool) -> Vec<u8> {
     let labels: Vec<&[&str]> = rows.iter().map(|_| &["0"][..]).collect();
     let access = access_lists(&labels);
     let mut fields = vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("id", DataType::UInt64, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
         Field::new("score", DataType::Float32, true),
     ];
     let mut columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(arrow::array::BinaryArray::from_iter(
-            rows.iter().map(|r| Some(r.id.as_bytes())),
+        Arc::new(arrow::array::UInt64Array::from_iter_values(
+            rows.iter().map(|r| r.id),
         )),
         Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 500.0))),
         Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 500.0))),
@@ -225,7 +232,7 @@ fn tag() -> Value {
 #[tokio::test]
 async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_refuses() {
     let served = Served::build(fixture).await;
-    assert_eq!(declared_names(&meta(&served).await), ["score"]);
+    assert_eq!(declared_names(&meta(&served).await), ["score", "id"]);
 
     let (status, body) = declare(&served, sentiment()).await;
     assert_eq!(status, 201, "{body}");
@@ -268,7 +275,7 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     assert_eq!(status, 201);
     assert_eq!(
         declared_names(&meta(&served).await),
-        ["score", "sentiment", "tag"],
+        ["score", "id", "sentiment", "tag"],
         "the runtime columns append after the build's, in declaration order"
     );
     let meta = meta(&served).await;
@@ -302,7 +309,7 @@ async fn a_row_may_leave_a_column_out_and_every_reader_answers_it() {
     // A JSON record without a key leaves that column out; `null` sends no value.
     let json_row = |tag: Option<Value>| {
         let mut record = json!({
-            "external_id": "ajE=", "x": 500.0, "y": 500.0, "access": ["0"], "score": 50.0,
+            "id": 1002, "x": 500.0, "y": 500.0, "access": ["0"], "score": 50.0,
             "sentiment": null,
         });
         if let Some(tag) = tag {
@@ -311,7 +318,7 @@ async fn a_row_may_leave_a_column_out_and_every_reader_answers_it() {
         json!([record]).to_string().into_bytes()
     };
     for (batch_id, content_type, body) in [
-        ("omitting", ARROW, batch(&[unvalued("o1")], false)),
+        ("omitting", ARROW, batch(&[unvalued(1001)], false)),
         ("json-omitting", JSON, json_row(None)),
     ] {
         let (status, body) = post_ingest(&served, batch_id, content_type, body).await;
@@ -325,19 +332,19 @@ async fn a_row_may_leave_a_column_out_and_every_reader_answers_it() {
         batch(
             &[
                 Row {
-                    id: "c1",
+                    id: 1011,
                     score: 1.0,
                     sentiment: Some(0.9),
                     tag: Some("eng"),
                 },
                 Row {
-                    id: "c2",
+                    id: 1012,
                     score: 2.0,
                     sentiment: Some(0.2),
                     tag: Some("ops"),
                 },
                 Row {
-                    id: "c3",
+                    id: 1013,
                     score: 3.0,
                     sentiment: None,
                     tag: None,
@@ -348,7 +355,7 @@ async fn a_row_may_leave_a_column_out_and_every_reader_answers_it() {
     )
     .await;
     // The same rows with nulls name the items the omitting rows created, and change nothing.
-    let nulls = ingest(&served, "nulls", batch(&[unvalued("o1")], true)).await;
+    let nulls = ingest(&served, "nulls", batch(&[unvalued(1001)], true)).await;
     let (status, receipt) =
         post_ingest(&served, "json-nulls", JSON, json_row(Some(Value::Null))).await;
     assert_eq!(status, 200, "{receipt}");
@@ -425,19 +432,17 @@ async fn a_row_may_leave_a_column_out_and_every_reader_answers_it() {
     assert_eq!(keys, ["eng", "ops"]);
 }
 
-/// A batch of rows carrying their geometry and label and no declared column.
-fn geometry(ids: &[&str]) -> Vec<u8> {
-    let ids: Vec<Option<&[u8]>> = ids.iter().map(|id| Some(id.as_bytes())).collect();
-    let rows: Vec<(Option<&[u8]>, f32, f32, &str)> =
-        ids.iter().map(|id| (*id, 400.0, 400.0, "0")).collect();
+/// A batch of rows carrying their `id`, geometry and label and no other declared column.
+fn geometry(ids: &[u64]) -> Vec<u8> {
+    let rows: Vec<(Option<u64>, f32, f32, &str)> =
+        ids.iter().map(|id| (Some(*id), 400.0, 400.0, "0")).collect();
     build_ingest_batch_optional(&rows)
 }
 
-/// A JSON record carrying its geometry and label, and `score` where it is given.
-fn record(id: &str, score: Option<f32>) -> Value {
-    use base64::Engine as _;
+/// A JSON record carrying its `id`, geometry and label, and `score` where it is given.
+fn record(id: u64, score: Option<f32>) -> Value {
     let mut record = json!({
-        "external_id": base64::engine::general_purpose::STANDARD.encode(id),
+        "id": id,
         "x": 400.0, "y": 400.0, "access": ["0"],
     });
     if let Some(score) = score {
@@ -474,19 +479,19 @@ async fn a_row_may_leave_declared_columns_out_whether_it_adds_or_creates() {
     ingest(
         &served,
         "held",
-        batch(&[held("h1"), held("h2"), held("h3")], false),
+        batch(&[held(1021), held(1022), held(1023)], false),
     )
     .await;
 
     let json_body = |records: Vec<Value>| Value::Array(records).to_string().into_bytes();
     let mut landed = Vec::new();
     for (batch_id, content_type, body, created, added) in [
-        ("add-arrow", ARROW, geometry(&["h1"]), 0, 1),
-        ("new-beside-add-arrow", ARROW, geometry(&["h2", "n1"]), 1, 1),
+        ("add-arrow", ARROW, geometry(&[1021]), 0, 1),
+        ("new-beside-add-arrow", ARROW, geometry(&[1022, 1031]), 1, 1),
         (
             "add-beside-new-json",
             JSON,
-            json_body(vec![record("h3", None), record("n2", Some(50.0))]),
+            json_body(vec![record(1023, None), record(1032, Some(50.0))]),
             1,
             1,
         ),
@@ -526,7 +531,7 @@ async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
     let served = served.restart().await;
     assert_eq!(
         declared_names(&meta(&served).await),
-        ["score", "sentiment", "tag"],
+        ["score", "id", "sentiment", "tag"],
         "replayed from the log"
     );
     assert_eq!(
@@ -539,7 +544,7 @@ async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
         "carrying",
         batch(
             &[Row {
-                id: "c1",
+                id: 1011,
                 score: 1.0,
                 sentiment: Some(0.9),
                 tag: None,
@@ -552,7 +557,7 @@ async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
     let served = served.restart().await;
     assert_eq!(
         declared_names(&meta(&served).await),
-        ["score", "sentiment", "tag"],
+        ["score", "id", "sentiment", "tag"],
         "carried by the segments manifest"
     );
     assert_eq!(
@@ -602,9 +607,9 @@ async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
     let served = Served::build(fixture).await;
     let note = json!({ "name": "note", "type": "text", "index": true });
     assert_eq!(declare(&served, note).await.0, 201);
-    let point = |id: &str, note: Option<&str>| {
+    let point = |id: u64, note: Option<&str>| {
         json!({
-            "external_id": b64(id.as_bytes()), "x": 500.0, "y": 500.0, "access": ["0"], "score": 1.0,
+            "id": id, "x": 500.0, "y": 500.0, "access": ["0"], "score": 1.0,
             "note": note,
         })
     };
@@ -613,9 +618,9 @@ async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
         "/control/ingest",
         "points",
         json!([
-            point("n1", Some("cedar grove")),
-            point("n2", Some("amber light")),
-            point("n3", None),
+            point(2001, Some("cedar grove")),
+            point(2002, Some("amber light")),
+            point(2003, None),
         ]),
     )
     .await;
@@ -625,7 +630,7 @@ async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
         &served,
         "/control/ingest",
         "edit",
-        json!([{ "external_id": b64(b"n3"), "note": "cedar bark" }]),
+        json!([{ "id": 2003, "note": "cedar bark" }]),
     )
     .await;
     drain(&served.server).await;

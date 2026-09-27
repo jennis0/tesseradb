@@ -57,7 +57,7 @@ async fn put(
         .client
         .put(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -79,7 +79,7 @@ async fn patch(
         .client
         .patch(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();

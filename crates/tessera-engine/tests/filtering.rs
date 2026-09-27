@@ -272,7 +272,7 @@ fn fixture() -> Fixture {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: bundle.clone(),
         limit: None,
         identity_key: test_key(),
@@ -284,7 +284,7 @@ fn fixture() -> Fixture {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("the fixture builds");
 
@@ -1260,7 +1260,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
-        // The schema declares six columns.
+        // The schema declares seven columns, the fixture's `id` last.
         scalars: vec![
             WalScalar::Utf8("eng".to_string()),
             WalScalar::Utf8("xx".to_string()),
@@ -1268,6 +1268,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
             WalScalar::I32(43),
             WalScalar::Null,
             WalScalar::Utf8("shared p97".to_string()),
+            WalScalar::Null,
             WalScalar::I32(1),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
@@ -1280,8 +1281,8 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         matches!(
             err,
             tessera_engine::AcceptError::ScalarArity {
-                expected: 6,
-                got: 7,
+                expected: 7,
+                got: 8,
                 ..
             }
         ),

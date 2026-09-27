@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryArray, DictionaryArray, Float32Array, GenericListBuilder, LargeStringBuilder,
+    ArrayRef, DictionaryArray, Float32Array, GenericListBuilder, LargeStringBuilder,
     ListArray, ListBuilder, StringArray, StringBuilder,
 };
 use arrow::buffer::OffsetBuffer;
@@ -28,29 +28,17 @@ use common::*;
 const VIENNA: &str = "Natural History Museum, Vienna";
 const LONDON: &str = "Natural History Museum";
 
-/// One ingest body with an `access` column of the caller's making, so the refusal cases can spell
-/// it wrong.
+/// One ingest body of `rows` new items with an `access` column of the caller's making, so the
+/// refusal cases can spell it wrong.
 fn body_with_access(rows: usize, access: arrow::array::ArrayRef) -> Vec<u8> {
-    body_with_access_from(100, rows, access)
-}
-
-/// [`body_with_access`] with its external ids starting `first` past the fixture's own.
-fn body_with_access_from(first: u64, rows: usize, access: arrow::array::ArrayRef) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         Field::new("access", access.data_type().clone(), true),
     ]));
-    let ids: Vec<Vec<u8>> = (0..rows as u64)
-        .map(|i| external_id_of(N_ITEMS + first + i))
-        .collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values(
-                ids.iter().map(|v| v.as_slice()),
-            )),
             Arc::new(Float32Array::from_iter_values(
                 (0..rows).map(|i| 10.0 + i as f32),
             )),
@@ -218,7 +206,7 @@ async fn a_scalar_and_a_dictionary_column_are_one_label_per_row() {
     let resp = ingest(&server, "scalar-1", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let dictionary: DictionaryArray<Int32Type> = vec![VIENNA].into_iter().collect();
-    let body = body_with_access_from(200, 1, Arc::new(dictionary));
+    let body = body_with_access(1, Arc::new(dictionary));
     let resp = ingest(&server, "dictionary-1", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     drain(&server).await;
@@ -247,8 +235,8 @@ async fn a_padded_label_is_stored_trimmed_on_every_encoding() {
             Arc::new(vec![" red "].into_iter().collect::<DictionaryArray<Int32Type>>()),
         ),
     ];
-    for (first, (batch_id, access)) in (100..).step_by(100).zip(bodies) {
-        let resp = ingest(&server, batch_id, body_with_access_from(first, 1, access)).await;
+    for (batch_id, access) in bodies {
+        let resp = ingest(&server, batch_id, body_with_access(1, access)).await;
         assert_eq!(resp.status(), 200, "{batch_id}: {}", resp.text().await.unwrap());
     }
     drain(&server).await;
@@ -393,16 +381,12 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     assert_eq!(resp.status(), 422, "an empty element is no label, and no default is declared");
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values([external_id_of(
-                N_ITEMS + 900,
-            )])),
             Arc::new(Float32Array::from_iter_values([10.0])),
             Arc::new(Float32Array::from_iter_values([10.0])),
         ],

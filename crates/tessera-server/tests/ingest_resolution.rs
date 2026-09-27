@@ -1,5 +1,5 @@
-//! **Which item an ingest row names, on the wire**: a row names an item by its `tessera_id`, its
-//! external id or a unique value, and may leave any column out. A row naming an item and carrying
+//! **Which item an ingest row names, on the wire**: a row names an item by its `tessera_id` or a
+//! unique value, and may leave any column out. A row naming an item and carrying
 //! what it stores changes nothing and answers the item's `tessera_id`; a row naming no item and
 //! carrying a position creates one; a batch that would change an item, names two items in one row,
 //! names one item in two rows or names a `tessera_id` nobody holds is `409` and writes nothing; a
@@ -14,7 +14,6 @@ mod common;
 use std::path::Path;
 
 use arrow::array::{StringArray, UInt64Array};
-use base64::Engine as _;
 use common::*;
 use serde_json::{json, Value};
 
@@ -90,10 +89,6 @@ async fn holder(served: &Served, gid: u64) -> String {
     points[0].0.to_string()
 }
 
-fn external(e: u64) -> String {
-    base64::engine::general_purpose::STANDARD.encode(e.to_le_bytes())
-}
-
 /// **A row naming an item and carrying what it stores changes nothing**, by each identifier, with
 /// every column left out or sent as stored; it answers the item's `tessera_id` and writes
 /// nothing. A row naming no item and carrying a position creates one.
@@ -109,7 +104,7 @@ async fn rows_naming_items_change_nothing_and_rows_naming_none_create() {
         json!([
             { "tessera_id": three },
             { "gid": gid_of(4), "code": "c4" },
-            { "external_id": external(5), "access": ["0"] },
+            { "gid": gid_of(5), "access": ["0"] },
         ]),
     )
     .await;

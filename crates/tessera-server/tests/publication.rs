@@ -160,7 +160,7 @@ async fn an_artifacts_only_commit_is_served_once_the_counter_reaches_the_answer(
         .put(server.control_url("/control/layers/clusters/artifacts"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{
                 "key": "k0",
                 "members": [member(1), member(2)],
@@ -219,7 +219,7 @@ async fn a_flush_requested_while_a_cycle_is_open_is_answered_two_ahead() {
         tessera_lifecycle::faults::PauseAction::Stall,
     );
 
-    ingest_one(&server, "two-ahead-1", &external_id_of(N_ITEMS + 1)).await;
+    ingest_one(&server, "two-ahead-1").await;
     let first = request_flush(&server).await;
     await_seam(&faults).await;
 
@@ -269,15 +269,9 @@ async fn rows_buffered_into_two_views_are_both_served_at_the_number() {
     let answer: Value = resp.json().await.unwrap_or(Value::Null);
     assert_eq!(status, 201, "the second view is created: {answer}");
 
-    for (batch_id, view, base) in [
-        ("into-s0", "s0", 5_000u64),
-        ("into-second", "second", 6_000),
-    ] {
-        let ids: Vec<Vec<u8>> = (0..3).map(|i| external_id_of(base + i)).collect();
-        let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (Some(&id[..]), 100.0 + i as f32, 100.0 + i as f32, "0"))
+    for (batch_id, view) in [("into-s0", "s0"), ("into-second", "second")] {
+        let rows: Vec<(Option<u64>, f32, f32, &str)> = (0..3)
+            .map(|i| (None, 100.0 + i as f32, 100.0 + i as f32, "0"))
             .collect();
         let resp = server
             .client
@@ -375,19 +369,13 @@ async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
 
-    let ext = external_id_of(N_ITEMS + 1);
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "parked-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&ext[..]),
-            10.0,
-            10.0,
-            "0",
-        )]))
+        .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
         .await
         .unwrap();
@@ -438,20 +426,15 @@ async fn await_seam(faults: &Arc<FaultSwitchboard>) {
     .await;
 }
 
-/// One row into `s0`, accepted.
-async fn ingest_one(server: &TestServer, batch_id: &str, external_id: &[u8]) -> Value {
+/// One new item into `s0`, accepted.
+async fn ingest_one(server: &TestServer, batch_id: &str) -> Value {
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(external_id),
-            10.0,
-            10.0,
-            "0",
-        )]))
+        .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
         .await
         .unwrap();
@@ -511,8 +494,7 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
     let tmp = TempDir::new().unwrap();
     let (server, faults) = serve_with_faults(&tmp).await;
 
-    let ext = external_id_of(N_ITEMS + 1);
-    ingest_one(&server, "gated-1", &ext).await;
+    ingest_one(&server, "gated-1").await;
 
     // Every WAL fsync from here fails, which poisons the log and shuts the flush's gate.
     faults.fail_next_fsyncs(100_000);
@@ -520,7 +502,7 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "op": "suppress", "external_id": member(1) }]))
+        .json(&json!([{ "op": "suppress", "field": "id", "value": "1" }]))
         .send()
         .await
         .unwrap();
@@ -582,8 +564,7 @@ async fn a_publication_that_has_not_swapped_does_not_move_the_counter() {
         tessera_lifecycle::faults::PauseAction::Stall,
     );
 
-    let ext = external_id_of(N_ITEMS + 1);
-    ingest_one(&server, "swap-1", &ext).await;
+    ingest_one(&server, "swap-1").await;
     let n = request_flush(&server).await;
 
     await_seam(&faults).await;
@@ -619,7 +600,7 @@ async fn wait_visible_holds_a_row_page_until_its_rows_are_served() {
     let server = serve(&tmp).await;
 
     // Without the parameter: acknowledged, not yet published.
-    let body = ingest_one(&server, "unwaited", &external_id_of(N_ITEMS + 1)).await;
+    let body = ingest_one(&server, "unwaited").await;
     assert!(
         body["publication"].as_u64().unwrap() > publication(&server).await,
         "the acknowledgement names a cycle that has not happened yet: {body}"
@@ -629,19 +610,13 @@ async fn wait_visible_holds_a_row_page_until_its_rows_are_served() {
         "no wait was asked for: {body}"
     );
 
-    let ext = external_id_of(N_ITEMS + 2);
     let resp = server
         .client
         .post(server.control_url("/control/ingest?wait=visible"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "waited")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&ext[..]),
-            10.0,
-            10.0,
-            "0",
-        )]))
+        .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
         .await
         .unwrap();
@@ -681,7 +656,7 @@ async fn wait_visible_holds_an_artifact_publication_until_it_is_served() {
         .put(server.control_url("/control/layers/clusters/artifacts?wait=visible"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{
                 "key": "k0",
                 "members": [member(1), member(2)],
@@ -744,19 +719,13 @@ async fn the_wait_is_bounded_and_says_so() {
     )
     .await;
 
-    let ext = external_id_of(N_ITEMS + 1);
     let resp = server
         .client
         .post(server.control_url("/control/ingest?wait=visible"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "bounded")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&ext[..]),
-            10.0,
-            10.0,
-            "0",
-        )]))
+        .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
         .await
         .unwrap();
@@ -783,19 +752,13 @@ async fn the_largest_wait_ceiling_waits_for_the_publication() {
     )
     .await;
 
-    let ext = external_id_of(N_ITEMS + 1);
     let resp = server
         .client
         .post(server.control_url("/control/ingest?wait=visible"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "unbounded")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&ext[..]),
-            10.0,
-            10.0,
-            "0",
-        )]))
+        .body(build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]))
         .send()
         .await
         .unwrap();
@@ -847,12 +810,7 @@ async fn wait_visible_holds_a_flush_until_the_unwaited_pages_are_served() {
 
     let mut waiting = Vec::new();
     for i in 1..=3 {
-        let body = ingest_one(
-            &server,
-            &format!("unwaited-{i}"),
-            &external_id_of(N_ITEMS + i),
-        )
-        .await;
+        let body = ingest_one(&server, &format!("unwaited-{i}")).await;
         waiting.push(ingested_ids(&body)[0]);
     }
     assert!(
@@ -901,7 +859,7 @@ async fn the_flush_wait_is_bounded_and_says_so() {
     )
     .await;
 
-    ingest_one(&server, "bounded-flush", &external_id_of(N_ITEMS + 1)).await;
+    ingest_one(&server, "bounded-flush").await;
 
     let body = request_flush_waiting(&server).await;
     assert_eq!(body["visible"], json!(false), "{body}");
@@ -936,15 +894,14 @@ async fn a_replayed_page_accepts_nothing_and_says_so() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
-    let ext = external_id_of(N_ITEMS + 1);
-    let first = ingest_one(&server, "replay-1", &ext).await;
+    let first = ingest_one(&server, "replay-1").await;
     assert_eq!(first["created"], json!(1));
     assert!(
         first.get("replayed").is_none(),
         "a first submission carries no flag: {first}"
     );
 
-    let second = ingest_one(&server, "replay-1", &ext).await;
+    let second = ingest_one(&server, "replay-1").await;
     assert_eq!(second["replayed"], json!(true), "{second}");
     assert_eq!(
         second["created"],

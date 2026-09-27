@@ -42,6 +42,8 @@ const ENTITIES: u64 = 20;
 /// dropping it leaves every declared item in a view and deletes none.
 const WORLD: std::ops::Range<u64> = 0..ENTITIES;
 const Q1: std::ops::Range<u64> = 0..10;
+/// The first `id` above the fixture's, for an item a test creates and names again.
+const NEW_ID: u64 = 1_000;
 
 fn position(view: &str, e: u64) -> (f64, f64) {
     match view.split_once(':') {
@@ -108,8 +110,8 @@ fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
             },
         }]
     };
-    // The declaration, for its schema alone: one entity-space attribute over the world file,
-    // which is the file that holds every entity.
+    // The declaration, for its schema alone: an entity-space attribute and the unique `id` over
+    // the world file, which is the file that holds every entity.
     let config_path = dir.join("config.toml");
     std::fs::write(
         &config_path,
@@ -126,7 +128,9 @@ point_visibility = { default = "public" }
 name   = "score"
 type   = "i32"
 render = true
-"#,
+"#
+        .to_string()
+            + ID_ATTRIBUTE,
     )
     .unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
@@ -250,17 +254,16 @@ async fn points(served: &Served, view: &str) -> Vec<PointRow> {
     decode_viewport(&resp.bytes().await.unwrap()).1
 }
 
-/// One ingest batch of `(external id, x, y, access)` rows into `view`.
-/// One ingest row: the external id, its position, its access label and the declared attribute —
-/// every declared column, which the schema check requires.
-type Row<'a> = (Vec<u8>, f32, f32, &'a [&'a str], Option<i32>);
+/// One ingest row: the `id` naming its item, or `None` for a new item without one, its position,
+/// its access labels and the declared `score`.
+type Row<'a> = (Option<u64>, f32, f32, &'a [&'a str], Option<i32>);
 
 /// One ingest body.
 fn batch(rows: &[Row<'_>]) -> Vec<u8> {
     let labels: Vec<&[&str]> = rows.iter().map(|(_, _, _, access, _)| *access).collect();
     let access = access_lists(&labels);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("id", DataType::UInt64, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -269,8 +272,8 @@ fn batch(rows: &[Row<'_>]) -> Vec<u8> {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(arrow::array::BinaryArray::from_iter(
-                rows.iter().map(|(id, ..)| Some(id.as_slice())),
+            Arc::new(arrow::array::UInt64Array::from_iter(
+                rows.iter().map(|(id, ..)| *id),
             )),
             Arc::new(arrow::array::Float32Array::from_iter_values(
                 rows.iter().map(|(_, x, ..)| *x),
@@ -335,10 +338,9 @@ async fn accepted(resp: reqwest::Response) -> Value {
     body
 }
 
-/// A JSON record naming `id` at `(x, y)` and carrying no other column.
-fn located(id: &[u8], x: f32, y: f32) -> Value {
-    use base64::Engine as _;
-    json!({ "external_id": base64::engine::general_purpose::STANDARD.encode(id), "x": x, "y": y })
+/// A JSON record naming the item holding `id` at `(x, y)` and carrying no other column.
+fn located(id: u64, x: f32, y: f32) -> Value {
+    json!({ "id": id, "x": x, "y": y })
 }
 
 /// The roster entry `/v1/meta` publishes for one view id, or `None` where the document does not
@@ -416,7 +418,7 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
     let rows: Vec<Row<'_>> = (0..4)
         .map(|i| {
             (
-                format!("q5-{i}").into_bytes(),
+                None,
                 100.0 + i as f32,
                 200.0,
                 &["0"][..],
@@ -511,7 +513,7 @@ async fn a_created_view_with_no_rows_survives_a_flush_and_is_listed_once() {
         &served,
         "world-batch",
         "world",
-        &[(b"w-0".to_vec(), 10.0, 20.0, &["0"][..], Some(0))],
+        &[(None, 10.0, 20.0, &["0"][..], Some(0))],
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -723,14 +725,14 @@ async fn a_drop_frees_the_key_and_the_drop_survives_a_restart() {
     assert_eq!(viewport(&served, "quarter:2026-Q1").await.status(), 404);
 }
 
-/// **One entity, two views** (`views.md` §4): a known `external_id` naming a view the entity is
-/// not in is accepted, the row lands in that view's pending segment, and after the flush the point
+/// **One entity, two views** (`views.md` §4): a row naming an existing item by its `id`, in a view
+/// the item is not in, is accepted, the row lands in that view's pending segment, and after the flush the point
 /// is in both views at its own position in each.
 ///
 /// The entity is untouched by the second batch — that is what makes this a join rather than an
 /// update — and the arms below are the ways a caller could try to make it an update by accident.
 #[tokio::test]
-async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
+async fn a_known_id_joins_a_second_view_and_is_placed_in_each() {
     let mut served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
@@ -742,31 +744,31 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
     // newly created view takes a new session, exactly as a client would.
     served.reauthorise().await;
 
-    let id = b"joiner".to_vec();
+    let id = Some(NEW_ID);
     assert_eq!(
         ingest(
             &served,
             "first",
             "world",
-            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))]
+            &[(id, 10.0, 10.0, &["0"][..], Some(7))]
         )
         .await
         .status(),
         200,
-        "an unknown external id allocates, as it always did"
+        "an `id` naming nothing creates an item"
     );
     // The same id, a different view: accepted. Before the flush and after it.
     let resp = ingest(
         &served,
         "join",
         "quarter:2026-Q5",
-        &[(id.clone(), 800.0, 300.0, &["0"][..], Some(7))],
+        &[(id, 800.0, 300.0, &["0"][..], Some(7))],
     )
     .await;
     assert_eq!(
         resp.status(),
         200,
-        "a known external id naming a view the entity is not in is a join: {:?}",
+        "a known `id` naming a view the item is not in is a join: {:?}",
         resp.text().await
     );
     drain(&served.server).await;
@@ -800,7 +802,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
             &served,
             "join-again",
             "quarter:2026-Q5",
-            &[(id.clone(), 810.0, 310.0, &["0"][..], Some(7))]
+            &[(id, 810.0, 310.0, &["0"][..], Some(7))]
         )
         .await,
     )
@@ -830,13 +832,13 @@ async fn a_second_row_a_relabel_and_a_changed_attribute_edit_the_item() {
             .status(),
         201
     );
-    let id = b"arms".to_vec();
+    let id = Some(NEW_ID);
     let first = accepted(
         ingest(
             &served,
             "first",
             "world",
-            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))],
+            &[(id, 10.0, 10.0, &["0"][..], Some(7))],
         )
         .await,
     )
@@ -850,14 +852,14 @@ async fn a_second_row_a_relabel_and_a_changed_attribute_edit_the_item() {
         ("attribute-null", "quarter:2026-Q5", 800.0, "1", None),
     ] {
         let body = accepted(
-            ingest(&served, batch_id, view, &[(id.clone(), x, 300.0, &[label][..], score)]).await,
+            ingest(&served, batch_id, view, &[(id, x, 300.0, &[label][..], score)]).await,
         )
         .await;
         assert_eq!(body["edited"], 1, "{batch_id}: {body}");
         assert_eq!(ingested_ids(&body), vec![tid], "{batch_id} keeps the item's identity");
     }
     let unchanged = accepted(
-        ingest_json(&served, "left-out", "quarter:2026-Q5", json!([located(&id, 800.0, 300.0)]))
+        ingest_json(&served, "left-out", "quarter:2026-Q5", json!([located(NEW_ID, 800.0, 300.0)]))
             .await,
     )
     .await;
@@ -883,12 +885,12 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
     // The visible-view set is fixed per session (`views.md` §6), so a reader of the
     // newly created view takes a new session, exactly as a client would.
     served.reauthorise().await;
-    let id = b"hidden".to_vec();
+    let id = Some(NEW_ID);
     let resp = ingest(
         &served,
         "first",
         "world",
-        &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))],
+        &[(id, 10.0, 10.0, &["0"][..], Some(7))],
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -928,7 +930,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
             &served,
             "join",
             "quarter:2026-Q5",
-            &[(id.clone(), 800.0, 300.0, &["0"][..], Some(7))]
+            &[(id, 800.0, 300.0, &["0"][..], Some(7))]
         )
         .await
         .status(),
@@ -973,7 +975,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
 
 /// **A drop deletes the items it leaves in no view**, flushed and buffered alike, as ordinary
 /// deletions: they enter the overlay and retire at the fold like any deletion, and a deleted
-/// item's external id names nothing afterwards. An item that also has a row in another view, even
+/// item's `id` names nothing afterwards. An item that also has a row in another view, even
 /// one still buffered, stays.
 #[tokio::test]
 async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
@@ -985,14 +987,14 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
         201
     );
 
-    let only_here = b"only-here".to_vec();
-    let also_elsewhere = b"also-elsewhere".to_vec();
+    let only_here = Some(NEW_ID);
+    let also_elsewhere = Some(NEW_ID + 1);
     assert_eq!(
         ingest(
             &served,
             "elsewhere",
             "world",
-            &[(also_elsewhere.clone(), 10.0, 10.0, &["0"][..], Some(1))]
+            &[(also_elsewhere, 10.0, 10.0, &["0"][..], Some(1))]
         )
         .await
         .status(),
@@ -1004,8 +1006,8 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
             "into-q5",
             "quarter:2026-Q5",
             &[
-                (only_here.clone(), 800.0, 300.0, &["0"][..], Some(2)),
-                (also_elsewhere.clone(), 810.0, 310.0, &["0"][..], Some(1)),
+                (only_here, 800.0, 300.0, &["0"][..], Some(2)),
+                (also_elsewhere, 810.0, 310.0, &["0"][..], Some(1)),
             ]
         )
         .await
@@ -1017,13 +1019,13 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
 
     // A third item, still in the buffer when the drop runs: its only row is the one the drop
     // discards, so it is deleted with the flushed one.
-    let buffered = b"buffered".to_vec();
+    let buffered = Some(NEW_ID + 2);
     assert_eq!(
         ingest(
             &served,
             "buffered",
             "quarter:2026-Q5",
-            &[(buffered.clone(), 820.0, 320.0, &["0"][..], Some(3))]
+            &[(buffered, 820.0, 320.0, &["0"][..], Some(3))]
         )
         .await
         .status(),
@@ -1037,27 +1039,26 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
          one that also sits in `world`: {body}"
     );
 
-    // The ordinary deletion observables. A deleted holder is forgotten at the interchange boundary
-    // (decision 0047), so its external id may be ingested again and allocates fresh; a live one
-    // still collides.
+    // The ordinary deletion observables. A deleted item's `id` names nothing, so a row carrying it
+    // creates a new item; a live item's names it.
     assert_eq!(
         ingest(
             &served,
             "reingest-deleted",
             "world",
-            &[(only_here.clone(), 20.0, 20.0, &["0"][..], Some(2))]
+            &[(only_here, 20.0, 20.0, &["0"][..], Some(2))]
         )
         .await
         .status(),
         200,
-        "a deleted holder is not a duplicate"
+        "a deleted item's `id` names nothing"
     );
     let live = accepted(
         ingest(
             &served,
             "reingest-live",
             "world",
-            &[(also_elsewhere.clone(), 30.0, 30.0, &["0"][..], Some(1))]
+            &[(also_elsewhere, 30.0, 30.0, &["0"][..], Some(1))]
         )
         .await,
     )
@@ -1071,7 +1072,7 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
             &served,
             "reingest-buffered",
             "world",
-            &[(buffered.clone(), 40.0, 40.0, &["0"][..], Some(3))]
+            &[(buffered, 40.0, 40.0, &["0"][..], Some(3))]
         )
         .await
         .status(),
@@ -1088,14 +1089,14 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
             .status(),
         201
     );
-    let both = b"both".to_vec();
+    let both = Some(NEW_ID + 3);
     let buffered_before = served.server.state.engine.buffered_items();
     assert_eq!(
         ingest(
             &served,
             "both-world",
             "world",
-            &[(both.clone(), 60.0, 60.0, &["0"][..], Some(6))]
+            &[(both, 60.0, 60.0, &["0"][..], Some(6))]
         )
         .await
         .status(),
@@ -1106,7 +1107,7 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
             &served,
             "both-q7",
             "quarter:2026-Q7",
-            &[(both.clone(), 800.0, 300.0, &["0"][..], Some(6))]
+            &[(both, 800.0, 300.0, &["0"][..], Some(6))]
         )
         .await
         .status(),
@@ -1133,7 +1134,7 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
             &served,
             "both-again",
             "world",
-            &[(both.clone(), 70.0, 70.0, &["0"][..], Some(6))]
+            &[(both, 70.0, 70.0, &["0"][..], Some(6))]
         )
         .await,
     )
@@ -1141,19 +1142,19 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
     assert_eq!(again["edited"], 1, "and the entity is alive, in `world`: {again}");
 
     // An item flushed into one view alone, dropped with it: after a restart, which replays the
-    // deletion from the drop's own record, a row carrying its external id creates a new item.
+    // deletion from the drop's own record, a row carrying its `id` creates a new item.
     assert_eq!(
         create(&served, "quarter", "2026-Q6", q_record("Q6", 2))
             .await
             .status(),
         201
     );
-    let solitary = b"solitary".to_vec();
+    let solitary = NEW_ID + 4;
     let resp = ingest(
         &served,
         "q6",
         "quarter:2026-Q6",
-        &[(solitary.clone(), 800.0, 300.0, &["0"][..], Some(4))],
+        &[(Some(solitary), 800.0, 300.0, &["0"][..], Some(4))],
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1167,7 +1168,7 @@ async fn a_drop_deletes_only_the_items_it_leaves_in_no_view() {
             &served,
             "reingest-solitary",
             "world",
-            json!([located(&solitary, 50.0, 50.0)]),
+            json!([located(solitary, 50.0, 50.0)]),
         )
         .await,
     )
@@ -1208,6 +1209,7 @@ quarter = "quarter.parquet"
 
 [defaults]
 allocation_view = "world"
+join_field      = "id"
 
 [[view]]
 name             = "world"
@@ -1226,7 +1228,9 @@ point_visibility = { default = "public" }
 name   = "score"
 type   = "i32"
 render = true
-"#,
+"#
+        .to_string()
+            + ID_ATTRIBUTE,
     )
     .unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
@@ -1289,7 +1293,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
             &served,
             "unknown-key",
             "quarter:2026-Q9",
-            &[(b"nobody".to_vec(), 10.0, 10.0, &["0"][..], Some(1))]
+            &[(None, 10.0, 10.0, &["0"][..], Some(1))]
         )
         .await
         .status(),
@@ -1308,18 +1312,18 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     assert!(view_ids(&meta(&served).await).contains(&"quarter:2026-Q2".to_string()));
     assert_eq!(viewport(&served, "quarter:2026-Q2").await.status(), 200);
 
-    // **Join.** An entity the build already knows joins the new view by its external id, and is
+    // **Join.** An entity the build already knows joins the new view by its `id`, and is
     // placed there with its own geometry — the same identity, a second row space.
     //
     // The batch carries the entity's **own** label set. Source 3 is a multiple of three, so the
     // fixture gave it `{0, 1}`; naming only `0` is now the 409 `views.md` §4 always specified,
     // the entity→term transpose having made the arm exact past its own flush.
-    let known = external_id_of(3);
+    let known = Some(3);
     let resp = ingest(
         &served,
         "join-minted",
         "quarter:2026-Q2",
-        &[(known.clone(), 400.0, 400.0, &["0", "1"][..], Some(3))],
+        &[(known, 400.0, 400.0, &["0", "1"][..], Some(3))],
     )
     .await;
     assert_eq!(resp.status(), 200, "a join into a minted group's view");
@@ -1464,7 +1468,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     let rows: Vec<Row<'_>> = (0..4)
         .map(|i| {
             (
-                format!("q2-{i}").into_bytes(),
+                None,
                 100.0 + i as f32,
                 200.0,
                 &["0"][..],
@@ -1681,7 +1685,8 @@ fn write_families_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
     write_points(path, &ids, |e| position(view, e), extra);
 }
 
-/// One plain view and one group, as the fixture above, over [`FAMILIES_SCHEMA`]'s five columns.
+/// One plain view and one group, as the fixture above, over [`FAMILIES_SCHEMA`]'s five columns and
+/// the unique `id`.
 fn build_families(dir: &Path) {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
@@ -1690,7 +1695,7 @@ fn build_families(dir: &Path) {
     let q1_points = dir.join("quarter-q1.parquet");
     write_families_points(&q1_points, "quarter:2026-Q1", Q1);
     let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, FAMILIES_SCHEMA).unwrap();
+    std::fs::write(&schema_path, format!("{FAMILIES_SCHEMA}{ID_ATTRIBUTE}")).unwrap();
     let config = tessera_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the families declaration parses");
     let out = dir.join("bundle");
@@ -1747,10 +1752,10 @@ const HELD: Attrs<'static> = Attrs {
     archive: Some("astro"),
 };
 
-fn families_batch(id: &[u8], x: f32, y: f32, a: Attrs<'_>) -> Vec<u8> {
+fn families_batch(id: u64, x: f32, y: f32, a: Attrs<'_>) -> Vec<u8> {
     let access = access_column(["0"]);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -1763,7 +1768,7 @@ fn families_batch(id: &[u8], x: f32, y: f32, a: Attrs<'_>) -> Vec<u8> {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(arrow::array::BinaryArray::from_iter([Some(id)])),
+            Arc::new(arrow::array::UInt64Array::from_iter_values([id])),
             Arc::new(arrow::array::Float32Array::from_iter_values([x])),
             Arc::new(arrow::array::Float32Array::from_iter_values([y])),
             Arc::new(access),
@@ -1784,7 +1789,7 @@ async fn families_ingest(
     served: &Served,
     batch_id: &str,
     view: &str,
-    id: &[u8],
+    id: u64,
     x: f32,
     y: f32,
     a: Attrs<'_>,
@@ -1817,15 +1822,15 @@ async fn an_edit_after_the_flush_carries_every_home_and_changes_what_it_names() 
     );
     served.reauthorise().await;
 
-    let id = b"families".to_vec();
-    let first = accepted(families_ingest(&served, "first", "world", &id, 10.0, 10.0, HELD).await).await;
+    let id = NEW_ID;
+    let first = accepted(families_ingest(&served, "first", "world", id, 10.0, 10.0, HELD).await).await;
     let tid = ingested_ids(&first)[0];
     // Past the flush every value is read back from the bundle's homes.
     drain(&served.server).await;
     assert_eq!(served.server.state.engine.buffered_items(), 0);
 
     let added = accepted(
-        families_ingest(&served, "same", "quarter:2026-Q5", &id, 800.0, 300.0, HELD).await,
+        families_ingest(&served, "same", "quarter:2026-Q5", id, 800.0, 300.0, HELD).await,
     )
     .await;
     assert_eq!(added["added"], 1, "the same values add the item to the view: {added}");
@@ -1840,7 +1845,7 @@ async fn an_edit_after_the_flush_carries_every_home_and_changes_what_it_names() 
     ] {
         // Only the column under test is sent; every other one is left to the stored value.
         let mut row = json!({
-            "external_id": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &id),
+            "id": id,
         });
         row[column] = match column {
             "score" => json!(differing.score),
@@ -1881,7 +1886,7 @@ async fn an_edit_after_the_flush_carries_every_home_and_changes_what_it_names() 
             &served,
             "nulls",
             "quarter:2026-Q5",
-            &id,
+            id,
             800.0,
             300.0,
             Attrs {
@@ -1926,7 +1931,7 @@ async fn a_row_giving_an_item_a_value_it_never_held_changes_it() {
     );
     served.reauthorise().await;
 
-    let id = b"never-held".to_vec();
+    let id = NEW_ID;
     // **`archive` is absent too, and a category says that with its reserved code** rather than a
     // null cell (per-point-attributes §3.4) — so this row also pins `is_absent_value` on the
     // *flushed* side: the code read back out of the hot column is absence, not a value `hep` could
@@ -1939,7 +1944,7 @@ async fn a_row_giving_an_item_a_value_it_never_held_changes_it() {
         archive: None,
     };
     assert_eq!(
-        families_ingest(&served, "sparse", "world", &id, 20.0, 20.0, sparse)
+        families_ingest(&served, "sparse", "world", id, 20.0, 20.0, sparse)
             .await
             .status(),
         200
@@ -1951,7 +1956,7 @@ async fn a_row_giving_an_item_a_value_it_never_held_changes_it() {
             &served,
             "supply",
             "quarter:2026-Q5",
-            &id,
+            id,
             800.0,
             300.0,
             Attrs {
@@ -1968,7 +1973,7 @@ async fn a_row_giving_an_item_a_value_it_never_held_changes_it() {
         "a value the item never held is a change to it"
     );
     let left_out = accepted(
-        ingest_json(&served, "added", "quarter:2026-Q5", json!([located(&id, 800.0, 300.0)]))
+        ingest_json(&served, "added", "quarter:2026-Q5", json!([located(id, 800.0, 300.0)]))
             .await,
     )
     .await;
@@ -2020,8 +2025,8 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
     );
     served.reauthorise().await;
 
-    let id = b"backfill".to_vec();
-    let resp = families_ingest(&served, "first", "world", &id, 10.0, 10.0, HELD).await;
+    let id = NEW_ID;
+    let resp = families_ingest(&served, "first", "world", id, 10.0, 10.0, HELD).await;
     assert_eq!(resp.status(), 200);
     let tessera_id = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
@@ -2029,7 +2034,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
     // The row adding the item leaves every value out, which is what would otherwise put an
     // absence in this view's tail.
     assert_eq!(
-        ingest_json(&served, "omit", "quarter:2026-Q5", json!([located(&id, 800.0, 300.0)]))
+        ingest_json(&served, "omit", "quarter:2026-Q5", json!([located(id, 800.0, 300.0)]))
             .await
             .status(),
         200
@@ -2048,38 +2053,36 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
 
 
 
-/// **A row that stops being a join keeps its label** (`views.md` §4, decision 0116).
+/// **A row whose item is deleted under it creates a fresh item that keeps its label.**
 ///
-/// The demotion direction of the same race. The handler resolves an external id to a live holder
-/// and stamps the row a join; between that pass and the apply the holder is deleted, so
-/// `established_collisions` clears the stamp and the row allocates a **fresh** entity. It must
-/// arrive still carrying its descriptors, or that fresh entity is written with no label at all —
-/// visible to no principal, and reachable by no deny either. Dropping them in the handler, as the
-/// code did until the arms moved, is what would have produced that.
+/// The handler resolves an `id` to a live item and plans an edit. If the item is deleted
+/// between that plan and the apply, the executor answers stale, the handler plans again against a
+/// generation without the item, and the row creates a fresh item. It must still carry its
+/// descriptors, or the fresh item is written with no label at all: visible to no principal, and
+/// reachable by no deny either.
 ///
-/// **Two halves, and the first does not reach the writer's demotion.** Sequentially the handler
-/// sees the deleted holder itself and never stamps the row, so what the first half asserts is the
-/// *property* — a re-ingest past a delete is served under the label it carried — and not the
-/// ordering. The second half submits the delete and the re-ingest together, which is the only way
-/// this deployment reaches the ordering at all; the executor decides which lands first, so each
-/// round asserts what holds either way: the row is taken and labelled, or it is refused.
+/// The first half runs the two in sequence, so the handler sees the deleted item itself; it
+/// asserts the property, not the ordering. The second half sends the delete and the re-ingest
+/// together, which is the only way to reach the ordering over HTTP, and the executor decides which
+/// lands first. A row that created an item is served under its label. A row that edited the live
+/// item was applied before the delete, which then removed the item, so it is not served.
 #[tokio::test]
-async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label() {
+async fn a_row_whose_item_is_deleted_under_it_creates_a_fresh_item_that_keeps_its_label() {
     let mut served = Served::build(build_fixture_bundle).await;
-    let id = b"demoted".to_vec();
+    let id = Some(NEW_ID);
     let resp = ingest(
         &served,
         "demote-first",
         "world",
-        &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))],
+        &[(id, 10.0, 10.0, &["0"][..], Some(7))],
     )
     .await;
     assert_eq!(resp.status(), 200);
     let first = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
 
-    // The holder is deleted, so the binding is dead bookkeeping: the re-ingest below allocates
-    // rather than answering 409, and it is no longer a join.
+    // The item is deleted, so the re-ingest below names no live item and creates one, where a
+    // live item would have been edited.
     let body = json!([{ "tessera_id": first.to_string(), "op": "delete" }]);
     let resp = served
         .server
@@ -2090,9 +2093,9 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "the holder is deleted");
+    assert_eq!(resp.status(), 200, "the item is deleted");
 
-    // The same external id again, under a label this principal holds.
+    // The same `id` again, under a label this principal holds.
     let resp = ingest(
         &served,
         "demote-second",
@@ -2100,15 +2103,15 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         &[(id, 800.0, 300.0, &["1"][..], Some(7))],
     )
     .await;
-    assert_eq!(resp.status(), 200, "a deleted holder does not collide");
+    assert_eq!(resp.status(), 200, "a deleted item does not collide");
     let second = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
-    assert_ne!(second, first, "a fresh entity, not the dead binding's");
+    assert_ne!(second, first, "a fresh item, not the deleted one");
     drain(&served.server).await;
     served.reauthorise().await;
 
-    // The whole point: the fresh entity carries the label the batch named, so a principal that
-    // satisfies it is served the row. A row that had arrived with its descriptors already dropped
-    // would be here with an empty term set and visible to nobody.
+    // The fresh item carries the label the batch named, so a principal that satisfies it is
+    // served the row. A row that had lost its descriptors would be stored with no label and be
+    // visible to nobody.
     assert!(
         points(&served, "quarter:2026-Q1")
             .await
@@ -2117,24 +2120,23 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         "the re-ingested row is served under the label it carried"
     );
 
-    // The concurrent half. The deny lane has priority over the work queue, so a delete submitted
-    // beside an ingest can apply between that ingest's handler pass and its admit — which is the
-    // demotion the writer has to survive.
-    let mut taken = Vec::new();
+    // The concurrent half. The deny lane has priority over the work queue, so a delete sent beside
+    // an ingest can apply between that ingest's plan and its apply.
+    let mut created = Vec::new();
+    let mut deleted_after_edit = Vec::new();
     for round in 0..8u32 {
-        let id = format!("demote-race-{round}").into_bytes();
+        let id = Some(NEW_ID + 1 + u64::from(round));
         let seed = ingest(
             &served,
             &format!("demote-race-seed-{round}"),
             "world",
-            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))],
+            &[(id, 10.0, 10.0, &["0"][..], Some(7))],
         )
         .await;
         assert_eq!(seed.status(), 200);
         let holder = ingested_ids(&seed.json::<Value>().await.unwrap())[0];
 
-        let body =
-            json!([{ "tessera_id": holder.to_string(), "op": "delete" }]);
+        let body = json!([{ "tessera_id": holder.to_string(), "op": "delete" }]);
         let batch_id = format!("demote-race-again-{round}");
         let rows = [(id, 800.0, 300.0, &["1"][..], Some(7))];
         let (deleted, again) = tokio::join!(
@@ -2155,13 +2157,19 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         let status = again.status().as_u16();
         let text = again.text().await.unwrap();
         match status {
-            // Taken: whether it joined the still-live holder or allocated past the delete, it must
-            // carry a label — the fresh-entity case is the one the demotion produces.
-            200 => taken.push(
-                ingested_ids(&serde_json::from_str::<Value>(&text).unwrap())[0],
-            ),
-            // Refused: the holder was still live at the admit and the labels differ, which is the
-            // label arm doing its job.
+            200 => {
+                let resp: Value = serde_json::from_str(&text).unwrap();
+                let taken = ingested_ids(&resp)[0];
+                if resp["created"] == 1 {
+                    assert_ne!(taken, holder, "round {round}: a fresh item: {text}");
+                    created.push(taken);
+                } else {
+                    assert_eq!(resp["edited"], 1, "round {round}: {text}");
+                    assert_eq!(taken, holder, "round {round}: the edit names the item: {text}");
+                    deleted_after_edit.push(taken);
+                }
+            }
+            // Planned twice against an item that moved each time.
             409 => assert!(
                 text.contains("\"conflict\""),
                 "round {round}: the only lawful refusal here is a conflict: {text}"
@@ -2170,22 +2178,25 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         }
     }
     drain(&served.server).await;
-    // A fresh session, as the first half takes one: the session authorised before the race holds
-    // a projection built at the previous generation, and until the pool's refresh lands it is
-    // served from that entry — every pre-race row, none of the flush's — with no header to say
-    // so (see `points`). Under load that read landed first and the rows below looked lost; they
-    // were published, and a session built at the live generation sees them.
+    // A session authorised before the flush can be answered from its projection at the previous
+    // generation until the background refresh replaces it; a fresh session is built at the live one.
     served.reauthorise().await;
     let served_ids: Vec<u64> = points(&served, "quarter:2026-Q1")
         .await
         .iter()
         .map(|p| p.0)
         .collect();
-    for id in taken {
+    for id in created {
         assert!(
             served_ids.contains(&id),
-            "every row the executor took is served under the label it carried; {id} is not in \
+            "every item a row created is served under the label it carried; {id} is not in \
              {served_ids:?}"
+        );
+    }
+    for id in deleted_after_edit {
+        assert!(
+            !served_ids.contains(&id),
+            "an item deleted after its edit is not served; {id} is in {served_ids:?}"
         );
     }
 }
@@ -2232,7 +2243,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
     let first: Vec<Row<'_>> = (0..6)
         .map(|i| {
             (
-                format!("first-{i}").into_bytes(),
+                None,
                 300.0 + i as f32,
                 300.0,
                 &["0"][..],
@@ -2256,7 +2267,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
     let stale: Vec<Row<'_>> = (0..3)
         .map(|i| {
             (
-                format!("stale-{i}").into_bytes(),
+                None,
                 320.0 + i as f32,
                 320.0,
                 &["0"][..],
@@ -2295,7 +2306,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
     let second: Vec<Row<'_>> = (0..4)
         .map(|i| {
             (
-                format!("second-{i}").into_bytes(),
+                None,
                 500.0 + i as f32,
                 500.0,
                 &["0"][..],
@@ -2383,7 +2394,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
     let shared: Vec<Row<'_>> = (0..5)
         .map(|i| {
             (
-                format!("shared-{i}").into_bytes(),
+                None,
                 600.0 + i as f32,
                 600.0,
                 &["0"][..],
@@ -2420,7 +2431,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
             &served,
             "fresh-q5",
             "quarter:2026-Q5",
-            &[(b"fresh-q5".to_vec(), 610.0, 610.0, &["0"][..], Some(0))],
+            &[(None, 610.0, 610.0, &["0"][..], Some(0))],
         )
         .await
         .status(),
@@ -2447,7 +2458,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
     let owned: Vec<Row<'_>> = (0..5)
         .map(|i| {
             (
-                format!("owned-{i}").into_bytes(),
+                None,
                 700.0 + i as f32,
                 700.0,
                 &["0"][..],
@@ -2483,7 +2494,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
             &served,
             "fresh-q6",
             "quarter:2026-Q6",
-            &[(b"fresh-q6".to_vec(), 710.0, 710.0, &["0"][..], Some(0))],
+            &[(None, 710.0, 710.0, &["0"][..], Some(0))],
         )
         .await
         .status(),
@@ -2547,15 +2558,15 @@ async fn a_view_created_and_fed_publishes_in_one_cycle(
     // The held view already carries rows; what this asserts is the four this commit adds.
     let held_before = points(served, held).await.len();
     let mut promised = 0;
-    for (view, base) in [(created, 0u64), (held, 100)] {
+    for view in [created, held] {
         let rows: Vec<Row<'_>> = (0..4)
             .map(|i| {
                 (
-                    format!("{view}-{}", base + i).into_bytes(),
+                    None,
                     100.0 + i as f32,
                     200.0,
                     &["0"][..],
-                    Some(i as i32),
+                    Some(i),
                 )
             })
             .collect();
@@ -2642,7 +2653,7 @@ async fn an_edit_in_a_view_dropped_before_the_tick_is_still_written() {
     );
     served.reauthorise().await;
 
-    let id = b"edited-through-a-dropped-view".to_vec();
+    let id = NEW_ID;
     let sparse = Attrs {
         score: None,
         depth: None,
@@ -2650,7 +2661,7 @@ async fn an_edit_in_a_view_dropped_before_the_tick_is_still_written() {
         note: None,
         archive: None,
     };
-    let first = accepted(families_ingest(&served, "sparse", "world", &id, 20.0, 20.0, sparse).await).await;
+    let first = accepted(families_ingest(&served, "sparse", "world", id, 20.0, 20.0, sparse).await).await;
     let tid = ingested_ids(&first)[0];
     drain(&served.server).await;
 
@@ -2660,7 +2671,7 @@ async fn an_edit_in_a_view_dropped_before_the_tick_is_still_written() {
             &served,
             "edit",
             "quarter:2026-Q5",
-            &id,
+            id,
             800.0,
             300.0,
             Attrs {

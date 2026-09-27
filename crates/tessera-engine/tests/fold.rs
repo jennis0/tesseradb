@@ -123,11 +123,11 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points_path.to_path_buf(), &id_schema()),
         out: out.to_path_buf(),
         // No declared columns: this fixture's subject is the sparse *term*, not the scalar tail,
         // and an empty schema is what `common`'s builder uses for the same reason.
-        schema: Default::default(),
+        schema: id_schema(),
         limit: None,
         identity_key: test_key(),
         shard_id: 0,
@@ -2127,6 +2127,12 @@ fn the_retirable_depth_route_dispatches_a_fold_without_anyone_asking() {
 /// everything the write path produced is in the partition's side-manifest; summing one alone
 /// reported a 1065× orphan ratio in a measured run, which was a missing addend and not a leak.
 fn dead_ratio(root: &Path, engine: &Engine) -> f64 {
+    let (unnamed, named) = unnamed_and_named(root, engine);
+    unnamed as f64 / named.max(1) as f64
+}
+
+/// The bytes under the live prefix no manifest names, and the bytes they name.
+fn unnamed_and_named(root: &Path, engine: &Engine) -> (u64, u64) {
     fn walk(dir: &Path, total: &mut u64) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -2158,7 +2164,7 @@ fn dead_ratio(root: &Path, engine: &Engine) -> f64 {
                 .map(|d| d.size),
         )
         .sum();
-    on_disc.saturating_sub(named) as f64 / named.max(1) as f64
+    (on_disc.saturating_sub(named), named)
 }
 
 /// **The tombstoned-row route dispatches a fold on a bundle every count gauge calls healthy**
@@ -2339,10 +2345,20 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
     // And the fold did what the route dispatched it for: the superseded prefix is gone whole, so
     // what was dead is reclaimed rather than merely rewritten beside itself.
     assert!(!root.join("v00000").exists());
-    let after = dead_ratio(&root, &engine);
-    assert!(
-        after < fresh.max(0.01),
-        "the folded bundle is back to a freshly-built one's dead fraction, measured {after:.4}"
+    let generation = engine.generation();
+    let prefix = root.join(&generation.prefix);
+    let segments_n = generation.bundle.partitions["default"].segments_n;
+    let manifests = [
+        prefix.join("MANIFEST.json"),
+        prefix.join(format!("partitions/default/SEGMENTS-{segments_n}.json")),
+    ]
+    .iter()
+    .map(|path| std::fs::metadata(path).expect("the manifest is on disc").len())
+    .sum::<u64>();
+    assert_eq!(
+        unnamed_and_named(&root, &engine).0,
+        manifests,
+        "the folded bundle holds nothing unnamed but its two manifests, as a freshly built one does"
     );
 }
 

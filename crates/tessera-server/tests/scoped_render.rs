@@ -161,13 +161,23 @@ fn sharing_roster() -> Vec<GroupViewDescriptor> {
 }
 
 /// The bundle: a plain view, a group of two quarters carrying the rendered family, and a second
-/// group that is a different layout over the same two keys (`views.md` §3.3).
+/// group that is a different layout over the same two keys (`views.md` §3.3). Every entity holds
+/// the unique `id` ([`id_schema`]) of its source id, read from a file naming them all.
 ///
 /// `declared` says whether the family is declared at all — the `false` build is the byte-equality
 /// reference for a view outside every scope.
 fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
+    let entities = dir.join("entities.parquet");
+    write_parquet(
+        &entities,
+        vec![column(
+            "entity_id",
+            false,
+            UInt64Array::from_iter_values(0..ENTITIES),
+        )],
+    );
     let world_points = dir.join("world.parquet");
     write_view_points(&world_points, "world", WORLD, None);
     let mut views = vec![gated_view("world", &world_points, &pairs, None)];
@@ -194,7 +204,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
     write_view_points(&borrowed_points, &borrowed, BORROWED, None);
     views.push(gated_view(&borrowed, &borrowed_points, &pairs, None));
     let out = dir.join("bundle");
-    build(&BuildArgs {
+    let args = BuildArgs {
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -291,8 +301,8 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
             false => Vec::new(),
         },
         ..build_args(&out, views)
-    })
-    .expect("the fixture builds");
+    };
+    build(&with_id(args, &entities)).expect("the fixture builds");
     out
 }
 
@@ -317,15 +327,15 @@ async fn viewport_bytes(served: &Served, token: &str, view: &str) -> (u16, Vec<u
     (status, resp.bytes().await.unwrap().to_vec())
 }
 
-/// One ingest batch into `view`. The fixture declares no entity-scoped attribute, so a row is its
-/// external id, its position, its access label and the group-scoped families' values **under
-/// their plain names** (`views.md` §5): the view is known from the header, so the column is not
-/// qualified and the view decides which of the family's columns the value is for.
+/// One ingest batch into `view`. A row is its `id`, its position, its access label and the
+/// group-scoped families' values **under their plain names** (`views.md` §5): the view is known
+/// from the header, so the column is not qualified and the view decides which of the family's
+/// columns the value is for.
 async fn ingest_with_heat(
     served: &Served,
     batch_id: &str,
     view: &str,
-    rows: &[(Vec<u8>, f32, f32, &str)],
+    rows: &[(u64, f32, f32, &str)],
     heat: &[Option<f32>],
 ) {
     let (status, body) = try_ingest_with_heat(served, batch_id, view, rows, heat).await;
@@ -334,10 +344,10 @@ async fn ingest_with_heat(
 
 /// One batch of rows carrying their geometry and label and no family column, which leaves every
 /// family's value as the item holds it; accepted.
-async fn ingest_bare(served: &Served, batch_id: &str, view: &str, rows: &[(Vec<u8>, f32, f32, &str)]) {
-    let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = rows
+async fn ingest_bare(served: &Served, batch_id: &str, view: &str, rows: &[(u64, f32, f32, &str)]) {
+    let rows: Vec<(Option<u64>, f32, f32, &str)> = rows
         .iter()
-        .map(|(id, x, y, access)| (Some(id.as_slice()), *x, *y, *access))
+        .map(|&(id, x, y, access)| (Some(id), x, y, access))
         .collect();
     let resp = served
         .server
@@ -361,7 +371,7 @@ async fn try_ingest_with_heat(
     served: &Served,
     batch_id: &str,
     view: &str,
-    rows: &[(Vec<u8>, f32, f32, &str)],
+    rows: &[(u64, f32, f32, &str)],
     heat: &[Option<f32>],
 ) -> (u16, String) {
     try_ingest_families(served, batch_id, view, rows, Some(heat), None, None).await
@@ -374,16 +384,16 @@ async fn try_ingest_families(
     served: &Served,
     batch_id: &str,
     view: &str,
-    rows: &[(Vec<u8>, f32, f32, &str)],
+    rows: &[(u64, f32, f32, &str)],
     heat: Option<&[Option<f32>]>,
     note: Option<&[Option<&str>]>,
     tag: Option<&[Option<f32>]>,
 ) -> (u16, String) {
-    use arrow::array::{BinaryArray, StringArray};
+    use arrow::array::StringArray;
     let access = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let nulls = vec![None; rows.len()];
     let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -392,8 +402,8 @@ async fn try_ingest_families(
         Field::new("tag", DataType::Float32, true),
     ]));
     let columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(BinaryArray::from_iter(
-            rows.iter().map(|(id, _, _, _)| Some(id.as_slice())),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|(id, _, _, _)| *id),
         )),
         Arc::new(Float32Array::from_iter_values(
             rows.iter().map(|(_, x, _, _)| *x),
@@ -471,8 +481,8 @@ fn points_columns(body: &[u8]) -> (Vec<String>, BTreeMap<u64, Option<f32>>) {
     (names, heat)
 }
 
-/// The source entity a served `tessera_id` stands for, read through the drill-down's
-/// `external_id` — the build mints the source id as eight little-endian bytes.
+/// The source entity a served `tessera_id` stands for, read through the drill-down's `id` — the
+/// build gives each entity its source id, and each batch here gives its rows theirs.
 ///
 /// **Through the API rather than through the bundle**, because the entity id a build assigns is
 /// not the source id (they are signature-sorted, §11.1) and the identity permutation is the
@@ -490,11 +500,9 @@ async fn entity_of(served: &Served, token: &str, id: u64) -> u64 {
         .json()
         .await
         .unwrap();
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(body["external_id"].as_str().expect("an external id"))
-        .unwrap();
-    u64::from_le_bytes(bytes.try_into().expect("eight bytes"))
+    body["fields"]["id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the item card carries its `id`: {body}"))
 }
 
 /// [`entity_of`] over a whole response, keyed by source entity.
@@ -821,8 +829,8 @@ async fn a_view_created_at_runtime_gains_its_scoped_column_at_the_first_flush() 
         "heat-runtime",
         "quarter:2026-Q3",
         &[
-            (external_id_of(MINTED[0]), 250.0, 250.0, "0"),
-            (external_id_of(MINTED[1]), 350.0, 350.0, "0"),
+            (MINTED[0], 250.0, 250.0, "0"),
+            (MINTED[1], 350.0, 350.0, "0"),
         ],
         &[Some(7.5), None],
     )
@@ -912,7 +920,7 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_car
         &served,
         "heat-flush",
         "quarter:2026-Q1",
-        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[(NEW, 250.0, 250.0, "0")],
         &[Some(42.25)],
     )
     .await;
@@ -957,7 +965,7 @@ async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
         &served,
         "heat-plain",
         "world",
-        &[(external_id_of(9_201), 250.0, 250.0, "0")],
+        &[(9_201, 250.0, 250.0, "0")],
         &[Some(1.0)],
     )
     .await;
@@ -973,8 +981,7 @@ async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
 async fn a_scoped_family_may_be_left_out_of_any_row() {
     let served = Served::build(build_with_families).await;
     const NEW: u64 = 9_901;
-    let id = external_id_of(NEW);
-    let bare = || build_ingest_batch_optional(&[(Some(&id[..]), 250.0, 250.0, "0")]);
+    let bare = || build_ingest_batch_optional(&[(Some(NEW), 250.0, 250.0, "0")]);
     let post = |batch_id: &'static str, view: &'static str, body: Vec<u8>| {
         let served = &served;
         async move {
@@ -1004,7 +1011,7 @@ async fn a_scoped_family_may_be_left_out_of_any_row() {
         &served,
         "owner-again-carrying",
         "quarter:2026-Q1",
-        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[(NEW, 250.0, 250.0, "0")],
         &[None],
     )
     .await;
@@ -1025,7 +1032,7 @@ async fn a_join_row_carries_this_views_scoped_value() {
         &served,
         "join-first",
         "quarter:2026-Q1",
-        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[(NEW, 250.0, 250.0, "0")],
         &[Some(11.0)],
     )
     .await;
@@ -1034,7 +1041,7 @@ async fn a_join_row_carries_this_views_scoped_value() {
         &served,
         "join-second",
         "quarter:2026-Q2",
-        &[(external_id_of(NEW), 260.0, 260.0, "0")],
+        &[(NEW, 260.0, 260.0, "0")],
         &[Some(22.0)],
     )
     .await;
@@ -1070,7 +1077,7 @@ async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
         &served,
         "heat-fold",
         "quarter:2026-Q1",
-        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[(NEW, 250.0, 250.0, "0")],
         &[Some(33.5)],
     )
     .await;
@@ -1138,7 +1145,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         &served,
         "heat-first-incarnation",
         "quarter:2026-Q3",
-        &[(external_id_of(REJOINS), 250.0, 250.0, "0")],
+        &[(REJOINS, 250.0, 250.0, "0")],
         // Above the threshold, so a value adopted by the next incarnation answers the leaf.
         Some(&[Some(90.0)]),
         Some(&[Some("peregrine")]),
@@ -1170,8 +1177,8 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         "heat-second-incarnation",
         "quarter:2026-Q3",
         &[
-            (external_id_of(REJOINS), 250.0, 250.0, "0"),
-            (external_id_of(FRESH), 350.0, 350.0, "0"),
+            (REJOINS, 250.0, 250.0, "0"),
+            (FRESH, 350.0, 350.0, "0"),
         ],
         Some(&[None, Some(5.0)]),
         Some(&[None, Some("linnet")]),
@@ -1309,7 +1316,7 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
         &served,
         "borrowed-owner",
         &owner,
-        &[(external_id_of(OWNED_ENTITY), 250.0, 250.0, "0")],
+        &[(OWNED_ENTITY, 250.0, 250.0, "0")],
         Some(&[Some(90.0)]),
         Some(&[Some("peregrine")]),
         None,
@@ -1321,7 +1328,7 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
         &served,
         "borrowed-sharing",
         &borrower,
-        &[(external_id_of(BORROWED_ENTITY), 350.0, 350.0, "0")],
+        &[(BORROWED_ENTITY, 350.0, 350.0, "0")],
         Some(&[Some(80.0)]),
         Some(&[Some("linnet")]),
         None,
@@ -1590,7 +1597,7 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
         &served,
         "heat-filter",
         "quarter:2026-Q1",
-        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[(NEW, 250.0, 250.0, "0")],
         // Above the threshold, so the answer changes by exactly this entity.
         &[Some(90.0)],
     )
@@ -1653,7 +1660,7 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
         &served,
         "sharing-door",
         "quarter_map:2026-Q1",
-        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[(NEW, 250.0, 250.0, "0")],
         &[Some(VALUE)],
     )
     .await;
@@ -1663,7 +1670,7 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
         &served,
         "sharing-door-owner",
         "quarter:2026-Q1",
-        &[(external_id_of(NEW), 260.0, 260.0, "0")],
+        &[(NEW, 260.0, 260.0, "0")],
     )
     .await;
     drain(&served.server).await;
@@ -1692,7 +1699,7 @@ fn answer(body: &str) -> Value {
     serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body}"))
 }
 
-/// A row naming an item by external id, with no coordinates, setting `tag` in `view`'s key.
+/// A row naming an item by its `id`, with no coordinates, setting `tag` in `view`'s key.
 async fn edit_tag(
     served: &Served,
     batch_id: &str,
@@ -1707,7 +1714,7 @@ async fn edit_tag(
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", view)
-        .json(&json!([{ "external_id": member(entity), "tag": tag }]))
+        .json(&json!([{ "id": entity, "tag": tag }]))
         .send()
         .await
         .unwrap();
@@ -1741,8 +1748,8 @@ async fn a_second_door_naming_one_cell_restates_its_value_or_edits_it() {
         "cell-first",
         "quarter:2026-Q1",
         &[
-            (external_id_of(AGREES), 250.0, 250.0, "0"),
-            (external_id_of(DISAGREES), 251.0, 251.0, "0"),
+            (AGREES, 250.0, 250.0, "0"),
+            (DISAGREES, 251.0, 251.0, "0"),
         ],
         &[Some(VALUE), Some(VALUE)],
     )
@@ -1754,7 +1761,7 @@ async fn a_second_door_naming_one_cell_restates_its_value_or_edits_it() {
         &served,
         "cell-agrees",
         "quarter_map:2026-Q1",
-        &[(external_id_of(AGREES), 300.0, 300.0, "0")],
+        &[(AGREES, 300.0, 300.0, "0")],
         &[Some(VALUE)],
     )
     .await;
@@ -1769,7 +1776,7 @@ async fn a_second_door_naming_one_cell_restates_its_value_or_edits_it() {
         &served,
         "cell-disagrees",
         "quarter_map:2026-Q1",
-        &[(external_id_of(DISAGREES), 301.0, 301.0, "0")],
+        &[(DISAGREES, 301.0, 301.0, "0")],
         &[Some(VALUE + 1.0)],
     )
     .await;
@@ -1809,8 +1816,8 @@ async fn a_join_naming_a_cell_an_unflushed_edit_set_restates_or_edits_it() {
         "pending-first",
         "quarter:2026-Q1",
         &[
-            (external_id_of(AGREES), 260.0, 260.0, "0"),
-            (external_id_of(DISAGREES), 261.0, 261.0, "0"),
+            (AGREES, 260.0, 260.0, "0"),
+            (DISAGREES, 261.0, 261.0, "0"),
         ],
         &[None, None],
     )
@@ -1825,7 +1832,7 @@ async fn a_join_naming_a_cell_an_unflushed_edit_set_restates_or_edits_it() {
         &served,
         "pending-agrees",
         "quarter_map:2026-Q1",
-        &[(external_id_of(AGREES), 310.0, 310.0, "0")],
+        &[(AGREES, 310.0, 310.0, "0")],
         None,
         None,
         Some(&[Some(VALUE)]),
@@ -1837,7 +1844,7 @@ async fn a_join_naming_a_cell_an_unflushed_edit_set_restates_or_edits_it() {
         &served,
         "pending-disagrees",
         "quarter_map:2026-Q1",
-        &[(external_id_of(DISAGREES), 311.0, 311.0, "0")],
+        &[(DISAGREES, 311.0, 311.0, "0")],
         None,
         None,
         Some(&[Some(VALUE + 1.0)]),
@@ -1918,9 +1925,9 @@ async fn a_text_cell_is_restated_or_edited_flushed_or_not() {
             &format!("text-first-{flushed}"),
             view,
             &[
-                (external_id_of(key(A)), 250.0, 250.0, "0"),
-                (external_id_of(key(B)), 251.0, 251.0, "0"),
-                (external_id_of(key(C)), 252.0, 252.0, "0"),
+                (key(A), 250.0, 250.0, "0"),
+                (key(B), 251.0, 251.0, "0"),
+                (key(C), 252.0, 252.0, "0"),
             ],
             None,
             Some(&[Some(prose), Some(prose), Some(prose)]),
@@ -1936,7 +1943,7 @@ async fn a_text_cell_is_restated_or_edited_flushed_or_not() {
             &served,
             &format!("text-differs-{flushed}"),
             &sharing,
-            &[(external_id_of(key(A)), 300.0, 300.0, "0")],
+            &[(key(A), 300.0, 300.0, "0")],
             None,
             Some(&[Some("different words entirely")]),
             None,
@@ -1949,7 +1956,7 @@ async fn a_text_cell_is_restated_or_edited_flushed_or_not() {
             &served,
             &format!("text-equal-{flushed}"),
             &sharing,
-            &[(external_id_of(key(B)), 301.0, 301.0, "0")],
+            &[(key(B), 301.0, 301.0, "0")],
             None,
             Some(&[Some(prose)]),
             None,
@@ -1963,7 +1970,7 @@ async fn a_text_cell_is_restated_or_edited_flushed_or_not() {
             &served,
             &format!("text-moved-{flushed}"),
             view,
-            &[(external_id_of(key(C)), 262.0, 262.0, "0")],
+            &[(key(C), 262.0, 262.0, "0")],
         )
         .await;
 
@@ -2019,7 +2026,7 @@ async fn a_neither_flag_family_gains_its_column_from_a_flush_and_keeps_it_throug
         &served,
         "tag-write",
         "quarter:2026-Q1",
-        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[(NEW, 250.0, 250.0, "0")],
         None,
         None,
         Some(&[Some(1234.5)]),
@@ -2099,8 +2106,8 @@ fn served_ids(body: &[u8]) -> Vec<u64> {
     out
 }
 
-/// The `tessera_id` one source entity is served under, found through the drill-down's external id
-/// — the identity permutation is the server's alone (I10), so a test cannot compute one.
+/// The `tessera_id` one source entity is served under, found through the drill-down's `id` — the
+/// identity permutation is the server's alone (I10), so a test cannot compute one.
 async fn id_of(served: &Served, token: &str, view: &str, entity: u64) -> u64 {
     let (status, body) = viewport_bytes(served, token, view).await;
     assert_eq!(status, 200, "{view}");
@@ -2302,7 +2309,7 @@ async fn an_edit_in_a_dropped_view_holds_nothing_in_the_log() {
         &served,
         "edit-then-drop-row",
         "quarter:2026-Q1",
-        &[(external_id_of(FRESH), 270.0, 270.0, "0")],
+        &[(FRESH, 270.0, 270.0, "0")],
         &[None],
     )
     .await;
@@ -2557,7 +2564,7 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
             &served,
             &format!("lifecycle-{round}"),
             written.view,
-            &[(external_id_of(written.entity), 250.0 + round as f32, 250.0, "0")],
+            &[(written.entity, 250.0 + round as f32, 250.0, "0")],
             Some(&[Some(written.heat)]),
             Some(&[Some(written.note)]),
             Some(&[Some(written.tag)]),

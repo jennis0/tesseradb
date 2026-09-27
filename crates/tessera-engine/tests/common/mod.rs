@@ -456,6 +456,7 @@ pub fn build_with_layers(
     corpus: &tessera_corpus::Corpus,
     config: tessera_build::config::Config,
 ) {
+    let schema = with_id(config.schema);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -472,7 +473,7 @@ pub fn build_with_layers(
         scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             points_path.to_path_buf(),
-            &config.schema,
+            &schema,
         ),
         out: out.to_path_buf(),
         limit: None,
@@ -485,7 +486,7 @@ pub fn build_with_layers(
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: config.schema,
+        schema,
     };
     build(&args).expect("the fixture's own declaration builds");
 }
@@ -508,6 +509,14 @@ pub fn id_schema() -> tessera_build::config::Schema {
         }],
         vocabularies: Default::default(),
     }
+}
+
+/// `schema` with [`id_schema`]'s `id` declared after its own columns, unless it declares one.
+pub fn with_id(mut schema: tessera_build::config::Schema) -> tessera_build::config::Schema {
+    if !schema.attributes.iter().any(|a| a.name == "id") {
+        schema.attributes.extend(id_schema().attributes);
+    }
+    schema
 }
 
 /// Every `source_id -> entity_id` pair the bundle's unique `id` column holds in its runs.

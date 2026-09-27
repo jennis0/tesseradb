@@ -227,6 +227,7 @@ struct Fixture {
 }
 
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
+    let schema = with_id(schema);
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,

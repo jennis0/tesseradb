@@ -97,16 +97,16 @@ async fn group_names(served: &Served) -> Vec<String> {
         .collect()
 }
 
-fn batch(rows: &[(&str, f32, f32)]) -> Vec<u8> {
+/// New items at `(x, y)`.
+fn batch(rows: &[(f32, f32)]) -> Vec<u8> {
     labelled_batch(rows, &["0"])
 }
 
 /// [`batch`], every row carrying `labels`.
-fn labelled_batch(rows: &[(&str, f32, f32)], labels: &[&str]) -> Vec<u8> {
+fn labelled_batch(rows: &[(f32, f32)], labels: &[&str]) -> Vec<u8> {
     let labels: Vec<&[&str]> = rows.iter().map(|_| labels).collect();
     let access = access_lists(&labels);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -114,14 +114,11 @@ fn labelled_batch(rows: &[(&str, f32, f32)], labels: &[&str]) -> Vec<u8> {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(arrow::array::BinaryArray::from_iter(
-                rows.iter().map(|r| Some(r.0.as_bytes())),
+            Arc::new(arrow::array::Float32Array::from_iter_values(
+                rows.iter().map(|r| r.0),
             )),
             Arc::new(arrow::array::Float32Array::from_iter_values(
                 rows.iter().map(|r| r.1),
-            )),
-            Arc::new(arrow::array::Float32Array::from_iter_values(
-                rows.iter().map(|r| r.2),
             )),
             Arc::new(access),
         ],
@@ -132,7 +129,7 @@ fn labelled_batch(rows: &[(&str, f32, f32)], labels: &[&str]) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-async fn ingest(served: &Served, batch_id: &str, view: &str, rows: &[(&str, f32, f32)]) -> u16 {
+async fn ingest(served: &Served, batch_id: &str, view: &str, rows: &[(f32, f32)]) -> u16 {
     served
         .server
         .client
@@ -281,7 +278,7 @@ async fn a_group_created_at_runtime_accepts_a_view_under_it() {
     );
 
     assert_eq!(
-        ingest(&served, "q1", "quarter:2026-Q1", &[("a", 100.0, 100.0)]).await,
+        ingest(&served, "q1", "quarter:2026-Q1", &[(100.0, 100.0)]).await,
         200
     );
     drain(&served.server).await;
@@ -391,7 +388,7 @@ async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
             &served,
             "into-embedding",
             "embedding",
-            &[("e1", 100.0, 100.0), ("e2", 200.0, 300.0)]
+            &[(100.0, 100.0), (200.0, 300.0)]
         )
         .await,
         200
@@ -583,7 +580,7 @@ async fn padded_gates_and_point_defaults_are_stored_trimmed() {
         .header("x-tessera-batch-id", "blank")
         .header("x-tessera-view", "defaulted")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(labelled_batch(&[("d1", 100.0, 100.0)], &["  "]))
+        .body(labelled_batch(&[(100.0, 100.0)], &["  "]))
         .send()
         .await
         .unwrap();
@@ -678,7 +675,7 @@ async fn the_declarations_survive_a_restart_and_a_fold() {
 
     // Published into a segments manifest, then replayed from it.
     assert_eq!(
-        ingest(&served, "rows", "embedding", &[("e1", 100.0, 100.0)]).await,
+        ingest(&served, "rows", "embedding", &[(100.0, 100.0)]).await,
         200
     );
     drain(&served.server).await;

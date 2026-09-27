@@ -266,7 +266,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -278,7 +278,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build carrying all three homes succeeds");
 }
@@ -969,8 +969,8 @@ fn a_deletion_reaches_every_home() {
         let source = source_of_entity[&u64::from(entity)];
         assert_eq!(
             fields.len(),
-            2,
-            "Home::RecordBlob: source {source}'s row is not its two blob-resident fields"
+            3,
+            "Home::RecordBlob: source {source}'s row is not its three blob-resident fields"
         );
         assert_eq!(
             fields[0].value,
@@ -984,6 +984,11 @@ fn a_deletion_reaches_every_home() {
             fields[1].value,
             tessera_filter::RecordValue::Utf8(prose_of(source)),
             "Home::RecordBlob: source {source}'s prose"
+        );
+        assert_eq!(
+            fields[2].value,
+            tessera_filter::RecordValue::U64(source),
+            "Home::RecordBlob: source {source}'s id"
         );
         walked += 1;
         Ok(())

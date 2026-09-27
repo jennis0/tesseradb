@@ -1,11 +1,10 @@
-//! **JSON on every record-bearing route, Arrow by content type, and one `limits` block** (ingest
-//! §1.2, §2.1; decision 0136 rulings 1 and 2).
+//! **JSON on every record-bearing route, Arrow by content type, and one `limits` block.**
 //!
 //! What is asserted, over the real routes and through served answers rather than bytes: a batch
 //! sent as JSON and the same batch sent as Arrow land rows a viewer cannot tell apart; a cell that
 //! does not coerce to its column is a 422 naming the row and the column, whole batch without
 //! effect; a row with no label at the JSON door takes the view's declared default or is refused
-//! with the count (decision 0133), as at the Arrow door; every limit `/control/status` publishes
+//! with the count, as at the Arrow door; every limit `/control/status` publishes
 //! is the one the route refuses over, at exactly that value; a growth page as Arrow lands what
 //! the same page as JSON lands; and a content type naming neither encoding is refused.
 
@@ -15,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, Int64Array, StringArray,
+    Array, ArrayRef, Float32Array, Float64Array, Int64Array, StringArray,
     TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -165,7 +164,6 @@ fn engine_over(bundle: &Path, dir: &Path) -> Engine {
 /// One row of the declared tail, as the two encodings spell it.
 #[derive(Clone)]
 struct Row {
-    id: u64,
     x: f32,
     y: f32,
     score: i64,
@@ -177,12 +175,11 @@ struct Row {
 }
 
 /// Every value is a function of `id % 10`, so a row of one ten-id range has a twin in every
-/// other: the same values under another external id.
+/// other.
 fn rows(ids: std::ops::Range<u64>) -> Vec<Row> {
     ids.map(|id| {
         let r = id % 10;
         Row {
-            id,
             x: 10.0 + r as f32,
             y: 20.0 + 2.0 * r as f32,
             score: 1_000 + (r % 3) as i64,
@@ -199,7 +196,6 @@ fn rows(ids: std::ops::Range<u64>) -> Vec<Row> {
 fn arrow_body(rows: &[Row]) -> Vec<u8> {
     let access = access_column(rows.iter().map(|_| "0"));
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -214,13 +210,9 @@ fn arrow_body(rows: &[Row]) -> Vec<u8> {
         Field::new("tag", DataType::Utf8, true),
         Field::new(LAYER, DataType::Utf8, true),
     ]));
-    let ids: Vec<Vec<u8>> = rows.iter().map(|r| external_id_of(r.id)).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values(
-                ids.iter().map(|v| v.as_slice()),
-            )),
             Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.x))),
             Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.y))),
             Arc::new(access),
@@ -244,18 +236,13 @@ fn arrow_body(rows: &[Row]) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-/// The fixed columns of an ingest batch over `ids`, every row at one place and labelled `0`.
-fn placed(ids: &[u64]) -> Vec<(Field, ArrayRef)> {
-    let access = access_column(ids.iter().map(|_| "0"));
-    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
+/// The fixed columns of an ingest batch of `rows` new items, every one at one place and labelled
+/// `0`: `x`, `y` and `access`, in that order.
+fn placed(rows: usize) -> Vec<(Field, ArrayRef)> {
+    let access = access_column((0..rows).map(|_| "0"));
     vec![
-        column(
-            "external_id",
-            true,
-            BinaryArray::from_iter_values(external.iter().map(|v| v.as_slice())),
-        ),
-        column("x", false, Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
-        column("y", false, Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
+        column("x", false, Float32Array::from_iter_values((0..rows).map(|_| 10.0))),
+        column("y", false, Float32Array::from_iter_values((0..rows).map(|_| 20.0))),
         (access_field(&access), Arc::new(access)),
     ]
 }
@@ -289,7 +276,6 @@ fn body_of(mut columns: Vec<(Field, ArrayRef)>) -> Vec<u8> {
 /// have to send; `seen` as the integer microseconds the roster's `timestamp_us` takes.
 fn json_record(row: &Row) -> Value {
     json!({
-        "external_id": member(row.id),
         "x": row.x,
         "y": row.y,
         "access": ["0"],
@@ -390,7 +376,6 @@ async fn record_without_ids(server: &TestServer, token: &str, tessera_id: u64) -
         match value {
             Value::Object(map) => {
                 map.remove("tessera_id");
-                map.remove("external_id");
                 map.remove("id");
                 for v in map.values_mut() {
                     strip(v);
@@ -404,8 +389,8 @@ async fn record_without_ids(server: &TestServer, token: &str, tessera_id: u64) -
     body
 }
 
-/// **The headline.** Ten rows as Arrow, the same ten values as a JSON array under other ids and
-/// again as newline-delimited objects, and a viewer is served thirty rows it cannot tell apart:
+/// **The headline.** Ten rows as Arrow, the same ten values as a JSON array and again as
+/// newline-delimited objects, and a viewer is served thirty rows it cannot tell apart:
 /// every indexed filter matches three for one, the layer's artifact counts all three sets, and a
 /// drill-down of one row from each encoding reads the same values, the `u64` past 2⁵³ included.
 #[tokio::test]
@@ -511,7 +496,6 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
         ("seen", json!(1.0e6)),
         ("tag", json!(7)),
         ("x", json!("east")),
-        ("external_id", json!("not base64!")),
         ("access", json!(7)),
         ("access", json!([7])),
         (LAYER, json!(true)),
@@ -561,7 +545,7 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
     );
 }
 
-/// **Decision 0133 at the JSON door.** An empty list, a null, an absent `access` and a list of
+/// **An unlabelled row at the JSON door.** An empty list, a null, an absent `access` and a list of
 /// empty, blank or null labels are each a row with no label: under a declared default all of them
 /// land under it; under no default the batch is refused naming the count of such rows and the
 /// view. A plain string is one label and a null element is dropped, as at the Arrow door, whose
@@ -569,17 +553,16 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
 #[tokio::test]
 async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_the_count() {
     fn body() -> Vec<u8> {
-        let id = |i: u64| member(N_ITEMS + 500 + i);
         json!([
-            { "external_id": id(0), "x": 10.0, "y": 10.0, "access": [] },
-            { "external_id": id(1), "x": 11.0, "y": 11.0, "access": null },
-            { "external_id": id(2), "x": 12.0, "y": 12.0 },
-            { "external_id": id(3), "x": 13.0, "y": 13.0, "access": ["1"] },
-            { "external_id": id(4), "x": 14.0, "y": 14.0, "access": [""] },
-            { "external_id": id(5), "x": 15.0, "y": 15.0, "access": ["  "] },
-            { "external_id": id(6), "x": 16.0, "y": 16.0, "access": [null] },
-            { "external_id": id(7), "x": 17.0, "y": 17.0, "access": " 1 " },
-            { "external_id": id(8), "x": 18.0, "y": 18.0, "access": [null, "1"] },
+            { "x": 10.0, "y": 10.0, "access": [] },
+            { "x": 11.0, "y": 11.0, "access": null },
+            { "x": 12.0, "y": 12.0 },
+            { "x": 13.0, "y": 13.0, "access": ["1"] },
+            { "x": 14.0, "y": 14.0, "access": [""] },
+            { "x": 15.0, "y": 15.0, "access": ["  "] },
+            { "x": 16.0, "y": 16.0, "access": [null] },
+            { "x": 17.0, "y": 17.0, "access": " 1 " },
+            { "x": 18.0, "y": 18.0, "access": [null, "1"] },
         ])
         .to_string()
         .into_bytes()
@@ -632,7 +615,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
         &server,
         "empty-element",
         Some("application/json"),
-        json!([{ "external_id": member(N_ITEMS + 600), "x": 1.0, "y": 1.0, "access": [""] }])
+        json!([{ "x": 1.0, "y": 1.0, "access": [""] }])
             .to_string()
             .into_bytes(),
     )
@@ -645,7 +628,6 @@ fn plain_json_body(ids: std::ops::Range<u64>) -> Vec<u8> {
     Value::Array(
         ids.map(|id| {
             json!({
-                "external_id": member(N_ITEMS + 1_000 + id),
                 "x": 10.0 + (id % 7) as f64,
                 "y": 20.0 + (id % 5) as f64,
                 "access": ["0"],
@@ -657,9 +639,10 @@ fn plain_json_body(ids: std::ops::Range<u64>) -> Vec<u8> {
     .into_bytes()
 }
 
+/// A publication of `artifacts`, each member named by its `id`.
 fn publish_body(artifacts: &[(&str, Vec<String>)]) -> Vec<u8> {
     json!({
-        "addressing": "external",
+        "field": "id",
         "artifacts": artifacts
             .iter()
             .map(|(key, members)| json!({ "key": key, "members": members }))
@@ -701,8 +684,8 @@ fn grow_json(artifacts: &[(&str, Vec<String>)]) -> Vec<u8> {
     publish_body(artifacts)
 }
 
-/// The growth route's Arrow form: `key` and `members` per row, the envelope in the schema's
-/// metadata (ingest §1.2).
+/// The growth route's Arrow form: `key` and `members` per row, and the field naming the members
+/// in the schema's metadata.
 fn grow_arrow(artifacts: &[(&str, Vec<String>)]) -> Vec<u8> {
     use arrow::array::{ListBuilder, StringBuilder};
     let mut lists = ListBuilder::new(StringBuilder::new());
@@ -719,7 +702,7 @@ fn grow_arrow(artifacts: &[(&str, Vec<String>)]) -> Vec<u8> {
             Field::new("members", lists.data_type().clone(), true),
         ])
         .with_metadata(
-            [("addressing".to_string(), "external".to_string())]
+            [("field".to_string(), "id".to_string())]
                 .into_iter()
                 .collect(),
         ),
@@ -755,9 +738,9 @@ async fn served_plain(limits: IngestLimits) -> (TempDir, TestServer) {
 #[tokio::test]
 async fn every_limit_in_the_block_is_enforced_at_its_published_value() {
     let three_rows = plain_json_body(0..3);
-    // Two artifacts of three members: the at-cap body, and long enough that every count leg
+    // Two artifacts of five members: the at-cap body, and long enough that every count leg
     // below (three artifacts of one member, a growth of four) sits under the byte cap.
-    let two_artifacts = publish_body(&[("p1", members(0..3)), ("p2", members(3..6))]);
+    let two_artifacts = publish_body(&[("p1", members(0..5)), ("p2", members(5..10))]);
     let limits = IngestLimits {
         admission: 8,
         max_batch_rows: 3,
@@ -832,9 +815,9 @@ async fn every_limit_in_the_block_is_enforced_at_its_published_value() {
         "{body}"
     );
     let three = publish_body(&[
-        ("a", members(6..7)),
-        ("b", members(7..8)),
-        ("c", members(8..9)),
+        ("a", members(10..11)),
+        ("b", members(11..12)),
+        ("c", members(12..13)),
     ]);
     assert!(
         three.len() <= two_artifacts.len(),
@@ -860,11 +843,11 @@ async fn every_limit_in_the_block_is_enforced_at_its_published_value() {
     let (status, body) = patch_raw(
         &server,
         "application/json",
-        grow_json(&[("p1", members(6..8)), ("p2", members(8..9))]),
+        grow_json(&[("p1", members(10..12)), ("p2", members(12..13))]),
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    let four = grow_json(&[("p1", members(9..11)), ("p2", members(11..13))]);
+    let four = grow_json(&[("p1", members(13..15)), ("p2", members(15..17))]);
     assert!(
         four.len() <= two_artifacts.len(),
         "under the byte cap, so the count is the refusal"
@@ -885,7 +868,7 @@ async fn every_limit_in_the_block_is_enforced_at_its_published_value() {
     let items = |n: usize| -> Value {
         Value::Array(
             (0..n)
-                .map(|i| json!({ "external_id": member(i as u64), "op": "suppress" }))
+                .map(|i| json!({ "field": "id", "value": member(i as u64), "op": "suppress" }))
                 .collect(),
         )
     };
@@ -1022,7 +1005,7 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
         lists.finish()
     }
     let key = || Arc::new(StringArray::from(vec!["a"])) as Arc<dyn Array>;
-    let list = one_list(&[Some("QUFBQUFBQUFBQUE=")]);
+    let list = one_list(&[Some("40")]);
     let list_type = list.data_type().clone();
     let (status, body) = patch_raw(
         &server,
@@ -1034,7 +1017,7 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
                 Field::new("parent", DataType::Utf8, true),
             ],
             vec![key(), Arc::new(list.clone()), key()],
-            &[("addressing", "external")],
+            &[("field", "id")],
         ),
     )
     .await;
@@ -1053,7 +1036,7 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
                 Field::new("members", list_type.clone(), true),
             ],
             vec![key(), Arc::new(list.clone())],
-            &[("addressing", "external"), ("default_space", "wgs84")],
+            &[("field", "id"), ("default_space", "wgs84")],
         ),
     )
     .await;
@@ -1077,7 +1060,7 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
                 Field::new("members", null_members.data_type().clone(), true),
             ],
             vec![key(), Arc::new(null_members)],
-            &[("addressing", "external")],
+            &[("field", "id")],
         ),
     )
     .await;
@@ -1092,34 +1075,6 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
         artifacts.len(),
         2,
         "none of the three refusals applied anything"
-    );
-
-    // The Arrow form's envelope is the schema's metadata, and a stream without it is refused
-    // naming what it lacks.
-    let (status, body) = patch_raw(&server, ARROW, {
-        let mut lists = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
-        lists.values().append_value(member(40));
-        lists.append(true);
-        let lists = lists.finish();
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Utf8, false),
-            Field::new("members", lists.data_type().clone(), true),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(StringArray::from(vec!["a"])), Arc::new(lists)],
-        )
-        .unwrap();
-        let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.into_inner().unwrap()
-    })
-    .await;
-    assert_eq!(status, 422, "{body}");
-    assert_eq!(body["error"], "contract", "{body}");
-    assert!(
-        body["detail"].as_str().unwrap().contains("addressing"),
-        "{body}"
     );
 }
 
@@ -1170,9 +1125,9 @@ async fn a_null_coordinate_in_an_arrow_batch_is_refused() {
                 Float64Array::from(vec![1.0, 2.0, 3.0])
             }
         };
-        let mut columns = placed(&[500, 501, 502]);
-        columns[1] = column("x", true, with_null("x"));
-        columns[2] = column("y", true, with_null("y"));
+        let mut columns = placed(3);
+        columns[0] = column("x", true, with_null("x"));
+        columns[1] = column("y", true, with_null("y"));
         let body = body_of(columns);
         let (status, resp) = ingest(&server, &format!("null-{nulled}"), Some(ARROW), body).await;
         assert_eq!(status, 422, "{nulled}: {resp}");
@@ -1209,7 +1164,7 @@ async fn declare_widths(server: &TestServer) {
 /// `grade` (`u8`) as `int64`, `weight` (`f32`) as `float64`, `precise` (`f64`) as `float32` and
 /// `label` (`keyword`, a string on the wire) as `large_utf8`.
 fn widths_body(ids: &[u64], grades: &[Option<i64>]) -> Vec<u8> {
-    let mut columns = placed(ids);
+    let mut columns = placed(ids.len());
     columns.extend([
         column("grade", true, Int64Array::from(grades.to_vec())),
         column("weight", true, Float64Array::from_iter_values(ids.iter().map(|_| 0.5))),
@@ -1283,17 +1238,17 @@ async fn an_arrow_integer_outside_its_declaration_is_refused_naming_the_row() {
     );
 }
 
-/// A row without coordinates naming an existing item, as Arrow, setting `grade` from an `int64`
-/// column.
-fn grade_row_body(external_id: u64, grade: i64) -> Vec<u8> {
+/// A row without coordinates naming an existing item by `tessera_id`, as Arrow, setting `grade`
+/// from an `int64` column.
+fn grade_row_body(tessera_id: u64, grade: i64) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("tessera_id", DataType::Utf8, true),
         Field::new("grade", DataType::Int64, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values([external_id_of(external_id)])),
+            Arc::new(StringArray::from_iter_values([tessera_id.to_string()])),
             Arc::new(Int64Array::from(vec![grade])),
         ],
     )
@@ -1330,13 +1285,13 @@ async fn an_arrow_column_on_a_row_without_coordinates_at_another_width_is_read_a
     let tessera_id = ingested_ids(&answer)[0];
     drain(&server).await;
 
-    let (status, answer) = post_rows(&server, "too-wide", grade_row_body(800, 300)).await;
+    let (status, answer) = post_rows(&server, "too-wide", grade_row_body(tessera_id, 300)).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract");
     let detail = answer["detail"].as_str().unwrap();
     assert!(names_cell(detail, 0, "grade"), "{detail}");
 
-    let (status, answer) = post_rows(&server, "fits", grade_row_body(800, 42)).await;
+    let (status, answer) = post_rows(&server, "fits", grade_row_body(tessera_id, 42)).await;
     assert_eq!(status, 200, "{answer}");
     drain(&server).await;
     assert_eq!(fields_of(&server, tessera_id).await["grade"], json!(42));
@@ -1365,9 +1320,10 @@ async fn declare_venue(server: &TestServer) {
     .await;
 }
 
-/// An ingest batch whose `venue` keys arrive as `large_utf8`, null where a row has none.
-fn venue_ingest_body(ids: &[u64], venues: &[Option<&str>]) -> Vec<u8> {
-    let mut columns = placed(ids);
+/// An ingest batch of one new item per key in `venues`, its `venue` keys arriving as `large_utf8`,
+/// null where a row has none.
+fn venue_ingest_body(venues: &[Option<&str>]) -> Vec<u8> {
+    let mut columns = placed(venues.len());
     columns.push(column(
         "venue",
         true,
@@ -1376,16 +1332,17 @@ fn venue_ingest_body(ids: &[u64], venues: &[Option<&str>]) -> Vec<u8> {
     body_of(columns)
 }
 
-/// A row without coordinates setting one item's `venue`, its key as `large_utf8`.
-fn venue_row_body(external_id: u64, venue: &str) -> Vec<u8> {
+/// A row without coordinates setting one item's `venue`, naming the item by `tessera_id` and its
+/// key as `large_utf8`.
+fn venue_row_body(tessera_id: u64, venue: &str) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("tessera_id", DataType::Utf8, true),
         Field::new("venue", DataType::LargeUtf8, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values([external_id_of(external_id)])),
+            Arc::new(StringArray::from_iter_values([tessera_id.to_string()])),
             Arc::new(arrow::array::LargeStringArray::from_iter_values([venue])),
         ],
     )
@@ -1408,7 +1365,7 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
         &server,
         "venues",
         Some(ARROW),
-        venue_ingest_body(&[1000, 1001], &[Some("arxiv"), None]),
+        venue_ingest_body(&[Some("arxiv"), None]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");
@@ -1419,7 +1376,7 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
     let (matched, _) = viewport(&server, &["0"], arxiv()).await;
     assert_eq!(matched, [first], "the ingested key is served");
 
-    let (status, answer) = post_rows(&server, "venue-value", venue_row_body(1001, "arxiv")).await;
+    let (status, answer) = post_rows(&server, "venue-value", venue_row_body(second, "arxiv")).await;
     assert_eq!(status, 200, "{answer}");
     drain(&server).await;
     let (mut matched, _) = viewport(&server, &["0"], arxiv()).await;
@@ -1435,7 +1392,7 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
         &server,
         "unknown-venue",
         Some(ARROW),
-        venue_ingest_body(&[1002], &[Some("nature")]),
+        venue_ingest_body(&[Some("nature")]),
     )
     .await;
     assert_eq!(status, 422, "{answer}");
@@ -1445,7 +1402,7 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
         "{answer}"
     );
     let (status, answer) =
-        post_rows(&server, "unknown-value", venue_row_body(1000, "nature")).await;
+        post_rows(&server, "unknown-value", venue_row_body(first, "nature")).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract");
 }
@@ -1456,10 +1413,9 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
 async fn a_column_of_the_null_type_is_a_declared_column_with_no_values() {
     let (_tmp, server) = served_declared().await;
     declare_venue(&server).await;
-    let ids = [1100u64, 1101];
-    let mut columns = placed(&ids);
+    let mut columns = placed(2);
     for name in ["score", "weight", "big", "seen", "tag", "venue"] {
-        columns.push(column(name, true, arrow::array::NullArray::new(ids.len())));
+        columns.push(column(name, true, arrow::array::NullArray::new(2)));
     }
     let (status, answer) = ingest(&server, "null-type", Some(ARROW), body_of(columns)).await;
     assert_eq!(status, 200, "{answer}");
@@ -1480,7 +1436,7 @@ const PAST_I64: u64 = 1 << 63;
 async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
     let (_tmp, server) = served_declared().await;
     let high_water = control_status(&server).await["entity_id_high_water"].clone();
-    let mut columns = placed(&[900, 901]);
+    let mut columns = placed(2);
     columns.push(column("score", true, UInt64Array::from(vec![7, PAST_I64])));
     let (status, answer) = ingest(&server, "past-i64", Some(ARROW), body_of(columns)).await;
     assert_eq!(status, 422, "{answer}");
@@ -1518,16 +1474,16 @@ async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
 #[tokio::test]
 async fn a_wrong_typed_column_in_an_empty_batch_is_refused() {
     let (_tmp, server) = served_declared().await;
-    let mut columns = placed(&[]);
+    let mut columns = placed(0);
     columns.push(column("weight", true, StringArray::from(Vec::<&str>::new())));
     let (status, answer) = ingest(&server, "empty", Some(ARROW), body_of(columns)).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
 }
 
-/// An ingest batch carrying `weight` (`f32`) as a `float64` column.
-fn weights_body(ids: &[u64], weights: &[f64]) -> Vec<u8> {
-    let mut columns = placed(ids);
+/// An ingest batch of one new item per weight, carrying `weight` (`f32`) as a `float64` column.
+fn weights_body(weights: &[f64]) -> Vec<u8> {
+    let mut columns = placed(weights.len());
     columns.push(column("weight", true, Float64Array::from(weights.to_vec())));
     body_of(columns)
 }
@@ -1544,7 +1500,7 @@ async fn a_finite_float_past_f32_is_refused_at_every_path() {
         &server,
         "past-f32-arrow",
         Some(ARROW),
-        weights_body(&[1000, 1001], &[0.5, 1e300]),
+        weights_body(&[0.5, 1e300]),
     )
     .await;
     assert_eq!(status, 422, "{answer}");
@@ -1574,7 +1530,7 @@ async fn a_finite_float_past_f32_is_refused_at_every_path() {
         &server,
         "infinite",
         Some(ARROW),
-        weights_body(&[1002, 1003, 1004], &[f64::INFINITY, f64::NEG_INFINITY, f64::NAN]),
+        weights_body(&[f64::INFINITY, f64::NEG_INFINITY, f64::NAN]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");

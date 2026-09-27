@@ -212,7 +212,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &id_schema()),
         out: root.clone(),
         limit: None,
         identity_key: test_key(),
@@ -224,7 +224,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: id_schema(),
     };
     tessera_build::build(&args)?;
     Ok(Fixture {

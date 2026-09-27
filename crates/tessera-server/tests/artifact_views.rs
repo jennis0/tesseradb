@@ -124,11 +124,9 @@ fn build_group(
                 .collect(),
         },
     );
-    build(&BuildArgs {
-        groups,
-        ..build_args(&out, views)
-    })
-    .expect("the two-view group builds");
+    // q1 draws every entity, so its points file declares every item's `id`.
+    let args = with_id(build_args(&out, views), &dir.join("q1.parquet"));
+    build(&BuildArgs { groups, ..args }).expect("the two-view group builds");
     out
 }
 
@@ -178,7 +176,7 @@ async fn put(
             layer.replace('/', "%2F")
         )))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -976,14 +974,14 @@ async fn create_key(server: &TestServer, key: &str) {
     assert_eq!(created.status().as_u16(), 201);
 }
 
-/// As many new items as q2 was built with, every one right of the shapes these tests publish,
-/// returning their `tessera_id`s.
+/// As many new items as q2 was built with, `id` 20,000 onwards, every one right of the shapes
+/// these tests publish, returning their `tessera_id`s.
 async fn ingest_right_of_the_shape(server: &TestServer, view: &str, batch_id: &str) -> BTreeSet<u64> {
-    let ids: Vec<Vec<u8>> = (0..IN_VIEW[1]).map(|i| external_id_of(20_000 + i)).collect();
-    let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = ids
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (Some(&id[..]), 600.0 + (i % 300) as f32, (i * 3 % 1000) as f32, "0"))
+    let rows: Vec<(Option<u64>, f32, f32, &str)> = (0..IN_VIEW[1])
+        .map(|i| {
+            let at = i as usize;
+            (Some(20_000 + i), 600.0 + (at % 300) as f32, (at * 3 % 1000) as f32, "0")
+        })
         .collect();
     let resp = server
         .client
@@ -1173,14 +1171,14 @@ async fn a_growth_grows_the_artifact_in_the_view_it_names() {
             .json(&body)
             .send()
     };
-    let resp = patch(json!({ "addressing": "external", "artifacts": [
+    let resp = patch(json!({ "field": "id", "artifacts": [
         { "key": "c1", "members": members(10..20) }
     ] }))
     .await
     .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
 
-    let resp = patch(json!({ "addressing": "external", "artifacts": [
+    let resp = patch(json!({ "field": "id", "artifacts": [
         { "key": "c1", "view": "q2", "members": members(10..25) }
     ] }))
     .await
@@ -1268,7 +1266,7 @@ fn arrow_growth(key: &str, members: Vec<String>, view: Option<(DataType, Option<
             _ => Arc::new(Int64Array::from(vec![Some(2)])),
         });
     }
-    let metadata = [("addressing".to_string(), "external".to_string())].into_iter().collect();
+    let metadata = [("field".to_string(), "id".to_string())].into_iter().collect();
     let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
     let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();

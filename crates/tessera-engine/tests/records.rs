@@ -429,7 +429,7 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
             scoped("blurb", ScalarType::Text, Some("unicode"), "quarter", quarter_views),
             scoped("hush", ScalarType::I32, None, "secret", vec![secret_view]),
         ],
-        attribute_sources: tessera_build::config::AttributeSource::over(world.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(world.clone(), &with_id(schema.clone())),
         out: out.clone(),
         limit: None,
         identity_key: key,
@@ -441,7 +441,7 @@ fn build_bundle_of(dir: &Path, key: IdentityKey, n: u64) -> PathBuf {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("the records fixture builds");
     out
@@ -1327,15 +1327,15 @@ fn a_sparse_filter_under_no_time_budget_still_advances_and_completes() {
 fn a_read_that_finds_no_row_gives_one_typed_page_of_no_rows() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
-    let fields = names(&["band", "score", "heat", "tag", "note", "prose", "when", "flag"]);
-    let system = names(&["position", "external_id", "labels"]);
+    let fields = names(&["band", "score", "heat", "tag", "note", "prose", "when", "flag", "id"]);
+    let system = names(&["position", "labels"]);
     let mut base = request("s0", &fields);
     base.system_fields = &system;
     base.page_rows = Some(10);
     base.pages = Some(1);
     let (full, _) = respond(&fx.engine, &session, base.clone()).unwrap();
     let schema = full.pages[0].0.schema();
-    assert_eq!(schema.fields().len(), 1 + fields.len() + 4);
+    assert_eq!(schema.fields().len(), 1 + fields.len() + 3);
 
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
         let mut none = base.clone();
@@ -1569,20 +1569,20 @@ fn positions_come_back_within_one_grid_step() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
     let by_tid = sources_by_tid(&fx);
-    let system = names(&["position", "external_id"]);
-    let fields: Vec<String> = Vec::new();
+    let system = names(&["position"]);
+    let fields = names(&["id"]);
     let step = 1000.0 / 4_294_967_296.0;
     let mut checked = 0;
     for batch in pages_of(&fx, &session, "s0", &fields, &system) {
         let x = col::<Float64Array>(&batch, "tessera:x");
         let y = col::<Float64Array>(&batch, "tessera:y");
-        let external = col::<BinaryArray>(&batch, "tessera:external_id");
+        let held = col::<UInt64Array>(&batch, "id");
         for (i, tid) in ids_of(&batch).into_iter().enumerate() {
             let s = by_tid[&tid];
             let (px, py) = position(s);
             assert!((x.value(i) - px).abs() <= step, "x of {s}: {} against {px}", x.value(i));
             assert!((y.value(i) - py).abs() <= step, "y of {s}: {} against {py}", y.value(i));
-            assert_eq!(external.value(i), s.to_le_bytes());
+            assert_eq!(held.value(i), s);
             checked += 1;
         }
     }
@@ -2636,8 +2636,8 @@ fn encoded_bytes(batch: &RecordBatch) -> usize {
 fn a_pages_bytes_are_its_buffers_and_the_ceiling_holds_on_them() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&both_credential()).unwrap();
-    let fields = names(&["note", "prose", "tag", "band", "score", "when"]);
-    let system = names(&["labels", "external_id", "position"]);
+    let fields = names(&["note", "prose", "tag", "band", "score", "when", "id"]);
+    let system = names(&["labels", "position"]);
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
         let mut req = request("s0", &fields);
         req.system_fields = &system;

@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array};
+use arrow::array::{Float64Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -69,7 +69,8 @@ fn places() -> Vec<(f64, f64)> {
 /// The one row `places()` clips.
 const POLAR: usize = 11;
 
-/// A bundle whose one view is projected `web_mercator` against the whole world.
+/// A bundle whose one view is projected `web_mercator` against the whole world, declaring the
+/// unique `id` ([`id_schema`]) so a built place is named by its index in `points`.
 ///
 /// `Fields::moved` is what a projected `[[view]]` compiles to — the geographic names carried on the
 /// canonical axes — so the build reads `lon`/`lat` here exactly as it would from a declaration.
@@ -83,7 +84,7 @@ fn build_projected_in(out: &Path, tmp: &Path, points: &[(f64, f64)], frame: Boun
     let pairs_path = tmp.join("pairs.parquet");
     write_lon_lat(&points_path, points);
     write_pairs_n(&pairs_path, points.len() as u64);
-    build(&build_args(
+    let args = build_args(
         out,
         vec![tessera_build::ViewArgs {
             projection: Projection::WebMercator,
@@ -91,15 +92,16 @@ fn build_projected_in(out: &Path, tmp: &Path, points: &[(f64, f64)], frame: Boun
             point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
             ..view_args("s0", &points_path, AccessInput::relation(pairs_path))
         }],
-    ))
-    .expect("the projected fixture builds");
+    );
+    build(&with_id(args, &points_path)).expect("the projected fixture builds");
 }
 
-/// An ingest batch under caller-chosen column names, so the refusal tests can spell them wrong.
-fn ingest_batch(columns: (&str, &str), rows: &[(Vec<u8>, f64, f64, &str)]) -> Vec<u8> {
+/// An ingest batch of `(id, x, y, access label)` rows under caller-chosen coordinate column
+/// names, so the refusal tests can spell them wrong.
+fn ingest_batch(columns: (&str, &str), rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
     let access = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new(columns.0, DataType::Float64, false),
         Field::new(columns.1, DataType::Float64, false),
         access_field(&access),
@@ -107,8 +109,8 @@ fn ingest_batch(columns: (&str, &str), rows: &[(Vec<u8>, f64, f64, &str)]) -> Ve
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![
-            Arc::new(BinaryArray::from_iter_values(
-                rows.iter().map(|(id, _, _, _)| id.as_slice()),
+            Arc::new(UInt64Array::from_iter_values(
+                rows.iter().map(|(id, _, _, _)| *id),
             )),
             Arc::new(Float64Array::from(
                 rows.iter().map(|(_, x, _, _)| *x).collect::<Vec<_>>(),
@@ -125,10 +127,10 @@ fn ingest_batch(columns: (&str, &str), rows: &[(Vec<u8>, f64, f64, &str)]) -> Ve
     w.into_inner().unwrap()
 }
 
-/// The ingested-row external id for source `i`, distinct from the build's own 8-byte spelling so
-/// both copies of a place are addressable.
-fn ingested_id(i: usize) -> Vec<u8> {
-    format!("ingested-{i}").into_bytes()
+/// The `id` an ingested copy of place `i` takes, distinct from the built copy's `i` so both copies
+/// of a place are addressable.
+fn ingested_id(i: usize) -> u64 {
+    1_000_000 + i as u64
 }
 
 /// `POST /control/ingest`, returning the status and the decoded body.
@@ -174,21 +176,18 @@ fn served_positions_in(engine: &Engine, k: usize, bbox: [f64; 4]) -> BTreeMap<u6
         .collect()
 }
 
-/// The position an external id's row was placed at, or a panic naming the id.
-fn position_of(engine: &Engine, positions: &BTreeMap<u64, u64>, external_id: &[u8]) -> u64 {
+/// The position the item holding `id` was placed at, or a panic naming the id.
+fn position_of(engine: &Engine, positions: &BTreeMap<u64, u64>, id: u64) -> u64 {
     let entity = engine
-        .resolve_external_ids(std::slice::from_ref(&external_id.to_vec()))
-        .expect("the sidecar and the live map both answer")[0]
-        .expect("this external id was established by a build or an accepted batch");
-    let id = engine
+        .resolve_unique_values("id", &[id.to_string()])
+        .expect("`id` is a declared unique attribute")[0]
+        .unwrap_or_else(|| panic!("no item holds id {id}"));
+    let tessera_id = engine
         .tessera_id_of(entity)
         .expect("a live entity has an identifier");
-    *positions.get(&id.raw()).unwrap_or_else(|| {
-        panic!(
-            "the row for external id {} was not served",
-            String::from_utf8_lossy(external_id)
-        )
-    })
+    *positions
+        .get(&tessera_id.raw())
+        .unwrap_or_else(|| panic!("the item holding id {id} was not served"))
 }
 
 /// An engine config that flushes only when asked, so every position below is read after a flush
@@ -230,7 +229,7 @@ async fn a_build_and_an_ingest_place_a_projected_coordinate_in_one_cell() {
     )
     .await;
 
-    let rows: Vec<(Vec<u8>, f64, f64, &str)> = points
+    let rows: Vec<(u64, f64, f64, &str)> = points
         .iter()
         .enumerate()
         .map(|(i, (lon, lat))| (ingested_id(i), *lon, *lat, "0"))
@@ -247,8 +246,8 @@ async fn a_build_and_an_ingest_place_a_projected_coordinate_in_one_cell() {
         "both copies of every place must be served, or the comparison below is vacuous"
     );
     for (i, (lon, lat)) in points.iter().enumerate() {
-        let from_build = position_of(&server.state.engine, &positions, &external_id_of(i as u64));
-        let from_ingest = position_of(&server.state.engine, &positions, &ingested_id(i));
+        let from_build = position_of(&server.state.engine, &positions, i as u64);
+        let from_ingest = position_of(&server.state.engine, &positions, ingested_id(i));
         assert_eq!(
             from_build, from_ingest,
             "lon {lon}, lat {lat} was placed differently by the build and the ingest"
@@ -317,12 +316,8 @@ async fn a_polar_row_is_clipped_counted_and_lands_on_the_frames_edge() {
     tick(&server).await;
 
     let positions = served_positions(&server.state.engine, 400);
-    let ingested = position_of(&server.state.engine, &positions, &ingested_id(POLAR));
-    let built = position_of(
-        &server.state.engine,
-        &positions,
-        &external_id_of(POLAR as u64),
-    );
+    let ingested = position_of(&server.state.engine, &positions, ingested_id(POLAR));
+    let built = position_of(&server.state.engine, &positions, POLAR as u64);
     assert_eq!(
         ingested, built,
         "the same polar row through the two doors must land in the same cell"
@@ -377,12 +372,8 @@ async fn a_projected_row_outside_the_frame_is_clamped_where_a_build_clamps_it() 
     tick(&server).await;
 
     let positions = served_positions_in(&server.state.engine, 400, [0.0, 0.0, 0.5, 0.5]);
-    let ingested = position_of(&server.state.engine, &positions, &ingested_id(TOKYO));
-    let built = position_of(
-        &server.state.engine,
-        &positions,
-        &external_id_of(TOKYO as u64),
-    );
+    let ingested = position_of(&server.state.engine, &positions, ingested_id(TOKYO));
+    let built = position_of(&server.state.engine, &positions, TOKYO as u64);
     assert_eq!(ingested, built, "the build and the ingest clamp Tokyo into one cell");
     let (cell_x, _) = deinterleave((ingested >> 32) as u32);
     assert_eq!(cell_x, 65_535, "Tokyo is stored on the frame's eastern edge");
@@ -476,7 +467,7 @@ async fn replay_reproduces_the_stored_positions_without_re_running_the_transform
     )
     .await;
 
-    let rows: Vec<(Vec<u8>, f64, f64, &str)> = points
+    let rows: Vec<(u64, f64, f64, &str)> = points
         .iter()
         .enumerate()
         .map(|(i, (lon, lat))| (ingested_id(i), *lon, *lat, "0"))
@@ -545,24 +536,9 @@ async fn replay_reproduces_the_stored_positions_without_re_running_the_transform
     for (i, (lon, lat)) in points.iter().enumerate() {
         let id = ingested_id(i);
         assert_eq!(
-            position_of(&replayed, &after_restart, &id),
-            position_of(&server.state.engine, &live, &id),
+            position_of(&replayed, &after_restart, id),
+            position_of(&server.state.engine, &live, id),
             "replay moved lon {lon}, lat {lat}"
         );
-    }
-}
-
-/// A shallow recursive copy — enough for a bundle directory and a WAL sequence, and small enough
-/// that reaching for a dependency would cost more than it saved.
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
     }
 }

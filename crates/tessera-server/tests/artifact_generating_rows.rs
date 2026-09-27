@@ -14,7 +14,7 @@ mod common;
 
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float32Array, RecordBatch};
+use arrow::array::{Float32Array, RecordBatch, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use common::*;
@@ -24,18 +24,20 @@ use tessera_engine::EngineConfig;
 
 const TOPICS: &str = "topics/generating";
 
-/// An ingested item's member address. Its external id is the caller's own bytes.
-fn ingested(name: &str) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(name.as_bytes())
-}
+/// The `id`s of the ingested items, past the fixture's own.
+const FLUSH_A: u64 = 10_001;
+const FLUSH_B: u64 = 10_002;
+const FLUSH_C: u64 = 10_003;
+const BUFFER_A: u64 = 10_004;
+const BUFFER_B: u64 = 10_005;
 
-/// An Arrow ingest batch whose rows may carry **several** access labels each, which is what lets
-/// one ingested item be visible to both principals and another to one of them.
-fn ingest_batch(rows: &[(&str, f32, f32, &[&str])]) -> Vec<u8> {
+/// An Arrow ingest batch of new items by `id`, whose rows may carry **several** access labels
+/// each, which is what lets one ingested item be visible to both principals and another to one of
+/// them.
+fn ingest_batch(rows: &[(u64, f32, f32, &[&str])]) -> Vec<u8> {
     let access = access_lists(&rows.iter().map(|(_, _, _, a)| *a).collect::<Vec<_>>());
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -43,8 +45,8 @@ fn ingest_batch(rows: &[(&str, f32, f32, &[&str])]) -> Vec<u8> {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values(
-                rows.iter().map(|(id, _, _, _)| id.as_bytes()),
+            Arc::new(UInt64Array::from_iter_values(
+                rows.iter().map(|(id, _, _, _)| *id),
             )),
             Arc::new(Float32Array::from_iter_values(
                 rows.iter().map(|(_, x, _, _)| *x),
@@ -74,7 +76,7 @@ async fn put(server: &TestServer, artifacts: serde_json::Value) -> serde_json::V
         .client
         .put(artifacts_url(server))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -90,7 +92,7 @@ async fn patch(server: &TestServer, artifacts: serde_json::Value) -> serde_json:
         .client
         .patch(artifacts_url(server))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -101,7 +103,7 @@ async fn patch(server: &TestServer, artifacts: serde_json::Value) -> serde_json:
 }
 
 /// Ingest one batch under a fresh batch id.
-async fn ingest(server: &TestServer, batch_id: &str, rows: &[(&str, f32, f32, &[&str])]) {
+async fn ingest(server: &TestServer, batch_id: &str, rows: &[(u64, f32, f32, &[&str])]) {
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
@@ -120,13 +122,13 @@ async fn ingest(server: &TestServer, batch_id: &str, rows: &[(&str, f32, f32, &[
     );
 }
 
-/// One entity's disposition.
-async fn change(server: &TestServer, external_id: &str, op: &str) {
+/// One item's disposition, the item named by its `id`.
+async fn change(server: &TestServer, id: u64, op: &str) {
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "external_id": external_id, "op": op }]))
+        .json(&json!([{ "field": "id", "value": member(id), "op": op }]))
         .send()
         .await
         .unwrap();
@@ -236,9 +238,9 @@ async fn build_matrix(server: &TestServer) {
         server,
         "generating-flushed",
         &[
-            ("flush-a", 11.0, 11.0, &["0", "1"]),
-            ("flush-b", 12.0, 12.0, &["0", "1"]),
-            ("flush-c", 13.0, 13.0, &["0"]),
+            (FLUSH_A, 11.0, 11.0, &["0", "1"]),
+            (FLUSH_B, 12.0, 12.0, &["0", "1"]),
+            (FLUSH_C, 13.0, 13.0, &["0"]),
         ],
     )
     .await;
@@ -253,7 +255,7 @@ async fn build_matrix(server: &TestServer) {
                 "members": (0..40).map(member).collect::<Vec<_>>(),
                 "content": [{
                     "values": ["from the ingest"],
-                    "generated_from": [ingested("flush-a"), ingested("flush-b"), ingested("flush-c")]
+                    "generated_from": [member(FLUSH_A), member(FLUSH_B), member(FLUSH_C)]
                 }]
             },
             {
@@ -261,7 +263,7 @@ async fn build_matrix(server: &TestServer) {
                 "members": (0..40).map(member).collect::<Vec<_>>(),
                 "content": [{
                     "values": ["from both"],
-                    "generated_from": shared.iter().cloned().chain([ingested("flush-c")]).collect::<Vec<_>>()
+                    "generated_from": shared.iter().cloned().chain([member(FLUSH_C)]).collect::<Vec<_>>()
                 }]
             },
             {
@@ -278,7 +280,7 @@ async fn build_matrix(server: &TestServer) {
     // **A growth by a member that already has a row.** The set gains it at this publication.
     patch(
         server,
-        json!([{ "key": GROWN, "rank": 0, "members": [ingested("flush-c")] }]),
+        json!([{ "key": GROWN, "rank": 0, "members": [member(FLUSH_C)] }]),
     )
     .await;
     tick(server).await;
@@ -289,8 +291,8 @@ async fn build_matrix(server: &TestServer) {
         server,
         "generating-buffered",
         &[
-            ("buffer-a", 21.0, 21.0, &["0", "1"]),
-            ("buffer-b", 22.0, 22.0, &["0"]),
+            (BUFFER_A, 21.0, 21.0, &["0", "1"]),
+            (BUFFER_B, 22.0, 22.0, &["0"]),
         ],
     )
     .await;
@@ -301,7 +303,7 @@ async fn build_matrix(server: &TestServer) {
             "members": (0..40).map(member).collect::<Vec<_>>(),
             "content": [{
                 "values": ["published with its members"],
-                "generated_from": [ingested("buffer-a"), ingested("buffer-b")]
+                "generated_from": [member(BUFFER_A), member(BUFFER_B)]
             }]
         }]),
     )
@@ -378,7 +380,7 @@ async fn a_suppressed_member_of_a_generating_set_withholds_the_content_from_ever
 
     // The mixed set's flushed member, which only the broad principal can see and which is the one
     // member that makes the narrow principal fail it.
-    change(&server, &ingested("flush-c"), "suppress").await;
+    change(&server, FLUSH_C, "suppress").await;
     let mut without_suppressed = all_keys();
     without_suppressed.retain(|key| key != MIXED && key != FLUSHED && key != GROWN);
     assert_eq!(
@@ -403,7 +405,7 @@ async fn a_suppressed_member_of_a_generating_set_withholds_the_content_from_ever
     assert_eq!(keys(&server, &["1"]).await, Vec::<String>::new());
 
     // An unsuppress restores the member, and the content is served again.
-    change(&server, &ingested("flush-c"), "unsuppress").await;
+    change(&server, FLUSH_C, "unsuppress").await;
     assert_matrix(&server, "after the unsuppress").await;
 }
 
@@ -429,7 +431,7 @@ async fn a_merge_leaves_every_answer_where_it_was() {
     assert_matrix(&server, "after the flush").await;
 
     // Flush further segments until a merge has published.
-    let mut filler = 0;
+    let mut filler: u64 = 0;
     wait_until(
         "a merge published",
         std::time::Duration::from_secs(120),
@@ -442,7 +444,7 @@ async fn a_merge_leaves_every_answer_where_it_was() {
             ingest(
                 &server,
                 &name,
-                &[(&name, 30.0 + filler as f32, 30.0, &["0", "1"])],
+                &[(20_000 + filler, 30.0 + filler as f32, 30.0, &["0", "1"])],
             )
             .await;
             tick(&server).await;

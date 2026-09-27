@@ -92,7 +92,7 @@ async fn put(
         .client
         .put(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -114,7 +114,7 @@ async fn patch(
         .client
         .patch(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -571,6 +571,12 @@ name             = "s0"
 extent           = { min = 0.0, max = 1000.0 }
 point_visibility = { default = "public" }
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[layer]]
 name = "clusters/built"
 title = "clusters"
@@ -665,6 +671,7 @@ fn build_with_labels(dir: &std::path::Path) {
     let parsed = tessera_build::config::Config::parse(&config, &Default::default())
         .expect("the declaration parses");
     let args = tessera_build::BuildArgs {
+        attribute_sources: tessera_build::config::AttributeSource::over(&points, &parsed.schema),
         layers: parsed.layers,
         layer_inputs: parsed.layer_sources,
         schema: parsed.schema,

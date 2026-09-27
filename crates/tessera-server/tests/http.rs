@@ -875,12 +875,11 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     // `/control/changes` suppress: the case this test exists for. The entire control plane is off
     // the viewer/session gate; a deny op must reach the WAL regardless.
     const SUPPRESS_SOURCE_ID: u64 = 3;
-    let external_id = member(SUPPRESS_SOURCE_ID);
     let suppress_resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .json(&serde_json::json!([{ "field": "id", "value": member(SUPPRESS_SOURCE_ID), "op": "suppress" }]))
         .send()
         .await
         .unwrap();

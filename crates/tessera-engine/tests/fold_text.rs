@@ -129,7 +129,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -141,7 +141,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("a bundle with an indexed text column builds");
 }

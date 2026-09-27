@@ -7,7 +7,9 @@
 //!
 //! The fixture declares three unique columns at the build: `doi`, a keyword with no other home
 //! than the record blob, so `eq` and `in` are the only filters it takes; `gid`, an indexed `u64`
-//! whose values pass 2^53; and `serial`, a rendered `i64` holding negative values.
+//! whose values pass 2^53; and `serial`, a rendered `i64` holding negative values. Beside them it
+//! declares `id`, the points file's `entity_id`, which no row here changes, so a test can find
+//! the item the build made of each source row.
 
 mod common;
 
@@ -147,6 +149,7 @@ fn fixture_of(unique: bool, views: &[&str]) -> Fixture {
     let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the fixture schema parses")
         .schema;
+    let schema = with_id(schema);
     tessera_build::build(&tessera_build::BuildArgs {
         views: views
             .iter()
@@ -270,10 +273,9 @@ fn naming_built(engine: &Engine, mut r: UnallocatedRow, source: u64) -> Unalloca
     r
 }
 
-/// The item the build made of `source`, found by the `gid` it was built with.
+/// The item the build made of `source`, found by the `id` no row here changes.
 fn built(engine: &Engine, source: u64) -> EntityId {
-    engine.resolve_unique_values("gid", &[gid_of(source).to_string()]).unwrap()[0]
-        .expect("the built item holds its gid")
+    item_of_id(engine, source).unwrap().expect("the built item holds its id")
 }
 
 fn full(engine: &Engine) -> Session {
@@ -888,7 +890,7 @@ fn a_runtime_declaration_over_duplicates_is_refused() {
         ),
         "a column holding values twice is refused"
     );
-    assert!(!engine.meta().declared_scalars.iter().any(|d| d.unique));
+    assert!(!engine.meta().declared_scalars.iter().any(|d| d.unique && d.name != "id"));
 
     // A duplicate held only by a buffered row.
     let twin = ingest(
@@ -1353,7 +1355,8 @@ fn a_new_unique_column_declared_at_runtime_is_enforced_and_indexed() {
         .expect("a new unique column is declared"));
     let with_isbn = |engine: &Engine, id: &str, doi: &str, gid: u64, isbn: &str| {
         let mut r = row(engine, id, b"0", doi, gid, gid as i64 % 1_000_000 + 50_000);
-        r.scalars.push(WalScalar::Utf8(isbn.to_string()));
+        // `id`, which no row here holds, then the new column.
+        r.scalars.extend([WalScalar::Null, WalScalar::Utf8(isbn.to_string())]);
         r
     };
     let first = ingest(&engine, "isbn-1", vec![with_isbn(&engine, "i1", "10.i/1", BIG * 15, "978-1")]);

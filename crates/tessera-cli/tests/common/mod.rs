@@ -52,8 +52,8 @@ impl Ports {
     }
 }
 
-/// A generated corpus of 2,000 items built into a bundle in `dir`, with external ids and the viewer
-/// on `0.0.0.0`, so that a health check has to reach it on loopback.
+/// A generated corpus of 2,000 items built into a bundle in `dir`, with the viewer on `0.0.0.0`, so
+/// that a health check has to reach it on loopback.
 pub fn deployment(dir: &Path, ports: &Ports) {
     let materialised = tessera()
         .args(["corpus", "materialise", "--seed", "1", "--n", "2000", "--out"])

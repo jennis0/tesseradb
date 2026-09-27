@@ -203,7 +203,7 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: bundle.clone(),
         limit: None,
         identity_key: test_key(),
@@ -215,7 +215,7 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("the fixture builds");
     let engine = open_engine_publishing(

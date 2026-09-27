@@ -144,14 +144,17 @@ fn build_projected(out: &Path, tmp: &Path) -> Config {
     build(&BuildArgs {
         layers: config.layers.clone(),
         layer_inputs: config.layer_sources.clone(),
-        ..build_args(
-            out,
-            vec![tessera_build::ViewArgs {
-                projection: Projection::WebMercator,
-                extent: world_frame(),
-                point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
-                ..view_args("s0", &points_path, AccessInput::relation(pairs_path))
-            }],
+        ..with_id(
+            build_args(
+                out,
+                vec![tessera_build::ViewArgs {
+                    projection: Projection::WebMercator,
+                    extent: world_frame(),
+                    point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
+                    ..view_args("s0", &points_path, AccessInput::relation(&pairs_path))
+                }],
+            ),
+            &points_path,
         )
     })
     .expect("the projected fixture builds");
@@ -255,7 +258,7 @@ async fn an_authored_wgs84_shape_lands_where_a_membership_one_does_through_eithe
         &server,
         "regions/batch",
         json!({
-            "addressing": "external",
+            "field": "id",
             "default_space": "wgs84",
             "artifacts": [{ "key": "uk", "members": members, "content": [{ "values": [UK] }] }]
         }),
@@ -266,7 +269,7 @@ async fn an_authored_wgs84_shape_lands_where_a_membership_one_does_through_eithe
         &server,
         "regions/row",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{
                 "key": "uk", "members": members, "space": "wgs84",
                 "content": [{ "values": [UK] }]
@@ -311,7 +314,7 @@ async fn an_authored_shape_report_carries_the_decomposition() {
         &server,
         "regions/report",
         json!({
-            "addressing": "external",
+            "field": "id",
             "default_space": "wgs84",
             "artifacts": [{ "key": "uk", "members": members, "content": [{ "values": [UK] }] }]
         }),
@@ -348,7 +351,6 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
         &server,
         "regions/flat",
         json!({
-            "addressing": "external",
             "default_space": "wgs84",
             "artifacts": [{ "key": "uk", "members": [], "content": [{ "values": [UK] }] }]
         }),
@@ -363,7 +365,6 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
         &server,
         "regions/flat",
         json!({
-            "addressing": "external",
             "artifacts": [{ "key": "uk", "members": [], "content": [{ "values": [UK] }] }]
         }),
     )
@@ -381,7 +382,6 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
         &server,
         "regions/batch",
         json!({
-            "addressing": "external",
             "default_space": "wgs84",
             "artifacts": [{
                 "key": "uk", "members": [],

@@ -1158,7 +1158,7 @@ fn built_fixture() -> Fixture {
             view_id: "s0".to_string(),
             projection: tessera_spatial::Projection::None,
             extent: extent(),
-            points,
+            points: points.clone(),
             point_fields: Default::default(),
             select: None,
             access: tessera_build::config::AccessInput::relation(pairs),
@@ -1166,7 +1166,7 @@ fn built_fixture() -> Fixture {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points, &id_schema()),
         out: root.clone(),
         limit: None,
         identity_key: test_key(),
@@ -1178,7 +1178,7 @@ fn built_fixture() -> Fixture {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: id_schema(),
     })
     .expect("a build carrying its layer");
 

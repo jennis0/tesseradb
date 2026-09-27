@@ -1,6 +1,6 @@
-//! **Ingest rows without coordinates**: rows naming items that exist, by `external_id` or
-//! `tessera_id`, carrying only the values they change, in JSON by default and Arrow by content
-//! type. Such a row edits the item it names and places it nowhere new; one naming no item creates
+//! **Ingest rows without coordinates**: rows naming items that exist, by `tessera_id` or by the
+//! value of the unique `id`, carrying only the values they change, in JSON by default and Arrow by
+//! content type. Such a row edits the item it names and places it nowhere new; one naming no item creates
 //! nothing and is refused. What this file pins is the wire: the counts each answer carries, the two
 //! encodings landing identical values, and the rows the route refuses.
 
@@ -16,8 +16,12 @@ use serde_json::{json, Value};
 
 const N: u64 = 40;
 
+/// The `id` of the item most tests ingest and then edit; the build's items hold `0..N`.
+const SUBJECT: u64 = 1_000;
+
 /// One rendered, indexed `f32` at the build, and two `public` vocabularies no build column names,
 /// one closed and one open, so a runtime category over either fixes the width at the declaration.
+/// The fixture adds the unique `id` ([`ID_ATTRIBUTE`]).
 const SCHEMA_TOML: &str = r#"
 [[vocabulary]]
 name       = "dept"
@@ -44,7 +48,8 @@ index  = true
 /// A served fixture with two runtime columns declared: an indexed keyword and an indexed
 /// category, each of which a row without coordinates can set.
 async fn serve() -> Served {
-    let served = Served::build(|dir| build_scored(dir, N, SCHEMA_TOML)).await;
+    let served =
+        Served::build(|dir| build_scored(dir, N, &format!("{SCHEMA_TOML}{ID_ATTRIBUTE}"))).await;
     declare(
         &served,
         json!({"name": "tag", "type": "keyword", "index": true}),
@@ -76,21 +81,15 @@ async fn declare(served: &Served, body: Value) {
     );
 }
 
-/// Ingest one point and answer its `tessera_id`. The runtime columns [`serve`] declares are
-/// null, since a later row sets them.
-async fn ingest_point(served: &Served, batch_id: &str, external_id: &str) -> u64 {
-    ingest_point_with(served, batch_id, external_id, json!({})).await
+/// Ingest one point holding `id` and answer its `tessera_id`. The runtime columns [`serve`]
+/// declares are null, since a later row sets them.
+async fn ingest_point(served: &Served, batch_id: &str, id: u64) -> u64 {
+    ingest_point_with(served, batch_id, json!({"id": id})).await
 }
 
-/// [`ingest_point`], with `columns` added to the row.
-async fn ingest_point_with(
-    served: &Served,
-    batch_id: &str,
-    external_id: &str,
-    columns: Value,
-) -> u64 {
+/// Ingest one point with `columns` added to the row, and answer its `tessera_id`.
+async fn ingest_point_with(served: &Served, batch_id: &str, columns: Value) -> u64 {
     let mut row = json!({
-        "external_id": base64_of(external_id),
         "x": 500.0,
         "y": 500.0,
         "access": ["0"],
@@ -119,11 +118,6 @@ async fn ingest_point_with(
     ingested_ids(&answer)[0]
 }
 
-fn base64_of(text: &str) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
-}
-
 /// One `POST /control/ingest` request of rows without coordinates, with the view header where
 /// `view` says so.
 async fn values(served: &Served, batch_id: &str, view: Option<&str>, body: Value) -> (u16, Value) {
@@ -141,18 +135,16 @@ async fn values(served: &Served, batch_id: &str, view: Option<&str>, body: Value
     (status, resp.json().await.unwrap_or(Value::Null))
 }
 
-/// The same batch as an Arrow IPC stream over the same two columns.
-fn arrow_values(external_id: &str, tag: &str) -> Vec<u8> {
+/// One Arrow batch of one row naming its item by `id`.
+fn arrow_values(id: u64, tag: &str) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("id", DataType::UInt64, true),
         Field::new("tag", DataType::Utf8, true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(arrow::array::BinaryArray::from_iter(
-                [Some(external_id.as_bytes())].into_iter(),
-            )),
+            Arc::new(arrow::array::UInt64Array::from_iter([Some(id)])),
             Arc::new(StringArray::from_iter([Some(tag)])),
         ],
     )
@@ -188,14 +180,14 @@ async fn item_fields(served: &Served, id: u64) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rows_without_coordinates_edit_restate_and_create_nothing() {
     let served = serve().await;
-    let id = ingest_point(&served, "points-1", "subject").await;
+    let id = ingest_point(&served, "points-1", SUBJECT).await;
     tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
         "values-1",
         Some("s0"),
-        json!([{"external_id": base64_of("subject"), "tag": "alpha", "dept": "ops"}]),
+        json!([{"id": SUBJECT, "tag": "alpha", "dept": "ops"}]),
     )
     .await;
     assert_eq!(status, 200, "the row is accepted: {answer}");
@@ -222,7 +214,7 @@ async fn rows_without_coordinates_edit_restate_and_create_nothing() {
         &served,
         "values-2",
         Some("s0"),
-        json!([{"external_id": base64_of("subject"), "tag": "alpha"}]),
+        json!([{"id": SUBJECT, "tag": "alpha"}]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");
@@ -233,7 +225,7 @@ async fn rows_without_coordinates_edit_restate_and_create_nothing() {
         &served,
         "values-3",
         None,
-        json!([{"external_id": base64_of("subject"), "tag": "beta"}]),
+        json!([{"id": SUBJECT, "tag": "beta"}]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");
@@ -246,7 +238,7 @@ async fn rows_without_coordinates_edit_restate_and_create_nothing() {
         &served,
         "values-4",
         Some("s0"),
-        json!([{"external_id": base64_of("nobody"), "tag": "gamma"}]),
+        json!([{"id": SUBJECT + 1, "tag": "gamma"}]),
     )
     .await;
     assert_eq!(status, 422, "{answer}");
@@ -300,14 +292,14 @@ async fn a_row_without_coordinates_mints_a_new_key_of_an_open_vocabulary() {
         json!({"name": "grade", "type": "category", "vocabulary": "grade", "index": true}),
     )
     .await;
-    let id = ingest_point_with(&served, "points-1", "subject", json!({"grade": null})).await;
+    let id = ingest_point_with(&served, "points-1", json!({"id": SUBJECT, "grade": null})).await;
     tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
         "values-1",
         Some("s0"),
-        json!([{"external_id": base64_of("subject"), "grade": "g0"}]),
+        json!([{"id": SUBJECT, "grade": "g0"}]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");
@@ -317,7 +309,7 @@ async fn a_row_without_coordinates_mints_a_new_key_of_an_open_vocabulary() {
         &served,
         "values-2",
         Some("s0"),
-        json!([{"external_id": base64_of("subject"), "dept": "legal"}]),
+        json!([{"id": SUBJECT, "dept": "legal"}]),
     )
     .await;
     assert_eq!(
@@ -337,7 +329,7 @@ async fn a_row_without_coordinates_mints_a_new_key_of_an_open_vocabulary() {
     let served = served.restart().await;
     assert_eq!(item_fields(&served, id).await["grade"], json!("g0"));
     assert_minted_key_is_listed(&served, "g0").await;
-    let second = ingest_point_with(&served, "points-2", "second", json!({"grade": null})).await;
+    let second = ingest_point_with(&served, "points-2", json!({"grade": null})).await;
     tick(&served.server).await;
     assert!(
         item_fields(&served, second).await["grade"].is_null(),
@@ -397,14 +389,14 @@ async fn a_value_an_edit_gives_derives_its_artifact_as_a_create_does() {
     });
     register(&served.server, grades).await;
 
-    ingest_point_with(&served, "points-1", "by-ingest", json!({"grade": "g1"})).await;
-    ingest_point_with(&served, "points-2", "by-values", json!({"grade": null})).await;
+    ingest_point_with(&served, "points-1", json!({"grade": "g1"})).await;
+    ingest_point_with(&served, "points-2", json!({"id": SUBJECT, "grade": null})).await;
     tick(&served.server).await;
     let (status, answer) = values(
         &served,
         "values-1",
         Some("s0"),
-        json!([{"external_id": base64_of("by-values"), "grade": "g2"}]),
+        json!([{"id": SUBJECT, "grade": "g2"}]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");
@@ -421,7 +413,7 @@ async fn a_value_an_edit_gives_derives_its_artifact_as_a_create_does() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_two_encodings_land_identical_values() {
     let served = serve().await;
-    let id = ingest_point(&served, "points-1", "subject").await;
+    let id = ingest_point(&served, "points-1", SUBJECT).await;
     tick(&served.server).await;
 
     let resp = served
@@ -432,7 +424,7 @@ async fn the_two_encodings_land_identical_values() {
         .header("x-tessera-batch-id", "values-arrow")
         .header("x-tessera-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(arrow_values("subject", "alpha"))
+        .body(arrow_values(SUBJECT, "alpha"))
         .send()
         .await
         .unwrap();
@@ -448,7 +440,7 @@ async fn the_two_encodings_land_identical_values() {
         &served,
         "values-json",
         Some("s0"),
-        json!([{"external_id": base64_of("subject"), "tag": "alpha"}]),
+        json!([{"id": SUBJECT, "tag": "alpha"}]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");
@@ -459,7 +451,7 @@ async fn the_two_encodings_land_identical_values() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_row_may_name_its_entity_by_tessera_id() {
     let served = serve().await;
-    let id = ingest_point(&served, "points-1", "subject").await;
+    let id = ingest_point(&served, "points-1", SUBJECT).await;
     tick(&served.server).await;
 
     let (status, answer) = values(
@@ -496,7 +488,7 @@ fn arrow_values_by_tessera_id(id: u64, tag: &str) -> Vec<u8> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
     let served = serve().await;
-    let id = ingest_point(&served, "points-1", "subject").await;
+    let id = ingest_point(&served, "points-1", SUBJECT).await;
     tick(&served.server).await;
 
     let resp = served
@@ -524,14 +516,14 @@ async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_row_naming_its_item_by_both_forms_or_neither() {
     let served = serve().await;
-    let id = ingest_point(&served, "points-1", "subject").await;
+    let id = ingest_point(&served, "points-1", SUBJECT).await;
     tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
         "values-both",
         Some("s0"),
-        json!([{"external_id": base64_of("subject"), "tessera_id": id.to_string(),
+        json!([{"id": SUBJECT, "tessera_id": id.to_string(),
                 "tag": "alpha"}]),
     )
     .await;
@@ -558,14 +550,14 @@ async fn a_row_naming_its_item_by_both_forms_or_neither() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_undeclared_column_is_refused_naming_the_column() {
     let served = serve().await;
-    ingest_point(&served, "points-1", "subject").await;
+    ingest_point(&served, "points-1", SUBJECT).await;
     tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
         "values-1",
         Some("s0"),
-        json!([{"external_id": base64_of("subject"), "sentiment": 0.5}]),
+        json!([{"id": SUBJECT, "sentiment": 0.5}]),
     )
     .await;
     assert_eq!(status, 422, "{answer}");
@@ -581,7 +573,7 @@ async fn an_undeclared_column_is_refused_naming_the_column() {
         &served,
         "values-2",
         None,
-        json!([{"external_id": base64_of("subject"), "sentiment": 0.5}]),
+        json!([{"id": SUBJECT, "sentiment": 0.5}]),
     )
     .await;
     assert_eq!(status, 422, "{answer}");

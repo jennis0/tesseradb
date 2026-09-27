@@ -182,7 +182,7 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -194,7 +194,7 @@ fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build with a declared schema should succeed");
 }
@@ -290,7 +290,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     let declared = &bundle.manifest.declared_scalars;
     assert_eq!(
         declared.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
-        vec!["band", "ingested_at", "score"],
+        vec!["band", "ingested_at", "score", "id"],
         "declaration order is the column order and must survive compilation verbatim"
     );
     assert_eq!(
@@ -298,7 +298,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
             .iter()
             .map(|d| d.arrow_type.arrow_type_name())
             .collect::<Vec<_>>(),
-        vec!["u8", "i64", "f32"]
+        vec!["u8", "i64", "f32", "u64"]
     );
     // The category names its vocabulary; the two plain scalars name none.
     assert_eq!(declared[0].vocabulary.as_deref(), Some("band"));
@@ -376,7 +376,7 @@ fn both_build_implementations_write_the_same_tail() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -388,7 +388,7 @@ fn both_build_implementations_write_the_same_tail() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: schema.clone(),
+        schema: with_id(schema.clone()),
     };
 
     let streamed = tmp.path().join("streamed");
@@ -640,7 +640,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["band", "ingested_at", "score"],
+        vec!["band", "ingested_at", "score", "id"],
         "the tail's declared order survives the fold — it is what every reader reads by position"
     );
 }
@@ -1091,7 +1091,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -1103,7 +1103,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build whose render set is not a declaration prefix succeeds");
 }
@@ -1295,7 +1295,13 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
             .item(&session, id)
             .expect("drill-down succeeds")
             .unwrap_or_else(|| panic!("{label} is visible to full coverage"));
-        let names: Vec<&str> = served.fields.iter().map(|f| f.name.as_str()).collect();
+        // `id` only finds the built items; the columns under test are the others.
+        let names: Vec<&str> = served
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|name| *name != "id")
+            .collect();
         assert_eq!(
             names,
             ["audit", "band", "score"],
@@ -1426,6 +1432,10 @@ fn record_fields_of(source: u64) -> Vec<tessera_filter::RecordField> {
             tag: 3,
             value: tessera_filter::RecordValue::U8(tier_code_of(source)),
         },
+        tessera_filter::RecordField {
+            tag: 4,
+            value: tessera_filter::RecordValue::U64(source),
+        },
     ]
 }
 
@@ -1498,7 +1508,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -1510,7 +1520,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build with blob-resident columns succeeds");
 }

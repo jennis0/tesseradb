@@ -909,7 +909,9 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
                     descriptors: vec![b"0".to_vec()],
                     x: 5.0 + i as f64,
                     y: 5.0,
+                    // The fixture's `id` first, which these items do not hold.
                     scalars: vec![
+                        WalScalar::Null,
                         WalScalar::Utf8(format!("note-{i}")),
                         WalScalar::Utf8(format!("tag-{}", i % 3)),
                         WalScalar::Utf8(format!("word{i} shared")),

@@ -404,12 +404,7 @@ async fn a_key_addresses_its_view_on_both_planes() {
         .header("x-tessera-batch-id", "key-address")
         .header("x-tessera-view", "quarter:2026-Q2")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&external_id_of(9_001)),
-            42.0,
-            42.0,
-            "0",
-        )]))
+        .body(build_ingest_batch_optional(&[(None, 42.0, 42.0, "0")]))
         .send()
         .await
         .unwrap();

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BinaryArray, Float64Array, StringArray, UInt64Array};
+use arrow::array::{ArrayRef, Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -105,6 +105,14 @@ yearly   = "yearly.parquet"
 
 [defaults]
 allocation_view = "papers"
+join_field      = "id"
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+source = "papers"
 
 [[view]]
 name             = "papers"
@@ -235,14 +243,15 @@ fn build_side(layers: &str, keyed: &dyn Fn(u64) -> bool) -> Built {
         layer_inputs: config.layer_sources,
         scoped_layers,
         schema: config.schema,
+        attribute_sources: config.attribute_sources,
         ..build_args(&dir.join("bundle"), views)
     })
     .expect("the fixture builds");
     Built { _tmp: tmp, dir }
 }
 
-/// `POST /control/ingest` in Arrow, rows without coordinates: an id column and a column named for
-/// the layer, under the view header where `view` is given.
+/// `POST /control/ingest` in Arrow, rows without coordinates: the `id` naming each item and a
+/// column named for the layer, under the view header where `view` is given.
 async fn post_keys(
     server: &TestServer,
     batch_id: &str,
@@ -252,14 +261,13 @@ async fn post_keys(
     key_of: &dyn Fn(u64) -> String,
 ) -> (u16, Value) {
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new(layer, DataType::Utf8, true),
     ]));
-    let ext: Vec<Vec<u8>> = rows.iter().map(|e| external_id_of(*e)).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values(ext.iter().map(Vec::as_slice))) as ArrayRef,
+            Arc::new(UInt64Array::from(rows.to_vec())) as ArrayRef,
             text(rows.iter().map(|e| key_of(*e))),
         ],
     )

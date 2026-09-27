@@ -51,7 +51,7 @@ async fn publish(server: &TestServer, layer: &str, artifacts: serde_json::Value)
         .client
         .put(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -66,7 +66,7 @@ async fn patch(server: &TestServer, layer: &str, artifacts: serde_json::Value) -
         .client
         .patch(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .json(&json!({ "field": "id", "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -458,7 +458,7 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
         .client
         .put(artifacts_url(server, NAMES))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": [
+        .json(&json!({ "field": "id", "artifacts": [
             { "key": "n-x", "attached_to": { "layer": LAYER, "key": "p-open" },
               "content": [{ "values": ["X"] }], "access": ["red"] }
         ] }))
@@ -514,7 +514,7 @@ fn arrow_growth(key: &str, labels: Option<&[&str]>) -> Vec<u8> {
             Field::new("members", members.data_type().clone(), false),
             Field::new("access", access.data_type().clone(), true),
         ],
-        [("addressing".to_string(), "external".to_string())].into(),
+        [("field".to_string(), "id".to_string())].into(),
     ));
     let batch = arrow::record_batch::RecordBatch::try_new(
         Arc::clone(&schema),
@@ -594,7 +594,7 @@ async fn a_record_without_access_on_a_layer_reading_labels_is_refused() {
             .client
             .put(artifacts_url(&server, LAYER))
             .bearer_auth(OPERATOR_CREDENTIAL)
-            .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+            .json(&json!({ "field": "id", "artifacts": artifacts }))
             .send()
     };
     for refused in [
@@ -1247,7 +1247,7 @@ async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_non
         .client
         .put(artifacts_url(&server, LAYER))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": [
+        .json(&json!({ "field": "id", "artifacts": [
             { "key": "hidden", "members": members(0..40), "access": ["nothing"] }
         ] }))
         .send()

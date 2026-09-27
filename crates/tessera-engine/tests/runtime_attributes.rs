@@ -300,11 +300,6 @@ fn declared_names(engine: &Engine) -> Vec<String> {
         .collect()
 }
 
-/// The entity id the build gave source row 0, through the external-id map the sidecar holds.
-fn built_entity(root: &Path, source: u64) -> EntityId {
-    EntityId::new(source_to_new_map(root, "v00000")[&source])
-}
-
 /// How many of the prefix's partitions hold an entity-space base value file for `column`, over the
 /// number of partitions. A column declared at a running service has no base until a fold writes one
 /// (`ingest.md` §6.3), so this is 0 before the fold and every partition after it.
@@ -416,7 +411,8 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
         ["band", "score"],
         "the render tail is the build's alone: this route does not accept `render`"
     );
-    let old = built_entity(&fx.root, 0);
+    // A built item: a build issues entity ids from 0.
+    let old = EntityId::new(0);
 
     // The drill-down: absent for the older entity, from the schema, with no blob read.
     let reads_before = engine.generation().filter_columns.record_reads();

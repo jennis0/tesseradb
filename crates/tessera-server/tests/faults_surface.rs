@@ -81,8 +81,7 @@ async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
     assert_eq!(resp.status(), 200);
 
     // Ingest still acks: the seam sits at publication, not on the WAL path a 200 depends on.
-    let ext = external_id_of(N_ITEMS + 1);
-    let body = build_ingest_batch_optional(&[(Some(&ext[..]), 10.0, 10.0, "0")]);
+    let body = build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]);
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
@@ -201,8 +200,7 @@ async fn an_executor_panic_fails_readiness_and_reports_dead() {
         tessera_lifecycle::faults::PauseSite::BeforeManifestPublish,
         tessera_lifecycle::faults::PauseAction::Panic,
     );
-    let ext = external_id_of(N_ITEMS + 1);
-    let body = build_ingest_batch_optional(&[(Some(&ext[..]), 10.0, 10.0, "0")]);
+    let body = build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]);
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))

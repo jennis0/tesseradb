@@ -96,11 +96,11 @@ async fn filtered(served: &Served, filters: Value) -> (u16, BTreeSet<u64>) {
     (status, points.into_iter().map(|(id, _)| id).collect())
 }
 
-fn batch(rows: &[(&str, u64, &str)]) -> Vec<u8> {
+/// Rows of `(gid, code)` at one position.
+fn batch(rows: &[(u64, &str)]) -> Vec<u8> {
     let labels: Vec<&[&str]> = rows.iter().map(|_| &["0"][..]).collect();
     let access = access_lists(&labels);
     let fields = vec![
-        Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -108,14 +108,11 @@ fn batch(rows: &[(&str, u64, &str)]) -> Vec<u8> {
         Field::new("code", DataType::Utf8, true),
     ];
     let columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(arrow::array::BinaryArray::from_iter(
-            rows.iter().map(|r| Some(r.0.as_bytes())),
-        )),
         Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 500.0))),
         Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 500.0))),
         Arc::new(access),
-        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.1))),
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.2))),
+        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.0))),
+        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.1))),
     ];
     let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
@@ -206,15 +203,14 @@ async fn a_decimal_string_finds_an_integer_past_two_to_the_fifty_three() {
     assert_eq!(status, 422);
 }
 
-/// **A row carrying a held value names its holder**: with an external id the holder does not
-/// carry, it edits the holder, which keeps its `tessera_id`; a batch setting one new value in two
-/// rows is `409`.
+/// **A row carrying a held value names its holder**: it edits the holder, which keeps its
+/// `tessera_id`; a batch setting one new value in two rows is `409`.
 #[tokio::test]
 async fn a_row_carrying_a_held_value_names_the_holder() {
     let served = Served::build(fixture).await;
     let (_, holder) = filtered(&served, json!({ "gid": { "eq": gid_of(3).to_string() } })).await;
     let holder = *holder.iter().next().unwrap();
-    let (status, body) = ingest(&served, "held", batch(&[("x1", gid_of(3), "fresh")])).await;
+    let (status, body) = ingest(&served, "held", batch(&[(gid_of(3), "fresh")])).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["edited"], 1, "{body}");
     assert_eq!(body["tessera_ids"][0], holder.to_string(), "{body}");
@@ -222,12 +218,12 @@ async fn a_row_carrying_a_held_value_names_the_holder() {
     let (status, body) = ingest(
         &served,
         "twice",
-        batch(&[("x2", 7, "a"), ("x3", 7, "b")]),
+        batch(&[(7, "a"), (7, "b")]),
     )
     .await;
     assert_eq!(status, 409, "one value in two rows: {body}");
 
-    let (status, body) = ingest(&served, "free", batch(&[("x4", 7, "a")])).await;
+    let (status, body) = ingest(&served, "free", batch(&[(7, "a")])).await;
     assert_eq!(status, 200, "{body}");
 }
 
@@ -247,7 +243,7 @@ async fn unique_is_declared_and_removed_on_a_column_that_exists() {
 
     let (status, body) = declare(&served, json!({ "name": "gid", "type": "u64", "unique": false })).await;
     assert_eq!(status, 200, "{body}");
-    let (status, body) = ingest(&served, "same", batch(&[("y1", gid_of(3), "z")])).await;
+    let (status, body) = ingest(&served, "same", batch(&[(gid_of(3), "z")])).await;
     assert_eq!(status, 200, "no longer unique, so the value names no item: {body}");
     assert_eq!(body["created"], 1, "{body}");
     let (status, body) = declare(&served, json!({ "name": "gid", "type": "u64", "unique": true })).await;

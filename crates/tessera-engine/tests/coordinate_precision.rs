@@ -123,7 +123,7 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points_path.to_path_buf(), &id_schema()),
         out: out.to_path_buf(),
         limit: None,
         identity_key: test_key(),
@@ -135,7 +135,7 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: id_schema(),
     })
     .expect("the deep-frame fixture builds");
 }

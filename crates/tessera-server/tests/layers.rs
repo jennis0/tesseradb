@@ -215,7 +215,7 @@ async fn layer_versions(server: &TestServer) -> Vec<(String, u64)> {
 async fn register_grown(server: &TestServer, name: &str) {
     register(server, declaration(name, None)).await;
     let artifacts = json!({
-        "addressing": "external",
+        "field": "id",
         "artifacts": [{ "key": "c0", "members": [member(0), member(1), member(2)] }]
     });
     assert_eq!(publish(server, name, artifacts).await.0, 201);
@@ -225,7 +225,7 @@ async fn register_grown(server: &TestServer, name: &str) {
         .patch(server.control_url(&route))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": [member(3), member(4)] }]
         }))
         .send()
@@ -377,7 +377,7 @@ async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() 
         &server,
         "clusters/a",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [
                 { "key": "c0", "members": [member(0), member(1), member(2)] },
                 { "key": "c1", "members": [member(3), member(4)] },
@@ -424,7 +424,7 @@ async fn an_unresolvable_member_refuses_the_whole_batch() {
         &server,
         "clusters/a",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [
                 { "key": "c0", "members": [member(0)] },
                 { "key": "c1", "members": [member(1), nonexistent] },
@@ -463,7 +463,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422() {
         &server,
         "regions/uk",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": [member(0)] }]
         }),
     )
@@ -476,7 +476,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422() {
         &server,
         "clusters/never",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": [member(0)] }]
         }),
     )
@@ -524,7 +524,7 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
         &server,
         "clusters/a",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
@@ -572,7 +572,7 @@ async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
         &server,
         "clusters/a",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": [member(0), member(1)] }]
         }),
     )
@@ -607,7 +607,7 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
         &server,
         "clusters/a",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [
                 { "key": "c0", "members": [member(0), member(3)] },
                 { "key": "c1", "members": [member(6), member(9)] },
@@ -657,7 +657,7 @@ async fn the_artifacts_frame_serves_a_level_in_key_order() {
         let (status, body) = publish(
             &server,
             "clusters/a",
-            json!({ "addressing": "external", "artifacts": artifacts }),
+            json!({ "field": "id", "artifacts": artifacts }),
         )
         .await;
         assert_eq!(status, 201, "{body}");
@@ -711,7 +711,7 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
         &server,
         "clusters/a",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
@@ -770,7 +770,7 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
         &server,
         "clusters/a",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
@@ -847,7 +847,7 @@ async fn plant_three_levels(server: &TestServer) {
             "admin/boundaries",
             json!({
                 "level": level,
-                "addressing": "external",
+                "field": "id",
                 "artifacts": [{ "key": key, "members": members }]
             }),
         )
@@ -976,7 +976,7 @@ async fn one_cluster(server: &TestServer) {
         server,
         "clusters/a",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
@@ -1223,7 +1223,7 @@ async fn the_shape_columns_trail_and_are_absent_when_no_served_layer_declares_on
         &server,
         "clusters/hulled",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": [member(0), member(3), member(6)] }]
         }),
     )
@@ -1288,7 +1288,7 @@ async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_princi
     let (status, body) = publish(
         &server,
         "boundaries/b",
-        json!({ "addressing": "external", "artifacts": [{ "key": "sw", "members": [], "wkt": SQUARE }] }),
+        json!({ "artifacts": [{ "key": "sw", "members": [], "wkt": SQUARE }] }),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -1358,7 +1358,7 @@ async fn a_shape_published_into_a_warm_level_is_served() {
     let (status, body) = publish(
         &server,
         "boundaries/b",
-        json!({ "addressing": "external", "artifacts": [{ "key": "sw", "members": [], "wkt": SQUARE }] }),
+        json!({ "artifacts": [{ "key": "sw", "members": [], "wkt": SQUARE }] }),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -1371,7 +1371,7 @@ async fn a_shape_published_into_a_warm_level_is_served() {
     let (status, body) = publish(
         &server,
         "boundaries/b",
-        json!({ "addressing": "external", "artifacts": [{ "key": "ne", "members": [], "wkt": NE_SQUARE }] }),
+        json!({ "artifacts": [{ "key": "ne", "members": [], "wkt": NE_SQUARE }] }),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -1455,7 +1455,7 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
         &server,
         "clusters/drawn",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": members, "content": [{ "values": ["a name", "not a polygon"] }] }]
         }),
     )
@@ -1467,7 +1467,7 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
         &server,
         "clusters/drawn",
         json!({
-            "addressing": "external",
+            "field": "id",
             "artifacts": [{ "key": "c0", "members": members, "content": [{ "values": ["a name", SQUARE] }] }]
         }),
     )

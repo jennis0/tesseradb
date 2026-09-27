@@ -278,7 +278,7 @@ async fn the_page_schema_is_the_named_fields_then_the_system_fields() {
         &json!({
             "view": "s0",
             "fields": ["note", "archive", "year", "score"],
-            "system_fields": ["labels", "position", "external_id"],
+            "system_fields": ["labels", "position"],
             "filters": { "archive": { "in": ["astro"] } },
             "keep_unmatched": true,
             "page_rows": 400,
@@ -303,7 +303,6 @@ async fn the_page_schema_is_the_named_fields_then_the_system_fields() {
             "tessera:labels",
             "tessera:x",
             "tessera:y",
-            "tessera:external_id",
             "tessera:matched",
         ]
     );
@@ -334,7 +333,7 @@ async fn a_read_that_finds_no_row_carries_one_typed_page_of_no_rows() {
     let mut body = json!({
         "view": "s0",
         "fields": ["note", "archive", "year", "score"],
-        "system_fields": ["labels", "position", "external_id"],
+        "system_fields": ["labels", "position"],
         "page_rows": 10,
         "pages": 1,
     });
@@ -453,7 +452,7 @@ async fn zstd_pages_decode_to_the_uncompressed_pages() {
     let token = token_for(&f.server, &["0"]).await;
     let body = json!({
         "view": "s0", "fields": ["note", "archive", "score", "year"],
-        "system_fields": ["position", "external_id", "labels"],
+        "system_fields": ["position", "labels"],
         "order": "stored", "page_rows": 500,
     });
     let plain = read_all(&f.server, &token, &body).await;

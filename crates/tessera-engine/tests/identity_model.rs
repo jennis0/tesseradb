@@ -183,6 +183,17 @@ fn built_gid(source: u64) -> u64 {
     1_000 + source
 }
 
+/// The entity the build gave each source row, found by the `gid` it was built with: read before
+/// any row changes one.
+fn built_entities(engine: &Engine) -> BTreeMap<u64, u64> {
+    let gids: Vec<String> = (0..BUILT).map(|s| built_gid(s).to_string()).collect();
+    let found = engine.resolve_unique_values("gid", &gids).unwrap();
+    (0..BUILT)
+        .zip(found)
+        .map(|(source, entity)| (source, entity.expect("a built item holds its gid").raw()))
+        .collect()
+}
+
 fn built_doi(source: u64) -> String {
     format!("d{source}")
 }
@@ -502,7 +513,7 @@ enum Expect {
 }
 
 impl Model {
-    fn built(engine: &Engine, root: &Path) -> Model {
+    fn built(engine: &Engine) -> Model {
         let mut model = Model {
             doi_unique: true,
             group: true,
@@ -515,7 +526,7 @@ impl Model {
             made: BUILT,
             ..Model::default()
         };
-        for (source, entity) in source_to_new_map(root, "v00000") {
+        for (source, entity) in built_entities(engine) {
             let tid = engine.tessera_id_of(EntityId::new(entity)).unwrap().raw();
             let position = built_position(source);
             let labels = terms_of(source).iter().map(|t| t.to_string()).collect();
@@ -1780,13 +1791,13 @@ fn label_layer() -> tessera_types::layer::LayerDeclaration {
 
 /// Register the layer and publish its artifact over every built item, its content generated
 /// from [`CONTENT_SOURCES`], answering the content's items' `tessera_id`s.
-fn publish_content(engine: &Engine, root: &Path) -> BTreeSet<u64> {
+fn publish_content(engine: &Engine) -> BTreeSet<u64> {
     use tessera_lifecycle::membership::IncomingContent;
     use tessera_lifecycle::IncomingArtifact;
     engine
         .register_layer(label_layer())
         .expect("the layer registers");
-    let map = source_to_new_map(root, "v00000");
+    let map = built_entities(engine);
     let entity = |source: u64| EntityId::new(map[&source]);
     engine
         .publish_artifacts(
@@ -1819,8 +1830,8 @@ fn run(ops: &[Op]) -> Run {
     let fx = fixture();
     let engine = open(&fx);
     engine.set_merge_for_test(false);
-    let mut model = Model::built(&engine, &fx.root);
-    model.content_from = publish_content(&engine, &fx.root);
+    let mut model = Model::built(&engine);
+    model.content_from = publish_content(&engine);
     let highest = run_highest(&model);
     let mut run = Run {
         fx,
@@ -1954,8 +1965,8 @@ fn repeated_edits_and_folds_stop_the_id_space_growing() {
     let fx = fixture();
     let engine = open(&fx);
     engine.set_merge_for_test(false);
-    let mut model = Model::built(&engine, &fx.root);
-    model.content_from = publish_content(&engine, &fx.root);
+    let mut model = Model::built(&engine);
+    model.content_from = publish_content(&engine);
     let highest = run_highest(&model);
     let mut run = Run {
         fx,

@@ -52,11 +52,10 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
     out
 }
 
-/// One ingest row at the wire's shape: the reserved columns and `tag`.
-fn batch(id: &[u8], x: f32, y: f32, tag: &str) -> Vec<u8> {
+/// One ingest row creating an item: the reserved columns and `tag`.
+fn batch(x: f32, y: f32, tag: &str) -> Vec<u8> {
     let access = access_column(["0"]);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -65,7 +64,6 @@ fn batch(id: &[u8], x: f32, y: f32, tag: &str) -> Vec<u8> {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(arrow::array::BinaryArray::from_iter([Some(id)])),
             Arc::new(arrow::array::Float32Array::from_iter_values([x])),
             Arc::new(arrow::array::Float32Array::from_iter_values([y])),
             Arc::new(access),
@@ -86,12 +84,7 @@ async fn ingest(server: &TestServer, batch_id: &str, tag: &str, i: usize) {
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", "s0")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(batch(
-            batch_id.as_bytes(),
-            100.0 + i as f32,
-            100.0 + i as f32,
-            tag,
-        ))
+        .body(batch(100.0 + i as f32, 100.0 + i as f32, tag))
         .send()
         .await
         .unwrap();
