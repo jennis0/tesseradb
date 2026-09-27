@@ -5,6 +5,8 @@
 //! assertions are against the manifest a served bundle is read from, and against the marks whose
 //! loss would let a later online registration reissue ids a built layer already holds.
 
+mod common;
+
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
+use common::assert_bundles_identical;
 use tessera_build::{build, build_in_memory, BuildArgs};
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
@@ -1150,67 +1153,6 @@ fn refuse_spelling(layers: &str, write_sources: impl FnOnce(&Inputs)) -> String 
     )
 }
 
-/// Every file of two bundles, compared byte for byte — `MANIFEST.json` with its wall-clock
-/// `created_at` blanked, and `CURRENT`, which is nothing but that manifest's digest, skipped with
-/// it. Every digest the manifest records for every other file is compared verbatim, so a
-/// membership that differed by one entity fails here.
-fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
-    fn collect(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
-        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    walk(root, &path, out);
-                } else {
-                    let rel = path
-                        .strip_prefix(root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    out.insert(rel, std::fs::read(&path).unwrap());
-                }
-            }
-        }
-        let mut out = std::collections::BTreeMap::new();
-        walk(root, root, &mut out);
-        out
-    }
-    let (a, b) = (collect(left), collect(right));
-    assert_eq!(
-        a.keys().collect::<Vec<_>>(),
-        b.keys().collect::<Vec<_>>(),
-        "{what}: the two bundles do not contain the same files"
-    );
-    for (name, left_bytes) in &a {
-        let right_bytes = &b[name];
-        if name.ends_with("MANIFEST.json") {
-            let normalise = |bytes: &[u8]| {
-                let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-                value["created_at"] = serde_json::Value::Null;
-                value
-            };
-            assert_eq!(
-                normalise(left_bytes),
-                normalise(right_bytes),
-                "{what}: MANIFEST.json differs (ignoring created_at)"
-            );
-            continue;
-        }
-        if name == "CURRENT" {
-            continue;
-        }
-        assert_eq!(
-            left_bytes, right_bytes,
-            "{what}: {name} is not byte-identical"
-        );
-    }
-    assert!(
-        a.len() > 6,
-        "{what}: expected a full bundle, found {}",
-        a.len()
-    );
-}
-
 /// The artifact row carrying its own membership as a list.
 fn write_curated_with_members(path: &Path, artifacts: &[(&str, Vec<u64>)]) {
     write_curated_column(path, "members", artifacts)
@@ -1562,6 +1504,39 @@ fn a_negative_inline_member_id_is_its_twos_complement_unsigned_id() {
         &from_declaration,
         "negative inline against a file",
     );
+}
+
+/// **An inline member may be written as its decimal digits**, which is how a `u64` from 2^63 is
+/// written, TOML holding no integer that large. It builds what the same ids in a file build.
+#[test]
+fn an_inline_member_written_as_its_digits_builds_what_the_file_builds() {
+    let ids = twos_complement_ids();
+    let signed: Vec<(&str, Vec<i64>)> = vec![("c-0", vec![-5, -4, 0]), ("c-1", vec![3, -1])];
+    let build_with = |layer: String, write_sources: &dyn Fn(&Inputs)| {
+        let inputs = inputs_over(&ids);
+        std::fs::write(&inputs.config, format!("{VIEW_TOML}{layer}")).unwrap();
+        write_sources(&inputs);
+        let out = inputs.dir.join("bundle");
+        run(&inputs, &out).expect("a build over ids from 2^63 succeeds");
+        (out, inputs)
+    };
+    let (from_file, _a) = build_with(curated_from(false), &|inputs| {
+        write_curated_ids_at(inputs, false, &DataType::UInt64, &signed)
+    });
+    let inline = format!(
+        "{CURATED_LAYER}artifacts = [{}]\n",
+        signed
+            .iter()
+            .map(|(key, members)| {
+                let digits: Vec<String> =
+                    members.iter().map(|m| format!("\"{}\"", *m as u64)).collect();
+                format!("{{ key = \"{key}\", members = [{}] }}", digits.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let (from_declaration, _b) = build_with(inline, &|_| {});
+    assert_bundles_identical(&from_file, &from_declaration, "digits inline against a file");
 }
 
 /// **An excluded id this build did not assign refuses the build**, where an unknown *member*

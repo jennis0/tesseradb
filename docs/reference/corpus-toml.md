@@ -220,8 +220,8 @@ One artifact written in the declaration, for a layer a person authors rather tha
 | --- | --- | --- | --- |
 | `key` | string | required | The artifact's key, which `parent` and `attached_key` name it by. |
 | `level` | integer | `0` | The level the artifact is at: 0 on a layer with no levels. |
-| `members` | array of integers | not set | The members, as integer values of the join field. Only on an `enumerated` layer, and refused beside `excluding`. |
-| `excluding` | array of integers | not set | The members by exclusion: the ids of the points the artifact leaves out, which the build turns into `members`. Only on an `enumerated` layer, and refused beside `members`. |
+| `members` | array of strings or integers | not set | The members, as values of the join field: a string for a `keyword` join field, and an integer or a string of its decimal digits for an integer one, the string holding a value TOML cannot write as an integer, such as a `u64` from 2^63. Only on an `enumerated` layer, and refused beside `excluding`. |
+| `excluding` | array of strings or integers | not set | The members by exclusion: the join values of the items the artifact leaves out, written as `members` is, which the build turns into `members`. Only on an `enumerated` layer, and refused beside `members`. |
 | `contents` | array of arrays of strings | `[]` | The artifact's content, best first: one array per rank, holding a value for each `[[layer.content.supplied]]` entry in order. |
 | `bbox` | array of numbers | not set | A `bbox` layer's shape: `[min_x, min_y, max_x, max_y]`. |
 | `circle` | array of numbers | not set | A `circle` layer's shape: `[cx, cy, r]`. |

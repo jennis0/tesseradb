@@ -4,11 +4,13 @@
 //! item by that field's value: a string or an integer. With no join field each row of the points
 //! file is an item of its own, and anything that would need a join is refused.
 
+mod common;
+
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, ListArray, StringArray, UInt64Array};
+use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, ListArray, StringArray, UInt64Array};
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
@@ -403,6 +405,79 @@ fn a_members_column_in_the_other_family_is_refused_naming_both_types() {
     .to_string();
     assert!(said.contains("UInt64"), "{said}");
     assert!(said.contains("Utf8"), "{said}");
+}
+
+/// **An inline membership names items by a keyword join field's values**, and builds what the same
+/// membership in an artifacts file builds.
+#[test]
+fn an_inline_membership_names_items_by_keyword_values() {
+    let keys = keys();
+    let named = [vec![0usize, 3, 5], vec![7, 9]];
+    let build_with = |layer: String, file: bool| {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write_points(
+            &dir.join("points.parquet"),
+            Some(Arc::new(StringArray::from(keys.clone()))),
+        );
+        if file {
+            let values: Vec<&str> = named.iter().flatten().map(|i| keys[*i].as_str()).collect();
+            let members = ListArray::new(
+                Arc::new(Field::new("item", DataType::Utf8, true)),
+                OffsetBuffer::from_lengths(named.iter().map(Vec::len)),
+                Arc::new(StringArray::from(values)) as ArrayRef,
+                None,
+            );
+            write(
+                &dir.join("clusters.parquet"),
+                vec![
+                    Field::new("key", DataType::Utf8, false),
+                    Field::new("members", Array::data_type(&members).clone(), true),
+                ],
+                vec![Arc::new(StringArray::from(vec!["c0", "c1"])), Arc::new(members)],
+            );
+        }
+        let out = dir.join("bundle");
+        build(&args(dir, &(joined("keyword") + &layer), &out)).expect("the build succeeds");
+        (out, tmp)
+    };
+    let (from_file, _a) = build_with(ARTIFACT_LAYER.to_string(), true);
+    let spelled = |members: &[usize]| {
+        members
+            .iter()
+            .map(|i| format!("\"{}\"", keys[*i]))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let inline = ARTIFACT_LAYER.replace(
+        "source     = \"clusters\"\n",
+        &format!(
+            "artifacts  = [{{ key = \"c0\", members = [{}] }}, {{ key = \"c1\", members = [{}] }}]\n",
+            spelled(&named[0]),
+            spelled(&named[1])
+        ),
+    );
+    let (from_declaration, _b) = build_with(inline, false);
+    common::assert_bundles_identical(&from_file, &from_declaration, "inline against a file");
+}
+
+/// **An integer member of a keyword join field is refused**, saying how to write it.
+#[test]
+fn an_inline_integer_member_of_a_keyword_join_field_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_points(
+        &dir.join("points.parquet"),
+        Some(Arc::new(StringArray::from(keys()))),
+    );
+    let said = build(&args(
+        dir,
+        &(joined("keyword") + INLINE_LAYER),
+        &dir.join("bundle"),
+    ))
+    .expect_err("an integer names no keyword")
+    .to_string();
+    assert!(said.contains("clusters/a"), "{said}");
 }
 
 /// **A membership written beside an artifact names items**, and without a join field there is

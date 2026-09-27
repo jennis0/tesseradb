@@ -85,7 +85,7 @@ use tessera_types::EntityId;
 
 use rayon::prelude::*;
 
-use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
+use crate::config::{ArtifactSource, Fields, InlineArtifact, JoinValue, LayerSources};
 use crate::error::{BuildError, Result};
 use crate::shapes::{
     inline_shape, shape_declared, space_at, space_column, ShapeColumns, ShapeContext,
@@ -732,7 +732,7 @@ pub fn read(
                         input.name, scope.group
                     )));
                 }
-                plan_inline(&input.name, rows, &mut plan, shapes.as_mut())?
+                plan_inline(&input.name, rows, &mut plan, shapes.as_mut(), ids)?
             }
             // **Which artifacts exist is the layer's own artifact source's to say** — while the
             // layer's value set is closed. Without one a member source would be both the roster and
@@ -1085,6 +1085,7 @@ fn plan_inline(
     rows: &[InlineArtifact],
     plan: &mut LayerPlan,
     mut shapes: Option<&mut ShapeReader>,
+    ids: &crate::ids::IdSpace,
 ) -> Result<()> {
     for row in rows {
         // An inline artifact is on an unscoped layer: the scoped spelling is refused where the
@@ -1119,8 +1120,12 @@ fn plan_inline(
             view_key: None,
             membership: match (&row.members, &row.excluding) {
                 // Both is refused at parse, where the declaration can name the artifact.
-                (Some(members), _) => PlannedMembership::Included(inline_ids(members)),
-                (_, Some(excluding)) => PlannedMembership::Excluded(inline_ids(excluding)),
+                (Some(members), _) => {
+                    PlannedMembership::Included(inline_ids(layer, &row.key, members, ids)?)
+                }
+                (_, Some(excluding)) => {
+                    PlannedMembership::Excluded(inline_ids(layer, &row.key, excluding, ids)?)
+                }
                 (None, None) => PlannedMembership::default(),
             },
             contents: row
@@ -3658,12 +3663,50 @@ fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
     (!column.is_null(row)).then(|| column.value(row))
 }
 
-/// An inline membership's ids, read by the rule every integer id column is.
-fn inline_ids(ids: &[i64]) -> Vec<u64> {
-    crate::ids::integer_ids(&arrow::array::Int64Array::from(ids.to_vec()))
-        .expect("int64 is an integer id type")
-        .values()
-        .to_vec()
+/// An inline membership's source ids: a keyword resolved to its rank, as a members file's is, and
+/// an integer read by the rule every integer id column is.
+fn inline_ids(
+    layer: &str,
+    key: &str,
+    values: &[JoinValue],
+    ids: &crate::ids::IdSpace,
+) -> Result<Vec<u64>> {
+    let object = format!("layer '{layer}': artifact {key}");
+    values
+        .iter()
+        .map(|value| match (ids, value) {
+            (crate::ids::IdSpace::Supplied(keys), JoinValue::Text(text)) => {
+                match keys.rank(text.as_bytes()) {
+                    crate::ids::NO_SOURCE_ID => Err(BuildError::Invalid(format!(
+                        "{object}: the membership names '{text}', which no points file of this \
+                         build carries. Name a member by a value of the join field"
+                    ))),
+                    source_id => Ok(source_id),
+                }
+            }
+            (crate::ids::IdSpace::Supplied(_), JoinValue::Integer(integer)) => {
+                Err(BuildError::Invalid(format!(
+                    "{object}: the member {integer} is an integer, and the join field holds \
+                     strings. Write it as \"{integer}\""
+                )))
+            }
+            (_, JoinValue::Integer(integer)) => Ok(*integer as u64),
+            (crate::ids::IdSpace::Integer { signed: true }, JoinValue::Text(text)) => text
+                .parse::<i64>()
+                .map(|integer| integer as u64)
+                .map_err(|_| not_an_integer(&object, text)),
+            (_, JoinValue::Text(text)) => {
+                text.parse::<u64>().map_err(|_| not_an_integer(&object, text))
+            }
+        })
+        .collect()
+}
+
+fn not_an_integer(object: &str, text: &str) -> BuildError {
+    BuildError::Invalid(format!(
+        "{object}: the member '{text}' is not a value of the join field, which holds integers. \
+         Write it in decimal digits"
+    ))
 }
 
 /// One row's membership, as source entity ids.

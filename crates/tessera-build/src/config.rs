@@ -903,18 +903,25 @@ pub struct InlineArtifact {
     /// The level the artifact is at: 0 on a layer with no levels.
     #[serde(default)]
     pub level: u32,
-    /// The members, as integer values of the join field. Only on an
-    /// `enumerated` layer, and refused beside `excluding`.
+    /// The members, as values of the join field: a string for a `keyword` join field, and an
+    /// integer or a string of its decimal digits for an integer one, the string holding a value
+    /// TOML cannot write as an integer, such as a `u64` from 2^63. Only on an `enumerated` layer,
+    /// and refused beside `excluding`.
+    ///
+    /// Type: array of strings or integers.
     ///
     /// Default: not set.
     #[serde(default)]
-    pub members: Option<Vec<i64>>,
-    /// The members by exclusion: the ids of the points the artifact leaves out, which the build
-    /// turns into `members`. Only on an `enumerated` layer, and refused beside `members`.
+    pub members: Option<Vec<JoinValue>>,
+    /// The members by exclusion: the join values of the items the artifact leaves out, written as
+    /// `members` is, which the build turns into `members`. Only on an `enumerated` layer, and
+    /// refused beside `members`.
+    ///
+    /// Type: array of strings or integers.
     ///
     /// Default: not set.
     #[serde(default)]
-    pub excluding: Option<Vec<i64>>,
+    pub excluding: Option<Vec<JoinValue>>,
     /// The artifact's content, best first: one array per rank, holding a value for each
     /// `[[layer.content.supplied]]` entry in order.
     #[serde(default)]
@@ -2984,6 +2991,14 @@ struct Defaults {
     /// `[defaults].allocation_view` as written. Resolved against the built view registry by
     /// [`Config::anchor_view`], not here: the groups are compiled after `[defaults]` is.
     allocation_view: Option<String>,
+}
+
+/// A value of the join field as a declaration writes it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum JoinValue {
+    Integer(i64),
+    Text(String),
 }
 
 /// The declared unique attribute a build joins its files on, and the column a file carries it in
