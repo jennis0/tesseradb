@@ -92,7 +92,14 @@ impl ArtifactProjections {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "a level's row forms are published from the deltas since the last tick"
         );
-        if lost && !self.kept_without_a_column(&address, &mut rows, &applied.added, "amended") {
+        if lost
+            && !self.kept_without_a_column(
+                &address,
+                Arc::make_mut(&mut rows),
+                &applied.added,
+                "amended",
+            )
+        {
             return;
         }
         let amended = Arc::make_mut(&mut rows);
@@ -395,7 +402,9 @@ impl ArtifactProjections {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "a level's held row form took a flush's segment"
             );
-            if lost && !self.kept_without_a_column(&address, &mut rows, &added, "extended") {
+            if lost
+                && !self.kept_without_a_column(&address, Arc::make_mut(&mut rows), &added, "extended")
+            {
                 continue;
             }
             self.insert_newest(address, Held { key, at, rows });
@@ -480,21 +489,23 @@ impl ArtifactProjections {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "a level's held row form took a merge's rebase"
             );
-            if lost && !self.kept_without_a_column(&address, &mut rows, &added, "rebased") {
+            if lost
+                && !self.kept_without_a_column(&address, Arc::make_mut(&mut rows), &added, "rebased")
+            {
                 continue;
             }
             self.insert_newest(address, Held { key, at, rows });
         }
     }
 
-    /// What a level does when its memberships no longer partition, `amendment` naming which of the
-    /// three amendments reached it. A form holding its own bitmaps goes back to the artifact-major
+    /// What a level does when its memberships no longer partition, `amendment` naming the
+    /// amendment that reached it. A form holding its own bitmaps goes back to the artifact-major
     /// route; one holding no bitmaps takes the list form instead, since its column is its
     /// membership. `false` where that recomposition failed and the form is dropped.
-    fn kept_without_a_column(
+    pub(super) fn kept_without_a_column(
         &self,
         address: &LevelAddress,
-        rows: &mut Arc<ArtifactRows>,
+        rows: &mut ArtifactRows,
         added: &[(u32, u32)],
         amendment: &str,
     ) -> bool {
@@ -513,7 +524,7 @@ impl ArtifactProjections {
         }
         let started = std::time::Instant::now();
         let scratch = self.scratch().to_path_buf();
-        if !Arc::make_mut(rows).recompose_as_list(added, &scratch) {
+        if !rows.recompose_as_list(added, &scratch) {
             self.drop_lost_column(address, view);
             return false;
         }

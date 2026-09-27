@@ -90,7 +90,7 @@ pub(super) fn grouped_growth<'a>(
                     continue;
                 }
                 if let Some(record) = held.store.get(layer, *level, *ordinal) {
-                    joining.andnot_inplace(&record.members);
+                    record.members.remove_from(joining);
                 }
             }
         }

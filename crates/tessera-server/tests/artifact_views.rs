@@ -945,6 +945,68 @@ async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_re
     assert_eq!(served(&server, "quarter:q1", SHAPES).await, untouched);
 }
 
+/// An entity-scoped row-major level drawn on a view dropped and created again between a fold and a
+/// restart. Its members grew after the fold, so the restart completes the fold's column for the
+/// untouched view; the recreated view has none of the rows that column addresses, and is served
+/// the same before the restart and after it.
+#[tokio::test]
+async fn a_global_row_major_level_over_a_recreated_view_answers_the_same_after_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_group(&tmp).await;
+    let mut declared = declaration(PLAIN, None, "flat");
+    declared["layout"] = json!("row_major_label");
+    register(&server, declared).await;
+    let (status, body) = put(
+        &server,
+        PLAIN,
+        json!([
+            { "key": "c0", "members": members(0..50) },
+            { "key": "c1", "members": members(250..300) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    flush_and_fold(&server, Some("quarter:q1")).await;
+
+    let resp = server
+        .client
+        .patch(server.control_url(&format!(
+            "/control/layers/{}/artifacts",
+            PLAIN.replace('/', "%2F")
+        )))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "addressing": "external", "artifacts": [
+            { "key": "c0", "members": members(50..80) }
+        ] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", resp.text().await);
+    recreate(&server, "q2").await;
+    ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    ticked(&server).await;
+
+    let q1 = vec![("c0".to_string(), 80), ("c1".to_string(), 50)];
+    assert_eq!(served(&server, "quarter:q1", PLAIN).await, q1);
+    let q2 = served(&server, "quarter:q2", PLAIN).await;
+    assert!(
+        q2.iter().all(|(_, count)| *count == 0),
+        "no member has a row in the recreated view: {q2:?}"
+    );
+
+    let server = restart(server, &tmp).await;
+    assert_eq!(
+        served(&server, "quarter:q1", PLAIN).await,
+        q1,
+        "q1 after a restart"
+    );
+    assert_eq!(
+        served(&server, "quarter:q2", PLAIN).await,
+        q2,
+        "the recreated view after a restart"
+    );
+}
+
 /// Drop a view of the group and create it again under the same key.
 async fn recreate(server: &TestServer, key: &str) {
     drop_key(server, key).await;

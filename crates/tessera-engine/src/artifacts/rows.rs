@@ -284,7 +284,7 @@ impl MembershipRows {
             self.rows.resize_with(idx + 1, || None);
             self.generating.resize_with(idx + 1, Vec::new);
         }
-        let rows = Arc::new(space.project(&record.members));
+        let rows = Arc::new(record.members.projected(|part| space.project(part)));
         // A column-only form keeps the slot and not the set: the `Arc` is shared, not the bitmap.
         self.rows[idx] = Some(if self.rows_held {
             Arc::clone(&rows)
