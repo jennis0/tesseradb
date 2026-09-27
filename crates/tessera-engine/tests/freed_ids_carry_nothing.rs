@@ -118,6 +118,8 @@ fn check(engine: &Engine, x: TesseraId, z: TesseraId, x_score: i32, after: &str)
                 "Home::Row: z's views, after {after}"
             ),
             Home::RenderColumn | Home::RenderPresence => {
+                // Served first, so the projection a fold's refresh may be building is built.
+                assert!(served(engine, &subset, "s0", None).contains(&z.raw()));
                 let out = engine
                     .viewport(&subset, tessera_engine::ViewportRequest::new("s0", 0, WHOLE, 10_000))
                     .unwrap();

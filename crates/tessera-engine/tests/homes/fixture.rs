@@ -404,15 +404,22 @@ pub fn served(
     view: &str,
     filter: Option<FilterExpr>,
 ) -> BTreeSet<u64> {
-    let mut req = ViewportRequest::new(view, 0, WHOLE, 10_000);
-    req.filter = filter;
-    engine
-        .viewport(session, req)
-        .unwrap()
-        .points
-        .tessera_ids
-        .into_iter()
-        .collect()
+    // `ProjectionBuilding` is the shed a fold's or a merge's refresh window can answer with,
+    // which a caller retries, so it is retried here on a bounded deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let mut req = ViewportRequest::new(view, 0, WHOLE, 10_000);
+        req.filter = filter.clone();
+        match engine.viewport(session, req) {
+            Ok(out) => return out.points.tessera_ids.into_iter().collect(),
+            Err(tessera_engine::EngineError::ProjectionBuilding)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("the viewport of {view} neither answered nor kept shedding: {e:?}"),
+        }
+    }
 }
 
 pub fn leaf(column: &str, operand: FilterOperand) -> Option<FilterExpr> {

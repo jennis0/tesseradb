@@ -1404,16 +1404,23 @@ impl Run {
 
     // ---- what is served ----------------------------------------------------------------------
 
+    /// A viewport's points. `ProjectionBuilding` is the shed a fold's refresh window can answer
+    /// with, which a caller retries, so it is retried here on a bounded deadline.
     fn served(&self, session: &Session, view: &str, filter: Option<FilterExpr>) -> BTreeSet<u64> {
-        let mut req = ViewportRequest::new(view, 0, VIEWPORT, 10_000);
-        req.filter = filter;
-        self.engine()
-            .viewport(session, req)
-            .unwrap()
-            .points
-            .iter()
-            .map(|(id, _)| id.raw())
-            .collect()
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let mut req = ViewportRequest::new(view, 0, VIEWPORT, 10_000);
+            req.filter = filter.clone();
+            match self.engine().viewport(session, req) {
+                Ok(out) => return out.points.iter().map(|(id, _)| id.raw()).collect(),
+                Err(tessera_engine::EngineError::ProjectionBuilding)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("the viewport of {view} neither answered nor kept shedding: {e:?}"),
+            }
+        }
     }
 
     fn check(&self, after: &str) {
