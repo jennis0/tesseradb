@@ -1469,7 +1469,7 @@ fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Res
 
 /// `PATCH /control/layers/{name}/artifacts`'s Arrow form: one row per artifact, `key: utf8` and
 /// `members: list<utf8>` or `large_list<utf8>`, with `view` and `access` optional, and
-/// `addressing` and `level` in the schema metadata. Decoded into the JSON form's body, so
+/// `field` and `level` in the schema metadata. Decoded into the JSON form's body, so
 /// the handler has one path.
 fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     use arrow::array::{LargeListArray, ListArray, StringArray};
@@ -1491,29 +1491,13 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
         }
     }
     for name in metadata.keys() {
-        if !matches!(name.as_str(), "addressing" | "field" | "level") {
+        if !matches!(name.as_str(), "field" | "level") {
             return Err(ApiError::Contract(format!(
                 "growth body: schema metadata `{name}` is not one this route takes; the envelope \
-                 is `addressing`, `field` and `level`"
+                 is `field` and `level`"
             )));
         }
     }
-    let addressing =
-        match metadata.get("addressing").map(String::as_str) {
-            Some("tessera") => Addressing::Tessera,
-            Some("field") => Addressing::Field,
-            Some(other) => {
-                return Err(ApiError::Contract(format!(
-                    "growth body: schema metadata `addressing` is '{other}'; it is `tessera` or \
-                     `field`"
-                )))
-            }
-            None => return Err(ApiError::Contract(
-                "growth body: the IPC schema's metadata carries no `addressing`; the Arrow form \
-                 carries `addressing` and `level` there"
-                    .to_string(),
-            )),
-        };
     let field = metadata.get("field").cloned();
     let level = match metadata.get("level") {
         None => 0,
@@ -1654,26 +1638,24 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     }
     Ok(GrowBody {
         level,
-        addressing,
         field,
         default_space: None,
         artifacts,
     })
 }
 
-/// Resolves every member address of a batch to an entity at the boundary. `flat` holds every
-/// address and `widths` each artifact's share. An unresolvable member refuses the batch, never
-/// dropped.
+/// Resolves every member address of a batch to an entity at the boundary: a `tessera_id`, or a
+/// value of `field` where the batch names one. `flat` holds every address and `widths` each
+/// artifact's share. An unresolvable member refuses the batch, never dropped.
 fn resolve_member_addresses(
     state: &AppState,
-    addressing: Addressing,
     field: Option<&str>,
     flat: &[&String],
     widths: &[usize],
     layout: &str,
 ) -> Result<Vec<tessera_types::EntityId>, ApiError> {
-    let resolved: Vec<Option<tessera_types::EntityId>> = match (addressing, field) {
-        (Addressing::Tessera, None) => {
+    let resolved: Vec<Option<tessera_types::EntityId>> = match field {
+        None => {
             let ids = flat
                 .iter()
                 .map(|raw| {
@@ -1687,26 +1669,12 @@ fn resolve_member_addresses(
                 .resolve_tessera_ids(&ids)
                 .map_err(map_store_error)?
         }
-        (Addressing::Field, Some(field)) => {
+        Some(field) => {
             let values: Vec<String> = flat.iter().map(|value| (*value).clone()).collect();
             state
                 .engine
                 .resolve_unique_values(field, &values)
                 .map_err(map_engine_error)?
-        }
-        (Addressing::Tessera, Some(_)) => {
-            return Err(ApiError::Contract(
-                "`field` names the unique field members are values of, and this batch addresses \
-                 members by tessera_id; leave `field` out, or send `addressing: \"field\"`"
-                    .to_string(),
-            ))
-        }
-        (Addressing::Field, None) => {
-            return Err(ApiError::Contract(
-                "`addressing: \"field\"` addresses members by values of a unique field, and the \
-                 batch names none; send `field`"
-                    .to_string(),
-            ))
         }
     };
 
@@ -1722,25 +1690,14 @@ fn resolve_member_addresses(
     Ok(resolved.into_iter().flatten().collect())
 }
 
-/// How a batch addresses its members: one form per request rather than per member, since a
-/// per-member tag would be most of a large membership's body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Addressing {
-    /// A `tessera_id`, as a string of decimal digits.
-    Tessera,
-    /// A value of the unique field the batch's `field` names, as its text.
-    Field,
-}
-
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublishBody {
     /// Defaults to the layer's only level. A layer that declared none has exactly level 0.
     #[serde(default)]
     level: u32,
-    addressing: Addressing,
-    /// The unique field members are values of, under `addressing: "field"`.
+    /// The unique field whose values name the members, one form per request since a per-member
+    /// tag would be most of a large membership's body. Absent, members are `tessera_id`s.
     #[serde(default)]
     field: Option<String>,
     /// The space of a row's shape and authored shape content where the row names none: `"view"`
@@ -1762,7 +1719,7 @@ struct IncomingArtifactBody {
     /// entity-scoped one. Keys are unique per view, and an edge may not cross views.
     #[serde(default)]
     view: Option<String>,
-    /// Decimal `tessera_id` strings or values of the batch's `field`, by its `addressing`. Absent
+    /// Decimal `tessera_id` strings, or values of the batch's `field` where it names one. Absent
     /// only when `excluding` is given; an empty list is a membership that holds nobody.
     #[serde(default)]
     members: Option<Vec<String>>,
@@ -2165,7 +2122,6 @@ async fn publish_artifacts(
     }
     let PublishBody {
         level,
-        addressing,
         field,
         default_space,
         mut artifacts,
@@ -2296,7 +2252,6 @@ async fn publish_artifacts(
 
             let resolved = resolve_member_addresses(
                 state,
-                addressing,
                 field.as_deref(),
                 &flat,
                 &widths,
@@ -2390,15 +2345,14 @@ async fn publish_artifacts(
     acknowledge(&state, &wait, declared(batch.created == 0), body).await
 }
 
-/// `PATCH /control/layers/{name}/artifacts`'s body. Addressing and `default_space` are
-/// as on [`PublishBody`].
+/// `PATCH /control/layers/{name}/artifacts`'s body. `field` and `default_space` are as on
+/// [`PublishBody`].
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GrowBody {
     /// Defaults to the layer's only level.
     #[serde(default)]
     level: u32,
-    addressing: Addressing,
     #[serde(default)]
     field: Option<String>,
     #[serde(default)]
@@ -2485,7 +2439,6 @@ async fn grow_memberships(
     })?;
     let GrowBody {
         level,
-        addressing,
         field,
         default_space,
         mut artifacts,
@@ -2545,7 +2498,6 @@ async fn grow_memberships(
                 .collect();
             let resolved = resolve_member_addresses(
                 state,
-                addressing,
                 field.as_deref(),
                 &flat,
                 &widths,
