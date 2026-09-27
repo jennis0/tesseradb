@@ -97,6 +97,24 @@ def test_a_change_names_an_item_by_tessera_id_or_by_a_unique_value_as_text():
     ]
 
 
+def test_a_timestamp_value_is_sent_as_its_microseconds_since_the_epoch():
+    """A timestamp field's values travel as decimal microseconds, whichever library holds them;
+    one with no time zone is UTC."""
+    import datetime
+
+    pd = pytest.importorskip("pandas")
+    numpy = pytest.importorskip("numpy")
+    micros = str(1_577_836_800_000_005)
+    naive = datetime.datetime(2020, 1, 1, 0, 0, 0, 5)
+    held = [
+        naive,
+        naive.replace(tzinfo=datetime.timezone.utc),
+        pd.Timestamp("2020-01-01 00:00:00.000005"),
+        numpy.datetime64("2020-01-01T00:00:00.000005"),
+    ]
+    assert Database.addresses(held, field="ts") == [{"field": "ts", "value": micros}] * 4
+
+
 def serving():
     """The fake plane, started, with its address."""
     server = http.server.HTTPServer(("127.0.0.1", 0), _Backpressure)

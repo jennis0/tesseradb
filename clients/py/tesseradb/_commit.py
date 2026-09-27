@@ -37,6 +37,7 @@ what it wrote can be read after the next cycle.
 
 from __future__ import annotations
 
+import datetime
 import json
 import numbers
 from dataclasses import dataclass
@@ -841,11 +842,16 @@ class Planner:
 
 
 def text(value: Any) -> str:
-    """An item's address as a JSON route carries it: an integer in decimal digits, anything else
-    as its text. Any integer, not only Python's, so a frame's numpy and pyarrow scalars read as the
-    numbers they hold."""
+    """An item's address as a JSON route carries it: an integer in decimal digits, a timestamp as
+    the decimal digits of its microseconds since the epoch, anything else as its text. Any integer
+    or timestamp, not only Python's, so a frame's numpy, pandas and pyarrow scalars read as the
+    values they hold. A timestamp with no time zone is read as UTC, as an inserted one is."""
     if isinstance(value, numbers.Integral) and not isinstance(value, bool):
         return str(int(value))
+    if isinstance(value, pa.TimestampScalar):
+        return str(value.cast(pa.timestamp("us")).value)
+    if isinstance(value, datetime.datetime) or type(value).__name__ == "datetime64":
+        return str(pa.scalar(value, pa.timestamp("us")).value)
     return str(value)
 
 

@@ -1648,7 +1648,8 @@ class Database:
         """The ids given, in the form the server's change requests take them.
 
         Each is `{"tessera_id": ...}`, or with `field`, `{"field": field, "value": ...}`. Both
-        travel as text: an integer in decimal digits, and a string as itself.
+        travel as text: an integer in decimal digits, a timestamp as the decimal digits of its
+        microseconds since the epoch, and a string as itself.
         """
         if field is None:
             return [{"tessera_id": C.text(one)} for one in ids]
