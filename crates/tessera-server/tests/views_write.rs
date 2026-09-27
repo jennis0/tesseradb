@@ -1230,7 +1230,8 @@ type   = "i32"
 render = true
 "#
         .to_string()
-            + ID_ATTRIBUTE,
+            + ID_ATTRIBUTE
+            + "source = \"world\"\n",
     )
     .unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
