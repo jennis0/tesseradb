@@ -347,7 +347,7 @@ pub fn label_layer() -> tessera_types::layer::LayerDeclaration {
         scope: Default::default(),
         name: LAYER.into(),
         title: None,
-        views: vec!["s0".into()],
+        views: vec!["s0".into(), "quarter:q1".into()],
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,

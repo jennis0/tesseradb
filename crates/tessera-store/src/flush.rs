@@ -227,7 +227,10 @@ pub fn write_flush_segment(
 
     // Each entity's position in the sorted order, relative to `row_base`. Held here rather than
     // as a `permutation.bin`, whose length is the *bundle's* whole entity space — the wrong shape
-    // for a segment covering a few thousand ids at the top of it.
+    // for a segment covering a few thousand ids at the top of it. The rows are ascending and
+    // distinct, so only a span too wide to address is refused; that a listed entity has no row
+    // elsewhere in the view holds because the fold that freed it dropped every row of its
+    // previous holder, and publication checks it.
     let extent = SegmentExtent::from_rows(
         input.seg_id,
         input.row_base,

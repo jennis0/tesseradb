@@ -497,6 +497,42 @@ impl Executor {
                     .as_deref()
                     .is_some_and(|id| bound_elsewhere(id, None)),
             });
+        // An entity the handler resolved can since have been retired by a fold, freed, and issued
+        // to another item: each must still hold the item the handler resolved it to.
+        let stale = stale || {
+            let key = &self.deps.identity_key;
+            let number_of =
+                |tessera_id: u64| key.invert(tessera_types::TesseraId::new(tessera_id)).1;
+            let mut named: Vec<(EntityId, EntityId)> = edits
+                .iter()
+                .map(|submitted| (submitted.edit.old, submitted.edit.number))
+                .collect();
+            for slot in &slots {
+                match slot {
+                    tessera_lifecycle::Slot::Unchanged { entity, tessera_id }
+                    | tessera_lifecycle::Slot::Joined { entity, tessera_id } => {
+                        named.push((*entity, number_of(*tessera_id)));
+                    }
+                    tessera_lifecycle::Slot::Written {
+                        row,
+                        tessera_id: Some(tessera_id),
+                    } => {
+                        if let Some(entity) = rows.get(*row as usize).and_then(|r| r.join) {
+                            named.push((entity, number_of(*tessera_id)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let entities: Vec<EntityId> = named.iter().map(|(entity, _)| *entity).collect();
+            match crate::edited::numbers_of(&generation, &entities) {
+                Ok(numbers) => named
+                    .iter()
+                    .zip(numbers)
+                    .any(|((_, resolved), now)| now != *resolved),
+                Err(_) => true,
+            }
+        };
         drop(generation);
         if stale {
             reply.fail(ExecError::Stale);

@@ -100,7 +100,7 @@ Four identifiers name an item or a view, one for each party that needs to addres
 
 | Identifier | Assigned by | Held by | What changes it |
 |---|---|---|---|
-| entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; the id an edit left is issued again once a compaction has removed its rows |
+| entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; the id an edit left is issued again once a compaction has removed its rows and the log has rotated past that compaction |
 | `tessera_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rebuild, which creates a new bundle with a new key |
 | external id | the operator, before ingest | the operator, and any record of a write naming it | nothing, for the item's life |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |

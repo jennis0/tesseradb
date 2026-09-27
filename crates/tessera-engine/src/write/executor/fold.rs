@@ -1024,7 +1024,9 @@ impl Executor {
                         .find(|extent| extent.seg_id == descriptor.seg_id)
                 })
             else {
-                return Err("a carried-forward segment has no extent in the live row space".to_string());
+                return Err(
+                    "a carried-forward segment has no extent in the live row space".to_string()
+                );
             };
             carried.add_segment(extent);
         }

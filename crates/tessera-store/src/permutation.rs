@@ -1632,6 +1632,9 @@ pub struct RowSpace {
     base_rows: u32,
     /// Dense spans ordered, ascending, disjoint.
     extents: Vec<SegmentExtent>,
+    /// Every entity an extent lists below its span, so a lookup that finds no row in the base or
+    /// a span answers from one bitmap probe rather than a search of every extent's list.
+    listed: Arc<croaring::Bitmap>,
     /// `base_rows` plus every extent's `row_count`, maintained rather than recomputed.
     total_rows: u64,
 }
@@ -1644,6 +1647,7 @@ impl RowSpace {
             extent_inverse: std::sync::OnceLock::new(),
             base_rows,
             extents: Vec::new(),
+            listed: Arc::new(croaring::Bitmap::new()),
             total_rows: base_rows as u64,
         }
     }
@@ -1735,6 +1739,8 @@ impl RowSpace {
         if extent.entity_lo < self.entity_floor() {
             return None;
         }
+        // A fold frees an id only once it has removed every row of the id's previous holder, so a
+        // listed entity with a row here is corruption rather than a race.
         if extent
             .below
             .iter()
@@ -1751,6 +1757,13 @@ impl RowSpace {
         if total_rows > u64::from(u32::MAX) {
             return None;
         }
+        let listed = if extent.below.is_empty() {
+            Arc::clone(&self.listed)
+        } else {
+            let mut listed = (*self.listed).clone();
+            listed.add_many(&extent.below.iter().map(|&(e, _)| e).collect::<Vec<_>>());
+            Arc::new(listed)
+        };
         let mut extents = self.extents.clone();
         extents.push(extent);
         Some(RowSpace {
@@ -1761,6 +1774,7 @@ impl RowSpace {
             extent_inverse: std::sync::OnceLock::new(),
             base_rows: self.base_rows,
             extents,
+            listed,
             total_rows,
         })
     }
@@ -1800,6 +1814,11 @@ impl RowSpace {
         extents.extend_from_slice(&self.extents[..start]);
         extents.push(merged);
         extents.extend_from_slice(&self.extents[start + seg_ids.len()..]);
+        // A listed row the merged span now holds leaves the lists.
+        let mut listed = croaring::Bitmap::new();
+        for extent in &extents {
+            listed.add_many(&extent.below.iter().map(|&(e, _)| e).collect::<Vec<_>>());
+        }
         Some(RowSpace {
             base: Arc::clone(&self.base),
             base_inverse: self.base_inverse.clone(),
@@ -1808,6 +1827,7 @@ impl RowSpace {
             extent_inverse: std::sync::OnceLock::new(),
             base_rows: self.base_rows,
             extents,
+            listed: Arc::new(listed),
             total_rows: self.total_rows,
         })
     }
@@ -1821,7 +1841,7 @@ impl RowSpace {
 
     /// Row ID currently occupied by `e`, or `None` if it has none: the base lookup below the
     /// build bound, otherwise a binary search over the extents' dense spans, `O(log k)`, and
-    /// where neither holds it, each extent's listed rows.
+    /// where neither holds it and it is listed, the extent that lists it.
     pub fn row_of(&self, e: EntityId) -> Option<RowId> {
         let raw = e.raw();
         let found = if raw < self.base.bound() {
@@ -1833,10 +1853,12 @@ impl RowSpace {
                 .and_then(|i| self.extents[i].dense_row_of(raw))
         };
         found.or_else(|| {
-            self.extents
-                .iter()
-                .filter(|extent| !extent.below.is_empty())
-                .find_map(|extent| extent.below_row_of(raw))
+            let listed = u32::try_from(raw).is_ok_and(|e| self.listed.contains(e));
+            listed.then(|| {
+                self.extents
+                    .iter()
+                    .find_map(|extent| extent.below_row_of(raw))
+            })?
         })
     }
 
@@ -1896,10 +1918,10 @@ impl RowSpace {
     pub fn project_extents_from(&self, mask: &croaring::Bitmap, from: usize) -> croaring::Bitmap {
         let extents = &self.extents[from.min(self.extents.len())..];
         // An extent maps only the entities it holds, so a mask whose highest entity is below the
-        // lowest of them projects to nothing at all. One `maximum` against an iterator, a `Vec` and a bitmap per extent: a
-        // stored level's held form asks this of every artifact it holds at every flush, and on a
-        // corpus whose artifacts are hundreds of thousands of admin divisions almost every one of
-        // them has nothing in the extent a flush just wrote.
+        // lowest of them projects to nothing at all. One `maximum` against an iterator, a `Vec`
+        // and a bitmap per extent: a stored level's held form asks this of every artifact it
+        // holds at every flush, and on a corpus whose artifacts are hundreds of thousands of admin
+        // divisions almost every one of them has nothing in the extent a flush just wrote.
         let floor = extents.iter().filter_map(SegmentExtent::lowest).min();
         if let (Some(floor), Some(highest)) = (floor, mask.maximum()) {
             if u64::from(highest) < floor {

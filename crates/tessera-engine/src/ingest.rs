@@ -817,8 +817,7 @@ impl Engine {
         if !adding {
             return Ok(membership());
         }
-        // A flush places rows only above a view's newest, so an item older than that moves to a
-        // new entity to join the view.
+        // An item below the view's entity floor moves to a new entity to join the view.
         if !joined::joins_in_place(generation, entity, &view.id) {
             return Ok(Decided::Edited { added: true });
         }

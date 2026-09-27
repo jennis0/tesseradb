@@ -24,14 +24,15 @@
 //! its current holder.
 //!
 //! The free and held sets are written into every side-manifest. A restart takes them from the
-//! served manifest and removes every id a kept log record or the overlay names, since an id issued
-//! after that manifest was written appears in one or the other until a later manifest records it.
+//! served manifest and removes every id a kept log record or the overlay names from both: an id
+//! issued after that manifest was written appears in one or the other until a later manifest
+//! records it, and a held id a kept record names has had its previous holder's state replayed.
 //!
 //! ## One space, two regions, growing towards each other
 //!
 //! Points are allocated **upward from 0**. Row-less entities — an artifact, and the entity a layer
-//! takes so that layer suppression can ride the deny lane — are allocated **downward from the top**.
-//! Both marks live in this one struct, and **exhaustion is the two marks meeting**, which is the
+//! takes so that layer suppression can ride the deny lane — are allocated **downward from the
+//! top**. Both marks live in this one struct, and **exhaustion is the two marks meeting**, which is the
 //! true condition where a fixed ceiling per region would be a guess about the split.
 //!
 //! **The reason is not identifier supply, which is where a reader looks first.** Three structures
@@ -220,9 +221,9 @@ impl Allocator {
 
     /// Seed the freed ids from durable state at open. The held sets the log has been reclaimed
     /// past, to `retained_from`, are freed first, since a set can be freed and issued after the
-    /// state was written; then every id in `named` is taken out: the ids a kept log record or the
-    /// overlay names, each issued since. A set still held was never freed, so nothing took an id
-    /// from it.
+    /// state was written. Then every id in `named` is taken out of the free and the held sets
+    /// alike: an id a kept log record or the overlay names was issued since, or, in a set still
+    /// held, is named by a record of its previous holder, which the replay has applied.
     pub fn seed_freed(
         &mut self,
         free: Bitmap,
@@ -231,9 +232,13 @@ impl Allocator {
         named: &Bitmap,
     ) {
         self.free = free;
-        self.held = held.into_iter().filter(|(_, ids)| !ids.is_empty()).collect();
+        self.held = held;
         self.promote(retained_from);
         self.free.andnot_inplace(named);
+        for (_, ids) in &mut self.held {
+            ids.andnot_inplace(named);
+        }
+        self.held.retain(|(_, ids)| !ids.is_empty());
     }
 
     /// The freed ids issued before the high-water.
@@ -360,10 +365,11 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
 }
 
 /// Every point entity `records` name: the rows an ingest allocated or joined, the entities its
-/// edits left, and every entity a change or an overlay snapshot names. A freed id among them was
-/// issued after the manifest that recorded it free, which [`Allocator::seed_freed`] takes out.
+/// edits left, every entity a change or an overlay snapshot names, and every member an artifact
+/// publication or growth names. [`Allocator::seed_freed`] takes these out of the freed ids.
 pub fn entities_named(records: &[WalRecord]) -> Bitmap {
     let mut named = Bitmap::new();
+    let mut sets: Vec<&Vec<u8>> = Vec::new();
     let mut add = |entity: EntityId| {
         if let Ok(entity) = u32::try_from(entity.raw()) {
             named.add(entity);
@@ -389,7 +395,24 @@ pub fn entities_named(records: &[WalRecord]) -> Bitmap {
                     add(entry.entity_id);
                 }
             }
+            WalRecord::ArtifactPublish { artifacts, .. } => {
+                for artifact in artifacts {
+                    sets.push(&artifact.members);
+                    sets.extend(artifact.contents.iter().map(|c| &c.generated_from));
+                }
+            }
+            WalRecord::ArtifactGrow { growth, .. } => {
+                for grown in growth {
+                    sets.extend([&grown.joining, &grown.leaving]);
+                }
+            }
             _ => {}
+        }
+    }
+    // A set that does not decode names nothing the replay could apply.
+    for bytes in sets.into_iter().filter(|bytes| !bytes.is_empty()) {
+        if let Some(members) = crate::membership::deserialise_members(bytes) {
+            named.or_inplace(&members);
         }
     }
     named
@@ -589,19 +612,28 @@ mod tests {
         alloc.seed_freed(
             Bitmap::of(&[3, 4, 9]),
             vec![
-                (12, Bitmap::of(&[20])),
+                (12, Bitmap::of(&[20, 21])),
                 (10, Bitmap::of(&[30, 31])),
                 (13, Bitmap::new()),
+                (14, Bitmap::of(&[40])),
             ],
             11,
-            &Bitmap::of(&[4, 31]),
+            &Bitmap::of(&[4, 21, 31, 40]),
         );
         assert_eq!(
             alloc.free().iter().collect::<Vec<_>>(),
             vec![3, 9, 30],
             "a set the log was reclaimed past is freed, and a named id is taken out of it too"
         );
-        assert_eq!(alloc.held().len(), 1, "an empty held set is dropped");
+        assert_eq!(
+            alloc
+                .held()
+                .iter()
+                .map(|(p, ids)| (*p, ids.iter().collect::<Vec<_>>()))
+                .collect::<Vec<_>>(),
+            vec![(12, vec![20])],
+            "a named id leaves a set still held, and an emptied or empty set is dropped"
+        );
     }
 
     #[test]

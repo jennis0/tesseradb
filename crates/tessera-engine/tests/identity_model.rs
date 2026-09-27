@@ -826,6 +826,12 @@ enum Op {
     Changes(Vec<(u16, u8)>),
     Flush,
     Fold,
+    /// A fold with a batch into view 0 or 1 sent while it is in flight and left unflushed, so the
+    /// log is kept from before the fold's publication.
+    PinnedFold {
+        view: u8,
+        rows: Vec<RowGen>,
+    },
     Restart,
     /// Send an earlier batch again, under its own batch id and body.
     Resend(u16),
@@ -873,6 +879,8 @@ fn op() -> impl Strategy<Value = Op> {
         12 => prop::collection::vec((any::<u16>(), 0u8..3), 1..4).prop_map(Op::Changes),
         12 => Just(Op::Flush),
         4 => Just(Op::Fold),
+        2 => (0u8..2, prop::collection::vec(row_gen(), 1..3))
+            .prop_map(|(view, rows)| Op::PinnedFold { view, rows }),
         8 => Just(Op::Restart),
         8 => any::<u16>().prop_map(Op::Resend),
         4 => any::<bool>().prop_map(Op::DoiUnique),
@@ -1418,7 +1426,9 @@ impl Run {
                 {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(e) => panic!("the viewport of {view} neither answered nor kept shedding: {e:?}"),
+                Err(e) => {
+                    panic!("the viewport of {view} neither answered nor kept shedding: {e:?}")
+                }
             }
         }
     }
@@ -1727,6 +1737,30 @@ impl Run {
                 // fold or during its flight.
                 self.flush();
             }
+            Op::PinnedFold { view, rows } => {
+                // Everything buffered is placed first, so the fold's tick places nothing.
+                self.flush();
+                let engine = self.engine();
+                let before = engine.write_executor_stats();
+                engine.set_fold_paused_for_test(true);
+                engine.request_fold();
+                wait_until("the fold holds", Duration::from_secs(60), || {
+                    engine.fold_is_holding_for_test()
+                });
+                self.ingest(*view, rows);
+                let engine = self.engine();
+                engine.set_fold_paused_for_test(false);
+                wait_until("the fold publishes", Duration::from_secs(60), || {
+                    let now = engine.write_executor_stats();
+                    assert_eq!(
+                        (now.fold_failures, now.fold_refusals),
+                        (before.fold_failures, before.fold_refusals),
+                        "the fold was refused or discarded: {:?}",
+                        now.last_fold_refusal
+                    );
+                    now.folds > before.folds
+                });
+            }
             Op::Restart => self.restart(),
             Op::Resend(which) => self.resend(*which),
             Op::DoiUnique(unique) => self.doi_unique(*unique),
@@ -1920,6 +1954,8 @@ fn edit_heavy_op() -> impl Strategy<Value = Op> {
         3 => prop::collection::vec((any::<u16>(), 0u8..3), 1..3).prop_map(Op::Changes),
         14 => Just(Op::Flush),
         8 => Just(Op::Fold),
+        4 => (0u8..2, prop::collection::vec(edit_row(), 1..3))
+            .prop_map(|(view, rows)| Op::PinnedFold { view, rows }),
         5 => Just(Op::Restart),
     ]
 }

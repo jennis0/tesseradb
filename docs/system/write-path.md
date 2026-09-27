@@ -32,9 +32,9 @@ stateDiagram-v2
 
 An item has an entity id: its position in entity space, the corpus-wide record of its identity
 and access label, shared by every view. An edit moves the item to a new entity id and keeps its
-`tessera_id` ([edits](#edits)). It also has one row per view, its position in that view's file layout, called row space; a
-row's position can move when files are rewritten, at a merge or a compaction, though never at a
-flush, which only appends.
+`tessera_id` ([edits](#edits)). It also has one row per view, its position in that view's file
+layout, called row space; a row's position can move when files are rewritten, at a merge or a
+compaction, though never at a flush, which only appends.
 
 The stages exist because of how the map is stored. Rows are kept sorted by position on disc, so
 that a screen tile is one contiguous run of rows, and a sorted file cannot take a new row in the
@@ -525,8 +525,11 @@ allocator issues free ids, lowest first, before any id from its high point.
 
 Every side-manifest records the free ids and the held-back ones, each set with the WAL position it
 waits for. A restart takes both from the newest manifest it serves, frees the sets whose position
-the log has passed, and removes every id a replayed record or the overlay names: such an id was
-issued after the manifest was written, and a later manifest records it taken. A partition serving
+the log has passed, and removes every id a replayed record or the overlay names from the free and
+the held sets alike. In a free set such an id was issued after the manifest was written; in a set
+still held it is named by a record of its previous holder, which the replay has applied, so it is
+never freed. The ids an artifact publication or growth names count, as do the rows, deletions and
+snapshots. A partition serving
 an older manifest after a step-down issues no freed id, since the manifest it serves can list an
 id issued since.
 

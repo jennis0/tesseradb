@@ -135,7 +135,8 @@ fn a_key_in_two_runs_keeps_the_newest_binding() {
 
     let out_dir = dir.path().join("coalesced");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let (rows, _) = coalesce_external_id_runs(&[old, new], 100, 202, &[], &out_dir).expect("coalesce runs");
+    let (rows, _) =
+        coalesce_external_id_runs(&[old, new], 100, 202, &[], &out_dir).expect("coalesce runs");
 
     let pairs = pairs_of(&out_dir.join("external-ids.arrow"));
     assert_eq!(rows, 5, "six bindings over five distinct keys");
