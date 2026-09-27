@@ -88,6 +88,8 @@ impl Shed {
 pub(crate) struct Producer<T> {
     opening: Option<oneshot::Sender<Result<T, ApiError>>>,
     tx: mpsc::Sender<Bytes>,
+    /// The runtime the body is polled on, which a send waits on while the channel is full.
+    runtime: tokio::runtime::Handle,
     state: Arc<AtomicU8>,
     stall: Duration,
     /// The whole-stream deadline, where this stream refuses frames for time.
@@ -110,7 +112,8 @@ pub(crate) struct Pending<T> {
 pub(crate) struct Opened(StreamBody);
 
 /// A stream whose sends are refused after `stall` of a full channel, and, with a `deadline`, after
-/// that long from [`Producer::start_deadline`]. `cancel_guard` moves into the body.
+/// that long from [`Producer::start_deadline`]. `cancel_guard` moves into the body. Called on the
+/// runtime the body is polled on.
 pub(crate) fn channel<T>(
     cancel_guard: CancelGuard,
     stall: Duration,
@@ -122,6 +125,7 @@ pub(crate) fn channel<T>(
     let producer = Producer {
         opening: Some(opening_tx),
         tx,
+        runtime: tokio::runtime::Handle::current(),
         state: Arc::clone(&state),
         stall,
         deadline,
@@ -187,31 +191,37 @@ impl<T> Producer<T> {
     }
 
     /// Sends one frame, blocking, under the per-send stall budget (a reader that stopped) and the
-    /// whole-stream deadline once started (a reader that drips). Refusal is [`SinkClosed`], which
-    /// the engine treats as cancellation.
+    /// whole-stream deadline once started (a reader that drips). A full channel is waited on until
+    /// the body takes a frame from it, so a frame goes out as soon as there is room. Refusal is
+    /// [`SinkClosed`], which the engine treats as cancellation. Called off the runtime's workers,
+    /// as the blocking thread the engine runs on is.
     pub(crate) fn send(&mut self, frame: Vec<u8>) -> SinkResult {
-        let send_started = Instant::now();
-        let mut item = Bytes::from(frame);
-        loop {
-            if let (Some(from), Some(deadline)) = (self.deadline_from, self.deadline) {
-                if from.elapsed() >= deadline {
-                    self.shed = Some(Shed::Deadline);
-                    return Err(SinkClosed);
-                }
-            }
-            match self.tx.try_send(item) {
-                Ok(()) => return Ok(()),
-                Err(mpsc::error::TrySendError::Full(back)) => {
-                    if send_started.elapsed() >= self.stall {
-                        self.shed = Some(Shed::Stall);
-                        return Err(SinkClosed);
-                    }
-                    item = back;
-                    // Poll with a short sleep: tokio's mpsc has no blocking send with a timeout,
-                    // and 5 ms is fine against a stall budget of seconds.
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => return Err(SinkClosed),
+        let deadline_left = match (self.deadline_from, self.deadline) {
+            (Some(from), Some(deadline)) => Some(deadline.saturating_sub(from.elapsed())),
+            _ => None,
+        };
+        if deadline_left.is_some_and(|left| left.is_zero()) {
+            self.shed = Some(Shed::Deadline);
+            return Err(SinkClosed);
+        }
+        let item = match self.tx.try_send(Bytes::from(frame)) {
+            Ok(()) => return Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(SinkClosed),
+            Err(mpsc::error::TrySendError::Full(item)) => item,
+        };
+        let wait = deadline_left.map_or(self.stall, |left| left.min(self.stall));
+        let sent = self
+            .runtime
+            .block_on(tokio::time::timeout(wait, self.tx.send(item)));
+        match sent {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(SinkClosed),
+            Err(_) => {
+                self.shed = Some(match deadline_left {
+                    Some(left) if left < self.stall => Shed::Deadline,
+                    _ => Shed::Stall,
+                });
+                Err(SinkClosed)
             }
         }
     }
