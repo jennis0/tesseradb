@@ -717,7 +717,9 @@ struct ScannedSegment<'a> {
 }
 
 /// Test every row of `domain` against `column`'s hot values — the render-column scan, parallel
-/// over the domain, chunked exactly as the per-tile crossing is. A segment that holds the column
+/// over the domain, chunked exactly as the per-tile crossing is, and on the calling thread where
+/// that is one chunk. `domain` ascends, which the walk through each chunk's segments relies on.
+/// A segment that holds the column
 /// at a type other than a fixed width is a malformed bundle, refused. A segment whose schema does
 /// not hold the column matches nothing, answered from the schema, never from a blob read.
 fn scan_rows(
@@ -1288,8 +1290,10 @@ pub(crate) fn filter_refusal(e: crate::filter::FilterError) -> EngineError {
 
 /// Test every row of `domain` against `entities`, giving the rows that matched. `None` where the
 /// row space declined to invert a row. Parallel over the domain, on the engine's own pool, so a
-/// serial walk here cannot move the crossover against the route it competes with. Chunks are cut
-/// by row count, so neither one huge range nor a thousand slivers defeats the split.
+/// serial walk here cannot move the crossover against the route it competes with; a domain of no
+/// more than one chunk, 4,096 rows, is walked on the calling thread. Chunks are cut by row count
+/// and gather consecutive ranges, so neither one huge range nor a thousand slivers defeats the
+/// split.
 fn per_tile_crossing(
     row_space: &tessera_store::permutation::RowSpace,
     entities: &croaring::Bitmap,

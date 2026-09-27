@@ -3260,3 +3260,48 @@ fn a_driven_read_sends_what_the_walk_sends_through_changes_mid_read() {
         assert_same(&turns, &walked, &format!("{order:?}, taking turns"));
     }
 }
+
+/// **A filter on a rendered field is exact where the rows it tests span several segments and
+/// several chunks of the scan**: over more rows than one chunk holds, in a view of a built
+/// segment and three flushed ones, so a chunk gathers ranges on both sides of a segment boundary.
+#[test]
+fn a_rendered_filter_is_exact_across_segments_and_chunks() {
+    let mut fx = Fx::sized(BIG);
+    fx.engine.set_merge_for_test(false);
+    for batch in 0..3u64 {
+        let start = BIG + batch * 400;
+        fx.ingest(&format!("b{batch}"), &(start..start + 400).collect::<Vec<_>>());
+        publish_buffered(&fx.engine);
+    }
+    let segments = fx.engine.generation().bundle.partitions["default"].views["s0"]
+        .segments
+        .len();
+    assert!(segments >= 4, "the view holds {segments} segments");
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let hot = FilterExpr::Leaf {
+        column: "heat".into(),
+        operand: FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Float(2.0),
+                inclusive: true,
+            }),
+            hi: None,
+        },
+    };
+    let expected: Vec<u64> = (0..BIG + 1200)
+        .filter(|&s| heat_of(s).is_some_and(|v| v >= 2.0))
+        .collect();
+    let (_, matched) = viewport_counts(&fx.engine, &session, "s0", Some(hot.clone()));
+    assert_eq!(matched, expected.len() as u64);
+    let fields = names(&["heat"]);
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let mut base = request("s0", &fields);
+        base.filter = Some(hot.clone());
+        base.order = Some(order);
+        let want = match order {
+            RecordsOrder::Map => fx.map_order(expected.iter().copied(), "s0"),
+            RecordsOrder::Stored => fx.stored_order(expected.iter().copied()),
+        };
+        assert_eq!(read_all(&fx.engine, &session, &base).ids(), fx.tids(&want), "{order:?}");
+    }
+}

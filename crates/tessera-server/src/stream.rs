@@ -88,8 +88,9 @@ impl Shed {
 pub(crate) struct Producer<T> {
     opening: Option<oneshot::Sender<Result<T, ApiError>>>,
     tx: mpsc::Sender<Bytes>,
-    /// The runtime the body is polled on, which a send waits on while the channel is full.
-    runtime: tokio::runtime::Handle,
+    /// Signalled by the body each time it takes a frame, which a send waits on while the channel
+    /// is full.
+    room: Arc<Room>,
     state: Arc<AtomicU8>,
     stall: Duration,
     /// The whole-stream deadline, where this stream refuses frames for time.
@@ -112,8 +113,7 @@ pub(crate) struct Pending<T> {
 pub(crate) struct Opened(StreamBody);
 
 /// A stream whose sends are refused after `stall` of a full channel, and, with a `deadline`, after
-/// that long from [`Producer::start_deadline`]. `cancel_guard` moves into the body. Called on the
-/// runtime the body is polled on.
+/// that long from [`Producer::start_deadline`]. `cancel_guard` moves into the body.
 pub(crate) fn channel<T>(
     cancel_guard: CancelGuard,
     stall: Duration,
@@ -122,10 +122,11 @@ pub(crate) fn channel<T>(
     let (opening_tx, opening_rx) = oneshot::channel();
     let (tx, rx) = mpsc::channel::<Bytes>(CHANNEL_FRAMES);
     let state = Arc::new(AtomicU8::new(RUNNING));
+    let room = Arc::new(Room::default());
     let producer = Producer {
         opening: Some(opening_tx),
         tx,
-        runtime: tokio::runtime::Handle::current(),
+        room: Arc::clone(&room),
         state: Arc::clone(&state),
         stall,
         deadline,
@@ -138,6 +139,7 @@ pub(crate) fn channel<T>(
             first: None,
             rx,
             state,
+            room,
             cancel_guard,
             done: false,
         },
@@ -192,36 +194,37 @@ impl<T> Producer<T> {
 
     /// Sends one frame, blocking, under the per-send stall budget (a reader that stopped) and the
     /// whole-stream deadline once started (a reader that drips). A full channel is waited on until
-    /// the body takes a frame from it, so a frame goes out as soon as there is room. Refusal is
-    /// [`SinkClosed`], which the engine treats as cancellation. Called off the runtime's workers,
-    /// as the blocking thread the engine runs on is.
+    /// the body takes a frame from it, so a frame goes out as soon as there is room; the wait
+    /// needs no runtime, so it ends within its budget whatever state the runtime is in. Refusal is
+    /// [`SinkClosed`], which the engine treats as cancellation.
     pub(crate) fn send(&mut self, frame: Vec<u8>) -> SinkResult {
-        let deadline_left = match (self.deadline_from, self.deadline) {
-            (Some(from), Some(deadline)) => Some(deadline.saturating_sub(from.elapsed())),
-            _ => None,
-        };
-        if deadline_left.is_some_and(|left| left.is_zero()) {
-            self.shed = Some(Shed::Deadline);
-            return Err(SinkClosed);
-        }
-        let item = match self.tx.try_send(Bytes::from(frame)) {
-            Ok(()) => return Ok(()),
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(SinkClosed),
-            Err(mpsc::error::TrySendError::Full(item)) => item,
-        };
-        let wait = deadline_left.map_or(self.stall, |left| left.min(self.stall));
-        let sent = self
-            .runtime
-            .block_on(tokio::time::timeout(wait, self.tx.send(item)));
-        match sent {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => Err(SinkClosed),
-            Err(_) => {
-                self.shed = Some(match deadline_left {
-                    Some(left) if left < self.stall => Shed::Deadline,
-                    _ => Shed::Stall,
-                });
-                Err(SinkClosed)
+        let send_started = Instant::now();
+        let mut item = Bytes::from(frame);
+        loop {
+            let deadline_left = match (self.deadline_from, self.deadline) {
+                (Some(from), Some(deadline)) => Some(deadline.saturating_sub(from.elapsed())),
+                _ => None,
+            };
+            if deadline_left.is_some_and(|left| left.is_zero()) {
+                self.shed = Some(Shed::Deadline);
+                return Err(SinkClosed);
+            }
+            // Read before the attempt, so a frame the body takes after it is not missed.
+            let taken = *self.room.taken.lock();
+            match self.tx.try_send(item) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Closed(_)) => return Err(SinkClosed),
+                Err(mpsc::error::TrySendError::Full(back)) => item = back,
+            }
+            let stall_left = self.stall.saturating_sub(send_started.elapsed());
+            if stall_left.is_zero() {
+                self.shed = Some(Shed::Stall);
+                return Err(SinkClosed);
+            }
+            let wait = deadline_left.map_or(stall_left, |left| left.min(stall_left));
+            let mut held = self.room.taken.lock();
+            if *held == taken {
+                self.room.took.wait_for(&mut held, wait);
             }
         }
     }
@@ -314,9 +317,32 @@ struct StreamBody {
     first: Option<Bytes>,
     rx: mpsc::Receiver<Bytes>,
     state: Arc<AtomicU8>,
+    room: Arc<Room>,
     cancel_guard: CancelGuard,
     /// Once the end is yielded, every later poll is `Ready(None)`, never a second error.
     done: bool,
+}
+
+/// How many frames the body has taken, which a producer waiting on a full channel waits to see
+/// move. A body that is dropped counts as taking one, so a waiting producer finds the channel
+/// closed at once.
+#[derive(Default)]
+struct Room {
+    taken: parking_lot::Mutex<u64>,
+    took: parking_lot::Condvar,
+}
+
+impl Room {
+    fn took_one(&self) {
+        *self.taken.lock() += 1;
+        self.took.notify_all();
+    }
+}
+
+impl Drop for StreamBody {
+    fn drop(&mut self) {
+        self.room.took_one();
+    }
 }
 
 impl futures_core::Stream for StreamBody {
@@ -331,7 +357,10 @@ impl futures_core::Stream for StreamBody {
             return Poll::Ready(Some(Ok(first)));
         }
         match this.rx.poll_recv(cx) {
-            Poll::Ready(Some(frame)) => Poll::Ready(Some(Ok(frame))),
+            Poll::Ready(Some(frame)) => {
+                this.room.took_one();
+                Poll::Ready(Some(Ok(frame)))
+            }
             Poll::Ready(None) => {
                 this.done = true;
                 if this.state.load(Ordering::SeqCst) == COMPLETE {
