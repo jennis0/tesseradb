@@ -542,6 +542,69 @@ fn a_log_the_growth_holds_replays_to_what_was_served() {
     );
 }
 
+/// **A suppression accepted while a growth holds the log is still in force after a restart.** The
+/// log is replayed a record at a time, and the suppression's record sits among flushed and
+/// rotated batches: a restricted viewer is still not served the item, and neither the item nor
+/// its artifact counts it.
+#[test]
+fn a_suppression_accepted_while_a_growth_holds_the_log_holds_after_a_restart() {
+    let fx = fixture();
+    let hidden = (0..300u64)
+        .find(|&s| subset_sees(s))
+        .expect("the fixture gives the subset principal something to see");
+    let restricted = |engine: &Engine| {
+        let session = engine.authorise(&subset_credential()).unwrap();
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 4, [0.0, 0.0, 1000.0, 1000.0], 2 * N_ITEMS as usize),
+            )
+            .expect("a viewport over the whole map")
+            .tiles
+            .iter()
+            .map(|t| t.visible)
+            .sum::<u64>()
+    };
+    let before = {
+        let engine = fx.open();
+        publish(&fx, &engine, 0..300);
+        grow(&fx, &engine, 300..310);
+        let seen = restricted(&engine);
+        engine
+            .accept_change(fx.members(hidden..hidden + 1)[0], ChangeOp::Suppress)
+            .unwrap();
+        for batch in 0..3 {
+            ingest(&engine, &format!("after-{batch}"));
+            publish_buffered(&engine);
+            rotate(&engine);
+        }
+        tick(&engine);
+        assert_eq!(
+            restricted(&engine),
+            seen - 1,
+            "the suppression hides the item"
+        );
+        assert_eq!(
+            count(&engine),
+            309,
+            "and takes it out of its artifact's count"
+        );
+        seen - 1
+    };
+
+    let engine = fx.open();
+    assert_eq!(
+        restricted(&engine),
+        before,
+        "the restart still hides the suppressed item from the restricted viewer"
+    );
+    assert_eq!(
+        count(&engine),
+        309,
+        "and its artifact still does not count it"
+    );
+}
+
 /// **The pin the case above proves, as the number an operator reads.**
 ///
 /// A log that cannot rotate and a log that is merely busy are the same size, and until the gauge

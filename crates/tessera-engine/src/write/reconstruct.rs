@@ -74,7 +74,8 @@ impl WritePath {
 
         // Two walks over the log, each holding one record at a time. The first rebuilds what the
         // second is read against: the declarations, the registry an extent's ordinals resolve
-        // through, and the roster. The second applies the records that name entities.
+        // through, and the roster. It leaves the ingest batches unread. The second applies the
+        // vocabulary mints, the memberships and every record that names an entity.
 
         // Vocabularies declared while the service ran; the second walk applies the mints that name
         // them. A record restating a vocabulary the manifests carry applies only its values; one
@@ -103,13 +104,13 @@ impl WritePath {
         let mut attributes = seed.attributes;
         let mut served = seed.manifest.clone();
         let mut unique_events: Vec<crate::write::UniqueEvent> = Vec::new();
-        // A drop can promote a buffered join row to its item's own row, taking the label of the
-        // own row it discards. Up to the last drop every row is buffered as the log has it, so
-        // that promotion sees what it saw before; past it, a row that already has geometry is
-        // never buffered at all.
+        // Up to the last view drop every row is buffered, flushed or not, because a drop's
+        // promotion of a join row to its item's own row reads the buffer. Past it, a row that
+        // already has geometry is not buffered. A drop late in a held log therefore buffers most
+        // of the log's rows until the walk ends.
         let mut last_view_drop: Option<u64> = None;
 
-        for item in wal.records() {
+        for item in wal.records_but_ingest() {
             let (position, record) = item.map_err(EngineError::Wal)?;
             // A record whose meaning is not built refuses the open: a log carrying one was written
             // by a binary this one is not, and replaying past it would serve state that omits what
@@ -372,8 +373,8 @@ impl WritePath {
             artifacts.seed_level_version(&version.layer, version.level, version.version);
         }
 
-        // Same ordering rule again, with one exception: `Unsuppress` needs the later record to
-        // win, so seeding first and replaying on top reverts an acked unsuppress otherwise.
+        // Same ordering rule again: the overlay is seeded and the log replayed on top, because
+        // seeding after replay would revert an acked unsuppress the newest manifest predates.
         let mut replay = Replay::new(dict, initial_deny.clone(), seed.view_ids_of_key);
         // The entity-space marks the records imply. The row-less mark takes the minimum where the
         // point mark takes the maximum: the two regions grow towards each other, so "furthest
@@ -382,7 +383,8 @@ impl WritePath {
         let mut wal_low_water = tessera_lifecycle::alloc::ROWLESS_CEILING;
         // Every point entity a kept record names.
         let mut named = croaring::Bitmap::new();
-        // Each edit's `(number, new entity)`, kept where the entity ends buffered or deleted.
+        // Each edit's `(number, new entity)` whose first row no flush has written, and so whose
+        // pair no run holds; kept where the entity ends buffered or deleted.
         let mut edits: Vec<(EntityId, EntityId)> = Vec::new();
         // Every batch-carrying record, by the rule both accept sites use
         // ([`tessera_lifecycle::batch_identity`]).
@@ -419,8 +421,9 @@ impl WritePath {
             named.or_inplace(&tessera_lifecycle::alloc::entities_named([&record]));
             if let WalRecord::IngestBatch { edits: batch, .. } = &record {
                 edits.extend(batch.iter().filter_map(|edit| {
-                    let entity = edit.rows.first()?.entity_id;
-                    Some((edit.number, entity))
+                    let first = edit.rows.first()?;
+                    (!has_row(first.entity_id, &first.view))
+                        .then_some((edit.number, first.entity_id))
                 }));
             }
             if let Some(identity) = tessera_lifecycle::batch_identity(&record) {

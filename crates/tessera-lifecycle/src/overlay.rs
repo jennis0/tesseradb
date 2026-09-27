@@ -390,16 +390,16 @@ impl<'a> Replay<'a> {
             // lives. The rows here already carry their codes, so the buffer needs no binding to
             // read one.
             WalRecord::VocabularyMint { .. } => {}
-            // **The registry is rebuilt by the caller, and only the deny lane is this function's
+            // **The registry is rebuilt by the caller, and only the deny lane is this replay's
             // business.** A layer's own entity is an ordinary entity as far as the overlay is
             // concerned: a suppression against it arrives as a `ChangeBatch` and is applied by
             // the arm above, with no special case, which is the whole reason a layer takes an
             // entity at all. What these records carry beyond that — the declaration and the
-            // reserved runs — belongs to the registry the write path reconstructs, in the same
-            // second pass as the vocabulary mints and for the same reason.
+            // reserved runs — belongs to the registry, which the write path rebuilds in its own
+            // walk of the log.
             // An artifact's own entity is an ordinary entity here too, on the same argument: its
             // suppression arrives as a `ChangeBatch`. The membership the record carries belongs
-            // to the artifact store, rebuilt in that same second pass.
+            // to the artifact store, which the write path also rebuilds.
             // **A drop discards the rows the buffer held for the view, here as on the live
             // path** (`views.md` §3.4, `Executor::publish_roster`). They name a coordinate system
             // that no longer exists, so nothing will ever give them geometry — and since a
@@ -424,8 +424,7 @@ impl<'a> Replay<'a> {
                     self.overlay.apply(*entity, ChangeOp::Delete);
                 }
             }
-            // A view create is the roster's, rebuilt by the caller in that same second pass, and
-            // names no entity.
+            // A view create is the roster's, which the write path rebuilds, and names no entity.
             WalRecord::LayerCreate { .. }
             | WalRecord::LayerDrop { .. }
             | WalRecord::ArtifactPublish { .. }
