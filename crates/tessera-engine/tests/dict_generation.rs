@@ -237,7 +237,6 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
     for i in 0..8u32 {
         let external = format!("novel-{i}");
         let row = UnallocatedRow {
-            join_only: false,
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
@@ -249,7 +248,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], external, [0u8; 32])
+            .ingest_rows(vec![row], external, [0u8; 32])
             .expect("an ingest under a novel descriptor is accepted");
     }
     engine.request_flush();
@@ -346,7 +345,6 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
     for i in 0..8u32 {
         let external = format!("refresh-novel-{i}");
         let row = UnallocatedRow {
-            join_only: false,
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
@@ -358,7 +356,7 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], external, [0u8; 32])
+            .ingest_rows(vec![row], external, [0u8; 32])
             .expect("an ingest under a novel descriptor is accepted");
     }
     engine.request_flush();

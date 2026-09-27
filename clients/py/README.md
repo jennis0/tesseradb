@@ -141,9 +141,9 @@ The one place a name is matched is an attribute's value column: the attribute wa
 column of its name in the frame inserted into the **allocation view** fills it, as SQL's `INSERT BY
 NAME` does. At the first commit, attribute-named columns on any other view's insert are ignored,
 since the build reads an attribute from one file. After it, every view's points carry the declared
-columns their frame holds, a group's scoped ones included, and a row that creates an item must
-carry every declared column, with nulls (`pa.nulls(n)`) where it has no value; the SDK adds none
-itself, and the server's refusal names a column left out. `columns={attribute: column}` names
+columns their frame holds, a group's scoped ones included. A column left out of a page leaves the
+value as it is: a new item has none there, and an item the row names keeps what it holds. A null
+clears a value. The SDK adds no column itself. `columns={attribute: column}` names
 one explicitly, on the allocation view's insert and, after the first commit, on any view's. The
 first commit reads each attribute from one table, the allocation view's frame or the attribute's
 own insert, and that table holds a row for every item, with nulls where it has no value; the build
@@ -170,7 +170,7 @@ insert it as a frame.
 `id=` names the column that names the rows. Its bytes are that row's external id at every door: a
 string's UTF-8, binary as it stands, and an integer's eight little-endian bytes, so a negative id
 and its two's-complement unsigned value are the same id. That is what the build reads and what
-`/control/ingest`, `/control/values` and `/control/changes` take. The declaration is what says
+`/control/ingest` and `/control/changes` take. The declaration is what says
 where identity is: a view's `fields.entity_id`, an attribute's `entity_id_field`, a members
 table's `fields.entity`. The SDK rewrites no column to say it.
 
@@ -468,15 +468,14 @@ no live token is accepted without comment.
 db.status()                                    # the watermarks, queues and pagination units
 db.compact()                                   # ask for the fold that removes a deletion's rows
 db.drop_layer("clusters/kmeans")               # the inverse of declare_layer
-db.drop_view("slices", "a", delete_dangling=False)   # the inverse of create_view
+db.drop_view("slices", "a")                    # the inverse of create_view
 ```
 
 `remove()` puts a deletion in the overlay, and the compaction that removes its rows is what ends
 it; `compact()` is how one is asked for, and it is accepted rather than finished when the call
 returns. `drop_layer()` tombstones the name rather than freeing it, so a later declaration under
-it is refused and no stale reference reaches a different layer. `drop_view()` deletes no entity;
-`delete_dangling=True` submits the entities holding a row in no other view as ordinary
-deletions, and the answer's `deleted` says how many.
+it is refused and no stale reference reaches a different layer. `drop_view()` deletes the items
+it leaves in no view, as `remove()` deletes one, and the answer's `deleted` says how many.
 
 ## A deployment somebody else runs
 

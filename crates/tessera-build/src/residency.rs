@@ -72,8 +72,8 @@
 //!
 //! They are still modelled, and still printed, as **mapped** terms: an operator whose disk is the
 //! constraint has the same right to see the number as one whose memory is. What changed is that
-//! [`Residency::total`] — the figure `--memory-budget` is compared against — leaves them out. A
-//! model that kept charging them would refuse builds that now fit, which is the failure mode of
+//! [`Residency::memory_peak`] — the figure `--memory-budget` is compared against — leaves them out.
+//! A model that kept charging them would refuse builds that now fit, which is the failure mode of
 //! carrying a cost model past the thing it modelled.
 //!
 //! **[`disk`] is the other half, and the disk pre-flight is its reader.** It carries every mapped
@@ -256,8 +256,8 @@ pub(crate) struct Term {
     /// A file under `.build-tmp/` or in the bundle, rather than anonymous memory — reported, but
     /// not charged against the memory budget.
     pub mapped: bool,
-    /// The disk phases these bytes stand through. Meaningless for an anonymous term, which the
-    /// memory model reads as one window.
+    /// The phases these bytes stand through: on the disk for a mapped term, in memory for an
+    /// anonymous one.
     pub phases: Phases,
     /// **A constant of the code rather than a rate over the corpus.** A partition's writer buffers
     /// and the bucket the key type bounds, the Morton histogram, the allocator slack: these are the
@@ -266,21 +266,69 @@ pub(crate) struct Term {
     pub constant: bool,
 }
 
-/// The entity-order residency, term by term.
+/// What the plan sizes to the memory its stage has left: the three stages that hold as much as
+/// they are given rather than a fixed amount.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Sizing {
+    /// Member entries in one publication batch.
+    pub publication_batch: u64,
+    /// Bytes the unique index spill sorts in memory; zero where no column is unique.
+    pub unique_spill: u64,
+    /// Workers the term-image pass runs across.
+    pub term_image_workers: u64,
+}
+
+/// The entity-order residency, term by term, and the sizes it was fitted at.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Residency {
     pub terms: Vec<Term>,
+    pub sizing: Sizing,
 }
 
 impl Residency {
-    /// What the build asks the *machine* for: the anonymous terms only. A mapped term is page cache
+    /// Every anonymous term, summed as though all were held at once. A mapped term is page cache
     /// and is reported rather than charged (see the module docs).
+    #[cfg(test)]
     pub fn total(&self) -> u64 {
         self.terms
             .iter()
             .filter(|t| !t.mapped)
             .map(|t| t.bytes)
             .sum()
+    }
+
+    /// What the build asks the *machine* for in one phase: the anonymous terms standing through it.
+    pub fn memory_at(&self, phase: Phase) -> u64 {
+        self.terms
+            .iter()
+            .filter(|t| !t.mapped && t.phases.holds(phase))
+            .map(|t| t.bytes)
+            .sum()
+    }
+
+    /// The phase that asks the machine for most, and what it comes to: the figure
+    /// `--memory-budget` is compared against.
+    pub fn memory_peak(&self) -> (Phase, u64) {
+        Phase::ALL
+            .iter()
+            .map(|&phase| (phase, self.memory_at(phase)))
+            .max_by_key(|&(_, bytes)| bytes)
+            .expect("Phase::ALL is not empty")
+    }
+
+    /// One phase's anonymous terms as one line each, largest first — the form a memory refusal
+    /// prints.
+    pub fn describe_memory(&self, phase: Phase) -> String {
+        let mut terms: Vec<&Term> = self
+            .terms
+            .iter()
+            .filter(|t| !t.mapped && t.phases.holds(phase) && t.bytes > 0)
+            .collect();
+        terms.sort_by_key(|t| std::cmp::Reverse(t.bytes));
+        terms
+            .iter()
+            .map(|t| format!("\n  {:>9} MiB  {}", t.bytes >> 20, t.what))
+            .collect()
     }
 
     /// What the build asks the **disk** for in one phase: the mapped terms standing through it.
@@ -320,6 +368,7 @@ impl Residency {
     /// within each half**, because the operator's next move is to drop or narrow whatever is at the
     /// top of what they are being refused for; the mapped terms follow, marked, because they are
     /// the disk the same build wants.
+    #[cfg(test)]
     pub fn describe(&self) -> String {
         let mut terms = self.terms.clone();
         terms.sort_by_key(|t| (t.mapped, std::cmp::Reverse(t.bytes)));
@@ -395,28 +444,27 @@ fn carries_characters(ty: ScalarType) -> bool {
 
 /// What a spilled column's extents cost against the column's Parquet payload: **one half**.
 ///
-/// The extents are the same 256 KiB zstd blocks the base blob is cut into, and the base blob at
-/// the 10⁸ PaperSeek rung measured 44.77 GB against 128 GiB of prose — 2.9×
-/// (`probes/2026-09-04-rung-4-whole/breakdown.txt`). Half is charged rather than a 2.9th because
-/// that ratio is one corpus's prose at one operating point. A keyword column compresses harder
-/// still where its values repeat: GBIF's `scientificname` spilled 1.63 GB of extents over 3.93 GB
-/// of characters, 0.42×, and its blocks alone 0.27× (measured,
-/// `probes/2026-09-10-blob-resident-strings/`).
+/// The extents are the same zstd blocks the base blob is cut into. Written through the record
+/// writer at 32 KiB blocks, one value a row as an extent holds it, the blocks come to 0.413 of the
+/// characters on 10⁶ PaperSeek abstracts, 0.351 on the first 2×10⁷ of GBIF's `scientificname` and
+/// 0.507 on GeoNames' names (0.374, 0.252 and 0.479 at 256 KiB). At 256 KiB, the base blob at the
+/// 10⁸ PaperSeek rung measured 44.77 GB against 128 GiB of prose, 2.9×
+/// (`probes/2026-09-04-rung-4-whole/breakdown.txt`), and GBIF's `scientificname` spilled 1.63 GB
+/// of extents over 3.93 GB of characters (`probes/2026-09-10-blob-resident-strings/`).
 ///
 /// ⊘ **On the characters alone this is an estimate and not a ceiling.** A compression ratio has no
-/// lower bound at one half. Measured at 0.251 on GBIF's `scientificname` and 0.345 on PaperSeek
-/// prose, but at **0.567 to 0.750 on high-entropy short values** — random hex, base64 and
-/// lowercase at 12 to 32 characters, zstd level 3 over 256 KiB blocks — and at 0.634 on GeoNames'
-/// names. What bounds the error is that zstd does not expand incompressible input, so the blocks
-/// are at most the characters and half of them reads at most 2× low.
+/// lower bound at one half: at 32 KiB, random hex, base64 and lowercase values of 12 to 32
+/// characters come to 0.557 to 0.786 of their characters. What bounds the error is that zstd does
+/// not expand incompressible input, so the blocks are at most the characters and half of them
+/// reads at most 2× low.
 ///
 /// **What closes most of that gap is the framing charged beside them**
-/// ([`record_framing_bytes`]): a short value's row costs 15 bytes of frame around 8 to 13 of
-/// characters, so half of the two together is above every measured shape but one. GeoNames' 13.5
-/// characters a name compress to 8.6 bytes and are charged 14.2; 12 random lowercase characters
-/// compress to 7.2 and are charged 13.5. The one shape still under-read is a value of 30
-/// characters or more that does not compress at all — 32 random base64 characters are 24 bytes
-/// against a charge of 23.5, 2% low.
+/// ([`extent_framing_bytes`]): 10 bytes a row around the characters, so half of the two together
+/// is above every measured shape but one. At 32 KiB, GeoNames' 13.5 characters a name take 6.8
+/// bytes a row and are charged 11.7; 12 random lowercase characters take 8.1 and are charged 11.0.
+/// The one shape still under-read is a value of 30 characters or more that does not compress at
+/// all: 32 random base64 characters take 24.8 bytes against a charge of 21.0, 15% low, the same at
+/// either block size.
 const EXTENT_SHARE: u64 = 2;
 
 /// What one record-blob row costs beyond its characters: **3 bytes a row and 3 a field**, plus a
@@ -444,6 +492,33 @@ fn record_framing_bytes(schema: &crate::config::Schema, rows: u64) -> u64 {
         return 0;
     }
     rows.saturating_mul(RECORD_ROW_BYTES + fields)
+}
+
+/// What the record blob's writer holds a block while it writes: 32 B in the vector it seals blocks
+/// into, which may stand at twice its length while it grows, and 28 B in the Arrow columns it
+/// copies them into at the end, with the vector still held (`tessera_filter_write::record`).
+const BLOB_DIRECTORY_BYTES_PER_BLOCK: u64 = 2 * 32 + 28;
+
+/// The uncompressed rows the record blob is cut into blocks from: every blob-resident column's
+/// characters or fixed-width values, and the framing around them ([`RECORD_ROW_BYTES`],
+/// [`RECORD_FIELD_BYTES`], [`RECORD_UTF8_FIELD_BYTES`]), as though every entity held every field.
+/// A blob-resident column is the one that stands through the blob phase with no render lane, which
+/// is how [`model_inputs`] sets its phases.
+fn blob_row_bytes(n: u64, columns: &[ColumnCost]) -> u64 {
+    let fields: u64 = columns
+        .iter()
+        .filter(|c| !c.render && c.phases.holds(Phase::Blob))
+        .map(|c| match carries_characters(c.ty) {
+            true => c
+                .payload_bytes
+                .saturating_add(n.saturating_mul(RECORD_UTF8_FIELD_BYTES)),
+            false => n.saturating_mul(RECORD_FIELD_BYTES + fixed_width(c.ty)),
+        })
+        .fold(0u64, u64::saturating_add);
+    match fields {
+        0 => 0,
+        _ => fields.saturating_add(n.saturating_mul(RECORD_ROW_BYTES)),
+    }
 }
 
 /// What a record-blob row costs the block around its fields: the entity gap the block header
@@ -761,9 +836,8 @@ pub(crate) fn entity_order_residency(
     level_entries: u64,
     layer_entries: u64,
     memory_budget: u64,
+    supplied: Option<&Term>,
 ) -> Residency {
-    let batch_entries = level_entries.min(crate::layers::publication_batch_entries(memory_budget));
-    let publication_bytes = batch_entries.saturating_mul(BYTES_PER_MEMBER_ENTRY);
     let mut terms = vec![
         // **A file under `.build-tmp/` where there is one at all**, and so charged to the disk
         // rather than to memory. The ids are read sequentially by every pass but one — the join's
@@ -801,16 +875,6 @@ pub(crate) fn entity_order_residency(
             constant: false,
         },
     ];
-    // The unique indexes are sorted one column at a time, each through a spill of this size.
-    if columns.iter().any(|column| column.unique) {
-        terms.push(Term {
-            what: "the unique index spill, one column at a time".into(),
-            bytes: crate::unique_index::spill_budget(memory_budget) as u64,
-            mapped: false,
-            phases: Phases::INDEX,
-            constant: true,
-        });
-    }
     for (index, column) in columns.iter().enumerate() {
         let width = fixed_width(column.ty);
         let presence = n.div_ceil(8);
@@ -958,18 +1022,27 @@ pub(crate) fn entity_order_residency(
             constant: false,
         });
     }
-    if member_entries > 0 {
+    // **The record blob's block directory, on the heap until the blob is finished.** The writer
+    // keeps each sealed block's offsets, lengths and ranks, and copies them into the Arrow columns
+    // it writes only at the end ([`BLOB_DIRECTORY_BYTES_PER_BLOCK`]). A block is
+    // [`tessera_filter::RECORD_BLOCK_TARGET`] of rows, so this rises with the blob and not with a
+    // constant: about 390 MB over 128 GiB of prose.
+    let blob_row_bytes = blob_row_bytes(n, columns);
+    if blob_row_bytes > 0 {
+        let blocks = blob_row_bytes.div_ceil(tessera_filter::RECORD_BLOCK_TARGET as u64);
         terms.push(Term {
             what: format!(
-                "{batch_entries} member entr(ies) in one publication batch at \
-                 {BYTES_PER_MEMBER_ENTRY} B — the publication's own Roaring, while the batch it \
-                 is publishing is in flight (the largest level holds {level_entries})"
+                "the record blob's block directory, {BLOB_DIRECTORY_BYTES_PER_BLOCK} B a block \
+                 over {blocks} block(s) of the {} MiB of rows it is written from",
+                blob_row_bytes >> 20
             ),
-            bytes: publication_bytes,
+            bytes: blocks.saturating_mul(BLOB_DIRECTORY_BYTES_PER_BLOCK),
             mapped: false,
-            phases: Phases::JOIN,
+            phases: Phases::BLOB,
             constant: false,
         });
+    }
+    if member_entries > 0 {
         terms.push(Term {
             what: format!(
                 "the published memberships the store reads back through the packed extent, at \
@@ -1164,6 +1237,91 @@ pub(crate) fn entity_order_residency(
         phases: Phases::ASSEMBLE,
         constant: true,
     });
+    terms.push(Term {
+        what: "slack for decode buffers, stage scratch and the allocator".into(),
+        bytes: SLACK,
+        mapped: false,
+        phases: Phases::SPILL.onwards(),
+        constant: true,
+    });
+    // **The supplied keys' arena**, charged before the stages are sized so they leave room for it.
+    terms.extend(supplied.cloned());
+    fit(
+        Residency {
+            terms,
+            sizing: Sizing::default(),
+        },
+        n,
+        columns.iter().any(|column| column.unique),
+        member_entries,
+        level_entries,
+        memory_budget,
+    )
+}
+
+/// **The three stages that take what they are given, sized to what their phase has left.** Each is
+/// charged to one phase, beside the fixed terms of that phase only: the publication in the join,
+/// the unique index spill in the index phase, the term images in the assembly.
+///
+/// - The publication batch is the join's room at [`BYTES_PER_MEMBER_ENTRY`], up to
+///   [`crate::layers::PUBLICATION_BATCH_MAX_ENTRIES`] and never more than the largest level.
+/// - The unique spill is the index phase's room, up to [`crate::unique_index::spill_budget`]'s
+///   share of the budget.
+/// - The term images run on as many workers as the assembly's room holds, one at least and
+///   [`crate::term_images_pass::derive_threads`] at most.
+///
+/// A stage whose smallest size does not fit is charged that size, so the phase comes out over the
+/// budget and the build is refused with it.
+fn fit(
+    mut residency: Residency,
+    n: u64,
+    unique: bool,
+    member_entries: u64,
+    level_entries: u64,
+    memory_budget: u64,
+) -> Residency {
+    let room = |residency: &Residency, phase: Phase| {
+        memory_budget.saturating_sub(residency.memory_at(phase))
+    };
+
+    // Sized even where no member table is declared: a layer's inline artifacts are published in
+    // batches too, and their entries are not known here.
+    let publication_batch = match level_entries {
+        0 => crate::layers::publication_batch_entries(room(&residency, Phase::Join)),
+        _ => level_entries
+            .min(crate::layers::publication_batch_entries(room(&residency, Phase::Join))),
+    };
+    if member_entries > 0 {
+        residency.terms.push(Term {
+            what: format!(
+                "{publication_batch} member entr(ies) in one publication batch at \
+                 {BYTES_PER_MEMBER_ENTRY} B — the publication's own Roaring, while the batch it \
+                 is publishing is in flight (the largest level holds {level_entries})"
+            ),
+            bytes: publication_batch.saturating_mul(BYTES_PER_MEMBER_ENTRY),
+            mapped: false,
+            phases: Phases::JOIN,
+            // A rate over the largest level until the batch's own bound binds, and flat above it.
+            constant: publication_batch < level_entries,
+        });
+    }
+
+    // The unique indexes are sorted one column at a time, each through a spill of this size.
+    let unique_spill = match unique {
+        false => 0,
+        true => crate::unique_index::spill_budget(memory_budget, room(&residency, Phase::Index))
+            as u64,
+    };
+    if unique {
+        residency.terms.push(Term {
+            what: "the unique index spill, one column at a time".into(),
+            bytes: unique_spill,
+            mapped: false,
+            phases: Phases::INDEX,
+            constant: true,
+        });
+    }
+
     // **The term images** (`crate::term_images_pass`, pipeline step 10c). The pass holds one term
     // per worker in flight: that term's posting as an owned bitmap over entity space, its image
     // over row space, the buffer the image is serialised into, and one projection scratch. A
@@ -1173,36 +1331,30 @@ pub(crate) fn entity_order_residency(
     // image's width: it is the containers' payloads with five bytes of key, count and typecode
     // each, which is under the resident form for every shape but an image of full bitsets. The
     // scratch is `tessera_store`'s own bound over this corpus's entity space, so a small build pays
-    // its own rows rather than the ceiling a 10⁹ one reaches. Nothing in the pass scales with the
-    // dictionary: the table is written into the file as the pass's row buffer fills, and that
-    // buffer is a constant 160 KiB.
-    //
-    // **The worker count is the pass's own** (`crate::term_images_pass::derive_threads`), which is
-    // capped rather than the machine's width, and capped for this term: three bitmaps a worker is
-    // about 1.3 GB at rung 6, so an uncapped width forecasts past the budget such a build runs
-    // under.
+    // its own rows rather than the ceiling a 10⁹ one reaches.
     //
     // ⊘ **Modelled**, and a ceiling rather than an expectation: a term over a third of the corpus
-    // in run-friendly order is kilobytes (assumed). The fold's memory estimate charges the same
-    // window over its own one thread, at a flat ceiling for the scratch rather than this bound.
-    let image_workers = crate::term_images_pass::derive_threads() as u64;
+    // in run-friendly order is kilobytes (assumed).
     let scratch = tessera_store::permutation::project_scratch_bound(n, n);
-    terms.push(Term {
+    let per_worker = term_image_bitmap_bytes(n).saturating_add(scratch.total());
+    let term_image_workers = (room(&residency, Phase::Assemble) / per_worker.max(1))
+        .clamp(1, crate::term_images_pass::derive_threads() as u64);
+    residency.terms.push(Term {
         what: format!(
-            "the term images, over {image_workers} worker(s): one term's posting, its image and \
-             the buffer it is frozen into, each at a bitset container per 65,536 values"
+            "the term images, over {term_image_workers} worker(s): one term's posting, its image \
+             and the buffer it is frozen into, each at a bitset container per 65,536 values"
         ),
-        bytes: image_workers.saturating_mul(term_image_bitmap_bytes(n)),
+        bytes: term_image_workers.saturating_mul(term_image_bitmap_bytes(n)),
         mapped: false,
         phases: Phases::ASSEMBLE,
         constant: false,
     });
-    terms.push(Term {
+    residency.terms.push(Term {
         what: format!(
-            "the term images' projection scratch, {} MiB over {image_workers} worker(s)",
+            "the term images' projection scratch, {} MiB over {term_image_workers} worker(s)",
             scratch.total() >> 20
         ),
-        bytes: image_workers.saturating_mul(scratch.total()),
+        bytes: term_image_workers.saturating_mul(scratch.total()),
         mapped: false,
         phases: Phases::ASSEMBLE,
         // The pool never exceeds one window of row ids and a chunk a bucket, and the stamp and its
@@ -1210,40 +1362,13 @@ pub(crate) fn entity_order_residency(
         // above it, which is the shape the partitions' buckets have.
         constant: true,
     });
-    // **Arrow's all-ones validity bitmaps, during the `columns.arrow` layout pass.** Every column
-    // of the file is non-nullable and arrow writes a validity buffer for it all the same
-    // (`docs/evidence/memos/2026-09-11-arrow-all-ones-validity-buffers.md`). The file keeps them as
-    // three numbers (`tessera_store::columns::Fill`) but the layout pass does not: arrow's IPC
-    // writer builds every buffer of the batch before it writes any of them, so one `n / 8`-byte
-    // bitmap per column is alive at once — 437 MB a column at rung 6, anonymous, and a rate over
-    // `n` rather than a constant.
-    //
-    // **Two fixed columns plus the render columns**, counted here as every fixed-width declared
-    // column, which is the same ceiling [`widest_render`] takes: `render` is refused at the
-    // declaration for every string type, so a render column is one of these. A build that declares
-    // fixed-width columns it does not render is over-charged by `n / 8` each.
-    let render_columns = columns
-        .iter()
-        .filter(|column| !carries_characters(column.ty))
-        .count() as u64;
-    terms.push(Term {
-        what: format!(
-            "arrow's all-ones validity bitmaps over {} column(s) at n/8 bytes each, alive together              while the columns.arrow layout is learnt",
-            2 + render_columns
-        ),
-        bytes: (2 + render_columns).saturating_mul(n.div_ceil(8)),
-        mapped: false,
-        phases: Phases::ASSEMBLE,
-        constant: false,
-    });
-    terms.push(Term {
-        what: "slack for decode buffers, stage scratch and the allocator".into(),
-        bytes: SLACK,
-        mapped: false,
-        phases: Phases::JOIN,
-        constant: true,
-    });
-    Residency { terms }
+
+    residency.sizing = Sizing {
+        publication_batch,
+        unique_spill,
+        term_image_workers,
+    };
+    residency
 }
 
 /// What the entity-order model is arithmetic over for this build: one [`ColumnCost`] per declared
@@ -1383,6 +1508,7 @@ pub(crate) fn plan_routes(
     ids: IdShape,
     payloads: &[f64],
     free: Option<u64>,
+    id_space: &crate::ids::IdSpace,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let spilled = crate::pipeline::ColumnRoutes::every_available(&args.schema);
     let (columns, entries, level_entries, layer_entries) =
@@ -1399,6 +1525,7 @@ pub(crate) fn plan_routes(
         free,
         args.memory_budget
             .unwrap_or_else(crate::pipeline::detect_memory_budget),
+        supplied_key_arena(id_space).as_ref(),
     )
 }
 
@@ -1412,9 +1539,10 @@ pub(crate) fn routes_for(
     payloads: &[f64],
     free: Option<u64>,
     route: crate::ExtentRoute,
+    id_space: &crate::ids::IdSpace,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let forced = match route {
-        crate::ExtentRoute::Derived => return plan_routes(args, n, ids, payloads, free),
+        crate::ExtentRoute::Derived => return plan_routes(args, n, ids, payloads, free, id_space),
         crate::ExtentRoute::Arena => crate::pipeline::ColumnRoutes::forced_only(&args.schema),
         crate::ExtentRoute::Extents => crate::pipeline::ColumnRoutes::every_available(&args.schema),
     };
@@ -1431,6 +1559,7 @@ pub(crate) fn routes_for(
         level_entries,
         layer_entries,
         budget,
+        supplied_key_arena(id_space).as_ref(),
     );
     (forced, tail)
 }
@@ -1487,6 +1616,7 @@ fn choose_routes(
     layer_entries: u64,
     free: Option<u64>,
     memory_budget: u64,
+    supplied: Option<&Term>,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let mut routes = crate::pipeline::ColumnRoutes::every_available(schema);
     let ceiling = free.unwrap_or(0) / ROUTE_HEADROOM;
@@ -1505,6 +1635,7 @@ fn choose_routes(
             level_entries,
             layer_entries,
             memory_budget,
+            supplied,
         );
         // **The arena route carries its offset lane's 12 B an item** — the `(entity, at)` records
         // of the value partition the join replays the `at` words from (`crate::pipeline`'s
@@ -1527,6 +1658,7 @@ fn choose_routes(
         level_entries,
         layer_entries,
         memory_budget,
+        supplied,
     );
     (routes, tail)
 }
@@ -2019,7 +2151,10 @@ pub(crate) fn disk(
         ),
         Phases::ASSEMBLE,
     );
-    Residency { terms }
+    Residency {
+        terms,
+        sizing: tail.sizing,
+    }
 }
 
 /// **The line a build prints where the forecast is over the free space**, or `None` where it is
@@ -2369,6 +2504,7 @@ mod tests {
             entries,
             free,
             u64::MAX,
+            None,
         )
     }
 
@@ -2390,6 +2526,7 @@ mod tests {
             // As above: one layer, so the largest layer's entries are all of them.
             member_entries,
             u64::MAX,
+            None,
         )
     }
 
@@ -2601,8 +2738,15 @@ mod tests {
         // **Net of the partitions the column opens.** Its storage is a file and is charged at
         // nothing; what a declared column does cost the machine is the join's `(entity, value)`
         // partition and, for a keyword one, the dictionary's `(row, ordinal)` partition — both
-        // constants of the key type, both named terms of their own.
-        assert_eq!(scaling_total(&with_keyword), scaling_total(&bare));
+        // constants of the key type, both named terms of their own — and, being blob-resident, the
+        // record blob's block directory.
+        let directory = with_keyword
+            .terms
+            .iter()
+            .find(|t| t.what.starts_with("the record blob's block directory"))
+            .expect("a blob-resident column gives the blob a directory")
+            .bytes;
+        assert_eq!(scaling_total(&with_keyword) - directory, scaling_total(&bare));
         let term = with_keyword
             .terms
             .iter()
@@ -2898,21 +3042,19 @@ mod tests {
         );
     }
 
-    /// **The rung-6 forecast fits the budget that build runs under.**
+    /// **The rung-6 forecast fits a 22 GiB budget.**
     ///
     /// 3.5×10⁹ rows and entities over the GBIF declaration's four columns and three member rows an
-    /// item, priced against the 24 GiB budget the rung is built under. The pre-flight refuses a
-    /// build whose anonymous total exceeds the budget (`crate::pipeline`), so this is that refusal
-    /// read at the model: under the bound is a build that starts.
+    /// item. The pre-flight refuses a build whose largest phase exceeds the budget
+    /// (`crate::pipeline`), so this is that refusal read at the model: under the bound is a build
+    /// that starts.
     ///
-    /// The term this test exists for is the term images'. It is the worker count times three
-    /// bitmaps of a bitset container per 65,536 values, so at the machine's own width on a
-    /// twelve-core box it came to 15,002 MiB by itself and put the forecast over the budget.
-    /// `crate::term_images_pass::derive_threads` caps the width, and this asserts the consequence
-    /// rather than the cap.
+    /// The term images are the largest stage that sizes itself, at three bitmaps of a bitset
+    /// container per 65,536 values a worker, and at this budget the assembly has room for every
+    /// worker the pass would run.
     #[test]
-    fn the_rung_six_forecast_fits_the_twenty_four_gibibyte_budget() {
-        const BUDGET: u64 = 24 << 30;
+    fn the_rung_six_forecast_fits_a_twenty_two_gibibyte_budget() {
+        const BUDGET: u64 = 22 << 30;
         const N: u64 = 3_495_729_729;
         // The declaration's columns at the characters an item the corpus measures, as
         // `the_gbif_rung_spills_where_the_slice_that_fits_does_not` states them.
@@ -2940,14 +3082,17 @@ mod tests {
             3 * N,
             Some(459_000_000_000),
             BUDGET,
+            None,
         );
-        let total = residency.total();
+        let (phase, peak) = residency.memory_peak();
         assert!(
-            total <= BUDGET,
-            "the rung-6 forecast is {} MiB against a {} MiB budget, so the build is refused              before it starts:{}",
-            total >> 20,
+            peak <= BUDGET,
+            "the rung-6 forecast is {} MiB in the {} phase against a {} MiB budget, so the build \
+             is refused before it starts:{}",
+            peak >> 20,
+            phase.name(),
             BUDGET >> 20,
-            residency.describe()
+            residency.describe_memory(phase)
         );
         // The term images are a real share of it and not a term that rounded to nothing: a model
         // charging them at zero would pass the bound above for the wrong reason.
@@ -3066,8 +3211,9 @@ mod tests {
                 - n / crate::spill::PARTITION_BUCKETS as u64);
         assert_eq!(
             with.total() - without.total(),
-            rows * BYTES_PER_MEMBER_ENTRY + pass_bucket,
-            "only the Roaring copies and the artifact pass's bucket are memory"
+            rows.min(crate::layers::PUBLICATION_BATCH_MAX_ENTRIES) * BYTES_PER_MEMBER_ENTRY
+                + pass_bucket,
+            "only one publication batch's Roaring copies and the artifact pass's bucket are memory"
         );
         assert_eq!(
             with.at(Phase::Join) - without.at(Phase::Join),
@@ -3171,7 +3317,14 @@ mod tests {
     fn fixture_disk(args: &crate::BuildArgs, n: u64) -> Residency {
         let payloads = payloads_per_item(args);
         let free = crate::pipeline::available_disk(&args.out);
-        let (_routes, tail) = plan_routes(args, n, IdShape::dense(n), &payloads, free);
+        let (_routes, tail) = plan_routes(
+            args,
+            n,
+            IdShape::dense(n),
+            &payloads,
+            free,
+            &crate::ids::IdSpace::Integer,
+        );
         disk(
             args,
             Corpus {
@@ -3437,15 +3590,19 @@ mod tests {
     /// operator is being refused for and the one they can act on.
     #[test]
     fn the_breakdown_leads_with_the_term_worth_acting_on() {
-        let described = campaign_residency(50_000_000, 200).describe();
+        let residency = campaign_residency(50_000_000, 200);
+        let described = residency.describe();
         let first = described
             .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or_default();
-        assert!(
-            first.contains("member entr"),
-            "the member tables are the largest charged term at this schema; got {first}"
-        );
+        let largest = residency
+            .terms
+            .iter()
+            .filter(|t| !t.mapped)
+            .max_by_key(|t| t.bytes)
+            .expect("the model charges something");
+        assert!(first.contains(&largest.what), "got {first}");
         assert!(!first.contains("(mapped)"), "got {first}");
     }
 
@@ -3712,6 +3869,125 @@ require_member_visibility = "none"
         );
     }
 
+    /// The fixture with its `code` column declared unique, which puts the unique index spill in
+    /// the index phase beside the columns the other phases do not hold.
+    fn unique_fixture(n: u64) -> (crate::BuildArgs, tempfile::TempDir) {
+        let (mut args, temp) = fixture(n);
+        args.schema
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "code")
+            .expect("the fixture declares `code`")
+            .unique = true;
+        (args, temp)
+    }
+
+    /// The model of the unique fixture at `budget`.
+    fn unique_model(args: &crate::BuildArgs, budget: u64) -> Residency {
+        let mut args = args.clone();
+        args.memory_budget = Some(budget);
+        plan_routes(
+            &args,
+            20_000,
+            IdShape::dense(20_000),
+            &payloads_per_item(&args),
+            None,
+            &crate::ids::IdSpace::Integer,
+        )
+        .1
+    }
+
+    /// The smallest whole-MiB budget its largest phase fits under while every term summed does
+    /// not: the budget [`a_budget_that_holds_the_largest_phase_builds_within_it`] builds under.
+    /// Searched for rather than fixed, since the term images' width follows the machine's.
+    fn tight_budget(args: &crate::BuildArgs) -> u64 {
+        (32u64..512)
+            .map(|mib| mib << 20)
+            .find(|&budget| {
+                let model = unique_model(args, budget);
+                model.memory_peak().1 <= budget && model.total() > budget
+            })
+            .expect("a budget between the largest phase and the sum")
+    }
+
+    /// **A budget that holds the largest phase builds, and within it.** The unique index spill is
+    /// sized to what the index phase leaves and charged there alone, so the spill no longer stands
+    /// beside the publication and the term images it never meets. Summed as though every stage ran
+    /// at once, this build's terms are over the budget; phase by phase they are under it, and the
+    /// build's anonymous memory, sampled through the build in a process of its own, stays under
+    /// it too.
+    #[test]
+    fn a_budget_that_holds_the_largest_phase_builds_within_it() {
+        let (args, _temp) = unique_fixture(20_000);
+        let budget = tight_budget(&args);
+        let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "residency::tests::build_under_the_tight_budget_and_print_its_anonymous_peak",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("run the build in a process of its own");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "the build under {} MiB failed:\n{stdout}\n{}",
+            budget >> 20,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let peak: u64 = stdout
+            .lines()
+            .find_map(|line| line.split("anonymous peak: ").nth(1))
+            .and_then(|bytes| bytes.split_whitespace().next()?.parse().ok())
+            .expect("the child prints its anonymous peak");
+        assert!(
+            peak <= budget,
+            "the build held {} MiB of anonymous memory under a {} MiB budget",
+            peak >> 20,
+            budget >> 20
+        );
+    }
+
+    /// The build [`a_budget_that_holds_the_largest_phase_builds_within_it`] measures, run alone so
+    /// the process's anonymous memory is the build's: `RssAnon` sampled every millisecond.
+    #[test]
+    #[ignore = "run in a process of its own by the tight-budget build test"]
+    fn build_under_the_tight_budget_and_print_its_anonymous_peak() {
+        fn rss_anon() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find(|line| line.starts_with("RssAnon:"))
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .and_then(|kib| kib.parse::<u64>().ok())
+                })
+                .map_or(0, |kib| kib << 10)
+        }
+        let (mut args, _temp) = unique_fixture(20_000);
+        args.memory_budget = Some(tight_budget(&args));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sampler = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let mut peak = rss_anon();
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    peak = peak.max(rss_anon());
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                peak.max(rss_anon())
+            })
+        };
+        let built = crate::build(&args);
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let peak = sampler.join().expect("the sampler");
+        built.expect("the build fits its budget");
+        println!("anonymous peak: {peak}");
+    }
+
     /// **A build into a directory that already holds a bundle refuses, and the bundle stands.**
     ///
     /// The argument check runs before the sweep (`crate::pipeline::build`) for this case alone:
@@ -3784,7 +4060,14 @@ require_member_visibility = "none"
         let (args, _temp) = fixture(N);
         let free = crate::pipeline::available_disk(&args.out);
         let (_routes, model) =
-            plan_routes(&args, N, IdShape::dense(N), &payloads_per_item(&args), free);
+            plan_routes(
+                &args,
+                N,
+                IdShape::dense(N),
+                &payloads_per_item(&args),
+                free,
+                &crate::ids::IdSpace::Integer,
+            );
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();
         println!(
@@ -3796,12 +4079,10 @@ require_member_visibility = "none"
     /// **The headline of the entity-order model: what anonymous memory grows with the corpus is
     /// named, and it is four terms.**
     ///
-    /// Every term the model charges against the machine is a constant or one publication batch — a
-    /// share of the budget — with four exceptions, and this test subtracts them rather than
-    /// pretending they are not there:
+    /// Every term the model charges against the machine is a constant or one publication batch,
+    /// itself bounded, with four exceptions, and this test subtracts them rather than pretending
+    /// they are not there:
     ///
-    /// - arrow's all-ones validity bitmaps during the `columns.arrow` layout pass, `n / 8` bytes a
-    ///   column alive together;
     /// - a spilled string column's duplicate map, `n / 4` bytes a column, held from the postings
     ///   stage to the end of the record blob's merge;
     /// - the artifact pass's partition bucket, which holds one record per **member entry** in its
@@ -3810,16 +4091,14 @@ require_member_visibility = "none"
     ///   type's bound; this one is not, and a layer of many ordinals a row is where it shows;
     /// - the term images, one worker's posting, image and frozen buffer each at a bitset container
     ///   per 65,536 values. The projection scratch beside them is bounded by one window of row ids
-    ///   and is one of the constants.
+    ///   and is one of the constants;
+    /// - the record blob's block directory, a few words a block of its rows.
     ///
     /// Naming them is the point: the assertions are equalities against exactly these four, so a
     /// term that starts rising with the corpus fails here whether or not anyone remembered to look.
     /// What grows properly is the disk the same model reports beside it.
     #[test]
     fn the_anonymous_total_grows_only_by_the_four_terms_this_names() {
-        // The floor a partition's own constant needs, and the budget both row counts here carry
-        // more member entries than one publication batch of.
-        const BUDGET: u64 = 2 << 30;
         let residency = |n: u64| {
             let columns = [
                 column(ScalarType::U8, 0),
@@ -3837,42 +4116,42 @@ require_member_visibility = "none"
                 // One layer, so its entries are all of them: three a row, which is the shape that
                 // makes the artifact pass's bucket the entry-bounded term it is.
                 3 * n,
-                BUDGET,
+                // A budget no stage is sized down by, so every worker runs at every row count.
+                u64::MAX,
+                None,
             )
         };
-        // Arrow's validity bitmaps: `tessera_id`, `residual` and the two fixed-width declared
-        // columns, at one bit a row each. The two that carry characters are not render columns and
-        // are not in `columns.arrow`.
-        let bitmaps = |n: u64| 4 * n.div_ceil(8);
-        // **And the one spilled column's duplicate map**: two whole-column Roaring bitmaps at n/8
+        // **The one spilled column's duplicate map**: two whole-column Roaring bitmaps at n/8
         // bytes apiece for the column, and two more for the build, held while that column's map is
-        // being built. It is the second term that is a rate in the row count rather than one
-        // publication batch, and it is charged for a spilled string column alone — a build with no
-        // such column has no such term, which is why the assertions below name it separately
-        // rather than folding it into the rate.
+        // being built.
         let duplicates = |n: u64| 4 * n.div_ceil(8);
         // **And the term images' three bitmaps**: a posting, an image and a frozen buffer a
         // worker. The projection scratch beside them is bounded by one window and is one of the
         // constants, so it appears in the second assertion and not the first.
         let workers = crate::term_images_pass::derive_threads() as u64;
         let images = |n: u64| workers * term_image_bitmap_bytes(n);
+        // **And the record blob's directory**: every column here is blob-resident, so a row is
+        // the keyword's 8 characters and the text's 400, a `u8` and a `u32`, with 7 bytes of frame
+        // around each string, 3 around each fixed value and 3 around the row: 436 bytes.
+        let directory = |n: u64| {
+            (436 * n).div_ceil(tessera_filter::RECORD_BLOCK_TARGET as u64)
+                * BLOB_DIRECTORY_BYTES_PER_BLOCK
+        };
         let image_scratch =
             |n: u64| workers * tessera_store::permutation::project_scratch_bound(n, n).total();
         let small = residency(10_000_000);
         let large = residency(100_000_000);
-        // **The rate terms are equal net of the bitmaps**: one publication batch, whatever the
-        // level behind it.
         assert_eq!(
             scaling_total(&small)
-                - bitmaps(10_000_000)
                 - duplicates(10_000_000)
-                - images(10_000_000),
+                - images(10_000_000)
+                - directory(10_000_000),
             scaling_total(&large)
-                - bitmaps(100_000_000)
                 - duplicates(100_000_000)
-                - images(100_000_000),
-            "the anonymous rate is one publication batch, arrow's validity bitmaps, the spilled \
-             column's duplicate map and the term images' window:\nat 10⁷{}\nat 10⁸{}",
+                - images(100_000_000)
+                - directory(100_000_000),
+            "the anonymous rate is the spilled column's duplicate map, the term images' window \
+             and the record blob's directory:\nat 10⁷{}\nat 10⁸{}",
             small.describe(),
             large.describe()
         );
@@ -3880,21 +4159,20 @@ require_member_visibility = "none"
         // artifact pass's. A partition's bucket is `n / 128` records and never more than 2³²/128,
         // so the total rises to that bound and is flat above it; the pass's bucket counts member
         // entries rather than rows, so it goes on rising with them. The two row counts here
-        // straddle 2³², and above it the anonymous total moves by the validity bitmaps and that one
-        // bucket.
+        // straddle 2³².
         let pass_bucket = |n: u64| 16 * (3 * n / crate::spill::PARTITION_BUCKETS as u64);
         let at_bound = residency(1u64 << 32);
         let beyond = residency(1u64 << 34);
         assert_eq!(
             beyond.total() - at_bound.total(),
-            (bitmaps(1u64 << 34) - bitmaps(1u64 << 32))
-                + (duplicates(1u64 << 34) - duplicates(1u64 << 32))
+            (duplicates(1u64 << 34) - duplicates(1u64 << 32))
                 + (pass_bucket(1u64 << 34) - pass_bucket(1u64 << 32))
                 + (images(1u64 << 34) - images(1u64 << 32))
-                + (image_scratch(1u64 << 34) - image_scratch(1u64 << 32)),
-            "above the key type's bound the anonymous total moves by the validity bitmaps, the \
-             spilled column's duplicate map, the artifact pass's bucket and the term images' \
-             bitmaps and scratch, and nothing else:\nat 2³²{}\nat 2³⁴{}",
+                + (image_scratch(1u64 << 34) - image_scratch(1u64 << 32))
+                + (directory(1u64 << 34) - directory(1u64 << 32)),
+            "above the key type's bound the anonymous total moves by the spilled column's \
+             duplicate map, the artifact pass's bucket, the term images' bitmaps and scratch and \
+             the record blob's directory, and nothing else:\nat 2³²{}\nat 2³⁴{}",
             at_bound.describe(),
             beyond.describe()
         );

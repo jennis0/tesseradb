@@ -108,11 +108,11 @@ Writes through the control plane: the limits on each request, and when buffered 
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `ingest_admission` | integer | `64` | Requests to `/control/ingest` and `/control/values` handled at once. One more is refused with 429 at once. A value above 2305843009213693951 is refused. |
+| `ingest_admission` | integer | `64` | Requests to `/control/ingest` handled at once. One more is refused with 429 at once. A value above 2305843009213693951 is refused. |
 | `ingest_queue_bound` | integer | `32` | Ingest batches that may wait for the writer. When the queue is full an ingest is refused with 429 and a `Retry-After`. Deletions and suppressions do not wait in it and are never refused for load. |
 | `ingest_buffer_max_items` | integer | `1000000` | Ingested items that may wait for a flush. At or above it `/control/ingest` is refused with 429 before anything is written. |
-| `ingest_max_batch_rows` | integer | `10000` | The most rows one `/control/ingest` or `/control/values` request may carry. A request with more is refused with 422. |
-| `ingest_max_batch_bytes` | integer | `16777216` (16 MiB) | The largest body `/control/ingest` or `/control/values` accepts, in bytes. A larger one is refused with 422. |
+| `ingest_max_batch_rows` | integer | `10000` | The most rows one `/control/ingest` request may carry. A request with more is refused with 422. |
+| `ingest_max_batch_bytes` | integer | `16777216` (16 MiB) | The largest body `/control/ingest` accepts, in bytes. A larger one is refused with 422. |
 | `commit_window_max_items` | integer | `10000` | Rows at which a commit window closes. Items allocated ids in one window are grouped by the access terms they carry, so a wider window stores the access index more compactly. `0` is read as 1. |
 | `flush_max_age_secs` | integer | `90` | Seconds between flushes, which publish buffered writes as a new segment and make them visible. |
 | `flush_max_items` | integer | `40000` | Buffered rows at which a flush runs before `flush_max_age_secs` has passed. |

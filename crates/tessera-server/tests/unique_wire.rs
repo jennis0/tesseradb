@@ -1,8 +1,9 @@
 //! **Unique fields on the wire**: `/v1/meta` says which columns are unique and which operators a
 //! unique column with no other filter home takes; a filter compares an integer past 2^53 exactly
-//! when it is sent as a decimal string; an ingest setting a held value is `409` naming the value
-//! and the holder's `tessera_id`; and `PUT /control/attributes` declares `unique` on a column that
-//! exists, `409` where the column holds a value twice.
+//! when it is sent as a decimal string; an ingest row carrying a held value names its holder, and
+//! is `409` naming the holder's `tessera_id` where it would change it; and `PUT
+//! /control/attributes` declares `unique` on a column that exists, `409` where the column holds a
+//! value twice.
 //!
 //! The engine-level cases are `tessera-engine/tests/unique_fields.rs`; this file pins the routes.
 
@@ -205,18 +206,18 @@ async fn a_decimal_string_finds_an_integer_past_two_to_the_fifty_three() {
     assert_eq!(status, 422);
 }
 
-/// **An ingest setting a held value is `409`** naming the value and the holder's `tessera_id`,
-/// and nothing is written.
+/// **A row carrying a held value names its holder**: with an external id the holder does not
+/// carry, it edits the holder, which keeps its `tessera_id`; a batch setting one new value in two
+/// rows is `409`.
 #[tokio::test]
-async fn an_ingest_setting_a_held_value_is_a_conflict_naming_the_holder() {
+async fn a_row_carrying_a_held_value_names_the_holder() {
     let served = Served::build(fixture).await;
     let (_, holder) = filtered(&served, json!({ "gid": { "eq": gid_of(3).to_string() } })).await;
     let holder = *holder.iter().next().unwrap();
     let (status, body) = ingest(&served, "held", batch(&[("x1", gid_of(3), "fresh")])).await;
-    assert_eq!(status, 409, "{body}");
-    let detail = body["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains(&gid_of(3).to_string()), "{detail}");
-    assert!(detail.contains(&holder.to_string()), "{detail}");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["edited"], 1, "{body}");
+    assert_eq!(body["tessera_ids"][0], holder.to_string(), "{body}");
 
     let (status, body) = ingest(
         &served,
@@ -247,7 +248,8 @@ async fn unique_is_declared_and_removed_on_a_column_that_exists() {
     let (status, body) = declare(&served, json!({ "name": "gid", "type": "u64", "unique": false })).await;
     assert_eq!(status, 200, "{body}");
     let (status, body) = ingest(&served, "same", batch(&[("y1", gid_of(3), "z")])).await;
-    assert_eq!(status, 200, "no longer unique: {body}");
+    assert_eq!(status, 200, "no longer unique, so the value names no item: {body}");
+    assert_eq!(body["created"], 1, "{body}");
     let (status, body) = declare(&served, json!({ "name": "gid", "type": "u64", "unique": true })).await;
     assert_eq!(status, 409, "two items hold the value now: {body}");
 

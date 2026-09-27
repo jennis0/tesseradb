@@ -2,11 +2,10 @@
 
 use std::sync::atomic::Ordering;
 
-use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_plugin::Descriptor;
 use tessera_store::StoreError;
-use tessera_types::{EntityId, IdentityError, TermId, TesseraId};
+use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::engine::Engine;
 use crate::write::joined::flushed_terms_of;
@@ -37,22 +36,45 @@ impl Engine {
         self.generation.load().external_index.resolve(external_id)
     }
 
-    /// Invert `tessera_id`s to entity ids for the admin plane: `None` per position for an
-    /// identifier that names nothing. Points sit below the high-water mark; row-less entities
-    /// sit at or above the low-water mark, so testing only `entity < high_water` would refuse
-    /// every layer identifier ever issued.
-    pub fn resolve_tessera_ids(&self, ids: &[TesseraId]) -> Vec<Option<EntityId>> {
-        let generation = self.generation.load_full();
+    /// Resolve `tessera_id`s to the entities holding them for the admin plane: `None` per
+    /// position for an identifier that names nothing. Points sit below the high-water mark;
+    /// row-less entities sit at or above the low-water mark, so testing only `entity < high_water`
+    /// would refuse every layer identifier ever issued.
+    pub fn resolve_tessera_ids(
+        &self,
+        ids: &[TesseraId],
+    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
+        self.tessera_ids_in(&self.generation.load_full(), ids)
+    }
+
+    /// [`Self::resolve_tessera_ids`] against `generation`. An identifier's number names the entity
+    /// the edited-items map holds for it, or the number itself where it has none
+    /// ([`crate::edited`]). An item is named while `generation` holds it ([`holds_item`]) and has
+    /// not deleted it: a fold that removes a deleted item also drops its deletion, so the overlay
+    /// alone no longer says it is gone.
+    pub(crate) fn tessera_ids_in(
+        &self,
+        generation: &Generation,
+        ids: &[TesseraId],
+    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
         let shard = generation.bundle.manifest.identity.shard_id;
         let high_water = self.allocator_high_water();
         let low_water = self.allocator_low_water();
-        ids.iter()
-            .map(|id| {
-                let (id_shard, entity) = self.identity_key.invert(*id);
-                let issued = entity.raw() < high_water || entity.raw() >= low_water;
-                (id_shard == shard && issued).then_some(entity)
-            })
-            .collect()
+        let inverted: Vec<(u32, EntityId)> =
+            ids.iter().map(|id| self.identity_key.invert(*id)).collect();
+        let numbers: Vec<EntityId> = inverted.iter().map(|(_, number)| *number).collect();
+        let held = crate::edited::entities_of_numbers(generation, &numbers, |entity| {
+            if entity.raw() < high_water {
+                holds_item(generation, entity) && !generation.overlay.is_deleted(entity)
+            } else {
+                entity.raw() >= low_water
+            }
+        })?;
+        Ok(inverted
+            .iter()
+            .zip(held)
+            .map(|((id_shard, _), entity)| entity.filter(|_| *id_shard == shard))
+            .collect())
     }
 
     /// Does `view` hold a row for `entity`? "In the view" is the view's permutation and the
@@ -88,6 +110,15 @@ impl Engine {
         &self,
         external_ids: &[Vec<u8>],
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
+        self.external_ids_in(&self.generation.load(), external_ids)
+    }
+
+    /// [`Self::resolve_external_ids`], reading the bound runs of `generation`.
+    pub(crate) fn external_ids_in(
+        &self,
+        generation: &Generation,
+        external_ids: &[Vec<u8>],
+    ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
         let mut results: Vec<Option<EntityId>> = self.write.live().established_entities(external_ids);
 
         let residual_positions: Vec<usize> = results
@@ -102,11 +133,7 @@ impl Engine {
             .iter()
             .map(|&i| external_ids[i].clone())
             .collect();
-        let residual_results = self
-            .generation
-            .load()
-            .external_index
-            .resolve_many(&residual_keys)?;
+        let residual_results = generation.external_index.resolve_many(&residual_keys)?;
         for (pos, resolved) in residual_positions.into_iter().zip(residual_results) {
             results[pos] = resolved;
         }
@@ -142,20 +169,19 @@ impl Engine {
             .external_id_of_checked(entity, self.allocator_high_water())
     }
 
-    /// The body hash and per-row entity ids a batch id was previously accepted with — the
-    /// idempotency check for `/control/ingest`: equal hash is a 200 no-op; different hash is 409.
-    /// An accelerant, not the authority: the same check runs again on the executor, race-free.
-    pub fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
-        self.write.live().accepted_batch(batch_id)
+    /// The body hash a batch id was accepted with, if it was: a batch replayed with the same
+    /// bytes is reported as a replay. The executor decides the same question again, race-free.
+    pub fn accepted_batch(&self, batch_id: &str) -> Option<[u8; 32]> {
+        self.write
+            .live()
+            .accepted_batch(batch_id)
+            .map(|(hash, _)| hash)
     }
 
-    /// Compute the wire `tessera_id` for `entity`, returned instead of the raw `EntityId`, which
-    /// never crosses the trust boundary. `IdentityKey::forward` refuses an entity at or above
-    /// `u32::MAX`: unreachable in practice, but a typed error rather than a panic.
-    pub fn tessera_id_of(&self, entity: EntityId) -> std::result::Result<TesseraId, IdentityError> {
-        let generation = self.generation.load_full();
-        self.identity_key
-            .forward(generation.bundle.manifest.identity.shard_id, entity)
+    /// The wire `tessera_id` of the item `entity` holds: the permutation of its number, returned
+    /// instead of the raw `EntityId`, which never crosses the trust boundary.
+    pub fn tessera_id_of(&self, entity: EntityId) -> std::result::Result<TesseraId, StoreError> {
+        self.tessera_id_in(&self.generation.load_full(), entity)
     }
 
     /// Request a flush. Accepted at any time and executed promptly: the flag pulls the tick's
@@ -181,130 +207,41 @@ impl Engine {
         self.write.wake();
     }
 
-    /// Submit an ingest batch whose rows name no artifacts — the plain form, and every batch that
-    /// carries no membership column.
-    pub fn accept_ingest(
-        &self,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-    ) -> std::result::Result<Vec<EntityId>, crate::write::AcceptError> {
-        self.accept_ingest_joining(rows, batch_id, body_hash, Default::default())
-            .map(|(entity_ids, _)| entity_ids)
-    }
-
-    /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids
-    /// are assigned on the executor, at the close of the commit window this submission lands in.
-    /// `artifacts` says which artifacts these rows join, resolved and grown in the same commit so
-    /// a batch is never half-applied: a closed layer refuses the whole batch if a key names no
-    /// artifact; an open layer creates it.
-    ///
-    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
-    pub fn accept_ingest_joining(
-        &self,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        artifacts: tessera_lifecycle::BatchArtifacts,
-    ) -> std::result::Result<(Vec<EntityId>, u64), crate::write::AcceptError> {
-        // Checked before the submit, so an out-of-extent row is refused with nothing acked,
-        // nothing WAL-durable and no entity id burned. `plan_flush` assumes this holds.
-        //
-        // A stepped-down node refuses ingest here, before the per-row checks: this keeps it from
-        // accepting rows a flush would bury under a manifest assembled from older served state.
-        // Denies are not gated; see `AcceptError::SteppedDown`.
-        if self.any_partition_stepped_down() {
-            return Err(crate::write::AcceptError::SteppedDown);
-        }
-        // A row longer than the schema would pair values with columns that do not exist. A
-        // shorter row is lawful: a column declared while the service runs appends at the tail, so
-        // a row decoded before the declaration holds nothing for it, padded at the window's close.
-        let declared = self.meta().declared_scalars.len();
-        if let Some((index, row)) = rows
-            .iter()
-            .enumerate()
-            .find(|(_, row)| row.scalars.len() > declared)
-        {
-            return Err(crate::write::AcceptError::ScalarArity {
-                index,
-                expected: declared,
-                got: row.scalars.len(),
-            });
-        }
-        // Checked against each row's own view, not the bundle as a whole: a bundle-wide check
-        // would pass a row with no cell in the view it targets.
-        let meta = self.meta();
-        for (index, row) in rows.iter().enumerate() {
-            let Some(quantisation) = meta.quantisation_of(&row.view) else {
-                return Err(crate::write::AcceptError::UnknownView {
-                    index,
-                    view: row.view.clone(),
-                });
-            };
-            if !quantisation.contains(row.x, row.y) {
-                return Err(crate::write::AcceptError::OutsideExtent {
-                    index,
-                    x: row.x,
-                    y: row.y,
-                    quantisation,
-                });
-            }
-        }
-        // Unique values are checked here, and re-checked on the executor against what was added
-        // since. Where the executor cannot re-check from memory it hands the batch back, and it is
-        // checked here once more.
-        let mut submission = (rows, batch_id, artifacts);
-        let mut checks = 0;
-        loop {
-            let seq = crate::unique::check_rows(&self.generation(), &submission.0, &self.identity_key)?;
-            #[cfg(feature = "fault-injection")]
-            self.switches.hold_write_check_if_wanted();
-            checks += 1;
-            let (rows, batch_id, artifacts) = submission;
-            match self
-                .write
-                .accept_ingest(rows, batch_id, body_hash, artifacts, seq)
-            {
-                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::UniqueStale(
-                    stale,
-                ))) if checks < 2 => match *stale {
-                    tessera_lifecycle::StaleSubmission::Ingest {
-                        rows,
-                        batch_id,
-                        artifacts,
-                    } => submission = (rows, batch_id, artifacts),
-                    other => {
-                        return Err(crate::write::AcceptError::Exec(
-                            tessera_lifecycle::ExecError::UniqueStale(Box::new(other)),
-                        ))
-                    }
-                },
-                answered => return answered,
-            }
-        }
-    }
-
-    /// Submit one `/control/changes` entry and wait for its receipt. An `Err` does not mean
-    /// nothing happened: for `Delete`/`Suppress` a WAL failure still
-    /// applies the change. See `ExecError::Wal`. A caller with several wants
-    /// [`Engine::submit_change`] instead.
+    /// Apply one `/control/changes` request of one change, and wait for its receipt. See
+    /// [`Engine::accept_changes`].
     pub fn accept_change(
         &self,
         entity: EntityId,
         op: ChangeOp,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.write.accept_change(entity, op)
+        self.accept_changes(vec![(entity, op)])
     }
 
-    /// Enqueue one `/control/changes` entry without waiting, so several from one request reach
-    /// the executor's queue together — the precondition for the deny lane's group commit. Read
-    /// `PendingChange::wait` before treating either half's `Err` as "nothing happened".
-    pub fn submit_change(
+    /// Apply one `/control/changes` request and wait for its receipt. The request is one log
+    /// record: durable whole or not at all. An `Err` does not mean nothing happened: where the
+    /// append or fsync fails, every deletion and suppression is applied all the same. See
+    /// `ExecError::Wal`.
+    pub fn accept_changes(
         &self,
-        entity: EntityId,
-        op: ChangeOp,
+        changes: Vec<(EntityId, ChangeOp)>,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
+        self.submit_changes(changes)?.wait()
+    }
+
+    /// Enqueue one `/control/changes` request without waiting, so requests from several callers
+    /// reach the deny lane together and share one fsync. Read `PendingChange::wait` before
+    /// treating either half's `Err` as "nothing happened".
+    pub fn submit_changes(
+        &self,
+        changes: Vec<(EntityId, ChangeOp)>,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
-        self.write.submit_change(entity, op)
+        // A change resolved before an edit moved its item reaches the item where it is now.
+        let mut changes = changes;
+        let generation = self.generation();
+        crate::edited::follow_changes(&generation, &mut changes)
+            .map_err(|e| crate::write::AcceptError::Unreadable(e.to_string()))?;
+        self.write
+            .submit_changes(changes, crate::edited::Stamp::of(&generation))
     }
 
     /// One registered layer's declaration, by name, with no gate. Answers what a declaration
@@ -376,38 +313,6 @@ impl Engine {
         request: tessera_lifecycle::AttributeRequest,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         self.write.declare_attribute(request)
-    }
-
-    /// Fill attribute values on entities that already exist. Nothing is allocated and no row is
-    /// created: every cell that is absent takes the supplied value, one that already holds it is
-    /// a no-op, and one that holds a different value refuses the whole batch.
-    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
-    pub fn fill_values(
-        &self,
-        request: tessera_lifecycle::ValuesRequest,
-    ) -> std::result::Result<crate::write::ValuesReceipt, crate::write::AcceptError> {
-        // Checked and re-checked as an ingest's unique values are.
-        let mut request = Box::new(request);
-        let mut checks = 0;
-        loop {
-            let seq = crate::unique::check_fills(&self.generation(), &request, &self.identity_key)?;
-            #[cfg(feature = "fault-injection")]
-            self.switches.hold_write_check_if_wanted();
-            checks += 1;
-            match self.write.fill_values(request, seq) {
-                Err(crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::UniqueStale(
-                    stale,
-                ))) if checks < 2 => match *stale {
-                    tessera_lifecycle::StaleSubmission::Values(again) => request = again,
-                    other => {
-                        return Err(crate::write::AcceptError::Exec(
-                            tessera_lifecycle::ExecError::UniqueStale(Box::new(other)),
-                        ))
-                    }
-                },
-                answered => return answered,
-            }
-        }
     }
 
     /// Declare a vocabulary while the service runs. Answers `(existing, added, titles)`.
@@ -490,15 +395,14 @@ impl Engine {
         self.write.create_view(group, key, visibility, metadata)
     }
 
-    /// Drop a view. Its key may be created again, as a new incarnation with none of the dropped
-    /// view's rows or artifacts.
+    /// Drop a view, deleting the items it leaves in no view. Its key may be created again, as a
+    /// new incarnation with none of the dropped view's rows or artifacts.
     pub fn drop_view(
         &self,
         group: String,
         key: String,
-        delete_dangling: bool,
     ) -> std::result::Result<crate::write::ViewDropped, crate::write::AcceptError> {
-        self.write.drop_view(group, key, delete_dangling)
+        self.write.drop_view(group, key)
     }
 
     /// Put a batch of artifacts into one level of a layer, returning a `tessera_id` per artifact
@@ -510,6 +414,12 @@ impl Engine {
         level: u32,
         artifacts: Vec<tessera_lifecycle::IncomingArtifact>,
     ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
+        // A member resolved before an edit moved its item is the item where it is now.
+        let mut artifacts = artifacts;
+        let generation = self.generation();
+        crate::edited::follow_artifacts(&generation, &mut artifacts)
+            .map_err(|e| crate::write::AcceptError::Unreadable(e.to_string()))?;
+        let stamp = crate::edited::Stamp::of(&generation);
         self.refuse_rowless(artifacts.iter().map(|a| &a.members))?;
 
         // A declared member that is deleted refuses the batch; a suppressed one is accepted, being
@@ -517,7 +427,6 @@ impl Engine {
         // position, never an entity id. A membership spelled by exclusion carries no members here:
         // the complement is taken on the executor, so this and the row-less check pass over the
         // empty set the record carries.
-        let generation = self.generation();
         let mut deleted = 0u64;
         let mut first_artifact = None;
         for (index, artifact) in artifacts.iter().enumerate() {
@@ -550,7 +459,9 @@ impl Engine {
             ));
         }
 
-        let batch = self.write.publish_artifacts(layer, level, artifacts)?;
+        let batch = self
+            .write
+            .publish_artifacts(layer, level, artifacts, stamp)?;
         let shard = generation.bundle.manifest.identity.shard_id;
         let tessera_ids = batch
             .entities
@@ -592,11 +503,15 @@ impl Engine {
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
     ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
+        let mut joins = joins;
+        let generation = self.generation();
+        crate::edited::follow_growth(&generation, &mut joins)
+            .map_err(|e| crate::write::AcceptError::Unreadable(e.to_string()))?;
+        let stamp = crate::edited::Stamp::of(&generation);
         self.refuse_rowless(joins.iter().map(|j| &j.joining))?;
 
         // A count and the key of the first join naming one, never an entity id: the detail is the
         // caller's 422 body.
-        let generation = self.generation();
         let mut deleted = 0u64;
         let mut first_key = None;
         for join in &joins {
@@ -622,7 +537,7 @@ impl Engine {
             ));
         }
 
-        let grown = self.write.grow_memberships(layer, level, joins)?;
+        let grown = self.write.grow_memberships(layer, level, joins, stamp)?;
         let shard = generation.bundle.manifest.identity.shard_id;
         grown
             .into_iter()
@@ -702,4 +617,18 @@ pub struct PublishedArtifactAddress {
     pub level: u32,
     pub ordinal: u32,
     pub key: Option<String>,
+}
+
+/// Whether `generation` holds `entity` as an item: a buffered row, a row in some view, or the
+/// label a flush wrote, which an item whose views were all dropped still holds. A fold that
+/// removes a deleted item removes all three.
+pub(crate) fn holds_item(generation: &Generation, entity: EntityId) -> bool {
+    generation.buffer.contains(entity)
+        || generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .values()
+                .any(|view| view.row_space.row_of(entity).is_some())
+        })
+        || flushed_terms_of(generation, entity).is_some()
 }

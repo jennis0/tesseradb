@@ -7,9 +7,9 @@
 //! served as absent. Both look like a clustering that failed its existence criterion.
 //!
 //! The distinction these cases exist to hold is the one this corpus has caught twice: **a deletion
-//! retires at the fold that executes it, and a suppression retires only on unsuppress.** A pass that
-//! dropped a suppressed member's bit while it was at it would give a suppression a second
-//! retirement route, and the member would not come back at the unsuppress — fail-open, and
+//! retires at the fold that executes it, and a live member's suppression only on unsuppress.**
+//! A pass that dropped a suppressed member's bit while it was at it would give a suppression a
+//! second retirement route, and the member would not come back at the unsuppress — fail-open, and
 //! indistinguishable from a cluster that had always been that size.
 //!
 //! A test of decision 0107's rule for a generating set the fold emptied was removed with the
@@ -239,8 +239,8 @@ fn a_fold_rewrites_the_memberships_into_the_prefix_it_publishes() {
 ///
 /// Deleting a member and suppressing another moves the served count by two, both at the ack. What
 /// the fold changes is which of those is *structural*: the deletion is executed and its bit goes,
-/// so the count stays down; the suppression retires only on unsuppress, so its bit is still there
-/// and the member comes back.
+/// so the count stays down; the live member's suppression retires only on unsuppress, so its bit
+/// is still there and the member comes back.
 #[test]
 fn a_deleted_member_is_gone_after_the_fold_and_a_suppressed_one_comes_back() {
     let fx = fixture();
@@ -711,7 +711,6 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -723,7 +722,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row],
             String::from_utf8_lossy(external_id).into_owned(),
             key,
@@ -769,7 +768,7 @@ fn a_member_ingested_since_the_last_fold_counts_from_its_flush() {
         "buffered: the member has no row at all yet, so it is in no count"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         count(&engine),
         301,
@@ -800,7 +799,7 @@ fn a_flush_disturbs_no_artifacts_count() {
     assert_eq!(count(&engine), 300);
 
     ingest(&engine, b"unrelated");
-    flush(&engine);
+    publish_buffered(&engine);
 
     assert_eq!(
         count(&engine),
@@ -841,12 +840,12 @@ fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
         b"merge-d".as_slice(),
     ] {
         ingest(&engine, batch);
-        flush(&engine);
+        publish_buffered(&engine);
     }
 
     engine.set_merge_for_test(true);
     ingest(&engine, b"merge-e");
-    flush(&engine);
+    publish_buffered(&engine);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while engine.write_executor_stats().merges == 0 {
         assert!(
@@ -1857,7 +1856,7 @@ fn a_borrowing_label_takes_its_targets_flushed_member() {
         "the label is counted over the cluster's members"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(count_of(&engine, "clusters/a", "c0"), 301);
     assert_eq!(
         count_of(&engine, LABELS, "l0"),
@@ -1881,7 +1880,7 @@ fn a_borrowing_label_keeps_its_targets_membership_across_a_fold() {
     assert_eq!(count_of(&engine, LABELS, "l0"), 300);
 
     ingest(&engine, b"folded-for-the-label");
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
 
     assert_eq!(count_of(&engine, "clusters/a", "c0"), 300);

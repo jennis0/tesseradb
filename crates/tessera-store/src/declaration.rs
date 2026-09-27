@@ -127,8 +127,7 @@ pub fn check_attribute(
             spec.ty
         ));
     }
-    // A group-scoped column has no slot in the record blob, so the token index is the only place
-    // a scoped text column's values can live.
+    // A group-scoped text column's prose is kept with its token index, so it needs one.
     if spec.group_scoped && ty == ScalarType::Text && !spec.index {
         return Err(format!(
             "attribute '{name}': a group-scoped `text` column needs `index = true`"
@@ -176,8 +175,8 @@ pub fn check_column_name(name: &str) -> Result<(), String> {
 
 /// Every declared column must be carried where an item's values arrive: by a build's attribute
 /// source, and by an ingest row that creates an item, or places one in a view of a scoped
-/// column's own group. A null says there is no value. A `/control/values` batch fills only the
-/// columns it names, so it is not held to this. `declared` is `(attribute, column)`, the column
+/// column's own group. A null says there is no value. A row naming an item changes only the
+/// columns it carries, so it is not held to this. `declared` is `(attribute, column)`, the column
 /// being the attribute's own name except where a build's `field` moves it.
 pub fn check_declared_present<'a>(
     declared: impl IntoIterator<Item = (&'a str, &'a str)>,

@@ -221,7 +221,7 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 1);
+    assert_eq!(json["created"], 1);
     assert_eq!(json["over_bound"], 0);
 
     // Replay of the same batch id + body: idempotent 200.
@@ -287,83 +287,89 @@ async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
     );
 }
 
-/// Dedup must consult `Engine::established`, not only the bundle's external-id sidecar. The
-/// sidecar covers only the bundle built at open time; an id ingested five minutes ago in a
-/// *separate*, already-accepted batch lives only in the live map, and a dedup check that misses it
-/// would silently allocate a second entity and orphan the first (see `write.rs`'s
-/// `WritePath::accept_ingest` doc).
-#[tokio::test]
-async fn ingest_rejects_an_external_id_ingested_after_the_build() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let first_body = build_ingest_batch_raw(&[(b"z".as_slice(), 1.0, 1.0, "0")]);
+/// Post one ingest batch and return its status and answer.
+async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, serde_json::Value) {
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "z-batch-1")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(first_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let high_water_after_first = control_status(&server).await["entity_id_high_water"].clone();
-
-    // A fresh batch id, re-ingesting the same external id: must be rejected, not silently
-    // allocate a second entity for "z".
-    let second_body = build_ingest_batch_raw(&[(b"z".as_slice(), 9.0, 9.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "z-batch-2")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(second_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "conflict");
-
-    assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_after_first,
-        "the rejected re-ingest must not have allocated a second entity"
-    );
-}
-
-/// The bundle's own external-id sidecar half of duplicate detection: an id already present in
-/// the built bundle (not merely ingested live) must also be rejected.
-#[tokio::test]
-async fn ingest_rejects_an_external_id_already_in_the_bundle() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
-
-    // `external_id_of(0)` names a real item baked into the fixture at build time.
-    let body = build_ingest_batch(&[(0, 5.0, 5.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "bundle-dup-batch")
+        .header("x-tessera-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 409);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "conflict");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
 
+/// A second row for an external id ingested at the running service edits that item: it keeps its
+/// `tessera_id` and takes one new entity id.
+#[tokio::test]
+async fn a_second_row_for_an_ingested_external_id_edits_its_item() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    let (status, first) = post_body(
+        &server,
+        "z-batch-1",
+        build_ingest_batch_raw(&[(b"z".as_slice(), 1.0, 1.0, "0")]),
+    )
+    .await;
+    assert_eq!(status, 200, "{first}");
+    let high_water = control_status(&server).await["entity_id_high_water"]
+        .as_u64()
+        .unwrap();
+
+    let (status, second) = post_body(
+        &server,
+        "z-batch-2",
+        build_ingest_batch_raw(&[(b"z".as_slice(), 9.0, 9.0, "0")]),
+    )
+    .await;
+    assert_eq!(status, 200, "{second}");
     assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_before
+        (second["created"].as_u64(), second["edited"].as_u64()),
+        (Some(0), Some(1)),
+        "{second}"
+    );
+    assert_eq!(
+        ingested_ids(&second),
+        ingested_ids(&first),
+        "the item keeps its tessera_id"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"].as_u64(),
+        Some(high_water + 1),
+        "the edit took one entity id"
+    );
+}
+
+/// A row for an external id the build stored edits that item, as one ingested at the service does.
+#[tokio::test]
+async fn a_row_for_an_external_id_in_the_bundle_edits_its_item() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let high_water = control_status(&server).await["entity_id_high_water"]
+        .as_u64()
+        .unwrap();
+
+    // `external_id_of(0)` names an item the build stored.
+    let (status, answer) = post_body(
+        &server,
+        "bundle-edit",
+        build_ingest_batch(&[(0, 5.0, 5.0, "0")]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        (answer["created"].as_u64(), answer["edited"].as_u64()),
+        (Some(0), Some(1)),
+        "{answer}"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"].as_u64(),
+        Some(high_water + 1)
     );
 }
 
@@ -481,7 +487,7 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 2_000);
+    assert_eq!(json["created"], 2_000);
 }
 
 /// A `/control/changes` batch whose *later* item fails validation (unknown external
@@ -546,7 +552,7 @@ async fn changes_batch_validates_before_applying_anything() {
 /// Two concurrent acceptances (one `/control/ingest`, one `/control/changes`) must both survive.
 /// An unlocked apply+swap admits a lost-update race in which whichever `store()` wins silently
 /// discards the other's already-fsynced, already-acked change. Runs the engine's
-/// `accept_ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced to start
+/// `ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced to start
 /// together, so both race for the executor.
 ///
 /// **The race is structurally impossible today**, because exactly one thread can publish a
@@ -615,24 +621,27 @@ fn concurrent_ingest_and_change_both_survive() {
     let barrier_b = Arc::clone(&barrier);
     let ingest_thread = std::thread::spawn(move || {
         let new_external_id = external_id_of(N_ITEMS + 100);
-        // Unallocated: signature-sorted assignment happens on the executor, so a caller does not
-        // name the entity id at all.
-        let row = tessera_lifecycle::UnallocatedRow {
-            join_only: false,
+        // A caller does not name the entity id at all: the executor assigns it.
+        let row = tessera_lifecycle::IngestRow {
+            tessera_id: None,
             external_id: Some(new_external_id.clone()),
-            view: "s0".to_string(),
-            join: None,
-            descriptors: vec![b"0".to_vec()],
-            x: 5.0,
-            y: 5.0,
+            labels: Some(vec![b"0".to_vec()]),
+            position: Some((5.0, 5.0)),
             scalars: Vec::new(),
-            terms: engine_b.resolve_terms(std::slice::from_ref(&b"0".to_vec())),
             scoped: Vec::new(),
+            omitted: Vec::new(),
         };
         barrier_b.wait();
-        engine_b
-            .accept_ingest(vec![row], "concurrent-batch".to_string(), [7u8; 32])
-            .expect("ingest should be accepted")[0]
+        let receipt = engine_b
+            .ingest(tessera_engine::IngestRequest {
+                batch_id: "concurrent-batch".to_string(),
+                body_hash: [7u8; 32],
+                view: Some("s0".to_string()),
+                rows: vec![row],
+                artifacts: Default::default(),
+            })
+            .expect("ingest should be accepted");
+        engine_b.resolve_tessera_ids(&receipt.tessera_ids).unwrap()[0].expect("the item it created")
     });
 
     change_thread.join().unwrap();
@@ -696,7 +705,7 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
         .unwrap();
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 1);
+    assert_eq!(json["created"], 1);
     let tessera_ids = ingested_ids(&json);
     assert_eq!(tessera_ids.len(), 1);
     let tessera_id = tessera_ids[0];
@@ -726,11 +735,10 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
     assert_eq!(served, [tessera_id]);
 }
 
-/// Contracts §3.4 (r6): a batch mixing items with and without an external id is accepted whole,
-/// and duplicate detection considers only the supplied ones — the null-external-id rows have
-/// nothing to collide on and must not be rejected or interfere with the others' dedup check.
+/// A batch mixing items with and without an external id is accepted whole, and only the supplied
+/// ids name an item: the rows without one have nothing to collide on.
 #[tokio::test]
-async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
+async fn ingest_mixed_batch_only_supplied_external_ids_name_an_item() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
@@ -756,22 +764,19 @@ async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
         "two null external ids in one batch must not be treated as duplicates of each other"
     );
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 4);
+    assert_eq!(json["created"], 4);
     assert_eq!(ingested_ids(&json).len(), 4);
 
-    // A follow-up batch re-using one of the *supplied* external ids must still be caught.
-    let dup_body = build_ingest_batch_optional(&[(Some(b"mixed-a".as_slice()), 9.0, 9.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "mixed-batch-dup")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(dup_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
+    // A follow-up batch re-using one of the supplied external ids names that item.
+    let (status, again) = post_body(
+        &server,
+        "mixed-batch-again",
+        build_ingest_batch_optional(&[(Some(b"mixed-a".as_slice()), 9.0, 9.0, "0")]),
+    )
+    .await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["edited"], 1, "{again}");
+    assert_eq!(ingested_ids(&again)[0], ingested_ids(&json)[0]);
 }
 
 /// Contracts §3.4 (r6): two items with no external id in the *same* batch must not collide with
@@ -794,7 +799,7 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 2);
+    assert_eq!(json["created"], 2);
     let tessera_ids = ingested_ids(&json);
     assert_eq!(tessera_ids.len(), 2);
     assert_ne!(
@@ -1911,7 +1916,7 @@ async fn an_out_of_extent_coordinate_is_clamped_onto_the_edge_and_counted() {
     ];
     let (status, body) = post_ingest(&server, "outside", &rows, true).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["accepted"], 3);
+    assert_eq!(body["created"], 3);
     assert_eq!(body["clamped"], 2, "{body}");
     tick(&server).await;
 
@@ -3332,7 +3337,6 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
 
     let mounted = [
         ("POST", "/control/ingest"),
-        ("POST", "/control/values"),
         ("POST", "/control/changes"),
         ("GET", "/control/status"),
         ("POST", "/control/flush"),
@@ -3432,7 +3436,6 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
     // Every control route that reads a query, sent a parameter it does not define and no body, so
     // only the query can be refused.
     let queries = [
-        ("POST", "/control/values?wiat=visible"),
         ("POST", "/control/ingest?wiat=visible"),
         ("POST", "/control/changes?wiat=visible"),
         ("POST", "/control/flush?wiat=visible"),
@@ -3560,22 +3563,9 @@ async fn an_unauthenticated_caller_never_gets_a_byte_of_body_buffered() {
 // Group commit on the deny lane
 // =================================================================================================
 
-/// **One request of N denies costs one fsync, not N.**
-///
-/// This is the whole of the deny lane's group commit, and it needs both halves of the mechanism to
-/// hold: `run_changes` must enqueue the request before collecting any receipt, and the executor's
-/// deny drain must gather what it finds into one window. Break either and the count goes back to N
-/// — a handler that waits per item leaves the executor one entry to gather, and an executor that
-/// commits per entry finds a full queue and ignores it.
-///
-/// **Asserted on `wal_fsyncs`, off `/control/status`, not on a proxy.** Elapsed time would pass on
-/// a fast disk with the amortisation entirely absent; the fsync count is exact and is the claim.
-///
-/// The bound is `2 × ceil(N / DENY_WINDOW_MAX_ENTRIES)` rather than `1`, and the slack is one
-/// specific, measured thing rather than tolerance: the executor can wake on the first item's
-/// doorbell and commit a window of one while the handler is still enqueueing the rest, so a chunk
-/// costs a head window plus its own. The observed value is in the message, so a regression that
-/// stays inside the bound is still visible to whoever reads a failure here.
+/// **One request of N denies is one WAL record and one fsync.** The request is written whole or
+/// not at all, and asserted on the counts `/control/status` publishes rather than on elapsed time,
+/// which would pass on a fast disc with the amortisation absent.
 #[tokio::test]
 async fn a_change_batch_of_n_costs_one_fsync() {
     const N: u64 = 200;
@@ -3603,18 +3593,7 @@ async fn a_change_batch_of_n_costs_one_fsync() {
     let appends = after["write_executor"]["wal_appends"].as_u64().unwrap()
         - before["write_executor"]["wal_appends"].as_u64().unwrap();
 
-    let chunks = N.div_ceil(tessera_engine::DENY_WINDOW_MAX_ENTRIES as u64);
-    assert!(
-        fsyncs <= 2 * chunks,
-        "{N} denies in one request must be group-committed: expected at most {} fsyncs, got \
-         {fsyncs}. At one fsync per item this would be {N}, which is the ~300 denies/second \
-         ceiling the deny window exists to remove",
-        2 * chunks
-    );
-    assert_eq!(
-        appends, N,
-        "and exactly one WAL record per item — the window amortises the fsync, never the record"
-    );
+    assert_eq!((appends, fsyncs), (1, 1), "{N} denies in one request are one record");
 }
 
 /// **A deny batch whose append fails applies the `Delete`/`Suppress` items and nothing else.**
@@ -3850,10 +3829,6 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/limits/publish/max_excluded_per_request", "integer"),
     ("/limits/publish/max_shape_vertices", "integer"),
     ("/limits/publish/route", "string"),
-    ("/limits/values", "object"),
-    ("/limits/values/max_batch_bytes", "integer"),
-    ("/limits/values/max_batch_rows", "integer"),
-    ("/limits/values/route", "string"),
     ("/masked_count_cache", "object"),
     ("/masked_count_cache/bytes", "integer"),
     ("/masked_count_cache/entries", "integer"),
@@ -4609,7 +4584,7 @@ async fn the_predicate_op_is_refused_with_a_422() {
 /// refuse a user's write — while suppression is temporary hiding, and re-ingesting a
 /// byte-identical copy past one is the copy-no-deny-can-reach hole the check exists to close.
 #[tokio::test]
-async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
+async fn a_deleted_holder_names_nothing_and_a_suppressed_one_is_named() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let ingest = |batch: &'static str, ids: Vec<u64>| {
@@ -4648,24 +4623,22 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
     };
 
     let fresh = N_ITEMS + 100;
-    assert_eq!(ingest("rebind-1", vec![fresh]).await.status(), 200);
+    let first = ingest("rebind-1", vec![fresh]).await;
+    assert_eq!(first.status(), 200);
+    let first: serde_json::Value = first.json().await.unwrap();
 
-    // Suppressed: still a duplicate — 409, batch has no effect.
+    // Suppressed: the item still holds its external id, so the same row names it and changes
+    // nothing. Suppression is temporary hiding, not deletion, and no copy is made past it.
     assert_eq!(change("suppress", fresh).await.status(), 200);
-    let resp = ingest("rebind-2", vec![fresh]).await;
-    assert_eq!(
-        resp.status(),
-        409,
-        "a suppressed holder still collides: suppression is temporary hiding, not deletion"
-    );
+    let again: serde_json::Value = ingest("rebind-2", vec![fresh]).await.json().await.unwrap();
+    assert_eq!(again["unchanged"], 1, "{again}");
+    assert_eq!(again["tessera_ids"], first["tessera_ids"], "{again}");
 
-    // Deleted: forgotten — the same bytes under the same external id are accepted.
+    // Deleted: forgotten, so the same row creates a new item.
     assert_eq!(change("delete", fresh).await.status(), 200);
-    assert_eq!(
-        ingest("rebind-3", vec![fresh]).await.status(),
-        200,
-        "a deleted holder must not block a user's write (decision 0047)"
-    );
+    let reborn: serde_json::Value = ingest("rebind-3", vec![fresh]).await.json().await.unwrap();
+    assert_eq!(reborn["created"], 1, "a deleted holder names nothing: {reborn}");
+    assert_ne!(reborn["tessera_ids"], first["tessera_ids"], "{reborn}");
 
     // And the re-bound id is operable: a suppress addresses the new life, answered 200.
     assert_eq!(change("suppress", fresh).await.status(), 200);

@@ -3,11 +3,11 @@ use super::*;
 /// What `/control/ingest`'s batch id means to this executor: durably accepted, held in the open
 /// commit window, or never seen. Computed by [`BatchState::of`] on the executor thread only.
 pub(super) enum BatchState {
-    /// Durably accepted: the WAL record is fsynced, the rows are applied and the ids are recorded.
-    /// Same bytes replays these ids; different bytes is a `409`.
+    /// Durably accepted: the WAL record is fsynced, the rows are applied and the receipt is
+    /// recorded. Same bytes replays the receipt; different bytes is a `409`.
     Accepted {
         body_hash: [u8; 32],
-        entity_ids: Vec<EntityId>,
+        receipt: Vec<tessera_lifecycle::RowReceipt>,
     },
     /// Held in the open commit window, not yet acknowledged; a byte-identical retry joins the
     /// queue of waiters the entry will ack. There is exactly one open window.
@@ -15,8 +15,8 @@ pub(super) enum BatchState {
         window_seq: u64,
         body_hash: [u8; 32],
     },
-    /// Never seen, or what an accepted batch regresses to once WAL rotation reclaims its member: a
-    /// retry with an `external_id` then 409s, but one with none is re-ingested as new.
+    /// Never seen, or what an accepted batch regresses to once WAL rotation reclaims its member:
+    /// a retry is then resolved again as a new batch.
     Unknown,
 }
 
@@ -24,11 +24,8 @@ impl BatchState {
     /// Look `batch_id` up: the durable index, then the open window, then unknown. The two sets are
     /// disjoint: a batch id enters `accepted_batches` only at `close_window`.
     pub(super) fn of<W>(live: &LiveState, window: &CommitWindow<W>, batch_id: &str) -> BatchState {
-        if let Some((body_hash, entity_ids)) = live.accepted_batch(batch_id) {
-            return BatchState::Accepted {
-                body_hash,
-                entity_ids,
-            };
+        if let Some((body_hash, receipt)) = live.accepted_batch(batch_id) {
+            return BatchState::Accepted { body_hash, receipt };
         }
         match window.held(batch_id) {
             Some((window_seq, body_hash)) => BatchState::Held {
@@ -91,29 +88,32 @@ impl ClosingWindow {
         health.record_window_service(self.entries, self.started.elapsed().as_nanos() as u64);
     }
 
-    /// Committed: every waiter of an entry gets that entry's ids and the artifacts it created. A
-    /// death partway leaves some waiters unacked; each gets a 500, not a 503, since durable.
-    pub(super) fn ack(self, health: &ExecutorHealth, minted_per_entry: Vec<u64>) {
-        for (entry, minted) in self.closed.into_iter().zip(minted_per_entry) {
-            let ClosedEntry {
-                entity_ids,
-                mut waiters,
-                ..
-            } = entry;
-            let last = waiters
-                .pop()
-                .expect("an entry always has at least one waiter");
-            for waiter in waiters {
-                let entity_ids = entity_ids.clone();
-                waiter.ack(Ingested { entity_ids, minted });
+    /// Committed: every waiter of an entry gets that entry's receipt and the artifacts it
+    /// created. A death partway leaves some waiters unacked; each gets a 500, not a 503, since
+    /// durable.
+    pub(super) fn ack(
+        self,
+        health: &ExecutorHealth,
+        minted_per_entry: Vec<u64>,
+        joined_per_entry: Vec<u64>,
+    ) {
+        let counts = minted_per_entry.into_iter().zip(joined_per_entry);
+        for (entry, (minted, joined)) in self.closed.into_iter().zip(counts) {
+            let receipt = entry.receipt().to_vec();
+            for waiter in entry.waiters {
+                waiter.ack(Ingested {
+                    receipt: receipt.clone(),
+                    minted,
+                    joined,
+                    replayed: false,
+                });
             }
-            last.ack(Ingested { entity_ids, minted });
         }
         health.record_window_service(self.entries, self.started.elapsed().as_nanos() as u64);
     }
 }
 
-/// What a vocabulary pass drew, over a commit window's rows or a values batch's cells.
+/// What a vocabulary pass drew over a commit window's rows.
 pub(super) struct MintedCodes {
     /// The bindings published if the write commits: the live ones plus whatever the pass drew.
     pub(super) vocabularies: Vocabularies,
@@ -206,48 +206,6 @@ fn mint_cells<'a>(
     Ok(())
 }
 
-/// Draw a code for every novel vocabulary key a values batch carries, by the ingest window's
-/// rule, and rewrite each cell to its code. `columns` is where each named column landed.
-pub(super) fn mint_values_codes(
-    generation: &Generation,
-    request: &mut tessera_lifecycle::ValuesRequest,
-    columns: &[ValuesColumn],
-) -> std::result::Result<MintedCodes, MintError> {
-    let manifest = &generation.bundle.manifest;
-    let families = request
-        .view
-        .as_deref()
-        .map(|view| scoped_families_of_view(manifest, view))
-        .unwrap_or_default();
-    let targets: Vec<(&str, Option<&str>, ScalarType)> = columns
-        .iter()
-        .map(|column| match column {
-            ValuesColumn::Entity(at) => {
-                let d = &manifest.declared_scalars[*at];
-                (d.name.as_str(), d.vocabulary.as_deref(), d.arrow_type)
-            }
-            ValuesColumn::Scoped(at) => {
-                let f = &families[*at];
-                (f.name.as_str(), f.vocabulary.as_deref(), f.arrow_type)
-            }
-        })
-        .collect();
-    let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
-    let mut fresh: Vec<(String, String, u32)> = Vec::new();
-    for row in &mut request.rows {
-        mint_cells(
-            &mut row.values,
-            targets.iter().copied(),
-            &mut vocabularies,
-            &mut fresh,
-        )?;
-    }
-    Ok(MintedCodes {
-        vocabularies,
-        fresh,
-    })
-}
-
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
 /// mark did not move. The one exit outside [`ClosingWindow`], since allocation is what failed.
 fn fail_allocation(
@@ -257,7 +215,9 @@ fn fail_allocation(
     entries: u64,
     started: std::time::Instant,
 ) {
-    refuse_waiters(health, waiters, entries, started, || ExecError::Alloc(error));
+    refuse_waiters(health, waiters, entries, started, || {
+        ExecError::Alloc(error)
+    });
 }
 
 /// Answer every waiter of a window that will not commit, and time the window.
@@ -276,15 +236,6 @@ fn refuse_waiters(
     health.record_window_service(entries, started.elapsed().as_nanos() as u64);
 }
 
-/// One `/control/ingest` submission as the executor admits it.
-pub(super) struct IngestSubmission {
-    pub(super) rows: Vec<UnallocatedRow>,
-    pub(super) batch_id: String,
-    pub(super) body_hash: [u8; 32],
-    pub(super) artifacts: tessera_lifecycle::BatchArtifacts,
-    pub(super) unique_seq: u64,
-}
-
 /// What [`Executor::admit_ingest`] did with a submission, as far as the drain loop needs to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Admission {
@@ -292,13 +243,15 @@ pub(super) enum Admission {
     Admitted,
     /// It was answered outright (a replay, a join or a 409) and nothing was added to the window.
     Answered,
-    /// A conflicting external id forced the open window to close; the pass must yield to a deny.
+    /// A submission touching what the open window holds forced it to close; the pass must yield
+    /// to a deny.
     YieldedAfterClose,
 }
 
 impl Executor {
     /// Drains the work queue into one commit window and closes it, returning whether anything was
-    /// done. Closes at `commit_window_max_rows`, an empty queue, or a conflicting external id.
+    /// done. Closes at `commit_window_max_rows`, an empty queue, or a submission touching what the
+    /// window holds.
     pub(super) fn run_work_pass(&mut self) -> bool {
         let max_rows = self.health.commit_window_max_rows();
         #[cfg(feature = "fault-injection")]
@@ -349,21 +302,18 @@ impl Executor {
                     continue;
                 }
             };
-            let Command::Ingest {
-                rows,
-                batch_id,
-                body_hash,
-                artifacts,
-                unique_seq,
-                reply,
-            } = command
-            else {
-                // A values batch and a declaration read the unique values the window holds and has
-                // not yet applied, so the window closes first. Every other command is tolerable
-                // while a window is open: none of them touch the buffer or the swap.
+            let Command::Ingest { submission, reply } = command else {
+                // A declaration reads the unique values the window has not applied, and a change
+                // to the view roster changes the views the window's rows are going into, so the
+                // window closes first. Every other command is tolerable while a window is open: an
+                // edit's close carries the memberships and generating sets it finds then.
                 if matches!(
                     command,
-                    Command::Values { .. } | Command::DeclareAttribute { .. }
+                    Command::DeclareAttribute { .. }
+                        | Command::CreateView { .. }
+                        | Command::DropView { .. }
+                        | Command::CreateViewGroup { .. }
+                        | Command::CreatePlainView { .. }
                 ) && !window.is_empty()
                 {
                     window = self.close_and_reopen(window);
@@ -375,17 +325,7 @@ impl Executor {
 
             let admitted;
             let m = StageMark::now();
-            (window, admitted) = self.admit_ingest(
-                window,
-                IngestSubmission {
-                    rows,
-                    batch_id,
-                    body_hash,
-                    artifacts,
-                    unique_seq,
-                },
-                reply,
-            );
+            (window, admitted) = self.admit_ingest(window, submission, reply);
             self.health.lap(WriteStage::AdmitWindow, m);
             did_work = true;
             if admitted == Admission::YieldedAfterClose {
@@ -414,34 +354,30 @@ impl Executor {
 
     /// The batch-id state machine, evaluated on the executor rather than the handler: between a
     /// handler check and the enqueue the window can close, so a retry that saw unknown could
-    /// double-allocate into a fresh window.
+    /// be admitted into a fresh window twice.
     pub(super) fn admit_ingest(
         &mut self,
         mut window: CommitWindow<Reply<Ingested>>,
         submission: IngestSubmission,
         reply: Reply<Ingested>,
     ) -> (CommitWindow<Reply<Ingested>>, Admission) {
-        let IngestSubmission {
-            rows,
-            batch_id,
-            body_hash,
-            artifacts,
-            unique_seq,
-        } = submission;
-        match BatchState::of(&self.live, &window, &batch_id) {
+        match BatchState::of(&self.live, &window, &submission.batch_id) {
             BatchState::Accepted {
                 body_hash: prev_hash,
-                entity_ids,
+                receipt,
             } => {
-                if prev_hash == body_hash {
+                if prev_hash == submission.body_hash {
                     // A replay mints nothing: this batch's keys were created when first accepted.
                     reply.ack(Ingested {
-                            entity_ids,
-                            minted: 0,
-                        },
-                    );
+                        receipt,
+                        minted: 0,
+                        joined: 0,
+                        replayed: true,
+                    });
                 } else {
-                    reply.fail(ExecError::BatchConflict { batch_id });
+                    reply.fail(ExecError::BatchConflict {
+                        batch_id: submission.batch_id,
+                    });
                 }
                 (window, Admission::Answered)
             }
@@ -454,124 +390,148 @@ impl Executor {
                     window.seq(),
                     "the entry must be joined to the window it was found in"
                 );
-                if prev_hash == body_hash {
-                    let joined = window.join(&batch_id, reply);
+                if prev_hash == submission.body_hash {
+                    let joined = window.join(&submission.batch_id, reply);
                     debug_assert!(joined, "`held` just answered for this batch id");
                 } else {
                     // The 409 reaches the retry, not the held original, which is still owed its ack.
-                    reply.fail(ExecError::BatchConflict { batch_id });
+                    reply.fail(ExecError::BatchConflict {
+                        batch_id: submission.batch_id,
+                    });
                 }
                 (window, Admission::Answered)
             }
             BatchState::Unknown => {
                 let mut admission = Admission::Admitted;
-                // An external id the open window holds is bound at its close, and the joins below
-                // read the bindings.
-                if window.holds_external_id_of(&rows) {
+                // What the open window touches is written at its close, and the re-check below
+                // reads what was written.
+                let joined = submission.slots.iter().filter_map(|slot| match slot {
+                    tessera_lifecycle::Slot::Joined { entity, .. } => Some(*entity),
+                    _ => None,
+                });
+                let claims = tessera_lifecycle::WindowClaims::of(
+                    &submission.rows,
+                    submission.edits.iter().map(|e| e.edit.old).chain(joined),
+                    submission
+                        .edits
+                        .iter()
+                        .filter_map(|e| e.edit.rows.first()?.external_id.as_deref()),
+                    submission.keys.clone(),
+                );
+                if window.conflicts(&claims) {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
                 }
-                let rows = match self.resolve_joins(rows) {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        reply.fail(e);
-                        // A close above still owes the pass its yield to a deny.
-                        return (window, admission);
-                    }
-                };
-                // Over the rows as they will be applied: a join may have become a create above,
-                // or a create a join. A value the open window holds is added at its close, and
-                // the re-check below reads the added values.
-                let unique_keys = {
-                    let generation = self.generation.load();
-                    crate::unique::window_keys(&generation.bundle.manifest.declared_scalars, &rows)
-                };
-                if window.holds_unique_key(&unique_keys) {
-                    window = self.close_and_reopen(window);
-                    admission = Admission::YieldedAfterClose;
-                }
-                if let Some(entry) =
-                    self.admit(rows, batch_id, body_hash, artifacts, unique_seq, reply)
-                {
+                if let Some(entry) = self.admit(submission, reply) {
                     if window.is_empty() {
                         // Armed at the first entry: an empty window is never closed.
                         self.health.mark_work_started(window.opened_at());
                     }
-                    window.hold_unique_keys(unique_keys);
-                    window.push(entry);
+                    window.push(entry, claims);
                 }
                 (window, admission)
             }
         }
     }
 
-    /// The external-id admission check: whether each row joins the item its external id is bound
-    /// to or creates one, against state written at apply, which is why an entry naming an id the
-    /// open window holds must close it first.
-    fn resolve_joins(
-        &mut self,
-        mut rows: Vec<UnallocatedRow>,
-    ) -> std::result::Result<Vec<UnallocatedRow>, ExecError> {
-        // From one generation, so the exemption cannot race a delete.
-        let generation = self.generation.load();
-        let collisions = self.live.established_collisions(
-            &mut rows,
-            |e| generation.overlay.is_deleted(e),
-            |entity, view| {
-                generation.bundle.partitions.values().any(|partition| {
-                    partition
-                        .views
-                        .get(view)
-                        .is_some_and(|data| data.row_space.row_of(entity).is_some())
-                }) || generation.buffer.contains_in_view(entity, view)
-            },
-        );
-        if let Some(index) = rows.iter().position(|row| row.join_only && row.join.is_none()) {
-            return Err(ExecError::JoinRefused {
-                detail: format!(
-                    "row {index} joins an item deleted since the batch was checked; send the \
-                     batch again"
-                ),
-            });
-        }
-        if collisions > 0 {
-            return Err(ExecError::DuplicateExternalId { count: collisions });
-        }
-        settle_joins(&generation, &mut rows).map_err(|detail| ExecError::JoinRefused { detail })?;
-        Ok(rows)
-    }
-
-    /// The unique values against what was added since the handler checked them, from memory, and
-    /// the artifacts the batch names. `None` means the caller has already been answered.
+    /// The re-check of what the handler resolved, against what has changed since, from memory,
+    /// and the artifacts the batch names. `None` means the caller has already been answered.
     pub(super) fn admit(
         &mut self,
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        artifacts: tessera_lifecycle::BatchArtifacts,
-        unique_seq: u64,
+        submission: IngestSubmission,
         reply: Reply<Ingested>,
     ) -> Option<WindowEntry<Reply<Ingested>>> {
+        let IngestSubmission {
+            rows,
+            edits,
+            slots,
+            keys,
+            batch_id,
+            body_hash,
+            artifacts,
+            unique_seq,
+            over_bound,
+        } = submission;
         let generation = self.generation.load();
-        let rechecked =
-            crate::unique::recheck_rows(&generation, &rows, unique_seq, &self.deps.identity_key);
+        let creates = rows.iter().any(|row| row.join.is_none()) || !edits.is_empty();
+        let bound_elsewhere = |id: &[u8], item: Option<EntityId>| {
+            self.live.established_entity(id).is_some_and(|holder| {
+                Some(holder) != item && !generation.overlay.is_deleted(holder)
+            })
+        };
+        let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
+            || edits.iter().any(|submitted| {
+                let old = submitted.edit.old;
+                generation.overlay.is_deleted(old)
+                    || crate::write::joined::views_holding(&generation, old) != submitted.held_views
+                    || submitted.edit.rows[0]
+                        .external_id
+                        .as_deref()
+                        .is_some_and(|id| bound_elsewhere(id, Some(old)))
+            })
+            || slots.iter().any(|slot| match slot {
+                tessera_lifecycle::Slot::Unchanged { entity, .. }
+                | tessera_lifecycle::Slot::Joined { entity, .. } => {
+                    generation.overlay.is_deleted(*entity)
+                }
+                _ => false,
+            })
+            || rows.iter().any(|row| match row.join {
+                Some(entity) => {
+                    generation.overlay.is_deleted(entity)
+                        || generation.bundle.partitions.values().any(|partition| {
+                            partition
+                                .views
+                                .get(&row.view)
+                                .is_some_and(|data| data.row_space.row_of(entity).is_some())
+                        })
+                        || generation.buffer.contains_in_view(entity, &row.view)
+                }
+                None => row
+                    .external_id
+                    .as_deref()
+                    .is_some_and(|id| bound_elsewhere(id, None)),
+            });
+        // An entity the handler resolved can since have been retired by a fold, freed, and issued
+        // to another item: each must still hold the item the handler resolved it to.
+        let stale = stale || {
+            let key = &self.deps.identity_key;
+            let number_of =
+                |tessera_id: u64| key.invert(tessera_types::TesseraId::new(tessera_id)).1;
+            let mut named: Vec<(EntityId, EntityId)> = edits
+                .iter()
+                .map(|submitted| (submitted.edit.old, submitted.edit.number))
+                .collect();
+            for slot in &slots {
+                match slot {
+                    tessera_lifecycle::Slot::Unchanged { entity, tessera_id }
+                    | tessera_lifecycle::Slot::Joined { entity, tessera_id } => {
+                        named.push((*entity, number_of(*tessera_id)));
+                    }
+                    tessera_lifecycle::Slot::Written {
+                        row,
+                        tessera_id: Some(tessera_id),
+                    } => {
+                        if let Some(entity) = rows.get(*row as usize).and_then(|r| r.join) {
+                            named.push((entity, number_of(*tessera_id)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let entities: Vec<EntityId> = named.iter().map(|(entity, _)| *entity).collect();
+            match crate::edited::numbers_of(&generation, &entities) {
+                Ok(numbers) => named
+                    .iter()
+                    .zip(numbers)
+                    .any(|((_, resolved), now)| now != *resolved),
+                Err(_) => true,
+            }
+        };
         drop(generation);
-        match rechecked {
-            Ok(()) => {}
-            Err(crate::unique::Recheck::Refused(e)) => {
-                reply.fail(e);
-                return None;
-            }
-            Err(crate::unique::Recheck::Stale) => {
-                reply.fail(ExecError::UniqueStale(Box::new(
-                    tessera_lifecycle::StaleSubmission::Ingest {
-                        rows,
-                        batch_id,
-                        artifacts,
-                    },
-                )));
-                return None;
-            }
+        if stale {
+            reply.fail(ExecError::Stale);
+            return None;
         }
         let (memberships, edges) = match self.resolve_memberships(&artifacts) {
             Ok(resolved) => resolved,
@@ -583,6 +543,9 @@ impl Executor {
 
         Some(WindowEntry {
             rows,
+            edits: edits.into_iter().map(|e| e.edit).collect(),
+            slots,
+            over_bound,
             batch_id,
             body_hash,
             memberships,
@@ -605,7 +568,11 @@ impl Executor {
             scoped_families_by_view(&generation.bundle.manifest);
         let mut fresh: Vec<(String, String, u32)> = Vec::new();
         for entry in closing.entries_mut() {
-            for row in entry.rows_mut() {
+            let (rows, edits) = entry.rows_and_edits_mut();
+            for row in rows
+                .iter_mut()
+                .chain(edits.iter_mut().flat_map(|e| e.rows.iter_mut()))
+            {
                 // A column declared since admission is appended at the tail of `declared_scalars`.
                 crate::attributes::pad_to_schema(&mut row.scalars, declared_scalars);
                 mint_cells(
@@ -644,7 +611,20 @@ impl Executor {
         let started = window.opened_at();
         let mut mark = StageMark::now();
 
-        let closed = match self.live.with_allocator(|a| window.allocate(a)) {
+        let (identity, shard) = (
+            self.deps.identity_key,
+            self.generation.load().bundle.manifest.identity.shard_id,
+        );
+        let tessera_id_of = |entity: EntityId| {
+            identity
+                .forward(shard, entity)
+                .map(|id| id.raw())
+                .expect("the allocator issues entities inside the identity space")
+        };
+        let closed = match self
+            .live
+            .with_allocator(|a| window.allocate(a, tessera_id_of))
+        {
             Ok((closed, tally)) => {
                 // Recorded at allocation: a failed append still fragmented the entity axis.
                 self.health.record_fragmentation(tally);
@@ -687,10 +667,14 @@ impl Executor {
             }
         };
         // After the vocabulary mint above, since an artifact's key is a code only once drawn.
-        let rows = closing
-            .entries()
-            .iter()
-            .flat_map(|entry| entry.rows().iter().map(|row| row.scalars.as_slice()));
+        let rows = closing.entries().iter().flat_map(|entry| {
+            entry
+                .rows()
+                .iter()
+                .chain(entry.edits().iter().filter_map(|edit| edit.rows.first()))
+                .filter(|row| !row.join)
+                .map(|row| row.scalars.as_slice())
+        });
         match self.derive_records(rows, &vocabularies) {
             Ok(records) => mint_records.extend(records),
             Err(detail) => {
@@ -703,16 +687,22 @@ impl Executor {
 
         // A window carrying no join row reads no artifact.
         let restating = joining_entities(closing.entries());
-        let prepared = if restating.is_empty() {
-            growth_records(closing.entries(), None)
+        let (prepared, joined_per_entry) = if restating.is_empty() {
+            (
+                growth_records(closing.entries(), None),
+                joined_per_entry(closing.entries(), None),
+            )
         } else {
             self.live.with_artifacts(|store| {
-                growth_records(
-                    closing.entries(),
-                    Some(HeldMembers {
-                        store,
-                        restating: Some(&restating),
-                    }),
+                (
+                    growth_records(
+                        closing.entries(),
+                        Some(HeldMembers {
+                            store,
+                            restating: Some(&restating),
+                        }),
+                    ),
+                    joined_per_entry(closing.entries(), Some(store)),
                 )
             })
         };
@@ -726,16 +716,35 @@ impl Executor {
             }
         };
 
+        // An edited item keeps its suppression and every membership and generating set it is in,
+        // read here, on the thread that changes them, so nothing can move between the read and
+        // the append.
+        let generation = self.generation.load_full();
+        let mut moved: Vec<(EntityId, EntityId)> = Vec::new();
+        let mut first_edit: Option<usize> = None;
+        for (index, entry) in closing.entries_mut().iter_mut().enumerate() {
+            let (_, edits) = entry.rows_and_edits_mut();
+            for edit in edits.iter_mut() {
+                edit.suppressed = generation.overlay.is_suppressed(edit.old);
+                moved.push((edit.old, edit.rows[0].entity_id));
+                first_edit.get_or_insert(index);
+            }
+        }
+        drop(generation);
+        let carried = self.live.with_artifacts(|store| store.carried_over(&moved));
+
         mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
         let entries_at = vocabulary_records.len();
         let artifacts_at = entries_at + closing.entries().len();
         let growth_at = artifacts_at + mint_records.len();
+        let carried_at = growth_at + growth.len();
         let durable: Vec<&WalRecord> = vocabulary_records
             .iter()
             .chain(closing.entries().iter().map(|entry| &entry.record))
             .chain(mint_records.iter())
             .chain(growth.iter().map(|(record, _)| record))
+            .chain(carried.iter())
             .collect();
 
         let positions = match self.append_and_sync(&durable, Some(mark)) {
@@ -746,6 +755,7 @@ impl Executor {
                     Undurable::Append { at, .. } if (entries_at..artifacts_at).contains(&at) => {
                         at - entries_at
                     }
+                    Undurable::Append { at, .. } if at >= carried_at => first_edit.unwrap_or(0),
                     Undurable::Append { at, .. } if at >= growth_at => growth[at - growth_at].1,
                     _ => 0,
                 };
@@ -769,12 +779,13 @@ impl Executor {
         let artifact_records: Vec<&WalRecord> = mint_records
             .iter()
             .chain(growth.iter().map(|(record, _)| record))
+            .chain(carried.iter())
             .collect();
         self.apply_artifact_records(&artifact_records, &positions[artifacts_at..], Publish::AtTick);
 
         self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
         log_minted_artifacts(&minted_per_entry, &mint_records);
-        closing.ack(&self.health, minted_per_entry);
+        closing.ack(&self.health, minted_per_entry, joined_per_entry);
     }
 
     /// Index every entry of a committed window by its batch id, after the swap.
@@ -786,19 +797,10 @@ impl Executor {
         let m = StageMark::now();
         for (entry, wal_pos) in closed.iter().zip(positions) {
             let (batch_id, body_hash) = entry.batch_key();
-            debug_assert_eq!(
-                tessera_lifecycle::batch_identity(&entry.record),
-                Some(tessera_lifecycle::BatchIdentity {
-                    batch_id,
-                    body_hash,
-                    allocation: entry.entity_ids.clone(),
-                }),
-                "the accepted-batch index disagrees with the record it caches"
-            );
             self.live.record_accepted_batch(
                 batch_id.to_string(),
                 body_hash,
-                entry.entity_ids.clone(),
+                entry.receipt().to_vec(),
                 *wal_pos,
             );
         }
@@ -809,6 +811,10 @@ impl Executor {
     /// Clone the buffer once, insert every entry in the window, publish once. The clone is
     /// O(total buffered items), so a window of k entries pays it once. `vocabularies` is
     /// `close_window`'s own mutated copy, published verbatim, not cloned from the published `Arc`.
+    ///
+    /// An edit deletes its old entity and gives the new one the old one's suppression in the same
+    /// swap that buffers the new one's rows, so the item is hidden from its acknowledgement until
+    /// the new rows flush, and nobody who loses access by the edit keeps it past the ack.
     pub(super) fn apply_window(
         &self,
         closed: &mut [ClosedEntry<Reply<Ingested>>],
@@ -832,12 +838,28 @@ impl Executor {
 
         // What the buffered-row lists grow by: every entity this window buffered a row for.
         let mut inserted: Vec<EntityId> = Vec::new();
+        let mut overlay: Option<tessera_lifecycle::Overlay> = None;
+        let mut deleted: Vec<EntityId> = Vec::new();
+        let mut newly_denied: Vec<EntityId> = Vec::new();
+        let mut pairs: Vec<(u32, u32)> = Vec::new();
         let mut established = lock_recover(&self.live.established);
         // Updated together in one critical section, so the two can never disagree about an item.
         let mut established_inverse = lock_recover(&self.live.established_inverse);
         for (entry, wal_pos) in closed.iter_mut().zip(positions) {
             let terms = std::mem::take(&mut entry.terms);
-            for (row, row_terms) in entry.rows().iter().zip(terms) {
+            let edit_terms = std::mem::take(&mut entry.edit_terms);
+            let rows = entry.rows().iter().zip(terms);
+            let edit_rows = entry
+                .edits()
+                .iter()
+                .zip(edit_terms)
+                .flat_map(|(edit, terms)| {
+                    let mut terms = Some(terms);
+                    edit.rows
+                        .iter()
+                        .map(move |row| (row, terms.take().unwrap_or_default()))
+                });
+            for (row, row_terms) in rows.chain(edit_rows) {
                 // No external id means nothing to establish.
                 let mut m = StageMark::now();
                 if let Some(external_id) = &row.external_id {
@@ -852,21 +874,50 @@ impl Executor {
                 self.health.lap(WriteStage::RowWalPos, m);
                 inserted.push(row.entity_id);
             }
+            for edit in entry.edits() {
+                let new = edit.rows[0].entity_id;
+                let overlay = overlay.get_or_insert_with(|| (*generation.overlay).clone());
+                overlay.apply(edit.old, tessera_lifecycle::ChangeOp::Delete);
+                deleted.push(edit.old);
+                newly_denied.push(edit.old);
+                if edit.suppressed {
+                    overlay.apply(new, tessera_lifecycle::ChangeOp::Suppress);
+                    newly_denied.push(new);
+                }
+                buffer.remove(edit.old);
+                pairs.push((edit.number.raw() as u32, new.raw() as u32));
+            }
         }
         drop(established);
         drop(established_inverse);
-        // A joining row's values are its item's, whose entries are held already.
+        // A joining row's values are its item's, whose entries are held already. An edited item's
+        // old entity names nothing, so its entries go.
         let unique_live = unique.then(|| {
             let mut unique_live = (*generation.unique_live).clone();
+            if !deleted.is_empty() {
+                unique_live.remove_entities(&deleted.iter().map(|e| e.raw() as u32).collect());
+            }
             unique_live.add(
                 declared,
                 closed
                     .iter()
-                    .flat_map(|entry| entry.rows())
+                    .flat_map(|entry| {
+                        entry
+                            .rows()
+                            .iter()
+                            .chain(entry.edits().iter().flat_map(|edit| &edit.rows))
+                    })
                     .filter(|row| !row.join)
                     .map(|row| (row.entity_id, row.scalars.as_slice())),
             );
             unique_live
+        });
+        // An old entity's pair stays until the fold that removes the entity, which reads it to tell
+        // an entity an edit made from an item's number.
+        let edited_live = (!pairs.is_empty()).then(|| {
+            let mut edited_live = (*generation.edited_live).clone();
+            edited_live.add(&pairs);
+            edited_live
         });
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
@@ -875,14 +926,28 @@ impl Executor {
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
 
-        let next = generation.with_buffer(Arc::new(buffer), &inserted, |g| {
+        let change = |g: &mut crate::GenerationParts| {
             g.overlay_version = generation.overlay_version + 1;
             g.vocabularies = Arc::new(vocabularies);
             g.suggest = suggest;
             if let Some(unique_live) = unique_live {
                 g.unique_live = Arc::new(unique_live);
             }
-        });
+            if let Some(edited_live) = edited_live {
+                g.edited_live = Arc::new(edited_live);
+                g.edit_epoch = generation.edit_epoch + 1;
+            }
+        };
+        let next = match overlay {
+            None => generation.with_buffer(Arc::new(buffer), &inserted, change),
+            Some(overlay) => generation.with_denies(
+                Arc::new(overlay),
+                &newly_denied,
+                Arc::new(buffer),
+                &inserted,
+                change,
+            ),
+        };
         self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);
     }

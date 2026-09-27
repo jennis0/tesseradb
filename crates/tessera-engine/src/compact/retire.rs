@@ -1,10 +1,12 @@
 use croaring::Bitmap;
 
-use tessera_store::manifest::SegmentDescriptor;
+use tessera_store::manifest::LocatorExtent;
+use tessera_store::permutation::SegmentExtent;
 
-/// The whole entity range of every carried-forward segment and locator extent. Naming too many
-/// keeps a tombstone for another fold; naming too few exposes a deleted item. Built at
-/// publication, because built at plan time it would miss flushes published while the fold ran.
+/// The entities every carried-forward segment and locator extent can name: each dense span whole,
+/// and each entity listed below one. Naming too many keeps a tombstone for another fold; naming
+/// too few exposes a deleted item. Built at publication, because built at plan time it would miss
+/// flushes published while the fold ran.
 #[derive(Debug, Default)]
 pub(crate) struct CarriedForward {
     entities: Bitmap,
@@ -17,14 +19,18 @@ impl CarriedForward {
         }
     }
 
-    /// A flush's tier, run and locator extent lie within its segment's entity range, so that range
-    /// covers them all, including an item with no terms.
-    pub(crate) fn add_segment(&mut self, descriptor: &SegmentDescriptor) {
-        self.add_range(descriptor.entity_lo, descriptor.entity_hi);
+    /// A flush's tier, run and locator extent lie within the entities its segment holds, so the
+    /// segment's span and listed rows cover them all, including an item with no terms.
+    pub(crate) fn add_segment(&mut self, extent: &SegmentExtent) {
+        self.add_range(extent.entity_lo, extent.entity_hi);
+        self.entities
+            .add_many(&extent.below.iter().map(|&(entity, _)| entity).collect::<Vec<_>>());
     }
 
-    pub(crate) fn add_locator_extent(&mut self, extent: &tessera_store::manifest::LocatorExtent) {
+    /// `listed` is what the extent's file lists below its span.
+    pub(crate) fn add_locator_extent(&mut self, extent: &LocatorExtent, listed: &[u32]) {
         self.add_range(extent.entity_lo, extent.entity_hi);
+        self.entities.add_many(listed);
     }
 
     /// Inclusive. A range past `u32::MAX` is clamped outward to it, never dropped.
@@ -54,17 +60,9 @@ pub(crate) fn executed(d0: &Bitmap, carried: &CarriedForward) -> Bitmap {
 mod tests {
     use super::*;
 
-    use tessera_store::manifest::LocatorExtent;
-
-    fn segment(seg_id: &str, entity_lo: u64, entity_hi: u64) -> SegmentDescriptor {
-        SegmentDescriptor {
-            incarnation: 0,
-            view: "s0".to_string(),
-            seg_id: seg_id.to_string(),
-            row_count: (entity_hi - entity_lo + 1) as u32,
-            entity_lo,
-            entity_hi,
-        }
+    fn segment(seg_id: &str, entity_lo: u64, entity_hi: u64) -> SegmentExtent {
+        SegmentExtent::from_rows(seg_id, 0, (entity_lo, entity_hi), entity_lo..=entity_hi)
+            .expect("a dense extent")
     }
 
     fn locator(entity_lo: u64, entity_hi: u64) -> LocatorExtent {
@@ -72,6 +70,7 @@ mod tests {
             path: "entities/ext-locator-1.u32".to_string(),
             entity_lo,
             entity_hi,
+            listed: 0,
             external_id_run: "entities/external-ids-1.arrow".to_string(),
         }
     }
@@ -118,7 +117,7 @@ mod tests {
 
         let mut carried = CarriedForward::new();
         carried.add_segment(&segment("flush-3-1", 50, 53));
-        carried.add_locator_extent(&locator(54, 56));
+        carried.add_locator_extent(&locator(54, 56), &[]);
 
         let executed = executed(&d0, &carried);
 
@@ -133,7 +132,7 @@ mod tests {
     fn a_locator_extent_alone_protects_its_range() {
         let d0 = bitmap(&[12]);
         let mut carried = CarriedForward::new();
-        carried.add_locator_extent(&locator(10, 20));
+        carried.add_locator_extent(&locator(10, 20), &[]);
 
         assert!(executed(&d0, &carried).is_empty());
     }

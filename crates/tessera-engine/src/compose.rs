@@ -361,17 +361,19 @@ impl EffectiveMask {
     pub fn rows_in_range(&self, r: Range<u32>) -> Bitmap {
         self.debug_assert_in_domain(&r);
         let range_mask = Bitmap::from_range(r);
-        let mut result = self.base.bitmap().and(&range_mask);
+        // With a filter, the range is narrowed to the filter's rows before `base` is read, so a
+        // selective filter reads the containers of its own rows rather than every container of
+        // the mask in the range. The filter narrows `base` and `plus` alike, so no diff can
+        // reinstate a row it excluded.
+        let within = match &self.filter {
+            Some(filter) => filter.rows().and(&range_mask),
+            None => range_mask,
+        };
+        let mut result = self.base.bitmap().and(&within);
         result.andnot_inplace(&self.minus);
-        let plus_in_range = self.plus.and(&range_mask);
         // `plus ∩ base = ∅` (the structural invariant `compose` asserts), so this adds nothing
         // already in `result` and cannot double-count.
-        result.or_inplace(&plus_in_range);
-        // The filter is applied last, by intersection only: applying it earlier — to `base`, or
-        // before the `plus` union — would let a diff reinstate a row the filter had excluded.
-        if let Some(filter) = &self.filter {
-            result.and_inplace(filter.rows());
-        }
+        result.or_inplace(&self.plus.and(&within));
         result
     }
 

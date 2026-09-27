@@ -194,9 +194,20 @@ pub struct GenerationStamp {
 // 22: the manifest's identity descriptor has no `idset`, and its key is generated at the build.
 // 23: a declared scalar carries `unique`, and a side-manifest `unique_indexes`. A 22 manifest
 // lacks both and is refused as malformed.
+// 24: a unique index's run files are key run format 2, which packs each page's keys as gaps from
+// its first key; a format 1 run is refused at open.
+// 25: a side-manifest carries `edited_items`, the runs mapping an edited item's number to its
+// entity and back, and a segment may carry `edited-rows.u32`. A 24 manifest lacks the field and is
+// refused as malformed. A group-scoped text column stores its prose beside its postings.
+// 26: a side-manifest carries `free_entities` and `held_entities`, the entity ids a fold freed; a
+// flush or merge segment may hold rows for entities below its descriptor's span, and a locator
+// extent carries `listed` pairs after its dense slots. A 25 manifest lacks the fields and is
+// refused as malformed.
+// 27: record blobs are cut into 32 KiB blocks rather than 256 KiB. A 26 bundle reads correctly
+// but is refused, so that every bundle carries the one block size.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 23;
+pub const BUNDLE_FORMAT: u32 = 27;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

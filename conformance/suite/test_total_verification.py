@@ -137,7 +137,7 @@ def run(tmp_path_factory) -> SimpleNamespace:
         # resident session, which is why the other principals authorise afterwards.
         resp = server.ingest(files.ingest.read_bytes(), "total-verification-1")
         assert resp.status_code == 200, resp.text
-        assert resp.json()["accepted"] == INGEST[1] - INGEST[0]
+        assert resp.json()["created"] == INGEST[1] - INGEST[0]
         refreshes_before = server.status()["write_executor"]["flush"]["refreshes"]
         server.flush()
         deadline = time.monotonic() + 30.0

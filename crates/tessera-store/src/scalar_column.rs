@@ -1,6 +1,6 @@
 //! A column of an Arrow batch read as a declared scalar type: which Arrow types may carry each
 //! declared type, and what each row's value becomes. A build reads a points file's attribute
-//! columns here and the running service reads an ingest or values batch's columns here, so one
+//! columns here and the running service reads an ingest batch's columns here, so one
 //! column loads the same way at either.
 //!
 //! Every integer type carries every integer declaration, and a row whose value does not fit the
@@ -172,9 +172,9 @@ impl ScalarColumn {
         Ok(match &self.values {
             Values::Bool(values) => ScalarValue::Bool(values.value(row)),
             Values::F32(values) => ScalarValue::F32(values[row]),
-            Values::F64AsF32(values) => ScalarValue::F32(
-                narrow_to_f32(values[row]).ok_or(OutOfRange::F32(values[row]))?,
-            ),
+            Values::F64AsF32(values) => {
+                ScalarValue::F32(narrow_to_f32(values[row]).ok_or(OutOfRange::F32(values[row]))?)
+            }
             Values::F64(values) => ScalarValue::F64(values[row]),
             Values::Text(values) => ScalarValue::Utf8(values.value(row).to_string()),
             Values::Ints(values) => self.integer(values[row].into())?,

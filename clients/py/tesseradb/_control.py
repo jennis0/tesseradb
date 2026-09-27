@@ -203,29 +203,27 @@ class Control:
         return self._limits
 
     def ingest(self, body: bytes, batch: str, view: str | None = None) -> Answer:
-        """`POST /control/ingest`: add new items.
+        """`POST /control/ingest`: create items, edit them, or add them to a view.
+
+        A row names an item by its `tessera_id`, its `external_id` or a unique column's value. A
+        row naming none creates an item at its position; one carrying what the item stores
+        changes nothing; one naming an item with no row in the view adds it there; any other
+        edits the item, which keeps its `tessera_id`. A row without coordinates changes only what
+        it carries. Any column may be left out, keeping what the item stores, and a null clears
+        it. The answer counts the rows `created`, `edited`, `added` and `unchanged`, and in
+        `joined` the annotation memberships the rows added, and gives each row's `tessera_id`. A
+        row that only places its item in an annotation changes the annotation, not the item, and
+        is counted unchanged.
 
         - `body`: the rows, as an Arrow IPC stream.
         - `batch`: the request's batch id. A retry sends the same id with the same bytes, and the
           server answers it as a replay; the same id with other bytes is refused.
         - `view`: the view the rows are for. It may be left out where the database has one view.
         """
-        return self._rows("/control/ingest", body, batch, view)
-
-    def values(self, body: bytes, batch: str, view: str | None = None) -> Answer:
-        """`POST /control/values`: set attribute values on items the database holds.
-
-        The arguments are as for `ingest`. `view` is needed for a column or layer scoped to a
-        view group.
-        """
-        return self._rows("/control/values", body, batch, view)
-
-    def _rows(self, path: str, body: bytes, batch: str, view: str | None) -> Answer:
-        """The two row routes: the same headers, the view named where the page is of one."""
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", path, body, headers)
+        return self._send("POST", "/control/ingest", body, headers)
 
     def declare_layer(self, payload: dict) -> Answer:
         """`PUT /control/layers`: declare one annotation layer.
@@ -316,23 +314,15 @@ class Control:
         """
         return self._send("DELETE", f"/control/layers/{_segment(name)}" + _wait(wait))
 
-    def drop_view(
-        self, group: str, key: str, delete_dangling: bool = False, wait: bool = False
-    ) -> Answer:
+    def drop_view(self, group: str, key: str, wait: bool = False) -> Answer:
         """`DELETE /control/views/{group}/{key}`: remove one view of a view group.
 
-        No item is deleted unless `delete_dangling` is `True`, which deletes the items that are
-        in no other view. The answer's `deleted` counts them. `wait` is as for `flush`.
+        The items it leaves in no view are deleted, and the answer's `deleted` counts them.
+        `wait` is as for `flush`.
         """
-        query = {}
-        if delete_dangling:
-            query["delete_dangling"] = "true"
-        if wait:
-            query["wait"] = "visible"
-        path = f"/control/views/{_segment(group)}/{_segment(key)}"
-        if query:
-            path += "?" + urllib.parse.urlencode(query)
-        return self._send("DELETE", path)
+        return self._send(
+            "DELETE", f"/control/views/{_segment(group)}/{_segment(key)}" + _wait(wait)
+        )
 
     def compact(self) -> Answer:
         """`POST /control/compact`: ask for a compaction, which removes deleted items' rows.

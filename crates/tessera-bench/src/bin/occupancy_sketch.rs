@@ -29,8 +29,8 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -41,10 +41,10 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::projection::RowProjection;
 use tessera_engine::occupancy::{
     for_each_occupied_tile, occupied_tiles_ladder_with_precision, TileSketch,
 };
+use tessera_engine::projection::RowProjection;
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::unsplit32;
@@ -262,6 +262,7 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
         let temp = TempDir::new().expect("a temp dir for the segment");
         write_segment(temp.path(), &items, &written, &[]).expect("write_segment");
         let data = SegmentData {
+            entities: tessera_store::edited::RowEntities::Numbers,
             seg_id: format!("bench-{g}"),
             row_count: items.len() as u32,
             morton: MortonSlice::load(&temp.path().join("morton.u32")).expect("morton"),

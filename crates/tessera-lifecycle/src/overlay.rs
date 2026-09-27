@@ -2,19 +2,17 @@
 //! (`write-path.md` §5.4's two removal rules).
 //!
 //! The overlay is **two independent stores**, never one overwritable disposition: deletions and
-//! suppressions are separate facts that leave on different triggers. **Rule S** — an entry leaves
-//! `suppressed` only by its unsuppress. **Rule F** — an entry leaves `deleted` only at the
+//! suppressions are separate facts that leave on different triggers. **Rule S**: an entry leaves
+//! `suppressed` by its unsuppress, or at the compaction fold that removes the entity it names. A
+//! fold removes only deleted entities, and an item that still exists holds its suppression on its
+//! current entity, which no fold removes. **Rule F**: an entry leaves `deleted` only at the
 //! compaction fold that *executes* it.
-//!
-//! *(Owner-ruled 2026-08-03, replacing lifecycle §3.2's stamp ledger. That document is not yet
-//! rewritten — a reader who finds it describing per-deny retirement stamps has found the stale
-//! text, not a second mechanism.)*
 //!
 //! **A deletion retires at the fold that executes it.** [`Overlay::retire`] is Rule F's only route
 //! out of `deleted`, and its caller is the fold's own publication, which derives the executed set
 //! from what it demonstrably removed (`tessera_engine`'s `compact`, compaction §5). Rule F's safety
-//! is the identity match the publication seam builds (`write-path.md` §5.4, compaction §4), not a
-//! stamp ordering.
+//! is the identity match the publication builds (`write-path.md` §5.4, compaction §4), not a stamp
+//! ordering.
 //!
 //! Collapsing the two into a single enum ("last write wins") is fail-open, and has been caught
 //! twice: the sequence `delete → suppress → unsuppress` must not re-expose a deleted item. Two
@@ -34,9 +32,9 @@ use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
 
 /// Per-entity deny state, held as **two independent stores**.
 ///
-/// The two facts leave on different triggers — a suppression *only* by its unsuppress (Rule S), a
-/// deletion only at the compaction fold that executes it (Rule F, `write-path.md` §5.4) — and the
-/// rejected single rule (r1: one retirement stamp for every deny) is fail-open precisely for
+/// The two facts leave on different triggers: a suppression by its unsuppress, or with its entity
+/// at the fold that removes it (Rule S), a deletion only at the compaction fold that executes it
+/// (Rule F, `write-path.md` §5.4). One retirement stamp for every deny would be fail-open for
 /// suppression, because any stamp eventually retires the entry and re-exposes the item.
 ///
 /// **Two stores rather than two fields in one struct, and the difference is not cosmetic.**
@@ -45,7 +43,8 @@ use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
 /// could still break while compiling. Two containers, mutated in two places, cannot be collapsed by
 /// any refactor that still type-checks. It also makes r1 *unexpressible* rather than merely
 /// rejected: [`Overlay::suppressed`] is a bitmap of entity ids and carries no stamp field for a
-/// retirement rule to act on at all. Its only removal path is an `Unsuppress`.
+/// retirement rule to act on at all. It leaves by an `Unsuppress`, or with its entity's executed
+/// deletion in [`Overlay::retire`].
 ///
 /// Both sets are Roaring bitmaps because that is what they are — sets of entity ids, in entity
 /// space, where a set is the whole content.
@@ -53,8 +52,9 @@ use crate::wal::{ChangeOp, OverlaySnapshotEntry, WalRecord};
 pub struct Overlay {
     /// Set by `Delete`, and removed from **only** by [`Overlay::retire`] — Rule F's single route.
     deleted: Bitmap,
-    /// Set by `Suppress`, cleared **only** by `Unsuppress`. Never touched by `Delete`, which is
-    /// true by construction rather than by discipline.
+    /// Set by `Suppress`, cleared by `Unsuppress` and, for an entity whose deletion it retires, by
+    /// [`Overlay::retire`]. Never touched by `Delete`, which is true by construction rather than by
+    /// discipline.
     suppressed: Bitmap,
 }
 
@@ -96,7 +96,7 @@ impl Overlay {
     /// as it stands rather than enumerating.
     ///
     /// Separate from [`Self::deleted_set`] because the two manifest fields mean different
-    /// things and leave under different rules (`write-path.md` §5.4): a suppression only by its
+    /// things and leave under different rules (`write-path.md` §5.4): a suppression by its
     /// unsuppress (Rule S), a tombstone only at the fold that executes it (Rule F).
     /// [`Self::denied`] deliberately
     /// hands out only the union, which is right for the row mask and wrong here — a writer that
@@ -138,12 +138,11 @@ impl Overlay {
     /// How many deletions stand — **the gauge a compaction trigger keys on**, and not the same
     /// number as [`Self::len`].
     ///
-    /// `len` is `|deleted ∪ suppressed|`, and Rule S says a suppression never retires, so a
-    /// deployment holding 500,000 standing suppressions is permanently over any limit expressed in
-    /// those terms — and a trigger reading it would dispatch a **full no-op fold every interval,
-    /// for ever**, rewriting the corpus to retire nothing (compaction §9; r3, memory F5). A
-    /// trigger keys on what a fold can actually reduce; the *alarm* stays on total depth, which is
-    /// the right thing for an operator to see.
+    /// `len` is `|deleted ∪ suppressed|`, and a standing suppression leaves only by its
+    /// unsuppress, so a deployment holding 500,000 standing suppressions is permanently over any
+    /// limit expressed in those terms, and a trigger reading it would dispatch a full no-op fold
+    /// every interval, rewriting the corpus to retire nothing. A trigger keys on what a fold can
+    /// reduce; the alarm stays on total depth, which is the right thing for an operator to see.
     pub fn deleted_len(&self) -> u64 {
         self.deleted.cardinality()
     }
@@ -176,14 +175,13 @@ impl Overlay {
         }
     }
 
-    /// Withdraw `executed` from `deleted` — **Rule F's only retirement route, and it takes only
-    /// deletions** (write-path §5.4).
+    /// Withdraw `executed` from `deleted`, **Rule F's only retirement route** (write-path §5.4),
+    /// and withdraw [`Self::suppressions_retired_by`] from `suppressed`.
     ///
-    /// `suppressed` is not an operand and there is no sibling for it: a suppression's invisibility
-    /// rests on its overlay entry for as long as it stands, so any retirement route at all is
-    /// fail-open — *"any stamp eventually retires the entry and re-exposes the item"*. That is why
-    /// this takes one bitmap and subtracts it from one store rather than taking a set of entities
-    /// and asking which store they are in.
+    /// An executed entity has no row left anywhere, so its suppression hides nothing more, and an
+    /// id a fold frees must carry none to the item that takes it. An item that still exists holds
+    /// its suppression on its current entity, which is not deleted, so a suppression of an entity
+    /// in `executed` that this overlay does not delete stands.
     ///
     /// # The caller's obligation, which nothing here can check
     ///
@@ -202,12 +200,19 @@ impl Overlay {
     /// Returns how many entries were retired, which is what makes "this fold retired nothing"
     /// distinguishable from "this fold was not asked to".
     pub fn retire(&mut self, executed: &Bitmap) -> u64 {
-        let before = self.deleted.cardinality();
-        self.deleted.andnot_inplace(executed);
-        before - self.deleted.cardinality()
+        let retiring = executed.and(&self.deleted);
+        self.suppressed.andnot_inplace(&retiring);
+        self.deleted.andnot_inplace(&retiring);
+        retiring.cardinality()
     }
 
-    /// Re-state this overlay as WAL records, so the `ChangeByEntity` records it was accumulated
+    /// The suppressions [`Self::retire`] withdraws for `executed`: those of the entities in it
+    /// that this overlay deletes.
+    pub fn suppressions_retired_by(&self, executed: &Bitmap) -> Bitmap {
+        executed.and(&self.deleted).and(&self.suppressed)
+    }
+
+    /// Re-state this overlay as WAL records, so the `ChangeBatch` records it was accumulated
     /// from can be deleted (lifecycle §4's rotation; [`WalRecord::OverlaySnapshot`]).
     ///
     /// **Entries are ordered by entity id**, so the same overlay always encodes to the same bytes.
@@ -238,7 +243,7 @@ impl Overlay {
 
     /// Fold a snapshot back in.
     ///
-    /// Applied, never assigned: the snapshot is a record in a position, and a `ChangeByEntity`
+    /// Applied, never assigned: the snapshot is a record in a position, and a `ChangeBatch`
     /// earlier in the same file has already been applied when this runs.
     pub fn apply_snapshot(&mut self, entries: &[OverlaySnapshotEntry]) {
         for entry in entries {
@@ -268,7 +273,7 @@ pub(crate) fn as_u32(entity: EntityId) -> u32 {
 ///   deterministic, replay-order in-memory extension — see [`DescriptorResolver`]) and register
 ///   `external_id → entity_id` in this replay's own external-id map, which the caller keeps for
 ///   live `/control/changes` admission.
-/// - `ChangeByEntity` records apply their disposition directly. **No resolution happens here at
+/// - `ChangeBatch` records apply their disposition directly. **No resolution happens here at
 ///   all**: the entity was fixed at admission, which is what makes the record replay to the same
 ///   entity under a rotated identity key and lets it address an item that never had an external
 ///   id. The external-id-keyed `Change` record this replay once also had to resolve was deleted
@@ -339,8 +344,18 @@ pub fn replay<'a>(
 
     for record in records {
         match record {
-            WalRecord::IngestBatch { rows, .. } => {
-                for row in rows {
+            WalRecord::IngestBatch { rows, edits, .. } => {
+                // An edit deletes the entity its item leaves and gives the new one the old one's
+                // suppression, both in the record that creates the new one.
+                for edit in edits {
+                    overlay.apply(edit.old, ChangeOp::Delete);
+                    if let Some(first) = edit.rows.first() {
+                        if edit.suppressed {
+                            overlay.apply(first.entity_id, ChangeOp::Suppress);
+                        }
+                    }
+                }
+                for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
                     // Contracts §3.4 r6: no external id means no sidecar entry and nothing to
                     // establish here either — the item is addressable only by its `tessera_id`.
                     if let Some(external_id) = &row.external_id {
@@ -349,11 +364,11 @@ pub fn replay<'a>(
                     buffer.insert_row(row, &mut resolver);
                 }
             }
-            WalRecord::ChangeByEntity { entity_id, op } => {
-                // No resolution at all: the entity was fixed at admission, which is what makes
-                // this record replay to the same entity under a rotated identity key, and what
-                // lets it address an item that never had an external id.
-                overlay.apply(*entity_id, *op);
+            WalRecord::ChangeBatch { changes } => {
+                // No resolution at all: each entity was fixed at admission.
+                for (entity_id, op) in changes {
+                    overlay.apply(*entity_id, *op);
+                }
             }
             WalRecord::OverlaySnapshot { entries } => {
                 overlay.apply_snapshot(entries);
@@ -368,13 +383,13 @@ pub fn replay<'a>(
             WalRecord::VocabularyMint { .. } => {}
             // **The registry is rebuilt by the caller, and only the deny lane is this function's
             // business.** A layer's own entity is an ordinary entity as far as the overlay is
-            // concerned: a suppression against it arrives as a `ChangeByEntity` and is applied by
+            // concerned: a suppression against it arrives as a `ChangeBatch` and is applied by
             // the arm above, with no special case, which is the whole reason a layer takes an
             // entity at all. What these records carry beyond that — the declaration and the
             // reserved runs — belongs to the registry the write path reconstructs, in the same
             // second pass as the vocabulary mints and for the same reason.
             // An artifact's own entity is an ordinary entity here too, on the same argument: its
-            // suppression arrives as a `ChangeByEntity`. The membership the record carries belongs
+            // suppression arrives as a `ChangeBatch`. The membership the record carries belongs
             // to the artifact store, rebuilt in that same second pass.
             // **A drop discards the rows the buffer held for the view, here as on the live
             // path** (`views.md` §3.4, `Executor::publish_roster`). They name a coordinate system
@@ -385,25 +400,18 @@ pub fn replay<'a>(
             // rows it discards and the rows the recreate takes, and it is the one and only place
             // the two sets can be told apart.
             //
-            // **Dropping a view still deletes no entity** (`views.md` §3.4).
-            // `delete_dangling`'s deletions arrive here as the ordinary `ChangeByEntity` records
-            // the arm above applies, which is what keeps the drop from being a second retirement
-            // route.
-            WalRecord::ViewDrop { view } => {
+            // The items the drop left in no view are deleted here as a `ChangeBatch` delete is,
+            // and retire at the fold like any other deletion.
+            WalRecord::ViewDrop { view, deleted } => {
                 // **Every id the key resolves to, not just the owner's.** A key is one view of the
                 // group that owns it *and* one of every group sharing its views (`views.md` §3.3),
                 // and the record names the owner — so a prune built from the record alone would
                 // leave the sharing group's buffered rows to be flushed into whatever takes the
                 // key next. The expansion is `Manifest::view_ids_for_key`'s, passed in because
                 // this crate holds no manifest.
-                let ids = view_ids_of_key(&view.group, &view.key);
-                let orphaned: Vec<(EntityId, String)> = buffer
-                    .rows()
-                    .filter(|(_, item)| ids.iter().any(|id| id == &item.view))
-                    .map(|(entity, item)| (*entity, item.view.clone()))
-                    .collect();
-                for (entity, view) in orphaned {
-                    buffer.remove_in_view(entity, &view);
+                buffer.remove_views(&view_ids_of_key(&view.group, &view.key));
+                for entity in deleted {
+                    overlay.apply(*entity, ChangeOp::Delete);
                 }
             }
             // A view create is the roster's, rebuilt by the caller in that same second pass, and
@@ -414,12 +422,8 @@ pub fn replay<'a>(
             | WalRecord::ArtifactGrow { .. }
             | WalRecord::ArtifactFill { .. }
             | WalRecord::ViewCreate { .. } => {}
-            // The ingest design's remaining records (`ingest.md` §7.1) are not applied by anything
-            // yet, and a replay that meets one refuses to open before reaching here
-            // (`crate::wal::unbuilt_track`). None of them names the deny lane: a values row fills
-            // cells, and a declaration names no entity.
-            WalRecord::ValuesBatch { .. }
-            | WalRecord::AttributeDeclare { .. }
+            // A declaration names no entity.
+            WalRecord::AttributeDeclare { .. }
             | WalRecord::UniqueDeclare { .. }
             | WalRecord::VocabularyDeclare { .. }
             | WalRecord::ViewGroupCreate { .. }
@@ -431,10 +435,10 @@ pub fn replay<'a>(
     (overlay, buffer, established, resolver)
 }
 
-/// Drop everything the buffer holds for an entity the overlay has deleted, its rows in every view
-/// and its fills — **the buffer never holds anything of a deleted entity** (write-path §4.2,
-/// decision 0047). A join carries no terms and so is absent from the entity-space walk, and a fill
-/// is not a row at all; both pin the log exactly as an own row does.
+/// Drop every row the buffer holds for an entity the overlay has deleted, in every view — **the
+/// buffer never holds anything of a deleted entity** (write-path §4.2, decision 0047). A join
+/// carries no terms and so is absent from the entity-space walk, and it pins the log exactly as an
+/// own row does.
 ///
 /// A deleted row acquires no geometry: `plan_flush` skips it, so a flush never consumes it and
 /// its entry would sit in the buffer for the process's lifetime. That is not merely untidy —
@@ -445,9 +449,9 @@ pub fn replay<'a>(
 /// **Composition-neutral, which is what makes the removal safe rather than merely cheap.**
 /// `compose::verdict` answers `Some(false)` from `overlay.is_deleted` before it ever consults the
 /// buffer, and a deletion retires only at the fold that executes it (Rule F), so nothing downstream
-/// can observe the difference. Under decision 0047 the entity is *forgotten* — its id stays burned
-/// (I9), a re-ingest of its external id binds a new one — so the end state after reclamation, no
-/// row and no buffer entry, is the ruled one and not a loss.
+/// can observe the difference. Under decision 0047 the entity is *forgotten*, and a re-ingest of
+/// its external id binds a new one, so the end state after reclamation, no row and no buffer
+/// entry, is the ruled one and not a loss.
 ///
 /// Applied as an end-of-pass rule rather than at each `Delete`, because the manifests' deny seed
 /// is applied *before* the walk: a tombstone the seed carries would otherwise miss the
@@ -481,16 +485,11 @@ mod tests {
         );
     }
 
-    /// **Rule F's route takes deletions and cannot reach a suppression** — the fail-open caught
-    /// twice in review, in its most direct form.
-    ///
-    /// A retirement set is entities, not dispositions, so an entity that is both deleted and
-    /// suppressed is the case that matters: the deletion retires and the suppression stands, and
-    /// the item is still hidden afterwards. There is no sibling of this method for `suppressed`
-    /// and there must not be one — a suppression's invisibility rests on its entry for as long as
-    /// it stands, so any retirement route at all re-exposes the item.
+    /// **Rule F's route takes the executed entities' deletions and suppressions, and nothing
+    /// else.** A suppression of an entity the overlay does not delete stands even where the set
+    /// names it, and so does a deletion outside the set.
     #[test]
-    fn retirement_takes_deletions_and_leaves_every_suppression_standing() {
+    fn retirement_takes_the_executed_entities_and_leaves_every_other_deny_standing() {
         let mut overlay = Overlay::new();
         let both = EntityId::new(1);
         let deleted_only = EntityId::new(2);
@@ -503,33 +502,24 @@ mod tests {
         overlay.apply(suppressed_only, ChangeOp::Suppress);
         overlay.apply(untouched_delete, ChangeOp::Delete);
 
-        let mut executed = Bitmap::new();
-        for entity in [both, deleted_only, suppressed_only] {
-            executed.add(as_u32(entity));
-        }
+        let executed = Bitmap::of(&[as_u32(both), as_u32(deleted_only), as_u32(suppressed_only)]);
         assert_eq!(
-            overlay.retire(&executed),
-            2,
-            "the count is deletions withdrawn — the suppressed-only entity was in the set and \
-             contributed nothing"
+            overlay.suppressions_retired_by(&executed),
+            Bitmap::of(&[as_u32(both)])
         );
-
-        assert!(!overlay.is_deleted(both));
-        assert!(
-            overlay.is_suppressed(both),
-            "an entity that is both loses only its deletion; the suppression is what still hides it"
-        );
-        assert!(!overlay.is_deleted(deleted_only));
+        assert_eq!(overlay.retire(&executed), 2, "the count is deletions withdrawn");
+        assert!(!overlay.touches(both), "an executed entity leaves both stores");
+        assert!(!overlay.touches(deleted_only));
         assert!(
             overlay.is_suppressed(suppressed_only),
-            "a suppression named in a retirement set is not retired — it has no route at all"
+            "a suppression of an entity the overlay does not delete stands, though the set names it"
         );
         assert!(
             overlay.is_deleted(untouched_delete),
             "a deletion outside the set stands, which is the fail-closed direction: the next fold \
              takes it"
         );
-        assert_eq!(overlay.len(), 3);
+        assert_eq!(overlay.len(), 2);
     }
 
     /// An empty retirement set is a no-op, which is what every fold whose tombstones were all
@@ -538,8 +528,9 @@ mod tests {
     fn retiring_nothing_withdraws_nothing() {
         let mut overlay = Overlay::new();
         overlay.apply(EntityId::new(9), ChangeOp::Delete);
+        overlay.apply(EntityId::new(9), ChangeOp::Suppress);
         assert_eq!(overlay.retire(&Bitmap::new()), 0);
-        assert!(overlay.is_deleted(EntityId::new(9)));
+        assert!(overlay.is_deleted(EntityId::new(9)) && overlay.is_suppressed(EntityId::new(9)));
     }
 
     #[test]
@@ -579,9 +570,8 @@ mod tests {
         let dict = Dict::load(&paths).unwrap();
 
         let entity = EntityId::new(7);
-        let suppress = WalRecord::ChangeByEntity {
-            entity_id: entity,
-            op: ChangeOp::Suppress,
+        let suppress = WalRecord::ChangeBatch {
+            changes: vec![(entity, ChangeOp::Suppress)],
         };
 
         let (once, _, established_once, _) = replay(
@@ -628,6 +618,8 @@ mod tests {
         let dict = Dict::load(&paths).unwrap();
 
         let records = vec![WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b".to_string(),
             body_hash: [0u8; 32],
             rows: vec![

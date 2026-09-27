@@ -253,7 +253,14 @@ class Cycle:
         run_id = uuid.uuid4().hex[:8]
         acks: list[float] = []
         statuses: dict[str, int] = {}
-        totals = {"accepted": 0, "minted": 0, "offered": 0, "batches": 0}
+        totals = {
+            "accepted": 0,
+            "minted": 0,
+            "offered": 0,
+            "batches": 0,
+            "edited": 0,
+            "unchanged": 0,
+        }
         lock = threading.Lock()
 
         def one(item):
@@ -289,6 +296,8 @@ class Cycle:
             "batches": totals["batches"],
             "rows_offered": totals["offered"],
             "accepted": totals["accepted"],
+            "edited": totals["edited"],
+            "unchanged": totals["unchanged"],
             "minted": totals["minted"],
             "wall_s": round(wall, 2),
             "items_per_s": round(totals["accepted"] / wall, 1) if wall else None,
@@ -304,7 +313,10 @@ class Cycle:
             totals["offered"] += rows
             if r.status_code == 200:
                 body = r.json()
-                totals["accepted"] += body["accepted"]
+                # A row is taken where it created an item or added one to the view.
+                totals["accepted"] += body["created"] + body["added"]
+                totals["edited"] += body.get("edited", 0)
+                totals["unchanged"] += body.get("unchanged", 0)
                 totals["minted"] += body.get("minted", 0)
                 if tessera_ids is not None:
                     tessera_ids.update(enumerate(body.get("tessera_ids") or [], start))
@@ -492,6 +504,8 @@ class Cycle:
                 self.phase("view_recreate", lambda: self.do_view_recreate(control))
                 self.phase("write_cycle", lambda: self.do_write_cycle(control, hold))
                 self.phase("restart", lambda: self.do_restart(ranks))
+            if args.reingest:
+                self.phase("reingest", lambda: self.do_reingest(control, hold))
         finally:
             self.result["status_at_end"] = safe(
                 lambda: self.control_for(served, None).status()
@@ -1057,10 +1071,12 @@ class Cycle:
         }
 
     def do_write_cycle(self, control, hold) -> dict:
-        """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, a fold, and the count again in
-        every view, addressed by `external_id` since a deleted holder never blocks a re-ingest of
-        it. A re-ingest sends the item's rows in every view it was in, the anchor's first, and
-        each view must end at its count less the suppressed items it holds."""
+        """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, 1,000 edits, a fold, and the count
+        again in every view, addressed by `external_id` since a deleted holder never blocks a
+        re-ingest of it. A re-ingest sends the item's rows in every view it was in, the anchor's
+        first, and each view must end at its count less the suppressed items it holds. An edit
+        sends a live item's anchor row once as it is, which changes nothing, and once moved, which
+        edits it: both answer the item's own tessera_id, and no count moves."""
         if hold.head is None or hold.head.num_rows < 2:
             return {"skipped": "hold-out too small for a write cycle"}
         entities = hold.head.column("entity_id").to_numpy()
@@ -1106,6 +1122,30 @@ class Cycle:
                 out["reingest"]["statuses"][status] = out["reingest"]["statuses"].get(status, 0) + count
         # One external id is one entity: every view's pass answers it with one tessera_id.
         out["reingest"]["items_with_several_ids"] = sum(1 for tids in answered.values() if len(tids) > 1)
+
+        # The third n items, live and neither deleted nor suppressed, restated and then moved in
+        # the anchor view. A move a hair's width of the frame edits the item.
+        moved = np.sort(entities[2 * n : 3 * n])
+        anchor = [view for view in self.views if view["name"] == self.anchor]
+        restated, restated_ids = self.ingest_views(
+            anchor, moved, hold.max_body_bytes, hold.batch_rows, "restate", lambda view: ()
+        )
+        edited, edited_ids = self.ingest_views(
+            anchor, moved, hold.max_body_bytes, hold.batch_rows, "edit", lambda view: (), nudge=1e-3
+        )
+        restated, edited = restated[self.anchor], edited[self.anchor]
+        out["edit"] = {
+            "n": len(moved),
+            "restated_unchanged": restated["unchanged"],
+            "edited": edited["edited"],
+            "edit_unchanged": edited["unchanged"],
+            "created_or_added": restated["accepted"] + edited["accepted"],
+            "items_whose_tessera_id_moved": sum(
+                1 for entity, tids in edited_ids.items() if tids != restated_ids.get(entity)
+            ),
+            "ack_ms": edited["ack_ms"],
+            "statuses": edited["statuses"],
+        }
         _, out["flushed"], _ = self.flush_and_wait(control)
         folded = self.do_fold(control)
         out["fold"] = {
@@ -1120,6 +1160,42 @@ class Cycle:
         out["overlay"] = control.status()["overlay"]
         return out
 
+    def do_reingest(self, control, hold) -> dict:
+        """What a nightly re-ingest of a source sends: the whole hold-out again, in the anchor
+        view with its member columns, first as it was ingested and then with one entity in a
+        hundred moved. The first pass changes nothing and takes no entity id; the second edits
+        each moved item and takes one entity id for each. Both answer every item's own
+        tessera_id."""
+        anchor = [view for view in self.views if view["name"] == self.anchor]
+        out: dict = {"rows": len(self.held)}
+        answered: dict = {}
+        for label, nudge in (("unchanged", 0.0), ("one_in_a_hundred_moved", 1e-3)):
+            before = control.status()["entity_id_high_water"]
+            figures, ids = self.ingest_views(
+                anchor,
+                self.held,
+                hold.max_body_bytes,
+                hold.batch_rows,
+                f"nightly-{label}",
+                lambda view: self.column_layers(),
+                nudge=nudge,
+                nudge_every=100,
+            )
+            figures = figures[self.anchor]
+            figures["entity_ids_used"] = control.status()["entity_id_high_water"] - before
+            figures["moved"] = int(np.count_nonzero(self.held % 100 == 0)) if nudge else 0
+            answered[label] = ids
+            out[label] = figures
+        out["items_whose_tessera_id_moved"] = sum(
+            1 for entity, tids in answered["one_in_a_hundred_moved"].items()
+            if tids != answered["unchanged"].get(entity)
+        )
+        t0 = time.perf_counter()
+        _, out["flushed"], _ = self.flush_and_wait(control)
+        out["flush_s"] = round(time.perf_counter() - t0, 2)
+        out["visible_after"] = self.visible()
+        return out
+
     def column_layers(self, view: dict | None = None) -> list[str]:
         """The column-route layers a pass carries member columns for: every one on the pass that
         allocates the entities, or those drawn on `view`, by name or by its group."""
@@ -1131,11 +1207,20 @@ class Cycle:
         ]
 
     def ingest_views(
-        self, views, entities, cap: int, batch_rows: int, label: str, members
+        self,
+        views,
+        entities,
+        cap: int,
+        batch_rows: int,
+        label: str,
+        members,
+        nudge: float = 0.0,
+        nudge_every: int = 1,
     ) -> tuple[dict, dict]:
         """`entities`' rows in each of `views`, one pass per view in order, and each entity's
         answered tessera_ids across the passes. `members(view)` names the column-route layers
-        whose member columns that view's pass carries."""
+        whose member columns that view's pass carries; `nudge` moves the rows of every
+        `nudge_every`th entity."""
         figures: dict = {}
         answered: dict[int, set] = {}
         for view in views:
@@ -1149,6 +1234,8 @@ class Cycle:
                 view=view,
                 members=members(view),
                 record_order=True,
+                nudge=nudge,
+                nudge_every=nudge_every,
             )
             tessera_ids: dict[int, str] = {}
             figures[name] = self.run_ingest(
@@ -1385,6 +1472,26 @@ class Cycle:
                     f"the write cycle's re-ingest answered {reingest['items_with_several_ids']} "
                     f"item(s) with a different tessera_id in different views"
                 )
+            moved = cycle.get("edit") or {}
+            if moved.get("restated_unchanged") != moved.get("n"):
+                out.append(
+                    f"the write cycle restated {moved.get('n')} live items and "
+                    f"{moved.get('restated_unchanged')} were answered unchanged"
+                )
+            if moved.get("edited", 0) + moved.get("edit_unchanged", 0) != moved.get("n") or (
+                moved.get("created_or_added")
+            ):
+                out.append(
+                    f"the write cycle moved {moved.get('n')} live items and "
+                    f"{moved.get('edited')} were answered edited, "
+                    f"{moved.get('edit_unchanged')} unchanged and "
+                    f"{moved.get('created_or_added')} created or added"
+                )
+            if moved.get("items_whose_tessera_id_moved"):
+                out.append(
+                    f"the write cycle's edits answered {moved['items_whose_tessera_id_moved']} "
+                    f"item(s) with another tessera_id than the item held"
+                )
             if cycle.get("flushed") is False:
                 out.append("the write cycle's flush did not reach its publication")
             for name, counts in (cycle.get("by_view") or {}).items():
@@ -1394,6 +1501,7 @@ class Cycle:
                         f"expecting {counts.get('expected')}"
                     )
         out += recreate_failures(result.get("view_recreate") or {})
+        out += reingest_failures(result.get("reingest") or {})
         restart = result.get("restart") or {}
         if isinstance(restart, dict) and restart and not restart.get("failed"):
             if restart.get("visible") != restart.get("visible_before"):
@@ -1404,6 +1512,34 @@ class Cycle:
             if not restart.get("census_equal"):
                 out.append("the census after the restart is not the census before it")
         return out
+
+
+def reingest_failures(reingest: dict) -> list[str]:
+    """What a nightly re-ingest owes: the restated hold-out changes nothing and takes no entity id,
+    and the moved one edits exactly the items moved, one entity id each, none changing its
+    tessera_id."""
+    if not reingest or reingest.get("failed"):
+        return [f"the re-ingest failed: {reingest['failed']}"] if reingest.get("failed") else []
+    out = []
+    same, moved = reingest.get("unchanged") or {}, reingest.get("one_in_a_hundred_moved") or {}
+    if same.get("unchanged") != reingest.get("rows") or same.get("entity_ids_used"):
+        out.append(
+            f"the restated hold-out answered {same.get('unchanged')} of {reingest.get('rows')} rows "
+            f"unchanged and took {same.get('entity_ids_used')} entity id(s)"
+        )
+    if moved.get("edited") != moved.get("moved") or moved.get("entity_ids_used") != moved.get("edited"):
+        out.append(
+            f"the re-ingest moved {moved.get('moved')} items and answered {moved.get('edited')} "
+            f"edited, taking {moved.get('entity_ids_used')} entity id(s)"
+        )
+    if reingest.get("items_whose_tessera_id_moved"):
+        out.append(
+            f"the re-ingest answered {reingest['items_whose_tessera_id_moved']} item(s) with "
+            f"another tessera_id than the item held"
+        )
+    if reingest.get("flushed") is False:
+        out.append("the re-ingest's flush did not reach its publication")
+    return out
 
 
 def recreate_failures(recreate: dict) -> list[str]:

@@ -1,14 +1,14 @@
 //! **What does a mixed-field row actually compress to in the built record blob?**
 //!
-//! `records-and-search.md` §3 sets the block target at 256 KiB on the strength of the
-//! string-storage probe's **2.44×** — which was measured on *per-column title bytes*, one field
-//! type, one column, by a Python harness that never touched this format. The design says so and
+//! `records-and-search.md` §3 rests the blob's compression on the string-storage probe's
+//! **2.44×**, which was measured on *per-column title bytes*, one field type, one column, by a
+//! Python harness that never touched this format. The design says so and
 //! marks the mixed-row figure **assumed**; §11 item 6 owes the measurement. This is it.
 //!
 //! The gap being closed is not a rounding one. A blob row is not a column: it interleaves a
 //! `utf8` title with an `i64` timestamp and a `u8` count, so the compressor sees short runs of
-//! dissimilar bytes where the column gave it 256 KiB of one kind. Interleaving is the reason to
-//! expect *worse*; the shared context of neighbouring rows — the same `arXiv` prefixes, the same
+//! dissimilar bytes where the column gave it a whole block of one kind. Interleaving is the reason
+//! to expect *worse*; the shared context of neighbouring rows — the same `arXiv` prefixes, the same
 //! licence URLs, the same journal names, run after run — is the reason to expect *better*. Which
 //! wins is an empirical question about this corpus and this framing, and nothing before this
 //! answered it.
@@ -16,9 +16,10 @@
 //! # What is measured, and against what
 //!
 //! Three row shapes, every one written through [`RecordBlobWriter`] — the shipped writer, the
-//! shipped 256 KiB target, the shipped zstd level and framing — over real arXiv records read from
-//! the Kaggle snapshot in snapshot order, which is submission order, which is entity order
-//! (`probes/dataset.md` §4.1; the string-storage probe reads the same file the same way).
+//! shipped target ([`RECORD_BLOCK_TARGET`]), the shipped zstd level and framing — over real arXiv
+//! records read from the Kaggle snapshot in snapshot order, which is submission order, which is
+//! entity order (`probes/dataset.md` §4.1; the string-storage probe reads the same file the same
+//! way).
 //!
 //! | shape | fields | why it is here |
 //! |---|---|---|
@@ -40,8 +41,9 @@
 //!   entities. What the blob costs a corpus, addressing included — the number §3's storage
 //!   arithmetic is actually made of, and always the larger of the two burdens.
 //!
-//! Random single-row read latency is measured too, against §3's quoted 169 µs — the other figure
-//! the 256 KiB choice rests on, and the one that decides whether drill-down is an interaction.
+//! Random single-row read latency is measured too: the figure that decides whether drill-down is
+//! an interaction. §3 quotes 169 µs, taken on title bytes at 256 KiB blocks; at the shipped 32 KiB
+//! a GeoNames row reads in about 50 µs (`tessera_filter::record`).
 //!
 //! **Not measured here**: the coalesce and fold rewrite rates (§11 item 7), and any scale past the
 //! real corpus — arXiv has 2.42M records and this reads a prefix of them, so nothing here speaks

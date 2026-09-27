@@ -26,10 +26,9 @@ fn sidecar(base: &Path, n: u64) -> PathBuf {
 }
 
 fn change(tag: u8) -> WalRecord {
-    WalRecord::ChangeByEntity {
-        entity_id: EntityId::new(tag as u64),
-        op: ChangeOp::Suppress,
-    }
+    WalRecord::ChangeBatch {
+            changes: vec![(EntityId::new(tag as u64), ChangeOp::Suppress)],
+        }
 }
 
 fn suppression_of(entity: u64) -> OverlaySnapshotEntry {
@@ -158,9 +157,8 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     let entity = EntityId::new(42);
     {
         let (mut wal, _) = Wal::open(&base).unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: entity,
-            op: ChangeOp::Suppress,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(entity, ChangeOp::Suppress)],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -182,7 +180,7 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
     );
     assert!(
         overlay.is_suppressed(entity),
-        "a suppression retires only on unsuppress — reclaiming its record must not retire it"
+        "a live item's suppression retires only on unsuppress; reclaiming its record does not"
     );
 }
 

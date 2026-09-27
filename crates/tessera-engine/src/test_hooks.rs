@@ -10,9 +10,9 @@ use tessera_authz::{DeltaTier, Dict};
 #[cfg(feature = "fault-injection")]
 use tessera_types::EntityId;
 
-use crate::engine::Engine;
 #[cfg(feature = "fault-injection")]
 use crate::engine::open_rotation;
+use crate::engine::Engine;
 #[cfg(feature = "fault-injection")]
 use crate::error::{EngineError, Result};
 #[cfg(feature = "fault-injection")]
@@ -213,6 +213,14 @@ impl Engine {
         self.switches.merge_enabled.store(enabled, Ordering::SeqCst);
     }
 
+    /// Turn off driving a bulk read from its filter's matches, so the same request is answered
+    /// by walking the view in stretches, for a test to compare the two.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_driven_reads_for_test(&self, enabled: bool) {
+        self.switches.driven_reads_enabled.store(enabled, Ordering::SeqCst);
+    }
+
     /// Turn the entity-space coalesce off, so a soak can show the axes it bounds keep growing
     /// with the pass stopped.
     #[cfg(feature = "fault-injection")]
@@ -407,7 +415,7 @@ impl Engine {
         })
     }
 
-    /// Hold the next ingest or values batch whose handler's check passes, before it reaches the
+    /// Hold the next ingest batch whose handler's check passes, before it reaches the
     /// executor, so a test can change what it was checked against. [`Self::release_write_check_for_test`] lets
     /// it go.
     #[cfg(feature = "fault-injection")]

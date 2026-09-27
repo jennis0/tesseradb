@@ -8,7 +8,7 @@
 //! **Why the identifier never reaches the WAL.** A `tessera_id` is a keyed permutation of entity
 //! space, so a record carrying one would resolve under whatever key the bundle holds at replay: a
 //! rotation would silently redirect every such deny to a different entity. It is inverted once, at
-//! admission, and the entity is what is persisted (`WalRecord::ChangeByEntity`).
+//! admission, and the entity is what is persisted (`WalRecord::ChangeBatch`).
 
 mod common;
 

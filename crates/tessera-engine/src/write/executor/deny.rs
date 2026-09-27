@@ -1,6 +1,7 @@
 use super::*;
 
-/// The most entries one deny window may hold before it closes and commits. Raising it reduces
+/// The most changes one deny window gathers before it closes and commits; a single request larger
+/// than this is committed whole. Raising it reduces
 /// fsyncs and overlay clones at the cost of larger pending-receipt bursts.
 pub const DENY_WINDOW_MAX_ENTRIES: usize = 1_000;
 
@@ -19,27 +20,41 @@ pub(super) const DENY_DURABILITY_BACKOFF: [std::time::Duration; 2] = [
 /// so a test can arm exactly this many failures.
 pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
 
-/// One deny in an open window, with everything needed to apply it and answer its caller.
+/// One request in an open deny window, with everything needed to apply it and answer its caller.
 pub(super) struct DenyEntry {
-    pub(super) record: WalRecord,
-    pub(super) entity: EntityId,
-    pub(super) op: ChangeOp,
-    /// `None` for a cascaded deletion, which has no caller to answer but is otherwise an ordinary
-    /// entry.
+    /// In request order; one record carries them all.
+    pub(super) changes: Vec<(EntityId, ChangeOp)>,
+    /// `None` for the deletions a window's deletions cascade to, which have no caller to answer
+    /// but are otherwise an ordinary entry.
     pub(super) reply: Option<Reply<()>>,
 }
 
+impl DenyEntry {
+    fn record(&self) -> WalRecord {
+        WalRecord::ChangeBatch {
+            changes: self.changes.clone(),
+        }
+    }
+}
+
 impl Executor {
-    /// Gather the queued denies into one committable unit and commit it, closing at an empty queue
-    /// or [`DENY_WINDOW_MAX_ENTRIES`]. Returns whether anything was found.
+    /// Gather the queued deny requests into one committable unit and commit it, closing at an
+    /// empty queue or once [`DENY_WINDOW_MAX_ENTRIES`] changes are held. Returns whether anything
+    /// was found.
     pub(super) fn run_deny_pass(&mut self) -> bool {
         let mut entries: Vec<DenyEntry> = Vec::new();
+        let mut held = 0usize;
 
-        while entries.len() < DENY_WINDOW_MAX_ENTRIES {
+        while held < DENY_WINDOW_MAX_ENTRIES {
             let Ok(command) = self.queues.deny.try_recv() else {
                 break;
             };
-            let Command::Change { entity, op, reply } = command else {
+            let Command::Changes {
+                mut changes,
+                stamp,
+                reply,
+            } = command
+            else {
                 // Any other command applies immediately, so the window gathered so far is
                 // committed first to keep append order equal to apply order.
                 if !entries.is_empty() {
@@ -48,13 +63,15 @@ impl Executor {
                 self.execute(command);
                 return true;
             };
+            if !self.follow_since(stamp, |generation| {
+                crate::edited::follow_changes(generation, &mut changes)
+            }) {
+                reply.fail(ExecError::Stale);
+                continue;
+            }
+            held += changes.len();
             entries.push(DenyEntry {
-                record: WalRecord::ChangeByEntity {
-                    entity_id: entity,
-                    op,
-                },
-                entity,
-                op,
+                changes,
                 reply: Some(reply),
             });
         }
@@ -67,13 +84,31 @@ impl Executor {
         true
     }
 
-    /// Add a deletion for every artifact that depends on one this window deletes. Only `Delete`
-    /// cascades: a suppressed dependent is withheld by the serving predicate instead.
+    /// Whether a command resolved at `stamp` names its entities where their items are now,
+    /// `follow` having moved each that an edit committed since moved. `false` where a fold has
+    /// also retired entities since, which can drop the entry saying where an item went, or the
+    /// edited items cannot be read: the caller resolves the command's names again.
+    pub(super) fn follow_since(
+        &self,
+        stamp: crate::edited::Stamp,
+        follow: impl FnOnce(&crate::Generation) -> Result<(), tessera_store::StoreError>,
+    ) -> bool {
+        let generation = self.generation.load();
+        match stamp.since(&generation) {
+            crate::edited::Since::Still => true,
+            crate::edited::Since::Edited => follow(&generation).is_ok(),
+            crate::edited::Since::Folded => false,
+        }
+    }
+
+    /// Add one entry deleting every artifact that depends on one this window deletes. Only
+    /// `Delete` cascades: a suppressed dependent is withheld by the serving predicate instead.
     pub(super) fn cascade_dependents(&mut self, entries: &mut Vec<DenyEntry>) {
         let deleted: Vec<EntityId> = entries
             .iter()
-            .filter(|e| matches!(e.op, ChangeOp::Delete))
-            .map(|e| e.entity)
+            .flat_map(|e| e.changes.iter())
+            .filter(|(_, op)| matches!(op, ChangeOp::Delete))
+            .map(|(entity, _)| *entity)
             .collect();
         if deleted.is_empty() {
             return;
@@ -81,17 +116,16 @@ impl Executor {
         let cascade = self
             .live
             .with_artifacts(|store| store.cascade_from(&deleted));
-        for entity in cascade {
-            entries.push(DenyEntry {
-                record: WalRecord::ChangeByEntity {
-                    entity_id: entity,
-                    op: ChangeOp::Delete,
-                },
-                entity,
-                op: ChangeOp::Delete,
-                reply: None,
-            });
+        if cascade.is_empty() {
+            return;
         }
+        entries.push(DenyEntry {
+            changes: cascade
+                .into_iter()
+                .map(|entity| (entity, ChangeOp::Delete))
+                .collect(),
+            reply: None,
+        });
     }
 
     /// One fsync for the whole window, then apply, then one swap, then ack. On a failed append or
@@ -100,14 +134,15 @@ impl Executor {
     /// marked behind-live for these: they have no durable record behind them, so publishing them
     /// into a manifest would make a deny the caller was told failed permanent.
     pub(super) fn commit_denies(&mut self, entries: Vec<DenyEntry>) {
-        let records: Vec<&WalRecord> = entries.iter().map(|entry| &entry.record).collect();
+        let owned: Vec<WalRecord> = entries.iter().map(DenyEntry::record).collect();
+        let records: Vec<&WalRecord> = owned.iter().collect();
         let failed_at = match self.append_and_sync(&records, None) {
             Ok(_) => None,
             Err(Undurable::Append { at, error }) => Some((at, error)),
             // A sync is retried where a torn append is not; the first entry is blamed since no
             // one of them failed.
             Err(Undurable::Fsync(error)) => self
-                .retry_deny_durability(&entries, error)
+                .retry_deny_durability(&owned, error)
                 .err()
                 .map(|e| (0, e)),
         };
@@ -116,8 +151,8 @@ impl Executor {
         if let Some((index, error)) = failed_at {
             let applied: Vec<(EntityId, ChangeOp)> = entries
                 .iter()
-                .filter(|e| matches!(e.op, ChangeOp::Delete | ChangeOp::Suppress))
-                .map(|e| (e.entity, e.op))
+                .flat_map(|e| e.changes.iter().copied())
+                .filter(|(_, op)| matches!(op, ChangeOp::Delete | ChangeOp::Suppress))
                 .collect();
             if !applied.is_empty() {
                 self.apply_changes(applied);
@@ -135,7 +170,10 @@ impl Executor {
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
 
-        let applied: Vec<(EntityId, ChangeOp)> = entries.iter().map(|e| (e.entity, e.op)).collect();
+        let applied: Vec<(EntityId, ChangeOp)> = entries
+            .iter()
+            .flat_map(|e| e.changes.iter().copied())
+            .collect();
 
         self.apply_changes(applied);
         self.side_manifests.behind_live = true;
@@ -159,14 +197,13 @@ impl Executor {
     /// writeback error once, so this rewinds to the last durable offset and rewrites instead.
     pub(super) fn retry_deny_durability(
         &mut self,
-        entries: &[DenyEntry],
+        records: &[WalRecord],
         first: WalError,
     ) -> std::result::Result<(), WalError> {
-        let records: Vec<WalRecord> = entries.iter().map(|e| e.record.clone()).collect();
         let mut last = first;
         for delay in DENY_DURABILITY_BACKOFF {
             std::thread::sleep(delay);
-            match self.log.wal.retry_durability(&records) {
+            match self.log.wal.retry_durability(records) {
                 Ok(_) => return Ok(()),
                 Err(e) => last = e,
             }
@@ -225,9 +262,16 @@ impl Executor {
             self.health
                 .buffered_items
                 .store(buffer.len(), Ordering::SeqCst);
-            // A deleted entity names nothing, so its live unique entries go with its rows.
+            // A deleted entity names nothing, so its live unique entries go with its rows. Its
+            // edited-item pair stays until the fold that removes it, which reads the pair to tell
+            // an entity an edit made from an item's number.
             let mut unique_live = (*generation.unique_live).clone();
-            unique_live.remove_entities(&deleted.iter().filter_map(|e| u32::try_from(e.raw()).ok()).collect());
+            unique_live.remove_entities(
+                &deleted
+                    .iter()
+                    .filter_map(|e| u32::try_from(e.raw()).ok())
+                    .collect(),
+            );
             (Arc::new(buffer), Arc::new(unique_live))
         };
 
@@ -241,7 +285,7 @@ impl Executor {
                 g.unique_live = unique_live;
             })
         } else {
-            generation.with_denies(Arc::new(overlay), &newly_denied, buffer, |g| {
+            generation.with_denies(Arc::new(overlay), &newly_denied, buffer, &[], |g| {
                 g.overlay_version = overlay_version;
                 g.unique_live = unique_live;
             })

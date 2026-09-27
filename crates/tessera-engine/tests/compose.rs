@@ -538,6 +538,8 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     {
         let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b0".to_string(),
             body_hash: [0u8; 32],
             rows: vec![
@@ -568,32 +570,27 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
         .unwrap();
 
         // delete X -> suppress X -> unsuppress X (must stay excluded: delete is terminal).
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_X),
-            op: ChangeOp::Delete,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_X), ChangeOp::Delete)],
         })
         .unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_X),
-            op: ChangeOp::Suppress,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_X), ChangeOp::Suppress)],
         })
         .unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_X),
-            op: ChangeOp::Unsuppress,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_X), ChangeOp::Unsuppress)],
         })
         .unwrap();
 
         // suppress Y -> delete Y: the other order, and the deletion must outlive an unsuppress
         // that never comes.
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_Y),
-            op: ChangeOp::Suppress,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_Y), ChangeOp::Suppress)],
         })
         .unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_Y),
-            op: ChangeOp::Delete,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_Y), ChangeOp::Delete)],
         })
         .unwrap();
 

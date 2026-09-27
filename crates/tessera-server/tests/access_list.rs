@@ -188,7 +188,7 @@ async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
     let resp = ingest(&server, "list-1", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 3);
+    assert_eq!(json["created"], 3);
     assert_eq!(json["over_bound"], 0);
     drain(&server).await;
 
@@ -276,7 +276,7 @@ async fn an_empty_list_takes_the_views_declared_default() {
     let resp = ingest(&server, "empty-1", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 4);
+    assert_eq!(json["created"], 4);
     drain(&server).await;
 
     assert_eq!(
@@ -348,10 +348,9 @@ async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared(
     );
 }
 
-/// **The four cases at the Arrow door** (decision 0133): a null list cell, an empty list and an
-/// empty element are one case, a row with no label, filled by a declared default and refused with
-/// the count where none is declared; the column absent from the batch is refused at the schema.
-/// The JSON door's four are in `ingest_wire.rs`.
+/// **The cases at the Arrow door**: a null list cell leaves the label out, which on a new item is
+/// the view's declared default, and an empty list and an empty element are the default too; each
+/// is refused where none is declared, and nothing is written.
 #[tokio::test]
 async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     fn null_and_empty() -> Vec<u8> {
@@ -377,11 +376,10 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     assert_eq!(resp.status(), 422);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "contract", "{body}");
-    let detail = body["detail"].as_str().unwrap();
-    assert!(
-        mentions(detail, "2"),
-        "the refusal counts the null cell with the empty list: {detail}"
-    );
+    let mut null_only = ListBuilder::new(StringBuilder::new());
+    null_only.append(false);
+    let resp = ingest(&server, "null-only", body_with_access(1, Arc::new(null_only.finish()))).await;
+    assert_eq!(resp.status(), 422, "a new item leaving its label out, and no default is declared");
 
     let mut empty_element = ListBuilder::new(StringBuilder::new());
     empty_element.values().append_value("");
@@ -412,11 +410,11 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     .unwrap();
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();
+    // No `access` column leaves every row's label out, which on a new item is the default.
     let resp = ingest(&server, "absent", writer.into_inner().unwrap()).await;
     assert_eq!(resp.status(), 422);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "contract", "{body}");
-    assert!(body["detail"].as_str().unwrap().contains("'access'"), "{body}");
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water_before,

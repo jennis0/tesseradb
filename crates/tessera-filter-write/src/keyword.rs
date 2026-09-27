@@ -90,7 +90,8 @@ use std::path::Path;
 use croaring::Bitmap;
 use tessera_filter::{Access, Codes, ColumnKind, SortedDict, SortedDictWriter, ValueColumn};
 
-use crate::{invalid, merge_order, write_merged, Runs};
+use crate::{invalid, merge_order, write_merged};
+use tessera_roaring::RankedRuns;
 
 /// A remap entry for an input key the rebuilt dictionary does not hold: its every carrier was
 /// blanked. Only the fold can produce one, and an entity that still reached such a key would be a
@@ -232,11 +233,8 @@ fn live_ordinals(
             )));
         };
         let mut ordinals = Bitmap::new();
-        let mut runs = Runs::new(&keep);
-        while let Some((start, last)) = runs.next() {
-            // A run of kept entities is contiguous in slot space as well as in entity space, which
-            // is what lets the rank be taken once per run.
-            let slot0 = (present.rank(start) - 1) as usize;
+        for (start, last, rank) in RankedRuns::new(&present, &keep) {
+            let slot0 = rank as usize;
             for k in 0..=(last - start) as usize {
                 let ordinal = *src.get(slot0 + k).ok_or_else(|| {
                     invalid(format!(
@@ -902,9 +900,8 @@ mod tests {
     ///
     /// Rule F: a deletion is executed at the fold and nowhere else, so a coalesce carries a
     /// deleted-but-unfolded entity's key through untouched — there is no tombstone parameter on the
-    /// coalesce and no way to spell one. Rule S: a suppression retires only by its unsuppress and
-    /// touches no attribute artefact ever, so it is not in the fold's blanked set either and its
-    /// entity's key survives the rebuild.
+    /// coalesce and no way to spell one. Rule S: a suppression touches no attribute artefact ever,
+    /// so it is not in the fold's blanked set either and its entity's key survives the rebuild.
     ///
     /// **Fault injected:** give `coalesce_keyword_extents` a tombstone set to pass through and the
     /// first half fails on the missing entity; add a suppressed entity to the fold's `tombstones`

@@ -426,9 +426,8 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
     let engine = engine_over(tmp.path(), &root, config());
 
     let entity = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(b"ingested-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -450,7 +449,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
         )
         .expect("an ingest carrying the declared tail is accepted")[0];
 
-    flush(&engine);
+    publish_buffered(&engine);
     drop(engine);
 
     let tail = tail_by_identity(&root);
@@ -491,9 +490,8 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
     let mut expected = BTreeMap::new();
     for batch in 0..6u64 {
         let entity = engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![UnallocatedRow {
-                    join_only: false,
                     external_id: Some(format!("merged-{batch}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
@@ -514,7 +512,7 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
                 [batch as u8; 32],
             )
             .expect("accepted")[0];
-        flush(&engine);
+        publish_buffered(&engine);
         let id = test_key().forward(0, entity).unwrap();
         expected.insert(
             id.raw(),
@@ -578,9 +576,8 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
     // An ingest and a flush first, so the fold has a delta to fold in as well as a base to rewrite
     // — a fold over the base alone would not exercise the k-way path the tail travels through.
     let ingested = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(b"folded-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -599,7 +596,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             [7u8; 32],
         )
         .expect("accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     drop(engine);
 
@@ -679,9 +676,8 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
     let engine = engine_over(tmp.path(), &root, config_uncapped());
 
     let ingested = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(b"ingested-read-path".to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -700,7 +696,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let out = engine
@@ -805,7 +801,6 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
             .into_iter()
             .enumerate()
             .map(|(i, ((x, y), score))| UnallocatedRow {
-                join_only: false,
                 external_id: Some(format!("{batch}-{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
@@ -822,9 +817,9 @@ fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments(
             })
             .collect();
         engine
-            .accept_ingest(rows, batch.to_string(), [0u8; 32])
+            .ingest_rows(rows, batch.to_string(), [0u8; 32])
             .expect("the ingest is accepted");
-        flush(&engine);
+        publish_buffered(&engine);
     };
     // Five rows in `(2, 0)` and two in `(3, 3)`, every one scored.
     ingest(
@@ -1125,7 +1120,6 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
 /// (the ingest plane's shape); the flush narrows to the render columns before it writes.
 fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(b"non-prefix-flushed".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1200,13 +1194,13 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
     let engine = engine_over(tmp.path(), &root, config_uncapped());
 
     let flushed_entity = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![non_prefix_row(&engine, 4242, 2, 9.25)],
             "batch-non-prefix".to_string(),
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let out = engine
@@ -1296,13 +1290,13 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
     let engine = engine_over(tmp.path(), &root, config_uncapped());
 
     let flushed_entity = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![non_prefix_row(&engine, 4242, 2, 9.25)],
             "batch-non-prefix-drill".to_string(),
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let expect_item = |id, audit: i64, band_key: &str, score: f32, label: &str| {
@@ -1559,7 +1553,6 @@ fn record_stack(root: &Path) -> tessera_filter::RecordStack {
 /// One ingest row for the record fixture: `band` code, blob-resident `note` and `revision`.
 fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> UnallocatedRow {
     UnallocatedRow {
-        join_only: false,
         external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1602,13 +1595,13 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
     }
 
     let entity = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![record_row(&engine, "flushed-1", "the-flushed-note", 77)],
             "batch-record-1".to_string(),
             [0u8; 32],
         )
         .expect("an ingest carrying blob-resident values is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     // **Before the engine is dropped**: a published record extent that no *live* stack holds
     // answers no drill-down. The manifest entry below makes the bytes reachable to a reopen; this
@@ -1698,7 +1691,7 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     let engine = engine_over(tmp.path(), &root, config());
 
     let entities = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![
                 record_row(&engine, "s", "the-suppressed-prose", 1),
                 record_row(&engine, "d", "the-deleted-prose", 2),
@@ -1708,7 +1701,7 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
             [1u8; 32],
         )
         .expect("accepted");
-    flush(&engine);
+    publish_buffered(&engine);
 
     let manifest = side_manifest(&root);
     assert_eq!(manifest.record_extents.len(), 1);
@@ -1739,13 +1732,13 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     );
     // An unrelated publication leaves the extent alone too: a flush appends its own layer.
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![record_row(&engine, "later", "a-later-note", 4)],
             "batch-later".to_string(),
             [2u8; 32],
         )
         .expect("accepted");
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         before,
         extent_files(),
@@ -1847,7 +1840,7 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
     let mut ingested = Vec::new();
     for i in 0..8u64 {
         let entity = engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![record_row(
                     &engine,
                     &format!("co-{i}"),

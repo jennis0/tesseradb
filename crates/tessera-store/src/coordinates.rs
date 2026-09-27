@@ -65,16 +65,23 @@ impl fmt::Display for ColumnError {
 /// A coordinate column as `f64`, by [`f64_values`]: `float32` is widened and `float64` kept as it
 /// is, since at a deep frame narrowing would move a point into another cell.
 pub fn read_coordinates(column: &dyn Array) -> Result<Vec<f64>, ColumnError> {
+    read_optional_coordinates(column)?
+        .into_iter()
+        .enumerate()
+        .map(|(row, value)| value.ok_or(ColumnError::Null { row }))
+        .collect()
+}
+
+/// [`read_coordinates`], with `None` for a null row: an ingest row may carry no position.
+pub fn read_optional_coordinates(column: &dyn Array) -> Result<Vec<Option<f64>>, ColumnError> {
     let values =
         f64_values(column).ok_or_else(|| ColumnError::Type(column.data_type().clone()))?;
-    // A null slot's value buffer holds an arbitrary number, so a null is found before any is used.
-    if column.null_count() > 0 {
-        let row = (0..column.len()).find(|&row| column.is_null(row));
-        return Err(ColumnError::Null {
-            row: row.expect("a column with a null count has a null row"),
-        });
-    }
-    Ok(values)
+    // A null slot's value buffer holds an arbitrary number, so it is never read.
+    Ok(values
+        .into_iter()
+        .enumerate()
+        .map(|(row, value)| (!column.is_null(row)).then_some(value))
+        .collect())
 }
 
 /// Where one row lands in a view's frame.

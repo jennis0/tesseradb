@@ -178,10 +178,11 @@ pub struct WalRow {
     pub scoped: Vec<WalScalar>,
 }
 
-/// The disposition change carried by a [`WalRecord::ChangeByEntity`] record. The two removal rules
-/// (write-path §5.4; ruled 2026-08-03) are distinct and must not be conflated: suppressions retire
-/// only on `Unsuppress` (never touching postings — Rule S); deletions retire at the compaction fold
-/// that executes them (Rule F).
+/// The disposition change carried by each entry of a [`WalRecord::ChangeBatch`] record. The two
+/// removal rules (write-path §5.4) are distinct and must not be conflated: a suppression retires on
+/// `Unsuppress`, or with an entity an edit moved its item away from at the fold that removes its
+/// rows, and never touches postings (Rule S); a deletion retires at the compaction fold that
+/// executes it (Rule F). A fold logs the suppressions it retires as `Unsuppress` entries.
 ///
 /// A fourth variant, `Predicate`, was deleted with `WAL_VERSION` 5: decision 0047 withdrew the op
 /// at the boundary (an edit is a delete plus a re-ingest) and decision 0048 deleted the machinery
@@ -204,7 +205,7 @@ pub enum ChangeOp {
 /// each id at replay, and an entity deleted before it was ever flushed has no row and may have no
 /// extent entry — so replay could not resolve it and the node would refuse to open. A snapshot is
 /// state that was already resolved once; resolving it again can only lose. It is the same reason
-/// [`WalRecord::ChangeByEntity`] is keyed by entity, arrived at from the other end.
+/// [`WalRecord::ChangeBatch`] is keyed by entity, arrived at from the other end.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -250,10 +251,18 @@ pub enum WalRecord {
     /// An accepted `/control/ingest` batch. `body_hash` is the SHA-256 of the raw request body
     /// (idempotency key material — a retried `batch_id` must match it, or the request is a
     /// contract violation, never a silent overwrite).
+    ///
+    /// `rows` holds the rows the batch wrote: each item it created and each view it added an
+    /// item to in place. `edits` holds each item the batch moved to a new entity, with everything
+    /// the item carries, so replay reads nothing from stored files. `receipt` holds one entry per
+    /// row of the request, in request order, including the rows that changed nothing and wrote no
+    /// row, so a replay of the batch id answers the `tessera_id`s the first acceptance did.
     IngestBatch {
         batch_id: String,
         body_hash: [u8; 32],
         rows: Vec<WalRow>,
+        edits: Vec<WalEdit>,
+        receipt: Vec<RowReceipt>,
     },
     /// The whole live overlay, written so that the change records it was accumulated from can be
     /// deleted.
@@ -270,24 +279,16 @@ pub enum WalRecord {
     /// fails closed only if every earlier link survives.
     ///
     /// Under replay it is an ordinary record in position: it is applied where it occurs, and a
-    /// `ChangeByEntity` earlier in the same file still applies before it. See [`crate::replay`].
+    /// `ChangeBatch` earlier in the same file still applies before it. See [`crate::replay`].
     OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
-    /// An accepted `/control/changes` entry, addressed by **entity id**.
+    /// An accepted `/control/changes` request: every change it carries, in request order,
+    /// addressed by entity id. One record per request, so the request is durable whole or not at
+    /// all.
     ///
-    /// **Why the entity and not the identifier the caller supplied.** A `tessera_id` is a keyed
-    /// permutation of entity space, so a record carrying one would resolve under whatever key the
-    /// bundle holds at replay — a rotation would silently redirect every such deny to a different
-    /// entity. Inverting once, at admission, and persisting the result is what makes replay
-    /// identical across a rotation. It is the same reason [`OverlaySnapshotEntry`] is keyed by
-    /// entity, arrived at from the other end.
-    ///
-    /// It also closes a hole an external-id-keyed record cannot: contracts §3.4 r6 makes an
-    /// external id optional at ingest, and an item that arrived without one would be addressable by
-    /// nothing — not deletable, not suppressible, at all. The external-id-keyed `Change` variant
-    /// this one was added alongside was deleted with `WAL_VERSION` 5 (decision 0048), and replay
-    /// stopped resolving external ids at all: the resolution now happens once, in the handler, at
-    /// admission.
-    ChangeByEntity { entity_id: EntityId, op: ChangeOp },
+    /// Keyed by entity rather than by the identifier the caller supplied: the handler resolves a
+    /// `tessera_id` or an external id once, at admission, and replay applies what was decided
+    /// without resolving anything.
+    ChangeBatch { changes: Vec<(EntityId, ChangeOp)> },
     /// An accepted annotation-layer registration.
     ///
     /// **This record is what makes the row-less mark durable**, and that is not incidental to it.
@@ -347,21 +348,19 @@ pub enum WalRecord {
     /// rotation: a death that did not say which incarnation died could not be told apart from a
     /// death of the one created after it.
     ///
-    /// **This record removes no entity.** An entity whose only view was dropped still exists, with
-    /// its label, its attributes and its memberships, in no view; `delete_dangling` submits
-    /// ordinary deletions through the deny lane and is not a second retirement route
-    /// (`views.md` §3.4, write-path §5.4).
+    /// **It deletes the items it leaves in no view**, in the same record as the drop, so the log
+    /// never holds a drop without its deletions. Each is an ordinary deletion: replay applies it to
+    /// the overlay as a `ChangeBatch` delete would be, and the fold that executes it retires it.
     ViewDrop {
         view: tessera_types::view::DeadIncarnation,
+        /// The entities the drop left with a row in no view, flushed or buffered.
+        deleted: Vec<EntityId>,
     },
     /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
     /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
     /// meant something must not come to mean something else.
     ///
-    /// The ids do not come back either — the allocator is monotone with no free list
-    /// ([decision 0072](../../../docs/decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)
-    /// is settled and unbuilt). Reclaiming them is that decision's work, and its condition is that
-    /// the membership-reconciliation clause ships with it.
+    /// The ids do not come back either: the allocator frees no row-less id.
     LayerDrop {
         name: String,
         /// The registry version this drop moved the counter to, on `LayerCreate::version`'s rule.
@@ -434,25 +433,6 @@ pub enum WalRecord {
         /// [`MembershipGrowth::ordinal`]'s rule.
         ordinal: u32,
         part: ArtifactPart,
-    },
-    /// An accepted `POST /control/values` batch (`ingest.md` §1.4): attribute values for entities
-    /// that exist, one row per entity, applied per cell under the fill rule. `batch_id` and
-    /// `body_hash` are the idempotency key, as [`WalRecord::IngestBatch`]'s are. A layer column on
-    /// a values row is not carried here: it is a membership join and travels as an
-    /// [`WalRecord::ArtifactGrow`] in the same commit.
-    ValuesBatch {
-        batch_id: String,
-        body_hash: [u8; 32],
-        /// The view the batch's fills belong to: the `x-tessera-view` header where the caller
-        /// gave one, and the deployment's only view otherwise. It decides which flush pass writes
-        /// the fills and which view's column of a group-scoped family a scoped cell addresses, so
-        /// it is recorded for every batch and not only for one carrying a scoped column
-        /// (`ingest.md` §1.4). `None` on a batch that fills no cell.
-        view: Option<String>,
-        /// The columns the batch carries, by declared name, in the batch's own order. Every row's
-        /// values are positional to this list, so a batch may carry any subset of the schema.
-        columns: Vec<String>,
-        rows: Vec<ValuesRow>,
     },
     /// An attribute column declared while the service runs (`PUT /control/attributes`,
     /// `ingest.md` §1.3, §6.3). The segments manifest is the declaration's durable home; this
@@ -559,14 +539,13 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         // Listed rather than caught by a wildcard, so that a variant added later is a decision
         // here and not a default to "built".
         WalRecord::AttributeDeclare { .. }
-        | WalRecord::ValuesBatch { .. }
         | WalRecord::VocabularyDeclare { .. }
         | WalRecord::ViewGroupCreate { .. }
         | WalRecord::PlainViewCreate { .. }
         | WalRecord::VocabularyMint { .. }
         | WalRecord::IngestBatch { .. }
         | WalRecord::OverlaySnapshot { .. }
-        | WalRecord::ChangeByEntity { .. }
+        | WalRecord::ChangeBatch { .. }
         | WalRecord::LayerCreate { .. }
         | WalRecord::ViewCreate { .. }
         | WalRecord::ViewDrop { .. }
@@ -579,16 +558,58 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
 }
 
 /// What a record carries of the request that produced it: the id the client chose, the hash of the
-/// bytes it sent, and the entity ids that request was allocated.
+/// bytes it sent, and what the request did to each of its rows.
 ///
-/// The allocation is empty where the route allocates nothing — a values batch fills cells on
-/// entities that already exist — which is a different statement from a record carrying no batch at
-/// all, and [`batch_identity`] draws that line by returning `None` for the second.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchIdentity<'a> {
     pub batch_id: &'a str,
     pub body_hash: [u8; 32],
-    pub allocation: Vec<EntityId>,
+    pub receipt: &'a [RowReceipt],
+}
+
+/// What an accepted ingest batch did with one of its rows, and the `tessera_id` of the item the
+/// row named or created.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowReceipt {
+    pub outcome: RowOutcome,
+    pub tessera_id: u64,
+    /// The row created an item whose label resolves to more terms than the plugin declares an
+    /// item carries. It is stored all the same.
+    pub over_bound: bool,
+}
+
+/// What an accepted ingest row did to the item it named.
+///
+/// On-disk format: variants are positional under postcard — see [`WalRecord`]'s note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RowOutcome {
+    /// The row named no item and created one.
+    Created,
+    /// The row added an existing item to the batch's view, and changed nothing else.
+    Added,
+    /// The row named an item and every value it carried was the one stored.
+    Unchanged,
+    /// The row changed an item it named, which moved to a new entity.
+    Edited,
+}
+
+/// One item an ingest batch moved to a new entity: the old entity is deleted and the new one
+/// holds everything the item carries, in the one record.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalEdit {
+    /// The entity the item leaves. This record deletes it.
+    pub old: EntityId,
+    /// The item's number: the entity it was first given, which its `tessera_id` is taken from.
+    pub number: EntityId,
+    /// The old entity was suppressed, so the new one is.
+    pub suppressed: bool,
+    /// The item's rows on its new entity, every one carrying that entity: the first carries its
+    /// label and every declared value, and each other is a join placing it in one more view.
+    pub rows: Vec<WalRow>,
 }
 
 /// The batch a record was written for, if it was written for one — **the one rule the accepted-batch
@@ -596,9 +617,7 @@ pub struct BatchIdentity<'a> {
 ///
 /// The index that answers `x-tessera-batch-id` is a cache of this log: what it holds after a
 /// restart is whatever the retained members say, so anything that decides "does this record carry
-/// a batch id" twice can forget a kind of batch on one of the two paths and not the other. That is
-/// exactly what happened to `/control/values` (#154): the rebuild matched [`WalRecord::IngestBatch`]
-/// alone and a values id inside the retention window came back unknown.
+/// a batch id" twice can forget a kind of batch on one of the two paths and not the other.
 ///
 /// **A `match` with no wildcard arm**, on [`unbuilt_track`]'s rule: a record kind added later is a
 /// decision taken here, and the compiler asks for it rather than a default answering "carries no
@@ -608,27 +627,17 @@ pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
         WalRecord::IngestBatch {
             batch_id,
             body_hash,
-            rows,
-        } => Some(BatchIdentity {
-            batch_id,
-            body_hash: *body_hash,
-            allocation: rows.iter().map(|row| row.entity_id).collect(),
-        }),
-        WalRecord::ValuesBatch {
-            batch_id,
-            body_hash,
+            receipt,
             ..
         } => Some(BatchIdentity {
             batch_id,
             body_hash: *body_hash,
-            // A values row fills cells on an entity that already exists, so the batch was allocated
-            // nothing and a replay of it answers with `filled: 0` and no ids.
-            allocation: Vec::new(),
+            receipt,
         }),
         // Listed rather than caught by a wildcard, for this function's whole reason.
         WalRecord::VocabularyMint { .. }
         | WalRecord::OverlaySnapshot { .. }
-        | WalRecord::ChangeByEntity { .. }
+        | WalRecord::ChangeBatch { .. }
         | WalRecord::LayerCreate { .. }
         | WalRecord::LayerDrop { .. }
         | WalRecord::ViewCreate { .. }
@@ -710,17 +719,6 @@ pub enum ArtifactPart {
     },
     /// The access label, as descriptors in [`crate::membership::canonical_access`]'s order.
     Access(Vec<Vec<u8>>),
-}
-
-/// One row of a [`WalRecord::ValuesBatch`]: the entity the values fill, resolved at admission from
-/// the external id or the `tessera_id` the caller named (I10), and its values positional to the
-/// batch's `columns`.
-///
-/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ValuesRow {
-    pub entity_id: EntityId,
-    pub values: Vec<WalScalar>,
 }
 
 /// An attribute column as `PUT /control/attributes` declares it: the `[[attribute]]` block minus
@@ -998,7 +996,7 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// nothing (recovery reconstructs the buffer by the has-a-row predicate and rotation computes its
 /// own reclaim bound), and deleting them shifts every later discriminant, which is exactly what
 /// this version check exists to refuse. Version 5 deleted the `Change` variant, `ChangeOp`'s
-/// `Predicate` and the `descriptors` field of `ChangeByEntity` and `OverlaySnapshotEntry`
+/// `Predicate` and the `descriptors` field of the per-item change record and `OverlaySnapshotEntry`
 /// (decision 0048): `Change` was written by nothing — every accepted change is admitted against an
 /// entity — and the descriptors had no consumer once the evaluate store went. That shifts a variant
 /// index, drops an enum discriminant and drops a struct field, each of which postcard would decode
@@ -1061,7 +1059,12 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // **25**: every access label and declared word is stored trimmed. A log at 24 is refused.
 // **26**: `AttributeDeclaration` gained `unique`, and the variant table gained `UniqueDeclare`. A
 // log at 25 is refused.
-const WAL_VERSION: u16 = 26;
+// **27**: `IngestBatch` gained `receipt`, what each request row became, and `ChangeBatch`, one
+// request's changes whole, replaced `ChangeByEntity`. A log at 26 is refused.
+// **28**: `IngestBatch` gained `edits`, the items it moved to new entities, `RowOutcome` gained
+// `Edited`, and `ValuesBatch` left the variant table. A log at 27 is refused.
+// **29**: `ViewDrop` gained `deleted`, the items the drop left in no view. A log at 28 is refused.
+const WAL_VERSION: u16 = 29;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1654,7 +1657,7 @@ impl Wal {
     /// lived in a member reclamation has deleted.
     ///
     /// **What a restart would find, said while the process is still running.** A replay-derived
-    /// index — the accepted-batch index of `/control/ingest` and `/control/values` — knows only
+    /// index — the accepted-batch index of `/control/ingest` — knows only
     /// what the surviving members carry, so a live process holding entries below this figure
     /// answers a replay one a restart would not. `Executor::rotate_wal` reads this after every
     /// rotation and forgets what fell below it, which is what makes the two agree.
@@ -1730,8 +1733,9 @@ impl Wal {
     ///
     /// **The snapshot is durable before anything is deleted**, because the overlay's only durable
     /// home is the WAL: the `Change` records inside the members about to go are the sole record
-    /// that an item was suppressed, and a suppression retires only on unsuppress. Deleting first
-    /// and snapshotting after would re-expose every denied item on the next restart.
+    /// that an item was suppressed, and a live item's suppression retires only on unsuppress.
+    /// Deleting first and snapshotting after would re-expose every denied item on the next
+    /// restart.
     ///
     /// **Deletion is oldest-first**, because a crash midway through an unordered deletion leaves a
     /// *gap* in the sequence, and [`Wal::open`] fails closed on a gap — turning a benign crash into
@@ -2344,9 +2348,8 @@ mod tests {
     use super::*;
 
     fn record(tag: u8) -> WalRecord {
-        WalRecord::ChangeByEntity {
-            entity_id: EntityId::new(tag as u64),
-            op: ChangeOp::Delete,
+        WalRecord::ChangeBatch {
+            changes: vec![(EntityId::new(tag as u64), ChangeOp::Delete)],
         }
     }
 
@@ -2368,6 +2371,8 @@ mod tests {
             code: 31_337,
         };
         let batch = WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b1".to_string(),
             body_hash: [7u8; 32],
             rows: vec![WalRow {
@@ -2662,14 +2667,43 @@ mod tests {
                     entity: EntityId::new(4_294_836_223),
                 }),
             },
-            WalRecord::ValuesBatch {
+            WalRecord::IngestBatch {
                 batch_id: "sentiment-0".into(),
                 body_hash: [9u8; 32],
-                view: Some("quarter:2026-Q1".into()),
-                columns: vec!["sentiment".into(), "reviewed".into()],
-                rows: vec![ValuesRow {
-                    entity_id: EntityId::new(41),
-                    values: vec![WalScalar::F32(0.25), WalScalar::Null],
+                rows: Vec::new(),
+                edits: vec![WalEdit {
+                    old: EntityId::new(41),
+                    number: EntityId::new(7),
+                    suppressed: true,
+                    rows: vec![
+                        WalRow {
+                            external_id: None,
+                            entity_id: EntityId::new(90),
+                            view: "quarter:2026-Q1".into(),
+                            join: false,
+                            descriptors: vec![b"dept:eng".to_vec()],
+                            x: 0.5,
+                            y: 0.25,
+                            scalars: vec![WalScalar::F32(0.25), WalScalar::Null],
+                            scoped: Vec::new(),
+                        },
+                        WalRow {
+                            external_id: None,
+                            entity_id: EntityId::new(90),
+                            view: "quarter:2026-Q2".into(),
+                            join: true,
+                            descriptors: Vec::new(),
+                            x: 0.75,
+                            y: 0.5,
+                            scalars: Vec::new(),
+                            scoped: vec![WalScalar::Utf8("prose".into())],
+                        },
+                    ],
+                }],
+                receipt: vec![RowReceipt {
+                    outcome: RowOutcome::Edited,
+                    tessera_id: 12_345,
+                    over_bound: false,
                 }],
             },
             WalRecord::AttributeDeclare {
@@ -2751,10 +2785,10 @@ mod tests {
         ];
         // The growth's rank and leaving set are applied by `ArtifactStore::grow_set`, the four
         // fills by `ArtifactStore::fill`, the attribute declaration by
-        // `Executor::declare_attribute`, the values batch by `Executor::commit_values`, the
-        // vocabulary declaration by `Executor::commit_vocabulary_declare` and the two view
-        // declarations by `Executor::commit_view_group_create` and `commit_plain_view_create`.
-        // **Every record of the ingest design is applied now**, so no arm names a track.
+        // `Executor::declare_attribute`, the vocabulary declaration by
+        // `Executor::commit_vocabulary_declare` and the two view declarations by
+        // `Executor::commit_view_group_create` and `commit_plain_view_create`. **Every record of
+        // the ingest design is applied now**, so no arm names a track.
         let tracks: Vec<Option<&str>> = records
             .iter()
             .map(|record| unbuilt_track(record).map(|(_, track)| track))

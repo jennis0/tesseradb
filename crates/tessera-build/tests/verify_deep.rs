@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use tessera_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
 use tessera_spatial::Bounds;
 use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
-use tessera_store::manifest::{CurrentPointer, DenySet, FileDigest, SegmentsManifest};
+use tessera_store::manifest::{CurrentPointer, EntitySet, FileDigest, SegmentsManifest};
 use tessera_store::write_segments_manifest;
 use tessera_types::{EntityId, IdentityKey, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
@@ -167,6 +167,7 @@ fn flushed_bundle(root: &Path) {
     let rows = vec![
         FlushRow {
             entity_id: EntityId::new(n),
+            number: EntityId::new(n),
             external_id: Some(9_999u64.to_le_bytes().to_vec()),
             x: 10.0,
             y: 10.0,
@@ -174,6 +175,7 @@ fn flushed_bundle(root: &Path) {
         },
         FlushRow {
             entity_id: EntityId::new(n + 1),
+            number: EntityId::new(n + 1),
             external_id: Some(REBOUND_SOURCE.to_le_bytes().to_vec()),
             x: 990.0,
             y: 990.0,
@@ -195,6 +197,7 @@ fn flushed_bundle(root: &Path) {
             shard_id: 0,
             scalar_schema: &[],
             row_base: n as u32,
+            entity_floor: 0,
         }, &[],
     )
     .expect("the flush segment writes");
@@ -234,7 +237,7 @@ fn flushed_bundle(root: &Path) {
         dict_extents: seg0.dict_extents.clone(),
         external_id_runs,
         locator_extents: vec![locator],
-        tombstones: DenySet::of(&croaring::Bitmap::of(&[old_holder.raw() as u32])),
+        tombstones: EntitySet::of(&croaring::Bitmap::of(&[old_holder.raw() as u32])),
         files,
         ..SegmentsManifest::empty()
     };

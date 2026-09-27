@@ -42,7 +42,7 @@ class _StubServer:
         self.ingest_calls: list = []
         self.next_change = _Response(200, {})
         self.next_batch = _Response(200, {})
-        self.next_ingest = _Response(200, {"accepted": 0})
+        self.next_ingest = _Response(200, {"created": 0})
 
     def status(self):
         return {"entity_id_high_water": self.high_water}
@@ -134,14 +134,14 @@ def test_an_acked_ingest_is_not_an_applied_one(stub):
     """
     server, journal = stub
     server.high_water = 100
-    server.next_ingest = _Response(200, {"accepted": 3, "tessera_ids": ["11", "12", "13"]})
+    server.next_ingest = _Response(200, {"created": 3, "tessera_ids": ["11", "12", "13"]})
 
     journal.ingest(b"arrow-bytes", "batch-1")
 
     assert len(journal.ingests) == 1
     op = journal.ingests[0]
-    assert (op.batch_id, op.accepted, op.applied) == ("batch-1", 3, False)
-    assert op.required_high_water == 103, "the barrier waits for `before + accepted`"
+    assert (op.batch_id, op.created, op.applied) == ("batch-1", 3, False)
+    assert op.required_high_water == 103, "the barrier waits for `before + created`"
     assert journal.acked_count == 1
     # Acked-but-unapplied contributes nothing to the composed mask, which is correct twice over:
     # the entities postdate the bundle, and nothing has said they are visible.
@@ -152,7 +152,7 @@ def test_the_barrier_waits_for_the_watermark_and_then_marks_applied(stub):
     """`barrier` is the only thing that may set `applied`, and it may only do so on evidence."""
     server, journal = stub
     server.high_water = 100
-    server.next_ingest = _Response(200, {"accepted": 3})
+    server.next_ingest = _Response(200, {"created": 3})
     journal.ingest(b"arrow", "batch-1")
 
     server.high_water = 102  # short by one row
@@ -187,8 +187,8 @@ def test_the_barrier_is_a_no_op_with_nothing_pending(stub):
 def test_reflects_is_all_of_them_not_any_of_them(stub):
     """Two acked batches, one reflected: the barrier must not release."""
     pending = [
-        IngestOp(sequence=1, batch_id="a", accepted=2, required_high_water=102),
-        IngestOp(sequence=2, batch_id="b", accepted=5, required_high_water=107),
+        IngestOp(sequence=1, batch_id="a", created=2, required_high_water=102),
+        IngestOp(sequence=2, batch_id="b", created=5, required_high_water=107),
     ]
     assert not AckedJournal._reflects({"entity_id_high_water": 102}, pending)
     assert not AckedJournal._reflects({"entity_id_high_water": 106}, pending)

@@ -56,6 +56,9 @@ use crate::write::{write_segment, RunWriter};
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlushRow {
     pub entity_id: EntityId,
+    /// The item's number, which its `tessera_id` is taken from: `entity_id` for an item never
+    /// edited, and the entity it was first given for one an edit moved ([`crate::edited`]).
+    pub number: EntityId,
     /// `None` for an item ingested without one (contracts §3.4 r6): addressable only by its
     /// `tessera_id`, present in no external-id extent, and given the locator's absent sentinel.
     pub external_id: Option<Vec<u8>>,
@@ -74,9 +77,8 @@ pub struct FlushInput<'a> {
     /// The incarnation of the view this segment is written into (decision 0115), stamped into the
     /// descriptor so that a key created again cannot adopt it.
     pub incarnation: tessera_types::view::ViewIncarnation,
-    /// **Ascending by `entity_id`, with deleted entities already removed** (§3.5: a deletion's ID
-    /// stays burned and no row is created for it). Contiguity is I9's doing — ids are issued
-    /// monotonically from the high-water — and it is what makes the extent dense.
+    /// **Ascending by `entity_id`, with deleted entities already removed**: no row is created for
+    /// a deleted entity.
     pub rows: Vec<FlushRow>,
     pub quantisation: Quantisation,
     pub identity_key: &'a IdentityKey,
@@ -84,6 +86,9 @@ pub struct FlushInput<'a> {
     pub scalar_schema: &'a [(String, ScalarType)],
     /// Where this segment's rows begin in the view's row space — the view's current total.
     pub row_base: u32,
+    /// The view's [`crate::permutation::RowSpace::entity_floor`]: the rows of entities below it
+    /// are listed in the extent rather than given its dense span.
+    pub entity_floor: u64,
 }
 
 /// What a flush produced, for the caller to name in `SEGMENTS-<n+1>.json` and hand to
@@ -126,20 +131,16 @@ pub fn write_flush_segment(
         .all(|w| w[0].entity_id < w[1].entity_id)
     {
         return Err(StoreError::MalformedBundle {
-            detail: "write_flush_segment: rows must be strictly ascending by entity id (I9's \
-                     monotone allocation is what makes the extent dense)"
+            detail: "write_flush_segment: rows must be strictly ascending by entity id, the order \
+                     the extent and the locator are written in"
                 .to_string(),
         });
     }
 
-    let entity_lo = input.rows[0].entity_id.raw();
-    let entity_hi = input.rows[input.rows.len() - 1].entity_id.raw();
-    let span =
-        usize::try_from(entity_hi - entity_lo + 1).map_err(|_| StoreError::MalformedBundle {
-            detail: format!(
-                "write_flush_segment: entity span {entity_lo}..={entity_hi} is too wide"
-            ),
-        })?;
+    let (entity_lo, entity_hi) = SegmentExtent::flush_span(
+        input.entity_floor,
+        input.rows.iter().map(|r| r.entity_id.raw()),
+    );
 
     // **`view_rel`, never the joined id** (`views.md` §3.2): a group's view lays its files down
     // at `views/<group>/<key>/` and a `files` key spelled `views/<group>:<key>/` names a path no
@@ -170,7 +171,7 @@ pub fn write_flush_segment(
     let mut items: Vec<TilerItem> = Vec::with_capacity(input.rows.len());
     for row in &input.rows {
         items.push(TilerItem {
-            tessera_id: tessera_id_of(input.identity_key, input.shard_id, row.entity_id)?,
+            tessera_id: tessera_id_of(input.identity_key, input.shard_id, row.number)?,
             qx: fixed32(row.x, q.x_min, q.x_max),
             qy: fixed32(row.y, q.y_min, q.y_max),
             scalars: row.scalars.clone(),
@@ -224,51 +225,80 @@ pub fn write_flush_segment(
         }
     })?;
 
-    // The extent's `rows[e - entity_lo]` is the entity's position in the sorted order, relative to
-    // `row_base`. Written here rather than as a `permutation.bin`, whose length is the *bundle's*
-    // whole entity space — the wrong shape for a segment covering a few thousand ids at the top of
-    // it. Every slot is filled: deleted entities were removed by the caller, so the span is dense.
-    let mut extent_rows = vec![ROW_ABSENT; span];
-    for (row, entity) in entity_ids.iter().enumerate() {
-        extent_rows[(entity.raw() - entity_lo) as usize] = row as u32;
-    }
+    // Each entity's position in the sorted order, relative to `row_base`. Held here rather than
+    // as a `permutation.bin`, whose length is the *bundle's* whole entity space — the wrong shape
+    // for a segment covering a few thousand ids at the top of it. The rows are ascending and
+    // distinct, so only a span too wide to address is refused; that a listed entity has no row
+    // elsewhere in the view holds because the fold that freed it dropped every row of its
+    // previous holder, and publication checks it.
+    let extent = SegmentExtent::from_rows(
+        input.seg_id,
+        input.row_base,
+        (entity_lo, entity_hi),
+        entity_ids.iter().map(|e| e.raw()),
+    )
+    .ok_or_else(|| StoreError::MalformedBundle {
+        detail: format!(
+            "write_flush_segment: the entity span {entity_lo}..={entity_hi} is too wide to address"
+        ),
+    })?;
+
+    // The rows whose entity is not their number, which their `tessera_id` cannot name.
+    let edited: Vec<(u32, u32)> = entity_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(row, entity)| {
+            let at = input
+                .rows
+                .binary_search_by_key(entity, |r| r.entity_id)
+                .expect("every sorted entity is an input row's");
+            (input.rows[at].number != *entity).then(|| (row as u32, entity.raw() as u32))
+        })
+        .collect();
+    let edited_written = crate::edited::write_edited_rows(&seg_dir, &edited)?;
 
     // ---- the external-id directions (§3.6) --------------------------------------------------
     //
     // Forward: external_id → entity, sorted by the id bytes, because the reader binary-searches
-    // it. Reverse: entity → this run's ordinal, dense over the binding rows' span, with the absent
-    // sentinel for an entity that has no external id. Both, because the reverse direction is
-    // served live-map-first and locator-second, and rotation empties the live map at restart.
+    // it. Reverse: entity → this run's ordinal, with the absent sentinel for an entity that has no
+    // external id ([`write_locator`]). Both, because the reverse direction is served
+    // live-map-first and locator-second, and rotation empties the live map at restart.
     let binding: Vec<&FlushRow> = input
         .rows
         .iter()
         .filter(|r| joins.binary_search(&r.entity_id).is_err())
         .collect();
-    let bindings = match (binding.first(), binding.last()) {
-        (Some(first), Some(last)) => {
-            let (lo, hi) = (first.entity_id.raw(), last.entity_id.raw());
-            let mut forward: Vec<(&[u8], u32)> = binding
-                .iter()
-                .filter_map(|r| {
-                    let id = r.external_id.as_deref()?;
-                    u32::try_from(r.entity_id.raw()).ok().map(|e| (id, e))
-                })
-                .collect();
-            forward.sort_unstable_by(|a, b| a.0.cmp(b.0));
-            write_external_id_run(&seg_dir.join("external-ids.arrow"), &forward)?;
-            let mut locator = vec![ROW_ABSENT; (hi - lo + 1) as usize];
-            for (ordinal, (_, entity)) in forward.iter().enumerate() {
-                locator[(*entity as u64 - lo) as usize] = ordinal as u32;
-            }
-            write_u32_array(&seg_dir.join("ext-locator.u32"), &locator)?;
-            Some(LocatorExtent {
-                path: rel("ext-locator.u32"),
-                entity_lo: lo,
-                entity_hi: hi,
-                external_id_run: rel("external-ids.arrow"),
+    let bindings = if binding.is_empty() {
+        None
+    } else {
+        let mut forward: Vec<(&[u8], u32)> = binding
+            .iter()
+            .filter_map(|r| {
+                let id = r.external_id.as_deref()?;
+                u32::try_from(r.entity_id.raw()).ok().map(|e| (id, e))
             })
+            .collect();
+        forward.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        write_external_id_run(&seg_dir.join("external-ids.arrow"), &forward)?;
+        let mut slots: Vec<(u64, u32)> = binding
+            .iter()
+            .map(|r| (r.entity_id.raw(), ROW_ABSENT))
+            .collect();
+        for (ordinal, (_, entity)) in forward.iter().enumerate() {
+            let at = slots
+                .binary_search_by_key(&u64::from(*entity), |&(e, _)| e)
+                .expect("every bound entity is a binding row's");
+            slots[at].1 = ordinal as u32;
         }
-        _ => None,
+        let (lo, hi) = SegmentExtent::flush_span(input.entity_floor, slots.iter().map(|s| s.0));
+        let listed = write_locator(&seg_dir.join("ext-locator.u32"), (lo, hi), &slots)?;
+        Some(LocatorExtent {
+            path: rel("ext-locator.u32"),
+            entity_lo: lo,
+            entity_hi: hi,
+            listed,
+            external_id_run: rel("external-ids.arrow"),
+        })
     };
 
     // ---- what the manifest must name --------------------------------------------------------
@@ -287,6 +317,10 @@ pub fn write_flush_segment(
         let name = format!("{RENDER_PRESENCE_DIR}/{column}.roaring");
         files.insert(rel(&name), digest_of(&seg_dir.join(&name))?);
     }
+    if edited_written {
+        let name = crate::edited::EDITED_ROWS_FILE;
+        files.insert(rel(name), digest_of(&seg_dir.join(name))?);
+    }
 
     Ok(FlushOutput {
         segment: SegmentDescriptor {
@@ -297,13 +331,7 @@ pub fn write_flush_segment(
             entity_lo,
             entity_hi,
         },
-        extent: SegmentExtent {
-            entity_lo,
-            entity_hi,
-            seg_id: input.seg_id.to_string(),
-            row_base: input.row_base,
-            rows: extent_rows,
-        },
+        extent,
         locator_extent: bindings,
         files,
         // Composition treats entities at or above the watermark as buffer-resident, so this is
@@ -382,8 +410,42 @@ pub fn write_render_presence(
     Ok(Some(path))
 }
 
-/// A raw little-endian `u32` array, no header — the `ext-locator.u32` shape (contracts §2.4 r6),
-/// here over one segment's entity range rather than the whole entity space.
+/// A flush or coalesced locator extent: a raw little-endian `u32` slot per entity of
+/// `[entity_lo, entity_hi]`, then an `(entity, slot)` pair of `u32`s for each entity below
+/// `entity_lo`, ascending by entity. `slots` is every `(entity, ordinal)` the extent covers,
+/// ascending by entity, [`ROW_ABSENT`] for an entity with no external id; the span must hold every
+/// entity not below it. Returns how many pairs were listed.
+pub(crate) fn write_locator(
+    path: &Path,
+    (entity_lo, entity_hi): (u64, u64),
+    slots: &[(u64, u32)],
+) -> Result<u64> {
+    let malformed = |detail: String| StoreError::MalformedBundle { detail };
+    let span = (entity_hi + 1)
+        .checked_sub(entity_lo)
+        .and_then(|d| usize::try_from(d).ok())
+        .ok_or_else(|| malformed(format!("locator: span {entity_lo}..={entity_hi} is inverted")))?;
+    let mut dense = vec![ROW_ABSENT; span];
+    let mut listed: Vec<u32> = Vec::new();
+    for &(entity, ordinal) in slots {
+        if entity < entity_lo {
+            let entity = u32::try_from(entity)
+                .map_err(|_| malformed(format!("locator: entity {entity} exceeds u32")))?;
+            listed.extend([entity, ordinal]);
+        } else if entity <= entity_hi {
+            dense[(entity - entity_lo) as usize] = ordinal;
+        } else {
+            return Err(malformed(format!(
+                "locator: entity {entity} lies above the span {entity_lo}..={entity_hi}"
+            )));
+        }
+    }
+    dense.extend_from_slice(&listed);
+    write_u32_array(path, &dense)?;
+    Ok((listed.len() / 2) as u64)
+}
+
+/// A raw little-endian `u32` array, no header — the `ext-locator.u32` shape (contracts §2.4 r6).
 pub(crate) fn write_u32_array(path: &Path, values: &[u32]) -> Result<()> {
     let io = |source| StoreError::Io {
         path: path.to_path_buf(),
@@ -463,6 +525,7 @@ mod tests {
     fn row(entity: u64, x: f64, score: ScalarValue) -> FlushRow {
         FlushRow {
             entity_id: EntityId::new(entity),
+            number: EntityId::new(entity),
             external_id: None,
             x,
             y: 0.0,
@@ -489,6 +552,7 @@ mod tests {
                 shard_id: 0,
                 scalar_schema: &schema,
                 row_base: 0,
+                entity_floor: 0,
             }, &[],
         )
         .expect("flush");

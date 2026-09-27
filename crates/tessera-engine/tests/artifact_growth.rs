@@ -694,7 +694,6 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -706,7 +705,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
         scoped: Vec::new(),
     };
     let (_, minted) = engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             batch.to_string(),
             hash,
@@ -762,7 +761,7 @@ fn an_artifact_a_batch_minted_survives_a_restart() {
     );
     // A membership is projected through base rows, so the count is only readable once the ingested
     // points have them — which is what makes this the assertion rather than the one above.
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 1);
@@ -787,7 +786,7 @@ fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
             .register_layer(open_declaration("clusters/a"))
             .unwrap();
         assert_eq!(ingest_naming(&engine, "b1", "clusters/a", "c9"), 1);
-        flush(&engine);
+        publish_buffered(&engine);
         fold(&engine);
     }
     remove_the_whole_log(&fx.wal);
@@ -814,7 +813,6 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
     let before = engine.allocator_high_water();
     let descriptors = vec![b"0".to_vec()];
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(b"p1".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -826,7 +824,7 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
         scoped: Vec::new(),
     };
     let refused = engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             "b1".to_string(),
             [1u8; 32],
@@ -870,7 +868,6 @@ fn ingest_into_view(engine: &Engine, batch: &str, view: &str, external_id: &str,
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: view.to_string(),
         join: None,
@@ -882,7 +879,7 @@ fn ingest_into_view(engine: &Engine, batch: &str, view: &str, external_id: &str,
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             batch.to_string(),
             hash,
@@ -938,7 +935,7 @@ fn a_joining_row_restating_its_membership_appends_no_growth() {
         .expect("the layer is declared over both views");
 
     ingest_into_view(&engine, "b1", "s0", "p1", "c9");
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     assert_eq!(
         resampled_gauge(&engine).pin,
@@ -992,12 +989,12 @@ fn a_joining_row_naming_another_artifact_still_grows_it() {
 
     ingest_into_view(&engine, "b1", "s0", "p1", "c8");
     ingest_into_view(&engine, "b2", "s0", "p2", "c9");
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
 
     // A second view of p1, naming the cluster p2 created and p1 is in no part of.
     ingest_into_view(&engine, "b3", "s1", "p1", "c9");
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
 
     let artifacts = artifacts_of(&engine, &full_coverage_credential());
@@ -1107,7 +1104,7 @@ fn a_tick_puts_them_in_the_prefix_and_a_restore_needs_no_log() {
         let engine = fx.open();
         registered(&engine);
         ingest_naming(&engine, "b1", "clusters/a", "c0");
-        flush(&engine);
+        publish_buffered(&engine);
         wait_until("the tick's membership extent", WAIT, || {
             !fx.membership_files(&engine).is_empty()
         });
@@ -1149,7 +1146,7 @@ fn memberships_no_tick_published_come_back_from_the_log() {
         1,
         "the artifact the first batch created is back, and the second batch created none"
     );
-    flush(&engine);
+    publish_buffered(&engine);
     let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 1);
     assert_eq!(
@@ -1211,7 +1208,7 @@ fn a_fold_with_a_batchs_memberships_pending_produces_a_correct_bundle() {
         let engine = fx.open();
         registered(&engine);
         ingest_naming(&engine, "b1", "clusters/a", "c0");
-        flush(&engine);
+        publish_buffered(&engine);
         // Acknowledged after the last tick, so its growth is pending when the fold is requested.
         ingest_naming(&engine, "b2", "clusters/a", "c0");
         fold(&engine);

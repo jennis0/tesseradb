@@ -25,53 +25,48 @@ use tessera_types::{EntityId, TermId};
 use crate::alloc::{AllocError, PendingItem};
 use crate::wal::{WalError, WalRow, WalScalar};
 
-/// One ingest row awaiting entity-ID assignment on the executor.
+/// One row of an ingest batch as the caller sent it: the values that identify the item it names
+/// and the values it carries, each of which may be left out.
 ///
-/// Field-for-field [`WalRow`] minus `entity_id`, plus `terms`. Both halves matter:
+/// A left-out value keeps what the named item stores, and a new item has no value there. A value
+/// sent as null clears it. `omitted` lists the columns the row left out, as positions in the
+/// declared scalars followed by the batch view's group-scoped families; each such position holds
+/// its absence in `scalars` or `scoped`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IngestRow {
+    pub tessera_id: Option<tessera_types::TesseraId>,
+    pub external_id: Option<Vec<u8>>,
+    /// The row's access labels. `None` where the row left its label out, which keeps a named
+    /// item's label and gives a new item the view's default. `Some` of an empty list is no label.
+    pub labels: Option<Vec<Vec<u8>>>,
+    /// Frame coordinates in the batch's view, or `None` where the row carries none.
+    pub position: Option<(f64, f64)>,
+    pub scalars: Vec<WalScalar>,
+    pub scoped: Vec<WalScalar>,
+    pub omitted: Vec<usize>,
+}
+
+/// One row the handler has resolved to a write, awaiting entity-ID assignment on the executor: a
+/// row that creates an item, or one that adds an existing item to its view.
 ///
-/// - `descriptors` are the **raw descriptor bytes**, carried because that is what the WAL record
-///   stores — term IDs are bundle-relative ordinals, and a term coined between builds has no
-///   durable ID at all, so a `WalRow` cannot be framed from `terms` alone. Without this field the
-///   executor cannot build the record it is supposed to append.
-/// - `terms` are the **already-resolved** `TermId`s, and they are here because signature-sorted
-///   assignment (I9, design §11.1) needs each item's resolved term set to compute its sort key
-///   *before* any ID exists. Resolution therefore happens in the handler, ahead of the durability
-///   boundary — a structural exception argued at `WritePath::resolve_terms` in `tessera-engine`,
-///   not an oversight to be tidied up by moving it onto the executor.
+/// Field-for-field [`WalRow`] minus `entity_id`, plus `terms`. `descriptors` are the raw bytes the
+/// WAL record stores, since a term coined between builds has no durable id. `terms` are the
+/// resolved ids signature-sorted assignment needs before any entity id exists.
 ///
-/// `external_id` is optional (contracts §3.4 r6) and `None` must never collide with `None`: an
-/// item with no external ID is addressable only by its `tessera_id`, is established in no live
-/// map, and is not a duplicate of any other such item.
-///
-/// `view` is resolved by the handler against the bundle's declared views — never defaulted here
-/// — for the reason given at [`WalRow`]'s own field.
-///
-/// `x`/`y` are **frame coordinates**, on the same rule and for the same reason as [`WalRow`]'s: a
-/// projected view's transform has already run at the wire boundary (`projections.md` §3), so every
-/// reader below this type — the engine's out-of-frame check, the WAL record, the buffer, the
-/// flush's quantiser — sees a position in the frame and none of them projects anything.
+/// `x`/`y` are frame coordinates: a projected view's transform has already run at the wire
+/// boundary, so nothing below this type projects anything.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnallocatedRow {
     pub external_id: Option<Vec<u8>>,
     pub view: String,
-    /// The entity this row **joins**, where the handler resolved its `external_id` to one that
-    /// already exists and is in no such view (`views.md` §4). `None` is the ordinary case: an
-    /// unknown external id, or none at all, and the close allocates.
-    ///
-    /// **Carried rather than re-resolved on the executor**, on the change command's rule: the
-    /// resolution happens once, at admission, and what travels is the entity. The executor's own
-    /// backstop re-reads the live map beside the same generation it will clone from, so a batch
-    /// that raced a delete cannot be admitted against a stale answer.
+    /// The existing item this row adds to `view`, or `None` for a row that creates one.
     pub join: Option<tessera_types::EntityId>,
-    /// The row left out a column a new item must carry, so it is admitted only as the join the
-    /// handler resolved; the writer refuses it rather than let it become a new item.
-    pub join_only: bool,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f64,
     pub y: f64,
     pub scalars: Vec<WalScalar>,
-    /// This row's group-scoped attribute values ([`WalRow::scoped`], `views.md` §5) — positional
-    /// against the owning group's `scoped_scalars`, and empty for every view outside a scope.
+    /// This row's group-scoped attribute values ([`WalRow::scoped`]), positional against the
+    /// owning group's `scoped_scalars`, and empty for every view outside a scope.
     pub scoped: Vec<WalScalar>,
     pub terms: Vec<TermId>,
 }
@@ -199,40 +194,17 @@ impl BatchArtifacts {
     }
 }
 
-/// One accepted `POST /control/values` batch as it reaches the executor (`ingest.md` §1.4).
-///
-/// **Columns are named, and a row's values are positional against that list.** A values batch
-/// carries whichever subset of the schema the caller has, in the caller's own order, so a
-/// positional tail against the whole declared order would make the wire depend on a schema the
-/// caller may not have read. The executor resolves each name once per batch — to a position in
-/// the declared scalar tail, or to one of the view's group-scoped families — and the log carries
-/// the same named form, so a replay resolves it the same way.
+/// An item a row edits, as the handler resolved it: the entity it leaves, its number, and the rows
+/// its new entity takes, awaiting that entity's id on the executor.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValuesRequest {
-    pub batch_id: String,
-    pub body_hash: [u8; 32],
-    /// The view this batch's fills belong to: the `x-tessera-view` header where one was given,
-    /// and the deployment's first view otherwise, which a batch filling only entity-scoped cells
-    /// may take since any view's pass writes those. It decides which flush pass writes the fills
-    /// and which view's column of a group-scoped family a scoped cell addresses. `None` on a batch
-    /// that fills no cell.
-    pub view: Option<String>,
-    /// The declared column names this batch carries, in the caller's order.
-    pub columns: Vec<String>,
-    /// One row per entity, values positional against `columns`.
-    pub rows: Vec<IncomingValues>,
-    /// The artifacts this batch's rows named in a column named for a layer (`ingest.md` §1.4): a
-    /// membership join for an entity that exists, resolved and grown in the same commit as the
-    /// cells, so there is no state in which a value is filled and its membership is not. Empty
-    /// for a batch that named none.
-    pub artifacts: BatchArtifacts,
-}
-
-/// One row of a [`ValuesRequest`]: the entity the values fill, already resolved, and its cells.
-#[derive(Debug, Clone, PartialEq)]
-pub struct IncomingValues {
-    pub entity: EntityId,
-    pub values: Vec<crate::wal::WalScalar>,
+pub struct UnallocatedEdit {
+    pub old: EntityId,
+    /// The entity the item was first given, which its `tessera_id` is taken from.
+    pub number: EntityId,
+    /// The first row carries the item's label and every declared value, and its `terms`; each
+    /// other row places the item in one more view and carries that view's position and
+    /// group-scoped values alone. Every `join` is `None`: all of them take the new entity.
+    pub rows: Vec<UnallocatedRow>,
 }
 
 /// Why a command did not come back with a receipt. Distinct from [`ExecError`], which is why an
@@ -484,22 +456,6 @@ pub enum ExecError {
     /// deployment's own schema, never a filesystem path — so unlike most executor failures it may
     /// reach the caller, who cannot otherwise act on it.
     VocabularyRefused { detail: String },
-    /// `count` of this batch's rows name an external id the live map **already** holds → HTTP 409,
-    /// no effect (contracts §3.1's duplicate row).
-    ///
-    /// **A backstop, not the primary check.** `/control/ingest` already rejects duplicates in the
-    /// handler, with a detail naming them. But the live map is written at *apply* time, and apply
-    /// happens behind a queue — so between a handler's check and the executor's insert there is
-    /// a whole drain, and a client retry under a **fresh** `batch_id` can pass the handler check
-    /// twice. Without this the second insert silently overwrites the first, and the first item
-    /// stays visible, byte-identical to a suppressed one, and reachable by **no external id at
-    /// all** — so no deny can ever name it. Re-checked on the one thread that also performs the
-    /// insert, so check and apply cannot be separated.
-    ///
-    /// Carries a **count, never the ids**: this reaches a response body, and an external id is
-    /// caller-supplied data `tessera-server`'s `error.rs` keeps out of one. The handler's own check
-    /// is the one that names them, to the caller who supplied them.
-    DuplicateExternalId { count: usize },
     /// A layer registration or drop was refused → HTTP 422, no effect. Every check runs before the
     /// first allocation and before the WAL append, so a refusal leaves no ids spent, no record in
     /// the log and no half-registered layer.
@@ -525,24 +481,6 @@ pub enum ExecError {
     /// A group or a key this deployment does not carry → **404**, the same answer an unknown view
     /// gets on every other surface.
     ViewUnknown { detail: String },
-    /// The **join rule** refused this batch (`views.md` §4, §5) → HTTP **409**, no effect: a
-    /// joining row named a different access label, a different value for an entity-scoped
-    /// attribute, or a different value for a `(entity, attribute, key)` cell the deployment
-    /// already holds one for.
-    ///
-    /// **Evaluated on the serial writer, which is why it is an `ExecError`** (decision 0116).
-    /// These comparisons used to run in `/control/ingest`'s handler, a whole queue drain before
-    /// the map that decides which rows *are* joins — so a row promoted to a join in between skipped
-    /// every arm. The refusal is now taken beside `LiveState::established_collisions`, on the one
-    /// thread that also performs the apply, and before the WAL append: a refused batch leaves no
-    /// record, spends no entity id and moves nothing.
-    ///
-    /// **A rendered string, and it reaches the caller** — the same standing as
-    /// [`Self::LayerRefused`], and for the same reason. It names a row index, a column name and a
-    /// view key: the caller's own request measured against the deployment's published schema. It
-    /// names no entity id, no external id, no group the caller did not spell, and no value on
-    /// either side (**I10**).
-    JoinRefused { detail: String },
     /// An attribute declaration measured against the deployment's rules and refused → HTTP
     /// **422**, no effect: a reserved or malformed name, a type outside the declarable set, a
     /// vocabulary or group the deployment does not carry, or a flag combination the schema
@@ -555,22 +493,6 @@ pub enum ExecError {
     /// is one the caller cannot have under another identity, since a column's width and
     /// placement are baked into every row (`per-point-attributes.md` §2.2).
     AttributeConflict { detail: String },
-    /// A values row supplied a cell this deployment already holds a different value for
-    /// (`ingest.md` §1.1, §1.4) → **409**, the batch without effect.
-    ///
-    /// **Evaluated on the serial writer**, on [`Self::JoinRefused`]'s rule and beside it: the
-    /// sources it reads are the commit-window buffer and the flushed homes, and only the executor
-    /// moves either.
-    ///
-    /// **A rendered string, and it reaches the caller** — a row index and a column name, and for
-    /// a group-scoped column the key the cell is addressed by. It names **no held value**
-    /// (`ingest.md` §1.4), no entity id and no external id (**I10**).
-    ValueConflict { detail: String },
-    /// A values row named a subject that does not exist, or one this batch cannot fill →
-    /// **422**, the batch without effect. Separate from [`Self::ValueConflict`] because the
-    /// remedy differs: a conflicting cell is one the caller may not have, and an unresolved id is
-    /// one the caller ingests first (`ingest.md` §1.6).
-    ValuesRefused { detail: String },
     /// A vocabulary of this name exists with a different identity, or a value of this key is held
     /// with a different property → HTTP **409**, no effect (`ingest.md` §1.1: a part present and
     /// different). Separate from [`Self::VocabularyRefused`] on
@@ -583,21 +505,11 @@ pub enum ExecError {
     /// The detail names the values and, for an ingest, the holders' `tessera_id`s; never an entity
     /// id.
     UniqueTaken { detail: String },
-    /// The executor could not re-check a batch's unique values from memory, because what the
-    /// handler checked them against has changed since. The batch comes back, and the handler
-    /// checks it again and resubmits it. Nothing took effect.
-    UniqueStale(Box<StaleSubmission>),
-}
-
-/// A batch the executor handed back to be checked again: see [`ExecError::UniqueStale`].
-#[derive(Debug)]
-pub enum StaleSubmission {
-    Ingest {
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        artifacts: BatchArtifacts,
-    },
-    Values(Box<ValuesRequest>),
+    /// What the handler resolved a batch against has changed since: an item a row names was
+    /// deleted or joined to the row's view, or a value a row carries has a new holder, or an edit
+    /// moved an item a command names while a fold retired entities. Nothing took effect, and the
+    /// names are resolved again.
+    Stale,
 }
 
 impl std::fmt::Display for ExecError {
@@ -609,11 +521,6 @@ impl std::fmt::Display for ExecError {
                 f,
                 "batch id '{batch_id}' was already submitted with a different body"
             ),
-            ExecError::DuplicateExternalId { count } => write!(
-                f,
-                "{count} row(s) name an external id this deployment already knows; the batch had \
-                 no effect"
-            ),
             ExecError::VocabularyRefused { detail } | ExecError::VocabularyConflict { detail } => {
                 write!(f, "{detail}")
             }
@@ -624,11 +531,8 @@ impl std::fmt::Display for ExecError {
             | ExecError::AttributeRefused { detail }
             | ExecError::AttributeConflict { detail }
             | ExecError::ViewUnknown { detail }
-            | ExecError::ValueConflict { detail }
-            | ExecError::ValuesRefused { detail }
-            | ExecError::UniqueTaken { detail }
-            | ExecError::JoinRefused { detail } => write!(f, "{detail}"),
-            ExecError::UniqueStale(_) => write!(
+            | ExecError::UniqueTaken { detail } => write!(f, "{detail}"),
+            ExecError::Stale => write!(
                 f,
                 "the items this batch names changed while it was checked; send it again"
             ),
@@ -656,7 +560,6 @@ mod tests {
 
     fn row() -> UnallocatedRow {
         UnallocatedRow {
-            join_only: false,
             external_id: Some(b"ext-1".to_vec()),
             view: "default".to_string(),
             join: None,

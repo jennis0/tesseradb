@@ -218,6 +218,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
     let codes = sort_batch(&mut items, &mut entity_ids);
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
     let seg = SegmentData {
+        entities: tessera_store::edited::RowEntities::Numbers,
         seg_id: "seg0".into(),
         row_count: items.len() as u32,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),

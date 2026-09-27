@@ -121,7 +121,6 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
 
     // Buffered row: a second request publishes it without waiting out the deadline.
     let row = tessera_lifecycle::UnallocatedRow {
-        join_only: false,
         external_id: Some(b"prompt-flush".to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -133,7 +132,7 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])
+        .ingest_rows(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])
         .expect("the row is accepted");
     engine.request_flush();
     wait_until(
@@ -213,7 +212,7 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
         .accept_change(EntityId::new(entity), ChangeOp::Suppress)
         .expect("a suppression is accepted");
 
-    // The tick fires within a second; growth (the ChangeByEntity record) triggers a rotation,
+    // The tick fires within a second; growth (the ChangeBatch record) triggers a rotation,
     // whose reclaim deletes the original member — the buffer is empty, so the whole durable
     // prefix below the snapshot is reclaimable.
     wait_until(
@@ -271,7 +270,6 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
 
     for i in 0..4u8 {
         let row = tessera_lifecycle::UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("rows-trigger-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
@@ -283,7 +281,7 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], format!("rows-trigger-batch-{i}"), [i; 32])
+            .ingest_rows(vec![row], format!("rows-trigger-batch-{i}"), [i; 32])
             .expect("the row is accepted");
     }
 
@@ -292,4 +290,173 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
         WAIT,
         || engine.generation().segments_version > 0,
     );
+}
+
+/// **A request made while a cycle's second view waits is honoured by a prompt cycle.** A cycle
+/// holding rows in two views plans both, dispatches one and defers the other, and stays open
+/// until the deferred view publishes. A request made meanwhile is answered with the cycle after
+/// it; the tick that takes the deferred view consumes the request's flag, so that later cycle
+/// comes only because closing the open one arms it again. The period here is an hour, so the
+/// number arriving at all is the re-armed request's doing.
+#[test]
+fn a_request_made_while_a_view_is_deferred_is_honoured_without_the_period() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+    let mut ingested = Vec::new();
+    for (i, view) in ["s0", "s1"].into_iter().enumerate() {
+        let row = tessera_lifecycle::UnallocatedRow {
+            external_id: Some(format!("open-cycle-{view}").into_bytes()),
+            view: view.to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        };
+        let entity = engine
+            .ingest_rows(vec![row], format!("open-cycle-{view}"), [i as u8 + 1; 32])
+            .expect("the row is accepted")[0];
+        ingested.push((view, entity));
+    }
+
+    // The first view's flush is held, so the cycle is open and the second view deferred.
+    engine.set_flush_paused_for_test(true);
+    let first = engine.request_flush_publication();
+    wait_until("the first view's flush is held", WAIT, || {
+        engine.flush_is_holding_for_test()
+    });
+    let second = engine.request_flush_publication();
+    assert_eq!(
+        second,
+        first + 1,
+        "a request during an open cycle names the cycle after it"
+    );
+
+    engine.set_flush_paused_for_test(false);
+    wait_until("the open cycle publishes both views", WAIT, || {
+        engine.publication() >= first
+    });
+    for (view, entity) in &ingested {
+        assert!(
+            serves(&engine, view, *entity),
+            "the row in {view} is served at the number the first request was answered with"
+        );
+    }
+    wait_until(
+        "the cycle the second request was answered with publishes, well inside the period",
+        WAIT,
+        || engine.publication() >= second,
+    );
+}
+
+/// **A retry that finds nothing to flush still reaches the number a request was promised.** A
+/// flush that fails holds its cycle open and retries. A request made meanwhile is answered with the
+/// cycle after it. The row is deleted before the retry, so the retry plans nothing and closes the
+/// open cycle inside the tick, with no publication to wake the executor again: only the re-armed
+/// request brings the promised cycle before the hour-long period.
+///
+/// The flush is made to fail by a read-only segments directory. No fault switch fails a flush and
+/// lets it recover: a WAL fault leaves the overlay diverged and a step-down stays, and both refuse
+/// every later flush until a restart.
+#[test]
+fn a_retry_that_finds_nothing_to_flush_still_reaches_the_promised_number() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    let entity = ingest(&engine, "failed-cycle");
+
+    let segments = segments_dir(&root, "s0");
+    let writable = std::fs::metadata(&segments).unwrap().permissions();
+    std::fs::set_permissions(&segments, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let first = engine.request_flush_publication();
+    wait_until("the flush fails", WAIT, || {
+        engine.write_executor_stats().flush_failures >= 1
+    });
+    let second = engine.request_flush_publication();
+    assert_eq!(
+        second,
+        first + 1,
+        "a request during an open cycle names the cycle after it"
+    );
+
+    engine
+        .accept_change(entity, ChangeOp::Delete)
+        .expect("the deletion is accepted");
+    std::fs::set_permissions(&segments, writable).unwrap();
+
+    wait_until("the retry closes the failed cycle", WAIT, || {
+        engine.publication() >= first
+    });
+    wait_until(
+        "the cycle the second request was answered with publishes, well inside the period",
+        WAIT,
+        || engine.publication() >= second,
+    );
+    assert_eq!(
+        engine.write_executor_stats().flushes,
+        0,
+        "the deleted row was never flushed, so no cycle published a segment"
+    );
+}
+
+/// The directory `view`'s flushed segments are written into.
+fn segments_dir(root: &std::path::Path, view: &str) -> std::path::PathBuf {
+    let current: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
+    let partitions = root
+        .join(current["prefix"].as_str().unwrap())
+        .join("partitions");
+    let partition = std::fs::read_dir(&partitions)
+        .unwrap()
+        .next()
+        .expect("the bundle has a partition")
+        .unwrap()
+        .path();
+    tessera_store::view_path(&partition, view).join("segments")
+}
+
+/// Whether a full-coverage viewer is served `entity`, ingested at (0.5, 0.5), in `view`.
+fn serves(engine: &Engine, view: &str, entity: EntityId) -> bool {
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let wanted = engine.tessera_id_of(entity).unwrap();
+    engine
+        .viewport(
+            &session,
+            tessera_engine::ViewportRequest::new(view, 10, [0.4, 0.4, 0.6, 0.6], 200),
+        )
+        .unwrap()
+        .points
+        .iter()
+        .any(|(id, _)| id == wanted)
 }

@@ -894,7 +894,7 @@ fn a_read_continues_across_a_flush_a_fold_a_restart_and_a_publication() {
         .accept_change(fx.entities([899])[0], ChangeOp::Delete)
         .unwrap();
     ingest(engine, "late-arrival");
-    flush(engine);
+    publish_buffered(engine);
     let (sink, trailer) =
         respond(engine, &session, ArtifactsRequest { cursor: cursor.as_deref(), ..base.clone() })
             .unwrap();
@@ -1305,7 +1305,6 @@ fn ingest_at(engine: &Engine, batch: &str, places: &[(f64, f64)]) -> Vec<EntityI
         .iter()
         .enumerate()
         .map(|(i, &(x, y))| tessera_lifecycle::UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("{batch}-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
@@ -1318,7 +1317,7 @@ fn ingest_at(engine: &Engine, batch: &str, places: &[(f64, f64)]) -> Vec<EntityI
         })
         .collect();
     engine
-        .accept_ingest(rows, batch.to_string(), [0u8; 32])
+        .ingest_rows(rows, batch.to_string(), [0u8; 32])
         .expect("the ingest is accepted")
 }
 
@@ -1376,7 +1375,7 @@ fn a_merge_between_two_pages_of_one_response_renews_the_filter() {
                 .count() as u64;
             ingested.extend(entities);
         }
-        flush(engine);
+        publish_buffered(engine);
     }
     let late = IncomingArtifact::from_entities(Some("f-late".into()), ingested.clone());
     engine.publish_artifacts(FLOOR.into(), 0, vec![late]).unwrap();

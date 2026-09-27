@@ -80,6 +80,36 @@ fn level_length<'a>(
 pub(super) struct FoldDerived<'a> {
     pub(super) written: &'a [tessera_store::manifest::DerivedExtent],
     pub(super) pending_retirement: &'a PendingRetirement,
+    /// The ids this fold frees, held back from the WAL position beside them.
+    pub(super) freed: &'a tessera_store::manifest::HeldEntities,
+}
+
+/// The entities of `executed` the allocator may issue again: each one whose number, the entity
+/// its item was first given, is another. An item's number is never freed, so a `tessera_id` a
+/// client holds never comes to name another item.
+fn freed_by(
+    live: &Generation,
+    executed: &croaring::Bitmap,
+) -> Result<croaring::Bitmap, tessera_store::StoreError> {
+    const CHUNK: usize = 1 << 16;
+    let mut freed = croaring::Bitmap::new();
+    let mut entities: Vec<EntityId> = Vec::with_capacity(CHUNK);
+    let mut iter = executed.iter().peekable();
+    while iter.peek().is_some() {
+        entities.clear();
+        entities.extend(
+            iter.by_ref()
+                .take(CHUNK)
+                .map(|entity| EntityId::new(u64::from(entity))),
+        );
+        let numbers = crate::edited::numbers_of(live, &entities)?;
+        for (entity, number) in entities.iter().zip(numbers) {
+            if number != *entity {
+                freed.add(entity.raw() as u32);
+            }
+        }
+    }
+    Ok(freed)
 }
 
 /// The fold-written files whose stamped version is the level's now, after the fold's retirement
@@ -278,6 +308,10 @@ pub(super) fn fold_rebases(
         })
         // An index removed during the flight takes nothing; one still held must still list every
         // run the fold consumed.
+        && {
+            let listed: FxHashSet<&str> = live_manifest.edited_items.files().collect();
+            plan.edited.files().all(|rel| listed.contains(rel))
+        }
         && plan.unique.iter().all(|consumed| {
             live_manifest
                 .unique_indexes
@@ -330,6 +364,8 @@ pub(super) struct CarriedExtents<'a> {
     /// Every unique index the live manifest holds, less what the fold consumed: a folded
     /// column's base runs are the fold's own and are left out here.
     unique: Vec<tessera_store::manifest::UniqueIndexRuns>,
+    /// The edited-items live runs written during the fold's flight; the fold's own are its base.
+    edited: tessera_store::manifest::EditedItemsRuns,
     /// The dropped views whose segments were left behind, and how many segments that was.
     omitted_views: Vec<String>,
     omitted_segments: usize,
@@ -464,6 +500,23 @@ pub(super) fn carried_forward<'a>(
                 }
             })
             .collect(),
+        edited: {
+            let consumed: FxHashSet<&str> = plan.edited.files().collect();
+            let unconsumed =
+                |runs: &tessera_store::manifest::KeyRuns| tessera_store::manifest::KeyRuns {
+                    base: Vec::new(),
+                    live: runs
+                        .live
+                        .iter()
+                        .filter(|rel| !consumed.contains(rel.as_str()))
+                        .cloned()
+                        .collect(),
+                };
+            tessera_store::manifest::EditedItemsRuns {
+                by_number: unconsumed(&live_manifest.edited_items.by_number),
+                by_entity: unconsumed(&live_manifest.edited_items.by_entity),
+            }
+        },
         omitted_views,
         omitted_segments,
     }
@@ -475,8 +528,12 @@ pub(super) fn carried_forward<'a>(
 pub(super) fn carried_files(
     partition: &str,
     live_manifest: &SegmentsManifest,
+    bundle_files: &std::collections::BTreeMap<String, tessera_store::manifest::FileDigest>,
     forward: &CarriedExtents,
 ) -> std::collections::BTreeSet<String> {
+    // A segment an earlier fold carried has its files listed in the bundle's manifest.
+    let listed =
+        |rel: &str| live_manifest.files.contains_key(rel) || bundle_files.contains_key(rel);
     let mut rels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for descriptor in &forward.segments {
         let segment_prefix = format!(
@@ -497,9 +554,17 @@ pub(super) fn carried_files(
             live_manifest
                 .files
                 .keys()
+                .chain(bundle_files.keys())
                 .filter(|rel| rel.starts_with(&presence_prefix))
                 .cloned(),
         );
+        let edited_rows = format!(
+            "{segment_prefix}/{}",
+            tessera_store::edited::EDITED_ROWS_FILE
+        );
+        if listed(&edited_rows) {
+            rels.insert(edited_rows);
+        }
     }
     rels.extend(forward.runs.iter().cloned());
     rels.extend(forward.locators.iter().map(|e| e.path.clone()));
@@ -519,6 +584,7 @@ pub(super) fn carried_files(
     for index in &forward.unique {
         rels.extend(index.files().map(String::from));
     }
+    rels.extend(forward.edited.files().map(String::from));
     rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
     rels
 }
@@ -948,10 +1014,28 @@ impl Executor {
         // ---- retirement, evaluated here and nowhere earlier ---------------------------------------
         let mut carried = crate::compact::CarriedForward::new();
         for descriptor in &forward.segments {
-            carried.add_segment(descriptor);
+            let Some(extent) = partition_data
+                .views
+                .get(&descriptor.view)
+                .and_then(|view| {
+                    view.row_space
+                        .extents()
+                        .iter()
+                        .find(|extent| extent.seg_id == descriptor.seg_id)
+                })
+            else {
+                return Err(
+                    "a carried-forward segment has no extent in the live row space".to_string()
+                );
+            };
+            carried.add_segment(extent);
         }
+        let prefix_dir = self.prefix_dir(live);
         for extent in &forward.locators {
-            carried.add_locator_extent(extent);
+            let listed = tessera_store::listed_entities(&prefix_dir, extent).map_err(|e| {
+                format!("a carried-forward locator extent could not be read ({e})")
+            })?;
+            carried.add_locator_extent(extent, &listed);
         }
         let executed = crate::compact::executed(&plan.tombstones, &carried);
         Ok(FoldApplies {
@@ -1098,10 +1182,46 @@ impl Executor {
         external_id_runs.extend(completed.external_id_run.clone());
         external_id_runs.extend(forward.runs.iter().cloned());
 
+        // Read before the swap, while the edited-items map still holds the retired entities'
+        // pairs.
+        let freed = match freed_by(&live, &executed) {
+            Ok(freed) => freed,
+            Err(e) => {
+                discard(&format!(
+                    "the entities it retires could not be told apart from items' numbers ({e})"
+                ));
+                return;
+            }
+        };
+        // The suppressions leaving with their entities are logged before the manifest omits
+        // them, so a replay of the suppressions the log still holds ends without them. Each entity
+        // is deleted until this fold's swap, so the record hides nothing less even if the fold is
+        // then discarded.
+        let unsuppressed = live.overlay.suppressions_retired_by(&executed);
+        if !unsuppressed.is_empty() {
+            let record = WalRecord::ChangeBatch {
+                changes: unsuppressed
+                    .iter()
+                    .map(|entity| (EntityId::new(u64::from(entity)), ChangeOp::Unsuppress))
+                    .collect(),
+            };
+            if let Err(failure) = self.append_and_sync(&[&record], None) {
+                discard(&format!(
+                    "the suppressions leaving with its entities could not be logged ({})",
+                    failure.into_error()
+                ));
+                return;
+            }
+        }
         // `tombstones` must leave the overlay in the same commit as the manifest, or a manifest
         // carrying what the swap is about to retire would re-seed the overlay at the next restart.
         let mut published_overlay = (*live.overlay).clone();
         published_overlay.retire(&executed);
+        // At the log position no later record can name the freed ids at.
+        let freed = tessera_store::manifest::HeldEntities {
+            position: self.log.wal.position(),
+            entities: tessera_store::manifest::EntitySet::of(&freed),
+        };
 
         let (runtime_attributes, runtime_scoped_attributes) =
             self.live.attributes_for_publication();
@@ -1169,6 +1289,16 @@ impl Executor {
                     index
                 })
                 .collect(),
+            edited_items: tessera_store::manifest::EditedItemsRuns {
+                by_number: tessera_store::manifest::KeyRuns {
+                    base: completed.edited.by_number.base.clone(),
+                    live: forward.edited.by_number.live.clone(),
+                },
+                by_entity: tessera_store::manifest::KeyRuns {
+                    base: completed.edited.by_entity.base.clone(),
+                    live: forward.edited.by_entity.live.clone(),
+                },
+            },
             ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);
@@ -1176,7 +1306,12 @@ impl Executor {
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
         let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, plan);
 
-        let carried_rels = carried_files(&plan.partition, live_manifest, &forward);
+        let carried_rels = carried_files(
+            &plan.partition,
+            live_manifest,
+            &live.bundle.manifest.files,
+            &forward,
+        );
         for rel in &carried_rels {
             let Some(digest) = live_manifest
                 .files
@@ -1232,6 +1367,7 @@ impl Executor {
             Some(FoldDerived {
                 written: &derived,
                 pending_retirement: &pending,
+                freed: &freed,
             }),
         ) {
             discard(&format!(
@@ -1334,7 +1470,13 @@ impl Executor {
         // ---- rotate the WAL ---------------------------------------------------------------------
         //
         // Immediately: the manifest seed no longer carries the executed entries, but the WAL still
-        // holds the original delete records until a rotation reclaims them.
+        // holds the original delete records until a rotation reclaims them. The freed ids are
+        // issued once it has.
+        if let Some(ids) = freed.entities.entities() {
+            let ids = ids.clone();
+            self.live
+                .with_allocator(|alloc| alloc.release_after(freed.position, ids));
+        }
         self.rotate_wal();
         stairs.record("16 wal");
         self.live.with_attributes(|attributes| {
@@ -2400,10 +2542,33 @@ pub(super) fn fold_segments(
         let dir = tessera_store::view_path(&partition_dir, &descriptor.view)
             .join("segments")
             .join(&descriptor.seg_id);
+        // A fold writes each view's base, whose rows name their entities in the view's table.
+        let table = dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map(|view| view.join(tessera_store::ROW_ENTITY_FILE))
+            .filter(|path| path.exists())
+            .map(|path| tessera_store::RowToEntity::load(&path));
+        let entities = match table {
+            Some(Ok(table)) => {
+                tessera_store::edited::RowEntities::Table(std::sync::Arc::new(table))
+            }
+            Some(Err(e)) => {
+                tracing::warn!(
+                    view = %descriptor.view,
+                    error = %e,
+                    "the fold could not reopen a row-to-entity file it just wrote; its spatial \
+                     memberships are resolved at the flip instead"
+                );
+                continue;
+            }
+            None => tessera_store::edited::RowEntities::Numbers,
+        };
         match tessera_store::read::SegmentData::load(
             &dir,
             &descriptor.seg_id,
             descriptor.row_count,
+            entities,
         ) {
             Ok(segment) => out.push((descriptor.view.clone(), segment)),
             Err(e) => tracing::warn!(

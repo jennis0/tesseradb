@@ -1781,13 +1781,14 @@ impl ArtifactStore {
     /// ## How this stands to the two removal rules
     ///
     /// It does not touch them, and that is the whole of its relationship to them. Write-path §5.4's
-    /// rules govern *retirement* — a suppression retires only on unsuppress and never touches a
-    /// stored structure (Rule S); a deletion retires only at the compaction fold that executes it
-    /// (Rule F) — and the hazard they exist against is a second route by which a bit **leaves** a
-    /// membership. This adds bits. A member added here is retired by exactly the routes every other
-    /// member is retired by, having no separate provenance once it is in the set: [`Self::retire`]
-    /// and [`Self::repack_all`] cannot tell it from a declared one, which is the property that keeps
-    /// growth from becoming a third removal rule by the back door.
+    /// rules govern *retirement* — a suppression retires on unsuppress, or with its entity at the
+    /// fold that removes it, and never touches a stored structure (Rule S); a deletion retires
+    /// only at the compaction fold that executes it (Rule F) — and the hazard they exist against
+    /// is a second route by which a bit **leaves** a membership. This adds bits. A member added
+    /// here is retired by exactly the routes every other member is retired by, having no separate
+    /// provenance once it is in the set: [`Self::retire`] and [`Self::repack_all`] cannot tell it
+    /// from a declared one, which is the property that keeps growth from becoming a third removal
+    /// rule by the back door.
     ///
     /// What it must not become is a second *entry* route with its own rules, which is why it is one
     /// method and not one per caller: an unsuppress that restored a member by re-growing it, say,
@@ -2450,9 +2451,8 @@ impl ArtifactStore {
     /// existence criterion divides by.
     ///
     /// **`retired` is the fold's executed deletions and nothing else.** A *suppressed* member stays
-    /// in the set: a suppression retires only on unsuppress and never touches a stored structure
-    /// (Rule S), so dropping its bit here would give it a second retirement route, which is
-    /// fail-open.
+    /// in the set: a suppression never touches a stored structure (Rule S), so dropping its bit
+    /// here would give a live item's suppression a second retirement route, which is fail-open.
     ///
     /// A content whose generating set lost a retired member is **dropped whole**, content and set
     /// together ([`withdraw_content_of_retired_members`], decision 0135): containment is
@@ -3298,6 +3298,71 @@ pub fn growth_record<'a>(
         level,
         growth,
     })
+}
+
+impl ArtifactStore {
+    /// The growth that carries every membership and generating set holding an item's old entity
+    /// to its new one, for each `(old, new)` pair: one [`crate::wal::WalRecord::ArtifactGrow`] per
+    /// level that holds one. A membership gains the new entity and keeps the old, which the fold
+    /// removes with the entity. A generating set trades the old for the new, through the one
+    /// routine that changes a set, so its cardinality is unchanged and its content is never
+    /// withdrawn by the move.
+    pub fn carried_over(&self, moved: &[(EntityId, EntityId)]) -> Vec<crate::wal::WalRecord> {
+        if moved.is_empty() {
+            return Vec::new();
+        }
+        let old: Bitmap = moved.iter().map(|(old, _)| old.raw() as u32).collect();
+        let new_of: std::collections::BTreeMap<u32, u32> = moved
+            .iter()
+            .map(|(old, new)| (old.raw() as u32, new.raw() as u32))
+            .collect();
+        let replaced = |held: &Bitmap| -> (Bitmap, Bitmap) {
+            let leaving = held.and(&old);
+            let joining: Bitmap = leaving.iter().map(|e| new_of[&e]).collect();
+            (joining, leaving)
+        };
+        let mut records = Vec::new();
+        for ((layer, level), slots) in &self.levels {
+            let mut growth = Vec::new();
+            for (ordinal, record) in slots.iter().enumerate() {
+                let Some(record) = record else {
+                    continue;
+                };
+                if record.members.intersect(&old) {
+                    let (joining, _) = replaced(&record.members);
+                    growth.push(crate::wal::MembershipGrowth {
+                        ordinal: ordinal as u32,
+                        joining: serialise_members(&joining),
+                        leaving: Vec::new(),
+                        set: crate::wal::GrownSet::Membership,
+                    });
+                }
+                for (rank, content) in record.contents.iter().enumerate() {
+                    if !content.generated_from.intersect(&old) {
+                        continue;
+                    }
+                    let (joining, leaving) = replaced(&content.generated_from);
+                    growth.push(crate::wal::MembershipGrowth {
+                        ordinal: ordinal as u32,
+                        joining: serialise_members(&joining),
+                        leaving: serialise_members(&leaving),
+                        set: crate::wal::GrownSet::GeneratingSet {
+                            rank: rank as u16,
+                            cardinality: content.generated_from.cardinality(),
+                        },
+                    });
+                }
+            }
+            if !growth.is_empty() {
+                records.push(crate::wal::WalRecord::ArtifactGrow {
+                    layer: layer.clone(),
+                    level: *level,
+                    growth,
+                });
+            }
+        }
+        records
+    }
 }
 
 /// How many memberships `record` adds, read against `store` before the record is applied: every

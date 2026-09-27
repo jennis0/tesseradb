@@ -82,7 +82,6 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
 fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
     let descriptor = format!("novel-{i}").into_bytes();
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(format!("ext-{i}").into_bytes()),
         view: "s0".to_string(),
         join: None,
@@ -94,7 +93,7 @@ fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], format!("batch-{i}"), [i as u8; 32])
+        .ingest_rows(vec![row], format!("batch-{i}"), [i as u8; 32])
         .expect("ingest is accepted")[0]
 }
 
@@ -202,7 +201,7 @@ fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
         for i in 0..WIDTH {
             let entity = ingest_novel(&engine, i);
             ingested.push((entity, format!("ext-{i}").into_bytes()));
-            flush(&engine);
+            publish_buffered(&engine);
         }
         settle_coalesce(&engine);
         let coalesced = manifest_of(&root);
@@ -570,7 +569,6 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
 fn ingest_with(engine: &Engine, key: &[u8], descriptors: &[&[u8]], batch: &str) -> EntityId {
     let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
     let row = UnallocatedRow {
-        join_only: false,
         external_id: Some(key.to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -582,7 +580,7 @@ fn ingest_with(engine: &Engine, key: &[u8], descriptors: &[&[u8]], batch: &str) 
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0]
 }
 
@@ -702,7 +700,7 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
         let descriptors: &[&[u8]] = if i % 2 == 0 { &[b"0", b"1"] } else { &[b"0"] };
         let entity = ingest_with(&engine, &key, descriptors, &format!("carried-{i}"));
         carried.push((entity, key));
-        flush(&engine);
+        publish_buffered(&engine);
     }
 
     // Denied during the flight, after the fold's snapshot: these stand after the fold.
@@ -932,7 +930,6 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
             .map(|j| {
                 let i = window * 4 + j;
                 UnallocatedRow {
-                    join_only: false,
                     external_id: Some(format!("mixed-{i}").into_bytes()),
                     view: if j % 2 == 0 { "s0" } else { "s1" }.to_string(),
                     join: None,
@@ -950,16 +947,22 @@ fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same
                 }
             })
             .collect();
-        let allocated = engine
-            .accept_ingest(rows, format!("mixed-{window}"), [window as u8; 32])
-            .expect("the batch is accepted");
+        // A batch names one view, so each row is its own batch; sent in turn, their ids alternate
+        // between the two views.
+        let allocated: Vec<EntityId> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(j, row)| {
+                engine
+                    .ingest_rows(vec![row], format!("mixed-{window}-{j}"), [window as u8; 32])
+                    .expect("the batch is accepted")[0]
+            })
+            .collect();
         for (j, entity) in allocated.iter().enumerate() {
             if j % 2 == 0 { &mut s0 } else { &mut s1 }.push(entity.raw());
         }
         entities.extend(allocated);
-        tick_until(&engine, "both views to flush", WAIT, || {
-            engine.generation().buffer.is_empty()
-        });
+        publish_buffered(&engine);
     }
     assert!(
         s0.iter().min() < s1.iter().max() && s1.iter().min() < s0.iter().max(),

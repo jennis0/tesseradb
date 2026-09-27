@@ -12,6 +12,7 @@ pub mod entity_terms;
 pub mod error;
 pub mod flush;
 pub mod fold;
+pub mod edited;
 pub mod key_index;
 mod locator;
 pub mod manifest;
@@ -38,6 +39,7 @@ pub mod write;
 
 pub use coalesce::coalesce_external_id_runs;
 pub use coalesce::fold_external_id_runs;
+pub use coalesce::listed_entities;
 pub use entity_terms::{
     coalesce_entity_terms_extents, EntityTerms, EntityTermsExtentPaths, EntityTermsStack,
     EntityTermsWriter, ENTITY_TERMS_BASES_FILE, ENTITY_TERMS_BLOCK_SHIFT, ENTITY_TERMS_DIR,

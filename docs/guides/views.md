@@ -192,21 +192,21 @@ to nobody — and takes its first row space at the **next flush**, not before.
 
 ```
 DELETE /control/views/quarter/2026-Q1
-DELETE /control/views/quarter/2026-Q1?delete_dangling=true
 ```
 
 Dropping a view frees the key and reclaims its row-space artifacts at the next fold;
 requests naming it become the ordinary unknown-view 404. **The key can be created again**, in the
 same breath if you like — that is how you correct a record you got wrong. What does not come back
 is the view: a recreated `2026-Q1` starts empty, and the old one's points stay unreachable until
-the fold deletes them. **Dropping a view does not delete an
-entity.** An entity whose only view was `quarter:2026-Q1` still exists — with its label, its
-attributes, its layer memberships — in no view at all, and a later batch into a different view picks
-it back up by `external_id` under the ordinary join rule below. `delete_dangling=true` is sugar for
-the caller who does mean "and drop the entities this view was the only home of": the service finds
-every entity of the dropped view holding no row anywhere else (the ingest buffer included) and
-submits them as ordinary deletions on the deny lane — the same retirement route (Rule F) any other
-deletion takes, never a second one. The response's `deleted` count is `0` without the option.
+the fold deletes them.
+
+**Dropping a view deletes every item it leaves in no view.** An item with a row in
+`quarter:2026-Q1` and in another view keeps that other row and everything it holds. An item whose
+only row was in `quarter:2026-Q1`, flushed or still waiting for a flush, is deleted as
+`POST /control/changes` deletes one: its `tessera_id` stops naming anything at once, and its rows,
+values and layer memberships leave at the next fold. A later batch carrying its `external_id`
+creates a new item with a new `tessera_id`. The response's `deleted` counts the items the drop
+deleted.
 
 ## Add a quarter while the service runs
 
@@ -225,32 +225,39 @@ A row belongs to one view; a point that belongs to several is several batches, o
 cannot mint a view around the mistake, ever since `views.md` r19 withdrew the earlier
 first-batch-creates route.
 
-## Join an entity already known into a second view
+## Add an item already known to a second view, or change it
 
-An `external_id` already present elsewhere is not a duplicate when the batch names a view it is not
-yet in — it is a **join**: the row lands in that view's pending segment carrying the existing
-entity, and the entity, its label and its entity-scoped attributes are untouched. Three refusals
-guard the entity from being silently changed by a second view's row:
+A row that names an item the service holds, by its `tessera_id`, its `external_id` or a unique
+value, and carries a position in a view the item is not in, adds the item to that view. The item
+keeps its label and its values, stays served in its other views throughout, and is served in the
+new view from its next flush. The receipt counts it as `added` and answers the item's
+`tessera_id`.
 
-- **Already in the named view** (including a row still sitting unflushed in the commit window) —
-  `409`.
-- **A different `access` value on a known id** — `409`. A re-label is delete-plus-re-ingest
-  (decision 0047), never a value carried in on a join.
-- **An entity-scoped attribute value that neither byte-matches the stored one nor is null** —
-  `409` naming the column.
+The row may leave out any field, which keeps what the item stores. A row that carries something
+else, a value, the label, the external id or a position in a view the item is already in, edits
+the item. The receipt counts an edit as `edited` and answers the item's `tessera_id`, which an edit
+never changes.
 
-A **group-scoped** attribute may not appear on a plain view's batch at all — it is an undeclared
-column there. On a batch into any view whose key the attribute's group holds — the owner's own
-views, and every view of a group declaring `members` of it — it may, and on the owner's own views it
-must: a join carries geometry **and this key's scoped values**, and nothing else. It allocates no
-id, writes no descriptor and contributes no postings, which is what keeps a label supplied on a
-joining row inert rather than a quiet widening — but a scoped value belongs to the
-`(entity, attribute, key)` cell the row addresses, not to the entity, so it is the one thing such
-a row legitimately brings.
+An edited item moves to a new entity, carrying every view it is in, every value, its layer
+memberships, the contents generated from it, its group-scoped values under every key and any
+suppression. It is in no view from the acknowledgement until the flush that places its new rows,
+and is then served as the edit left it. A row with no coordinates edits only what it carries. A
+row whose one change is placing the item in a layer's artifacts is not an edit of the item but a
+change to those artifacts: the item stays where it is, the row is counted `unchanged`, and the
+receipt's `joined` counts the memberships it added.
 
-All three refusals are decided on the write executor, not in the handler, so a row that becomes a
-join between your request arriving and the write landing meets them too (decision 0116). You still
-get the `409` in the same request, and a refused batch leaves nothing behind.
+A **group-scoped** attribute may not appear on a plain view's batch at all: it is an undeclared
+column there. On a batch into any view whose key the attribute's group holds (the owner's own
+views, and every view of a group declaring `members` of it) it may. A scoped value belongs to the
+`(entity, attribute, key)` cell the row addresses, not to the entity, so a row adding the item to
+the view may give a cell the key does not hold yet a value; a row carrying the value a cell holds
+changes nothing, and one carrying another value edits the item.
+
+The handler decides a batch against one snapshot of what is stored. Before anything is written, the
+write executor checks again what can have moved since: an item deleted, already added to the view,
+passed by a newer item's flush, or given another view or external id since. Where something has,
+the batch is decided once more against what is stored then; if it has moved again, it is refused
+with `409` and nothing is written.
 
 ## Give an attribute a per-quarter value
 
@@ -359,8 +366,8 @@ external_id | x | y | access | kind | sentiment
 ```
 
 Nulls are absences and a category arrives as its **key** (never a code). Every row into a view of
-the family's own group carries the family, a join included, since the value is the view's: one it
-leaves out is refused, and a null says the row has no value. A batch into a view of a group sharing
+the family's own group may carry the family, a join included, since the value is the view's: a
+row that leaves it out keeps what the cell holds, and a null clears it. A batch into a view of a group sharing
 the keys may leave it out, as a build reads it from no such view. A view created while the service
 runs acquires its columns at the **first flush** that covers it, with no rebuild: from then on it
 filters, pins, renders and answers `/v1/categories` like any other, and `/v1/meta`'s
@@ -369,9 +376,9 @@ filters, pins, renders and answers `/v1/categories` like any other, and `/v1/met
 **Either door writes the cell.** A group that declares `members` of another shares its keys, and a
 scoped value is addressed by `(attribute → its group, key)` — never by the view — so a batch into
 `quarter_map:2026-Q3` may carry `sentiment` exactly as one into `quarter:2026-Q3` may, and both land
-in the one cell (decision 0116). What is refused is a **disagreement**: a row naming a cell that
-already holds the same value is accepted and its copy dropped, and one naming a different value is a
-`409` naming the column and the key. A view whose key the attribute's group does not hold refuses
+in the one cell. A row naming a cell that already holds the same value changes nothing, and one
+naming a different value edits the item, after which both doors answer the new value. A view whose
+key the attribute's group does not hold refuses
 the column as undeclared, exactly as a plain view does.
 
 ⊘ **A row already written is not filled in retroactively.** The value reaches the row tails of the
@@ -496,9 +503,10 @@ x-tessera-view: quarter:2026-Q5
 (external_id, x, y, access, sentiment, mood, note, coverage)
 ```
 
-An entity already seen in `world` or an earlier quarter that also appears in this batch is a join,
-not a duplicate — its label and its constant attributes are unchanged, and its `sentiment` for
-`2026-Q5` is a fresh value in a fresh column. Until the next flush, `quarter:2026-Q5` answers every
+An item already seen in `world` or an earlier quarter that also appears in this batch is added to
+the new quarter, not duplicated, provided its row carries what the item stores or leaves it out.
+Its label and its constant attributes are unchanged, and its `sentiment` for `2026-Q5` is a fresh
+value in a fresh column. Until the next flush, `quarter:2026-Q5` answers every
 viewer route empty. `/v1/viewport` against `quarter:2026-Q5` after the flush returns the new
 quarter's points; `/v1/meta` lists `quarter:2026-Q5` in `groups[..].views` from the moment the
 `PUT` was acknowledged, and in `scoped_scalars[..].views` from the first flush that covers the new

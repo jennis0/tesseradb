@@ -205,7 +205,6 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
         .iter()
         .enumerate()
         .map(|(i, (x, y))| UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("ingested-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
@@ -218,10 +217,10 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
         })
         .collect();
     let ingested: Vec<EntityId> = engine
-        .accept_ingest(rows, "batch-1".to_string(), [7u8; 32])
+        .ingest_rows(rows, "batch-1".to_string(), [7u8; 32])
         .expect("the batch is accepted");
     assert_eq!(ingested.len(), points.len());
-    flush(&engine);
+    publish_buffered(&engine);
 
     let built = source_to_new_map(&root, "v00000");
     let positions = served_positions(&engine);

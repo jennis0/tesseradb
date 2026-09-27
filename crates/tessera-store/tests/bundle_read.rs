@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, split32, tiles_for_bbox, Bounds, Tile};
 use tessera_store::manifest::{
-    CurrentPointer, DenySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
+    CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
     Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
@@ -132,8 +132,8 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         dict_extents: vec![],
         external_id_runs: vec![],
         locator_extents: vec![],
-        tombstones: DenySet::default(),
-        deny: DenySet::default(),
+        tombstones: EntitySet::default(),
+        deny: EntitySet::default(),
         files: segments_files,
         ..SegmentsManifest::empty()
     };
@@ -409,8 +409,8 @@ fn add_segments_manifest(root: &Path, n: u64, edit: impl FnOnce(&mut serde_json:
 /// Name a file in this manifest's `files` map that does not exist on disk, so verification fails
 /// for this candidate and no other. Any digest will do: the file cannot be opened, so it never
 /// reaches the comparison.
-fn deny_set(ids: &[u32]) -> DenySet {
-    DenySet::of(&ids.iter().copied().collect::<croaring::Bitmap>())
+fn deny_set(ids: &[u32]) -> EntitySet {
+    EntitySet::of(&ids.iter().copied().collect::<croaring::Bitmap>())
 }
 
 fn name_a_missing_file(value: &mut serde_json::Value) {

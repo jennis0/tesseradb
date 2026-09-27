@@ -11,6 +11,10 @@ pub(crate) struct ManifestSeed<'a> {
     /// `min(ceiling, side manifests)`: the row-less region's ceiling. A build sets this whenever
     /// its declaration carried layers, or the first online registration reissues their ids.
     pub low_water: u64,
+    /// The newest served side-manifest's freed ids, and the sets it holds back with their
+    /// positions; empty where no manifest can be trusted to be the newest.
+    pub free: croaring::Bitmap,
+    pub held: Vec<(u64, croaring::Bitmap)>,
     pub layers: &'a [tessera_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],
     /// The highest layer registry version counter any partition's manifest saved.
@@ -177,7 +181,7 @@ impl WritePath {
         // `try_with_marks`, not `with_marks`: the seeds come from durable state this run did not
         // write, so a corrupt or hand-edited pair must be refused here, not as a later opaque
         // exhaustion error.
-        let allocator = Allocator::try_with_marks(high_water, low_water).map_err(|e| {
+        let mut allocator = Allocator::try_with_marks(high_water, low_water).map_err(|e| {
             EngineError::Malformed(format!(
                 "entity-ID allocator seed from durable state (MANIFEST high-water {}, WAL \
                  high-water {}; MANIFEST low-water {}, WAL low-water {}): {e}",
@@ -432,6 +436,13 @@ impl WritePath {
         // win, so seeding first and replaying on top reverts an acked unsuppress otherwise.
         let (overlay, mut buffer, established, resolver) =
             replay(&records, dict, initial_deny.clone(), view_ids_of_key);
+
+        // An id the manifest records as free and a kept record or the overlay names was issued
+        // since the manifest was written.
+        let mut named = tessera_lifecycle::alloc::entities_named(&records);
+        named.or_inplace(overlay.deleted_set());
+        named.or_inplace(overlay.suppressed_set());
+        allocator.seed_freed(seed.free, seed.held, wal.retained_from(), &named);
         // Re-hashed once at open: `replay` builds this with `FxHashMap`, the live index does not
         // (see `WritePath::established`'s doc).
         let established: std::collections::HashMap<Vec<u8>, EntityId> =
@@ -458,129 +469,13 @@ impl WritePath {
 
         // Where each surviving row sits in the log, so a rotation knows what it may reclaim below.
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
-            if let WalRecord::IngestBatch { rows, .. } = record {
-                for row in rows {
+            if let WalRecord::IngestBatch { rows, edits, .. } = record {
+                for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
                     buffer.set_wal_pos(row.entity_id, &row.view, *position);
                 }
             }
         }
-
-        // The values batches, into the buffer's fill map: resolving a column name needs the served
-        // schema, so this runs here. A batch whose cells a flush already wrote is re-buffered;
-        // `plan_flush` consumes the fill and stops pinning the log.
-        for (record, position) in records.iter().zip(wal.replayed_positions()) {
-            // In log order, as a drop treats buffered rows: the group-scoped fills addressed to
-            // the dropped key go with it, and one accepted under a later view of that key stays.
-            if let WalRecord::ViewDrop { view } = record {
-                let owner_view =
-                    format!("{}{}{}", view.group, tessera_store::GROUP_SEPARATOR, view.key);
-                let orphaned: Vec<EntityId> = buffer
-                    .scoped_fills()
-                    .filter(|((_, held), _)| *held == owner_view)
-                    .map(|((entity, _), _)| *entity)
-                    .collect();
-                for entity in orphaned {
-                    buffer.remove_scoped_fill(entity, &owner_view);
-                }
-                continue;
-            }
-            let WalRecord::ValuesBatch {
-                view,
-                columns,
-                rows,
-                ..
-            } = record
-            else {
-                continue;
-            };
-            // A record with no view fills no cell; reading one that does as some view's would put
-            // a group-scoped cell in the wrong column.
-            let Some(view) = view else {
-                if columns.is_empty() {
-                    continue;
-                }
-                return Err(EngineError::Malformed(
-                    "the WAL carries a values batch filling cells and naming no view, which no \
-                     writer produces"
-                        .to_string(),
-                ));
-            };
-            let families = scoped_families_of_view(&served, view);
-            let owner_view = scoped_owner_view_of(&served, view);
-            // Empty unless the served manifest no longer carries the view's key: the group's
-            // families, whose cells went with the view.
-            let dropped_families: &[tessera_store::manifest::ScopedScalar] = owner_view
-                .split_once(tessera_store::GROUP_SEPARATOR)
-                .and_then(|(group, _)| served.groups.iter().find(|g| g.name == group))
-                .filter(|_| families.is_empty())
-                .map_or(&[], |group| &group.scoped_scalars);
-            for row in rows {
-                // A deleted entity's fill is never flushed, and would hold the log where it sits.
-                if overlay.is_deleted(row.entity_id) {
-                    continue;
-                }
-                let mut scalars: Vec<WalScalar> =
-                    vec![WalScalar::Null; served.declared_scalars.len()];
-                let mut scoped: Vec<WalScalar> = vec![WalScalar::Null; families.len()];
-                let mut any_entity = false;
-                let mut any_scoped = false;
-                for (at, name) in columns.iter().enumerate() {
-                    let Some(value) = row.values.get(at) else {
-                        continue;
-                    };
-                    if matches!(value, WalScalar::Null) {
-                        continue;
-                    }
-                    if let Some(position) =
-                        served.declared_scalars.iter().position(|d| &d.name == name)
-                    {
-                        scalars[position] = value.clone();
-                        any_entity = true;
-                        continue;
-                    }
-                    if let Some(position) = families.iter().position(|f| &f.name == name) {
-                        scoped[position] = value.clone();
-                        any_scoped = true;
-                        continue;
-                    }
-                    if dropped_families.iter().any(|f| &f.name == name) {
-                        continue;
-                    }
-                    // A column the served schema no longer carries. The values are unreadable
-                    // rather than wrong, since nothing can say which column they belong to, so
-                    // the open is refused rather than the cells dropped.
-                    return Err(EngineError::Malformed(format!(
-                        "the WAL carries a values batch naming column '{name}', which this \
-                         deployment's schema does not declare"
-                    )));
-                }
-                if any_entity {
-                    buffer.fill(
-                        row.entity_id,
-                        tessera_lifecycle::Fill {
-                            view: view.clone(),
-                            scalars,
-                            wal_pos: Some(*position),
-                        },
-                        |value| matches!(value, WalScalar::Null),
-                    );
-                    buffer.set_fill_wal_pos(row.entity_id, *position);
-                }
-                if any_scoped {
-                    buffer.fill_scoped(
-                        row.entity_id,
-                        owner_view.clone(),
-                        tessera_lifecycle::ScopedFill {
-                            view: view.clone(),
-                            scoped,
-                            wal_pos: Some(*position),
-                        },
-                        |value| matches!(value, WalScalar::Null),
-                    );
-                    buffer.set_scoped_fill_wal_pos(row.entity_id, &owner_view, *position);
-                }
-            }
-        }
+        let edited_live = crate::edited::EditedLive::derive(&records, &buffer, &overlay);
 
         let established_inverse: FxHashMap<EntityId, Vec<u8>> = established
             .iter()
@@ -589,8 +484,7 @@ impl WritePath {
         let resolver_state = resolver.into_state();
 
         // Every batch-carrying record, by the rule both accept sites use
-        // ([`tessera_lifecycle::batch_identity`]): a values batch is held under an id too, so
-        // matching only `IngestBatch` would leave a values id unknown after a restart.
+        // ([`tessera_lifecycle::batch_identity`]).
         let mut accepted_batches: AcceptedBatches = FxHashMap::default();
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             if let Some(identity) = tessera_lifecycle::batch_identity(record) {
@@ -598,7 +492,7 @@ impl WritePath {
                     identity.batch_id.to_string(),
                     AcceptedBatch {
                         body_hash: identity.body_hash,
-                        entity_ids: identity.allocation,
+                        receipt: identity.receipt.to_vec(),
                         wal_pos: *position,
                     },
                 );
@@ -622,6 +516,7 @@ impl WritePath {
                 vocabularies: runtime_vocabularies,
                 view_declarations,
                 unique_events,
+                edited_live,
             },
         ))
     }

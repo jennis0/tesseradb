@@ -237,7 +237,7 @@ async fn a_build_and_an_ingest_place_a_projected_coordinate_in_one_cell() {
         .collect();
     let (status, body) = post_ingest(&server, "batch-1", ingest_batch(("lon", "lat"), &rows)).await;
     assert_eq!(status, 200, "the projected batch is accepted: {body}");
-    assert_eq!(body["accepted"], points.len());
+    assert_eq!(body["created"], points.len());
     tick(&server).await;
 
     let positions = served_positions(&server.state.engine, 400);
@@ -309,7 +309,7 @@ async fn a_polar_row_is_clipped_counted_and_lands_on_the_frames_edge() {
         status, 200,
         "a clipped row is accepted, never refused: {body}"
     );
-    assert_eq!(body["accepted"], 1);
+    assert_eq!(body["created"], 1);
     assert_eq!(
         body["clipped"], 1,
         "the response carries the clip count beside the out-of-bound count it already returns"

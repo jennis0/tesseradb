@@ -603,6 +603,9 @@ struct BuildPlan {
     band_bounds: Vec<(u32, u32)>,
     /// What provenance records: the batch size iff the build actually batched.
     recorded_batch_items: Option<u64>,
+    /// The publication batch, the unique spill and the term-image workers, each sized to what its
+    /// stage has left of the budget ([`crate::residency::Sizing`]).
+    sizing: crate::residency::Sizing,
 }
 
 /// The budget when none is given: the smaller of MemAvailable and this process's cgroup limit,
@@ -702,26 +705,26 @@ fn plan_build(
     // **The route each string column takes, and the model it settles on.** A column with two
     // routes takes the arena while the entity-order stages have the disk for it and the extents
     // when they do not (`residency::plan_routes`, `build-column-extents.md` §2). The refusal below
-    // is not affected by the choice: every column's storage is a mapped term and `total()` counts
+    // is not affected by the choice: every column's storage is a mapped term and the refusal counts
     // the anonymous ones.
     let free = available_disk(&args.out);
-    let (routes, mut tail) = crate::residency::routes_for(args, n, ids, &payloads, free, route);
-    // **The supplied keys' arena is anonymous and has no spill route** (`crate::ids`), so it
-    // stands beside the entity-order terms and the refusal below counts it.
-    if let Some(arena) = crate::residency::supplied_key_arena(id_space) {
-        tail.terms.push(arena);
-    }
+    // **The supplied keys' arena is anonymous and has no spill route** (`crate::ids`), so the
+    // model charges it in every phase and sizes the stages around it.
+    let (routes, tail) =
+        crate::residency::routes_for(args, n, ids, &payloads, free, route, id_space);
     report_column_routes(args, &routes, &tail, free);
-    if tail.total() > budget {
+    let (phase, peak) = tail.memory_peak();
+    if peak > budget {
         return Err(BuildError::Invalid(format!(
-            "this build's entity-order stages need about {} MiB, over the {} MiB memory budget. \
-             Unlike the signature batch loop these do not batch — a declared column holds one \
-             value per item and a member table holds its own rows — so a smaller --batch-items \
-             does not help. Raise --memory-budget, drop a member source, or narrow the schema. \
-             Where the bytes are:{}",
-            tail.total() >> 20,
+            "this build's entity-order stages need about {} MiB in the {} phase, over the {} MiB \
+             memory budget, with every stage that can shrink already at its smallest. A declared \
+             column holds one value per item and a member table holds its own rows, so a smaller \
+             --batch-items does not help. Raise --memory-budget, drop a member source, or narrow \
+             the schema. Where the bytes are:{}",
+            peak >> 20,
+            phase.name(),
             budget >> 20,
-            tail.describe()
+            tail.describe_memory(phase)
         )));
     }
     // **A warning where the model's own error bar reaches the budget**, and not a refusal:
@@ -731,18 +734,29 @@ fn plan_build(
     // block builds that fit; saying nothing leaves the operator with the same silence the campaign
     // met. So the numbers are printed and the decision is theirs — the house rule for a thing that
     // is recoverable and discloses nothing.
-    else if tail.total().saturating_mul(2) > budget {
+    else if peak.saturating_mul(2) > budget {
         eprintln!(
-            "warning: this build's entity-order stages need at least {} MiB against a {} MiB \
-             budget, and that figure is a lower bound — it counts what the stages hold, not the \
-             readers and allocator around them (measured at roughly half the real peak). These \
-             stages do not batch. Where the bytes are:{}",
-            tail.total() >> 20,
+            "warning: this build's entity-order stages need at least {} MiB in the {} phase \
+             against a {} MiB budget, and that figure is a lower bound — it counts what the stages \
+             hold, not the readers and allocator around them (measured at roughly half the real \
+             peak). Where the bytes are:{}",
+            peak >> 20,
+            phase.name(),
             budget >> 20,
-            tail.describe()
+            tail.describe_memory(phase)
         );
     }
 
+    eprintln!(
+        "memory: about {} MiB at the {} phase of a {} MiB budget; publication batches of at most \
+         {} member entries, a {} MiB unique index spill, {} term-image worker(s)",
+        peak >> 20,
+        phase.name(),
+        budget >> 20,
+        tail.sizing.publication_batch,
+        tail.sizing.unique_spill >> 20,
+        tail.sizing.term_image_workers
+    );
     // The worst batch's pre-dedup pairs for stride `b`, bounded by summing every histogram
     // range a batch window overlaps — conservative by at most the two boundary ranges.
     let prefix: Vec<u64> = std::iter::once(0)
@@ -921,6 +935,7 @@ fn plan_build(
         bucket_in_ram,
         band_bounds,
         recorded_batch_items: (batches > 1).then_some(batch_items),
+        sizing: tail.sizing,
     })
 }
 
@@ -1866,6 +1881,7 @@ fn build_bundle(
         drop(source_ids);
         crate::layers::PublishedLayers::default()
     } else {
+        let publication_batch = plan.sizing.publication_batch;
         let mut plan = crate::layers::read(
             &args.layers,
             &args.layer_inputs,
@@ -1928,6 +1944,7 @@ fn build_bundle(
                 crate::PHASH,
                 &view_ids,
                 &derived,
+                publication_batch,
             )?
         } else {
             let ids = source_ids.ids();
@@ -1942,6 +1959,7 @@ fn build_bundle(
                 crate::PHASH,
                 &view_ids,
                 &derived,
+                publication_batch,
             )?;
             drop(source_ids);
             published
@@ -1982,7 +2000,7 @@ fn build_bundle(
             None => crate::unique_index::UniqueSource::Column(&attributes_by_entity[column]),
         },
         tmp.path(),
-        plan.budget,
+        plan.sizing.unique_spill as usize,
     )?;
     timer.end(BuildStage::UniqueIndexes, n);
     let (filter_paths, text_index) = write_filter_postings(
@@ -2237,6 +2255,7 @@ fn build_bundle(
             &view.view_id,
             rows_in_view,
             &mut derived_index,
+            plan.sizing.term_image_workers as usize,
         )?;
         artifact_paths.extend(images.iter().map(|images| images.path.clone()));
         let kept = images.as_ref().map_or(0, |images| images.report.kept);
@@ -3002,11 +3021,9 @@ fn write_scoped_columns(
             // is no per-entity slot for a scan to read. It leaves before the value column below is
             // written rather than writing one nothing opens.
             //
-            // ⊘ Its prose has **no blob row per view**, which is the one thing the entity-scoped
-            // family has that this one does not: the record blob is bundle-wide and addressed by a
-            // column's position in `declared_scalars`, which a family has none of. So a scoped
-            // text column answers `match` and is returned by no drill-down — the same restriction
-            // `render` has here, and for the same reason.
+            // Its prose is kept beside the postings, in a record blob of its own: the bundle-wide
+            // blob is addressed by a column's position in `declared_scalars`, which a family has
+            // none of, and an edit of the item carries the prose to its new entity.
             if attribute.ty == ScalarType::Text {
                 // **And it therefore writes no row lane**, which is only sound because `render`
                 // on `text` is refused at the declaration (`config::compile_attributes`'s
@@ -3033,6 +3050,7 @@ fn write_scoped_columns(
                     )?;
                     paths.extend(written.paths);
                 }
+                paths.extend(write_scoped_prose(&column_dir, &column.values)?);
                 report_scoped_coverage(attribute, view, column.present, n);
                 continue;
             }
@@ -3094,6 +3112,31 @@ fn write_scoped_columns(
         }
     }
     Ok((paths, render_columns))
+}
+
+/// One view's column of a group-scoped `text` family, its prose as a record blob under
+/// [`tessera_store::manifest::SCOPED_PROSE_DIR`]. Returns the files written.
+fn write_scoped_prose(
+    column_dir: &Path,
+    values: &crate::column::EntityColumn,
+) -> Result<Vec<PathBuf>> {
+    let dir = column_dir.join(tessera_store::manifest::SCOPED_PROSE_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+    let files = [
+        tessera_filter::RECORD_BLOCKS_FILE,
+        tessera_filter::RECORD_HASROW_FILE,
+        tessera_filter::RECORD_DIRECTORY_FILE,
+    ]
+    .map(|name| dir.join(name));
+    let rows = values
+        .present_entities()
+        .filter_map(|entity| Some((u32::try_from(entity).ok()?, values.str_at(entity)?)));
+    tessera_filter_write::write_prose(&files[0], &files[1], &files[2], rows)
+        .map_err(|e| BuildError::io(&dir, e))?;
+    for file in &files {
+        fsync_file(file)?;
+    }
+    Ok(files.to_vec())
 }
 
 /// One view's column of a **rendered** group-scoped attribute, held from the pass that read it

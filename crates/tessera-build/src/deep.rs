@@ -70,6 +70,8 @@ use sha2::{Digest, Sha256};
 use tessera_authz::{DeltaTier, PostingRef, PostingsReader};
 use tessera_store::manifest::{FileDigest, Manifest, SegmentsManifest};
 
+use tessera_types::{IdentityKey, TesseraId};
+
 use crate::error::{BuildError, Result};
 use crate::VerifyReport;
 
@@ -129,6 +131,11 @@ pub struct VerifyDeepReport {
     /// Unique index entries confirmed to agree with their column's values in both directions,
     /// at most one live entity to a key ([`check_unique_indexes`]); 0 where no column is unique.
     pub unique_entries: u64,
+    /// Edited-item pairs confirmed to be held by both directions of the map
+    /// ([`check_edited_items`]); 0 where no item has been edited.
+    pub edited_pairs: u64,
+    /// Segment rows whose entity is not their number, each confirmed to be a pair of the map.
+    pub edited_rows: u64,
 }
 
 /// Deep-verify the bundle at `root`: the shallow [`crate::verify`] pass, then §11's structural
@@ -159,6 +166,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         scoped_render_lanes: 0,
         cells: 0,
         unique_entries: 0,
+        edited_pairs: 0,
+        edited_rows: 0,
     };
 
     // Sorted so two runs over the same defective bundle refuse with the same message.
@@ -197,9 +206,120 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             partition,
             &mut report,
         )?;
+        check_edited_items(&prefix_dir, phash, &bundle.manifest, partition, &mut report)?;
     }
 
     Ok(report)
+}
+
+/// **The edited-items map agrees with itself and with the rows.** Its two directions hold the same
+/// pairs, an entity holds one number, a number has at most one live entity, and every row an edit
+/// moved is a pair of the map, its number being what its `tessera_id` inverts to.
+fn check_edited_items(
+    prefix_dir: &Path,
+    phash: &str,
+    manifest: &tessera_store::manifest::Manifest,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let runs = &partition.manifest.edited_items;
+    let unreadable = |e: tessera_store::StoreError| {
+        BuildError::Invalid(format!("partition {phash}: the edited items' runs: {e}"))
+    };
+    let forward: BTreeSet<(u32, u32)> = tessera_store::edited::entries(&runs.by_number, prefix_dir)
+        .map_err(unreadable)?
+        .into_iter()
+        .collect();
+    let mut number_of: BTreeMap<u32, u32> = BTreeMap::new();
+    for (entity, number) in
+        tessera_store::edited::entries(&runs.by_entity, prefix_dir).map_err(unreadable)?
+    {
+        if let Some(held) = number_of.insert(entity, number) {
+            if held != number {
+                return Err(BuildError::Invalid(format!(
+                    "partition {phash}: the edited items give entity {entity} two numbers, \
+                     {held} and {number}"
+                )));
+            }
+        }
+    }
+    let backward: BTreeSet<(u32, u32)> = number_of.iter().map(|(e, n)| (*n, *e)).collect();
+    if let Some((number, entity)) = forward.symmetric_difference(&backward).next() {
+        let (held, missing) = match forward.contains(&(*number, *entity)) {
+            true => ("by number", "by entity"),
+            false => ("by entity", "by number"),
+        };
+        return Err(BuildError::Invalid(format!(
+            "partition {phash}: the edited items hold number {number} and entity {entity} {held} \
+             and not {missing}"
+        )));
+    }
+    report.edited_pairs += forward.len() as u64;
+
+    // A number's live entity is one no deletion names that has a row: an edit deletes the entity
+    // it moves an item away from.
+    let deleted = partition
+        .manifest
+        .tombstones
+        .entities()
+        .cloned()
+        .unwrap_or_default();
+    let live = |entity: u32| {
+        !deleted.contains(entity)
+            && partition.views.values().any(|data| {
+                data.row_space
+                    .row_of(tessera_types::EntityId::new(u64::from(entity)))
+                    .is_some()
+            })
+    };
+    let mut entities_of: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for &(number, entity) in &forward {
+        entities_of.entry(number).or_default().push(entity);
+    }
+    for (number, entities) in &entities_of {
+        let alive: Vec<u32> = std::iter::once(*number)
+            .chain(entities.iter().copied())
+            .filter(|entity| live(*entity))
+            .collect();
+        if alive.len() > 1 {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} has {} live entities, {alive:?}; an item is \
+                 held by one",
+                alive.len()
+            )));
+        }
+    }
+
+    let key = IdentityKey::from_hex(&manifest.identity.key)
+        .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
+    let mut views: Vec<_> = partition.views.iter().collect();
+    views.sort_by(|a, b| a.0.cmp(b.0));
+    for (view, data) in views {
+        for segment in &data.segments {
+            let ids = segment.columns.tessera_id();
+            for (row, entity) in segment.entities.moved(ids, &key) {
+                let tessera_id = ids.get(row as usize).copied().ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "view {view}, segment {}: moved row {row} is past its {} rows",
+                        segment.seg_id,
+                        ids.len()
+                    ))
+                })?;
+                let (_, number) = key.invert(TesseraId::new(tessera_id));
+                if !u32::try_from(number.raw()).is_ok_and(|n| forward.contains(&(n, entity))) {
+                    return Err(BuildError::Invalid(format!(
+                        "view {view}, segment {}: row {row} holds entity {entity}, which the \
+                         edited items do not give number {}",
+                        segment.seg_id,
+                        number.raw()
+                    )));
+                }
+                report.edited_rows += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// **Every unique index agrees with its column, and no key names two live entities.**
@@ -285,7 +405,10 @@ fn check_unique_indexes(
         let scratch = crate::VerifyTmp::create(root)?;
         let homes_value = declared.index;
         let blob = !declared.render && !declared.index;
-        let mut spill = UniqueSpill::create(kind, scratch.path(), 64 << 20).map_err(store)?;
+        // The spill a build under the machine's own budget would sort the column in.
+        let budget = crate::pipeline::detect_memory_budget();
+        let spill_bytes = crate::unique_index::spill_budget(budget, budget);
+        let mut spill = UniqueSpill::create(kind, scratch.path(), spill_bytes).map_err(store)?;
         let mut push = |entity: u32, value: &tessera_spatial::ScalarValue| -> Result<()> {
             if entity >= bound || tombstones.contains(entity) {
                 return Ok(());
@@ -334,25 +457,29 @@ fn check_unique_indexes(
                 layers.push((values, dict));
             }
             let mut scratch_bytes = Vec::new();
+            let mut keyed = |dict: &tessera_filter::SortedDict, ordinal: u32| {
+                dict.key_of(ordinal, &mut scratch_bytes)
+                    .map(|key| tessera_spatial::ScalarValue::Utf8(key.to_string()))
+                    .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))
+            };
             for (values, dict) in &layers {
-                for entity in values.present().iter() {
-                    let value = match dict {
-                        Some(dict) => {
-                            let Some(ordinal) = values.value_of(entity) else {
-                                continue;
-                            };
-                            let key = dict
-                                .key_of(ordinal.raw(), &mut scratch_bytes)
-                                .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))?;
-                            tessera_spatial::ScalarValue::Utf8(key.to_string())
+                let present = values.present();
+                values.for_each_record_value_in(&present, |entity, value| {
+                    use tessera_filter::RecordValue as RV;
+                    let value = match (dict, value) {
+                        (None, value) => record_as_scalar(value),
+                        (Some(dict), RV::U8(o)) => keyed(dict, u32::from(o))?,
+                        (Some(dict), RV::U16(o)) => keyed(dict, u32::from(o))?,
+                        (Some(dict), RV::U32(o)) => keyed(dict, o)?,
+                        (Some(_), other) => {
+                            return Err(BuildError::Invalid(format!(
+                                "{attribute}: a keyword column holds {other:?} where it stores \
+                                 ordinals"
+                            )))
                         }
-                        None => match values.record_value_of(entity) {
-                            Some(value) => record_as_scalar(value),
-                            None => continue,
-                        },
                     };
-                    push(entity, &value)?;
-                }
+                    push(entity, &value)
+                })?;
             }
         } else if !blob {
             // Rendered alone: every view's rows carry the value, so each entity is read from the
@@ -402,22 +529,20 @@ fn check_unique_indexes(
             let mut wanted = croaring::Bitmap::new();
             wanted.add_range(0..bound);
             let mut failed: Option<BuildError> = None;
-            stack
-                .for_each_row_in(&wanted, &mut |entity, fields| {
-                    if failed.is_some() {
-                        return Ok(());
+            let walked = stack.for_each_row_in(&wanted, &mut |entity, fields| {
+                if let Some(field) = fields.into_iter().find(|f| f.tag as usize == at) {
+                    if let Err(e) = push(entity, &record_as_scalar(field.value)) {
+                        failed = Some(e);
+                        // Ends the walk; the error returned is `failed`.
+                        return Err(tessera_filter::RecordError::Malformed(String::new()));
                     }
-                    if let Some(field) = fields.into_iter().find(|f| f.tag as usize == at) {
-                        if let Err(e) = push(entity, &record_as_scalar(field.value)) {
-                            failed = Some(e);
-                        }
-                    }
-                    Ok(())
-                })
-                .map_err(|e| BuildError::Invalid(format!("the record blob: {e}")))?;
+                }
+                Ok(())
+            });
             if let Some(e) = failed {
                 return Err(e);
             }
+            walked.map_err(|e| BuildError::Invalid(format!("the record blob: {e}")))?;
         }
         let mut twice = 0u64;
         let column_dir = scratch.path().join("column");
@@ -859,9 +984,8 @@ impl PairsCursor {
                 path: self.path.clone(),
                 detail: e.to_string(),
             })?;
-            let malformed = |detail: &str| {
-                BuildError::Invalid(format!("{}: {detail}", self.path.display()))
-            };
+            let malformed =
+                |detail: &str| BuildError::Invalid(format!("{}: {detail}", self.path.display()));
             let entities = batch
                 .column_by_name("entity_id")
                 .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
@@ -1055,8 +1179,47 @@ struct ExtentSlots {
     rel: String,
     entity_lo: u64,
     entity_hi: u64,
+    /// How many `(entity, slot)` pairs follow the dense slots.
+    listed: u64,
     run: usize,
     slots: Slots,
+}
+
+impl ExtentSlots {
+    fn span(&self) -> usize {
+        (self.entity_hi + 1).saturating_sub(self.entity_lo) as usize
+    }
+
+    /// The `i`th listed pair.
+    fn listed_pair(&self, i: usize) -> (u64, u32) {
+        let at = self.span() + 2 * i;
+        (u64::from(self.slots.get(at)), self.slots.get(at + 1))
+    }
+
+    /// The slot `entity` has here, where the extent covers it.
+    fn slot_of(&self, entity: u64) -> Option<u32> {
+        if entity >= self.entity_lo && entity <= self.entity_hi {
+            return Some(self.slots.get((entity - self.entity_lo) as usize));
+        }
+        let (mut lo, mut hi) = (0usize, self.listed as usize);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let (held, slot) = self.listed_pair(mid);
+            match held.cmp(&entity) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(slot),
+            }
+        }
+        None
+    }
+
+    /// Every `(entity, slot)` the extent covers.
+    fn slots(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        (0..self.span())
+            .map(|i| (self.entity_lo + i as u64, self.slots.get(i)))
+            .chain((0..self.listed as usize).map(|i| self.listed_pair(i)))
+    }
 }
 
 /// One file of the sidecar family, mapped.
@@ -1226,7 +1389,7 @@ fn check_external_ids(
     let mut extents: Vec<ExtentSlots> =
         Vec::with_capacity(partition_manifest.locator_extents.len());
     for extent in &partition_manifest.locator_extents {
-        if extent.entity_hi < extent.entity_lo {
+        if extent.entity_hi + 1 < extent.entity_lo {
             return Err(BuildError::Invalid(format!(
                 "{}: entity span {}..={} is inverted",
                 extent.path, extent.entity_lo, extent.entity_hi
@@ -1242,15 +1405,33 @@ fn check_external_ids(
                     extent.path, extent.external_id_run
                 ))
             })?;
-        let span = extent.entity_hi - extent.entity_lo + 1;
-        let slots = Slots::over(&extent.path, verified_map(&extent.path)?, span)?;
-        extents.push(ExtentSlots {
+        let span = extent.entity_hi + 1 - extent.entity_lo;
+        let slots = Slots::over(
+            &extent.path,
+            verified_map(&extent.path)?,
+            span + 2 * extent.listed,
+        )?;
+        let slots = ExtentSlots {
             rel: extent.path.clone(),
             entity_lo: extent.entity_lo,
             entity_hi: extent.entity_hi,
+            listed: extent.listed,
             run,
             slots,
-        });
+        };
+        let listed: Vec<u64> = (0..slots.listed as usize)
+            .map(|i| slots.listed_pair(i).0)
+            .collect();
+        if !listed.windows(2).all(|w| w[0] < w[1])
+            || listed.last().is_some_and(|&e| e >= slots.entity_lo)
+        {
+            return Err(BuildError::Invalid(format!(
+                "{}: its listed entities do not ascend below the span beginning at {}, so a \
+                 lookup could miss one",
+                slots.rel, slots.entity_lo
+            )));
+        }
+        extents.push(slots);
     }
 
     // Direction one: every locator slot addresses a row bound to exactly its entity.
@@ -1277,12 +1458,10 @@ fn check_external_ids(
         }
     }
     for extent in &extents {
-        for i in 0..extent.slots.len() {
-            let slot = extent.slots.get(i);
+        for (entity, slot) in extent.slots() {
             if slot == LOCATOR_NONE {
                 continue;
             }
-            let entity = extent.entity_lo + i as u64;
             let run = &runs[extent.run];
             if slot as u64 >= run.rows {
                 return Err(BuildError::Invalid(format!(
@@ -1311,20 +1490,21 @@ fn check_external_ids(
             let entity = bound.get((run.offset + i) as usize) as u64;
             let mut covered = false;
             let agrees = tessera_store::locators_covering(entity, base_len, &extents, |x| {
-                (x.entity_lo, x.entity_hi)
+                (x.entity_lo, x.entity_hi, x.listed)
             })
-            .any(|locator| {
-                covered = true;
-                match locator {
-                    tessera_store::Locator::Base => {
-                        let slot = base.get(entity as usize);
-                        slot != LOCATOR_NONE && slot as u64 == run.offset + i
-                    }
-                    tessera_store::Locator::Extent(x) => {
-                        let extent = &extents[x];
-                        extent.run == r
-                            && extent.slots.get((entity - extent.entity_lo) as usize) as u64 == i
-                    }
+            .any(|locator| match locator {
+                tessera_store::Locator::Base => {
+                    covered = true;
+                    let slot = base.get(entity as usize);
+                    slot != LOCATOR_NONE && slot as u64 == run.offset + i
+                }
+                tessera_store::Locator::Extent(x) => {
+                    let extent = &extents[x];
+                    let Some(slot) = extent.slot_of(entity) else {
+                        return false;
+                    };
+                    covered = true;
+                    extent.run == r && slot as u64 == i
                 }
             });
             if !covered {

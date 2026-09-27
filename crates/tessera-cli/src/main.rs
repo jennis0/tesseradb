@@ -1456,7 +1456,8 @@ fn main() -> ExitCode {
                         println!(
                             "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
                              record(s), {} external-id binding(s), {} record blob row(s), {} \
-                             scoped render lane(s), {} Morton cell(s), {} unique index entr(ies)",
+                             scoped render lane(s), {} Morton cell(s), {} unique index entr(ies), \
+                             {} edited item(s) over {} row(s)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
@@ -1465,7 +1466,9 @@ fn main() -> ExitCode {
                             report.record_rows,
                             report.scoped_render_lanes,
                             report.cells,
-                            report.unique_entries
+                            report.unique_entries,
+                            report.edited_pairs,
+                            report.edited_rows
                         );
                         ExitCode::SUCCESS
                     }

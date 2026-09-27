@@ -12,7 +12,6 @@
 //!   view-scoped commands take per publication.
 //! - **R3** — `get`, `contains` and `contains_in_view`, hit and miss, probed in random order:
 //!   the join rule's admission check and the item drill-down.
-//! - **R4** — `fill_of` and `scoped_fill_of`, one per row of an accepted values batch.
 //! - **R5** — bytes held, per buffered row, for one buffer and for N retained generations that
 //!   each differ from the last by one 100-row window. Counted by a wrapping global allocator
 //!   (live bytes = allocated − freed), not by RSS, so the figure is the structure's and not the
@@ -33,6 +32,9 @@
 //!
 //! The fixture is **copied** before it is opened, exactly as `write_cost` copies it.
 
+#[path = "../ingest_rows.rs"]
+mod ingest_rows;
+use ingest_rows::IngestRows;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -44,8 +46,8 @@ use rand::{Rng, SeedableRng};
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
-use tessera_lifecycle::{Fill, IngestBuffer, Overlay, ScopedFill, UnallocatedRow};
+use tessera_lifecycle::wal::{ChangeOp, WalRow};
+use tessera_lifecycle::{IngestBuffer, Overlay, UnallocatedRow};
 use tessera_plugin::Passthrough;
 use tessera_store::read::open_bundle;
 use tessera_types::{EntityId, TermId};
@@ -154,34 +156,6 @@ fn filled(depth: usize, layout: Ids) -> IngestBuffer {
         i += 1;
     }
     buffer
-}
-
-/// Give every entity in `buffer` an entity-scoped and a group-scoped fill, as an accepted values
-/// batch over the whole buffer would.
-fn with_fills(buffer: &mut IngestBuffer, depth: usize, layout: Ids) {
-    let absent = |value: &WalScalar| matches!(value, WalScalar::Null);
-    for i in 0..depth as u64 {
-        let entity = layout.id(i);
-        buffer.fill(
-            entity,
-            Fill {
-                view: VIEW.to_string(),
-                scalars: vec![WalScalar::Null, WalScalar::I64(i as i64)],
-                wal_pos: Some(i),
-            },
-            absent,
-        );
-        buffer.fill_scoped(
-            entity,
-            VIEW.to_string(),
-            ScopedFill {
-                view: VIEW.to_string(),
-                scoped: vec![WalScalar::I64(i as i64)],
-                wal_pos: Some(i),
-            },
-            absent,
-        );
-    }
 }
 
 /// The minimum of `runs` timings of `body`, which is the statistic a constant wants on a machine
@@ -318,63 +292,6 @@ fn lookups(depths: &[usize], runs: usize, probes: usize) {
                 per(has_miss),
                 per(view_hit),
                 per(view_miss),
-            );
-        }
-    }
-}
-
-// =================================================================================================
-// R4: the fill lookups
-// =================================================================================================
-
-fn fill_lookups(depths: &[usize], runs: usize, probes: usize) {
-    println!("\n== R4: fill lookups with every entity filled, ns per call (min of {runs}) ==");
-    println!(
-        "{:>10} {:>10} {:>11} {:>11} {:>13} {:>13}",
-        "buffered", "layout", "fill hit", "fill miss", "scoped hit", "scoped miss"
-    );
-    for depth in depths {
-        for layout in [Ids::Dense, Ids::Scattered] {
-            let mut buffer = filled(*depth, layout);
-            with_fills(&mut buffer, *depth, layout);
-            let mut rng = StdRng::seed_from_u64(11);
-            let count = probes.min(*depth).max(1);
-            let mut hits: Vec<EntityId> = (0..*depth as u64).map(|i| layout.id(i)).collect();
-            hits.shuffle(&mut rng);
-            hits.truncate(count);
-            let misses: Vec<EntityId> = (0..count)
-                .map(|i| EntityId::new(u64::MAX / 2 + i as u64))
-                .collect();
-
-            let per = |nanos: u64| nanos as f64 / count as f64;
-            let hit = best(runs, || {
-                hits.iter().filter(|e| buffer.fill_of(**e).is_some()).count()
-            });
-            let miss = best(runs, || {
-                misses
-                    .iter()
-                    .filter(|e| buffer.fill_of(**e).is_some())
-                    .count()
-            });
-            let scoped_hit = best(runs, || {
-                hits.iter()
-                    .filter(|e| buffer.scoped_fill_of(**e, VIEW).is_some())
-                    .count()
-            });
-            let scoped_miss = best(runs, || {
-                misses
-                    .iter()
-                    .filter(|e| buffer.scoped_fill_of(**e, VIEW).is_some())
-                    .count()
-            });
-            println!(
-                "{:>10} {:>10} {:>11.1} {:>11.1} {:>13.1} {:>13.1}",
-                depth,
-                layout.name(),
-                per(hit),
-                per(miss),
-                per(scoped_hit),
-                per(scoped_miss),
             );
         }
     }
@@ -665,7 +582,6 @@ fn synth_rows(fx: &Fixture, count: usize, start: u64, terms: &[TermId]) -> Vec<U
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
-                join_only: false,
                 external_id: Some(format!("buffer-read-{n}").into_bytes()),
                 view: fx.view.clone(),
                 join: None,
@@ -714,7 +630,7 @@ fn experiment_e1(
                 let count = 5_000.min(depth - buffered);
                 let rows = synth_rows(fx, count, next, &terms);
                 next += count as u64;
-                engine.accept_ingest(rows, format!("fill-{round}-{next}"), [round as u8; 32])?;
+                engine.ingest_rows(rows, format!("fill-{round}-{next}"), [round as u8; 32])?;
                 buffered += count;
             }
             let [x_min, y_min, x_max, y_max] = fx.extent;
@@ -889,9 +805,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if wanted("3") || wanted("r") {
         lookups(&depths, runs, probes);
-    }
-    if wanted("4") || wanted("r") {
-        fill_lookups(&depths, runs, probes);
     }
     if wanted("5") || wanted("r") {
         memory(&depths, &[1usize, 2, 4, 8]);

@@ -50,7 +50,7 @@ describe('each route', () => {
     {name: 'dropLayer', call: (c) => c.dropLayer('a/b'), method: 'DELETE', path: '/control/layers/a%2Fb'},
     {name: 'dropLayer waiting', call: (c) => c.dropLayer('a', {wait: true}), method: 'DELETE', path: '/control/layers/a?wait=visible'},
     {name: 'dropView', call: (c) => c.dropView('g', 'k'), method: 'DELETE', path: '/control/views/g/k'},
-    {name: 'dropView with both', call: (c) => c.dropView('g', 'k', {deleteDangling: true, wait: true}), method: 'DELETE', path: '/control/views/g/k?delete_dangling=true&wait=visible'},
+    {name: 'dropView waiting', call: (c) => c.dropView('g', 'k', {wait: true}), method: 'DELETE', path: '/control/views/g/k?wait=visible'},
     {name: 'compact', call: (c) => c.compact(), method: 'POST', path: '/control/compact'},
     {name: 'flush', call: (c) => c.flush(), method: 'POST', path: '/control/flush'},
     {name: 'flush waiting', call: (c) => c.flush({wait: true}), method: 'POST', path: '/control/flush?wait=visible'}
@@ -72,7 +72,6 @@ describe('each route', () => {
 
   const writes: {name: string; call: (c: Control, o: WriteOptions) => Promise<Answer>; path: string}[] = [
     {name: 'ingest', call: (c, o) => c.ingest(rows, o), path: '/control/ingest'},
-    {name: 'values', call: (c, o) => c.values(rows, o), path: '/control/values'},
     {name: 'declareLayer', call: (c, o) => c.declareLayer({}, o), path: '/control/layers'},
     {name: 'declareViewGroup', call: (c, o) => c.declareViewGroup('g', {}, o), path: '/control/view_groups/g'},
     {name: 'declareAttribute', call: (c, o) => c.declareAttribute({}, o), path: '/control/attributes'},
@@ -125,9 +124,9 @@ describe('each route', () => {
     expect(sent[0]!.body).toBe(rows);
   });
 
-  for (const route of ['ingest', 'values'] as const) {
+  for (const route of ['ingest'] as const) {
     it(`${route} sends the bytes as given, under the caller's batch id and view`, async () => {
-      const sent = recording({status: 200, body: {accepted: 4}});
+      const sent = recording({status: 200, body: {created: 4}});
       const answer = await control[route](rows, {batch: 'page-0', view: 's0'});
       expect(sent[0]).toMatchObject({method: 'POST', url: `http://control/control/${route}`, body: rows});
       expect(sent[0]!.headers).toEqual({
@@ -137,7 +136,7 @@ describe('each route', () => {
         'x-tessera-view': 's0'
       });
       expect(answer.batch).toBe('page-0');
-      expect(answer.body).toEqual({accepted: 4});
+      expect(answer.body).toEqual({created: 4});
     });
 
     it(`${route} names no view unless given one, and makes a fresh batch id for each call`, async () => {
@@ -154,7 +153,7 @@ describe('each route', () => {
 describe('an answer', () => {
   it('after a 429, waits its Retry-After and resends the same batch id and bytes', async () => {
     vi.useFakeTimers();
-    const sent = recording({status: 429, headers: {'retry-after': '2'}}, {status: 429, headers: {'retry-after': '2'}}, {status: 200, body: {accepted: 4}});
+    const sent = recording({status: 429, headers: {'retry-after': '2'}}, {status: 429, headers: {'retry-after': '2'}}, {status: 200, body: {created: 4}});
     const pending = control.ingest(rows, {view: 's0'});
     await vi.advanceTimersByTimeAsync(1_999);
     expect(sent).toHaveLength(1);
@@ -162,7 +161,7 @@ describe('an answer', () => {
     expect(sent).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(2_000);
     const answer = await pending;
-    expect(answer).toMatchObject({status: 200, ok: true, attempts: 3, body: {accepted: 4}});
+    expect(answer).toMatchObject({status: 200, ok: true, attempts: 3, body: {created: 4}});
     expect(sent.map((s) => s.body)).toEqual([rows, rows, rows]);
     expect(new Set(sent.map((s) => s.headers['x-tessera-batch-id']))).toEqual(new Set([answer.batch]));
   });

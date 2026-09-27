@@ -51,7 +51,7 @@ use tessera_authz::postings::{PostingRef, PostingsReader};
 use tessera_lifecycle::membership::ArtifactStore;
 use tessera_plugin::Plugin;
 use tessera_store::derived::{resolve_segment, HeldShape, ShapeIndex};
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::read::SegmentData;
 // The derived structures' writer half lives beside the formats it writes; the alias is what keeps
 // the call sites below reading as what they do rather than as which file they are in.
 use tessera_store::derived;
@@ -581,21 +581,14 @@ fn load_build_segment(
     let dir = tessera_store::view_path(&prefix_dir.join("partitions").join(partition), view)
         .join("segments")
         .join(crate::BUILD_SEG_ID);
-    let morton = MortonSlice::load(&dir.join("morton.u32"));
-    let cuts = tessera_store::read::CutIndex::load(
-        &dir.join(tessera_store::read::CutIndex::FILE),
+    match SegmentData::load(
+        &dir,
+        crate::BUILD_SEG_ID,
         row_count,
-    );
-    let columns = ColumnsRef::load(&dir.join("columns.arrow"));
-    match (morton, cuts, columns) {
-        (Ok(morton), Ok(cuts), Ok(columns)) => Some(SegmentData {
-            seg_id: crate::BUILD_SEG_ID.to_string(),
-            row_count,
-            morton,
-            cuts,
-            columns,
-        }),
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+        tessera_store::edited::RowEntities::Numbers,
+    ) {
+        Ok(segment) => Some(segment),
+        Err(error) => {
             eprintln!(
                 "artifact pass: the segment this build just wrote would not reopen ({error}); \
                  every shape layer is recorded in its pinned or default layout and resolved at \

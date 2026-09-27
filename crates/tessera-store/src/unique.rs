@@ -32,7 +32,7 @@ use crate::key_index::{
 use crate::manifest::{BaseKeyRun, DeclaredScalar, Manifest, SegmentsManifest, UniqueIndexRuns};
 
 /// The most entries one run file holds before a writer starts the next, past the entities of its
-/// last key. At 12 bytes an entry an integer run is at most 768 MiB.
+/// last key. At most about 12 bytes an entry, an integer run is at most about 770 MiB.
 pub const RUN_MAX_ENTRIES: NonZeroU64 = match NonZeroU64::new(1 << 26) {
     Some(n) => n,
     None => unreachable!(),
@@ -86,6 +86,14 @@ impl UniqueKey {
     /// The key of a keyword value.
     pub fn keyword(value: &str) -> UniqueKey {
         UniqueKey::Keyword(keyword_key(value))
+    }
+
+    /// The key [`Self::widen`] made `widened` from, for a column whose keys are of `kind`.
+    pub fn of_widened(kind: KeyKind, widened: u128) -> UniqueKey {
+        match kind {
+            KeyKind::Keyword => UniqueKey::Keyword(widened),
+            KeyKind::Unsigned | KeyKind::Signed => UniqueKey::Int(widened as u64),
+        }
     }
 
     /// The key zero-extended, as a manifest records a base run's range.

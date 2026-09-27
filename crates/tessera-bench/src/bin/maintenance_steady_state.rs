@@ -28,6 +28,9 @@
 //!     --ticks 200 --rows 2000 [--hold-merge 9] [--scratch DIR]
 //! ```
 
+#[path = "../ingest_rows.rs"]
+mod ingest_rows;
+use ingest_rows::IngestRows;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -125,7 +128,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (vec![b"0".to_vec()], common.clone())
                     };
                     UnallocatedRow {
-                        join_only: false,
                         external_id: Some(key),
                         view: VIEW.to_string(),
                         join: None,
@@ -145,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let keys: Vec<Vec<u8>> = batch.iter().map(|r| r.external_id.clone().unwrap()).collect();
             let mut digest = [0u8; 32];
             digest[..8].copy_from_slice(&(tick as u64).to_le_bytes());
-            let entities = engine.accept_ingest(batch, format!("tick-{tick}"), digest)?;
+            let entities = engine.ingest_rows(batch, format!("tick-{tick}"), digest)?;
             bindings.extend(entities.into_iter().zip(keys));
         }
         let before = engine.write_executor_stats();

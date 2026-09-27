@@ -434,7 +434,6 @@ fn the_description_names_every_route_on_the_three_planes_and_no_other() {
             "/control/layers/{name}",
             "/control/layers/{name}/artifacts",
             "/control/status",
-            "/control/values",
             "/control/view_groups/{name}",
             "/control/views/{group}/{key}",
             "/control/views/{name}",
@@ -488,7 +487,6 @@ fn every_closed_dto_is_declared_closed() {
         "BrowseRequest",
         "PublicationAck",
         "IngestResponse",
-        "ValuesResponse",
         "ChangeItem",
         "AttributeDeclaration",
         "GroupScope",
@@ -1531,8 +1529,8 @@ async fn every_described_route_requires_its_planes_credential() {
         "/session/authorise and /session/revoke are the session plane's"
     );
     assert_eq!(
-        control_plane, 17,
-        "the control plane's operations are ingest, values, changes, status, flush, compact, \
+        control_plane, 16,
+        "the control plane's operations are ingest, changes, status, flush, compact, \
          the attribute, vocabulary, value-page, view group and plain view declarations, a group \
          view's create and drop, a layer's registration and drop, and an artifact publication \
          and growth"
@@ -1809,10 +1807,10 @@ fn control(server: &TestServer, method: &reqwest::Method, path: &str) -> reqwest
 
 const ARROW: &str = "application/vnd.apache.arrow.stream";
 
-/// `POST /control/ingest` in both encodings, a replay, and the refusals; then
-/// `POST /control/values` filling a column declared at the running service.
+/// `POST /control/ingest` in both encodings, a replay, the refusals, and an edit setting a column
+/// declared at the running service.
 #[tokio::test]
-async fn ingest_and_values_match_the_description() {
+async fn ingest_matches_the_description() {
     let doc = description();
     let f = fixture().await;
     let post = reqwest::Method::POST;
@@ -1835,7 +1833,7 @@ async fn ingest_and_values_match_the_description() {
         .await
         .unwrap();
     let answer = assert_answer(&doc, &post, resp, 200).await;
-    assert_eq!(answer["accepted"], 2);
+    assert_eq!(answer["created"], 2);
     assert_eq!(answer["tessera_ids"].as_array().unwrap().len(), 2);
     assert!(answer.get("replayed").is_none() && answer.get("visible").is_none());
 
@@ -1848,7 +1846,7 @@ async fn ingest_and_values_match_the_description() {
         .unwrap();
     let replay = assert_answer(&doc, &post, resp, 200).await;
     assert_eq!(replay["replayed"], true);
-    assert_eq!(replay["accepted"], 0);
+    assert_eq!(replay["created"], 0);
     assert_eq!(replay["tessera_ids"], answer["tessera_ids"]);
     let resp = ingest("openapi-json")
         .json(&json!([]))
@@ -1857,7 +1855,7 @@ async fn ingest_and_values_match_the_description() {
         .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
 
-    // Arrow leaving both declared columns out: a row that creates an item carries every one.
+    // Arrow leaving both declared columns out: the item is created with no value in either.
     let resp = control(&f.server, &post, "/control/ingest")
         .header("x-tessera-batch-id", "openapi-arrow")
         .header("content-type", ARROW)
@@ -1870,12 +1868,33 @@ async fn ingest_and_values_match_the_description() {
         .send()
         .await
         .unwrap();
+    let created = assert_answer(&doc, &post, resp, 200).await;
+    assert_eq!(created["created"], 1);
+
+    // The row again, naming the item by its `tessera_id` alone, changes nothing; a row naming no
+    // item and carrying no position creates nothing and is refused.
+    let named = json!([{ "tessera_id": created["tessera_ids"][0] }]);
+    assert_valid(&doc, "IngestRecords", &named);
+    let resp = ingest("openapi-named")
+        .header("content-type", "application/json")
+        .body(named.to_string())
+        .send()
+        .await
+        .unwrap();
+    let unchanged = assert_answer(&doc, &post, resp, 200).await;
+    assert_eq!(unchanged["unchanged"], 1);
+    let resp = ingest("openapi-unplaced")
+        .header("content-type", "application/json")
+        .body(json!([{ "access": ["0"] }]).to_string())
+        .send()
+        .await
+        .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
 
     // Waiting for the rows to be visible.
     let resp = control(&f.server, &post, "/control/ingest?wait=visible")
         .header("x-tessera-batch-id", "openapi-visible")
-        .json(&json!([{ "external_id": b64(b"openapi-2"), "x": 50.0, "y": 60.0,
+        .json(&json!([{ "external_id": b64(b"openapi-3"), "x": 50.0, "y": 60.0,
                          "access": "0", "archive": "astro", "score": null }]))
         .send()
         .await
@@ -1884,7 +1903,7 @@ async fn ingest_and_values_match_the_description() {
     assert!(answer["visible"].is_boolean());
 
     // Refusals: no batch id, an unknown view, an undeclared column, an encoding the route does
-    // not take, an external id the view already holds, and no credential.
+    // not take, and no credential.
     let one = json!([{ "x": 1.0, "y": 1.0, "access": ["0"] }]);
     let resp = control(&f.server, &post, "/control/ingest")
         .json(&one)
@@ -1912,12 +1931,6 @@ async fn ingest_and_values_match_the_description() {
         .await
         .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
-    let resp = ingest("openapi-held")
-        .json(&json!([{ "external_id": member(3), "x": 1.0, "y": 1.0, "access": ["0"] }]))
-        .send()
-        .await
-        .unwrap();
-    assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
     let resp = f
         .server
         .client
@@ -1929,7 +1942,8 @@ async fn ingest_and_values_match_the_description() {
         .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 401, "bad-credential").await;
 
-    // Values fill a column declared while the service runs, on an item the build placed.
+    // A row without coordinates sets a column declared while the service runs, on an item the
+    // build placed, and edits it.
     let put = reqwest::Method::PUT;
     let resp = control(&f.server, &put, "/control/attributes")
         .json(&json!({ "name": "rating", "type": "f64" }))
@@ -1937,34 +1951,14 @@ async fn ingest_and_values_match_the_description() {
         .await
         .unwrap();
     assert_answer(&doc, &put, resp, 201).await;
-    let values = |batch_id: &str| {
-        control(&f.server, &post, "/control/values").header("x-tessera-batch-id", batch_id)
-    };
     let rows = json!([{ "external_id": member(3), "rating": 4.5 }]);
-    assert_valid(&doc, "ValuesRecords", &rows);
-    let resp = values("openapi-values").json(&rows).send().await.unwrap();
+    assert_valid(&doc, "IngestRecords", &rows);
+    let resp = ingest("openapi-edit").json(&rows).send().await.unwrap();
     let answer = assert_answer(&doc, &post, resp, 200).await;
     assert_eq!(
-        (answer["rows"].clone(), answer["filled"].clone()),
+        (answer["rows"].clone(), answer["edited"].clone()),
         (json!(1), json!(1))
     );
-    let resp = values("openapi-values").json(&rows).send().await.unwrap();
-    let replay = assert_answer(&doc, &post, resp, 200).await;
-    assert_eq!(replay["replayed"], true);
-
-    // Refusals: a cell holding another value and an item the deployment does not hold.
-    let resp = values("openapi-values-differ")
-        .json(&json!([{ "external_id": member(3), "rating": 5.5 }]))
-        .send()
-        .await
-        .unwrap();
-    assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
-    let resp = values("openapi-values-nobody")
-        .json(&json!([{ "external_id": b64(b"nobody"), "rating": 1.0 }]))
-        .send()
-        .await
-        .unwrap();
-    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
 }
 
 /// A built item's `tessera_id`, as a string: the first point a viewport serves.
@@ -2265,28 +2259,20 @@ async fn declarations_match_the_description() {
         .unwrap();
     assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
 
-    let resp = control(
-        &f.server,
-        &delete,
-        "/control/views/quarter/2026-Q3?delete_dangling=true",
-    )
-    .send()
-    .await
-    .unwrap();
+    let resp = control(&f.server, &delete, "/control/views/quarter/2026-Q3")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(assert_answer(&doc, &delete, resp, 200).await["deleted"], 0);
     let resp = control(&f.server, &delete, "/control/views/quarter/2026-Q3")
         .send()
         .await
         .unwrap();
     assert_refusal_to(&doc, Some(&delete), resp, 404, "unknown").await;
-    let resp = control(
-        &f.server,
-        &delete,
-        "/control/views/quarter/2026-Q3?delete_dangling=maybe",
-    )
-    .send()
-    .await
-    .unwrap();
+    let resp = control(&f.server, &delete, "/control/views/quarter/2026-Q3?cascade=true")
+        .send()
+        .await
+        .unwrap();
     assert_refusal_to(&doc, Some(&delete), resp, 422, "contract").await;
 
     // A plain view, whose name shares a namespace with the groups'.

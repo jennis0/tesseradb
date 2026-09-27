@@ -27,37 +27,17 @@ from .split import (
 # ---------------------------------------------------------------------------------------------
 
 
-#: A declared type's wire type, for a column of nulls.
-WIRE_TYPES = {
-    "bool": pa.bool_(),
-    "u8": pa.uint8(),
-    "u16": pa.uint16(),
-    "u32": pa.uint32(),
-    "u64": pa.uint64(),
-    "i8": pa.int8(),
-    "i16": pa.int16(),
-    "i32": pa.int32(),
-    "i64": pa.int64(),
-    "f32": pa.float32(),
-    "f64": pa.float64(),
-    "timestamp_us": pa.timestamp("us"),
-    "keyword": pa.string(),
-    "text": pa.string(),
-    "category": pa.string(),
-}
-
-
 def wire_columns(
     rung: Path, view: dict | None = None
-) -> tuple[str | None, list[str], list[dict], list[tuple[str, pa.DataType]]]:
-    """`(access column, attribute columns, joined files, null columns)` for one view's batches,
+) -> tuple[str | None, list[str], list[dict]]:
+    """`(access column, attribute columns, joined files)` for one view's batches,
     the anchor's by default, read off the rung's own declaration: the view's
     `point_visibility.field`, and every `[[attribute]]` that travels with a point there. One read
     from a file of its own is joined on entity id, as the build reads it beside the points: each
     joined file is `(file, columns, select, fields)`. A group-scoped attribute travels only on a
     view of its group or of one sharing its keys, its rows picked by its file's discriminator,
-    `view` unless `fields.view` renames it. A batch names every declared column, so one the view's
-    points file does not hold travels as nulls at its declared type."""
+    `view` unless `fields.view` renames it. A declared column the view's points file does not hold
+    is left out of the batch, which keeps what the item already stores."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
     entity = declared.get("defaults", {}).get("entity_id_field", "entity_id")
@@ -65,7 +45,6 @@ def wire_columns(
     access = view["point_visibility"].get("field")
     held = set(pq.ParquetFile(view["points"]).schema_arrow.names)
     attributes: list[str] = []
-    nulls: list[tuple[str, pa.DataType]] = []
     joined: dict = {}
     for attribute in declared.get("attribute", []):
         group = scope_group(attribute)
@@ -75,8 +54,6 @@ def wire_columns(
         if own in (None, view["points"]):
             if attribute["name"] in held:
                 attributes.append(attribute["name"])
-            else:
-                nulls.append((attribute["name"], WIRE_TYPES[attribute["type"]]))
             continue
         column = (attribute.get("fields") or {}).get("view", "view")
         select = (column, view["key"]) if group is not None else None
@@ -91,7 +68,7 @@ def wire_columns(
         )
         entry["columns"].append(attribute["name"])
         attributes.append(attribute["name"])
-    return access, attributes, list(joined.values()), nulls
+    return access, attributes, list(joined.values())
 
 
 def scope_group(attribute: dict) -> str | None:
@@ -134,9 +111,8 @@ def encode_batch(
         names.append("access")
     arrays.append(pa.array([int(e).to_bytes(8, "little") for e in entities], pa.binary()))
     names.append("external_id")
-    # Every declared attribute, the access column included: the scalar tail is read back by
-    # position, so an omission misaligns it exactly as a spurious column does. A column that is
-    # also the compartment attribute is sent twice on purpose — once as `access`, once as itself.
+    # A column that is also the compartment attribute is sent twice on purpose: once as `access`,
+    # once as itself.
     for name in attributes:
         arrays.append(table.column(name).combine_chunks())
         names.append(name)
@@ -229,6 +205,8 @@ class HoldOut:
         view: dict | None = None,
         members: Sequence[str] = (),
         record_order: bool = False,
+        nudge: float = 0.0,
+        nudge_every: int = 1,
     ):
         #: The view's own points file: its positions, its access column, and whichever declared
         #: attributes it holds; and the `(column, key)` picking the view's rows out of a file
@@ -244,7 +222,7 @@ class HoldOut:
         }
         self.batch_rows = batch_rows
         self.held = np.sort(held)
-        self.access, self.attributes, joined, self.nulls = wire_columns(rung, view)
+        self.access, self.attributes, joined = wire_columns(rung, view)
         #: Each joined file's rows for the hold-out, read once: small beside the points.
         self.joined = [
             read_view_rows(
@@ -271,11 +249,23 @@ class HoldOut:
         #: Each row's entity id in the order the batches send them, where asked for: what the row
         #: index a body starts at is an index into.
         self.order: list[int] | None = [] if record_order else None
+        #: Added to the first coordinate of every `nudge_every`th entity's row, by entity id, which
+        #: moves each item it names.
+        self.nudge = nudge
+        self.nudge_every = nudge_every
 
     def emit(self, table: pa.Table, start: int):
         """[`bodies`] over one slice, its entity ids recorded first where `order` is kept."""
         if self.order is not None:
             self.order += table.column("entity_id").to_pylist()
+        if self.nudge:
+            at = table.column_names.index(self.coordinates[0])
+            column = table.column(at)
+            moved = pc.add(column, pa.scalar(self.nudge, table.schema.field(at).type))
+            if self.nudge_every > 1:
+                chosen = table.column("entity_id").to_numpy() % self.nudge_every == 0
+                moved = pc.if_else(pa.array(chosen), moved, column)
+            table = table.set_column(at, table.schema.field(at), moved)
         yield from self.bodies(table, start)
 
     @staticmethod
@@ -367,10 +357,6 @@ class HoldOut:
             self.head = pa.concat_tables(head)
 
     def encode(self, table: pa.Table) -> bytes:
-        """[`encode_batch`] over a slice of this hold-out, member columns and the declared
-        columns this view's file does not hold included, the latter as nulls."""
-        for name, dtype in self.nulls:
-            table = table.append_column(name, pa.nulls(table.num_rows, dtype))
-        names = [*self.attributes, *(name for name, _ in self.nulls)]
-        return encode_batch(table, self.coordinates, self.access, names, self.columns)
+        """[`encode_batch`] over a slice of this hold-out, member columns included."""
+        return encode_batch(table, self.coordinates, self.access, self.attributes, self.columns)
 

@@ -120,6 +120,8 @@ pub(crate) struct PrefixRotation {
     /// The new prefix's unique indexes, opened over its own manifest for the filter columns'
     /// reason.
     pub(crate) unique: Arc<tessera_store::unique::UniqueIndexes>,
+    /// The new prefix's edited-items runs, on the unique indexes' rule.
+    pub(crate) edited: Arc<tessera_store::edited::EditedIndex>,
     /// The executed deletions leaving `deleted` in this swap — Rule F, and empty for a rotation
     /// that retires nothing. **The caller's obligation is compaction §5's rule**, restated at
     /// `tessera_lifecycle::Overlay::retire`: only entities whose row *and* postings this

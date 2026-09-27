@@ -10,10 +10,11 @@ order matters for existence and for nothing else.
 two therefore cannot disagree about what would be sent.
 
 **The plan is built from what was inserted and what the database says it holds.** The SDK keeps no
-record of what it sent: a table goes as it was inserted, and a row the database already holds is a
-`409` on that page which the report carries. What the database has already been told is read from
-`/v1/meta` rather than from a log: its views, its groups and its layers. A re-run of a
-cell is a re-run.
+record of what it sent: a table goes as it was inserted. A row naming by its id an item the
+database holds, and carrying what the item stores, changes nothing and is counted as already
+present; one that would change the item is a `409` on that page which the report carries. What
+the database has already been told is read from `/v1/meta` rather than from a log: its views,
+its groups and its layers. A re-run of a cell is a re-run.
 
 **The target decides the route.** An insert into a view is a page of points, one into an attribute
 or a layer by key fills cells on entities the database holds, and a layer's two tables are
@@ -553,12 +554,12 @@ class Planner:
     # ------------------------------------------------------------------ 3. values
 
     def _values(self, document: dict) -> None:
-        """What `POST /control/values` carries: cells on rows the database holds.
+        """Rows without coordinates for `POST /control/ingest`: values on items the database holds.
 
-        An insert into an attribute fills that column's cells. An insert into a layer by key is a
-        column named for the layer, which the route reads by `/control/ingest`'s own rule: a key
-        an artifact holds joins the entity to it, and a key no artifact holds mints the artifact
-        it names on a layer whose value set is `open`.
+        An insert into an attribute sets that column on the items its rows name, editing each
+        item whose value changes. An insert into a layer by key is a column named for the layer: a
+        key an artifact holds places the item in it, and a key no artifact holds mints the
+        artifact it names on a layer whose value set is `open`.
 
         A group-scoped family and a scoped layer are paged per view: the insert's `view=` column
         says which view each row's value belongs to, and the page carries that view in
@@ -566,17 +567,6 @@ class Planner:
         """
         for insert in self._for("attribute", "values"):
             block = _block(document, "attribute", insert.target)
-            if block.get("render"):
-                self.findings.append(
-                    Finding(
-                        "a rendered column on the values route",
-                        f"attribute '{insert.target}' is declared `render`, and a rendered value "
-                        f"is drawn from the hot column of the row that carries it. The values "
-                        f"route fills entities and acquires no row, so it refuses one. Insert the "
-                        f"rows that carry it into the view instead",
-                    )
-                )
-                continue
             self._values_per_view(insert, _scoped_to(block), insert.columns["value"])
         for insert in self._for("layer", "key"):
             block = _block(document, "layer", insert.target)
@@ -595,7 +585,7 @@ class Planner:
                 Finding(
                     "a scoped insert with no view column",
                     f"'{insert.target}' is scoped to group '{group}', and a value belongs to one "
-                    f"view. The values route names the view in a header, so the insert names the "
+                    f"view. The ingest route names the view in a header, so the insert names the "
                     f"column that says which: view=",
                 )
             )
@@ -608,7 +598,7 @@ class Planner:
     def _values_of(
         self, insert, table: pa.Table, rows: list[int], view: str | None, column: str
     ) -> None:
-        """One page sequence of `POST /control/values`, over the rows this insert named."""
+        """One page sequence of rows without coordinates, over the rows this insert named."""
         if not rows:
             return
         columns = [
@@ -621,7 +611,7 @@ class Planner:
             name=insert.source if view is None else f"{insert.source}-{view}",
             view=view,
             table=_selected(table, rows, columns),
-            limits=self.limits.get("values", {}),
+            limits=self.limits.get("ingest", {}),
             line=f"values into '{insert.target}'{where}",
         )
 
@@ -1214,7 +1204,7 @@ def _send(control: Control, page: Page) -> Answer:
     if page.kind == "points":
         return control.ingest(page.body, page.batch, page.view)
     if page.kind == "values":
-        return control.values(page.body, page.batch, page.view)
+        return control.ingest(page.body, page.batch, page.view)
     if page.kind == "publish":
         return control.publish(page.name, page.body)
     if page.kind == "grow":
@@ -1243,18 +1233,21 @@ def _fold(report, page: Page, answer: Answer) -> None:
         return
     if page.kind == "points":
         view = page.view or ""
+        # A row that created an item or added one to the view is added here; one that named an
+        # item and changed nothing is already present.
         report.rows_accepted[view] = report.rows_accepted.get(view, 0) + int(
-            body.get("accepted", 0)
-        )
+            body.get("created", 0)
+        ) + int(body.get("added", 0))
+        report.items_edited += int(body.get("edited", 0))
+        report.already_present += int(body.get("unchanged", 0))
         report.artifacts_minted += int(body.get("minted", 0))
+        report.memberships_joined += int(body.get("joined", 0))
         report.tessera_ids += body.get("tessera_ids", [])
         report.clipped += int(body.get("clipped", 0))
         report.clamped += int(body.get("clamped", 0))
     elif page.kind == "values":
-        report.values_filled += int(body.get("filled", 0))
-        report.already_present += int(body.get("held", 0))
-        # A values page carrying a layer's key column mints artifacts from it as the other two
-        # doors do, and `joined` counts every membership it added, to minted and held artifacts.
+        report.items_edited += int(body.get("edited", 0))
+        report.already_present += int(body.get("unchanged", 0))
         report.artifacts_minted += int(body.get("minted", 0))
         report.memberships_joined += int(body.get("joined", 0))
     elif page.kind == "publish":

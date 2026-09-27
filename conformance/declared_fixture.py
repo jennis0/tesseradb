@@ -359,7 +359,7 @@ class Deployment:
         return resp
 
     def rows(self, route: str, rows: list[dict], batch: str, view: str | None = None) -> dict:
-        """`/control/ingest` or `/control/values`, as JSON, in pages the server accepts."""
+        """A row route, as JSON, in pages the server accepts."""
         out: dict = {}
         for n, start in enumerate(range(0, len(rows), 500)):
             resp = self.control(
@@ -390,8 +390,8 @@ def point_rows(ids, columns: list[Column], seed: int = 0, extent=WORLD_EXTENT) -
 
 
 def value_rows(ids, columns: list[Column]) -> list[dict]:
-    """Values rows for items `ids`: the address, then one cell per column, null where the item
-    has no value."""
+    """Rows without coordinates for items `ids`: the address, then one value per column, null
+    where the item has no value."""
     out = []
     for i in ids:
         row = {"external_id": external_id(i)}

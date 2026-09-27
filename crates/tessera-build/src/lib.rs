@@ -82,7 +82,7 @@ use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
 use tessera_types::{
     EntityId, IdentityKey, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
-    ROW_ABSENT, SMALL_TERM_THRESHOLD_DEFAULT,
+    SMALL_TERM_THRESHOLD_DEFAULT,
 };
 
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
@@ -1460,29 +1460,6 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         report_attribute_coverage(&attribute_coverage);
     }
 
-    // ---- 6b′. the unique indexes ------------------------------------------------------
-    // Before `sort_batch`, while `tiler_items` is still in entity order.
-    let unique = {
-        let scratch = crate::spill::TmpDir::create(&args.out)?;
-        let written = crate::unique_index::write_unique_indexes(
-            &args.out.join(PREFIX),
-            PHASH,
-            &args.schema,
-            |column| crate::unique_index::UniqueSource::Items(&tiler_items, column),
-            scratch.path(),
-            args.memory_budget.unwrap_or_else(pipeline::detect_memory_budget),
-        )?;
-        scratch.close()?;
-        written
-    };
-
-    // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
-    // Before `sort_batch`, which permutes `tiler_items` into row order: entity id is a staged
-    // item's *position*, so the values are entity-major exactly here and nowhere after.
-    // Transposed into one vector per column because that is the shape the emit consumes — the
-    // streaming pipeline reads its attributes column-major already, and one of the two builds
-    // paying a transpose is better than two emit paths that could disagree about a record's
-    // contents (which `write_manifests` exists to prevent for the same reason).
     // **The same route, derived the same way**: the streaming build's plan chooses a string
     // column's home from the modelled arena and the free space (`residency::plan_routes`), and the
     // oracle must reach the same answer over the same inputs. A column one build spilled and the
@@ -1502,15 +1479,42 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         slots: n,
         max_id: points.last().map_or(0, |p| p.source_id),
     };
-    let routes = residency::routes_for(
+    //
+    // The model's sizes for the stages that take what their phase leaves are the streaming
+    // build's too, so both builds cut the same batches.
+    let (routes, model) = residency::routes_for(
         args,
         n,
         ids,
         &residency::payloads_per_item(args),
         pipeline::available_disk(&args.out),
         ExtentRoute::Derived,
-    )
-    .0;
+        &id_space,
+    );
+
+    // ---- 6b′. the unique indexes ------------------------------------------------------
+    // Before `sort_batch`, while `tiler_items` is still in entity order.
+    let unique = {
+        let scratch = crate::spill::TmpDir::create(&args.out)?;
+        let written = crate::unique_index::write_unique_indexes(
+            &args.out.join(PREFIX),
+            PHASH,
+            &args.schema,
+            |column| crate::unique_index::UniqueSource::Items(&tiler_items, column),
+            scratch.path(),
+            model.sizing.unique_spill as usize,
+        )?;
+        scratch.close()?;
+        written
+    };
+
+    // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
+    // Before `sort_batch`, which permutes `tiler_items` into row order: entity id is a staged
+    // item's *position*, so the values are entity-major exactly here and nowhere after.
+    // Transposed into one vector per column because that is the shape the emit consumes — the
+    // streaming pipeline reads its attributes column-major already, and one of the two builds
+    // paying a transpose is better than two emit paths that could disagree about a record's
+    // contents (which `write_manifests` exists to prevent for the same reason).
     let filter_paths = {
         // The oracle's columns are mapped exactly as the streaming pipeline's are (`column.rs`),
         // so this path holds its own `.build-tmp/` for the length of the emit.
@@ -1733,6 +1737,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                         )
                     },
                 )?,
+                model.sizing.publication_batch,
             )?;
             // The runs and the merged table are dead the moment the publication has read them,
             // and this is the success path — so the removal is reported rather than left to
@@ -1807,6 +1812,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &view.view_id,
             n as u32,
             &mut derived_index,
+            model.sizing.term_image_workers as usize,
         )?]
     };
 
@@ -2283,7 +2289,18 @@ fn verified_open(
     let mut views = 0usize;
     let mut segments = 0usize;
     let mut rows = 0u64;
+    let current: CurrentPointer = {
+        let bytes = fs::read(root.join("CURRENT")).map_err(|e| BuildError::io(root, e))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| BuildError::Invalid(format!("CURRENT is not valid JSON: {e}")))?
+    };
     for partition in bundle.partitions.values() {
+        let prefix_dir = root.join(&current.prefix);
+        let edited = tessera_store::edited::EditedIndex::open(
+            &partition.manifest.edited_items,
+            &prefix_dir,
+            None,
+        )?;
         for (view_id, view) in &partition.views {
             views += 1;
             segments += view.segments.len();
@@ -2302,16 +2319,14 @@ fn verified_open(
                 direct_window_rows,
                 view_id,
                 view,
-                &identity_key,
-                shard_id,
+                Identity {
+                    key: &identity_key,
+                    shard_id,
+                    edited: &edited,
+                },
             )?;
         }
     }
-    let current: CurrentPointer = {
-        let bytes = fs::read(root.join("CURRENT")).map_err(|e| BuildError::io(root, e))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| BuildError::Invalid(format!("CURRENT is not valid JSON: {e}")))?
-    };
     // Sorted so two runs over one bundle report the columns in one order.
     let mut partitions: Vec<(&str, &tessera_store::manifest::SegmentsManifest)> = bundle
         .partitions
@@ -2522,8 +2537,7 @@ fn check_view_identity(
     direct_window_rows: u64,
     view_id: &str,
     view: &tessera_store::read::ViewData,
-    identity_key: &IdentityKey,
-    shard_id: u32,
+    identity: Identity<'_>,
 ) -> Result<()> {
     let total_rows = view.row_space.total_rows();
 
@@ -2572,15 +2586,7 @@ fn check_view_identity(
             Ok(())
         })?;
         surjective(claimed)?;
-        return walk_window(
-            view_id,
-            &layout,
-            &window,
-            0,
-            row_bound,
-            identity_key,
-            shard_id,
-        );
+        return walk_window(view_id, &layout, &window, 0, row_bound, identity);
     }
 
     // The one place the pass writes anything, so the one place the scratch directory is made.
@@ -2628,7 +2634,7 @@ fn check_view_identity(
         // The bucket's disk comes back before its rows are walked: the window holds everything
         // the walk needs.
         store.delete(k)?;
-        walk_window(view_id, &layout, &window, lo, hi, identity_key, shard_id)?;
+        walk_window(view_id, &layout, &window, lo, hi, identity)?;
     }
     Ok(())
 }
@@ -2645,12 +2651,9 @@ fn claim_rows(
         claim(row.raw(), entity)
     })?;
     for extent in view.row_space.extents() {
-        for (offset, &slot) in extent.rows.iter().enumerate() {
-            if slot == ROW_ABSENT {
-                continue;
-            }
+        for (entity, slot) in extent.pairs() {
             claimed += 1;
-            claim(extent.row_base + slot, extent.entity_lo + offset as u64)?;
+            claim(extent.row_base + slot, entity)?;
         }
     }
     Ok(claimed)
@@ -2658,15 +2661,24 @@ fn claim_rows(
 
 /// The rows of `[lo, hi)` that a segment holds, in row order: each one's entity from `window`, and
 /// its stored `tessera_id` against what the key derives for that entity.
+/// What a row's `tessera_id` is checked against: the key and shard it is derived under, and the
+/// edited items a moved row's entity is found in.
+#[derive(Clone, Copy)]
+struct Identity<'a> {
+    key: &'a IdentityKey,
+    shard_id: u32,
+    edited: &'a tessera_store::edited::EditedIndex,
+}
+
 fn walk_window(
     view_id: &str,
     layout: &[SegmentRows<'_>],
     window: &[u64],
     lo: u64,
     hi: u64,
-    identity_key: &IdentityKey,
-    shard_id: u32,
+    identity: Identity<'_>,
 ) -> Result<()> {
+    let (identity_key, shard_id) = (identity.key, identity.shard_id);
     for (row_base, rows, segment) in layout {
         let from = (*row_base).max(lo);
         let to = (row_base + u64::from(*rows)).min(hi);
@@ -2683,12 +2695,35 @@ fn walk_window(
                     segment.seg_id
                 )));
             }
+            let id = ids[local];
+            let recorded = segment.entities.recorded(local as u32).map(u64::from);
+            if recorded.is_some_and(|recorded| recorded != entity) {
+                return Err(BuildError::Invalid(format!(
+                    "view '{view_id}' segment '{}' row {local}: the row space claims entity \
+                     {entity} and the segment records entity {}",
+                    segment.seg_id,
+                    recorded.unwrap_or_default()
+                )));
+            }
             let expected = identity_key
                 .forward(shard_id, EntityId::new(entity))
                 .map_err(BuildError::Identity)?
                 .raw();
-            let id = ids[local];
-            if id != expected {
+            if id == expected {
+                continue;
+            }
+            // A row an edit moved records its entity, and its `tessera_id` is its number's, whose
+            // entries in the edited items name the entity.
+            let (shard, number) = identity_key.invert(tessera_types::TesseraId::new(id));
+            let moved = recorded.is_some()
+                && shard == shard_id
+                && u32::try_from(number.raw()).is_ok_and(|number| {
+                    identity
+                        .edited
+                        .entities_of(&[number])
+                        .is_ok_and(|held| held.iter().any(|(_, e)| u64::from(*e) == entity))
+                });
+            if !moved {
                 return Err(BuildError::Invalid(format!(
                     "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} does not \
                      match identity.key's derivation {expected:#x} for entity {entity}",

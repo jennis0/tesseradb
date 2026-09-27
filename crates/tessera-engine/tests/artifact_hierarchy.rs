@@ -390,7 +390,7 @@ fn a_suppressed_parent_does_not_take_its_child_with_it() {
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
     let root_entity = engine
-        .resolve_tessera_ids(&[served[0].tessera_id])[0]
+        .resolve_tessera_ids(&[served[0].tessera_id]).unwrap()[0]
         .expect("it names what was issued");
     engine
         .accept_change(root_entity, tessera_lifecycle::wal::ChangeOp::Suppress)
@@ -445,7 +445,7 @@ fn a_deleted_parent_leaves_its_child_a_root() {
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
     let root_entity = engine
-        .resolve_tessera_ids(&[served[0].tessera_id])[0]
+        .resolve_tessera_ids(&[served[0].tessera_id]).unwrap()[0]
         .expect("it names what was issued");
 
     engine
@@ -1818,7 +1818,6 @@ fn ingest_edges(
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -1830,7 +1829,7 @@ fn ingest_edges(
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             batch.to_string(),
             hash,
@@ -1922,7 +1921,7 @@ fn a_dag_child_published_under_two_parents_grows_by_a_batch_naming_all_three() {
     );
     // A membership is projected through base rows, so the counts are readable once the fold has
     // given the ingested point one.
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     for (key, was) in ["c", "p0", "p1"].iter().zip(before) {
         assert_eq!(count_of(&engine, key), was + 1, "{key} grew by the point");
@@ -2056,7 +2055,6 @@ fn ingest_levelled(
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        join_only: false,
         external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -2068,7 +2066,7 @@ fn ingest_levelled(
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             batch.to_string(),
             hash,
@@ -2149,7 +2147,7 @@ fn an_ingest_batch_records_an_edge_a_parentless_artifact_does_not_hold() {
 
     // A held row form changes at a tick and at no other moment, so the recorded edge reaches a
     // response on the same terms every other artifact change does.
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     let ids = ids_by_key(&engine);
     assert_eq!(
@@ -2191,7 +2189,7 @@ fn a_recorded_edge_survives_a_restart_and_a_fold() {
             vec![ids["p"]],
             "replay brings the edge back"
         );
-        flush(&engine);
+        publish_buffered(&engine);
         fold(&engine);
         assert_eq!(
             parents_in_bundle(&fx, &engine, "c"),
@@ -2237,7 +2235,7 @@ fn an_agreeing_edge_records_no_second_parent() {
             .expect("the edge the artifact holds is the edge the column names");
     }
     assert_eq!(served_parents(&engine, "c"), vec![ids["p"]]);
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     assert_eq!(
         parents_in_bundle(&fx, &engine, "c").len(),
@@ -2324,7 +2322,7 @@ fn a_tiered_edge_is_recorded_against_a_parent_minted_by_the_same_batch() {
         "only the country is created"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     let ids = ids_by_key(&engine);
     assert_eq!(

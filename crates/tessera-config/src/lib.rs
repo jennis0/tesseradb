@@ -359,8 +359,8 @@ struct RawServe {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawIngest {
-    /// Requests to `/control/ingest` and `/control/values` handled at once. One more is refused
-    /// with 429 at once. A value above 2305843009213693951 is refused.
+    /// Requests to `/control/ingest` handled at once. One more is refused with 429 at once. A value
+    /// above 2305843009213693951 is refused.
     ///
     /// Default: `64`.
     ingest_admission: Option<usize>,
@@ -375,13 +375,12 @@ struct RawIngest {
     ///
     /// Default: `1000000`.
     ingest_buffer_max_items: Option<usize>,
-    /// The most rows one `/control/ingest` or `/control/values` request may carry. A request
-    /// with more is refused with 422.
+    /// The most rows one `/control/ingest` request may carry. A request with more is refused with
+    /// 422.
     ///
     /// Default: `10000`.
     ingest_max_batch_rows: Option<usize>,
-    /// The largest body `/control/ingest` or `/control/values` accepts, in bytes. A larger one
-    /// is refused with 422.
+    /// The largest body `/control/ingest` accepts, in bytes. A larger one is refused with 422.
     ///
     /// Default: `16777216` (16 MiB).
     ingest_max_batch_bytes: Option<usize>,

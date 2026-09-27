@@ -113,6 +113,21 @@ pub(crate) fn plan_coalesce(
         }
     }
 
+    // A lookup reads every live run of both directions of the edited-items map too.
+    for (direction, runs) in [
+        (tessera_store::edited::Direction::ByNumber, &manifest.edited_items.by_number),
+        (tessera_store::edited::Direction::ByEntity, &manifest.edited_items.by_entity),
+    ] {
+        if let Some(window) =
+            select_window(&runs.live, policy.run_width, runs_policy, |rel| size_of(rel))
+        {
+            plan.edited.push(super::EditedWindow {
+                direction,
+                runs: runs.live[window].to_vec(),
+            });
+        }
+    }
+
     (!plan.is_empty()).then_some(plan)
 }
 

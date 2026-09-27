@@ -250,6 +250,7 @@ fn segment_of(rows_per_cell: u32) -> Segment {
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
 
     let data = SegmentData {
+        entities: tessera_store::edited::RowEntities::Numbers,
         seg_id: "cell-route".to_string(),
         row_count: ROWS,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),

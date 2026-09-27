@@ -60,7 +60,7 @@ fn suppressed_in(manifest: &SegmentsManifest) -> Vec<u64> {
 }
 
 /// The ids one of a manifest's deny fields carries, ascending.
-fn ids_of(field: &tessera_store::manifest::DenySet) -> Vec<u64> {
+fn ids_of(field: &tessera_store::manifest::EntitySet) -> Vec<u64> {
     field
         .entities()
         .expect("the field a writer produced decodes")

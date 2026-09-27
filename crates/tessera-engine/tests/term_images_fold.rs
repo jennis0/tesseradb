@@ -539,7 +539,6 @@ fn a_flush_before_the_fold_is_in_the_folds_images() {
     let mut rows = Vec::new();
     for i in 0..64u64 {
         rows.push(UnallocatedRow {
-            join_only: false,
             external_id: Some(format!("flushed-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
@@ -552,7 +551,7 @@ fn a_flush_before_the_fold_is_in_the_folds_images() {
         });
     }
     let flushed: Vec<EntityId> = engine
-        .accept_ingest(rows, "flush-before-the-fold".to_string(), [0u8; 32])
+        .ingest_rows(rows, "flush-before-the-fold".to_string(), [0u8; 32])
         .expect("the ingest is accepted");
     assert_eq!(flushed.len(), 64);
     let flushes_before = engine.write_executor_stats().flushes;

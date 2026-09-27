@@ -414,7 +414,7 @@ async fn the_same_batch_as_json_and_as_arrow_lands_identical_rows() {
     register_layer(&server, "open").await;
     let (status, body) = ingest(&server, "arrow", Some(ARROW), arrow_body(&rows(100..110))).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["accepted"], 10);
+    assert_eq!(body["created"], 10);
     let (status, body) = ingest(
         &server,
         "json-array",
@@ -423,11 +423,11 @@ async fn the_same_batch_as_json_and_as_arrow_lands_identical_rows() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["accepted"], 10);
+    assert_eq!(body["created"], 10);
     // No content type at all is JSON, the default (ingest §1.2).
     let (status, body) = ingest(&server, "ndjson", None, ndjson_body(&rows(300..310))).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["accepted"], 10);
+    assert_eq!(body["created"], 10);
     drain(&server).await;
 
     let (ids, artifacts) = viewport(&server, &["0"], None).await;
@@ -532,22 +532,7 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
         let detail = body["detail"].as_str().unwrap();
         assert!(names_cell(detail, 1, column), "{column} = {value}: {detail}");
     }
-    // A declared column missing from a row, and a layer column that changes shape mid-column.
-    let mut records: Vec<Value> = good.iter().map(json_record).collect();
-    records[2].as_object_mut().unwrap().remove("score");
-    let (status, body) = ingest(
-        &server,
-        "missing",
-        Some("application/json"),
-        Value::Array(records).to_string().into_bytes(),
-    )
-    .await;
-    assert_eq!(status, 422, "{body}");
-    assert_eq!(body["error"], "contract", "{body}");
-    assert!(
-        names_cell(body["detail"].as_str().unwrap(), 2, "score"),
-        "{body}"
-    );
+    // A layer column that changes shape mid-column.
     let mut records: Vec<Value> = good.iter().map(json_record).collect();
     records[0][LAYER] = json!(["k0"]);
     let (status, body) = ingest(
@@ -620,7 +605,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
     let one_before = visible_to(&server, &["1"]).await;
     let (status, resp) = ingest(&server, "filled", Some("application/json"), body()).await;
     assert_eq!(status, 200, "{resp}");
-    assert_eq!(resp["accepted"], 9);
+    assert_eq!(resp["created"], 9);
     drain(&server).await;
     assert_eq!(
         visible_to(&server, &["ir:sealed"]).await,
@@ -1261,7 +1246,7 @@ async fn an_arrow_column_at_another_width_is_read_as_a_build_reads_it() {
     let body = widths_body(&[600, 601], &[Some(7), Some(255)]);
     let (status, answer) = ingest(&server, "widths", Some(ARROW), body).await;
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer["accepted"], 2);
+    assert_eq!(answer["created"], 2);
     drain(&server).await;
 
     let (matched, _) = viewport(&server, &["0"], Some(json!({ "grade": { "eq": 255 } }))).await;
@@ -1298,8 +1283,9 @@ async fn an_arrow_integer_outside_its_declaration_is_refused_naming_the_row() {
     );
 }
 
-/// A values batch over an existing entity, as Arrow, filling `grade` from an `int64` column.
-fn grade_values_body(external_id: u64, grade: i64) -> Vec<u8> {
+/// A row without coordinates naming an existing item, as Arrow, setting `grade` from an `int64`
+/// column.
+fn grade_row_body(external_id: u64, grade: i64) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("grade", DataType::Int64, true),
@@ -1317,10 +1303,10 @@ fn grade_values_body(external_id: u64, grade: i64) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-async fn post_values(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, Value) {
+async fn post_rows(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, Value) {
     let resp = server
         .client
-        .post(server.control_url("/control/values"))
+        .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("content-type", ARROW)
@@ -1332,10 +1318,11 @@ async fn post_values(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16
     (status, resp.json().await.unwrap_or(Value::Null))
 }
 
-/// `/control/values` reads its Arrow columns by the same rule: an `int64` column fills a `u8`
-/// attribute where the value fits and is refused where it does not.
+/// A row without coordinates reads its Arrow columns by the same rule: an `int64` column sets a
+/// `u8` attribute where the value fits and is refused where it does not.
 #[tokio::test]
-async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
+async fn an_arrow_column_on_a_row_without_coordinates_at_another_width_is_read_as_a_build_reads_it()
+{
     let (_tmp, server) = served_declared().await;
     declare_widths(&server).await;
     let (status, answer) = ingest(&server, "rows", Some(ARROW), widths_body(&[800], &[None])).await;
@@ -1343,13 +1330,13 @@ async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
     let tessera_id = ingested_ids(&answer)[0];
     drain(&server).await;
 
-    let (status, answer) = post_values(&server, "too-wide", grade_values_body(800, 300)).await;
+    let (status, answer) = post_rows(&server, "too-wide", grade_row_body(800, 300)).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract");
     let detail = answer["detail"].as_str().unwrap();
     assert!(names_cell(detail, 0, "grade"), "{detail}");
 
-    let (status, answer) = post_values(&server, "fits", grade_values_body(800, 42)).await;
+    let (status, answer) = post_rows(&server, "fits", grade_row_body(800, 42)).await;
     assert_eq!(status, 200, "{answer}");
     drain(&server).await;
     assert_eq!(fields_of(&server, tessera_id).await["grade"], json!(42));
@@ -1389,8 +1376,8 @@ fn venue_ingest_body(ids: &[u64], venues: &[Option<&str>]) -> Vec<u8> {
     body_of(columns)
 }
 
-/// A values batch setting one entity's `venue`, its key as `large_utf8`.
-fn venue_values_body(external_id: u64, venue: &str) -> Vec<u8> {
+/// A row without coordinates setting one item's `venue`, its key as `large_utf8`.
+fn venue_row_body(external_id: u64, venue: &str) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, true),
         Field::new("venue", DataType::LargeUtf8, true),
@@ -1409,7 +1396,7 @@ fn venue_values_body(external_id: u64, venue: &str) -> Vec<u8> {
 }
 
 /// **A category's keys are read at either string offset width, as a build reads them**, at
-/// `/control/ingest` and at `/control/values`; a key the closed vocabulary does not list is still
+/// rows with coordinates and rows without; a key the closed vocabulary does not list is still
 /// refused.
 #[tokio::test]
 async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
@@ -1432,14 +1419,17 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
     let (matched, _) = viewport(&server, &["0"], arxiv()).await;
     assert_eq!(matched, [first], "the ingested key is served");
 
-    let (status, answer) = post_values(&server, "venue-value", venue_values_body(1001, "arxiv")).await;
+    let (status, answer) = post_rows(&server, "venue-value", venue_row_body(1001, "arxiv")).await;
     assert_eq!(status, 200, "{answer}");
     drain(&server).await;
     let (mut matched, _) = viewport(&server, &["0"], arxiv()).await;
     matched.sort_unstable();
     let mut expected = [first, second];
     expected.sort_unstable();
-    assert_eq!(matched, expected, "the key filled through /control/values is served");
+    assert_eq!(
+        matched, expected,
+        "the key set on a row without coordinates is served"
+    );
 
     let (status, answer) = ingest(
         &server,
@@ -1450,8 +1440,12 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
     .await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract");
-    assert!(answer["detail"].as_str().unwrap().contains("'venue'"), "{answer}");
-    let (status, answer) = post_values(&server, "unknown-value", venue_values_body(1000, "nature")).await;
+    assert!(
+        answer["detail"].as_str().unwrap().contains("'venue'"),
+        "{answer}"
+    );
+    let (status, answer) =
+        post_rows(&server, "unknown-value", venue_row_body(1000, "nature")).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract");
 }
@@ -1504,9 +1498,13 @@ async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
     let points = tmp.path().join("points.parquet");
     write_points_scored(
         &points,
-        Arc::new(UInt64Array::from_iter_values(
-            (0..N).map(|e| if e == 3 { PAST_I64 } else { e }),
-        )),
+        Arc::new(UInt64Array::from_iter_values((0..N).map(|e| {
+            if e == 3 {
+                PAST_I64
+            } else {
+                e
+            }
+        }))),
     );
     assert!(
         build_over(tmp.path(), points).is_err(),
@@ -1516,31 +1514,13 @@ async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
 
 /// **A column's type is checked on every record batch, an empty one included**, as the build
 /// checks it: a `utf8` column for the `f32` attribute `weight` is refused though no row carries a
-/// value, at both routes.
+/// value.
 #[tokio::test]
 async fn a_wrong_typed_column_in_an_empty_batch_is_refused() {
     let (_tmp, server) = served_declared().await;
     let mut columns = placed(&[]);
     columns.push(column("weight", true, StringArray::from(Vec::<&str>::new())));
     let (status, answer) = ingest(&server, "empty", Some(ARROW), body_of(columns)).await;
-    assert_eq!(status, 422, "{answer}");
-    assert_eq!(answer["error"], "contract", "{answer}");
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
-        Field::new("weight", DataType::Utf8, true),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter_values(std::iter::empty::<&[u8]>())),
-            Arc::new(StringArray::from(Vec::<&str>::new())),
-        ],
-    )
-    .unwrap();
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    let (status, answer) = post_values(&server, "empty", writer.into_inner().unwrap()).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
 }
@@ -1598,16 +1578,20 @@ async fn a_finite_float_past_f32_is_refused_at_every_path() {
     )
     .await;
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer["accepted"], 3, "{answer}");
+    assert_eq!(answer["created"], 3, "{answer}");
 
     let tmp = TempDir::new().unwrap();
     let points = tmp.path().join("points.parquet");
     write_points_with(
         &points,
         Arc::new(Int64Array::from_iter_values((0..N).map(|e| e as i64))),
-        Arc::new(Float64Array::from_iter_values(
-            (0..N).map(|e| if e == 3 { 1e300 } else { e as f64 }),
-        )),
+        Arc::new(Float64Array::from_iter_values((0..N).map(|e| {
+            if e == 3 {
+                1e300
+            } else {
+                e as f64
+            }
+        }))),
     );
     assert!(
         build_over(tmp.path(), points).is_err(),

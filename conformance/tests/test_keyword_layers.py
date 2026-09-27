@@ -281,7 +281,7 @@ def layers(tmp_path_factory, private_catalogue_bundle):
     def submit(batch: list[str | None], fx: list[int], external_base: int, offset: int) -> None:
         resp = srv.ingest(_ingest_body(batch, fx, external_base), f"kw-layers-{offset}")
         assert resp.status_code == 200, resp.text
-        assert resp.json()["accepted"] == len(batch)
+        assert resp.json()["created"] == len(batch)
         for i, key in enumerate(batch):
             oracle_id = INGEST_ID_BASE + offset + i
             fx_of[oracle_id] = fx[i]

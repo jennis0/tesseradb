@@ -21,6 +21,27 @@ pub struct TextExtentPaths {
     pub dict: std::path::PathBuf,
     pub postings: std::path::PathBuf,
     pub presence: std::path::PathBuf,
+    /// A group-scoped column's prose.
+    pub prose: Option<RecordExtentPaths>,
+}
+
+impl TextExtentPaths {
+    /// `extent`'s files resolved against the prefix directory that holds them, under the column
+    /// name a leaf resolves to.
+    pub fn of(prefix_dir: &Path, extent: &tessera_store::manifest::TextExtent) -> TextExtentPaths {
+        TextExtentPaths {
+            column: crate::filter::extent_column_name(&extent.column, extent.view.as_deref()),
+            dict_rel: extent.dict.clone(),
+            dict: prefix_dir.join(&extent.dict),
+            postings: prefix_dir.join(&extent.postings),
+            presence: prefix_dir.join(&extent.presence),
+            prose: extent.prose.as_ref().map(|prose| RecordExtentPaths {
+                blocks: prefix_dir.join(&prose.blocks),
+                hasrow: prefix_dir.join(&prose.hasrow),
+                directory: prefix_dir.join(&prose.directory),
+            }),
+        }
+    }
 }
 
 /// One column's window of extents, and the coalesced extent that replaces them. Named by the
@@ -261,14 +282,7 @@ impl FilterColumns {
                     column: text.column.clone(),
                 });
             };
-            layers.push(TextLayer::open(
-                &text.column,
-                &text.dict_rel,
-                &text.dict,
-                &text.postings,
-                &text.presence,
-                self.access,
-            )?);
+            layers.push(TextLayer::open(text, self.access)?);
         }
         for extent in extents {
             next.push_opened(extent)?;
@@ -355,14 +369,7 @@ impl FilterColumns {
                 });
             };
             replace_window(layers, column, &window.consumed, || {
-                TextLayer::open(
-                    column,
-                    &window.paths.dict_rel,
-                    &window.paths.dict,
-                    &window.paths.postings,
-                    &window.paths.presence,
-                    self.access,
-                )
+                TextLayer::open(&window.paths, self.access)
             })?;
         }
         Ok(next)

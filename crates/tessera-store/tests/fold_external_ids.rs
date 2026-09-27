@@ -53,6 +53,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
         .iter()
         .map(|(entity, external_id)| FlushRow {
             entity_id: EntityId::new(*entity),
+            number: EntityId::new(*entity),
             external_id: Some(external_id.as_bytes().to_vec()),
             x: ((*entity % 97) as f64) / 97.0,
             y: ((*entity % 89) as f64) / 89.0,
@@ -72,6 +73,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
             shard_id: 0,
             scalar_schema: &[],
             row_base: 0,
+            entity_floor: 0,
         }, &[],
     )
     .expect("the input segment writes");
@@ -121,6 +123,7 @@ fn locator_of(dir: &Path) -> Vec<u32> {
 fn flush_row(entity: u64, external_id: Option<&[u8]>, x: f64, y: f64) -> FlushRow {
     FlushRow {
         entity_id: EntityId::new(entity),
+        number: EntityId::new(entity),
         external_id: external_id.map(|id| id.to_vec()),
         x,
         y,
@@ -314,6 +317,7 @@ fn a_post_snapshot_entity_resolves_through_its_carried_forward_extent() {
             shard_id: 0,
             scalar_schema: &[],
             row_base: n as u32,
+            entity_floor: 0,
         }, &[],
     )
     .expect("the post-snapshot flush writes");

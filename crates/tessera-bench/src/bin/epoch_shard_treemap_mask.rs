@@ -391,6 +391,7 @@ fn synthetic_segment(rows: usize, seed: u64, scratch: &Path) -> SegmentData {
     let cuts = scratch.join(tessera_store::read::CutIndex::FILE);
     std::fs::write(&cuts, &starts).expect("write cell starts");
     SegmentData {
+        entities: tessera_store::edited::RowEntities::Numbers,
         seg_id: "epoch-shard-synthetic".into(),
         row_count: rows as u32,
         morton: MortonSlice::load(&morton).expect("load morton codes"),

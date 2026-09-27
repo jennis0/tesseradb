@@ -157,6 +157,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
             seg_id: "s-flush-0".to_string(),
             row_base: UNIVERSE,
             rows: extent_rows,
+            below: Vec::new(),
         })
         .expect("the extent continues row space exactly");
 

@@ -649,9 +649,8 @@ class Database:
         values it holds, wherever a column of those values is read. A column the call does not
         name is ignored, and the record returned says what was read and what was ignored. A column
         named like a declared attribute fills that attribute: at the first commit on the anchor
-        view alone, and after it on any view's rows, where a row that creates an item carries
-        every declared column. Several inserts into one target add up. Nothing is sent until
-        `commit()`.
+        view alone, and after it on any view's rows. Several inserts into one target add up.
+        Nothing is sent until `commit()`.
 
         A target that is not declared, a keyword the target does not read, a column the target
         needs and the call does not name, and a name that is not a column of the table are
@@ -1753,24 +1752,18 @@ class Database:
         self._refuse_before_the_first_commit("drop_layer")
         return _accepted(self.control.drop_layer(name, wait), f"drop_layer {name}")
 
-    def drop_view(
-        self, group: str, key: str, delete_dangling: bool = False, wait: bool = False
-    ) -> dict:
+    def drop_view(self, group: str, key: str, wait: bool = False) -> dict:
         """Remove one view of a view group, and return the server's answer.
 
         - `group`, `key`: the view is `"<group>:<key>"`.
-        - `delete_dangling`: `True` also deletes the items that were in no other view. The
-          answer's `deleted` says how many. A deletion cannot be undone.
         - `wait`: as for `drop_layer`.
 
-        Without `delete_dangling`, no item is deleted. The answer's `fills_dropped` counts the
-        items whose values for the view were sent and not yet published; those values are
-        dropped with the view.
+        The items the drop leaves in no view are deleted, and the answer's `deleted` says how
+        many. A deletion cannot be undone. Rows sent for the view and not yet published are
+        dropped with it.
         """
         self._refuse_before_the_first_commit("drop_view")
-        return _accepted(
-            self.control.drop_view(group, key, delete_dangling, wait), f"drop_view {group}/{key}"
-        )
+        return _accepted(self.control.drop_view(group, key, wait), f"drop_view {group}/{key}")
 
     def revoke(self, token) -> None:
         """End a token this database made, so it can no longer read.

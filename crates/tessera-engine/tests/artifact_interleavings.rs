@@ -159,7 +159,7 @@ fn park<'scope, 'env>(
     faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
     let gate = scope.spawn(move || {
         engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![row(engine, "gate", 1.0, 1.0)],
                 "gate".to_string(),
                 body_hash("gate"),
@@ -208,7 +208,6 @@ fn body_hash(seed: &str) -> [u8; 32] {
 fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
     let descriptors = vec![b"0".to_vec()];
     UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -226,7 +225,7 @@ fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
 /// batch created.
 fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str, x: f64, y: f64) -> u64 {
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row(engine, batch, x, y)],
             batch.to_string(),
             body_hash(batch),
@@ -262,7 +261,7 @@ fn count_of(engine: &Engine, key: &str) -> Option<u64> {
 /// in the bundle already. Which of the two publications carries the projection is not asserted here
 /// — only that a batch's own point is not countable until both have run.
 fn settle(engine: &Engine) {
-    flush(engine);
+    publish_buffered(engine);
     fold(engine);
 }
 
@@ -673,9 +672,9 @@ fn the_membership_replays_the_same_on_either_side_of_the_folds_pack() {
 /// against what is served.
 ///
 /// The fail-closed outcome is that the artifact stays out of every viewport across the join and
-/// across a fold: a suppression retires only on unsuppress (write-path §5.4, Rule S), and a fold
-/// is not one. What the unsuppress then reveals is the membership the join gave it — the points
-/// joined exactly as they would have otherwise.
+/// across a fold: a live artifact's suppression retires only on unsuppress (write-path §5.4, Rule
+/// S), and a fold is not one. What the unsuppress then reveals is the membership the join gave it:
+/// the points joined exactly as they would have otherwise.
 #[test]
 fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
     let fx = fixture();
@@ -716,7 +715,7 @@ fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
         assert_eq!(batch.join().unwrap(), 0, "c0 exists, so nothing is minted");
     });
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         count_of(&engine, "c0"),
         None,
@@ -896,7 +895,7 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
 
         faults.fail_next_appends(1);
         let refused = engine
-            .accept_ingest_joining(
+            .ingest_rows_joining(
                 vec![row(&engine, "b1", 5.0, 5.0)],
                 "b1".to_string(),
                 body_hash("b1"),
@@ -1019,7 +1018,7 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
                 )
                 .expect("a growth against a served artifact");
             engine
-                .accept_ingest(
+                .ingest_rows(
                     vec![row(&engine, &format!("stress-{i}"), 5.0, 5.0)],
                     format!("stress-{i}"),
                     body_hash(&format!("stress-{i}")),
@@ -1303,7 +1302,7 @@ fn ingest_with_edges(
     x: f64,
 ) -> Result<u64, String> {
     engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row(engine, batch, x, x)],
             batch.to_string(),
             body_hash(batch),

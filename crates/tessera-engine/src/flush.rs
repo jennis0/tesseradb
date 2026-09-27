@@ -1,13 +1,12 @@
 //! The flush: planning on the executor, writing on the background pool. A plan takes the
-//! buffered rows and value fills of one view from the live generation. Executing it writes a
-//! segment for the rows and entity-space extents for the values. Publication is in
-//! `write/executor`.
+//! buffered rows of one view from the live generation. Executing it writes a segment for the rows
+//! and entity-space extents for their values. Publication is in `write/executor`.
 //!
 //! A suppressed entity is flushed like any other, so that a later unsuppress has a row to
 //! reveal. A deleted entity is not written. A delete accepted after the plan was taken leaves a
 //! row that only its overlay entry hides; the fold (compaction) removes such rows.
 //!
-//! Coordinates are not re-checked here. `Engine::accept_ingest` refuses an out-of-extent
+//! Coordinates are not re-checked here. `Engine::ingest` refuses an out-of-extent
 //! coordinate before a row is buffered.
 
 use std::collections::BTreeMap;
@@ -321,12 +320,6 @@ pub(crate) struct FlushPlan {
     /// Ascending by entity id, deleted entities already removed; its ends give the segment's
     /// entity range.
     pub(crate) items: Vec<(EntityId, BufferedItem)>,
-    /// Cells an accepted `POST /control/values` batch filled on existing entities; a fill acquires no geometry.
-    pub(crate) fills: Vec<(EntityId, BufferedItem)>,
-    /// Every entity-scoped fill looked at, written or not; wider than `fills`, since an unconsumed fill would pin the log.
-    pub(crate) consumed_fills: Vec<EntityId>,
-    /// The same for the group-scoped fills, by the `(entity, owner view)` cell they address.
-    pub(crate) consumed_scoped_fills: Vec<(EntityId, String)>,
     /// The joins whose key a published run already records, ascending: they write no binding.
     pub(crate) recorded_joins: Vec<EntityId>,
 }
@@ -338,30 +331,16 @@ impl FlushPlan {
         self.items.iter().filter(|(_, item)| !item.join)
     }
 
-    /// [`Self::entity_space_items`] merged with the plan's fills, ascending by entity id: the
-    /// order extent writers require.
+    /// [`Self::entity_space_items`], ascending by entity id: the order extent writers require.
     pub(crate) fn value_rows(&self) -> impl Iterator<Item = &(EntityId, BufferedItem)> {
-        merge_by_entity(
-            self.fills.iter(),
-            self.items.iter().filter(|(_, item)| !item.join),
-        )
+        self.entity_space_items()
     }
 
-    /// Every row this flush publishes, joins included, merged with the plan's fills: a scoped
-    /// value belongs to the `(entity, view)` pair, which a join brings.
+    /// Every row this flush publishes, joins included: a scoped value belongs to the
+    /// `(entity, view)` pair, which a join brings.
     pub(crate) fn scoped_value_rows(&self) -> impl Iterator<Item = &(EntityId, BufferedItem)> {
-        merge_by_entity(self.fills.iter(), self.items.iter())
+        self.items.iter()
     }
-}
-
-/// Merge two runs already ascending by entity id into one ascending run.
-fn merge_by_entity<'a>(
-    fills: impl Iterator<Item = &'a (EntityId, BufferedItem)>,
-    items: impl Iterator<Item = &'a (EntityId, BufferedItem)>,
-) -> std::vec::IntoIter<&'a (EntityId, BufferedItem)> {
-    let mut merged: Vec<&'a (EntityId, BufferedItem)> = fills.chain(items).collect();
-    merged.sort_by_key(|(entity, _)| entity.raw());
-    merged.into_iter()
 }
 
 /// Why a tick published nothing.
@@ -414,50 +393,18 @@ pub(crate) fn plan_flush(
         .filter(|(entity, item)| item.view == view && !is_deleted(&generation.overlay, **entity))
         .map(|(entity, item)| (*entity, item.clone()))
         .collect();
-    // A values-batch fill acquires no geometry; a deleted entity is excluded for the same reason
-    // it gets no row. Every fill looked at is consumed, but only ones with a cell left to write
-    // are written, or an unconsumed fill would pin the log.
-    let mut consumed_fills: Vec<EntityId> = Vec::new();
-    let mut consumed_scoped_fills: Vec<(EntityId, String)> = Vec::new();
-    let mut fills: Vec<(EntityId, BufferedItem)> = Vec::new();
-    // An entity-scoped fill whose named view has been dropped is written by the first live
-    // view's pass: exactly one pass of a tick takes it, and the cells it writes name no view.
-    let live_views = || generation.bundle.partitions.values().flat_map(|p| p.views.keys());
-    let takes_orphans = live_views().min().is_some_and(|first| first == view);
-    for (entity, fill) in generation.buffer.fills() {
-        let orphaned = takes_orphans && !live_views().any(|live| *live == fill.view);
-        if (fill.view != view && !orphaned) || is_deleted(&generation.overlay, *entity) {
-            continue;
-        }
-        consumed_fills.push(*entity);
-        let item = entity_fill_as_item(generation, *entity, fill);
-        if item.scalars.iter().any(|v| !matches!(v, WalScalar::Null)) {
-            fills.push((*entity, item));
-        }
-    }
-    for ((entity, owner_view), fill) in generation.buffer.scoped_fills() {
-        if fill.view != view || is_deleted(&generation.overlay, *entity) {
-            continue;
-        }
-        consumed_scoped_fills.push((*entity, owner_view.clone()));
-        let item = scoped_fill_as_item(generation, *entity, owner_view, fill);
-        if item.scoped.iter().any(|v| !matches!(v, WalScalar::Null)) {
-            fills.push((*entity, item));
-        }
-    }
-    if items.is_empty() && consumed_fills.is_empty() && consumed_scoped_fills.is_empty() {
+    if items.is_empty() {
         return Err(NoFlush::NothingToFlush);
     }
     // A row buffered under an earlier arity holds nothing for a column declared since; padding
     // here means every positional read below sees one consistent schema.
     let declared = &generation.bundle.manifest.declared_scalars;
-    for (_, item) in items.iter_mut().chain(fills.iter_mut()) {
+    for (_, item) in items.iter_mut() {
         crate::attributes::pad_to_schema(&mut item.scalars, declared);
     }
     // The buffer is a hash map, so order is arbitrary until sorted. `write_flush_segment` requires
-    // ascending entity id; fills are sorted the same way for [`FlushPlan::value_rows`]'s merge.
+    // ascending entity id.
     items.sort_unstable_by_key(|(entity, _)| entity.raw());
-    fills.sort_by_key(|(entity, _)| entity.raw());
 
     // The first flush to give an entity a row writes its binding, whether that row is the
     // entity's own or a join: a dropped view can take the own row with it before it flushes. So
@@ -478,89 +425,8 @@ pub(crate) fn plan_flush(
 
     Ok(FlushPlan {
         items,
-        fills,
-        consumed_fills,
-        consumed_scoped_fills,
         recorded_joins,
     })
-}
-
-/// One unflushed fill as the value passes read it: a row with only the cells still owed. A fill
-/// creates nothing, so geometry, label and external id are absent. A cell a flushed column
-/// already holds is dropped here, making a replay of this fill idempotent.
-fn entity_fill_as_item(
-    generation: &Generation,
-    entity: EntityId,
-    fill: &tessera_lifecycle::Fill,
-) -> BufferedItem {
-    let manifest = &generation.bundle.manifest;
-    let mut blob = crate::write::joined::BlobRow::default();
-    let mut scalars = fill.scalars.clone();
-    for (at, declared) in manifest.declared_scalars.iter().enumerate() {
-        let Some(value) = scalars.get(at) else {
-            break;
-        };
-        if crate::write::joined::scalar_is_absent(value, declared) {
-            continue;
-        }
-        if crate::write::joined::flushed_scalar_of(generation, entity, at, &mut blob)
-            .is_some_and(|held| !crate::write::joined::scalar_is_absent(&held, declared))
-        {
-            scalars[at] = WalScalar::Null;
-        }
-    }
-    fill_item(&fill.view, scalars, Vec::new(), fill.wal_pos)
-}
-
-/// One `(entity, owner view)` cell's unflushed values as the scoped value pass reads them, on
-/// [`entity_fill_as_item`]'s rule and dropping a cell the owner view's column already holds.
-fn scoped_fill_as_item(
-    generation: &Generation,
-    entity: EntityId,
-    owner_view: &str,
-    fill: &tessera_lifecycle::ScopedFill,
-) -> BufferedItem {
-    let manifest = &generation.bundle.manifest;
-    let families = crate::write::scoped_families_of_view(manifest, &fill.view);
-    let mut scoped = fill.scoped.clone();
-    for (at, family) in families.iter().enumerate() {
-        let declared = crate::write::joined::declared_of_scoped(family);
-        let Some(value) = scoped.get(at) else {
-            break;
-        };
-        if crate::write::joined::scalar_is_absent(value, &declared) {
-            continue;
-        }
-        let held = crate::write::joined::flushed_scoped_of(generation, entity, family, owner_view)
-            .is_some_and(|held| !crate::write::joined::scalar_is_absent(&held, &declared))
-            || crate::write::joined::flushed_scoped_text_present(generation, entity, family, owner_view);
-        if held {
-            scoped[at] = WalScalar::Null;
-        }
-    }
-    fill_item(&fill.view, Vec::new(), scoped, fill.wal_pos)
-}
-
-/// The row shape both fills take. One of the two tails is empty: an entity-scoped fill writes no
-/// scoped cell and a scoped fill writes no entity-scoped one, so an entity holding both is two
-/// rows of the plan and each pass sees a value in exactly one of them.
-fn fill_item(
-    view: &str,
-    scalars: Vec<WalScalar>,
-    scoped: Vec<WalScalar>,
-    wal_pos: Option<u64>,
-) -> BufferedItem {
-    BufferedItem {
-        terms: Vec::new(),
-        view: view.to_string(),
-        join: false,
-        x: 0.0,
-        y: 0.0,
-        scalars,
-        scoped,
-        external_id: None,
-        wal_pos,
-    }
 }
 
 /// Everything the background pool needs to turn a [`FlushPlan`] into durable files. Taken from
@@ -574,6 +440,9 @@ pub(crate) struct FlushContext {
     pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     pub(crate) seg_id: String,
     pub(crate) row_base: u32,
+    /// The view's entity floor when planned: the rows of entities below it are listed in the
+    /// segment's extent.
+    pub(crate) entity_floor: u64,
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
     pub(crate) quantisation: Quantisation,
@@ -605,6 +474,9 @@ pub(crate) struct FlushContext {
     pub(crate) shapes: Vec<Arc<crate::shapes::ShapeLevel>>,
     /// The unique columns when planned, each with its position in a buffered row and its type.
     pub(crate) unique_schema: Vec<(String, usize, ScalarType)>,
+    /// The edited-items map when planned: each planned entity's number is read from it on the pool.
+    pub(crate) edited: Arc<tessera_store::edited::EditedIndex>,
+    pub(crate) edited_live: Arc<crate::edited::EditedLive>,
 }
 
 /// A flush whose files are durable, awaiting manifest assembly and the swap on the executor. The side-manifest is
@@ -615,11 +487,7 @@ pub(crate) struct CompletedFlush {
     pub(crate) view: String,
     /// The entity ids removed from the buffer at publication: exactly what was consumed, not a range.
     pub(crate) consumed: Vec<EntityId>,
-    /// The entity-scoped fills this flush's plan consumed: every fill looked at, not only those with a cell left to write.
-    pub(crate) filled: Vec<EntityId>,
-    /// The same for the group-scoped fills, by the `(entity, owner view)` cell they address.
-    pub(crate) filled_scoped: Vec<(EntityId, String)>,
-    /// The row space this flush gave the plan's rows, or `None`: a values-only tick publishes no segment.
+    /// The row space this flush gave the plan's rows.
     pub(crate) segment: Option<SegmentFlush>,
     /// `Some` iff this flush promoted; its digest is already in `files`.
     pub(crate) dict_extent: Option<DictExtent>,
@@ -648,6 +516,17 @@ pub(crate) struct CompletedFlush {
     pub(crate) unique_columns: Vec<String>,
     /// One entry per unique column: the runs this flush wrote for it and the entries in them.
     pub(crate) unique_runs: Vec<FlushedUnique>,
+    /// The edited-items runs this flush wrote, prefix-relative and digested into `files`, and
+    /// the entities whose live pairs they hold.
+    pub(crate) edited_runs: FlushedEdited,
+}
+
+/// The edited-items runs one flush wrote, and the live pairs they replace.
+#[derive(Default)]
+pub(crate) struct FlushedEdited {
+    pub(crate) by_number: Vec<tessera_store::manifest::BaseKeyRun>,
+    pub(crate) by_entity: Vec<tessera_store::manifest::BaseKeyRun>,
+    pub(crate) entities: Vec<u32>,
 }
 
 /// The runs one flush wrote into one unique column's index, and the live entries they replace.
@@ -706,17 +585,16 @@ fn execute_flush_stages(
     mark: &mut StageMark,
 ) -> Result<CompletedFlush, MaintenanceFailed> {
     let consumed: Vec<EntityId> = plan.items.iter().map(|(entity, _)| *entity).collect();
-    let filled = plan.consumed_fills.clone();
-    let filled_scoped = plan.consumed_scoped_fills.clone();
+    let numbers = numbers_of(&plan, &ctx)?;
 
     // ---- promotion: term ids allocated downward from `u32::MAX` stay unsatisfiable until promoted here.
     let promotion = promote(&plan, &ctx)?;
     let promoted_from = promotion.extent.as_ref().map(|_| ctx.dict.len());
     *mark = laps.lap(FlushStage::Promote, *mark);
 
-    // ---- the segment: scalars narrowed to the render subset. A fills-only tick writes no segment.
+    // ---- the segment: scalars narrowed to the render subset.
     let mut rows: Vec<FlushRow> = Vec::with_capacity(plan.items.len());
-    for (entity, item) in &plan.items {
+    for ((entity, item), number) in plan.items.iter().zip(&numbers) {
         let mut scalars = Vec::with_capacity(ctx.render_indices.len() + ctx.scoped_render.len());
         // Positionally parallel to `render_indices`, the render subset in declaration order.
         for &index in &ctx.render_indices {
@@ -740,6 +618,7 @@ fn execute_flush_stages(
         }
         rows.push(FlushRow {
             entity_id: *entity,
+            number: *number,
             external_id: item.external_id.clone(),
             x: item.x,
             y: item.y,
@@ -764,6 +643,7 @@ fn execute_flush_stages(
                     shard_id: ctx.shard_id,
                     scalar_schema: &ctx.scalar_schema,
                     row_base: ctx.row_base,
+                    entity_floor: ctx.entity_floor,
                 },
                 &plan.recorded_joins,
             )
@@ -829,6 +709,14 @@ fn execute_flush_stages(
     for flushed in &unique_runs {
         to_digest.extend(flushed.runs.iter().cloned());
     }
+    let edited_runs = write_edited_runs(&plan, &numbers, &ctx)?;
+    to_digest.extend(
+        edited_runs
+            .by_number
+            .iter()
+            .chain(&edited_runs.by_entity)
+            .map(|run| run.path.clone()),
+    );
     *mark = laps.lap(FlushStage::FilterExtents, *mark);
 
     // ---- the entity-to-term transpose extent: written from the promotion, so its ordinals match the tier's.
@@ -857,13 +745,17 @@ fn execute_flush_stages(
         // The writer's own derivation, so the base is digested at the exact path it was written to.
         let rel =
             tessera_store::scoped_column_rel(&ctx.partition, column, view, ctx.scoped_incarnation);
+        let prose = |name: &str| format!("{}/{name}", tessera_store::manifest::SCOPED_PROSE_DIR);
         for name in [
-            tessera_filter::VALUES_FILE,
-            tessera_filter::PRESENCE_FILE,
-            tessera_filter::DICT_FILE,
-            "postings.arrow",
+            tessera_filter::VALUES_FILE.to_string(),
+            tessera_filter::PRESENCE_FILE.to_string(),
+            tessera_filter::DICT_FILE.to_string(),
+            "postings.arrow".to_string(),
+            prose(tessera_filter::RECORD_BLOCKS_FILE),
+            prose(tessera_filter::RECORD_HASROW_FILE),
+            prose(tessera_filter::RECORD_DIRECTORY_FILE),
         ] {
-            if ctx.prefix_dir.join(&rel).join(name).exists() {
+            if ctx.prefix_dir.join(&rel).join(&name).exists() {
                 to_digest.push(format!("{rel}/{name}"));
             }
         }
@@ -885,7 +777,8 @@ fn execute_flush_stages(
     *mark = laps.lap(FlushStage::RecordExtent, *mark);
     let mut text_extents = write_text_extents(&plan, &ctx, laps, *mark)?;
     text_extents.extend(scoped_texts);
-    // All three files of every text extent are digested: `publish_fold` discards the fold if one digest is missing.
+    // Every file of every text extent is digested: `publish_fold` discards the fold if one digest
+    // is missing.
     for extent in &text_extents {
         for rel in extent.files() {
             to_digest.push(rel.to_string());
@@ -906,8 +799,15 @@ fn execute_flush_stages(
         None => None,
         Some(out) => {
             let seg_dir = segment_dir(&ctx);
+            let entities = tessera_store::edited::RowEntities::Listed(std::sync::Arc::new(
+                tessera_store::edited::EditedRows::open(
+                    &seg_dir,
+                    tessera_store::edited::lists_edited_rows(out.files.keys()),
+                )
+                .map_err(|e| MaintenanceFailed(e.to_string()))?,
+            ));
             Some(
-                SegmentData::load(&seg_dir, &ctx.seg_id, out.segment.row_count)
+                SegmentData::load(&seg_dir, &ctx.seg_id, out.segment.row_count, entities)
                     .map_err(|e| MaintenanceFailed(e.to_string()))?,
             )
         }
@@ -959,8 +859,6 @@ fn execute_flush_stages(
         partition: ctx.partition,
         view: ctx.view,
         consumed,
-        filled,
-        filled_scoped,
         segment,
         dict_extent,
         filter_extents,
@@ -975,6 +873,7 @@ fn execute_flush_stages(
         prefix: ctx.prefix,
         unique_columns: ctx.unique_schema.iter().map(|(name, _, _)| name.clone()).collect(),
         unique_runs,
+        edited_runs,
     };
     // Freed under a stage rather than at the return, so this O(rows) allocator work is attributed.
     drop(plan);
@@ -1174,8 +1073,87 @@ fn write_filter_extents(
     Ok(out)
 }
 
+/// Each planned entity's number: its live pair's, its run pair's, or the entity itself.
+fn numbers_of(plan: &FlushPlan, ctx: &FlushContext) -> Result<Vec<EntityId>, MaintenanceFailed> {
+    let mut numbers: Vec<EntityId> = plan.items.iter().map(|(entity, _)| *entity).collect();
+    let mut unresolved: Vec<usize> = Vec::new();
+    for (at, entity) in numbers.iter_mut().enumerate() {
+        let raw = narrow_entity(*entity)?;
+        match ctx.edited_live.number_of(raw) {
+            Some(number) => *entity = EntityId::new(u64::from(number)),
+            None => unresolved.push(at),
+        }
+    }
+    if unresolved.is_empty() {
+        return Ok(numbers);
+    }
+    // A flush's entities are mostly new ones, above every entity a run gives a number.
+    let highest = ctx
+        .edited
+        .highest_entity()
+        .map_err(failed("the edited items' runs"))?;
+    let mut asked: Vec<u32> = Vec::new();
+    unresolved.retain(|&at| {
+        let raw = numbers[at].raw() as u32;
+        let in_runs = highest.is_some_and(|highest| raw <= highest);
+        if in_runs {
+            asked.push(raw);
+        }
+        in_runs
+    });
+    for (at, number) in ctx
+        .edited
+        .numbers_of(&asked)
+        .map_err(failed("the edited items' runs"))?
+    {
+        numbers[unresolved[at]] = EntityId::new(u64::from(number));
+    }
+    Ok(numbers)
+}
+
+/// Write the edited-items runs of every planned entity whose pair is live, fsynced: the first
+/// flush to give such an entity a row holds its pair from then on.
+fn write_edited_runs(
+    plan: &FlushPlan,
+    numbers: &[EntityId],
+    ctx: &FlushContext,
+) -> Result<FlushedEdited, MaintenanceFailed> {
+    let mut pairs: Vec<(u32, u32)> = Vec::new();
+    for ((entity, _), number) in plan.items.iter().zip(numbers) {
+        let raw = narrow_entity(*entity)?;
+        if ctx.edited_live.number_of(raw).is_some() {
+            pairs.push((narrow_entity(*number)?, raw));
+        }
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    if pairs.is_empty() {
+        return Ok(FlushedEdited::default());
+    }
+    let written = tessera_store::edited::write_edited_runs(
+        &ctx.prefix_dir,
+        &ctx.partition,
+        &ctx.seg_id,
+        &pairs,
+    )
+    .map_err(failed("the edited items' runs"))?;
+    let paths: Vec<std::path::PathBuf> = written.paths().map(Path::to_path_buf).collect();
+    tessera_store::fsync_written(&paths).map_err(failed("the edited items' runs"))?;
+    let based = |runs: &[tessera_store::key_index::WrittenRun<u32>]| {
+        runs.iter()
+            .map(|run| tessera_store::edited::as_base(&ctx.prefix_dir, run))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failed("the edited items' runs"))
+    };
+    Ok(FlushedEdited {
+        by_number: based(&written.by_number)?,
+        by_entity: based(&written.by_entity)?,
+        entities: pairs.iter().map(|(_, entity)| *entity).collect(),
+    })
+}
+
 /// Write a run per unique column from the values this flush writes, fsynced: an entity's own row
-/// and its fills, never a join, which carries no entity-scoped value.
+/// alone, never a join, which carries no entity-scoped value.
 fn write_unique_runs(
     plan: &FlushPlan,
     ctx: &FlushContext,
@@ -1435,7 +1413,7 @@ fn entity_scoped_rows<'a>(
     spec: &FilterColumnSpec,
     plan: &'a FlushPlan,
 ) -> Result<Vec<(u32, &'a WalScalar)>, MaintenanceFailed> {
-    let mut out = Vec::with_capacity(plan.items.len() + plan.fills.len());
+    let mut out = Vec::with_capacity(plan.items.len());
     for (entity, item) in plan.value_rows() {
         let entity = narrow_entity(*entity)?;
         let value = item.scalars.get(spec.index).ok_or_else(|| {
@@ -1457,7 +1435,7 @@ fn scoped_rows<'a>(
     spec: &ScopedColumnSpec,
     plan: &'a FlushPlan,
 ) -> Result<Vec<(u32, &'a WalScalar)>, MaintenanceFailed> {
-    let mut out = Vec::with_capacity(plan.items.len() + plan.fills.len());
+    let mut out = Vec::with_capacity(plan.items.len());
     for (entity, item) in plan.scoped_value_rows() {
         let entity = narrow_entity(*entity)?;
         // A row buffered before the family was declared has nothing here — ordinary absence.
@@ -1548,7 +1526,7 @@ fn write_text_extents(
     let mut mark = mark;
     let mut out = Vec::with_capacity(ctx.text_schema.len());
     for spec in &ctx.text_schema {
-        let mut rows = Vec::with_capacity(plan.items.len() + plan.fills.len());
+        let mut rows = Vec::with_capacity(plan.items.len());
         for (entity, row) in plan.value_rows() {
             rows.push((
                 narrow_entity(*entity)?,
@@ -1615,6 +1593,7 @@ fn write_text_layer(
 
     let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
     let mut presence = croaring::Bitmap::new();
+    let mut prose_rows: Vec<(u32, &str)> = Vec::new();
     let mut scratch = tessera_analyse::TokenScratch::default();
     for (entity, value) in rows {
         let prose = match value {
@@ -1627,6 +1606,9 @@ fn write_text_layer(
             }
         };
         presence.add(entity);
+        if view.is_some() {
+            prose_rows.push((entity, prose));
+        }
         analyser.for_each_token(
             prose,
             &mut scratch,
@@ -1670,6 +1652,26 @@ fn write_text_layer(
     )
     .map_err(|e| MaintenanceFailed(format!("{presence_rel}: {e}")))?;
     text_lap(&mut sub, FlushStage::TextPresence);
+    // A group-scoped column's prose, which its postings cannot give back.
+    let prose = match view {
+        None => None,
+        Some(_) => {
+            let prose = tessera_store::manifest::RecordExtent {
+                blocks: format!("{rel_dir}/{}-prose.blocks.bin", target.seg_id),
+                hasrow: format!("{rel_dir}/{}-prose.hasrow.roaring", target.seg_id),
+                directory: format!("{rel_dir}/{}-prose.directory.arrow", target.seg_id),
+            };
+            prose_rows.sort_by_key(|(entity, _)| *entity);
+            tessera_filter_write::write_prose(
+                &target.prefix_dir.join(&prose.blocks),
+                &target.prefix_dir.join(&prose.hasrow),
+                &target.prefix_dir.join(&prose.directory),
+                prose_rows,
+            )
+            .map_err(|e| MaintenanceFailed(format!("{}: {e}", prose.blocks)))?;
+            Some(prose)
+        }
+    };
 
     Ok(Some(tessera_store::manifest::TextExtent {
         column: column.to_string(),
@@ -1679,6 +1681,7 @@ fn write_text_layer(
         dict: dict_rel,
         postings: postings_rel,
         presence: presence_rel,
+        prose,
     }))
 }
 
@@ -1801,6 +1804,15 @@ fn write_empty_scoped_base(
             tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
         )
         .map_err(|e| failed("the token postings", &e))?;
+        let prose = column_dir.join(tessera_store::manifest::SCOPED_PROSE_DIR);
+        std::fs::create_dir_all(&prose).map_err(|e| failed("the prose", &e))?;
+        tessera_filter_write::write_prose(
+            &prose.join(tessera_filter::RECORD_BLOCKS_FILE),
+            &prose.join(tessera_filter::RECORD_HASROW_FILE),
+            &prose.join(tessera_filter::RECORD_DIRECTORY_FILE),
+            std::iter::empty(),
+        )
+        .map_err(|e| failed("the prose", &e))?;
         return Ok(());
     }
     let codes = empty_codes(spec.ty, spec.category);
@@ -2161,9 +2173,9 @@ mod tests {
         plan_flush(generation, VIEW, false, false)
     }
 
-    /// **A suppression never touches postings and retires only on unsuppress**, so a flush that
-    /// skipped it would leave a later unsuppress with nothing to reveal: no row would exist, and
-    /// unsuppressing the item would show nothing at all.
+    /// **A suppression never touches postings, and an item's is lifted only by an unsuppress**, so
+    /// a flush that skipped it would leave a later unsuppress with nothing to reveal: no row would
+    /// exist, and unsuppressing the item would show nothing at all.
     #[test]
     fn a_suppressed_entity_is_flushed_so_a_later_unsuppress_has_something_to_reveal() {
         let generation = generation_with(&[(7, item(&[1]))], &[(7, ChangeOp::Suppress)]);
@@ -2172,7 +2184,7 @@ mod tests {
         assert_eq!(plan.items[0].0, EntityId::new(7));
     }
 
-    /// A deletion's ID stays burned (I9), no row is created, and the deny entry stands.
+    /// A deleted entity acquires no row, and the deny entry stands.
     #[test]
     fn a_deleted_entity_acquires_no_row() {
         let generation = generation_with(

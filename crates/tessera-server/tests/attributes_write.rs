@@ -282,12 +282,13 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     assert_eq!(tag["category"]["vocabulary"], "dept");
 }
 
-/// **A batch carries every declared column, the runtime ones included.** One that omits a column
-/// is refused at either door and allocates nothing; one that carries it as nulls is accepted and
-/// serves no value. Every viewer-plane reader answers the column over the rows that carried a
-/// value: the filter, the drill-down, and the categories vocabulary of a runtime category.
+/// **A row may leave a declared column out, the runtime ones included.** One that creates an item
+/// leaving a column out, at either door, creates it with no value there; the same row sent again
+/// with nulls names that item and changes nothing. Every viewer-plane reader answers the column
+/// over the rows that carried a value: the filter, the drill-down, and the categories vocabulary
+/// of a runtime category.
 #[tokio::test]
-async fn a_batch_carries_every_declared_column_and_every_reader_answers_it() {
+async fn a_row_may_leave_a_column_out_and_every_reader_answers_it() {
     let served = Served::build(fixture).await;
     assert_eq!(declare(&served, sentiment()).await.0, 201);
     assert_eq!(declare(&served, tag()).await.0, 201);
@@ -298,7 +299,7 @@ async fn a_batch_carries_every_declared_column_and_every_reader_answers_it() {
         sentiment: None,
         tag: None,
     };
-    // A JSON record without a key is missing that column; `null` is a value.
+    // A JSON record without a key leaves that column out; `null` sends no value.
     let json_row = |tag: Option<Value>| {
         let mut record = json!({
             "external_id": "ajE=", "x": 500.0, "y": 500.0, "access": ["0"], "score": 50.0,
@@ -314,8 +315,8 @@ async fn a_batch_carries_every_declared_column_and_every_reader_answers_it() {
         ("json-omitting", JSON, json_row(None)),
     ] {
         let (status, body) = post_ingest(&served, batch_id, content_type, body).await;
-        assert_eq!(status, 422, "{batch_id}: {body}");
-        assert_eq!(body["error"], "contract", "{batch_id}: {body}");
+        assert_eq!(status, 200, "{batch_id}: {body}");
+        assert_eq!(body["created"], 1, "{batch_id}: {body}");
     }
 
     let carrying = ingest(
@@ -346,11 +347,12 @@ async fn a_batch_carries_every_declared_column_and_every_reader_answers_it() {
         ),
     )
     .await;
-    // The refused batches' external ids are free, so the refusals bound nothing.
+    // The same rows with nulls name the items the omitting rows created, and change nothing.
     let nulls = ingest(&served, "nulls", batch(&[unvalued("o1")], true)).await;
     let (status, receipt) =
         post_ingest(&served, "json-nulls", JSON, json_row(Some(Value::Null))).await;
     assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["unchanged"], 1, "{receipt}");
     drain(&served.server).await;
 
     assert_eq!(
@@ -368,7 +370,7 @@ async fn a_batch_carries_every_declared_column_and_every_reader_answers_it() {
             .await
             .len(),
         2,
-        "the two batches of nulls landed and the refused ones did not; no build row scores past 6"
+        "the two omitting rows landed once each; no build row scores past 6"
     );
     assert_eq!(
         filtered(&served, json!({ "tag": { "eq": "ops" } })).await,
@@ -444,13 +446,11 @@ fn record(id: &str, score: Option<f32>) -> Value {
     record
 }
 
-/// **A row that joins an item already held needs no declared column; a row that creates one
-/// does**, at both doors. A join's values are the item's already, so a batch of joins into a
-/// second view may leave them out; a row creating an item without them is refused, alone, beside a
-/// join or beside a new record that carries the key, and nothing is allocated. A JSON join record
-/// may leave a key out beside a new record that carries it.
+/// **A row may leave every declared column out, whether it adds an item to a view or creates
+/// one**, at both doors. A row adding a held item to a second view keeps the item's values; a
+/// row creating an item leaving a column out creates it with no value there.
 #[tokio::test]
-async fn a_row_joining_a_held_item_needs_no_declared_column_and_a_new_one_does() {
+async fn a_row_may_leave_declared_columns_out_whether_it_adds_or_creates() {
     let served = Served::build(fixture).await;
     let resp = served
         .server
@@ -477,48 +477,24 @@ async fn a_row_joining_a_held_item_needs_no_declared_column_and_a_new_one_does()
         batch(&[held("h1"), held("h2"), held("h3")], false),
     )
     .await;
-    let high_water = control_status(&served.server).await["entity_id_high_water"].clone();
 
     let json_body = |records: Vec<Value>| Value::Array(records).to_string().into_bytes();
-    for (batch_id, content_type, body) in [
-        ("new-arrow", ARROW, geometry(&["n1"])),
-        ("new-beside-join-arrow", ARROW, geometry(&["h1", "n1"])),
+    let mut landed = Vec::new();
+    for (batch_id, content_type, body, created, added) in [
+        ("add-arrow", ARROW, geometry(&["h1"]), 0, 1),
+        ("new-beside-add-arrow", ARROW, geometry(&["h2", "n1"]), 1, 1),
         (
-            "new-beside-join-json",
-            JSON,
-            json_body(vec![record("h1", None), record("n1", None)]),
-        ),
-        // Each record is held to the rule alone: a key one new record carries is missing from
-        // the next.
-        (
-            "new-beside-new-json",
-            JSON,
-            json_body(vec![record("n1", Some(5.0)), record("n2", None)]),
-        ),
-    ] {
-        let (status, body) = post_ingest_into(&served, "extra", batch_id, content_type, body).await;
-        assert_eq!(status, 422, "{batch_id}: {body}");
-        assert_eq!(body["error"], "contract", "{batch_id}: {body}");
-    }
-    assert_eq!(
-        control_status(&served.server).await["entity_id_high_water"],
-        high_water,
-        "no refused batch allocated an item"
-    );
-
-    let mut joined = Vec::new();
-    for (batch_id, content_type, body) in [
-        ("join-arrow", ARROW, geometry(&["h1"])),
-        ("join-json", JSON, json_body(vec![record("h2", None)])),
-        (
-            "join-beside-new-json",
+            "add-beside-new-json",
             JSON,
             json_body(vec![record("h3", None), record("n2", Some(50.0))]),
+            1,
+            1,
         ),
     ] {
         let (status, body) = post_ingest_into(&served, "extra", batch_id, content_type, body).await;
         assert_eq!(status, 200, "{batch_id}: {body}");
-        joined.extend(ingested_ids(&body));
+        assert_eq!((body["created"].clone(), body["added"].clone()), (json!(created), json!(added)), "{batch_id}: {body}");
+        landed.extend(ingested_ids(&body));
     }
     drain(&served.server).await;
     let token = token_for(&served.server, &["0", "1"][..]).await;
@@ -534,9 +510,10 @@ async fn a_row_joining_a_held_item_needs_no_declared_column_and_a_new_one_does()
     assert_eq!(resp.status().as_u16(), 200);
     let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
     let served_ids: BTreeSet<u64> = points.into_iter().map(|(id, _)| id).collect();
-    assert_eq!(served_ids, joined.iter().copied().collect(), "every accepted row is in `extra`");
-    // The joins kept the value each item was created with.
-    assert_eq!(item(&served, joined[0]).await["fields"]["score"], json!(1.0));
+    assert_eq!(served_ids, landed.iter().copied().collect(), "every row is in `extra`");
+    // An added item kept the value it was created with; a new one holds none.
+    assert_eq!(item(&served, landed[0]).await["fields"]["score"], json!(1.0));
+    assert!(item(&served, landed[2]).await["fields"].get("score").is_none());
 }
 
 /// **The declaration survives a restart**, from the log alone before any publication and from
@@ -619,7 +596,7 @@ async fn write_json(served: &Served, route: &str, batch_id: &str, body: Value) -
 }
 
 /// A text column declared at a running service matches the same items after a restart as it did
-/// before, whether its prose arrived by ingest or by a values fill.
+/// before, whether its prose arrived with the item or by a later edit.
 #[tokio::test]
 async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
     let served = Served::build(fixture).await;
@@ -646,8 +623,8 @@ async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
     drain(&served.server).await;
     write_json(
         &served,
-        "/control/values",
-        "values",
+        "/control/ingest",
+        "edit",
         json!([{ "external_id": b64(b"n3"), "note": "cedar bark" }]),
     )
     .await;

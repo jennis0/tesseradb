@@ -270,9 +270,8 @@ fn ingest_point_into(
         *slot = *byte;
     }
     let ids = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -328,7 +327,7 @@ fn a_point_ingested_with_a_value_counts_on_the_next_request() {
     let versions = fx.engine.write_executor_stats();
 
     ingest_point(&fx.engine, "fresh-1", value, 0, 5.0, 5.0);
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
 
     let after = served(&fx.engine, grant, BY_RULE, 0, WHOLE_MAP);
     assert_eq!(
@@ -381,7 +380,7 @@ fn a_new_value_mints_its_artifact_at_the_windows_close() {
         "the novel value minted no artifact at the window's close"
     );
 
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     let after = served(&fx.engine, grant, BY_RULE, 0, WHOLE_MAP);
     assert_eq!(
         after.get(&novel.to_string()),
@@ -397,7 +396,7 @@ fn a_new_value_mints_its_artifact_at_the_windows_close() {
         artifacts_before + 1,
         "the same value minted a second artifact"
     );
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     assert_eq!(
         served(&fx.engine, grant, BY_RULE, 0, WHOLE_MAP).get(&novel.to_string()),
         Some(&2)
@@ -620,7 +619,7 @@ fn a_label_attached_to_a_predicate_artifact_follows_its_target() {
 
     // Suppress the band; the label goes with it, without anything being said about the label.
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[id])[0]
+    let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0]
         .expect("a served artifact's identifier names an entity");
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
@@ -648,7 +647,7 @@ fn a_suppressed_values_key_never_mints_again() {
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[id])[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0].unwrap();
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is accepted");
@@ -667,7 +666,7 @@ fn a_suppressed_values_key_never_mints_again() {
         artifacts,
         "a point carrying a suppressed value minted a second artifact for it"
     );
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     assert!(
         !served(&fx.engine, grant, BANDS, 0, WHOLE_MAP).contains_key(&anchor),
         "the suppression was defeated by ingesting a point"
@@ -688,7 +687,7 @@ fn a_deleted_values_key_returns_as_a_new_artifact() {
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
     let before_id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[before_id])[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[before_id]).unwrap()[0].unwrap();
 
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)
@@ -707,7 +706,7 @@ fn a_deleted_values_key_returns_as_a_new_artifact() {
         13.0,
         13.0,
     );
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
 
     let after = served(&fx.engine, grant, BANDS, 0, WHOLE_MAP);
     assert!(

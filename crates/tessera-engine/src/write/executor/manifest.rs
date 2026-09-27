@@ -50,8 +50,8 @@ impl std::fmt::Display for ManifestCommitRefused {
 /// rather than carried forward, as two separate sets and never their union: publishing the union
 /// would make every deletion look retirable by an unsuppress.
 pub(super) fn write_deny_state(manifest: &mut SegmentsManifest, overlay: &Overlay) {
-    manifest.deny = DenySet::of(overlay.suppressed_set());
-    manifest.tombstones = DenySet::of(overlay.deleted_set());
+    manifest.deny = EntitySet::of(overlay.suppressed_set());
+    manifest.tombstones = EntitySet::of(overlay.deleted_set());
 }
 
 /// Carry the live vocabulary bindings into a manifest's `vocabulary_extensions`. Unioned, never
@@ -184,6 +184,9 @@ impl Executor {
     ) -> Result<(), ManifestCommitRefused> {
         let live_manifest = &partition_data.manifest;
         self.write_live_state(next, fold.is_some());
+        if let Some(fold) = &fold {
+            next.held_entities.push(fold.freed.clone());
+        }
         let (derived, pending) = match &fold {
             Some(fold) => (fold.written, Some(fold.pending_retirement)),
             None => (self.side_manifests.derived_extents.as_slice(), None),
@@ -228,9 +231,17 @@ impl Executor {
     /// geometry swap. `min`, not `max`, for the low-water mark: the row-less region grows downward.
     /// A fold writes the declarations into its `MANIFEST.json` and sets its own list of those made
     /// since it planned, so `fold` leaves them alone.
+    ///
+    /// The high-water mark is the allocator's, not the highest entity a segment holds: an item
+    /// deleted before its flush holds no row, and once the log records naming it are reclaimed,
+    /// only this keeps its entity id, and so its `tessera_id`, from being issued again.
     fn write_live_state(&self, manifest: &mut SegmentsManifest, fold: bool) {
         let registry = self.live.registry_for_publication();
         manifest.entity_id_low_water = manifest.entity_id_low_water.min(registry.low_water);
+        manifest.entity_id_high_water = manifest
+            .entity_id_high_water
+            .max(self.live.allocator_high_water());
+        (manifest.free_entities, manifest.held_entities) = self.live.allocator_freed();
         manifest.layers = registry.layers;
         manifest.layer_tombstones = registry.tombstones;
         manifest.layer_registry_version = registry.version;

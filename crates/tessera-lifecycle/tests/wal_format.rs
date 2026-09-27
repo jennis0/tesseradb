@@ -27,6 +27,8 @@ fn a_wal_row_round_trips_its_view() {
     {
         let (mut wal, _) = Wal::open(&path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b1".into(),
             body_hash: [0u8; 32],
             rows: vec![row.clone()],
@@ -106,6 +108,8 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
     {
         let (mut wal, _) = Wal::open(&path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b1".into(),
             body_hash: [0u8; 32],
             rows: vec![row.clone()],
@@ -148,11 +152,19 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// members' length for the view's, and a 20 content takes the first forty bytes of its
 /// generating set for a digest and a cardinality. **23** is the version before a publication
 /// carried its view's incarnation: a 23 publication read at 24 takes the members' length for it.
-/// **25** is the version before an attribute declaration carried `unique`.
+/// **25** is the version before an attribute declaration carried `unique`. **26** is the version
+/// before an ingest batch carried its receipt and a change request became one record: a 26 batch
+/// read at 27 takes the next record's leading bytes for the receipt it does not carry. **27** is
+/// the version before an ingest batch carried its edits: a 27 batch read at 28 takes its receipt's
+/// length for the edits'. **28** is the version before a view drop carried its deletions: a 28 drop
+/// read at 29 takes the next record's leading bytes for them.
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
-    for (index, version) in [15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25].into_iter().enumerate() {
+    for (index, version) in [15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+        .into_iter()
+        .enumerate()
+    {
         let at = dir.path().join(format!("v{index}"));
         std::fs::create_dir(&at).unwrap();
         std::fs::write(at.join("wal-000001.log"), header_at_version(version, 1, 0)).unwrap();
@@ -166,7 +178,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
-    std::fs::write(other.join("wal-000001.log"), header_at_version(26, 1, 0)).unwrap();
+    std::fs::write(other.join("wal-000001.log"), header_at_version(29, 1, 0)).unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
 
@@ -205,6 +217,7 @@ fn view_create_and_drop_round_trip() {
         .unwrap();
         wal.append(&WalRecord::ViewDrop {
             view: dropped.clone(),
+            deleted: vec![EntityId::new(7), EntityId::new(9)],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -212,9 +225,10 @@ fn view_create_and_drop_round_trip() {
     let (_wal, records) = Wal::open(&path).unwrap();
     assert_eq!(records.len(), 2);
     match (&records[0], &records[1]) {
-        (WalRecord::ViewCreate { view }, WalRecord::ViewDrop { view: stone }) => {
+        (WalRecord::ViewCreate { view }, WalRecord::ViewDrop { view: stone, deleted }) => {
             assert_eq!(view, &created);
             assert_eq!(stone, &dropped);
+            assert_eq!(deleted, &[EntityId::new(7), EntityId::new(9)]);
         }
         other => panic!("expected a create then a drop, got {other:?}"),
     }
@@ -255,6 +269,8 @@ fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
     {
         let (mut wal, _) = Wal::open(&path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b".into(),
             body_hash: [0u8; 32],
             rows: vec![row],
@@ -266,9 +282,9 @@ fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(
         hex,
-        "5457414c1a0001000000000000000000000000000000870000000101620000000000000000000000000000\
+        "5457414c1d0001000000000000000000000000000000890000000101620000000000000000000000000000\
          000000000000000000000000000000000000010101650301760000000000000000e03f000000000000d03f\
          0e000101ab02cdd702038486880804ffffffffffffffffff0105fe06d70407dfc50808ffffffffffffffffff\
-         01090000c03f0a00000000000002c00b8080f281838985060c016b0d010101b47f9998"
+         01090000c03f0a00000000000002c00b8080f281838985060c016b0d0101010000778dca01"
     );
 }

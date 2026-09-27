@@ -49,6 +49,8 @@ fn row(i: u64) -> WalRow {
 
 fn batch(rows: usize) -> WalRecord {
     WalRecord::IngestBatch {
+        edits: Vec::new(),
+        receipt: Vec::new(),
         batch_id: "geonames-holdout-000017".to_owned(),
         body_hash: [7u8; 32],
         rows: (0..rows as u64).map(row).collect(),

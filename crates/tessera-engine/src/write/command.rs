@@ -15,13 +15,13 @@ use std::sync::Arc;
 
 use tessera_lifecycle::command::{
     AttributeRequest, BatchArtifacts, DeclaredValue, ExecError, MembershipGrown, SubmitError,
-    UnallocatedRow, ValuesRequest, VocabularyRequest,
+    UnallocatedEdit, UnallocatedRow, VocabularyRequest,
 };
 use tessera_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
 use tessera_lifecycle::wal::{ChangeOp, PlainViewDeclaration, ViewGroupDeclaration};
 use tessera_types::EntityId;
 
-use super::{AcceptError, ExecutorHealth, PublishedBatch, ValuesReceipt};
+use super::{AcceptError, ExecutorHealth, PublishedBatch};
 
 /// Where a command is answered. Every answer goes out through [`Reply::ack`] or [`Reply::fail`],
 /// so under fault injection every command's answer passes the `BeforeAck` pause and is recorded
@@ -111,20 +111,16 @@ impl<T> Pending<T> {
 /// What one accepted ingest batch did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ingested {
-    /// One `EntityId` per submitted row, in the caller's submitted row order, not the
-    /// signature-sorted order the IDs were assigned in. The handler turns each into a
-    /// `tessera_id` for the response, the only reason an entity ID is materialised outside the
-    /// engine at all.
-    pub(crate) entity_ids: Vec<EntityId>,
-    /// How many artifacts this batch's membership column created: a key no artifact held, on a
-    /// layer whose `value_set` is open. Zero for every batch that named none, which is every batch
-    /// that carries no membership column and every one whose keys all existed.
-    ///
-    /// Reported because minting is not undoable: a typo creates a permanent object rather than
-    /// being refused, and the mitigation is that the caller who made it is told, in the same 200
-    /// that accepted the rows. A replayed batch reports zero: the count is what this submission
-    /// created, and a duplicate batch id creates nothing.
+    /// One per row of the request, in request order.
+    pub(crate) receipt: Vec<tessera_lifecycle::RowReceipt>,
+    /// How many artifacts this batch's membership columns created: a key no artifact held, on a
+    /// layer whose `value_set` is open. Reported because a minted artifact cannot be undone.
     pub(crate) minted: u64,
+    /// How many memberships this batch's membership columns added, to artifacts it created and to
+    /// held ones alike.
+    pub(crate) joined: u64,
+    /// The batch id was accepted earlier with this body, and `receipt` is that acceptance's.
+    pub(crate) replayed: bool,
 }
 
 /// What one vocabulary declaration did.
@@ -157,10 +153,8 @@ pub(crate) struct VocabularyValues {
 /// What a view drop did beside dropping the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewDropped {
-    /// Entities `delete_dangling` submitted for deletion.
+    /// Items the drop deleted: those it left with a row in no view.
     pub deleted: u64,
-    /// Group-scoped fills not yet flushed, which addressed the dropped view and went with it.
-    pub fills_dropped: u64,
 }
 
 /// One unit of work for the write executor, and the channel it is answered on.
@@ -172,27 +166,49 @@ pub struct ViewDropped {
 /// acknowledged onto one name. Items and members are addressed by entity, which the handler
 /// resolves at the boundary, because a `tessera_id` means nothing without its key. Large payloads
 /// are boxed so one variant does not set the size of every command in the queue.
+/// One `/control/ingest` batch as its handler resolved it.
+pub(crate) struct IngestSubmission {
+    /// The rows the batch writes: items it creates, and items it adds to its view in place.
+    pub(crate) rows: Vec<UnallocatedRow>,
+    /// The items the batch moves to new entities.
+    pub(crate) edits: Vec<SubmittedEdit>,
+    /// One per row of the request: the written row it became, or the item it left unchanged.
+    pub(crate) slots: Vec<tessera_lifecycle::Slot>,
+    /// The unique values the created rows set, as `(declared position, key widened)`.
+    pub(crate) keys: Vec<(u16, u128)>,
+    pub(crate) batch_id: String,
+    pub(crate) body_hash: [u8; 32],
+    /// The artifacts the written rows name in a column named for a layer. Resolved and grown
+    /// when the window closes, in the same commit as the rows.
+    pub(crate) artifacts: BatchArtifacts,
+    /// The live unique entries' sequence number the handler resolved the batch at; the
+    /// executor re-checks the created rows' values against the entries added since.
+    pub(crate) unique_seq: u64,
+    /// The request rows creating an item whose label resolves to more terms than the plugin
+    /// declares an item carries.
+    pub(crate) over_bound: Vec<u32>,
+}
+
+/// One item an ingest batch edits, and what the handler read of it: the executor refuses the
+/// edit as stale where the item's rows have moved since.
+pub(crate) struct SubmittedEdit {
+    pub(crate) edit: UnallocatedEdit,
+    /// Every view the old entity held a row in, as the handler read it.
+    pub(crate) held_views: Vec<String>,
+}
+
 pub(crate) enum Command {
-    /// An accepted `/control/ingest` batch. `batch_id` and `body_hash` are the idempotency key.
-    /// The answer is the entity per row, in the caller's order, and how many artifacts it minted.
+    /// An accepted `/control/ingest` batch, resolved by its handler. `batch_id` and `body_hash`
+    /// are the idempotency key. The answer is what each row of the request became.
     Ingest {
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        /// The artifacts this batch's rows named in a column named for a layer, empty for a batch
-        /// that named none. Resolved and grown when the window closes, in the same commit as the
-        /// rows, so there is no state in which a point is ingested and its membership is not.
-        artifacts: BatchArtifacts,
-        /// The live unique entries' sequence number the handler checked this batch's unique values
-        /// at; the executor re-checks them against the entries added since.
-        unique_seq: u64,
+        submission: IngestSubmission,
         reply: Reply<Ingested>,
     },
-    /// One accepted `/control/changes` entry. The only command on the deny lane
+    /// One accepted `/control/changes` request, applied whole. The only command on the deny lane
     /// ([`Command::is_never_shed`]).
-    Change {
-        entity: EntityId,
-        op: ChangeOp,
+    Changes {
+        changes: Vec<(EntityId, ChangeOp)>,
+        stamp: crate::edited::Stamp,
         reply: Reply<()>,
     },
     /// Register an annotation layer. The answer is the layer's own entity, which the handler turns
@@ -212,13 +228,11 @@ pub(crate) enum Command {
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
         reply: Reply<()>,
     },
-    /// Drop a view of a view group. Its key is never issued again. With `delete_dangling`, the
-    /// entities that hold a row in no other view are submitted as ordinary deletions, which retire
-    /// at the fold like any other.
+    /// Drop a view of a view group, deleting the items it leaves with a row in no view. The
+    /// deletions retire at the fold like any other.
     DropView {
         group: String,
         key: String,
-        delete_dangling: bool,
         reply: Reply<ViewDropped>,
     },
     /// Declare an attribute column. The answer is whether an identical declaration already held the
@@ -256,6 +270,7 @@ pub(crate) enum Command {
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
+        stamp: crate::edited::Stamp,
         reply: Reply<PublishedBatch>,
     },
     /// Add entities to the memberships of artifacts that exist, each named by its key. The whole
@@ -265,15 +280,8 @@ pub(crate) enum Command {
         layer: String,
         level: u32,
         joins: Vec<IncomingGrowth>,
+        stamp: crate::edited::Stamp,
         reply: Reply<Vec<MembershipGrown>>,
-    },
-    /// An accepted `POST /control/values` batch: attribute values for entities that exist, filled
-    /// per cell. The answer says how many cells were filled, already held, joined and minted.
-    Values {
-        request: Box<ValuesRequest>,
-        /// The unique values' sequence number the handler checked them at.
-        unique_seq: u64,
-        reply: Reply<ValuesReceipt>,
     },
 }
 
@@ -295,7 +303,7 @@ impl Command {
     /// unrefusable answer to. There is no `submit_deny` to reach for instead: the lane follows the
     /// command, and this function is the whole of the rule.
     pub(crate) fn is_never_shed(&self) -> bool {
-        matches!(self, Command::Change { .. })
+        matches!(self, Command::Changes { .. })
     }
 }
 
@@ -314,9 +322,9 @@ mod tests {
                 #[cfg(feature = "fault-injection")]
                 None,
             );
-            let cmd = Command::Change {
-                entity: EntityId::new(1),
-                op,
+            let cmd = Command::Changes {
+                changes: vec![(EntityId::new(1), op)],
+                stamp: Default::default(),
                 reply,
             };
             assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
@@ -327,11 +335,17 @@ mod tests {
                 None,
             );
         let ingest = Command::Ingest {
-            rows: Vec::new(),
-            batch_id: "b".into(),
-            body_hash: [0u8; 32],
-            artifacts: Default::default(),
-            unique_seq: 0,
+            submission: IngestSubmission {
+                rows: Vec::new(),
+                edits: Vec::new(),
+                slots: Vec::new(),
+                keys: Vec::new(),
+                batch_id: "b".into(),
+                body_hash: [0u8; 32],
+                artifacts: Default::default(),
+                unique_seq: 0,
+                over_bound: Vec::new(),
+            },
             reply,
         };
         assert!(!ingest.is_never_shed());

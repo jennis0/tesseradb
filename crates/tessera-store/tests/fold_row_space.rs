@@ -48,6 +48,7 @@ fn write_input(dir: &Path, seg_id: &str, entities: &[u64], stride: u64) -> FoldS
     FoldSegmentInput {
         seg_id: seg_id.to_string(),
         dir: seg_dir,
+        entities: tessera_store::edited::RowEntities::Numbers,
     }
 }
 

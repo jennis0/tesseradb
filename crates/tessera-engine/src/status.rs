@@ -20,6 +20,8 @@ pub(crate) struct ServeCounters {
     /// `member_of` leaves that read the level's row column rather than an artifact-major
     /// membership, whose walk is measurably slower.
     pub(crate) member_of_column_walks: AtomicU64,
+    /// Bulk-read stretches driven from their filter's matches rather than walked over the view.
+    pub(crate) driven_stretches: AtomicU64,
     /// Requests served from a one-generation-stale entry.
     pub(crate) stale_serves: AtomicU64,
     /// Entries the background refresh has produced.
@@ -156,6 +158,11 @@ impl Engine {
     /// membership.
     pub fn member_of_column_walks(&self) -> u64 {
         self.counters.member_of_column_walks.load(Ordering::Relaxed)
+    }
+
+    /// Bulk-read stretches driven from their filter's matches rather than walked over the view.
+    pub fn driven_stretches(&self) -> u64 {
+        self.counters.driven_stretches.load(Ordering::Relaxed)
     }
 
     /// Delegates to `WritePath::allocator_high_water`, which owns the allocator.
@@ -321,7 +328,8 @@ impl Engine {
     }
 
     /// Retirable deletions: `|deleted|`, never the union with `suppressed`. Read beside
-    /// [`Engine::overlay_depth`]: this is what a fold can reduce, since a suppression never retires.
+    /// [`Engine::overlay_depth`]: this is what a fold can reduce, since a fold retires a
+    /// suppression only of an entity it removes, which is deleted too.
     pub fn retirable_deletions(&self) -> u64 {
         self.generation.load().overlay.deleted_len()
     }
@@ -478,12 +486,6 @@ impl Engine {
     /// occupancy bound is checked against. Lags by at most one apply.
     pub fn buffered_items(&self) -> usize {
         self.write.health().buffered_items.load(Ordering::SeqCst)
-    }
-
-    /// Unflushed `POST /control/values` fills the buffer holds, entity- and group-scoped together.
-    /// A figure that never falls after a restart is a fill pinning the log that will not release.
-    pub fn buffered_fills(&self) -> usize {
-        self.generation().buffer.fill_count()
     }
 
     /// One past the lowest row-less entity ever allocated. Read beside the high-water mark:

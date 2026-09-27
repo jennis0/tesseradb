@@ -24,6 +24,7 @@ fn unit_quantisation() -> Quantisation {
 fn row(entity: u64, external_id: Option<&[u8]>, x: f64, y: f64) -> FlushRow {
     FlushRow {
         entity_id: EntityId::new(entity),
+        number: EntityId::new(entity),
         external_id: external_id.map(|id| id.to_vec()),
         x,
         y,
@@ -46,6 +47,7 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
             shard_id: 0,
             scalar_schema: &[],
             row_base,
+            entity_floor: 0,
         }, &[],
     )
     .unwrap()
@@ -237,6 +239,7 @@ fn unordered_rows_are_refused() {
             shard_id: 0,
             scalar_schema: &[],
             row_base: 50,
+            entity_floor: 0,
         }, &[],
     );
     assert!(result.is_err());

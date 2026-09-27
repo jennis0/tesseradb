@@ -4,15 +4,12 @@ use super::*;
 // Live state
 // =================================================================================================
 
-/// One accepted batch, as the idempotency index holds it.
-///
-/// The ids ride along so a byte-identical replay answers with the same `tessera_id`s without
-/// re-deriving them from `external_id`. A null-external-id row has none of those to derive them
-/// from. An accepted values batch was allocated nothing and carries an empty vector.
+/// One accepted batch, as the idempotency index holds it: what each row of the request became,
+/// so a byte-identical replay answers the `tessera_id`s the first acceptance did.
 #[derive(Clone)]
 pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) body_hash: [u8; 32],
-    pub(in crate::write) entity_ids: Vec<EntityId>,
+    pub(in crate::write) receipt: Vec<tessera_lifecycle::RowReceipt>,
     /// Where the record carrying this batch lies in the log. The index is a cache of the WAL
     /// ([`tessera_lifecycle::batch_identity`]), so an entry outlives its record only until the
     /// rotation that deletes the member holding it. `Executor::rotate_wal` forgets everything
@@ -20,7 +17,7 @@ pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) wal_pos: u64,
 }
 
-/// The `/control/ingest` and `/control/values` idempotency index: batch id -> what was accepted
+/// The `/control/ingest` idempotency index: batch id -> what was accepted
 /// under it.
 pub(in crate::write) type AcceptedBatches = FxHashMap<String, AcceptedBatch>;
 
@@ -104,6 +101,25 @@ impl LiveState {
 
     pub(crate) fn allocator_low_water(&self) -> u64 {
         lock_recover(&self.allocator).low_water()
+    }
+
+    /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.
+    pub(crate) fn allocator_freed(
+        &self,
+    ) -> (
+        tessera_store::manifest::EntitySet,
+        Vec<tessera_store::manifest::HeldEntities>,
+    ) {
+        let alloc = lock_recover(&self.allocator);
+        let held = alloc
+            .held()
+            .iter()
+            .map(|(position, ids)| tessera_store::manifest::HeldEntities {
+                position: *position,
+                entities: tessera_store::manifest::EntitySet::of(ids),
+            })
+            .collect();
+        (tessera_store::manifest::EntitySet::of(alloc.free()), held)
     }
 
     /// Runs `f` with both the registry and the allocator held, in that lock order.
@@ -438,10 +454,13 @@ impl LiveState {
         }
     }
 
-    pub(crate) fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
+    pub(crate) fn accepted_batch(
+        &self,
+        batch_id: &str,
+    ) -> Option<([u8; 32], Vec<tessera_lifecycle::RowReceipt>)> {
         lock_recover(&self.accepted_batches)
             .get(batch_id)
-            .map(|held| (held.body_hash, held.entity_ids.clone()))
+            .map(|held| (held.body_hash, held.receipt.clone()))
     }
 
     /// The descriptor bytes behind `terms`, read out of the resolver's extension map.
@@ -450,7 +469,7 @@ impl LiveState {
     /// descriptor. Total for any id a flush plan can name: replay always re-interns a buffered
     /// item's descriptors before it re-enters the buffer, so `promote` may treat a miss as a
     /// failed flush rather than a dropped term.
-    pub(in crate::write) fn descriptors_of(&self, terms: &FxHashSet<TermId>) -> FxHashMap<TermId, Vec<u8>> {
+    pub(crate) fn descriptors_of(&self, terms: &FxHashSet<TermId>) -> FxHashMap<TermId, Vec<u8>> {
         let state = lock_recover(&self.resolver_state);
         state
             .0
@@ -469,38 +488,17 @@ impl LiveState {
         ids
     }
 
-    /// How many of `rows` name an external id the live map already holds. Backstops a race the
-    /// executor's queue creates against the handler's own check in `control.rs`.
-    ///
-    /// Returns a count, never the ids: an external id must not reach a response body. A deleted
-    /// holder does not collide and allocates fresh; otherwise a known external id is a join, and
-    /// the row is stamped with the entity it joins.
-    pub(in crate::write) fn established_collisions(
-        &self,
-        rows: &mut [UnallocatedRow],
-        is_deleted: impl Fn(EntityId) -> bool,
-        holds: impl Fn(EntityId, &str) -> bool,
-    ) -> usize {
-        let established = lock_recover(&self.established);
-        let mut collisions = 0;
-        for row in rows.iter_mut() {
-            let Some(id) = row.external_id.as_ref() else {
-                continue;
-            };
-            let Some(entity) = established.get(id.as_slice()).copied() else {
-                continue;
-            };
-            if is_deleted(entity) {
-                row.join = None;
-                continue;
-            }
-            if holds(entity, &row.view) {
-                collisions += 1;
-                continue;
-            }
-            row.join = Some(entity);
-        }
-        collisions
+    /// The terms `descriptors` resolve to, interning none: `None` where one is novel, which no
+    /// stored label holds.
+    pub(crate) fn lookup_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Option<Vec<TermId>> {
+        let state = lock_recover(&self.resolver_state);
+        descriptors
+            .iter()
+            .map(|d| {
+                dict.lookup(d)
+                    .or_else(|| state.0.get(d.as_slice()).copied())
+            })
+            .collect()
     }
 
     /// Drop every retired entity's external-id binding from the live map: the other half of a
@@ -545,19 +543,19 @@ impl LiveState {
     /// Index one accepted batch, at the position of the record that carries it.
     ///
     /// The three arguments are [`tessera_lifecycle::BatchIdentity`]'s three fields plus that
-    /// position, and both accept sites check them against what the record they appended says.
+    /// position.
     pub(in crate::write) fn record_accepted_batch(
         &self,
         batch_id: String,
         body_hash: [u8; 32],
-        ids: Vec<EntityId>,
+        receipt: Vec<tessera_lifecycle::RowReceipt>,
         wal_pos: u64,
     ) {
         lock_recover(&self.accepted_batches).insert(
             batch_id,
             AcceptedBatch {
                 body_hash,
-                entity_ids: ids,
+                receipt,
                 wal_pos,
             },
         );

@@ -126,9 +126,9 @@ class RenderRefused(Exception):
 
 
 class EntityAttributes(Case):
-    """Entity-scoped attributes declared live. The items the live build holds get their cells
-    through `/control/values` and the rest arrive over `/control/ingest` carrying them; with
-    `values_first` the values page goes first."""
+    """Entity-scoped attributes declared live. The items the live build holds get their values
+    on rows of `/control/ingest` without coordinates, and the rest arrive over `/control/ingest`
+    carrying them; with `values_first` the rows without coordinates go first."""
 
     def __init__(self, name: str, columns: list[Column], filters=(), values_first=False):
         self.name = name
@@ -168,7 +168,7 @@ class EntityAttributes(Case):
                 f"{self.name}-ingest",
             ),
             lambda: d.rows(
-                "/control/values", fx.value_rows(BUILT, self.columns), f"{self.name}-values"
+                "/control/ingest", fx.value_rows(BUILT, self.columns), f"{self.name}-values"
             ),
         ]
         for write in reversed(writes) if self.values_first else writes:
@@ -242,7 +242,7 @@ class LiveVocabularies(Case):
             fx.point_rows(INGESTED, [fx.fx_column(), *VOCABULARY_COLUMNS]),
             "vocab-ingest",
         )
-        d.rows("/control/values", fx.value_rows(BUILT, VOCABULARY_COLUMNS), "vocab-values")
+        d.rows("/control/ingest", fx.value_rows(BUILT, VOCABULARY_COLUMNS), "vocab-values")
         d.publish()
         return d
 

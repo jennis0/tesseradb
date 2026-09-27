@@ -3,11 +3,8 @@
 //! count that cycle moves.
 //!
 //! What this file pins is the gap `partitions[].segments_version` leaves. That version moves only
-//! where a cycle wrote a segment, so a commit that only filled values, or only published artifact
-//! records, moves nothing a client can key on and the only way to know it landed was to sleep.
-//! Two of the three tests here therefore assert the version *did not* move beside asserting the
-//! counter did: a `publication` that only tracked segments would pass on the count and fail on
-//! the pair.
+//! where a cycle wrote a segment, so a commit that only published artifact records moves nothing a
+//! client can key on and the only way to know it landed was to sleep.
 //!
 //! The executor's own counters, `write_executor.flush.ticks` and `.flushes`, answer a different
 //! question and stay where they are. They count what the executor did; this counts what a caller
@@ -82,43 +79,6 @@ async fn await_publication(server: &TestServer, n: u64) {
     .await;
 }
 
-async fn declare_attribute(server: &TestServer, body: Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/attributes"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    let answer: Value = resp.json().await.unwrap_or(Value::Null);
-    assert!(
-        status == 200 || status == 201,
-        "the declaration is accepted: {status} {answer}"
-    );
-}
-
-/// The `tessera_id`s a filtered viewport answers, from a fresh session so anything published
-/// since the last one is in the answer.
-async fn filtered(server: &TestServer, filters: Value) -> BTreeSet<u64> {
-    let token = token_for(server, &["0", "1"][..]).await;
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(&token)
-        .json(&json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
-            "filters": filters
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 200);
-    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
-    points.into_iter().map(|(id, _)| id).collect()
-}
-
 /// The `tessera_id`s `s0` serves from a small box around one point, from a fresh session. Small
 /// enough that the fixture's own rows, which sit on a grid across the frame, cannot fill the k
 /// budget and hide the row a test is asking about.
@@ -160,51 +120,6 @@ async fn points_in(server: &TestServer, view: &str) -> BTreeSet<u64> {
 }
 
 // ---------------------------------------------------------------------------------------------
-
-/// **A values-only commit.** A fill acquires no geometry, so the cycle that publishes it writes
-/// no segment and `segments_version` stands still; the counter is what says the cell is readable.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_values_only_commit_is_readable_once_the_counter_reaches_the_answer() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-    declare_attribute(
-        &server,
-        json!({"name": "tag", "type": "keyword", "index": true}),
-    )
-    .await;
-
-    let version_before = segments_version(&server).await;
-
-    let resp = server
-        .client
-        .post(server.control_url("/control/values"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "values-1")
-        .header("x-tessera-view", "s0")
-        .json(&json!([{"external_id": member(3), "tag": "alpha"}]))
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    let answer: Value = resp.json().await.unwrap();
-    assert_eq!(status, 200, "the fill is accepted: {answer}");
-    assert_eq!(answer["filled"], 1);
-
-    let n = request_flush(&server).await;
-    await_publication(&server, n).await;
-
-    assert_eq!(
-        filtered(&server, json!({ "tag": { "eq": "alpha" } }))
-            .await
-            .len(),
-        1,
-        "the cell the cycle published answers a filter as soon as the counter names it"
-    );
-    assert!(
-        segments_version(&server).await >= version_before,
-        "a version never moves backwards"
-    );
-}
 
 /// **An artifacts-only commit.** A publication into a declared layer writes no point rows either,
 /// so the same gap applies: the layer's artifacts are served from a row form the cycle published
@@ -585,24 +500,6 @@ async fn artifacts_served(server: &TestServer) -> usize {
         .unwrap_or(0)
 }
 
-/// One `POST /control/values` batch, accepted.
-async fn post_values(server: &TestServer, batch_id: &str, body: &Value) -> Value {
-    let resp = server
-        .client
-        .post(server.control_url("/control/values"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
-        .json(body)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    let answer: Value = resp.json().await.unwrap();
-    assert_eq!(status, 200, "the batch is accepted: {answer}");
-    answer
-}
-
 // ---- The counter advances only on a publication ------------------------------------------------
 
 /// **A node whose plan is refused holds its cycle open.** A poisoned WAL publishes no flush
@@ -866,7 +763,7 @@ async fn the_wait_is_bounded_and_says_so() {
     assert_eq!(resp.status().as_u16(), 200, "the write is not refused");
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["visible"], json!(false), "{body}");
-    assert_eq!(body["accepted"], json!(1), "the rows were taken: {body}");
+    assert_eq!(body["created"], json!(1), "the rows were taken: {body}");
 
     // The number stands, and the caller reaches it by reading status as it would have anyway.
     await_publication(&server, body["publication"].as_u64().unwrap()).await;
@@ -1030,7 +927,7 @@ async fn an_unknown_wait_value_on_the_flush_is_refused() {
 
 // ---- The replay answer ---------------------------------------------------------------------------
 
-/// **A replayed page accepts nothing and says so** (write-path §2.4). `accepted` is the effect
+/// **A replayed page accepts nothing and says so.** `created` is the effect
 /// this submission had, so a client summing it over its pages is not made to double-count every
 /// page it retried; `tessera_ids` is the full list either way, which is what a caller correlates
 /// its rows by.
@@ -1041,7 +938,7 @@ async fn a_replayed_page_accepts_nothing_and_says_so() {
 
     let ext = external_id_of(N_ITEMS + 1);
     let first = ingest_one(&server, "replay-1", &ext).await;
-    assert_eq!(first["accepted"], json!(1));
+    assert_eq!(first["created"], json!(1));
     assert!(
         first.get("replayed").is_none(),
         "a first submission carries no flag: {first}"
@@ -1050,38 +947,12 @@ async fn a_replayed_page_accepts_nothing_and_says_so() {
     let second = ingest_one(&server, "replay-1", &ext).await;
     assert_eq!(second["replayed"], json!(true), "{second}");
     assert_eq!(
-        second["accepted"],
+        second["created"],
         json!(0),
         "the replay took no rows, so a client's sum stays honest: {second}"
     );
     assert_eq!(
         second["tessera_ids"], first["tessera_ids"],
         "and the identifiers are the same ones, which is what the caller correlates by"
-    );
-}
-
-/// The same on the values route, where the fill rule answers a replay as a no-op and the flag is
-/// what tells that apart from cells another writer had already filled identically.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_replayed_values_page_is_flagged() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-    declare_attribute(
-        &server,
-        json!({"name": "tag", "type": "keyword", "index": true}),
-    )
-    .await;
-
-    let body = json!([{"external_id": member(3), "tag": "alpha"}]);
-    let first = post_values(&server, "values-1", &body).await;
-    assert_eq!(first["filled"], json!(1));
-    assert!(first.get("replayed").is_none(), "{first}");
-
-    let second = post_values(&server, "values-1", &body).await;
-    assert_eq!(second["replayed"], json!(true), "{second}");
-    assert_eq!(
-        second["filled"],
-        json!(0),
-        "the fill rule answered it as a no-op: {second}"
     );
 }

@@ -1,5 +1,5 @@
-//! Waiting on the write executor: the poll loop the lifecycle cases share, and the three
-//! executor events they wait for.
+//! Waiting on the write executor: the poll loop the lifecycle cases share, and the executor
+//! events they wait for.
 //!
 //! Each case names its own deadline (a `WAIT` const, or the argument to [`wait_until`]) because a
 //! heavy corpus needs longer than a two-item one; the loop itself is the same everywhere.
@@ -21,24 +21,34 @@ pub fn wait_until(what: &str, within: Duration, mut cond: impl FnMut() -> bool) 
 
 /// Drive ticks until `cond` holds. A pass is dispatched on a tick only while none of its kind is
 /// outstanding, so waiting on one tick can miss the pass a test is waiting for.
+///
+/// Returns once the cycle its last request was answered with has published, so no request of its
+/// own is left to publish rows the caller buffers next.
 pub fn tick_until(engine: &Engine, what: &str, within: Duration, mut cond: impl FnMut() -> bool) {
     let mut last = Instant::now() - Duration::from_secs(1);
+    let mut requested = 0;
     wait_until(what, within, || {
         if last.elapsed() >= Duration::from_millis(50) {
-            engine.request_flush();
+            requested = engine.request_flush_publication();
             last = Instant::now();
         }
         cond()
     });
+    wait_until("the last requested publication", within, || {
+        engine.publication() >= requested
+    });
 }
 
-/// Force a flush and wait for it to publish.
-pub fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    wait_until("the flush never published", Duration::from_secs(60), || {
-        engine.write_executor_stats().flushes > before
-    });
+/// Request a flush once and wait for the publication cycle that honours it: every row buffered
+/// before the request is then served, and no request is left to publish rows buffered after this
+/// returns.
+pub fn publish_buffered(engine: &Engine) {
+    let publication = engine.request_flush_publication();
+    wait_until(
+        "the publication honouring the flush",
+        Duration::from_secs(60),
+        || engine.publication() >= publication,
+    );
 }
 
 /// Force a fold and wait for it to publish, failing the moment one is discarded rather than

@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::fixed32;
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_store::manifest::{
-    CurrentPointer, DenySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
-    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
+    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
@@ -120,8 +120,8 @@ pub fn build_bundle(root: &Path, n: u64) {
         dict_extents: vec![],
         external_id_runs: vec![],
         locator_extents: vec![],
-        tombstones: DenySet::default(),
-        deny: DenySet::default(),
+        tombstones: EntitySet::default(),
+        deny: EntitySet::default(),
         vocabulary_extensions: vec![],
         files,
         ..SegmentsManifest::empty()
@@ -212,6 +212,7 @@ pub fn flush_segment(
             rows: (entity_lo..entity_lo + count)
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
+                    number: EntityId::new(e),
                     external_id: Some(format!("ext-{e}").into_bytes()),
                     x: ((e * 37) % 100) as f64 / 100.0,
                     y: ((e * 61) % 100) as f64 / 100.0,
@@ -228,6 +229,7 @@ pub fn flush_segment(
             shard_id: 0,
             scalar_schema: &[],
             row_base,
+            entity_floor: 0,
         }, &[],
     )
     .expect("write_flush_segment");
@@ -240,6 +242,7 @@ pub fn flush_segment(
         .join("segments")
         .join(&seg_id);
     let segment = SegmentData {
+        entities: tessera_store::edited::RowEntities::Numbers,
         seg_id,
         row_count: out.segment.row_count,
         morton: MortonSlice::load(&seg_dir.join("morton.u32")).expect("morton"),

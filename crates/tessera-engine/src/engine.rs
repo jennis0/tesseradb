@@ -1,7 +1,7 @@
 //! The engine's state, the bundle open protocol and the shared compute pool.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -11,13 +11,12 @@ use rustc_hash::FxHashMap;
 use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_lifecycle::Overlay;
 use tessera_plugin::Plugin;
-use tessera_store::{Bundle, StoreError};
 use tessera_store::manifest::{CurrentPointer, Declarations};
 use tessera_store::read::open_bundle;
 use tessera_store::vocabulary::Vocabularies;
+use tessera_store::{Bundle, StoreError};
 use tessera_types::{EntityId, IdentityKey};
 
-use crate::{Generation, GenerationHandle};
 use crate::cache::RowProjectionCache;
 use crate::config::{coalesce_policy, merge_policy, EngineConfig};
 use crate::error::{EngineError, Result};
@@ -25,6 +24,7 @@ use crate::geometry::GeometryPublication;
 use crate::status::ServeCounters;
 use crate::switches::TestSwitches;
 use crate::write::{PublishGeometryError, WritePath};
+use crate::{Generation, GenerationHandle};
 
 /// Builds the shared compute pool with a panic handler. `install`, `join` and `scope` propagate a
 /// worker panic to their caller and never reach this handler; `spawn`, used by the write path's
@@ -277,6 +277,34 @@ fn across_partitions<'a, T, I: IntoIterator<Item = T>>(
         .collect()
 }
 
+/// The freed entity ids the newest served side-manifest records, and the sets it holds back.
+/// "Newest" is the partition whose served manifest has the highest number, which is meaningful
+/// while a bundle has one partition, as every bundle has.
+///
+/// Every publication records the allocator's sets, which shrink as ids are issued and grow only at
+/// a fold, so an older manifest can list an id issued since. A stepped-down partition serves a
+/// manifest older than one it wrote, so nothing is taken where one is: the ids stay unissued.
+fn freed_of(bundle: &Bundle) -> (croaring::Bitmap, Vec<(u64, croaring::Bitmap)>) {
+    if bundle.partitions.values().any(|p| p.stepped_down()) {
+        return (croaring::Bitmap::new(), Vec::new());
+    }
+    let Some(newest) = bundle.partitions.values().max_by_key(|p| p.segments_n) else {
+        return (croaring::Bitmap::new(), Vec::new());
+    };
+    let manifest = &newest.manifest;
+    let free = manifest
+        .free_entities
+        .entities()
+        .cloned()
+        .unwrap_or_default();
+    let held = manifest
+        .held_entities
+        .iter()
+        .filter_map(|h| Some((h.position, h.entities.entities()?.clone())))
+        .collect();
+    (free, held)
+}
+
 /// The filter artefact of the bundle's first partition: the build's columns plus every extent that
 /// partition's side manifest names.
 fn open_filter_columns(
@@ -520,6 +548,7 @@ fn reconstruct_writes(
     // The row-less mark's homes are the side manifests only; `MANIFEST.json` carries no such
     // field.
     let side_manifest_low_waters: Vec<u64> = across_partitions(bundle, |m| [m.entity_id_low_water]);
+    let (free, held) = freed_of(bundle);
     // One partition today, so this concatenation is the whole registry; at more than one it is
     // the union.
     let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> =
@@ -562,6 +591,8 @@ fn reconstruct_writes(
                 tessera_types::layer::ROWLESS_CEILING,
                 &side_manifest_low_waters,
             ),
+            free,
+            held,
             layers: &manifest_layers,
             tombstones: &manifest_layer_tombstones,
             registry_version: across_partitions(bundle, |m| [m.layer_registry_version])
@@ -772,6 +803,15 @@ fn first_generation(
         .map_err(EngineError::Store)?,
         None => tessera_store::unique::UniqueIndexes::default(),
     };
+    let edited = match bundle.partitions.values().next() {
+        Some(partition) => tessera_store::edited::EditedIndex::open(
+            &partition.manifest.edited_items,
+            prefix_dir,
+            None,
+        )
+        .map_err(EngineError::Store)?,
+        None => tessera_store::edited::EditedIndex::default(),
+    };
 
     // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
     // cold start; only for the vocabularies a declared category column draws on.
@@ -811,6 +851,10 @@ fn first_generation(
             external_index: Arc::clone(&readers.external_index),
             unique: Arc::new(unique),
             unique_live: Arc::new(crate::unique::UniqueLive::derive(&bundle.manifest, &buffer)),
+            edited: Arc::new(edited),
+            edited_live: Arc::new(state.edited_live.clone()),
+            edit_epoch: 0,
+            fold_epoch: 0,
             delta_postings: readers.delta_postings.clone(),
             overlay_version: 0,
             overlay: Arc::new(overlay),
@@ -1042,6 +1086,10 @@ impl Engine {
         // A level nothing built a form for would otherwise hold its staged pieces for the
         // process's life.
         engine.shapes.clear_staged();
+        // The rows the log held and no flush wrote, which the occupancy bound and the row trigger
+        // count from the first request, not from the first write.
+        let buffered = engine.generation().buffer.len();
+        engine.write.health().buffered_items.store(buffered, Ordering::SeqCst);
         Ok(engine)
     }
 
@@ -1254,6 +1302,15 @@ pub(crate) fn open_rotation(
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
     );
 
+    let edited = Arc::new(
+        tessera_store::edited::EditedIndex::open(
+            &partition.manifest.edited_items,
+            &prefix_dir,
+            None,
+        )
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+    );
+
     Ok((
         bundle,
         crate::geometry::PrefixRotation {
@@ -1262,6 +1319,7 @@ pub(crate) fn open_rotation(
             external_index,
             filter_columns,
             unique,
+            edited,
             retired,
         },
     ))

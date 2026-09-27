@@ -891,9 +891,9 @@ impl Manifest {
     /// **One definition, because a key is not one view.** A create lands on every sharing group at
     /// the same moment and a drop takes it off every one of them, so anything that acts on "the
     /// views of this key" — [`Self::with_roster`]'s death loop, the drop's buffer prune, its
-    /// `delete_dangling` probe, and the WAL replay's own prune — must expand the same way. Three
-    /// copies of the expansion is how one of them comes to prune a single spelling and leave the
-    /// other's rows to be adopted by whatever takes the key next
+    /// probe for the items it leaves in no view, and the WAL replay's own prune — must expand the
+    /// same way. Three copies of the expansion is how one of them comes to prune a single spelling
+    /// and leave the other's rows to be adopted by whatever takes the key next
     /// ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
     ///
     /// The caller passes the **owner**: `owner_of_group` is what turns the group a request named
@@ -1287,23 +1287,23 @@ pub struct SegmentDescriptor {
     pub entity_hi: u64,
 }
 
-/// A set of entity ids under a deny, as `deny` and `tombstones` carry one: the portable Roaring
-/// serialisation, base64 in the JSON.
+/// A set of entity ids, as `deny`, `tombstones` and the allocator's freed ids are carried: the
+/// portable Roaring serialisation, base64 in the JSON.
 ///
 /// The bytes are decoded once, when the manifest is deserialised, and an id set that does not
 /// decode is held as undecodable rather than as the empty set. [`SegmentsManifest::honourability`]
 /// then refuses the manifest, because a reader that took undecodable bytes for "nothing is
 /// denied" would serve every entity the field names.
 #[derive(Debug, Clone)]
-pub struct DenySet {
+pub struct EntitySet {
     encoded: String,
     entities: Option<croaring::Bitmap>,
 }
 
-impl DenySet {
+impl EntitySet {
     /// The set `entities` names, encoded for a manifest about to be written.
     pub fn of(entities: &croaring::Bitmap) -> Self {
-        DenySet {
+        EntitySet {
             encoded: base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
                 entities.serialize::<croaring::Portable>(),
@@ -1336,13 +1336,22 @@ impl DenySet {
     }
 }
 
-impl Default for DenySet {
+/// One set of freed entity ids held back in [`SegmentsManifest::held_entities`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeldEntities {
+    /// The WAL position the log must be kept from before these ids are issued.
+    pub position: u64,
+    pub entities: EntitySet,
+}
+
+impl Default for EntitySet {
     fn default() -> Self {
-        DenySet::of(&croaring::Bitmap::new())
+        EntitySet::of(&croaring::Bitmap::new())
     }
 }
 
-impl Serialize for DenySet {
+impl Serialize for EntitySet {
     fn serialize<S: serde::Serializer>(
         &self,
         serializer: S,
@@ -1351,13 +1360,13 @@ impl Serialize for DenySet {
     }
 }
 
-impl<'de> Deserialize<'de> for DenySet {
+impl<'de> Deserialize<'de> for EntitySet {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         let encoded = String::deserialize(deserializer)?;
-        let entities = DenySet::decode(&encoded);
-        Ok(DenySet { encoded, entities })
+        let entities = EntitySet::decode(&encoded);
+        Ok(EntitySet { encoded, entities })
     }
 }
 
@@ -1546,6 +1555,11 @@ pub struct TextExtent {
     /// and appears in no posting. Without this the layer would report it absent, and a later
     /// extent could claim it.
     pub presence: String,
+    /// The prose itself, one row per entity in [`Self::presence`]: `Some` exactly when
+    /// [`Self::view`] is. An entity-scoped column's prose is in the record blob; a group-scoped
+    /// column's is here, since the postings cannot give back the words they were made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prose: Option<RecordExtent>,
 }
 
 impl TextExtent {
@@ -1557,8 +1571,13 @@ impl TextExtent {
             self.presence.as_str(),
         ]
         .into_iter()
+        .chain(self.prose.iter().flat_map(RecordExtent::files))
     }
 }
+
+/// The directory under a group-scoped text column's base that holds its prose, as a record blob
+/// with one field per row.
+pub const SCOPED_PROSE_DIR: &str = "prose";
 
 /// One entry of `record_extents`: one flush's record-blob layer (`records-and-search.md` §3, §7).
 ///
@@ -1796,16 +1815,21 @@ pub struct TermImageExtent {
 /// locator-second, and rotation empties the live map at restart.
 ///
 /// The file is a dense `u32` array over `[entity_lo, entity_hi]`, no header, `0xFFFFFFFF` for an
-/// entity with no caller-supplied external id (contracts §3.4 r6 makes it optional). Each slot is
-/// an **ordinal into `external_id_run`**, named here rather than inferred, because a segment's
-/// extent is its own file and the concatenation order that gives the base locator its meaning does
-/// not extend across flushes.
+/// entity with no caller-supplied external id (contracts §3.4 r6 makes it optional), followed by
+/// [`Self::listed`] `(entity, slot)` pairs of `u32`s for the entities below `entity_lo` it covers,
+/// ascending by entity: an entity id a fold freed and an edit took again, as
+/// [`crate::permutation::SegmentExtent::below`] lists its row. Each slot is an **ordinal into
+/// `external_id_run`**, named here rather than inferred, because a segment's extent is its own
+/// file and the concatenation order that gives the base locator its meaning does not extend across
+/// flushes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocatorExtent {
     pub path: String,
     pub entity_lo: u64,
-    /// Inclusive.
+    /// Inclusive; `entity_lo - 1` where every entity the extent covers is listed.
     pub entity_hi: u64,
+    /// How many `(entity, slot)` pairs follow the dense array.
+    pub listed: u64,
     /// Prefix-relative path of the `external_id_runs` entry these ordinals index.
     pub external_id_run: String,
 }
@@ -1836,6 +1860,42 @@ impl UniqueIndexRuns {
             .iter()
             .map(|run| run.path.as_str())
             .chain(self.live.iter().map(String::as_str))
+    }
+}
+
+/// One index's runs in the key run format: the base runs a fold wrote, with their key ranges, and
+/// the live runs written since.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyRuns {
+    /// Ascending by key range with disjoint ranges.
+    pub base: Vec<BaseKeyRun>,
+    /// Prefix-relative, oldest first. Any key may be in any of them.
+    pub live: Vec<String>,
+}
+
+impl KeyRuns {
+    /// Every run file these runs name.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.base
+            .iter()
+            .map(|run| run.path.as_str())
+            .chain(self.live.iter().map(String::as_str))
+    }
+}
+
+/// The edited items' two indexes ([`crate::edited`]): number to entity, and entity to number.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditedItemsRuns {
+    pub by_number: KeyRuns,
+    pub by_entity: KeyRuns,
+}
+
+impl EditedItemsRuns {
+    /// Every run file both indexes name.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.by_number.files().chain(self.by_entity.files())
     }
 }
 
@@ -2112,19 +2172,31 @@ pub struct SegmentsManifest {
     /// No `serde(default)`: an absent list would read as no column being unique, and the ingest
     /// refusal and the `eq` route would then stop without anything reporting it.
     pub unique_indexes: Vec<UniqueIndexRuns>,
+    /// Which entity holds each item an edit moved to a new entity ([`crate::edited`]).
+    ///
+    /// No `serde(default)`: an absent map would name every edited item's first entity, which a
+    /// fold has removed.
+    pub edited_items: EditedItemsRuns,
+    /// The entity ids a fold freed that the allocator issues before its high-water, as of this
+    /// publication (`tessera_lifecycle::alloc`). Ids that do not decode are read as none, which
+    /// issues nothing twice.
+    pub free_entities: EntitySet,
+    /// Freed entity ids the allocator holds back until the log keeps no record older than the
+    /// position beside them.
+    pub held_entities: Vec<HeldEntities>,
     /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
     /// a bundle straight out of `tessera build`, whose one `ext-locator.u32` covers every entity
     /// it knows about.
     #[serde(default)]
     pub locator_extents: Vec<LocatorExtent>,
-    /// The entities already deleted whose rows a fold has not yet removed — see [`DenySet`].
+    /// The entities already deleted whose rows a fold has not yet removed — see [`EntitySet`].
     #[serde(default)]
-    pub tombstones: DenySet,
-    /// The suppression set as it stood when this manifest was written — see [`DenySet`]. A
+    pub tombstones: EntitySet,
+    /// The suppression set as it stood when this manifest was written — see [`EntitySet`]. A
     /// separate field from [`SegmentsManifest::tombstones`] and never its union: publishing the
     /// union would make every deletion look retirable by an unsuppress.
     #[serde(default)]
-    pub deny: DenySet,
+    pub deny: EntitySet,
     /// Category bindings minted since the last build or fold — see [`VocabularyExtension`]. Empty
     /// in a bundle straight out of `tessera build`, and emptied again by every fold.
     #[serde(default)]
@@ -2261,9 +2333,12 @@ impl SegmentsManifest {
             text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             unique_indexes: Vec::new(),
+            edited_items: EditedItemsRuns::default(),
+            free_entities: EntitySet::default(),
+            held_entities: Vec::new(),
             locator_extents: Vec::new(),
-            tombstones: DenySet::default(),
-            deny: DenySet::default(),
+            tombstones: EntitySet::default(),
+            deny: EntitySet::default(),
             vocabulary_extensions: Vec::new(),
             files: BTreeMap::new(),
         }
@@ -2592,8 +2667,8 @@ mod tests {
     }
 
     /// A `deny` set for the ids given.
-    fn deny_set(ids: &[u32]) -> DenySet {
-        DenySet::of(&ids.iter().copied().collect::<croaring::Bitmap>())
+    fn deny_set(ids: &[u32]) -> EntitySet {
+        EntitySet::of(&ids.iter().copied().collect::<croaring::Bitmap>())
     }
 
     /// A deny field whose bytes do not decode is refused, never read as the empty set. Reading it
@@ -2620,7 +2695,7 @@ mod tests {
     fn a_deny_set_round_trips_through_its_json_encoding() {
         for ids in [vec![], vec![0u32], vec![1, 2, 3, 70_000, u32::MAX]] {
             let written = serde_json::to_value(deny_set(&ids)).unwrap();
-            let read: DenySet = serde_json::from_value(written).unwrap();
+            let read: EntitySet = serde_json::from_value(written).unwrap();
             assert_eq!(
                 read.entities().unwrap().to_vec(),
                 ids,

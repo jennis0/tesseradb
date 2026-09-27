@@ -145,7 +145,6 @@ fn build_rows_with_signatures(
         .map(|i| {
             let descriptors = vec![format!("{}", i % signatures.max(1)).into_bytes()];
             UnallocatedRow {
-                join_only: false,
                 external_id: Some(format!("{tag}-{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
@@ -190,7 +189,7 @@ fn row_construction_against_accept_ingest() {
 
         let t = Instant::now();
         engine
-            .accept_ingest(rows, format!("a-{batch}"), [batch as u8; 32])
+            .ingest_rows(rows, format!("a-{batch}"), [batch as u8; 32])
             .expect("ingest is accepted");
         accept_total += t.elapsed();
         done += n;
@@ -222,7 +221,7 @@ fn ingest_cost(engine: &Engine, total: usize, window: usize, between_flushes: us
     for (b, rows) in batches.into_iter().enumerate() {
         let t = Instant::now();
         engine
-            .accept_ingest(rows, format!("s-{b}"), [b as u8; 32])
+            .ingest_rows(rows, format!("s-{b}"), [b as u8; 32])
             .expect("ingest is accepted");
         spent += t.elapsed();
         since_flush += window;
@@ -307,7 +306,7 @@ fn cost_against_signature_diversity() {
         let t = Instant::now();
         for (b, rows) in batches.into_iter().enumerate() {
             engine
-                .accept_ingest(rows, format!("g-{b}"), [b as u8; 32])
+                .ingest_rows(rows, format!("g-{b}"), [b as u8; 32])
                 .expect("ingest is accepted");
         }
         let elapsed = t.elapsed();

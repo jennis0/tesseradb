@@ -2959,6 +2959,7 @@ dependencies = [
  "libc",
  "memmap2",
  "parquet",
+ "proptest",
  "rand 0.8.7",
  "rayon",
  "rustc-hash 1.1.0",
@@ -3006,6 +3007,7 @@ dependencies = [
  "tempfile",
  "tessera-authz",
  "tessera-filter",
+ "tessera-roaring",
  "tessera-types",
  "zstd",
 ]
@@ -3026,6 +3028,7 @@ dependencies = [
  "tessera-authz",
  "tessera-lifecycle",
  "tessera-types",
+ "twox-hash",
 ]
 
 [[package]]

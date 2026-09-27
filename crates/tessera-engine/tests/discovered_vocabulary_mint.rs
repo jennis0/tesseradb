@@ -6,7 +6,7 @@
 //! deliberately does not mint — see that function's own doc) and is resolved to a code once, on the
 //! write executor, at the close of the commit window the row lands in.
 //!
-//! Every case here calls `Engine::accept_ingest` directly, the same boundary the HTTP handler calls
+//! Every case here calls `Engine::ingest` directly, the same boundary the HTTP handler calls
 //! after it has already turned a discovered vocabulary's key into `WalScalar::Utf8` (or, for a
 //! declared one, into its code). That is deliberate: it is the executor's own resolution this file
 //! is pinning, not the handler's validation, which has no engine-crate seam to test from here.
@@ -188,9 +188,8 @@ fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
 
 fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId {
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -286,7 +285,7 @@ fn a_novel_key_mints_and_the_row_stores_the_code() {
         .expect("the novel key is bound as soon as the window that minted it is published");
     assert_ne!(code, 0, "0 is the absent sentinel, never a minted code");
 
-    flush(&engine);
+    publish_buffered(&engine);
 
     assert_eq!(
         stored_code_of(&root, "department", entity),
@@ -326,7 +325,6 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     let engine = engine_over(tmp.path(), &root, config());
 
     let row = |external_id: &str| UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -339,7 +337,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     };
 
     let entities = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row("f-1"), row("f-2")],
             "batch-finance".to_string(),
             [1u8; 32],
@@ -374,7 +372,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     assert_eq!(finance_mints[0].2, code);
 
     let engine = engine_over(tmp.path(), &root, config());
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(stored_code_of(&root, "department", entities[0]), Some(code));
     assert_eq!(stored_code_of(&root, "department", entities[1]), Some(code));
     drop(engine);
@@ -496,9 +494,8 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
     // The space is now fully spent (`code_before` plus the four just minted = all five free
     // codes); a sixth novel key must be refused, not silently reuse one of the five.
     let err = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                join_only: false,
                 external_id: Some(b"one-too-many".to_vec()),
                 view: "s0".to_string(),
                 join: None,
@@ -612,7 +609,6 @@ fn a_refused_window_publishes_none_of_the_keys_it_drew() {
     let engine = engine_over(tmp.path(), &root, config());
 
     let row = |external_id: &str, key: &str| UnallocatedRow {
-        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
@@ -627,7 +623,7 @@ fn a_refused_window_publishes_none_of_the_keys_it_drew() {
     // The first row's key draws a code; the second is the empty string, which is not a value, so
     // the window is refused after the first has already minted.
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row("drawn-1", "logistics"), row("empty-1", "")],
             "batch-refused".to_string(),
             [7u8; 32],
@@ -686,7 +682,7 @@ fn a_declared_vocabulary_is_unaffected_by_the_mint_loop() {
         "nothing mints for a declared vocabulary — the assigned set must not grow"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         stored_code_of(&root, "band", entity),
         Some(2),

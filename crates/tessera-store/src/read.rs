@@ -149,14 +149,18 @@ pub struct SegmentData {
     /// `morton`, which selection evaluates per cell instead of per row.
     pub cuts: CutIndex,
     pub columns: ColumnsRef,
+    /// Where each row's entity is read ([`crate::edited`]).
+    pub entities: crate::edited::RowEntities,
 }
 
 impl SegmentData {
-    /// Opens a segment's three files from its directory. The error names the one that failed.
+    /// Opens a segment's three files from its directory, its rows' entities read from
+    /// `entities`. The error names the file that failed.
     pub fn load(
         dir: &Path,
         seg_id: &str,
         row_count: u32,
+        entities: crate::edited::RowEntities,
     ) -> std::result::Result<Self, SegmentLoadError> {
         Ok(SegmentData {
             seg_id: seg_id.to_string(),
@@ -179,7 +183,24 @@ impl SegmentData {
                     source,
                 }
             })?,
+            entities,
         })
+    }
+
+    /// The entity row `local` belongs to.
+    pub fn entity_of(
+        &self,
+        local: u32,
+        key: &tessera_types::IdentityKey,
+        shard_id: u32,
+    ) -> Result<tessera_types::EntityId> {
+        self.entities.entity_of(
+            local,
+            self.columns.tessera_id()[local as usize],
+            key,
+            shard_id,
+            &self.seg_id,
+        )
     }
 }
 
@@ -840,8 +861,39 @@ fn open_prefix(
                 }
             }
 
-            let segment = SegmentData::load(&seg_dir, &seg_desc.seg_id, seg_desc.row_count)
-                .map_err(|e| e.source)?;
+            // A base segment's rows name their entities in the view's row-to-entity file. A flush
+            // or merge segment lists the rows an edit moved, a file that must be there and verify
+            // where the manifest names it.
+            let entities = if is_base_segment {
+                match view_entry.row_space.row_entity() {
+                    Some(table) => crate::edited::RowEntities::Table(std::sync::Arc::clone(table)),
+                    None => crate::edited::RowEntities::Numbers,
+                }
+            } else {
+                let rel = format!(
+                    "partitions/{}/{}/segments/{}/{}",
+                    partition_desc.phash,
+                    crate::view_rel(&seg_desc.view),
+                    seg_desc.seg_id,
+                    crate::edited::EDITED_ROWS_FILE
+                );
+                let listed =
+                    segments_manifest.files.contains_key(&rel) || manifest.files.contains_key(&rel);
+                if listed {
+                    ensure_verified(
+                        &rel,
+                        &segments_manifest,
+                        &manifest.files,
+                        &seg_dir.join(crate::edited::EDITED_ROWS_FILE),
+                    )?;
+                }
+                crate::edited::RowEntities::Listed(std::sync::Arc::new(
+                    crate::edited::EditedRows::open(&seg_dir, listed)?,
+                ))
+            };
+            let segment =
+                SegmentData::load(&seg_dir, &seg_desc.seg_id, seg_desc.row_count, entities)
+                    .map_err(|e| e.source)?;
             let (morton, columns) = (&segment.morton, &segment.columns);
 
             if morton.len() as u32 != seg_desc.row_count
@@ -907,7 +959,7 @@ fn open_prefix(
 
             // Every segment after the first is one a flush appended or a merge collapsed, and it
             // owns row space above the base. Its entity→row mapping is rebuilt here from its own
-            // `tessera_id` column — nothing on disk carries it, deliberately; see
+            // `tessera_id` column and the rows an edit moved; see
             // [`SegmentExtent::rebuild`]. `with_extent` then re-checks contiguity and
             // well-formedness, so a manifest listing segments out of entity order, or one whose
             // `row_count` disagrees with what the extent actually owns, fails closed here rather
@@ -925,11 +977,10 @@ fn open_prefix(
                     }
                 })?;
                 let extent = SegmentExtent::rebuild(
-                    &seg_desc.seg_id,
+                    &segment,
                     seg_desc.entity_lo,
                     seg_desc.entity_hi,
                     row_base,
-                    columns.tessera_id(),
                     &identity_key,
                     manifest.identity.shard_id,
                 )?;
