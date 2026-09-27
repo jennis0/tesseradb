@@ -134,16 +134,13 @@ acknowledged, written to the WAL, or allocated an entity id.
 
 ### Resolving a batch
 
-A row names an item by the values that identify one: its `tessera_id`, its external id, and each
-unique field's value it carries that is not null. The request handler reads one generation for the
-whole batch, off the executor thread, and looks each value up there: a `tessera_id` by inverting
-it, an external id in the live map and the bundle's runs, a unique value in the field's index. A
-deleted item names nothing, and a `tessera_id` names an item only while the service holds it (a
-row, a buffered row, or the label a flush wrote), since a fold that removes a deleted item also
-drops its deletion. The same
-rule answers a change naming a `tessera_id`. An external id bound since the handler's generation
-was taken, to an item that generation does not hold yet, sends the batch back to be decided
-against a newer one.
+A row names an item by the values that identify one: its `tessera_id`, and each unique field's
+value it carries that is not null. The request handler reads one generation for the whole batch,
+off the executor thread, and looks each value up there: a `tessera_id` by inverting it, a unique
+value in the field's index. A deleted item names nothing, and a `tessera_id` names an item only
+while the service holds it (a row, a buffered row, or the label a flush wrote), since a fold that
+removes a deleted item also drops its deletion. The same rule answers a change naming a
+`tessera_id` or a unique value.
 
 | What the row's values name | What the handler decides |
 |---|---|
@@ -152,11 +149,11 @@ against a newer one.
 | One item, and every value the row carries is the one stored | The row changes nothing. It is counted `unchanged` and writes nothing |
 | One item with no row in the batch's view, the row carrying a position there and changing nothing else | The row adds the item to the view in place, counted `added`: the item keeps its entity and stays served in its other views, and the next flush places the row |
 | One item, and the row's one change is placing it in artifacts that do not hold it | A change to the artifacts, not the item: the item joins them and keeps its entity, the row is counted `unchanged` and the memberships in `joined` |
-| One item, and the row changes a value, the label, the external id or a position | The row edits the item, counted `edited` |
+| One item, and the row changes a value, the label or a position | The row edits the item, counted `edited` |
 | Two items | Refused with `409`, naming the values and the items' `tessera_id`s |
 
-Across the batch, two rows may not name one item, and two rows may not set one unique value or one
-external id, since each row is decided without seeing the others. A `tessera_id` naming no live or
+Across the batch, two rows may not name one item, and two rows may not set one unique value, since
+each row is decided without seeing the others. A `tessera_id` naming no live or
 suppressed item is refused, because a new item is given its `tessera_id` when it is created and a
 caller cannot choose one. Any refusal refuses the whole batch, and names rows by their position in
 it, values as sent and items by `tessera_id`.
@@ -177,11 +174,9 @@ items its unchanged rows named, and the rows that create or add. The executor ne
 check them. It checks what can have moved since the handler's generation, from memory:
 
 - an item a row names that has since been deleted, or added to the view;
-- an item a row edits that has since been deleted, added to or dropped from a view, or whose
-  external id has since been given to another item;
+- an item a row edits that has since been deleted, or added to or dropped from a view;
 - the unique columns, declared or withdrawn since, where the batch creates items;
-- a value a created row sets that has since been given to an item;
-- an external id since bound.
+- a value a created row sets that has since been given to an item.
 
 The values the most recent flushes moved to disc, up to a million entries, are kept in memory for
 this check. Where something has moved, nothing is written, and the handler decides the batch once
@@ -198,8 +193,8 @@ from the publication its receipt names.
 
 The handler builds the new entity whole from what the old one stores, so the WAL record carries
 everything and a replay reads no stored file. It carries a row for every view the item is in, the
-batch's view first: the position there, the label, every value and the external id, the row's
-values over the stored ones, and the group-scoped values and prose of every key the item holds. A
+batch's view first: the position there, the label and every value, the row's values over the
+stored ones, and the group-scoped values and prose of every key the item holds. A
 view the batch names and the item is not in is added. A row carrying values scoped to the batch's
 view for an item with no row under that view's key is refused, since no row would hold them; sent
 with the item's position in the view, it adds the item there with them. What cannot be read fails
@@ -213,7 +208,7 @@ append:
   so the content is still served while its generating items are visible;
 - a suppression standing against the old entity, copied to the new one; the old entity keeps its
   own until the compaction that removes it;
-- the unique values and the external id, which name the new entity from the acknowledgement.
+- the unique values, which name the new entity from the acknowledgement.
 
 A change, a growth or a publication resolved before an edit moved an item it names reaches the
 item where it is now. The generation counts the windows that committed an edit and the folds that
@@ -239,7 +234,8 @@ Rows arrive at the executor without an entity id. Allocation happens once per co
 the executor rather than per request.
 
 Within one window, entity ids are assigned in order of each item's signature, its sorted,
-deduplicated list of terms, and then by external id. This groups the items carrying a term into
+deduplicated list of terms, and among items with one signature in the order the window received
+them. This groups the items carrying a term into
 contiguous runs of ids, which the term index stores far more compactly than scattered ids. Nothing
 repairs this ordering later: a wider window produces longer runs, and a narrower one does not. Ids
 a compaction freed are assigned first, lowest first, so they land among other terms' runs rather
@@ -247,8 +243,7 @@ than in a run of their own ([freed entity ids](#freed-entity-ids)).
 
 The window closes when it reaches a configured row count, or when the server's incoming work is
 observed empty, whichever comes first. It also closes before admitting a batch that touches what a
-batch in the window touches: an item a row adds to a view, a unique value or an external id a new
-item takes. Each of these is written at the close, and the executor's check of the later batch
+batch in the window touches: an item a row adds to a view, or a unique value a new item takes. Each of these is written at the close, and the executor's check of the later batch
 reads what was written.
 
 At close, the whole window is sorted and allocated from the id allocator in one call. One WAL
@@ -318,8 +313,8 @@ the new label, which edits it ([edits](#edits)).
 
 ### Accepting a deny
 
-A change names its item by an external id, resolved against the current map of live items, or by
-a `tessera_id`, inverted under the bundle's identity key.
+A change names its item by a `tessera_id`, inverted under the bundle's identity key, or by a unique
+field and one value of it, looked up in the field's index.
 
 The whole batch is validated and every address resolved before anything is accepted. If any one
 address fails to resolve, the whole batch is refused and nothing is queued. An address that
@@ -491,8 +486,8 @@ do:
 
 A fold takes a snapshot at the start of its run, naming which rows and term-index entries to
 remove and which deletions to retire once they are gone. A deletion's overlay record is removed
-only once the compaction that removed its row, its term-index entries and its external-id binding has
-been published. Between the snapshot and the compaction's publication, more flushes, merges and denies
+only once the compaction that removed its row, its term-index entries and its unique values has been
+published. Between the snapshot and the compaction's publication, more flushes, merges and denies
 can still land: an entity a flush gave a fresh row to while the compaction was running is not retired
 this round, and the next fold takes it instead. If retirement followed the plan rather than what
 was actually removed, an entity whose row survived the compaction would lose the record hiding it.
@@ -546,8 +541,8 @@ id issued since.
 A freed id is lower than the entities a view already has rows for, and so is an older item added to
 a view in place, so a flush cannot place such a row by extending the segment's range of entities
 without widening that range across the whole view. The segment lists the rows of such entities
-beside its range instead, and a lookup that finds no row in the base or a range reads the lists;
-the external-id locator a flush writes does the same. A merge keeps the listed rows, and the
+beside its range instead, and a lookup that finds no row in the base or a range reads the lists. A
+merge keeps the listed rows, and the
 compaction folds them into the base like any other.
 
 Measured on the GeoNames corpus (13.5 million items), over five rounds that each send a
@@ -653,7 +648,8 @@ crates:
 - an item on a freed id carrying nothing of the item that held it, in any home, across a flush, a
   merge, a restart and a compaction, and freed ids restored at a restart less those issued since
   (`freed_ids_carry_nothing`);
-- a re-bound external id across a flush and a restart;
+- a unique value given to a new item after its holder's deletion, across a flush, log rotation and
+  a restart;
 - a row deleted before its first flush;
 - a unique value found and refused across a flush, a merge, a compaction and a restart, by
   concurrent batches, and after `unique` is declared at a running service;

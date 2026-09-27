@@ -161,7 +161,7 @@ drawn at random by `tessera build` each time it creates a bundle and is stored i
 manifest. Nobody configures, supplies or changes it. A rebuild creates a new bundle with a new key,
 so every `tessera_id` changes, and one from the old bundle does not name an item in the new one.
 The change takes effect on the restart that loads the new bundle. A client holding `tessera_id`s
-from the old bundle reads its items again, by external id or afresh.
+from the old bundle reads its items again, by a unique field's values or afresh.
 
 ## Where this is tested and where it lives
 
