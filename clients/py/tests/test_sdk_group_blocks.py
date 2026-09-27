@@ -37,6 +37,13 @@ def rows(keys):
     )
 
 
+def join_values(db, n):
+    """The join field's values for items `0..n`: a group's rows fill no attribute at the first
+    commit, the join field included, so its values are an insert of their own."""
+    ids = pa.table({"entity_id": pa.array(range(n), pa.uint64())})
+    db.insert("entity_id", ids, id="entity_id", value="entity_id")
+
+
 @pytest.fixture
 def db(tmp_path):
     database = create(tmp_path / "db")
@@ -60,6 +67,7 @@ def test_a_roster_is_a_table_and_the_rows_carry_the_view_each_belongs_to(db, che
         access="access",
         view="quarter",
     )
+    join_values(db, 2)
     assert checked(db).ok
     # A declaration carrying groups alone anchors on the first view of the first roster.
     assert 'allocation_view = "quarter:2026-Q1"' in db.declaration
@@ -72,6 +80,7 @@ def test_a_group_whose_views_each_have_their_own_file_inserts_one_table_per_view
     for key in ("q1", "q2"):
         db.insert("quarter", rows([key]), id="entity_id", x="x", y="y", access="access",
                   view_key=key)
+    join_values(db, 1)
     assert checked(db).ok
     assert db.declaration.count("[[view_group.view]]") == 2
     assert 'allocation_view = "quarter:q1"' in db.declaration
@@ -86,6 +95,7 @@ def test_a_members_group_takes_its_own_points_and_declares_no_metadata(db, check
     db.insert("quarter", roster=roster(["q1"]), key="quarter", label="label")
     db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access",
               view="quarter")
+    join_values(db, 1)
     assert checked(db).ok
 
 
@@ -132,6 +142,7 @@ def test_a_scoped_attribute_names_its_group_and_its_insert_names_the_view_column
         value="sentiment",
         view="quarter",
     )
+    join_values(db, 1)
     assert checked(db).ok
     assert 'scope = { group = "quarter" }' in db.declaration
 
@@ -151,6 +162,7 @@ def test_a_scoped_layer_with_no_views_is_drawn_on_its_group(db, checked):
     db.insert("quarter", roster=roster(["q1"]), key="quarter")
     db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access",
               view="quarter")
+    join_values(db, 1)
     assert checked(db).ok
     assert 'views = ["quarter"]' in db.declaration
 

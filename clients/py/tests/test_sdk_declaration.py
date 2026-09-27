@@ -236,6 +236,8 @@ def test_a_group_takes_its_roster_and_its_rows_from_two_inserts(db, checked):
     rows = points()
     rows["quarter"] = ["q1"] * len(rows)
     db.insert("quarter", rows, id="id", x="x", y="y", view="quarter")
+    # A group's rows fill no attribute at the first commit, the join field included.
+    db.insert("id", points()[["id"]], id="id", value="id")
     assert checked(db).ok
     text = db.declaration
     assert '[view_group.views]\nsource = "quarter_roster"' in text

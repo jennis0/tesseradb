@@ -174,7 +174,10 @@ attribute: one declared `unique=True`, a keyword or an integer, whose each value
 most. `declare_join_field(name)` makes one of them the **join field**, `[defaults].join_field` in
 the declaration, and every table inserted with `id=` names its rows by it: `id=` is the column
 holding each row's value of the join field. The allocation view's `id=` column fills the join
-attribute itself. A file that calls the column something else says so in its block's `fields`
+attribute itself. A view group's rows fill no attribute at the first commit, so a database whose
+views are all in groups inserts the join field's values as a table of their own,
+`db.insert("paper", ids, id="paper", value="paper")`; the check refuses the declaration until it
+does. A file that calls the column something else says so in its block's `fields`
 under the join field's name, and a members table in its `fields.entity`; the SDK rewrites no
 column to say it. On a later commit the `id=` column travels as the join field's column on
 `/control/ingest`, and a row whose value names an item the database holds edits that item.
