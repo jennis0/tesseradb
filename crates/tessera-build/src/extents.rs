@@ -244,11 +244,11 @@ impl ExtentColumn {
 ///
 /// What an open extent costs the merge **per extent** is one uncompressed block,
 /// [`RECORD_BLOCK_TARGET`], and the share allowed for them is a sixty-fourth of the budget: 32 MB
-/// of blocks, 128 extents, at the smallest budget a build is run under, and 1,281 at the 21.5 GB
-/// rung 6 was built under, which is past the 964 extents that build's widest column spilled. The
-/// extent count rises with the corpus and the budget does not, so the bound is what keeps the
-/// merge's memory off the corpus; the fold below it is the cost of that bound and is paid only
-/// where the bound bites.
+/// of blocks, 1,024 extents, at the smallest budget a build is run under, and 10,252 at the
+/// 21.5 GB rung 6 was built under, which is past the 964 extents that build's widest column
+/// spilled. The extent count rises with the corpus and the budget does not, so the bound is what
+/// keeps the merge's memory off the corpus; the fold below it is the cost of that bound and is paid
+/// only where the bound bites.
 ///
 /// **A block buffer is the whole of what an open extent costs.** It used to bring in a has-row
 /// bitmap and a live set as well, and neither fell with the fan-in: a join chunk is a run of the
@@ -717,11 +717,11 @@ mod tests {
     /// fan-in by the budget rather than by what a reader would prefer.** A bundle-level proof of it
     /// is not reachable from a build here: the extent count is `JOIN_STAGE_BYTES` over the staged
     /// row width, a constant of the code, while the fan-in is the memory budget over sixty-four
-    /// 256 KiB blocks — so folding a 10⁷-row corpus wants a budget under 82 MB and its entity-order
-    /// stages refuse under 1,082 MiB. The two meet at the 3.5×10⁹-row rung and nowhere a test can
-    /// go. So the claim is made here, over the one artefact a fold can change: the record blob its
-    /// extents merge into, written from a folded column and an unfolded one and compared byte for
-    /// byte.
+    /// blocks of [`RECORD_BLOCK_TARGET`] — so folding a 10⁷-row corpus wants a budget under 11 MB
+    /// and its entity-order stages refuse under 1,082 MiB. Even the 3.5×10⁹-row rung's 964 extents
+    /// fit the fan-in of the smallest budget, and nothing a test can build comes near. So the claim
+    /// is made here, over the one artefact a fold can change: the record blob its extents merge
+    /// into, written from a folded column and an unfolded one and compared byte for byte.
     #[test]
     fn a_fold_changes_no_byte_of_the_blob_its_extents_merge_into() {
         let plain_dir = tempfile::tempdir().expect("a temp dir");

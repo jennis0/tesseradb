@@ -203,9 +203,11 @@ pub struct GenerationStamp {
 // flush or merge segment may hold rows for entities below its descriptor's span, and a locator
 // extent carries `listed` pairs after its dense slots. A 25 manifest lacks the fields and is
 // refused as malformed.
+// 27: record blobs are cut into 32 KiB blocks rather than 256 KiB. A 26 bundle reads correctly
+// but is refused, so that every bundle carries the one block size.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 26;
+pub const BUNDLE_FORMAT: u32 = 27;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

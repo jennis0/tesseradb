@@ -45,15 +45,20 @@
 //! carry one early.
 //!
 //! **Blocks**: rows concatenate in ascending entity order and are cut into zstd-compressed blocks
-//! against a 256 KiB uncompressed target ([`RECORD_BLOCK_TARGET`]), measured over the rows and not
+//! against a 32 KiB uncompressed target ([`RECORD_BLOCK_TARGET`]), measured over the rows and not
 //! the header. **A row never splits across blocks**: a block seals when appending the next row
 //! would pass the target, so a row larger than the target gets an oversized block of its own — the
-//! target is a target, not a cap (records §3). Whole-row blocks are what make drill-down one block
-//! read and one decompress; the 256 KiB point is the string-storage probe's measured operating
-//! point on *title-shaped* bytes (2.44× at 169 µs/read), and the mixed-field row ratio records §3
-//! once marked assumed is measured there at 3.00× against a 2.54× title control through this
-//! writer. Neither figure is quoted here as this format's: both were taken before the row form
-//! moved twice.
+//! target is a target, not a cap (records §3). Whole-row blocks are what make an item's record one
+//! block read and one decompress.
+//!
+//! The target sets what one row costs: the read decompresses the whole block, walks every row's
+//! length to prove the rows tile it (below), and walks to the row it wants. On GeoNames, whose
+//! rows are a name and an integer id at about 33 bytes, one warm row costs about 50 µs at 32 KiB
+//! (39 to decompress, 10 for the header and the tiling walk, 4 to reach and decode the row)
+//! against 500 µs at 256 KiB, and a bulk read of 1,000 random items asking for a stored field
+//! 51 ms against 266 ms. A read that touches every block (a walk of the whole store, or an `in`
+//! of 10⁵ values) costs the same at either size. The price is compression: 2.77× there against
+//! 3.03×, a store 10% larger and a bundle 0.9% larger, with eight times the directory entries.
 //!
 //! # Addressing is has-row rank (records §3, review B5)
 //!
@@ -134,9 +139,8 @@ use croaring::{Bitmap, Portable};
 
 use crate::values::Access;
 
-/// Uncompressed target bytes per block. The string-storage probe's operating point — measured on
-/// title-shaped bytes, not on mixed rows (records §3 marks the mixed ratio *assumed*).
-pub const RECORD_BLOCK_TARGET: usize = 256 * 1024;
+/// Uncompressed target bytes per block, for every producer: build, flush, coalesce and fold.
+pub const RECORD_BLOCK_TARGET: usize = 32 * 1024;
 
 /// The blob's three base files, under `attrs/record/` (records §7). `record` is a reserved column
 /// name at schema parse precisely so this namespace cannot collide with a declaration (review N10).
@@ -1304,9 +1308,7 @@ impl RecordBlob {
     ///
     /// **One entity per call, one decompress per call**, with nothing held between calls: a
     /// caller that wants many rows must not loop this, and [`Self::for_each_row_in`] is the read
-    /// for that. Measured on the GeoNames bundle, a served artifact's name cost ~163 µs through
-    /// here — 408 ms for the 2 518 artifacts of one viewport, against 1.3 ms for the same viewport
-    /// with no layer.
+    /// for that.
     pub fn fields_of(&self, entity: u32) -> Result<Option<Vec<RecordField>>, RecordError> {
         let hasrow = self.hasrow()?;
         if !hasrow.contains(entity) {
@@ -1346,8 +1348,7 @@ impl RecordBlob {
     /// having: entities ascend, so ranks ascend, so blocks ascend, and one `Vec<u8>` of block
     /// bytes serves every wanted row inside it. Cost is O(blocks touched) rather than
     /// O(entities), which for a set contiguous in entity space — an artifact level, whose ids are
-    /// one reserved run — is the difference between a decompress per artifact and one per 256 KiB
-    /// of rows.
+    /// one reserved run — is the difference between a decompress per artifact and one per block.
     ///
     /// An entity in `wanted` with no row is simply not visited; absence is an answer here exactly
     /// as it is for [`Self::fields_of`], and never an error.

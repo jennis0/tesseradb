@@ -444,7 +444,7 @@ fn carries_characters(ty: ScalarType) -> bool {
 
 /// What a spilled column's extents cost against the column's Parquet payload: **one half**.
 ///
-/// The extents are the same 256 KiB zstd blocks the base blob is cut into, and the base blob at
+/// The extents are the same zstd blocks the base blob is cut into, and the base blob at
 /// the 10⁸ PaperSeek rung measured 44.77 GB against 128 GiB of prose — 2.9×
 /// (`probes/2026-09-04-rung-4-whole/breakdown.txt`). Half is charged rather than a 2.9th because
 /// that ratio is one corpus's prose at one operating point. A keyword column compresses harder
