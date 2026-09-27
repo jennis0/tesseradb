@@ -1768,21 +1768,15 @@ paths:
         and its rows stay on disc, unreachable, until the compaction fold. Its artifacts become
         unreachable with it. Rows buffered for it and not yet flushed are discarded.
 
-        No item is deleted unless `delete_dangling` is `true`: then every item with a row in this
-        view and in no other is deleted, as `POST /control/changes` deletes it, and `deleted`
-        counts them.
+        Every item the drop leaves with a row in no view, flushed or buffered, is deleted, as
+        `POST /control/changes` deletes it, and `deleted` counts them. A deleted item names
+        nothing afterwards: a later row carrying its external id or one of its unique values creates
+        a new item, and one carrying its `tessera_id` is refused.
       security:
         - operatorCredential: []
       parameters:
         - $ref: "#/components/parameters/ViewGroup"
         - $ref: "#/components/parameters/ViewKey"
-        - name: delete_dangling
-          in: query
-          required: false
-          description: Also delete the items that have a row in this view and no other. Absent is `false`.
-          schema:
-            type: boolean
-            default: false
         - $ref: "#/components/parameters/Wait"
       responses:
         "200":
@@ -1803,7 +1797,6 @@ paths:
                 $ref: "#/components/schemas/Error"
         "422":
           description: |
-            - `delete_dangling` is not `true` or `false`
             - `wait` has a value other than `visible`
             - The query names another parameter
           content:
@@ -4057,7 +4050,7 @@ components:
         deleted:
           type: integer
           minimum: 0
-          description: Items `delete_dangling` deleted. `0` without it.
+          description: Items the drop deleted, those it left with a row in no view.
         publication:
           type: integer
           minimum: 0

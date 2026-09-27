@@ -1196,7 +1196,7 @@ fn every_foreign_cursor_is_refused_alike() {
     refusals.push(present("s0", &session, &cursor, Some(RecordsOrder::Stored)).unwrap_err());
     // A view dropped and created again under the same key.
     fx.engine
-        .drop_view("quarter".into(), "q2".into(), false)
+        .drop_view("quarter".into(), "q2".into())
         .expect("the view drops");
     fx.engine
         .create_view("quarter".into(), "q2".into(), None, Default::default())

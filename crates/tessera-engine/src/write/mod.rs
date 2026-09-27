@@ -792,18 +792,8 @@ impl WritePath {
     }
 
     /// Drop a view, freeing its key and killing its incarnation.
-    pub(crate) fn drop_view(
-        &self,
-        group: String,
-        key: String,
-        delete_dangling: bool,
-    ) -> Result<ViewDropped, AcceptError> {
-        self.submit(|reply| Command::DropView {
-            group,
-            key,
-            delete_dangling,
-            reply,
-        })
+    pub(crate) fn drop_view(&self, group: String, key: String) -> Result<ViewDropped, AcceptError> {
+        self.submit(|reply| Command::DropView { group, key, reply })
     }
 
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order and

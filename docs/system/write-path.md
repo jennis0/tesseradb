@@ -203,9 +203,8 @@ batch's view first: the position there, the label, every value and the external 
 values over the stored ones, and the group-scoped values and prose of every key the item holds. A
 view the batch names and the item is not in is added. A row carrying values scoped to the batch's
 view for an item with no row under that view's key is refused, since no row would hold them; sent
-with the item's position in the view, it adds the item there with them. An item left in no view,
-its views all dropped, is edited only by a row that places it in one. What cannot be read fails the
-batch closed rather than writing an item with less than it held.
+with the item's position in the view, it adds the item there with them. What cannot be read fails
+the batch closed rather than writing an item with less than it held.
 
 At the commit the executor carries what lives outside the item's own rows, from memory, in the same
 append:
@@ -340,6 +339,10 @@ while one is open.
 
 A deny is queued separately from ingest and is never refused for load. There is no route from this
 queue to a 429.
+
+A view drop deletes the items it leaves with a row in no view, flushed or buffered. The drop's own
+WAL record lists their entity ids, so the log never holds the drop without its deletions, and they
+enter the overlay and leave it as any deletion does.
 
 ### The overlay: two stores
 

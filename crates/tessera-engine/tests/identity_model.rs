@@ -837,7 +837,7 @@ enum Op {
     Resend(u16),
     /// Declare `unique` on `doi`, or take it off.
     DoiUnique(bool),
-    /// Drop [`GROUP_VIEW`], leaving its items in their other views.
+    /// Drop [`GROUP_VIEW`], deleting the items it leaves in no view.
     DropView,
 }
 
@@ -1369,24 +1369,12 @@ impl Run {
         }
     }
 
-    /// Drop the group's view. Its items stay, in whatever other views they are in, and its scoped
-    /// values go with the key. An item whose only row is still buffered in the view would lose its
-    /// label and values with the row, which the model does not follow, so such a view is flushed
-    /// first.
+    /// Drop the group's view. An item it leaves in no view, flushed or buffered, is deleted; the
+    /// rest stay in their other views. The scoped values go with the key.
     fn drop_view(&mut self) {
-        let buffered_only_there = self.model.items.values().any(|item| {
-            item.views.keys().eq([GROUP_VIEW])
-                && !self
-                    .model
-                    .flushed
-                    .contains(&(item.tid, GROUP_VIEW.to_string()))
-        });
-        if buffered_only_there {
-            self.flush();
-        }
         let answered = self
             .engine()
-            .drop_view(GROUP.0.to_string(), GROUP.1.to_string(), false);
+            .drop_view(GROUP.0.to_string(), GROUP.1.to_string());
         if !self.model.group {
             assert!(
                 answered.is_err(),
@@ -1394,17 +1382,30 @@ impl Run {
             );
             return;
         }
-        answered.expect("the view drops");
+        let dropped = answered.expect("the view drops");
         self.model.group = false;
+        let only_there: Vec<u64> = self
+            .model
+            .items
+            .values()
+            .filter(|item| item.views.keys().eq([GROUP_VIEW]))
+            .map(|item| item.tid)
+            .collect();
+        assert_eq!(
+            dropped.deleted,
+            only_there.len() as u64,
+            "the drop deletes the items it leaves in no view: {only_there:?}"
+        );
+        for tid in only_there {
+            self.model.items.remove(&tid);
+            self.model.deleted.insert(tid);
+            if self.model.content_from.contains(&tid) {
+                self.model.content_lost = true;
+            }
+        }
         for item in self.model.items.values_mut() {
             item.views.remove(GROUP_VIEW);
             item.scoped = Default::default();
-            // A render-only column's value is held in the item's rows alone, so an item left in
-            // no view loses it.
-            if item.views.is_empty() {
-                item.score = None;
-                item.extras[0] = None;
-            }
         }
         self.model.flushed.retain(|(_, view)| view != GROUP_VIEW);
         self.model.floors.remove(GROUP_VIEW);
@@ -2121,7 +2122,17 @@ fn each_kind_of_row_is_decided_as_the_model_decides_it() {
         },
         Op::DoiUnique(true),
         Op::Fold,
-        // The group's view dropped, then named again.
+        // Two items in the group's view alone, one flushed and one buffered, which the drop
+        // deletes; then the view is named again.
+        Op::Ingest {
+            view: 3,
+            rows: vec![fresh(5)],
+        },
+        Op::Flush,
+        Op::Ingest {
+            view: 3,
+            rows: vec![fresh(6)],
+        },
         Op::DropView,
         Op::Ingest {
             view: 3,

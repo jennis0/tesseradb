@@ -153,7 +153,7 @@ pub(crate) struct VocabularyValues {
 /// What a view drop did beside dropping the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewDropped {
-    /// Entities `delete_dangling` submitted for deletion.
+    /// Items the drop deleted: those it left with a row in no view.
     pub deleted: u64,
 }
 
@@ -228,13 +228,11 @@ pub(crate) enum Command {
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
         reply: Reply<()>,
     },
-    /// Drop a view of a view group. Its key is never issued again. With `delete_dangling`, the
-    /// entities that hold a row in no other view are submitted as ordinary deletions, which retire
-    /// at the fold like any other.
+    /// Drop a view of a view group, deleting the items it leaves with a row in no view. The
+    /// deletions retire at the fold like any other.
     DropView {
         group: String,
         key: String,
-        delete_dangling: bool,
         reply: Reply<ViewDropped>,
     },
     /// Declare an attribute column. The answer is whether an identical declaration already held the

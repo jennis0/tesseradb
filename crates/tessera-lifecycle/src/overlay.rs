@@ -395,11 +395,9 @@ pub fn replay<'a>(
             // rows it discards and the rows the recreate takes, and it is the one and only place
             // the two sets can be told apart.
             //
-            // **Dropping a view still deletes no entity** (`views.md` §3.4).
-            // `delete_dangling`'s deletions arrive here as the ordinary `ChangeBatch` records
-            // the arm above applies, which is what keeps the drop from being a second retirement
-            // route.
-            WalRecord::ViewDrop { view } => {
+            // The items the drop left in no view are deleted here as a `ChangeBatch` delete is,
+            // and retire at the fold like any other deletion.
+            WalRecord::ViewDrop { view, deleted } => {
                 // **Every id the key resolves to, not just the owner's.** A key is one view of the
                 // group that owns it *and* one of every group sharing its views (`views.md` §3.3),
                 // and the record names the owner — so a prune built from the record alone would
@@ -407,6 +405,9 @@ pub fn replay<'a>(
                 // key next. The expansion is `Manifest::view_ids_for_key`'s, passed in because
                 // this crate holds no manifest.
                 buffer.remove_views(&view_ids_of_key(&view.group, &view.key));
+                for entity in deleted {
+                    overlay.apply(*entity, ChangeOp::Delete);
+                }
             }
             // A view create is the roster's, rebuilt by the caller in that same second pass, and
             // names no entity.

@@ -395,15 +395,14 @@ impl Engine {
         self.write.create_view(group, key, visibility, metadata)
     }
 
-    /// Drop a view. Its key may be created again, as a new incarnation with none of the dropped
-    /// view's rows or artifacts.
+    /// Drop a view, deleting the items it leaves in no view. Its key may be created again, as a
+    /// new incarnation with none of the dropped view's rows or artifacts.
     pub fn drop_view(
         &self,
         group: String,
         key: String,
-        delete_dangling: bool,
     ) -> std::result::Result<crate::write::ViewDropped, crate::write::AcceptError> {
-        self.write.drop_view(group, key, delete_dangling)
+        self.write.drop_view(group, key)
     }
 
     /// Put a batch of artifacts into one level of a layer, returning a `tessera_id` per artifact

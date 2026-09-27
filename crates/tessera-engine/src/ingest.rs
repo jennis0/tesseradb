@@ -450,26 +450,16 @@ impl Engine {
         let row = &request.rows[at];
         let manifest = &generation.bundle.manifest;
         let declared = &manifest.declared_scalars;
-        let unreadable = |e: &dyn std::fmt::Display| AcceptError::Unreadable(e.to_string());
         let held_views = joined::views_holding(generation, old);
         let placing = view.zip(row.position);
         let buffered = generation.buffer.get(old);
         let own_view = match (placing, buffered) {
             (Some((view, _)), _) => view.id.clone(),
             (None, Some(item)) => item.view.clone(),
-            (None, None) => match held_views.first() {
-                Some(view) => view.clone(),
-                None => {
-                    let tid = self
-                        .tessera_id_in(generation, old)
-                        .map_err(|e| unreadable(&e))?
-                        .raw();
-                    return Err(AcceptError::Contract(format!(
-                        "row {at} changes item {tid}, which has a row in no view, and carries no \
-                         position; send its coordinates in a view"
-                    )));
-                }
-            },
+            // A view drop deletes the items it leaves in no view, so an item holds a row somewhere.
+            (None, None) => held_views.first().cloned().ok_or_else(|| {
+                AcceptError::Unreadable(format!("row {at}'s item has no readable row in any view"))
+            })?,
         };
         let mut views: Vec<String> = vec![own_view.clone()];
         views.extend(held_views.iter().filter(|v| **v != own_view).cloned());

@@ -347,12 +347,13 @@ pub enum WalRecord {
     /// rotation: a death that did not say which incarnation died could not be told apart from a
     /// death of the one created after it.
     ///
-    /// **This record removes no entity.** An entity whose only view was dropped still exists, with
-    /// its label, its attributes and its memberships, in no view; `delete_dangling` submits
-    /// ordinary deletions through the deny lane and is not a second retirement route
-    /// (`views.md` §3.4, write-path §5.4).
+    /// **It deletes the items it leaves in no view**, in the same record as the drop, so the log
+    /// never holds a drop without its deletions. Each is an ordinary deletion: replay applies it to
+    /// the overlay as a `ChangeBatch` delete would be, and the fold that executes it retires it.
     ViewDrop {
         view: tessera_types::view::DeadIncarnation,
+        /// The entities the drop left with a row in no view, flushed or buffered.
+        deleted: Vec<EntityId>,
     },
     /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
     /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
@@ -1061,7 +1062,8 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // request's changes whole, replaced `ChangeByEntity`. A log at 26 is refused.
 // **28**: `IngestBatch` gained `edits`, the items it moved to new entities, `RowOutcome` gained
 // `Edited`, and `ValuesBatch` left the variant table. A log at 27 is refused.
-const WAL_VERSION: u16 = 28;
+// **29**: `ViewDrop` gained `deleted`, the items the drop left in no view. A log at 28 is refused.
+const WAL_VERSION: u16 = 29;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

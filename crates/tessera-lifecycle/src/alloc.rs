@@ -390,6 +390,11 @@ pub fn entities_named(records: &[WalRecord]) -> Bitmap {
                     add(*entity);
                 }
             }
+            WalRecord::ViewDrop { deleted, .. } => {
+                for entity in deleted {
+                    add(*entity);
+                }
+            }
             WalRecord::OverlaySnapshot { entries } => {
                 for entry in entries {
                     add(entry.entity_id);

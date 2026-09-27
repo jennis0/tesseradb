@@ -68,8 +68,9 @@ per-view fact means dropping the view and creating a fresh one, under the same k
 chooses: a dropped key can be reused, and a view created under it starts empty, carrying none of
 its predecessor's items.
 
-Dropping a view deletes no item. An item that was only in the dropped view keeps its identity,
-label and declared values, with no position anywhere, until a later batch gives it one.
+Dropping a view deletes every item it leaves with a row in no view, flushed or buffered, as any
+deletion does: its number stays reserved, and its rows and values leave at the next compaction. The
+drop's response counts them. An item with a row in another view keeps it and everything it holds.
 
 Two view groups can share one set of views: a quarterly map and a quarterly embedding built over
 the same quarters can use the same keys and per-view facts, rather than declaring them twice.

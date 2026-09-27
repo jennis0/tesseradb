@@ -1752,23 +1752,18 @@ class Database:
         self._refuse_before_the_first_commit("drop_layer")
         return _accepted(self.control.drop_layer(name, wait), f"drop_layer {name}")
 
-    def drop_view(
-        self, group: str, key: str, delete_dangling: bool = False, wait: bool = False
-    ) -> dict:
+    def drop_view(self, group: str, key: str, wait: bool = False) -> dict:
         """Remove one view of a view group, and return the server's answer.
 
         - `group`, `key`: the view is `"<group>:<key>"`.
-        - `delete_dangling`: `True` also deletes the items that were in no other view. The
-          answer's `deleted` says how many. A deletion cannot be undone.
         - `wait`: as for `drop_layer`.
 
-        Without `delete_dangling`, no item is deleted. Rows sent for the view and not yet published
-        are dropped with it.
+        The items the drop leaves in no view are deleted, and the answer's `deleted` says how
+        many. A deletion cannot be undone. Rows sent for the view and not yet published are
+        dropped with it.
         """
         self._refuse_before_the_first_commit("drop_view")
-        return _accepted(
-            self.control.drop_view(group, key, delete_dangling, wait), f"drop_view {group}/{key}"
-        )
+        return _accepted(self.control.drop_view(group, key, wait), f"drop_view {group}/{key}")
 
     def revoke(self, token) -> None:
         """End a token this database made, so it can no longer read.
