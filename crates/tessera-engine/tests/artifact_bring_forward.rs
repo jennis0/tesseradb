@@ -910,6 +910,133 @@ fn an_amended_form_equals_one_built_from_scratch() {
     }
 }
 
+/// **Points flushed and merged after a fold, joining nothing, leave the level served from its
+/// column at a restart.** The level has not moved, so the fold's column is current for the base
+/// rows; the row space has extents it does not reach, and the restart brings it over them rather
+/// than transposing it into per-artifact rows, which at billions of rows is more memory than the
+/// server has.
+#[test]
+fn a_restart_over_flushed_and_merged_rows_serves_the_level_from_its_column() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    fold(&engine);
+    merge(&engine);
+    let before = served(&engine);
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(served(&reopened), before);
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the level's form is held");
+    assert!(
+        !form.membership().rows_held(),
+        "the level is served from its column and holds no rows"
+    );
+    assert_eq!(form.layout(), ServingLayout::RowMajorLabel);
+    assert_eq!(reopened.columns_composed(), 0);
+}
+
+/// **A restart after writes serves a row-major level from the fold's column, brought forward,
+/// and never from rows it transposes or projects.**
+///
+/// After a fold the level takes a growth and a publication over base rows, which move it past the
+/// column the fold wrote, and flushes and a merge, which give the row space extents the column
+/// does not reach; members join on both sides of the merge. A restart then has the fold's column
+/// and records that say more. It completes the column with the base rows it misses and brings it
+/// over every extent, the amendments the live engine made as the writes arrived, so it holds the
+/// pairs those writes added and no row of the level. The form it serves is compared with one built
+/// from scratch over the same records and row space, extent for extent and declared size for
+/// declared size.
+#[test]
+fn a_restart_after_writes_brings_the_folds_column_forward_without_holding_rows() {
+    // The two layouts that hold a column.
+    for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+        let fx = fixture();
+        let engine = fx.open();
+        engine
+            .register_layer(declaration(LAYER, Some(layout)))
+            .unwrap();
+        publish(&engine, "a0", fx.members(0..100));
+        publish(&engine, "a1", fx.members(500..600));
+        // Read before the fold reclaims the prefix the map is read from.
+        let (joining, later) = (fx.members(100..150), fx.members(700..720));
+        fold(&engine);
+
+        grow(&engine, "a0", joining);
+        publish(&engine, "a2", later);
+        let merged = merge(&engine);
+        engine.set_merge_for_test(false);
+        grow(&engine, "a1", vec![merged[0], merged[2]]);
+        let fresh = ingest(&engine, b"after-the-merge");
+        publish_buffered(&engine);
+        grow(&engine, "a2", vec![fresh]);
+        let before = served(&engine);
+        assert_eq!(
+            before,
+            vec![
+                ("a0".to_string(), 150),
+                ("a1".to_string(), 102),
+                ("a2".to_string(), 21)
+            ],
+            "{layout:?}: the writes reached the live engine"
+        );
+        drop(engine);
+
+        let reopened = fx.open();
+        assert_eq!(
+            served(&reopened),
+            before,
+            "{layout:?}: the restart serves what the live engine served"
+        );
+        let form = reopened
+            .held_artifact_form_for_test("s0", LAYER, 0)
+            .expect("the level's form is held");
+        assert!(
+            !form.membership().rows_held(),
+            "{layout:?}: the level is served from its column and holds no rows"
+        );
+        assert_eq!(
+            form.layout(),
+            layout,
+            "{layout:?}: and in the layout the fold wrote"
+        );
+        assert!(reopened.columns_adopted() > 0);
+        assert_eq!(
+            reopened.columns_composed(),
+            0,
+            "{layout:?}: the fold's column was brought forward and nothing was composed"
+        );
+        // Everything but the per-artifact bitmaps, which a column-only form does not hold.
+        let without_rows = |form: Vec<String>| -> Vec<String> {
+            form.into_iter()
+                .map(|line| match (line.find(" rows="), line.find(" extent=")) {
+                    (Some(from), Some(to)) => format!("{}{}", &line[..from], &line[to..]),
+                    _ => line,
+                })
+                .collect()
+        };
+        let brought = without_rows(form_of(&reopened, LAYER));
+
+        reopened.forget_artifact_forms_for_test(LAYER);
+        assert_eq!(served(&reopened), before);
+        let rebuilt = without_rows(form_of(&reopened, LAYER));
+        assert_eq!(brought.len(), rebuilt.len());
+        for (brought, built) in brought.iter().zip(&rebuilt) {
+            assert_eq!(
+                brought, built,
+                "{layout:?}: the restart's form and one built from scratch describe different \
+                 levels"
+            );
+        }
+    }
+}
+
 /// **A level whose generating sets are paged is maintained into the form a build produces.**
 ///
 /// The differential above moves memberships; this one moves the other set an artifact carries. A

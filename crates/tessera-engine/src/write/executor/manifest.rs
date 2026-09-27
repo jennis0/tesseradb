@@ -1,7 +1,9 @@
 use super::*;
 
 /// Every level's version, and the derived files of `held` still adoptable at it. A file whose
-/// level has moved is dropped, so a manifest never names one nothing could adopt.
+/// level has moved is dropped, so a manifest never names one nothing could adopt, except a row
+/// column: a membership only grows between folds, and an open completes a column the level has
+/// moved past ([`crate::artifacts::ArtifactProjections::adopt_columns`]).
 pub(super) fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[tessera_store::manifest::DerivedExtent],
@@ -24,7 +26,13 @@ pub(super) fn artifact_coordinates(
         .collect();
     let still_true = held
         .iter()
-        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
+        .filter(|entry| {
+            let now = expected(&entry.layer, entry.level);
+            match entry.form {
+                tessera_store::manifest::DerivedForm::RowColumn { .. } => entry.level_version <= now,
+                _ => entry.level_version == now,
+            }
+        })
         .cloned()
         .collect();
     (versions, still_true)

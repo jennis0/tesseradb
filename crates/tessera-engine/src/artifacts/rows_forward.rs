@@ -159,6 +159,36 @@ impl ArtifactRows {
         (added, taken)
     }
 
+    /// The `(row, ordinal)` pairs over the base rows that the form's column does not carry: what a
+    /// column written at an earlier level version misses. A membership only grows between folds,
+    /// so the column's labels are a subset of the records' and these pairs are the whole
+    /// difference. An artifact exactly as large as the column labels it has not grown and is not
+    /// projected; the others are projected one at a time, so this holds one artifact's rows and
+    /// the pairs found, never the level.
+    pub(super) fn base_joins<'a>(
+        &self,
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+    ) -> Vec<(u32, u32)> {
+        let Some(column) = self.column.as_deref() else {
+            return Vec::new();
+        };
+        let mut added = Vec::new();
+        for (ordinal, record) in artifacts {
+            if record.members.cardinality() == column.declared_size(ordinal) {
+                continue;
+            }
+            for row in space.project_base(&record.members).iter() {
+                let mut carried = false;
+                column.for_each_label(row, |held| carried |= held == ordinal);
+                if !carried {
+                    added.push((row, ordinal));
+                }
+            }
+        }
+        added
+    }
+
     /// Every artifact's generating sets extended by the extents this form does not yet cover —
     /// [`Self::extend_by`]'s generating half, for routes whose memberships come from a segment's
     /// resolution rather than from the records ([`Self::extend_by_resolved`]).

@@ -1363,6 +1363,14 @@ impl RowColumn {
                 }
             })
             .collect();
+        // An ordinal published after the base was written is live and labels no base row.
+        if let Some(later) = live.get(out.len()..) {
+            out.extend(
+                later
+                    .iter()
+                    .map(|&live| if live { TILE_INDEX_EMPTY } else { TILE_INDEX_HOLE }),
+            );
+        }
         let mut widen = |ordinal: u32, row: u32| {
             let Some(e) = out.get_mut(ordinal as usize) else {
                 return;

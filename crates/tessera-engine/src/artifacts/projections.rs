@@ -217,12 +217,13 @@ pub struct ArtifactProjections {
     /// claim one. Claimed once and then dropped, unlike the map above it: an index belongs to one
     /// view, so once that view's row form has taken it there is nothing left for a second reader.
     pub(super) indexes_held: Mutex<BTreeMap<LevelAddress, (DerivedKey, TileIndex)>>,
-    /// The fold-written row-major columns adopted at open, waiting for the level's first request to
-    /// claim one. [`Self::indexes_held`]'s map, one structure along: claimed once and then dropped,
-    /// because a column belongs to one view's row form.
+    /// The fold-written row-major columns adopted at open. Held for the prefix's life rather than
+    /// claimed once, unlike [`Self::indexes_held`]: the pack is mapped, so holding it costs its
+    /// per-artifact counts, and every build of the level starts from it, a rebuild included,
+    /// rather than from a projection that holds the level's rows.
     pub(super) columns_held: Mutex<BTreeMap<LevelAddress, (DerivedKey, RowColumn)>>,
     /// The base half of an attribute predicate's row column, per `(view, layer, level)`. Held
-    /// rather than claimed, unlike [`Self::columns_held`]: it is taken again at every flush, since
+    /// rather than claimed, as [`Self::columns_held`] is: it is taken again at every flush, since
     /// the form above it rebuilds on the geometry moving and the base does not.
     pub(super) predicate_bases: Mutex<BTreeMap<LevelAddress, (DerivedKey, Arc<RowColumn>)>>,
     /// How many forms this has built since the engine opened. Read by the fold's own log line and
@@ -465,9 +466,10 @@ impl ArtifactProjections {
     }
 
     /// Take the fold-written row-major columns this prefix's manifests name, for every
-    /// `(view, layer, level)` whose coordinate still holds. [`Self::adopt_indexes`]' rule, and a
-    /// stale one is wrong the same way: a growth adds rows the column does not label, and an
-    /// unlabelled row is one no artifact claims, so its masked count comes back short.
+    /// `(view, layer, level)` at or past the version the column was written at. Unlike an index,
+    /// a column the level has moved past is kept, keyed at the version it describes: a membership
+    /// only grows between folds, so its labels are a subset of the level's, and the build that
+    /// claims it completes it rather than projecting the level whole ([`Self::claim_column`]).
     ///
     /// The manifest's layout tag is checked against the file's own magic rather than trusted over
     /// it: a mis-described file refuses at the first bytes, landing here as a drop and a
@@ -491,15 +493,15 @@ impl ArtifactProjections {
             };
             let layout = *layout;
             let level_version = store.level_version(&extent.layer, extent.level);
-            if level_version != extent.level_version {
-                tracing::info!(
+            if level_version < extent.level_version {
+                tracing::warn!(
                     layer = %extent.layer,
                     level = extent.level,
                     view = %view,
                     written_at = extent.level_version,
                     now = level_version,
-                    "a fold-written row-major column is not adopted: the level has moved since it \
-                     was written, so it is recomposed on first use"
+                    "a fold-written row-major column describes a later version of its level than \
+                     the store holds; it is not adopted and the level is recomposed on first use"
                 );
                 continue;
             }
@@ -527,7 +529,7 @@ impl ArtifactProjections {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
                     (view.to_string(), extent.layer.clone(), extent.level),
-                    (DerivedKey::of(prefix, level_version), column),
+                    (DerivedKey::of(prefix, extent.level_version), column),
                 );
         }
     }

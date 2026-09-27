@@ -1065,15 +1065,15 @@ fn a_fold_that_retires_the_top_artifact_writes_a_column_the_survivors_fit() {
     own_entity_retired("p15", 7_500..8_000, 7_000..7_500);
 }
 
-/// **A column whose coordinate has moved is not adopted**, and the level recomposes on first use.
+/// **A column the level has moved past is completed, not recomposed.** A membership only grows
+/// between folds, so the fold's column labels a subset of the level: the restart takes it and adds
+/// the rows it misses, rather than projecting the level whole and composing a column again.
 ///
-/// The direction of the mistake is what makes equality the only admissible test: a growth adds rows
-/// the column does not label, and an unlabelled row is one no artifact claims — so an artifact
-/// holding it silently stops being a candidate there and its masked count comes back short. That is
-/// a *narrower* answer with nothing reporting a fault, which is exactly what an existence criterion
-/// then renders as absence.
+/// The direction of the mistake is why the answers are compared: a growth adds rows the column
+/// does not label, and an unlabelled row is one no artifact claims, so a column adopted without
+/// its completion serves a masked count short with nothing reporting a fault.
 #[test]
-fn a_column_the_level_has_moved_past_is_recomposed_rather_than_adopted() {
+fn a_column_the_level_has_moved_past_is_completed_rather_than_recomposed() {
     let fx = fixture();
     let engine = published(
         &fx,
@@ -1084,10 +1084,11 @@ fn a_column_the_level_has_moved_past_is_recomposed_rather_than_adopted() {
     let _ = sweep(&engine);
     assert!(
         !fx.row_column_files(&engine).is_empty(),
-        "the fold wrote a column to be stale about"
+        "the fold wrote a column to be behind"
     );
 
-    // The level moves after the fold wrote its column: a growth the column has never labelled.
+    // The level moves after the fold wrote its column: an artifact published over base rows the
+    // column has never labelled.
     engine
         .publish_artifacts(
             FLAT.into(),
@@ -1110,15 +1111,21 @@ fn a_column_the_level_has_moved_past_is_recomposed_rather_than_adopted() {
         grown,
         "the restart serves what the live engine served"
     );
-    assert_eq!(
-        reopened.columns_adopted(),
-        0,
-        "the fold's column describes a level version the store has moved past"
-    );
     assert!(
-        reopened.columns_composed() > 0,
-        "so it is recomposed on first use, which is what every request did before the fold wrote \
-         anything"
+        reopened.columns_adopted() > 0,
+        "the fold's column is taken although the level has moved past it"
+    );
+    assert_eq!(
+        reopened.columns_composed(),
+        0,
+        "and completed, so nothing is composed"
+    );
+    let form = reopened
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the sweep left the level's form held");
+    assert!(
+        !form.membership().rows_held(),
+        "the completed level is served from its column and holds no rows"
     );
 }
 
