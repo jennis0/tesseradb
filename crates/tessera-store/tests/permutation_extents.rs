@@ -272,3 +272,25 @@ fn a_dense_span_with_an_empty_slot_defers_to_the_extent_that_lists_it() {
         croaring::Bitmap::of(&[2, 3])
     );
 }
+
+/// A projection reaches listed rows from the mask where it is the smaller side and from the list
+/// where that is: both give the same rows.
+#[test]
+fn listed_rows_project_the_same_from_either_side() {
+    // Entities 1, 3 and 5 lost their rows to a fold.
+    let base = base_holding(7, &[0, 2, 4, 6]);
+    let space = base
+        .with_extent(flushed(&base, "s1", &[5, 7, 1, 3]))
+        .unwrap();
+    for (mask, rows) in [
+        (vec![3], vec![7]),
+        (vec![0, 1, 2, 3, 4, 5, 6], vec![0, 1, 2, 3, 4, 6, 7]),
+        (vec![1, 2, 4, 5, 7], vec![1, 2, 4, 5, 6]),
+    ] {
+        assert_eq!(
+            space.project(&croaring::Bitmap::of(&mask)),
+            croaring::Bitmap::of(&rows),
+            "mask {mask:?}"
+        );
+    }
+}

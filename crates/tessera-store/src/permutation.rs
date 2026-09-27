@@ -1539,15 +1539,32 @@ impl SegmentExtent {
     /// (`probes/2026-08-04-refresh-ladder/`), which is the patch's cost being a function of the
     /// grant's width rather than of the flush's size. `reset_at_or_after` costs O(containers
     /// skipped), which is the cost model this index is designed against
-    /// (`CLAUDE.md`: bitmap operations cost O(containers touched), not O(cardinality)). The
-    /// listed rows are tested one by one, in proportion to the rows the flush carried.
+    /// (`CLAUDE.md`: bitmap operations cost O(containers touched), not O(cardinality)).
+    ///
+    /// The listed rows are reached from whichever side is smaller: the mask's entities within the
+    /// listed ones' range, each looked up, or the listed rows, each tested against the mask. A
+    /// stored level projects each of its artifacts through the extent a flush wrote, and most
+    /// artifacts are far smaller than the flush.
     fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
-        let mut rows: Vec<u32> = self
-            .below
-            .iter()
-            .filter(|&&(entity, _)| mask.contains(entity))
-            .map(|&(_, row)| self.row_base + row)
-            .collect();
+        let mut rows: Vec<u32> = Vec::new();
+        if let (Some(&(first, _)), Some(&(last, _))) = (self.below.first(), self.below.last()) {
+            if mask.range_cardinality(first..=last) <= self.below.len() as u64 {
+                let mut iter = mask.iter();
+                iter.reset_at_or_after(first);
+                for entity in iter.take_while(|&entity| entity <= last) {
+                    if let Ok(at) = self.below.binary_search_by_key(&entity, |&(e, _)| e) {
+                        rows.push(self.row_base + self.below[at].1);
+                    }
+                }
+            } else {
+                rows.extend(
+                    self.below
+                        .iter()
+                        .filter(|&&(entity, _)| mask.contains(entity))
+                        .map(|&(_, row)| self.row_base + row),
+                );
+            }
+        }
         // `entity_hi` is inclusive and the range end is exclusive; both ends are already inside
         // `u32` because a `mask` is entity-space and entity ids are capped at `u32::MAX` (I9).
         if !self.rows.is_empty() {
