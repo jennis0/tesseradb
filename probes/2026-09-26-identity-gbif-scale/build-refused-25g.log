@@ -1,0 +1,37 @@
+Running scope as unit: run-r1ad37a53c3184ad097c38dea84853564.scope
+view 'geo': web_mercator, quantising against x [0, 1], y [0, 1]
+        asked for lon [-180, 180], lat [-85.0511287798066, 85.0511287798066] — snapped outward to the square at z0 (0, 0), lon [-180, 180], lat [-85.05112877980659, 85.0511287798066]
+        the data spans x [0, 1], y [0, 1] — 65536 x 65536 of the 65536 x 65536 cells
+        3495729729 point(s) placed, none clamped onto the frame's edge
+        66037 of 3495729729 point(s) (0.0%) CLIPPED at web_mercator's ±85.0511287798066° domain — stored on the frame's edge, not where they were written. Built anyway at any proportion: the domain is the projection's own boundary and no frame moves it, so a real tail beyond it is the wrong projection for this corpus rather than the wrong frame
+schema: 5 column(s), 1.00 B/row against the 12 B fixed row (+8%)
+        0.93 GiB per 10^9 items — unalterable without rewriting the corpus
+        every column materialises in EVERY view — including ones whose items carry no value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration
+tessera build: commit 22ba64448ec7c036bd0038730997cda77724739d
+stage       source_ids    114.10s  rows=3495729729   peak=   664 MiB
+stage       dictionary    171.37s  rows=254          peak=  1075 MiB
+columns: 2 of 2 string column(s) spill their characters as record-blob extents, the entity-order stages modelling 218447 MiB of scratch against 463705 MiB free: specieskey (no room for its arena), scientificname (no room for its arena)
+swept the partial bundle at /home/joe/code/tessera/data/ladder/gbif/bundle/v00000: this build wrote no CURRENT, so nothing names it and a retry has the disk back
+build FAILED: invalid input: this build's entity-order stages need about 25616 MiB, over the 25600 MiB memory budget. Unlike the signature batch loop these do not batch — a declared column holds one value per item and a member table holds its own rows — so a smaller --batch-items does not help. Raise --memory-budget, drop a member source, or narrow the schema. Where the bytes are:
+       6399 MiB  279620266 member entr(ies) in one publication batch at 24 B — the publication's own Roaring, while the batch it is publishing is in flight (the largest level holds 3495729729)
+       5000 MiB  the term images, over 4 worker(s): one term's posting, its image and the buffer it is frozen into, each at a bitset container per 65,536 values
+       4096 MiB  the unique index spill, one column at a time
+       2083 MiB  arrow's all-ones validity bitmaps over 5 column(s) at n/8 bytes each, alive together              while the columns.arrow layout is learnt
+       1482 MiB  the artifact pass's (row, ordinal) partition: 128 MiB of writer buffers, one loaded bucket of 81931165 member entries at 8 B each and the 8 B keys it is sorted into, and the u32 window the list form counts its rows in
+       1322 MiB  the segment assembly: a 128 MiB Morton histogram, the row partition's 257 MiB of writer buffers, and one bucket of 27310388 records held as the 12 B it was written at and the 24 B it is sorted as
+       1011 MiB  the assembly's (entity, row) and 1 (row, value) partition(s): writer buffers, the loaded pairs bucket at 8 B a record, and one lane's bucket at up to 12 B a record, the window it is placed in and a byte a row saying which rows it filled
+        904 MiB  the attribute join's 3 value partition(s): 128 MiB of writer buffers each, and one loaded bucket and window at the widest column's 12 B a record over the 27310388 records a bucket holds
+        833 MiB  declared column 1 (keyword): the duplicate map over its extents, two whole-column Roaring bitmaps at 416 MiB apiece
+        833 MiB  declared column 3 (keyword): the duplicate map over its extents, two whole-column Roaring bitmaps at 416 MiB apiece
+        833 MiB  the two further whole-column Roaring bitmaps held while one spilled column's duplicate map is built, at 416 MiB apiece
+        440 MiB  the keyword dictionary's (row, ordinal) partition: writer buffers, one loaded bucket at 8 B a record and the u32 window it is scattered into
+        310 MiB  the term images' projection scratch, 77 MiB over 4 worker(s)
+         64 MiB  slack for decode buffers, stage scratch and the allocator
+      69730 MiB (mapped)  declared column 3 (keyword): 69730 MiB of extents in .build-tmp/, modelled at half the source's 106123 MiB of characters and their row framing
+      40005 MiB (mapped)  the member spill's runs and the table they merge into, at an estimate of 4 B a member entry, in .build-tmp/
+      30004 MiB (mapped)  the published memberships the store reads back through the packed extent, at an estimate of 3 B a member entry
+      27450 MiB (mapped)  declared column 1 (keyword): 27450 MiB of extents in .build-tmp/, modelled at half the source's 21562 MiB of characters and their row framing
+      27087 MiB (mapped)  declared column 4 (u64): 8 B/item, in .build-tmp/
+      13335 MiB (mapped)  the ordinal→entity map, 4 B/item, in .build-tmp/
+       7084 MiB (mapped)  declared column 2 (u16): 2 B/item, in .build-tmp/
+       3750 MiB (mapped)  declared column 0 (u8): 1 B/item, in .build-tmp/

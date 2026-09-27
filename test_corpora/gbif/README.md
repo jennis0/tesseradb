@@ -111,11 +111,23 @@ Owner ruling, 2026-09-09. Distinct and null figures are the census's, over its 2
 | keyword | `specieskey` | ~10⁶ | 11% (as `species`) | `index = true` — a genuine lookup |
 | numeric | `year` | 377 | 3.7% | `index = true` — "since 2020" is what a map of this is asked |
 | utf8 | `scientificname` | — | 0.0% | neither flag: blob-resident, returned on drill-down |
+| u64 | `gbifid` | one a row | 0.0% | `unique = true`, neither flag: its unique index answers `eq` and `in` |
 
-⊘ **`gbifid` and `occurrenceid` are not taken.** Both are unique per row at 3.65×10⁹, which is a
-~100 GB keyword dictionary and exactly the pathology
-[`probes/2026-09-08-keyword-spill/`](../../probes/2026-09-08-keyword-spill/README.md) was written
-about.
+`gbifid` is GBIF's key for a record, a string of digits on the share, declared a unique `u64`. Its
+index is 42.1 GB over the placed rows
+([`probes/2026-09-26-identity-gbif-scale/`](../../probes/2026-09-26-identity-gbif-scale/README.md)).
+
+⊘ **`occurrenceid` is taken only under `prepare.py --occurrenceid`.** It is the publisher's
+identifier, about 42 bytes a row and not required by GBIF to be unique, and stored as a keyword it
+would add on the order of 140 GB to the bundle.
+
+**Held rows for an ingest.** `--holdout N` writes N rows that have no coordinate to
+`holdout.parquet`, each given the coordinate of a placed row of the same part, so its `gbifid` is
+one the build never saw. `--duplicates N` copies N placed rows to `duplicates.parquet`, each
+setting a `gbifid` an item holds. `--reuse-taxonomy` keeps the member file and the kingdom
+vocabulary already in the output directory, after checking that the member file has one row for
+each placed row and the vocabulary names every kingdom seen, and saves reading the three rank
+columns and writing 23 GB.
 
 ⊘ **`locality` is not taken, and this is the hook for it.** It is 48.45 GiB compressed, the
 corpus's largest column at 14.2 B/row, and a text index over it is deferred past the first build.
