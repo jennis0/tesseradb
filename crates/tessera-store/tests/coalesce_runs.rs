@@ -61,6 +61,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
             shard_id: 0,
             scalar_schema: &[],
             row_base: 0,
+            entity_floor: 0,
         }, &[],
     )
     .expect("the input segment writes");
@@ -134,7 +135,7 @@ fn a_key_in_two_runs_keeps_the_newest_binding() {
 
     let out_dir = dir.path().join("coalesced");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let rows = coalesce_external_id_runs(&[old, new], 100, 202, &out_dir).expect("coalesce runs");
+    let (rows, _) = coalesce_external_id_runs(&[old, new], 100, 202, &[], &out_dir).expect("coalesce runs");
 
     let pairs = pairs_of(&out_dir.join("external-ids.arrow"));
     assert_eq!(rows, 5, "six bindings over five distinct keys");
@@ -176,7 +177,7 @@ fn the_locator_points_at_the_surviving_ordinal() {
 
     let out_dir = dir.path().join("coalesced");
     std::fs::create_dir_all(&out_dir).unwrap();
-    coalesce_external_id_runs(&[old, new], 100, 202, &out_dir).expect("coalesce runs");
+    coalesce_external_id_runs(&[old, new], 100, 202, &[], &out_dir).expect("coalesce runs");
 
     let pairs = pairs_of(&out_dir.join("external-ids.arrow"));
     let locator = locator_of(&out_dir);
@@ -214,7 +215,7 @@ fn a_binding_outside_the_span_is_refused() {
     let out_dir = dir.path().join("coalesced");
     std::fs::create_dir_all(&out_dir).unwrap();
 
-    let err = coalesce_external_id_runs(&[run], 100, 202, &out_dir)
+    let err = coalesce_external_id_runs(&[run], 100, 202, &[], &out_dir)
         .expect_err("a binding past the span must not be written");
     assert!(
         err.to_string().contains("500"),

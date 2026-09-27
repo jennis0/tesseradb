@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::fixed32;
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_store::manifest::{
-    CurrentPointer, DenySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
+    CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
     SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::permutation::SegmentExtent;
@@ -120,8 +120,8 @@ pub fn build_bundle(root: &Path, n: u64) {
         dict_extents: vec![],
         external_id_runs: vec![],
         locator_extents: vec![],
-        tombstones: DenySet::default(),
-        deny: DenySet::default(),
+        tombstones: EntitySet::default(),
+        deny: EntitySet::default(),
         vocabulary_extensions: vec![],
         files,
         ..SegmentsManifest::empty()
@@ -229,6 +229,7 @@ pub fn flush_segment(
             shard_id: 0,
             scalar_schema: &[],
             row_base,
+            entity_floor: 0,
         }, &[],
     )
     .expect("write_flush_segment");

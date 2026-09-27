@@ -149,6 +149,7 @@ impl Fixture {
             shard_id: 0,
             scalar_schema: &[],
             row_base,
+            entity_floor: 0,
         };
         tessera_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input, &[]).unwrap()
     }
@@ -855,6 +856,7 @@ fn listed(flushes: u64) -> (SegmentsManifest, BTreeMap<String, FileDigest>) {
             path: format!("{seg}/ext-locator.u32"),
             entity_lo: i * 10,
             entity_hi: i * 10 + 9,
+            listed: 0,
             external_id_run: format!("{seg}/external-ids.arrow"),
         });
         manifest.dict_extents.push(DictExtent {

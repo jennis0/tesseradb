@@ -30,7 +30,7 @@ fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)
 /// One of a manifest's deny fields, holding `ids`, as it is written into the JSON.
 fn deny_set(ids: &[u64]) -> serde_json::Value {
     let entities: croaring::Bitmap = ids.iter().map(|id| *id as u32).collect();
-    serde_json::to_value(tessera_store::manifest::DenySet::of(&entities)).unwrap()
+    serde_json::to_value(tessera_store::manifest::EntitySet::of(&entities)).unwrap()
 }
 
 fn visible(engine: &Engine) -> u64 {

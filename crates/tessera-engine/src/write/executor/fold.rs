@@ -80,6 +80,36 @@ fn level_length<'a>(
 pub(super) struct FoldDerived<'a> {
     pub(super) written: &'a [tessera_store::manifest::DerivedExtent],
     pub(super) pending_retirement: &'a PendingRetirement,
+    /// The ids this fold frees, held back from the WAL position beside them.
+    pub(super) freed: &'a tessera_store::manifest::HeldEntities,
+}
+
+/// The entities of `executed` the allocator may issue again: each one an edit moved an item away
+/// from, which is therefore no item's number, and against which no suppression stands.
+fn freed_by(
+    live: &Generation,
+    executed: &croaring::Bitmap,
+    overlay: &tessera_lifecycle::Overlay,
+) -> Result<croaring::Bitmap, tessera_store::StoreError> {
+    const CHUNK: usize = 1 << 16;
+    let mut freed = croaring::Bitmap::new();
+    let mut entities: Vec<EntityId> = Vec::with_capacity(CHUNK);
+    let mut iter = executed.iter().peekable();
+    while iter.peek().is_some() {
+        entities.clear();
+        entities.extend(
+            iter.by_ref()
+                .take(CHUNK)
+                .map(|entity| EntityId::new(u64::from(entity))),
+        );
+        let numbers = crate::edited::numbers_of(live, &entities)?;
+        for (entity, number) in entities.iter().zip(numbers) {
+            if number != *entity && !overlay.is_suppressed(*entity) {
+                freed.add(entity.raw() as u32);
+            }
+        }
+    }
+    Ok(freed)
 }
 
 /// The fold-written files whose stamped version is the level's now, after the fold's retirement
@@ -984,10 +1014,26 @@ impl Executor {
         // ---- retirement, evaluated here and nowhere earlier ---------------------------------------
         let mut carried = crate::compact::CarriedForward::new();
         for descriptor in &forward.segments {
-            carried.add_segment(descriptor);
+            let Some(extent) = partition_data
+                .views
+                .get(&descriptor.view)
+                .and_then(|view| {
+                    view.row_space
+                        .extents()
+                        .iter()
+                        .find(|extent| extent.seg_id == descriptor.seg_id)
+                })
+            else {
+                return Err("a carried-forward segment has no extent in the live row space".to_string());
+            };
+            carried.add_segment(extent);
         }
+        let prefix_dir = self.prefix_dir(live);
         for extent in &forward.locators {
-            carried.add_locator_extent(extent);
+            let listed = tessera_store::listed_entities(&prefix_dir, extent).map_err(|e| {
+                format!("a carried-forward locator extent could not be read ({e})")
+            })?;
+            carried.add_locator_extent(extent, &listed);
         }
         let executed = crate::compact::executed(&plan.tombstones, &carried);
         Ok(FoldApplies {
@@ -1138,6 +1184,20 @@ impl Executor {
         // carrying what the swap is about to retire would re-seed the overlay at the next restart.
         let mut published_overlay = (*live.overlay).clone();
         published_overlay.retire(&executed);
+        // Read before the swap, while the edited-items map still holds the retired entities'
+        // pairs, and at the log position no later record can name them at.
+        let freed = match freed_by(&live, &executed, &published_overlay) {
+            Ok(freed) => tessera_store::manifest::HeldEntities {
+                position: self.log.wal.position(),
+                entities: tessera_store::manifest::EntitySet::of(&freed),
+            },
+            Err(e) => {
+                discard(&format!(
+                    "the entities it retires could not be told apart from items' numbers ({e})"
+                ));
+                return;
+            }
+        };
 
         let (runtime_attributes, runtime_scoped_attributes) =
             self.live.attributes_for_publication();
@@ -1283,6 +1343,7 @@ impl Executor {
             Some(FoldDerived {
                 written: &derived,
                 pending_retirement: &pending,
+                freed: &freed,
             }),
         ) {
             discard(&format!(
@@ -1385,7 +1446,13 @@ impl Executor {
         // ---- rotate the WAL ---------------------------------------------------------------------
         //
         // Immediately: the manifest seed no longer carries the executed entries, but the WAL still
-        // holds the original delete records until a rotation reclaims them.
+        // holds the original delete records until a rotation reclaims them. The freed ids are
+        // issued once it has.
+        if let Some(ids) = freed.entities.entities() {
+            let ids = ids.clone();
+            self.live
+                .with_allocator(|alloc| alloc.release_after(freed.position, ids));
+        }
         self.rotate_wal();
         stairs.record("16 wal");
         self.live.with_attributes(|attributes| {

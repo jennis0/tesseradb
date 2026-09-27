@@ -115,9 +115,10 @@ impl RunDesc {
     }
 }
 
-/// One flush-published locator extent: a dense `u32` array over `[entity_lo, entity_hi]`, giving
-/// each entity's ordinal **into the single run it names** — not into the concatenation of every
-/// run, which is what the *base* locator's ordinals mean.
+/// One flush-published locator extent: a dense `u32` array over `[entity_lo, entity_hi]` and the
+/// listed pairs after it ([`crate::manifest::LocatorExtent`]), giving each entity's ordinal **into
+/// the single run it names** — not into the concatenation of every run, which is what the *base*
+/// locator's ordinals mean.
 ///
 /// **The two conventions differ deliberately, and the newer one is the robust one.** A base-locator
 /// ordinal is a position in the listed-order concatenation, so it survives a flush (runs are
@@ -130,8 +131,17 @@ struct LocatorRunDesc {
     entity_lo: u64,
     /// Inclusive.
     entity_hi: u64,
+    /// How many `(entity, slot)` pairs follow the dense array.
+    listed: u64,
     /// The prefix-relative path of the run these ordinals index.
     run_rel: String,
+}
+
+impl LocatorRunDesc {
+    /// Slots in the dense array.
+    fn span(&self) -> u64 {
+        (self.entity_hi + 1).saturating_sub(self.entity_lo)
+    }
 }
 
 /// The `entities/ext-locator.u32` file's identity plus its declared length (contracts §2.4 r6:
@@ -140,7 +150,8 @@ struct LocatorRunDesc {
 struct LocatorDesc {
     path: PathBuf,
     digest: String,
-    /// Entries — the file's length in `u32`s, i.e. `entity_id_high_water` at build.
+    /// Entries — the file's length in `u32`s, i.e. `entity_id_high_water` at build, or a flush
+    /// extent's dense slots and its listed pairs' two words each.
     len: u64,
 }
 
@@ -446,20 +457,20 @@ impl LocatorRunSlot {
         self.cell.get().is_some()
     }
 
-    /// This entity's ordinal into the run this extent names, or `None` when the entity is covered
-    /// by the extent but has no external id at all (contracts §2.4 r6's ordinary case, carried by
-    /// [`LOCATOR_NONE`] — never an error).
-    fn ordinal_of(&self, entity: EntityId) -> Result<Option<u32>> {
+    /// This entity's slot: `None` where the extent does not cover the entity, `Some(None)` where
+    /// it covers it and the entity has no external id at all (contracts §2.4 r6's ordinary case,
+    /// carried by [`LOCATOR_NONE`] — never an error), and the ordinal into the run this extent
+    /// names otherwise.
+    fn lookup(&self, entity: EntityId) -> Result<Option<Option<u32>>> {
         let raw = entity.raw();
-        debug_assert!(raw >= self.desc.entity_lo && raw <= self.desc.entity_hi);
-        let idx = (raw - self.desc.entity_lo) as usize;
+        let span = self.desc.span();
         let bytes = self
             .cell
             .get_or_init(|| {
                 load_locator(&LocatorDesc {
                     path: self.desc.path.clone(),
                     digest: self.desc.digest.clone(),
-                    len: self.desc.entity_hi - self.desc.entity_lo + 1,
+                    len: span + 2 * self.desc.listed,
                 })
             })
             .as_ref()
@@ -470,11 +481,25 @@ impl LocatorRunSlot {
         // SAFETY: identical to `LocatorSlot::get_or_load` — `load_locator` validated the length
         // is a checked multiple of 4 and matches `len * 4` exactly, and the mmap base is
         // page-aligned.
-        let len = (self.desc.entity_hi - self.desc.entity_lo + 1) as usize;
-        let slots: &[u32] =
-            unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, len) };
-        let ord = slots[idx];
-        Ok(if ord == LOCATOR_NONE { None } else { Some(ord) })
+        let words: &[u32] = unsafe {
+            std::slice::from_raw_parts(
+                bytes.as_ptr() as *const u32,
+                (span + 2 * self.desc.listed) as usize,
+            )
+        };
+        let (dense, listed) = words.split_at(span as usize);
+        let ord = if raw >= self.desc.entity_lo && raw <= self.desc.entity_hi {
+            dense[(raw - self.desc.entity_lo) as usize]
+        } else {
+            let Ok(raw) = u32::try_from(raw) else {
+                return Ok(None);
+            };
+            match listed_slot(listed, raw) {
+                Some(ord) => ord,
+                None => return Ok(None),
+            }
+        };
+        Ok(Some((ord != LOCATOR_NONE).then_some(ord)))
     }
 }
 
@@ -526,6 +551,21 @@ impl LocatorSlot {
     }
 }
 
+/// The slot `listed`, a locator extent's `(entity, slot)` pairs ascending by entity, gives
+/// `entity`, where it lists it.
+pub(crate) fn listed_slot(listed: &[u32], entity: u32) -> Option<u32> {
+    let (mut lo, mut hi) = (0usize, listed.len() / 2);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match listed[2 * mid].cmp(&entity) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Some(listed[2 * mid + 1]),
+        }
+    }
+    None
+}
+
 fn load_locator(desc: &LocatorDesc) -> std::result::Result<Mmap, String> {
     let file = File::open(&desc.path).map_err(|e| format!("io error: {e}"))?;
     let mapping = unsafe { Mmap::map(&file) }.map_err(|e| format!("io error: {e}"))?;
@@ -559,18 +599,20 @@ pub enum Locator {
 }
 
 /// The locators that can hold `entity`'s slot, in the order a lookup asks them: every flushed
-/// extent whose span covers it, newest first, then the base locator if `entity` is below its
-/// length `base_len`. An entity's external id is the first slot any of them holds; spans may
-/// overlap one another and the base.
+/// extent whose span covers it or whose listed pairs lie below it, newest first, then the base
+/// locator if `entity` is below its length `base_len`. An entity's external id is the first slot
+/// any of them holds; spans may overlap one another and the base. `span` gives an extent's
+/// `(entity_lo, entity_hi, listed)`.
 pub fn locators_covering<'a, T>(
     entity: u64,
     base_len: u64,
     extents: &'a [T],
-    span: impl Fn(&T) -> (u64, u64) + 'a,
+    span: impl Fn(&T) -> (u64, u64, u64) + 'a,
 ) -> impl Iterator<Item = Locator> + 'a {
     let flushed = extents.iter().enumerate().rev().filter_map(move |(i, extent)| {
-        let (lo, hi) = span(extent);
-        (lo <= entity && entity <= hi).then_some(Locator::Extent(i))
+        let (lo, hi, listed) = span(extent);
+        ((lo <= entity && entity <= hi) || (listed > 0 && entity < lo))
+            .then_some(Locator::Extent(i))
     });
     flushed.chain((entity < base_len).then_some(Locator::Base))
 }
@@ -679,6 +721,7 @@ impl ExternalIdSidecar {
                 digest: digest.sha256.clone(),
                 entity_lo: extent.entity_lo,
                 entity_hi: extent.entity_hi,
+                listed: extent.listed,
                 run_rel: extent.external_id_run.clone(),
             }));
         }
@@ -850,11 +893,11 @@ impl ExternalIdSidecar {
         // external id.
         let mut covered = false;
         for locator in locators_covering(entity.raw(), self.locator_len(), &self.locator_runs, |s| {
-            (s.desc.entity_lo, s.desc.entity_hi)
+            (s.desc.entity_lo, s.desc.entity_hi, s.desc.listed)
         }) {
-            covered = true;
             let slot = match locator {
                 Locator::Base => {
+                    covered = true;
                     if let Some(key) = self.external_id_of(entity)? {
                         return Ok(Some(key));
                     }
@@ -862,7 +905,11 @@ impl ExternalIdSidecar {
                 }
                 Locator::Extent(i) => &self.locator_runs[i],
             };
-            let Some(ordinal) = slot.ordinal_of(entity)? else {
+            let Some(held) = slot.lookup(entity)? else {
+                continue;
+            };
+            covered = true;
+            let Some(ordinal) = held else {
                 continue;
             };
             let run = self

@@ -199,9 +199,13 @@ pub struct GenerationStamp {
 // 25: a side-manifest carries `edited_items`, the runs mapping an edited item's number to its
 // entity and back, and a segment may carry `edited-rows.u32`. A 24 manifest lacks the field and is
 // refused as malformed. A group-scoped text column stores its prose beside its postings.
+// 26: a side-manifest carries `free_entities` and `held_entities`, the entity ids a fold freed; a
+// flush or merge segment may hold rows for entities below its descriptor's span, and a locator
+// extent carries `listed` pairs after its dense slots. A 25 manifest lacks the fields and is
+// refused as malformed.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 25;
+pub const BUNDLE_FORMAT: u32 = 26;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

@@ -103,6 +103,25 @@ impl LiveState {
         lock_recover(&self.allocator).low_water()
     }
 
+    /// The allocator's freed ids and the sets it holds back, as a side-manifest records them.
+    pub(crate) fn allocator_freed(
+        &self,
+    ) -> (
+        tessera_store::manifest::EntitySet,
+        Vec<tessera_store::manifest::HeldEntities>,
+    ) {
+        let alloc = lock_recover(&self.allocator);
+        let held = alloc
+            .held()
+            .iter()
+            .map(|(position, ids)| tessera_store::manifest::HeldEntities {
+                position: *position,
+                entities: tessera_store::manifest::EntitySet::of(ids),
+            })
+            .collect();
+        (tessera_store::manifest::EntitySet::of(alloc.free()), held)
+    }
+
     /// Runs `f` with both the registry and the allocator held, in that lock order.
     ///
     /// One critical section: a registration reads one and writes both, and taking them separately

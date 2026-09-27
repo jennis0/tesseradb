@@ -33,6 +33,7 @@ fn extent(lo: u64, hi: u64, seg_id: &str, row_base: u32, rows: &[u32]) -> Segmen
         seg_id: seg_id.to_string(),
         row_base,
         rows: rows.to_vec(),
+        below: Vec::new(),
     }
 }
 
@@ -163,4 +164,111 @@ fn an_extent_is_refused_unless_it_continues_row_space_exactly() {
     assert!(space.with_extent(extent(3, 3, "s1", 4, &[0])).is_none());
     assert!(space.with_extent(extent(2, 2, "s1", 3, &[0])).is_none());
     assert!(space.with_extent(extent(3, 3, "s1", 3, &[1])).is_none());
+}
+
+/// A base over `bound` entities where `in_row_order[row]` holds each row, and every other entity
+/// below `bound` has none: what a fold writes after removing a deleted entity's rows.
+fn base_holding(bound: u64, in_row_order: &[u64]) -> RowSpace {
+    let dir = Box::leak(Box::new(tempfile::TempDir::new().unwrap()));
+    let path = dir.path().join("permutation.bin");
+    let entities: Vec<EntityId> = in_row_order.iter().map(|&e| EntityId::new(e)).collect();
+    write_permutation(&path, &entities, bound).unwrap();
+    RowSpace::new(
+        Arc::new(Permutation::load(&path).unwrap()),
+        in_row_order.len() as u32,
+    )
+}
+
+/// The extent a flush writes over `entities`, in row order, into `space`.
+fn flushed(space: &RowSpace, seg_id: &str, entities: &[u64]) -> SegmentExtent {
+    let span = SegmentExtent::flush_span(space.entity_floor(), entities.iter().copied());
+    SegmentExtent::from_rows(
+        seg_id,
+        space.total_rows() as u32,
+        span,
+        entities.iter().copied(),
+    )
+    .expect("one row per entity")
+}
+
+/// **An entity a fold freed lies below the view's rows, and a flush lists its row.** It is found
+/// by lookup, by projection and by the reverse direction, exactly as a row in the dense span is.
+#[test]
+fn an_entity_below_the_views_rows_is_listed_and_found() {
+    // Entity 1's rows were removed by a fold; 0, 2 and 3 hold rows 0..3.
+    let base = base_holding(4, &[0, 2, 3]);
+    assert_eq!(base.row_of(EntityId::new(1)), None);
+    let extent = flushed(&base, "s1", &[4, 1, 5]);
+    assert_eq!((extent.entity_lo, extent.entity_hi), (4, 5));
+    assert_eq!(extent.below, vec![(1, 1)]);
+    let space = base.with_extent(extent).expect("the listed entity has no row");
+
+    assert_eq!(space.row_of(EntityId::new(1)), Some(RowId::new(4)));
+    assert_eq!(space.row_of(EntityId::new(4)), Some(RowId::new(3)));
+    assert_eq!(space.entity_of(RowId::new(4)), Some(EntityId::new(1)));
+    assert_eq!(
+        space.project(&croaring::Bitmap::of(&[1, 5])),
+        croaring::Bitmap::of(&[4, 5])
+    );
+    // A mask holding only the listed entity is below every dense span, and still projects.
+    assert_eq!(
+        space.project_extents_from(&croaring::Bitmap::of(&[1]), 0),
+        croaring::Bitmap::of(&[4])
+    );
+    assert_eq!(space.total_rows(), 6);
+}
+
+/// A listed entity that already has a row in the view would alias two rows onto one entity.
+#[test]
+fn a_listed_entity_that_already_has_a_row_is_refused() {
+    let base = base_holding(4, &[0, 2, 3]);
+    let extent = flushed(&base, "s1", &[2, 4]);
+    assert!(base.with_extent(extent).is_none());
+
+    let space = base.with_extent(flushed(&base, "s1", &[1])).unwrap();
+    assert!(
+        space.with_extent(flushed(&space, "s2", &[1, 6])).is_none(),
+        "an entity listed by an earlier extent is refused too"
+    );
+}
+
+/// An extent whose every row is listed has an empty span at the view's floor. A later extent
+/// continues above it, and a merge of the two moves no row.
+#[test]
+fn an_extent_of_listed_rows_alone_takes_an_empty_span_and_merges() {
+    let base = base_holding(5, &[0, 3, 4]);
+    let first = flushed(&base, "s1", &[2, 1]);
+    assert_eq!((first.entity_lo, first.entity_hi), (5, 4), "empty at the floor");
+    let space = base.with_extent(first).unwrap();
+    assert_eq!(space.entity_floor(), 5);
+    let space = space.with_extent(flushed(&space, "s2", &[6, 5])).unwrap();
+
+    let merged = SegmentExtent::from_rows("s3", 3, (5, 6), [2, 1, 6, 5]).unwrap();
+    let after = space
+        .collapsing(&["s1".into(), "s2".into()], merged)
+        .expect("the run is present and covers the same span and rows");
+    for e in 0..=6u64 {
+        assert_eq!(
+            after.row_of(EntityId::new(e)),
+            space.row_of(EntityId::new(e)),
+            "entity {e}"
+        );
+    }
+    let mask = croaring::Bitmap::of(&[1, 2, 5, 6]);
+    assert_eq!(after.project(&mask), space.project(&mask));
+}
+
+/// A merge's span can hold an entity another extent lists: its dense slot is empty, and the lookup
+/// falls through to the list.
+#[test]
+fn a_dense_span_with_an_empty_slot_defers_to_the_extent_that_lists_it() {
+    let base = base_holding(1, &[0]);
+    // Entity 2 was deleted before its flush, so its slot in s1's span is empty.
+    let space = base.with_extent(flushed(&base, "s1", &[1, 3])).unwrap();
+    let space = space.with_extent(flushed(&space, "s2", &[2, 4])).unwrap();
+    assert_eq!(space.row_of(EntityId::new(2)), Some(RowId::new(3)));
+    assert_eq!(
+        space.project(&croaring::Bitmap::of(&[2, 3])),
+        croaring::Bitmap::of(&[2, 3])
+    );
 }

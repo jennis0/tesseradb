@@ -440,6 +440,9 @@ pub(crate) struct FlushContext {
     pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     pub(crate) seg_id: String,
     pub(crate) row_base: u32,
+    /// The view's entity floor when planned: the rows of entities below it are listed in the
+    /// segment's extent.
+    pub(crate) entity_floor: u64,
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
     pub(crate) quantisation: Quantisation,
@@ -640,6 +643,7 @@ fn execute_flush_stages(
                     shard_id: ctx.shard_id,
                     scalar_schema: &ctx.scalar_schema,
                     row_base: ctx.row_base,
+                    entity_floor: ctx.entity_floor,
                 },
                 &plan.recorded_joins,
             )

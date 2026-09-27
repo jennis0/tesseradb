@@ -1276,6 +1276,7 @@ impl Executor {
                 // memory-mapped file, truncating the mapping and SIGBUS on the next read.
                 seg_id: format!("flush-{planned_at_n}-{}", self.flush.next_attempt()),
                 row_base,
+                entity_floor: view_data.row_space.entity_floor(),
                 identity_key: self.deps.identity_key,
                 shard_id: manifest.identity.shard_id,
                 quantisation,

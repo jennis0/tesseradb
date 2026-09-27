@@ -162,6 +162,7 @@ fn a_merge_substitutes_the_consumed_segments() {
                 seg_id: merged_extent.seg_id.clone(),
                 row_base: 50,
                 rows: vec![0, 1, 2, 3],
+                below: Vec::new(),
             },
             PublishedManifest {
                 manifest: next_manifest(&two, 4),
