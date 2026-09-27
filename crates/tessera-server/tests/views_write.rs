@@ -2076,8 +2076,8 @@ async fn a_row_whose_item_is_deleted_under_it_creates_a_fresh_item_that_keeps_it
     let first = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
 
-    // The holder is deleted, so the binding is dead bookkeeping: the re-ingest below allocates
-    // rather than answering 409, and it is no longer a join.
+    // The item is deleted, so the re-ingest below names no live item and creates one, where a
+    // live item would have been edited.
     let body = json!([{ "tessera_id": first.to_string(), "op": "delete" }]);
     let resp = served
         .server
@@ -2088,7 +2088,7 @@ async fn a_row_whose_item_is_deleted_under_it_creates_a_fresh_item_that_keeps_it
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "the holder is deleted");
+    assert_eq!(resp.status(), 200, "the item is deleted");
 
     // The same external id again, under a label this principal holds.
     let resp = ingest(
@@ -2098,15 +2098,15 @@ async fn a_row_whose_item_is_deleted_under_it_creates_a_fresh_item_that_keeps_it
         &[(id, 800.0, 300.0, &["1"][..], Some(7))],
     )
     .await;
-    assert_eq!(resp.status(), 200, "a deleted holder does not collide");
+    assert_eq!(resp.status(), 200, "a deleted item does not collide");
     let second = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
-    assert_ne!(second, first, "a fresh entity, not the dead binding's");
+    assert_ne!(second, first, "a fresh item, not the deleted one");
     drain(&served.server).await;
     served.reauthorise().await;
 
-    // The whole point: the fresh entity carries the label the batch named, so a principal that
-    // satisfies it is served the row. A row that had arrived with its descriptors already dropped
-    // would be here with an empty term set and visible to nobody.
+    // The fresh item carries the label the batch named, so a principal that satisfies it is
+    // served the row. A row that had lost its descriptors would be stored with no label and be
+    // visible to nobody.
     assert!(
         points(&served, "quarter:2026-Q1")
             .await
