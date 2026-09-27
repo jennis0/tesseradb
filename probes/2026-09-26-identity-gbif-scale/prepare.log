@@ -1,0 +1,50 @@
+Running scope as unit: run-r2c4ad13900f241efaac28fc1e24e3ebf.scope
+parts  8,369 of 8,369 (the whole corpus)
+output /home/joe/code/tessera/data/ladder/gbif
+[read, place and write] ...
+    500/8,369 parts, 208,283,763 placed (2.0 GB)
+    1,000/8,369 parts, 407,053,971 placed (2.0 GB)
+    1,500/8,369 parts, 564,793,784 placed (2.0 GB)
+    2,000/8,369 parts, 724,182,539 placed (2.4 GB)
+    2,500/8,369 parts, 829,841,620 placed (2.4 GB)
+    3,000/8,369 parts, 987,339,595 placed (2.4 GB)
+    3,500/8,369 parts, 1,087,083,719 placed (2.4 GB)
+    4,000/8,369 parts, 1,205,938,004 placed (2.4 GB)
+    4,500/8,369 parts, 1,494,932,674 placed (2.4 GB)
+    5,000/8,369 parts, 1,780,225,133 placed (2.4 GB)
+    5,500/8,369 parts, 1,979,443,976 placed (2.4 GB)
+    6,000/8,369 parts, 2,206,578,009 placed (2.4 GB)
+    6,500/8,369 parts, 2,483,418,908 placed (2.4 GB)
+    7,000/8,369 parts, 2,772,367,120 placed (2.4 GB)
+    7,500/8,369 parts, 3,103,466,912 placed (2.4 GB)
+    8,000/8,369 parts, 3,322,368,699 placed (2.4 GB)
+[read, place and write] 2899.79s
+[held rows] ...
+[held rows] 8.5s
+held out 1,000,000 rows without a coordinate, copied 10,000 placed rows as duplicates
+placed 3,495,729,729 of 3,654,488,638 (95.66%); 158,758,909 carry no coordinate (4.34%), 0 lie outside ±90/±180
+  66,037 placed rows are beyond ±85.0511° and clamp to the extent boundary (0.002%)
+[vocabulary] ...
+[vocabulary] 0.04s
+kingdom vocabulary: 9 keys, 0 rows carry none (0.00%)
+[the demo's terms] ...
+253 country terms; top five US 1,196,372,040, AU 243,865,874, GB 217,719,738, CA 204,591,124, FR 199,544,072
+[the demo's terms] 0.01s
+
+wrote to /home/joe/code/tessera/data/ladder/gbif:
+  .env                                     0.00 MB
+  corpus.toml                              0.01 MB
+  country-ranks.json                       0.01 MB
+  country-terms.txt                        0.00 MB
+  duplicates.parquet                      10.64 MB
+  holdout.parquet                         42.63 MB
+  manifest-2026-09-10.json                 0.00 MB
+  manifest.json                            0.00 MB
+  members-taxonomy.parquet             22955.85 MB
+  points.parquet                       66468.43 MB
+  prepare.log                              0.00 MB
+  tessera.toml                             0.00 MB
+  vocab-kingdom.parquet                    0.00 MB
+
+next:
+  cd /home/joe/code/tessera/data/ladder/gbif && tessera check --payloads && tessera build --stage-timings

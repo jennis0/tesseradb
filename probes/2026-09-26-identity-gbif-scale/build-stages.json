@@ -1,0 +1,290 @@
+[
+  {
+    "stage": "source_ids",
+    "wall_s": 115.027477477,
+    "rows": 3495729729,
+    "peak_rss_kib": 687884,
+    "started_at": 1790409483.4745939,
+    "ended_at": 1790409598.5020714
+  },
+  {
+    "stage": "dictionary",
+    "wall_s": 173.699559273,
+    "rows": 254,
+    "peak_rss_kib": 1109648,
+    "started_at": 1790409600.8437753,
+    "ended_at": 1790409774.5433345
+  },
+  {
+    "stage": "geometry_read",
+    "wall_s": 402.947061838,
+    "rows": 3495729729,
+    "peak_rss_kib": 8165628,
+    "started_at": 1790409780.700641,
+    "ended_at": 1790410183.6477027
+  },
+  {
+    "stage": "pairs_pack",
+    "wall_s": 0.087586643,
+    "rows": 3495729729,
+    "peak_rss_kib": 8165628,
+    "started_at": 1790410183.647847,
+    "ended_at": 1790410183.7354336
+  },
+  {
+    "stage": "signature_sort",
+    "wall_s": 27.471183213,
+    "rows": 452984832,
+    "peak_rss_kib": 17193700,
+    "started_at": 1790410183.7388995,
+    "ended_at": 1790410211.2100828
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 106.194320291,
+    "rows": 452984832,
+    "peak_rss_kib": 18626388,
+    "started_at": 1790410213.1189997,
+    "ended_at": 1790410319.31332
+  },
+  {
+    "stage": "signature_sort",
+    "wall_s": 23.880113584,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790410319.3168306,
+    "ended_at": 1790410343.1969442
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 81.455218284,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790410344.6833117,
+    "ended_at": 1790410426.13853
+  },
+  {
+    "stage": "signature_sort",
+    "wall_s": 25.088323491,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790410426.7231624,
+    "ended_at": 1790410451.811486
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 115.325508995,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790410453.3136137,
+    "ended_at": 1790410568.6391227
+  },
+  {
+    "stage": "signature_sort",
+    "wall_s": 26.636727656,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790410569.2834444,
+    "ended_at": 1790410595.920172
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 193.536426839,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790410599.7118654,
+    "ended_at": 1790410793.2482922
+  },
+  {
+    "stage": "signature_sort",
+    "wall_s": 25.019228326,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790410793.9255552,
+    "ended_at": 1790410818.9447834
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 208.174418708,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790410823.0310254,
+    "ended_at": 1790411031.205444
+  },
+  {
+    "stage": "signature_sort",
+    "wall_s": 26.301729903000002,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411031.9032075,
+    "ended_at": 1790411058.2049375
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 212.548424555,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411062.6198997,
+    "ended_at": 1790411275.1683242
+  },
+  {
+    "stage": "signature_sort",
+    "wall_s": 28.369500206,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411275.778878,
+    "ended_at": 1790411304.1483781
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 265.016072141,
+    "rows": 452984832,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411309.0575056,
+    "ended_at": 1790411574.0735776
+  },
+  {
+    "stage": "signature_sort",
+    "wall_s": 30.458993325,
+    "rows": 324835905,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411574.6892397,
+    "ended_at": 1790411605.1482332
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 101.153125704,
+    "rows": 324835905,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411607.102487,
+    "ended_at": 1790411708.2556129
+  },
+  {
+    "stage": "assignment",
+    "wall_s": 2.215626545,
+    "rows": 3495729729,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411708.2557697,
+    "ended_at": 1790411710.4713962
+  },
+  {
+    "stage": "postings_write",
+    "wall_s": 54.871067424,
+    "rows": 3495729729,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411711.764684,
+    "ended_at": 1790411766.6357515
+  },
+  {
+    "stage": "external_ids",
+    "wall_s": 0.000305021,
+    "rows": 0,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411766.6363535,
+    "ended_at": 1790411766.6366584
+  },
+  {
+    "stage": "attribute_tail",
+    "wall_s": 1832.257291567,
+    "rows": 3495729729,
+    "peak_rss_kib": 21048572,
+    "started_at": 1790411810.063129,
+    "ended_at": 1790413642.3204205
+  },
+  {
+    "stage": "layers",
+    "wall_s": 2000.647115385,
+    "rows": 1,
+    "peak_rss_kib": 28162804,
+    "started_at": 1790413698.9904137,
+    "ended_at": 1790415699.6375291
+  },
+  {
+    "stage": "unique_indexes",
+    "wall_s": 606.137188355,
+    "rows": 3495729729,
+    "peak_rss_kib": 29211656,
+    "started_at": 1790415718.8646288,
+    "ended_at": 1790416325.0018172
+  },
+  {
+    "stage": "text_index",
+    "wall_s": 0.0,
+    "rows": 0,
+    "peak_rss_kib": 30407684,
+    "started_at": 1790417424.8612905,
+    "ended_at": 1790417424.8612905
+  },
+  {
+    "stage": "filter_postings",
+    "wall_s": 1060.800871197,
+    "rows": 3495729729,
+    "peak_rss_kib": 30407684,
+    "started_at": 1790416365.4831789,
+    "ended_at": 1790417426.28405
+  },
+  {
+    "stage": "record_blob",
+    "wall_s": 1155.702615178,
+    "rows": 3495729729,
+    "peak_rss_kib": 30407684,
+    "started_at": 1790417456.4915957,
+    "ended_at": 1790418612.194211
+  },
+  {
+    "stage": "column_release",
+    "wall_s": 0.399126574,
+    "rows": 3495729729,
+    "peak_rss_kib": 30407684,
+    "started_at": 1790418612.1979592,
+    "ended_at": 1790418612.5970857
+  },
+  {
+    "stage": "tiler_sort",
+    "wall_s": 217.273845259,
+    "rows": 3495729729,
+    "peak_rss_kib": 30407684,
+    "started_at": 1790418620.3361819,
+    "ended_at": 1790418837.610027
+  },
+  {
+    "stage": "segment_write",
+    "wall_s": 614.517237069,
+    "rows": 3495729729,
+    "peak_rss_kib": 30407684,
+    "started_at": 1790418856.721244,
+    "ended_at": 1790419471.2384813
+  },
+  {
+    "stage": "artifact_pass",
+    "wall_s": 1988.156747391,
+    "rows": 3,
+    "peak_rss_kib": 30494536,
+    "started_at": 1790419548.4592402,
+    "ended_at": 1790421536.6159875
+  },
+  {
+    "stage": "term_images",
+    "wall_s": 9.722350034,
+    "rows": 252,
+    "peak_rss_kib": 30494536,
+    "started_at": 1790421536.6162057,
+    "ended_at": 1790421546.3385558
+  },
+  {
+    "stage": "artifact_pass",
+    "wall_s": 0.126056251,
+    "rows": 3,
+    "peak_rss_kib": 30494536,
+    "started_at": 1790421546.3386989,
+    "ended_at": 1790421546.464755
+  },
+  {
+    "stage": "manifests",
+    "wall_s": 82.482549312,
+    "rows": 269103470637,
+    "peak_rss_kib": 30494536,
+    "started_at": 1790421549.1501555,
+    "ended_at": 1790421631.632705
+  }
+]
