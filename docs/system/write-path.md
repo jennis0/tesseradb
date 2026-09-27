@@ -539,11 +539,11 @@ The segment lists the rows of such entities beside its range instead, and a look
 row in the base or a range reads the lists; the external-id locator a flush writes does the same.
 A merge keeps the listed rows, and the compaction folds them into the base like any other.
 
-Measured on the GeoNames rung (13.5 million items), over five rounds that each send a
+Measured on the GeoNames corpus (13.5 million items), over five rounds that each send a
 673,193-row hold-out again with the same 6,748 items moved, then flush and compact: the first two
 rounds took 6,748 new ids each and every later round none, so the high point stayed at 13,477,353.
 Freed ids land among other terms' runs in the term index rather than in a run of their own, and
-the compacted base postings measured 82,866 bytes after each of the two rounds on new ids and
+the compacted base term index measured 82,866 bytes after each of the two rounds on new ids and
 82,674 to 82,930 bytes after the rounds on freed ones; they were 52,018 bytes before the first
 edit. Ingest ran at 128,000 to 139,000 rows a second, a flush took 2.0 s and a compaction 146 to
 149 s in every round.
