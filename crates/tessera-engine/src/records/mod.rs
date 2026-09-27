@@ -634,14 +634,14 @@ impl Pager for ItemsPager<'_> {
         };
         let total = u32::try_from(open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
         let candidate = engine.filter_candidate(open.served.session, generation)?;
-        let routed = match driving_rows(&cx, expr, &candidate, self.walk.ceiling)? {
-            Some(rows) => {
-                let mut domain: Vec<Range<u32>> = Vec::new();
-                for_each_run_in(&rows, 0..total, &mut |run| domain.push(run));
-                filter_rows(&cx, expr, Some(&candidate), &domain, true, &req.cancel)?
-            }
-            None => filter_rows(&cx, expr, Some(&candidate), &[0..total], false, &req.cancel)?,
-        };
+        let driving = driving_rows(&cx, expr, &candidate, self.walk.ceiling)?;
+        let mut domain: Vec<Range<u32>> = Vec::new();
+        match &driving {
+            Some(rows) => for_each_run_in(rows, 0..total, &mut |run| domain.push(run)),
+            None => domain.push(0..total),
+        }
+        let routed =
+            filter_rows(&cx, expr, Some(&candidate), &domain, driving.is_some(), &req.cancel)?;
         let matched = open.mask.count_intersection(routed.rows.rows());
         Ok((
             RecordsCounts {
