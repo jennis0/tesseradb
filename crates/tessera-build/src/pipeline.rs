@@ -5959,19 +5959,23 @@ impl IdPresence {
     }
 }
 
+/// The widest span, in ids a row, whose two presence bitmaps are no larger than the source-ids
+/// array ([`union_id_span`]).
+const SPAN_BITS_PER_ROW: u64 = 32;
+
 /// The range the union's ids are known to lie in, where a bitmap over it is worth building.
 ///
 /// Every points file states the lowest and highest `entity_id` it holds in its own parquet
 /// statistics ([`input::id_bounds`]), and a `limit` selects `entity_id < limit`, so it bounds the
 /// selection above. The union lies inside the fold of those bounds.
 ///
-/// **The gate is `span <= total`**, `total` being the rows every view declares. A bitmap over the
-/// span is `span / 8` bytes against the `8 * total` the array costs, so the gate makes it at most
-/// a sixty-fourth of the file it stands in for, and it rejects a corpus whose ids are spread
-/// rather than numbered: the `multiview` fixture's ten views hold 21,300 items over a span of
-/// 13,463,247, which is 632 times its own row count, and a bitmap there would be 9.9 times the
-/// live array. The condition is also necessary for the union to be a range at all where the
-/// statistics are tight, a range of `n` distinct ids spanning exactly `n`.
+/// **The gate is a span of at most [`SPAN_BITS_PER_ROW`] ids a row**, over the rows every view
+/// declares. A bitmap over the span is `span / 8` bytes, and pass one holds at most two at once,
+/// the union and the view being read, so the gate keeps them within the `8 * total` bytes of the
+/// array the route stands in for. The route saves the array's sort in every case and the array itself
+/// where the union is a range, so a union of sparse ids, such as GBIF's `gbifid` at 1.8 ids a row,
+/// takes it. It rejects a corpus whose ids are spread rather than numbered: the `multiview`
+/// fixture's ten views hold 21,300 items over a span of 13,463,247, 632 ids a row.
 ///
 /// `None` where any view cannot be bounded — no statistics, or an id the statistics cannot state
 /// as a `u64` — which leaves the array as the only route. A view selecting no rows contributes
@@ -6020,7 +6024,7 @@ fn union_id_span(
     let Some(span) = high.checked_sub(low).and_then(|d| d.checked_add(1)) else {
         return Ok(None);
     };
-    Ok((span <= total).then_some((low, span)))
+    Ok((span <= total.saturating_mul(SPAN_BITS_PER_ROW)).then_some((low, span)))
 }
 
 /// Every view's ids as one presence bitmap over `[base, base + span)`, with each view's own anchor.
@@ -6145,12 +6149,12 @@ fn source_ids_of_presence(present: &IdPresence, tmp: &Path) -> Result<SourceIds>
 /// entity's identity, label and attributes shared across the row spaces.
 ///
 /// **Two routes to the same union.** Where every view's points file bounds its own ids and the
-/// union's span is no larger than the rows the views declare ([`union_id_span`]), the ids go into
-/// a presence bitmap a sixty-fourth of the array's size, and a union that turns out to be one
+/// union's span is at most [`SPAN_BITS_PER_ROW`] ids a row ([`union_id_span`]), the ids go into a
+/// presence bitmap no larger than the array, and a union that turns out to be one
 /// unbroken range needs no array at all: an ordinal is a subtraction and pass one writes nothing.
-/// At the GBIF rung that is 28 GB of writes and one sort of 3.5×10⁹ `u64`s not made. A union that
-/// is not a range is walked out of the bitmap into an array that is already sorted and already
-/// deduplicated.
+/// Over 3.5×10⁹ numbered rows that is 28 GB of writes and one sort of 3.5×10⁹ `u64`s not made. A
+/// union that is not a range, such as GBIF's `gbifid`, is walked out of the bitmap into an array
+/// that is already sorted and already deduplicated, so only the sort is not made.
 ///
 /// Otherwise the ids go into the array directly, each view's segment sorted and duplicate-checked
 /// in place and the whole sorted and deduplicated after. **Every view is counted before any is
