@@ -34,14 +34,15 @@ TOTAL_ROWS = 3_654_488_638
 #: `kingdom` rides as a rendered category column instead.
 RANKS = ["family", "genus", "species"]
 
-#: What `prepare.py` projects off the share. Ten of fifty columns, and the corpus is read once:
+#: What `prepare.py` projects off the share. Eleven of fifty columns, and the corpus is read once:
 #: the census measured 200 parts with eight columns in 70.7 s at eight threads, so a whole-corpus
 #: pass of this width is on the order of an hour (modelled from that rate).
 #:
-#: ⊘ **`gbifid` and `occurrenceid` are not here.** Both are unique per row at 3.65×10⁹, which is a
-#: ~100 GB keyword dictionary and the pathology `probes/2026-09-08-keyword-spill/` was written
-#: about. ⊘ **`locality` is not here** either: 48.45 GiB compressed, the corpus's largest column,
-#: and the text index over it is deferred past the first build.
+#: `gbifid` is GBIF's key for a record, a string of digits on the share and a unique `u64` in the
+#: declaration. ⊘ **`occurrenceid` is read only under `prepare.py --occurrenceid`.** It is the
+#: publisher's identifier, about 42 bytes a row, and stored as a keyword it would add on the order
+#: of 140 GB to the bundle. ⊘ **`locality` is not here**: 48.45 GiB compressed, the corpus's
+#: largest column, and the text index over it is deferred past the first build.
 COLUMNS = [
     "kingdom",
     *RANKS,
@@ -51,6 +52,7 @@ COLUMNS = [
     "countrycode",
     "decimallatitude",
     "decimallongitude",
+    "gbifid",
 ]
 
 

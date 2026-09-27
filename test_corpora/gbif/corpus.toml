@@ -124,6 +124,17 @@ name  = "scientificname"
 title = "Scientific name"
 type  = "keyword"
 
+# `gbifid` is GBIF's key for a record, one a row, and it is declared `unique`: the build refuses a
+# corpus in which two items hold one value, and an ingest a row setting a value another item
+# holds. Neither rendered nor indexed, so its unique index is its only filter structure and it
+# answers `eq` and `in` alone; the value itself is read from the record store.
+
+[[attribute]]
+name   = "gbifid"
+title  = "GBIF occurrence key"
+type   = "u64"
+unique = true
+
 # ---------------------------------------------------------------------------------------------
 # **The taxonomy, three levels, family → genus → species.** It starts at family and that is the
 # rung's one structural concession to the box: `merge_member_runs` holds the largest single
