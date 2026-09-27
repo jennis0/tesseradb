@@ -973,7 +973,7 @@ async fn a_global_row_major_level_over_a_recreated_view_answers_the_same_after_a
             PLAIN.replace('/', "%2F")
         )))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "addressing": "external", "artifacts": [
+        .json(&json!({ "field": "id", "artifacts": [
             { "key": "c0", "members": members(50..80) }
         ] }))
         .send()
