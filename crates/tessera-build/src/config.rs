@@ -2645,6 +2645,7 @@ impl Config {
             &defaults,
             strictness,
         )?;
+        require_join_source(&defaults, &file.attribute, &views, &view_groups)?;
         // The scopes first: which attributes are entity space and which are a family is what
         // decides the schema itself (`views.md` §5).
         let attribute_scopes = compile_attribute_scopes(&file.attribute, &view_groups)?;
@@ -3054,6 +3055,38 @@ fn compile_join(name: &str, attributes: &[AttributeBlock]) -> Result<Join> {
         field: name.to_string(),
         column: attribute.field.clone().unwrap_or_else(|| name.to_string()),
     })
+}
+
+/// **The join attribute's values are read from its own source**, so a declaration whose views
+/// read a points file needs one there. Refused while parsing, so `tessera check` and the build
+/// give one answer; a declaration whose views read no file is declared and empty either way.
+fn require_join_source(
+    defaults: &Defaults,
+    attributes: &[AttributeBlock],
+    views: &[View],
+    groups: &[ViewGroup],
+) -> Result<()> {
+    let Some(join) = &defaults.join else {
+        return Ok(());
+    };
+    let reads_points = views.iter().any(|v| v.source.is_some())
+        || groups.iter().any(|g| {
+            g.source.is_some()
+                || matches!(&g.roster, Roster::Inline(views) if views.iter().any(|v| v.source.is_some()))
+        });
+    let sourced = defaults.source.is_some()
+        || attributes
+            .iter()
+            .any(|a| a.name == join.field && a.source.is_some());
+    if reads_points && !sourced {
+        return Err(declaration_error(format!(
+            "attribute '{}': it is the join field and names no `source`, and `[defaults]` declares \
+             none, so the build has no file to read its values from. Name a `[sources]` key \
+             holding every item's value on it",
+            join.field
+        )));
+    }
+    Ok(())
 }
 
 /// One field an object's `fields` map may name.

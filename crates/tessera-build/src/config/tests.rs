@@ -1983,6 +1983,34 @@ fn a_join_field_must_be_a_declared_unique_keyword_or_integer() {
     assert!(bound_ok(&keyword, &[]).views[0].fields.joins());
 }
 
+/// **A join attribute with no file is refused wherever a view reads one**, by the parse `tessera
+/// check` runs as much as the build's, and accepted where no view reads a file.
+#[test]
+fn a_join_attribute_with_no_source_is_refused_where_a_view_reads_points() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let parse = |text: &str, strictness| {
+        std::fs::write(&path, text).expect("write config");
+        Config::parse_with(&path, &HashMap::new(), strictness)
+    };
+    // No default source: the severity column names its own, and the join attribute none.
+    let unsourced = joined()
+        .replace("[defaults]\nsource = \"corpus\"\n", "[defaults]\n")
+        .replace(
+            "vocabulary = \"severity\"\n",
+            "vocabulary = \"severity\"\nsource     = \"corpus\"\n",
+        );
+    assert!(parse(&unsourced, Strictness::Build).is_err(), "the build refuses it");
+    assert!(parse(&unsourced, Strictness::Declared).is_err(), "and so does the check");
+    let sourced = unsourced.replace("unique = true\n", "unique = true\nsource = \"corpus\"\n");
+    assert!(parse(&sourced, Strictness::Declared).is_ok(), "{sourced}");
+    let unread = unsourced.replace("source           = \"geometry\"\n", "");
+    assert!(
+        parse(&unread, Strictness::Declared).is_ok(),
+        "a view reading no file is declared and empty"
+    );
+}
+
 /// **Without a join field no file joins**: each points row is an item of its own, and a map may
 /// not move a join column there is none of.
 #[test]
@@ -3257,6 +3285,7 @@ fn a_scoped_attribute_may_read_its_own_source_through_fields_view() {
         "[defaults]\njoin_field = \"id\"\n{}",
         with_group(
             "\n[[attribute]]\nname = \"id\"\ntype = \"keyword\"\nunique = true\n\
+             source = \"other\"\n\
              \n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
              scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
              fields = { view = \"quarter\", id = \"doc\" }\n",
