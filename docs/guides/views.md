@@ -192,21 +192,21 @@ to nobody — and takes its first row space at the **next flush**, not before.
 
 ```
 DELETE /control/views/quarter/2026-Q1
-DELETE /control/views/quarter/2026-Q1?delete_dangling=true
 ```
 
 Dropping a view frees the key and reclaims its row-space artifacts at the next fold;
 requests naming it become the ordinary unknown-view 404. **The key can be created again**, in the
 same breath if you like — that is how you correct a record you got wrong. What does not come back
 is the view: a recreated `2026-Q1` starts empty, and the old one's points stay unreachable until
-the fold deletes them. **Dropping a view does not delete an
-entity.** An entity whose only view was `quarter:2026-Q1` still exists — with its label, its
-attributes, its layer memberships — in no view at all, and a later batch into a different view picks
-it back up by `external_id` under the rule for adding an item to a view, below. `delete_dangling=true` is sugar for
-the caller who does mean "and drop the entities this view was the only home of": the service finds
-every entity of the dropped view holding no row anywhere else (the ingest buffer included) and
-submits them as ordinary deletions on the deny lane — the same retirement route (Rule F) any other
-deletion takes, never a second one. The response's `deleted` count is `0` without the option.
+the fold deletes them.
+
+**Dropping a view deletes every item it leaves in no view.** An item with a row in
+`quarter:2026-Q1` and in another view keeps that other row and everything it holds. An item whose
+only row was in `quarter:2026-Q1`, flushed or still waiting for a flush, is deleted as
+`POST /control/changes` deletes one: its `tessera_id` stops naming anything at once, and its rows,
+values and layer memberships leave at the next fold. A later batch carrying its `external_id`
+creates a new item with a new `tessera_id`. The response's `deleted` counts the items the drop
+deleted.
 
 ## Add a quarter while the service runs
 
@@ -229,14 +229,14 @@ first-batch-creates route.
 
 A row that names an item the service holds, by its `tessera_id`, its `external_id` or a unique
 value, and carries a position in a view the item is not in, adds the item to that view. The item
-keeps its label and its values, and the row lands in the view at its next flush. The receipt counts
-it as `added` and answers the item's `tessera_id`.
+keeps its label and its values, stays served in its other views throughout, and is served in the
+new view from its next flush. The receipt counts it as `added` and answers the item's
+`tessera_id`.
 
 The row may leave out any field, which keeps what the item stores. A row that carries something
 else, a value, the label, the external id or a position in a view the item is already in, edits
-the item. So does adding an item older than the newest item a flush has written into the view,
-since a flush places rows above those. The receipt counts an edit as `edited` and answers the
-item's `tessera_id`, which an edit never changes.
+the item. The receipt counts an edit as `edited` and answers the item's `tessera_id`, which an edit
+never changes.
 
 An edited item moves to a new entity, carrying every view it is in, every value, its layer
 memberships, the contents generated from it, its group-scoped values under every key and any

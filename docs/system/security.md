@@ -86,12 +86,14 @@ fresh each time the visible set is composed. A deletion's rows leave the corpus 
 compaction; until then they are removed from the visible set the same way a suppressed item's are.
 
 An edit moves an item to a new entity and deletes the old one, and none of it can widen what a
-viewer sees. A suppression standing against the old entity is copied to the new one in the same
-WAL record and never removed from the old. The item's label is the edit's from the
-acknowledgement: until a flush places the new entity's rows the item is in no view, and once
-placed it is served under the new label only. A content generated from the item keeps it among
-its generating items, so the content stays served, and still only to a viewer who can see every
-one of them.
+viewer sees. A suppression standing against the old entity is copied to the new one in the same WAL
+record. An unsuppress lifts an item's suppression. A compaction drops the suppression of every
+entity it removes, the old entity among them, while an item that still exists keeps its suppression
+on its current entity, so an id freed there and issued to another item carries no suppression. The
+item's label is the edit's from the acknowledgement: until a flush places the new entity's rows the
+item is in no view, and once placed it is served under the new label only. A content generated from
+the item keeps it among its generating items, so the content stays served, and still only to a
+viewer who can see every one of them.
 
 The content key on a response is advisory: it lets a client tell that the corpus has changed since
 its last request, but it carries no authorisation weight, and presenting an old one never restores

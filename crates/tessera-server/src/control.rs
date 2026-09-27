@@ -1359,19 +1359,6 @@ struct ViewRecord {
     metadata: serde_json::Map<String, serde_json::Value>,
 }
 
-/// `DELETE /control/views/{group}/{key}`'s query.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DropViewQuery {
-    /// Also delete, as ordinary deletions, the view's entities that have a row in no other view.
-    #[serde(default)]
-    delete_dangling: bool,
-    /// Carried here rather than by a second [`WaitQuery`] extractor, which this query's
-    /// `deny_unknown_fields` would refuse.
-    #[serde(default)]
-    wait: Option<String>,
-}
-
 /// One supplied metadata value, typed by its JSON shape; the executor checks the type against
 /// the group's declaration. Integers and floats are kept apart, not coerced.
 fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataValue, ApiError> {
@@ -1436,16 +1423,15 @@ async fn create_view(
 }
 
 /// `DELETE /control/views/{group}/{key}`: drops a view and frees its key; its data stays on disc,
-/// unreachable, until the fold. It deletes no entity unless `delete_dangling` is set, and the
-/// body reports how many were deleted.
+/// unreachable, until the fold. It deletes the items it leaves in no view, and the body reports
+/// how many.
 async fn drop_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
-    ApiQuery(query): ApiQuery<DropViewQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let wait = WaitQuery { wait: query.wait };
     let dropped = state
-        .write(move |state| state.engine.drop_view(group, key, query.delete_dangling))
+        .write(move |state| state.engine.drop_view(group, key))
         .await?;
     let body = serde_json::json!({
         "deleted": dropped.deleted,

@@ -314,23 +314,15 @@ class Control:
         """
         return self._send("DELETE", f"/control/layers/{_segment(name)}" + _wait(wait))
 
-    def drop_view(
-        self, group: str, key: str, delete_dangling: bool = False, wait: bool = False
-    ) -> Answer:
+    def drop_view(self, group: str, key: str, wait: bool = False) -> Answer:
         """`DELETE /control/views/{group}/{key}`: remove one view of a view group.
 
-        No item is deleted unless `delete_dangling` is `True`, which deletes the items that are
-        in no other view. The answer's `deleted` counts them. `wait` is as for `flush`.
+        The items it leaves in no view are deleted, and the answer's `deleted` counts them.
+        `wait` is as for `flush`.
         """
-        query = {}
-        if delete_dangling:
-            query["delete_dangling"] = "true"
-        if wait:
-            query["wait"] = "visible"
-        path = f"/control/views/{_segment(group)}/{_segment(key)}"
-        if query:
-            path += "?" + urllib.parse.urlencode(query)
-        return self._send("DELETE", path)
+        return self._send(
+            "DELETE", f"/control/views/{_segment(group)}/{_segment(key)}" + _wait(wait)
+        )
 
     def compact(self) -> Answer:
         """`POST /control/compact`: ask for a compaction, which removes deleted items' rows.

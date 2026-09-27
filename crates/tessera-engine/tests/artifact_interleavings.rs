@@ -672,9 +672,9 @@ fn the_membership_replays_the_same_on_either_side_of_the_folds_pack() {
 /// against what is served.
 ///
 /// The fail-closed outcome is that the artifact stays out of every viewport across the join and
-/// across a fold: a suppression retires only on unsuppress (write-path §5.4, Rule S), and a fold
-/// is not one. What the unsuppress then reveals is the membership the join gave it — the points
-/// joined exactly as they would have otherwise.
+/// across a fold: a live artifact's suppression retires only on unsuppress (write-path §5.4, Rule
+/// S), and a fold is not one. What the unsuppress then reveals is the membership the join gave it:
+/// the points joined exactly as they would have otherwise.
 #[test]
 fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
     let fx = fixture();

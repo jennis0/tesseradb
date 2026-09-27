@@ -73,8 +73,10 @@ flowchart TB
 *What tessera build writes and tessera serve reads, and what the write path adds while serving.*
 
 A deny is in force from the moment it is acknowledged. It is recorded in the **overlay**, the
-in-memory record of what is hidden, and leaves the overlay on exactly one event: an unsuppress for
-a suppression, or the compaction that drops the rows for a deletion.
+in-memory record of what is hidden. A deletion leaves the overlay at the compaction that drops its
+rows. A suppression leaves it at an unsuppress, which lifts the item's suppression, or at the
+compaction that removes the entity it names. A compaction removes only deleted entities, so an item
+that still exists stays suppressed through the entity it holds.
 
 ## Generations
 
@@ -148,8 +150,7 @@ against a newer one.
 | No item, and the row carries a position | The row creates an item, labelled as the row says or with the view's `point_visibility.default` |
 | No item, and no position | Refused with `422`: an item is created in a view |
 | One item, and every value the row carries is the one stored | The row changes nothing. It is counted `unchanged` and writes nothing |
-| One item with no row in the batch's view, newer than the view's newest flushed item, the row carrying a position there and changing nothing else | The row adds the item to the view, counted `added` |
-| One item with no row in the batch's view, older than the view's newest flushed item | The row edits the item, counted `edited`: a flush places rows only above a view's newest, so the item moves to join it |
+| One item with no row in the batch's view, the row carrying a position there and changing nothing else | The row adds the item to the view in place, counted `added`: the item keeps its entity and stays served in its other views, and the next flush places the row |
 | One item, and the row's one change is placing it in artifacts that do not hold it | A change to the artifacts, not the item: the item joins them and keeps its entity, the row is counted `unchanged` and the memberships in `joined` |
 | One item, and the row changes a value, the label, the external id or a position | The row edits the item, counted `edited` |
 | Two items | Refused with `409`, naming the values and the items' `tessera_id`s |
@@ -179,8 +180,6 @@ check them. It checks what can have moved since the handler's generation, from m
 - an item a row edits that has since been deleted, added to or dropped from a view, or whose
   external id has since been given to another item;
 - the unique columns, declared or withdrawn since, where the batch creates items;
-- an item a row adds to a view that a newer item's flush, published or in flight, has since
-  passed;
 - a value a created row sets that has since been given to an item;
 - an external id since bound.
 
@@ -203,9 +202,8 @@ batch's view first: the position there, the label, every value and the external 
 values over the stored ones, and the group-scoped values and prose of every key the item holds. A
 view the batch names and the item is not in is added. A row carrying values scoped to the batch's
 view for an item with no row under that view's key is refused, since no row would hold them; sent
-with the item's position in the view, it adds the item there with them. An item left in no view,
-its views all dropped, is edited only by a row that places it in one. What cannot be read fails the
-batch closed rather than writing an item with less than it held.
+with the item's position in the view, it adds the item there with them. What cannot be read fails
+the batch closed rather than writing an item with less than it held.
 
 At the commit the executor carries what lives outside the item's own rows, from memory, in the same
 append:
@@ -213,8 +211,8 @@ append:
 - every membership of an enumerated layer's artifact, which the new entity joins;
 - every generating set of a supplied content, which the new entity joins and the old one leaves,
   so the content is still served while its generating items are visible;
-- a suppression standing against the old entity, copied to the new one and never removed from the
-  old one;
+- a suppression standing against the old entity, copied to the new one; the old entity keeps its
+  own until the compaction that removes it;
 - the unique values and the external id, which name the new entity from the acknowledgement.
 
 A change, a growth or a publication resolved before an edit moved an item it names reaches the
@@ -341,6 +339,10 @@ while one is open.
 A deny is queued separately from ingest and is never refused for load. There is no route from this
 queue to a 429.
 
+A view drop deletes the items it leaves with a row in no view, flushed or buffered. The drop's own
+WAL record lists their entity ids, so the log never holds the drop without its deletions, and they
+enter the overlay and leave it as any deletion does.
+
 ### The overlay: two stores
 
 The overlay holds two separate records of what is hidden, one for deletions and one for
@@ -354,7 +356,7 @@ An entry **retires** when it leaves the overlay. Each store has exactly one rout
 
 | Applies to | Removed by | Why only one route |
 |---|---|---|
-| A suppression (Rule S) | An explicit unsuppress, and nothing else | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. Any other removal route would let the item become visible again with no unsuppress ever issued |
+| A suppression (Rule S) | An explicit unsuppress, or the compaction that removes the entity it names | No rebuild or timer excludes a suppressed item on its own, so its invisibility depends entirely on this record for as long as the suppression stands. A compaction removes only deleted entities, whose rows are gone with it; an item that still exists keeps its suppression on its current entity |
 | A deletion (Rule F) | The compaction that removes the item's row and its term-index entries, and nothing else | The row still exists in a segment until that fold runs. Removing the record any earlier would leave a segment reachable that still contains the item |
 
 The mask a request subtracts from its answer, `denied[view]`, is derived from the union of the two
@@ -503,20 +505,28 @@ row and no term-index entries left for any request to find, so what a viewer see
 The next fold clears the entry again, at little further cost, because there is nothing left for it
 to remove.
 
-A suppression is carried through a compaction unchanged. Only an explicit unsuppress removes one
-(Rule S).
+A compaction drops the suppression of every entity it removes, with the entity's deletion: no
+record of a suppression is left naming an entity that no longer exists. An item that still exists
+is not deleted, so its current entity is not removed and its suppression stands; an edited item's
+old entities are removed while the item stays suppressed through the entity it holds. The
+compaction appends the unsuppression of the entities it removes to the WAL before it publishes, so
+a restart that replays their suppression from records the log still holds ends without it. Only
+an explicit unsuppress lifts the suppression of an item that exists (Rule S).
 
 ### Freed entity ids
 
-A compaction also frees entity ids. An edit leaves its item's old entity deleted, and once a
-compaction has removed that entity's rows and retired its deletion, the id can be given to a new
-entity. An id is freed only where it is no item's number. An item's first entity id is its number,
-from which its `tessera_id` is derived, and it stays reserved after the item is deleted, so a
-`tessera_id` a client holds never comes to name another item. An entity a suppression stands
-against is not freed either, since a suppression is removed only when it is lifted. An item edited
-again and again therefore holds its number and at most two other ids: the entity it is in, and the
-one its last edit left, until a compaction frees it. Under repeated edits of the same items the
-high point of the id space stops rising after the second compaction.
+A compaction also frees entity ids. Every entity it removes is freed, so its id can be given to a
+new entity, except an item's number. An item's first entity id is its number, from which its
+`tessera_id` is derived, and it stays reserved after the item is deleted, so a `tessera_id` a client
+holds never comes to name another item. The entities an edit leaves are removed and freed, including
+one an edit made and a later edit or deletion left before any flush placed it: the edited-items map
+keeps its pair until the compaction that removes it, which is how the compaction tells it from a
+number. A restart restores such a pair from the log, and where the log no longer holds the edit the
+entity is removed without being freed. An entity a suppression stood against is freed like any
+other, since the compaction drops its suppression with it, and the item that takes the id is not
+suppressed. An item edited again and again therefore holds its number and at most two other ids: the
+entity it is in, and the one its last edit left, until a compaction frees it. Under repeated edits
+of the same items the high point of the id space stops rising after the second compaction.
 
 A freed id is held back until the WAL has rotated past the compaction's publication. Until then a
 restart would replay records naming the id's previous holder, its rows, its deletion and its
@@ -533,11 +543,12 @@ snapshots. A partition serving
 an older manifest after a step-down issues no freed id, since the manifest it serves can list an
 id issued since.
 
-A freed id is lower than the entities a view already has rows for, so a flush cannot place its row
-by extending the segment's range of entities without widening that range across the whole view.
-The segment lists the rows of such entities beside its range instead, and a lookup that finds no
-row in the base or a range reads the lists; the external-id locator a flush writes does the same.
-A merge keeps the listed rows, and the compaction folds them into the base like any other.
+A freed id is lower than the entities a view already has rows for, and so is an older item added to
+a view in place, so a flush cannot place such a row by extending the segment's range of entities
+without widening that range across the whole view. The segment lists the rows of such entities
+beside its range instead, and a lookup that finds no row in the base or a range reads the lists;
+the external-id locator a flush writes does the same. A merge keeps the listed rows, and the
+compaction folds them into the base like any other.
 
 Measured on the GeoNames corpus (13.5 million items), over five rounds that each send a
 673,193-row hold-out again with the same 6,748 items moved, then flush and compact: the first two

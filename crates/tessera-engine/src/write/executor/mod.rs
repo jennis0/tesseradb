@@ -66,9 +66,6 @@ pub(super) struct Executor {
     pub(super) last_tick: std::time::Instant,
     /// What every accepted write since the last tick did to each level's row forms.
     pub(super) pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
-    /// The view the last dispatched flush writes and the entity floor its segment leaves; read
-    /// only while that flush is outstanding.
-    pub(super) flush_flight: Option<(String, u64)>,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
@@ -357,6 +354,13 @@ impl Executor {
                 g.external_index = Arc::clone(&r.external_index);
                 g.unique = Arc::clone(&r.unique);
                 g.edited = Arc::clone(&r.edited);
+                // The retired entities' pairs leave the live map with their runs' entries, or an id
+                // freed here and issued again would answer its previous holder's number.
+                if !r.retired.is_empty() {
+                    let mut edited_live = (*previous.edited_live).clone();
+                    edited_live.remove(r.retired.iter());
+                    g.edited_live = Arc::new(edited_live);
+                }
             }
             g.delta_postings = delta_postings;
             if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {

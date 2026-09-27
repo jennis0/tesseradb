@@ -468,15 +468,14 @@ no live token is accepted without comment.
 db.status()                                    # the watermarks, queues and pagination units
 db.compact()                                   # ask for the fold that removes a deletion's rows
 db.drop_layer("clusters/kmeans")               # the inverse of declare_layer
-db.drop_view("slices", "a", delete_dangling=False)   # the inverse of create_view
+db.drop_view("slices", "a")                    # the inverse of create_view
 ```
 
 `remove()` puts a deletion in the overlay, and the compaction that removes its rows is what ends
 it; `compact()` is how one is asked for, and it is accepted rather than finished when the call
 returns. `drop_layer()` tombstones the name rather than freeing it, so a later declaration under
-it is refused and no stale reference reaches a different layer. `drop_view()` deletes no entity;
-`delete_dangling=True` submits the entities holding a row in no other view as ordinary
-deletions, and the answer's `deleted` says how many.
+it is refused and no stale reference reaches a different layer. `drop_view()` deletes the items
+it leaves in no view, as `remove()` deletes one, and the answer's `deleted` says how many.
 
 ## A deployment somebody else runs
 

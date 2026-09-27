@@ -4,7 +4,9 @@
 //! An edit gives its item a new entity and keeps the item's number, the entity it was first given,
 //! which its `tessera_id` is taken from ([`tessera_store::edited`]). The window that commits an
 //! edit adds its pair here, and the first flush that gives the new entity a row writes a run
-//! holding it, whose publication removes the pair from here. Every lookup reads both.
+//! holding it, whose publication removes the pair from here. A new entity deleted or edited away
+//! before that flush keeps its pair here until the fold that removes the entity. Every lookup reads
+//! both.
 //!
 //! A `tessera_id` names the entity [`entities_of_numbers`] answers: an entity of the number's
 //! entries that the generation holds and has not deleted, or, where the number has no entries,
@@ -25,11 +27,12 @@ pub(crate) struct EditedLive {
 }
 
 impl EditedLive {
-    /// The pairs of the edits `records` carry whose new entity `buffer` still holds a row of:
-    /// what a restart starts from.
+    /// The pairs of the edits `records` carry whose new entity `buffer` still holds a row of, or
+    /// `overlay` deletes before a flush wrote its pair: what a restart starts from.
     pub(crate) fn derive(
         records: &[WalRecord],
         buffer: &tessera_lifecycle::IngestBuffer,
+        overlay: &tessera_lifecycle::Overlay,
     ) -> EditedLive {
         let mut live = EditedLive::default();
         let pairs: Vec<(u32, u32)> = records
@@ -41,8 +44,7 @@ impl EditedLive {
             .flatten()
             .filter_map(|edit| {
                 let entity = edit.rows.first()?.entity_id;
-                buffer
-                    .contains(entity)
+                (buffer.contains(entity) || overlay.is_deleted(entity))
                     .then(|| (narrow(edit.number), narrow(entity)))
             })
             .collect();
@@ -61,8 +63,8 @@ impl EditedLive {
         }
     }
 
-    /// Remove the pairs of `entities`: a flush has written them into a run, or the entities are
-    /// deleted and name nothing.
+    /// Remove the pairs of `entities`: a flush has written them into a run, or a fold has removed
+    /// the entities.
     pub(crate) fn remove(&mut self, entities: impl IntoIterator<Item = u32>) {
         for entity in entities {
             let Some(number) = self.by_entity.remove(&entity) else {

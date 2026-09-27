@@ -1325,10 +1325,10 @@ impl Permutation {
 /// `u32` per entity is smaller than any keyed form over such a span.
 ///
 /// `below` holds the rows of entities under `entity_lo`, as `(entity, row)` pairs ascending by
-/// entity. A fold frees the entity an edit moved an item away from, and the allocator issues
-/// freed ids before new ones, so a flush can carry an entity older than rows the view already
-/// holds. Those rows cannot join the dense span without widening it across the whole view, so
-/// they are listed. `entity_hi + 1 == entity_lo` for an extent whose every row is listed.
+/// entity. An existing item added to a view keeps its entity, and the allocator issues ids a fold
+/// freed before new ones, so a flush can carry an entity older than rows the view already holds.
+/// Those rows cannot join the dense span without widening it across the whole view, so they are
+/// listed. `entity_hi + 1 == entity_lo` for an extent whose every row is listed.
 ///
 /// It is not a `permutation.bin`. That file's length is the *bundle's* whole entity space, which
 /// is the wrong shape for a segment covering a few thousand ids at the top of it; an extent's rows
@@ -1739,8 +1739,9 @@ impl RowSpace {
         if extent.entity_lo < self.entity_floor() {
             return None;
         }
-        // A fold frees an id only once it has removed every row of the id's previous holder, so a
-        // listed entity with a row here is corruption rather than a race.
+        // An item is added to a view only where it has no row there, and a fold frees an id only
+        // once it has removed every row of the id's previous holder, so a listed entity with a row
+        // here is corruption rather than a race.
         if extent
             .below
             .iter()

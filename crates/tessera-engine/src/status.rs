@@ -328,7 +328,8 @@ impl Engine {
     }
 
     /// Retirable deletions: `|deleted|`, never the union with `suppressed`. Read beside
-    /// [`Engine::overlay_depth`]: this is what a fold can reduce, since a suppression never retires.
+    /// [`Engine::overlay_depth`]: this is what a fold can reduce, since a fold retires a
+    /// suppression only of an entity it removes, which is deleted too.
     pub fn retirable_deletions(&self) -> u64 {
         self.generation.load().overlay.deleted_len()
     }

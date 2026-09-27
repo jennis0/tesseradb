@@ -50,7 +50,7 @@ describe('each route', () => {
     {name: 'dropLayer', call: (c) => c.dropLayer('a/b'), method: 'DELETE', path: '/control/layers/a%2Fb'},
     {name: 'dropLayer waiting', call: (c) => c.dropLayer('a', {wait: true}), method: 'DELETE', path: '/control/layers/a?wait=visible'},
     {name: 'dropView', call: (c) => c.dropView('g', 'k'), method: 'DELETE', path: '/control/views/g/k'},
-    {name: 'dropView with both', call: (c) => c.dropView('g', 'k', {deleteDangling: true, wait: true}), method: 'DELETE', path: '/control/views/g/k?delete_dangling=true&wait=visible'},
+    {name: 'dropView waiting', call: (c) => c.dropView('g', 'k', {wait: true}), method: 'DELETE', path: '/control/views/g/k?wait=visible'},
     {name: 'compact', call: (c) => c.compact(), method: 'POST', path: '/control/compact'},
     {name: 'flush', call: (c) => c.flush(), method: 'POST', path: '/control/flush'},
     {name: 'flush waiting', call: (c) => c.flush({wait: true}), method: 'POST', path: '/control/flush?wait=visible'}

@@ -1144,7 +1144,7 @@ fn a_suppression_survives_the_fold_and_an_unsuppress_afterwards_reveals_its_item
     assert_eq!(
         engine.overlay_depth(),
         1,
-        "Rule S: a suppression never retires"
+        "Rule S: a live item's suppression retires only on unsuppress"
     );
     let after = engine.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(visible(&engine, &after), baseline - 1, "still hidden");
@@ -2361,8 +2361,8 @@ fn tick(engine: &Engine) {
 /// makes this case able to tell the two gauges apart. At one suppression and two deletions the
 /// overlay's *depth* is already 3 and its *retirable* part is 2 — so a trigger keyed on
 /// `Overlay::len()` fires here and the correct one does not. That is r3's memory F5 in its exact
-/// shape: a suppression never retires, so a `len`-keyed trigger dispatches a full fold that
-/// retires nothing, every interval, for ever.
+/// shape: a live item's suppression never leaves at a fold, so a `len`-keyed trigger dispatches a
+/// full fold that retires nothing, every interval, for ever.
 ///
 /// **Mutations this kills:** never consulting the schedule (no fold happens at all); keying the
 /// gauge on `Overlay::len()` rather than `deleted_len()` (the fold fires one deletion early, at the
@@ -3198,7 +3198,7 @@ fn a_join_keeps_its_key_when_the_binding_view_is_dropped_before_it_flushes() {
         .expect("the join is accepted");
     assert_eq!(joined, vec![entity], "a known external id joins its entity");
     engine
-        .drop_view("quarter".into(), "q2".into(), false)
+        .drop_view("quarter".into(), "q2".into())
         .expect("the view drops");
     wait_ticking(&engine, "the join to flush", || {
         engine.request_flush();
@@ -3247,7 +3247,8 @@ fn create_quarter_q2(engine: &Engine) {
 }
 
 /// **A fold publishes when a dropped view held the highest entity a run binds.** The surviving
-/// views' rows end below it, and the fold's base run must still hold its binding.
+/// views' rows end below it; the drop deleted the item, which was in no other view, and the fold
+/// removes its binding with it.
 #[test]
 fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3273,11 +3274,12 @@ fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
         engine.request_flush();
         engine.generation().buffer.is_empty()
     });
-    engine
-        .drop_view("quarter".into(), "q2".into(), false)
+    let dropped = engine
+        .drop_view("quarter".into(), "q2".into())
         .expect("the view drops");
+    assert_eq!(dropped.deleted, 1, "the drop deletes the item it leaves in no view");
 
     fold(&engine);
-    assert_eq!(engine.resolve_external_id(&key).unwrap(), Some(entity), "the key names its entity");
-    assert_eq!(engine.external_id_of(entity).unwrap(), Some(key), "the entity names its key");
+    assert_eq!(engine.resolve_external_id(&key).unwrap(), None, "the key names nothing");
+    assert_eq!(engine.external_id_of(entity).unwrap(), None, "the entity names no key");
 }
