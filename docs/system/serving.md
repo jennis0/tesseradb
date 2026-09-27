@@ -134,8 +134,8 @@ The server refuses a configuration that sets `serve.max_page_rows` or `serve.max
 `serve.max_page_bytes` above 2 GiB, or `serve.bulk_response_bytes` below `serve.max_page_bytes`.
 
 The server allows seven pages of `serve.max_page_bytes` for each bulk read. Building a page takes
-about four: the engine's memory test, reading notes of 8 bytes and then of 100 KB under a 256 KiB
-ceiling, measured 4.05 in the engine alone and holds it below eight. Encoded pages on their way to
+about three: the engine's memory test, reading notes of 8 bytes and then of 100 KB under a 256 KiB
+ceiling, measured 3.13 in the engine alone and holds it below eight. Encoded pages on their way to
 the socket take at most two more, one in the body channel and one being written. All bulk reads
 together can hold `serve.bulk_admission` × 7 × `serve.max_page_bytes`, 896 MiB at the defaults. The
 server has no memory cap of its own to hold that against, so it logs the figure at startup as

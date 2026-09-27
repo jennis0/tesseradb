@@ -444,28 +444,27 @@ fn carries_characters(ty: ScalarType) -> bool {
 
 /// What a spilled column's extents cost against the column's Parquet payload: **one half**.
 ///
-/// The extents are the same 256 KiB zstd blocks the base blob is cut into, and the base blob at
-/// the 10⁸ PaperSeek rung measured 44.77 GB against 128 GiB of prose — 2.9×
-/// (`probes/2026-09-04-rung-4-whole/breakdown.txt`). Half is charged rather than a 2.9th because
-/// that ratio is one corpus's prose at one operating point. A keyword column compresses harder
-/// still where its values repeat: GBIF's `scientificname` spilled 1.63 GB of extents over 3.93 GB
-/// of characters, 0.42×, and its blocks alone 0.27× (measured,
-/// `probes/2026-09-10-blob-resident-strings/`).
+/// The extents are the same zstd blocks the base blob is cut into. Written through the record
+/// writer at 32 KiB blocks, one value a row as an extent holds it, the blocks come to 0.413 of the
+/// characters on 10⁶ PaperSeek abstracts, 0.351 on the first 2×10⁷ of GBIF's `scientificname` and
+/// 0.507 on GeoNames' names (0.374, 0.252 and 0.479 at 256 KiB). At 256 KiB, the base blob at the
+/// 10⁸ PaperSeek rung measured 44.77 GB against 128 GiB of prose, 2.9×
+/// (`probes/2026-09-04-rung-4-whole/breakdown.txt`), and GBIF's `scientificname` spilled 1.63 GB
+/// of extents over 3.93 GB of characters (`probes/2026-09-10-blob-resident-strings/`).
 ///
 /// ⊘ **On the characters alone this is an estimate and not a ceiling.** A compression ratio has no
-/// lower bound at one half. Measured at 0.251 on GBIF's `scientificname` and 0.345 on PaperSeek
-/// prose, but at **0.567 to 0.750 on high-entropy short values** — random hex, base64 and
-/// lowercase at 12 to 32 characters, zstd level 3 over 256 KiB blocks — and at 0.634 on GeoNames'
-/// names. What bounds the error is that zstd does not expand incompressible input, so the blocks
-/// are at most the characters and half of them reads at most 2× low.
+/// lower bound at one half: at 32 KiB, random hex, base64 and lowercase values of 12 to 32
+/// characters come to 0.557 to 0.786 of their characters. What bounds the error is that zstd does
+/// not expand incompressible input, so the blocks are at most the characters and half of them
+/// reads at most 2× low.
 ///
 /// **What closes most of that gap is the framing charged beside them**
-/// ([`record_framing_bytes`]): a short value's row costs 15 bytes of frame around 8 to 13 of
-/// characters, so half of the two together is above every measured shape but one. GeoNames' 13.5
-/// characters a name compress to 8.6 bytes and are charged 14.2; 12 random lowercase characters
-/// compress to 7.2 and are charged 13.5. The one shape still under-read is a value of 30
-/// characters or more that does not compress at all — 32 random base64 characters are 24 bytes
-/// against a charge of 23.5, 2% low.
+/// ([`extent_framing_bytes`]): 10 bytes a row around the characters, so half of the two together
+/// is above every measured shape but one. At 32 KiB, GeoNames' 13.5 characters a name take 6.8
+/// bytes a row and are charged 11.7; 12 random lowercase characters take 8.1 and are charged 11.0.
+/// The one shape still under-read is a value of 30 characters or more that does not compress at
+/// all: 32 random base64 characters take 24.8 bytes against a charge of 21.0, 15% low, the same at
+/// either block size.
 const EXTENT_SHARE: u64 = 2;
 
 /// What one record-blob row costs beyond its characters: **3 bytes a row and 3 a field**, plus a
@@ -493,6 +492,33 @@ fn record_framing_bytes(schema: &crate::config::Schema, rows: u64) -> u64 {
         return 0;
     }
     rows.saturating_mul(RECORD_ROW_BYTES + fields)
+}
+
+/// What the record blob's writer holds a block while it writes: 32 B in the vector it seals blocks
+/// into, which may stand at twice its length while it grows, and 28 B in the Arrow columns it
+/// copies them into at the end, with the vector still held (`tessera_filter_write::record`).
+const BLOB_DIRECTORY_BYTES_PER_BLOCK: u64 = 2 * 32 + 28;
+
+/// The uncompressed rows the record blob is cut into blocks from: every blob-resident column's
+/// characters or fixed-width values, and the framing around them ([`RECORD_ROW_BYTES`],
+/// [`RECORD_FIELD_BYTES`], [`RECORD_UTF8_FIELD_BYTES`]), as though every entity held every field.
+/// A blob-resident column is the one that stands through the blob phase with no render lane, which
+/// is how [`model_inputs`] sets its phases.
+fn blob_row_bytes(n: u64, columns: &[ColumnCost]) -> u64 {
+    let fields: u64 = columns
+        .iter()
+        .filter(|c| !c.render && c.phases.holds(Phase::Blob))
+        .map(|c| match carries_characters(c.ty) {
+            true => c
+                .payload_bytes
+                .saturating_add(n.saturating_mul(RECORD_UTF8_FIELD_BYTES)),
+            false => n.saturating_mul(RECORD_FIELD_BYTES + fixed_width(c.ty)),
+        })
+        .fold(0u64, u64::saturating_add);
+    match fields {
+        0 => 0,
+        _ => fields.saturating_add(n.saturating_mul(RECORD_ROW_BYTES)),
+    }
 }
 
 /// What a record-blob row costs the block around its fields: the entity gap the block header
@@ -993,6 +1019,26 @@ pub(crate) fn entity_order_residency(
             bytes: 2u64.saturating_mul(n.div_ceil(8)),
             mapped: false,
             phases: Phases::INDEX,
+            constant: false,
+        });
+    }
+    // **The record blob's block directory, on the heap until the blob is finished.** The writer
+    // keeps each sealed block's offsets, lengths and ranks, and copies them into the Arrow columns
+    // it writes only at the end ([`BLOB_DIRECTORY_BYTES_PER_BLOCK`]). A block is
+    // [`tessera_filter::RECORD_BLOCK_TARGET`] of rows, so this rises with the blob and not with a
+    // constant: about 390 MB over 128 GiB of prose.
+    let blob_row_bytes = blob_row_bytes(n, columns);
+    if blob_row_bytes > 0 {
+        let blocks = blob_row_bytes.div_ceil(tessera_filter::RECORD_BLOCK_TARGET as u64);
+        terms.push(Term {
+            what: format!(
+                "the record blob's block directory, {BLOB_DIRECTORY_BYTES_PER_BLOCK} B a block \
+                 over {blocks} block(s) of the {} MiB of rows it is written from",
+                blob_row_bytes >> 20
+            ),
+            bytes: blocks.saturating_mul(BLOB_DIRECTORY_BYTES_PER_BLOCK),
+            mapped: false,
+            phases: Phases::BLOB,
             constant: false,
         });
     }
@@ -2692,8 +2738,15 @@ mod tests {
         // **Net of the partitions the column opens.** Its storage is a file and is charged at
         // nothing; what a declared column does cost the machine is the join's `(entity, value)`
         // partition and, for a keyword one, the dictionary's `(row, ordinal)` partition — both
-        // constants of the key type, both named terms of their own.
-        assert_eq!(scaling_total(&with_keyword), scaling_total(&bare));
+        // constants of the key type, both named terms of their own — and, being blob-resident, the
+        // record blob's block directory.
+        let directory = with_keyword
+            .terms
+            .iter()
+            .find(|t| t.what.starts_with("the record blob's block directory"))
+            .expect("a blob-resident column gives the blob a directory")
+            .bytes;
+        assert_eq!(scaling_total(&with_keyword) - directory, scaling_total(&bare));
         let term = with_keyword
             .terms
             .iter()
@@ -4024,10 +4077,10 @@ require_member_visibility = "none"
     }
 
     /// **The headline of the entity-order model: what anonymous memory grows with the corpus is
-    /// named, and it is three terms.**
+    /// named, and it is four terms.**
     ///
     /// Every term the model charges against the machine is a constant or one publication batch,
-    /// itself bounded, with three exceptions, and this test subtracts them rather than pretending
+    /// itself bounded, with four exceptions, and this test subtracts them rather than pretending
     /// they are not there:
     ///
     /// - a spilled string column's duplicate map, `n / 4` bytes a column, held from the postings
@@ -4038,13 +4091,14 @@ require_member_visibility = "none"
     ///   type's bound; this one is not, and a layer of many ordinals a row is where it shows;
     /// - the term images, one worker's posting, image and frozen buffer each at a bitset container
     ///   per 65,536 values. The projection scratch beside them is bounded by one window of row ids
-    ///   and is one of the constants.
+    ///   and is one of the constants;
+    /// - the record blob's block directory, a few words a block of its rows.
     ///
-    /// Naming them is the point: the assertions are equalities against exactly these three, so a
+    /// Naming them is the point: the assertions are equalities against exactly these four, so a
     /// term that starts rising with the corpus fails here whether or not anyone remembered to look.
     /// What grows properly is the disk the same model reports beside it.
     #[test]
-    fn the_anonymous_total_grows_only_by_the_three_terms_this_names() {
+    fn the_anonymous_total_grows_only_by_the_four_terms_this_names() {
         let residency = |n: u64| {
             let columns = [
                 column(ScalarType::U8, 0),
@@ -4076,15 +4130,28 @@ require_member_visibility = "none"
         // constants, so it appears in the second assertion and not the first.
         let workers = crate::term_images_pass::derive_threads() as u64;
         let images = |n: u64| workers * term_image_bitmap_bytes(n);
+        // **And the record blob's directory**: every column here is blob-resident, so a row is
+        // the keyword's 8 characters and the text's 400, a `u8` and a `u32`, with 7 bytes of frame
+        // around each string, 3 around each fixed value and 3 around the row: 436 bytes.
+        let directory = |n: u64| {
+            (436 * n).div_ceil(tessera_filter::RECORD_BLOCK_TARGET as u64)
+                * BLOB_DIRECTORY_BYTES_PER_BLOCK
+        };
         let image_scratch =
             |n: u64| workers * tessera_store::permutation::project_scratch_bound(n, n).total();
         let small = residency(10_000_000);
         let large = residency(100_000_000);
         assert_eq!(
-            scaling_total(&small) - duplicates(10_000_000) - images(10_000_000),
-            scaling_total(&large) - duplicates(100_000_000) - images(100_000_000),
-            "the anonymous rate is the spilled column's duplicate map and the term images' \
-             window:\nat 10⁷{}\nat 10⁸{}",
+            scaling_total(&small)
+                - duplicates(10_000_000)
+                - images(10_000_000)
+                - directory(10_000_000),
+            scaling_total(&large)
+                - duplicates(100_000_000)
+                - images(100_000_000)
+                - directory(100_000_000),
+            "the anonymous rate is the spilled column's duplicate map, the term images' window \
+             and the record blob's directory:\nat 10⁷{}\nat 10⁸{}",
             small.describe(),
             large.describe()
         );
@@ -4101,10 +4168,11 @@ require_member_visibility = "none"
             (duplicates(1u64 << 34) - duplicates(1u64 << 32))
                 + (pass_bucket(1u64 << 34) - pass_bucket(1u64 << 32))
                 + (images(1u64 << 34) - images(1u64 << 32))
-                + (image_scratch(1u64 << 34) - image_scratch(1u64 << 32)),
+                + (image_scratch(1u64 << 34) - image_scratch(1u64 << 32))
+                + (directory(1u64 << 34) - directory(1u64 << 32)),
             "above the key type's bound the anonymous total moves by the spilled column's \
-             duplicate map, the artifact pass's bucket and the term images' bitmaps and scratch, \
-             and nothing else:\nat 2³²{}\nat 2³⁴{}",
+             duplicate map, the artifact pass's bucket, the term images' bitmaps and scratch and \
+             the record blob's directory, and nothing else:\nat 2³²{}\nat 2³⁴{}",
             at_bound.describe(),
             beyond.describe()
         );

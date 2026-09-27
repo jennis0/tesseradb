@@ -202,7 +202,7 @@ DEPLOYMENT_NAME = "catalogue-tessera.toml"
 # contradiction it looks like: the empty string is refused as a *dictionary key* and a blob-resident
 # column has no dictionary — its row carries the bytes the wire carried.
 # Their planting carries the blob's adversarial shapes: an empty string (a value, not an absence),
-# a present zero in `pages` (distinguishable from the absent stride), a row larger than the 256 KiB
+# a present zero in `pages` (distinguishable from the absent stride), a row larger than the 32 KiB
 # block target (an oversized block of its own — records §3's "target, not a cap"), and entities
 # absent from both (absent from has-row entirely).
 #: The acquisition half, built from this module's own constants rather than restated, so that
@@ -368,7 +368,7 @@ ABSTRACT_ABSENT_STRIDE = 137
 PAGES_ZERO_STRIDE = 17
 
 # Two designated `note` entities, both inside `cross_lo` (so the crossover principals can reach
-# them at drill-down) and off every stride above. The oversize row is larger than the 256 KiB
+# them at drill-down) and off every stride above. The oversize row is larger than the 32 KiB
 # block target, so the build must give it an oversized block of its own (records §3 — the target
 # is a target, not a cap); the empty string is a value and must survive as one.
 NOTE_OVERSIZE_ID = 65_700
@@ -597,7 +597,7 @@ def note_of(source_id: int) -> str | None:
     if source_id % NOTE_ABSENT_STRIDE == 0:
         return None
     if source_id == NOTE_OVERSIZE_ID:
-        # > 256 KiB uncompressed, a pure function of the id range: the one row the block target
+        # 320,000 bytes uncompressed, a pure function of the id range: the one row the block target
         # cannot hold, which must become an oversized block of its own rather than split.
         return "".join(f"{i:08x}" for i in range(40_000))
     if source_id == NOTE_EMPTY_ID:

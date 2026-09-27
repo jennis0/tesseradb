@@ -11,9 +11,10 @@
 //! [`coalesce_record_extents`] and [`fold_record_blob`] are the value-column pair's counterparts
 //! (`coalesce_attr_extents`, `fold_value_column`): a merge by entity over layers whose entities
 //! may interleave, streaming rows through [`RecordBlobWriter`], which repacks small blocks toward
-//! the 256 KiB target as a side effect of re-blocking rather than as a pass of its own. Each input layer streams through [`tessera_filter::RecordBlob::for_each_row`],
-//! whose walk *is* the addressing self-check, so a defective input refuses the pass instead of
-//! being laundered into a clean-looking output.
+//! the block target as a side effect of re-blocking rather than as a pass of its own. Each input
+//! layer streams through [`tessera_filter::RecordBlob::for_each_row`], whose walk *is* the
+//! addressing self-check, so a defective input refuses the pass instead of being laundered into a
+//! clean-looking output.
 //!
 //! Write-path §5.4's two removal rules are the sharp edge, and the signatures are shaped so
 //! conflating them is unspellable here exactly as they are for the value column: the coalesce has
@@ -75,12 +76,12 @@ const ZSTD_LEVEL: i32 = 3;
 /// **The figure is per pool, and a pool is per producer, so it multiplies by however many run at
 /// once.** The build's attribute join writes its spilled columns from one rayon lane each
 /// (`tessera_build::pipeline`), so a schema with four spilled columns has four pools: twelve
-/// threads and 1.25 MB apiece at the 256 KiB target. A pool is therefore started once per column
+/// threads and 160 KiB apiece at the 32 KiB target. A pool is therefore started once per column
 /// and handed from one extent's writer to the next ([`BlockPool`]), not started per writer; a
 /// producer that seals no block starts no thread at all.
 ///
-/// **1.25 MB is the target, not a cap.** A row larger than the target gets an oversized block of
-/// its own (records §3), so a corpus with a 4 MB row has up to five of those in flight instead.
+/// **The target is not a cap.** A row larger than the target gets an oversized block of its own
+/// (records §3), so a corpus with a 4 MB row has up to five of those in flight instead.
 /// The bound in bytes is five times the largest row, and the target is what it is for every
 /// corpus whose rows are ordinary.
 ///
@@ -523,8 +524,8 @@ pub fn write_prose<'a>(
 /// one: a suppressed or deleted-but-unfolded entity's row rides through untouched, because a
 /// suppression never touches the blob (Rule S) and removal is the fold's (Rule F, write-path
 /// §5.4). What is written is the same `(entity, row)` relation the inputs carried between them,
-/// re-blocked against `target` — which is where small flush blocks repack toward the 256 KiB
-/// point, as a streaming rewrite holding one uncompressed block at a time.
+/// re-blocked against `target` — which is where small flush blocks repack toward the block
+/// target, as a streaming rewrite holding one uncompressed block at a time.
 pub fn coalesce_record_extents(
     inputs: &[&RecordBlob],
     blocks_path: &Path,

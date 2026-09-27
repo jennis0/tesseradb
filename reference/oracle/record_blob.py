@@ -26,7 +26,7 @@ block is `row_count u32 LE | first_rank u32 LE | first_entity u32 LE`, then one 
 row past the first holding that row's entity less its predecessor's less one, then the rows; a row
 is a LEB128 varint stating how many bytes of fields follow, then those fields; a field is
 `tag u16 LE | kind u8 | value`. Rows concatenate in ascending entity order into zstd blocks cut
-against a 256 KiB uncompressed target measured over the rows, a row never splitting — an oversized
+against a 32 KiB uncompressed target measured over the rows, a row never splitting — an oversized
 row gets an oversized block of its own. The directory is one Arrow IPC file batch per blob:
 `(compressed_offset, compressed_len, uncompressed_len, first_rank, row_count)`, and
 `hasrow.roaring` is the portable-serialised has-row bitmap whose rank order is the row order.
@@ -58,7 +58,7 @@ DIRECTORY_FILE = "directory.arrow"
 # The uncompressed block target (records §3), measured over a block's rows and not its header.
 # Transcribed, like the field kinds below: the format has one home in Rust and this is its checked
 # shadow — a drift fails [`self_check`] loudly.
-BLOCK_TARGET = 256 * 1024
+BLOCK_TARGET = 32 * 1024
 
 # A block's fixed header: row count, first rank, first entity.
 BLOCK_HEADER_FIXED = 12
@@ -178,7 +178,7 @@ def _walk_payload(payload: bytes, where: str, failures: list[str]) -> set[int]:
 def block_headers(record_dir: Path) -> list[dict]:
     """Each block's header facts, decompressed and parsed: `first_rank`, `first_entity`,
     `row_count` and `rows_len` — the last being the block's bytes past its header, which is what
-    the 256 KiB target is measured over.
+    the block target is measured over.
 
     Separate from [`self_check`] because it answers a question rather than collecting failures: a
     test asking which blocks passed the target needs the number, not a list of drifts.
