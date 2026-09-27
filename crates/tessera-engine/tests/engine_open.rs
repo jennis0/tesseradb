@@ -62,6 +62,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
     {
         let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
             receipt: Vec::new(),
             batch_id: "over-the-top".to_string(),
             body_hash: [0u8; 32],
@@ -421,7 +422,7 @@ fn a_deleted_items_tessera_id_is_not_issued_again_after_a_fold_and_a_restart() {
     let root = fixture_in(tmp.path());
     let engine = serving(&root);
     let first = create(&engine, "first", &["first"])[0];
-    let entity = engine.resolve_tessera_ids(&[first])[0].expect("the item it created");
+    let entity = engine.resolve_tessera_ids(&[first]).unwrap()[0].expect("the item it created");
     engine.accept_change(entity, ChangeOp::Delete).unwrap();
     fold(&engine);
     drop(engine);

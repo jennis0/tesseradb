@@ -165,22 +165,6 @@ pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croari
     entities
 }
 
-/// What one accepted `POST /control/values` batch did. Every count is bounded by the caller's own
-/// request and names no entity and no value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValuesReceipt {
-    pub filled: u64,
-    pub held: u64,
-    /// How many memberships this batch's layer columns added, to artifacts it created and to
-    /// artifacts already held alike.
-    pub joined: u64,
-    /// How many artifacts this batch's layer columns created: a key no artifact held, on a layer
-    /// whose value set is open. Under `open` a typo creates a permanent object rather than being
-    /// refused, and the mitigation is that the caller who made it is told the number in its own
-    /// `200`.
-    pub minted: u64,
-}
-
 /// What `commit_growth` answers per join: the artifact's entity and how many of the joining
 /// members it did not already hold.
 ///
@@ -304,7 +288,17 @@ impl Executor {
             }
             // A window of one entry is exactly the per-command semantics, which is why there is
             // no second deny implementation to keep in step with the first.
-            Command::Changes { changes, reply } => {
+            Command::Changes {
+                mut changes,
+                stamp,
+                reply,
+            } => {
+                if !self.follow_since(stamp, |generation| {
+                    crate::edited::follow_changes(generation, &mut changes)
+                }) {
+                    reply.fail(ExecError::Stale);
+                    return;
+                }
                 let mut entries = vec![DenyEntry {
                     changes,
                     reply: Some(reply),
@@ -341,11 +335,6 @@ impl Executor {
             Command::DeclareAttribute { request, reply } => {
                 self.commit_attribute_declare(*request, reply)
             }
-            Command::Values {
-                request,
-                unique_seq,
-                reply,
-            } => self.commit_values(request, unique_seq, reply),
             Command::DeclareVocabulary { request, reply } => {
                 self.commit_vocabulary_declare(*request, reply)
             }
@@ -363,15 +352,33 @@ impl Executor {
             Command::PublishArtifacts {
                 layer,
                 level,
-                artifacts,
+                mut artifacts,
+                stamp,
                 reply,
-            } => self.commit_artifacts(layer, level, artifacts, reply),
+            } => {
+                if !self.follow_since(stamp, |generation| {
+                    crate::edited::follow_artifacts(generation, &mut artifacts)
+                }) {
+                    reply.fail(ExecError::Stale);
+                    return;
+                }
+                self.commit_artifacts(layer, level, artifacts, reply)
+            }
             Command::GrowMemberships {
                 layer,
                 level,
-                joins,
+                mut joins,
+                stamp,
                 reply,
-            } => self.commit_growth(layer, level, joins, reply),
+            } => {
+                if !self.follow_since(stamp, |generation| {
+                    crate::edited::follow_growth(generation, &mut joins)
+                }) {
+                    reply.fail(ExecError::Stale);
+                    return;
+                }
+                self.commit_growth(layer, level, joins, reply)
+            }
         }
     }
 
@@ -761,272 +768,6 @@ impl Executor {
         reply.ack(());
     }
 
-    /// `POST /control/values`: fill attribute values on entities that already exist.
-    ///
-    /// It creates no point and no row. Every entity a row names was resolved at the boundary, so
-    /// this pass adds cells to entities that have them and members to artifacts; a subject that
-    /// does not exist refused the batch before it was submitted. What it does create, each
-    /// through the function the ingest window's close uses: a code for an open vocabulary's new
-    /// key; an artifact a layer column named and no artifact held, on an `open` layer
-    /// ([`Executor::prepare_mints`]); and an artifact a filled value names on a layer whose
-    /// artifacts are a column's values ([`Executor::derive_records`]).
-    ///
-    /// The fill rule is evaluated here and nowhere else, beside the join arm and for its reason:
-    /// the sources are the commit-window buffer, the unflushed fills and the flushed homes, and
-    /// only this thread moves any of them. An absent cell takes the value, a cell holding the
-    /// identical value is a no-op, and a cell holding a different value refuses the whole batch
-    /// with a `409` naming the column and the key and never the held value.
-    ///
-    /// One append, one fsync, one apply. The vocabulary mint records, the values record, and the
-    /// publications and growths its columns produced are made durable together and in that order,
-    /// so there is no state in which a cell is filled and its code or membership is not.
-    pub(super) fn commit_values(
-        &mut self,
-        mut request: Box<tessera_lifecycle::ValuesRequest>,
-        unique_seq: u64,
-        reply: Reply<ValuesOutcome>,
-    ) {
-        let started = std::time::Instant::now();
-        let generation = self.generation.load_full();
-
-        // The batch-id replay check, on the executor ([`BatchState`]'s rule). A values batch
-        // allocates nothing, so a replay has no ids to hand back; a byte-identical retry runs the
-        // pass below and finds every cell held identically, which is the fill rule's own no-op.
-        if let Some((held_hash, _)) = self.live.accepted_batch(&request.batch_id) {
-            if held_hash != request.body_hash {
-                reply.fail(ExecError::BatchConflict {
-                        batch_id: request.batch_id.clone(),
-                    },
-                );
-                return;
-            }
-        }
-
-        // The unique values against what was added since the handler checked them, from memory.
-        match crate::unique::recheck_fills(&generation, &request, unique_seq, &self.deps.identity_key) {
-            Ok(()) => {}
-            Err(crate::unique::Recheck::Refused(e)) => {
-                reply.fail(e);
-                return;
-            }
-            Err(crate::unique::Recheck::Stale) => {
-                reply.ack(ValuesOutcome::Stale(request));
-                return;
-            }
-        }
-        let columns = match values_columns(&generation.bundle.manifest, &request) {
-            Ok(columns) => columns,
-            Err(e) => {
-                reply.fail(e);
-                return;
-            }
-        };
-        // An open vocabulary's new key is minted here as the ingest window mints it, so the cell
-        // the fill rule compares and the log records is the code.
-        let minted = match mint_values_codes(&generation, &mut request, &columns) {
-            Ok(minted) => minted,
-            Err(e) => {
-                reply.fail(ExecError::VocabularyRefused {
-                    detail: e.to_string(),
-                });
-                return;
-            }
-        };
-        let vocabulary_records = minted.records();
-
-        let planned = match plan_fills(&generation, &request, &columns) {
-            Ok(planned) => planned,
-            Err(e) => {
-                reply.fail(e);
-                return;
-            }
-        };
-        // A layer column on a values row is a membership join, and mints what it names. A held
-        // key joins the entity to the artifact; a key no artifact holds mints it here, on an
-        // `open` layer, with the batch's rows as its first members and its lineage from a list
-        // column's own adjacency.
-        // The refusals are `resolve_or_mint`'s and are made below with the batch still without
-        // effect: a `closed` value set, and a layer declaring supplied content or a dependency.
-        let (mut memberships, mint_edges) = match self.resolve_memberships(&request.artifacts) {
-            Ok(resolved) => resolved,
-            Err(detail) => {
-                reply.fail(ExecError::LayerRefused { detail });
-                return;
-            }
-        };
-        // Through the one implementation the ingest door's window close uses, so a key arriving
-        // here creates the artifact the same key would have created there.
-        let wanted = match values_mint_plan(&memberships, &request.rows) {
-            Ok(wanted) => wanted,
-            Err(detail) => {
-                reply.fail(ExecError::ValuesRefused { detail });
-                return;
-            }
-        };
-        let mut mints: Vec<WalRecord> = Vec::new();
-        let mut minted_count = 0u64;
-        if !wanted.is_empty() || !mint_edges.is_empty() {
-            match self.prepare_mints(&wanted, &mint_edges) {
-                Ok(prepared) => {
-                    settle_resolved_ordinals(&mut memberships, &prepared.resolved);
-                    minted_count = wanted
-                        .keys()
-                        .filter(|at| prepared.minted.contains(*at))
-                        .count() as u64;
-                    mints = prepared.records;
-                }
-                Err(detail) => {
-                    reply.fail(ExecError::LayerRefused { detail });
-                    return;
-                }
-            }
-        }
-        // A value this batch filled creates its artifact on a layer whose artifacts are that
-        // column's values, as the same value would at an ingest window's close.
-        let filled = planned.fills.iter().map(|(_, fill)| fill.scalars.as_slice());
-        match self.derive_records(filled, &minted.vocabularies) {
-            Ok(records) => mints.extend(records),
-            Err(detail) => {
-                reply.fail(ExecError::LayerRefused { detail });
-                return;
-            }
-        }
-        let growth = match self
-            .live
-            .with_artifacts(|store| values_growth_records(&memberships, &request.rows, store))
-        {
-            Ok(records) => records,
-            Err(detail) => {
-                reply.fail(ExecError::ValuesRefused { detail });
-                return;
-            }
-        };
-        // Read before the apply, on `growth_receipt`'s rule: afterwards every joining member is a
-        // member and how many were new is gone.
-        let joined = self.live.with_artifacts(|store| {
-            mints
-                .iter()
-                .chain(&growth)
-                .map(|record| tessera_lifecycle::membership::members_added(record, store))
-                .sum::<u64>()
-        });
-
-        let values_record = WalRecord::ValuesBatch {
-            batch_id: request.batch_id.clone(),
-            body_hash: request.body_hash,
-            view: request.view.clone(),
-            columns: request.columns.clone(),
-            rows: request
-                .rows
-                .iter()
-                .map(|row| tessera_lifecycle::wal::ValuesRow {
-                    entity_id: row.entity,
-                    values: row.values.clone(),
-                })
-                .collect(),
-        };
-        // The publications that minted come first, then the growths: the window close's own
-        // order, and for its reason: a growth of this batch may name an ordinal one of them
-        // claimed, and replay applies the sequence in order, so an artifact must exist before
-        // anything addresses it.
-        let artifact_records: Vec<&WalRecord> = mints.iter().chain(growth.iter()).collect();
-        // The vocabulary mints go first, since the values record carries their codes.
-        let mut durable: Vec<&WalRecord> = vocabulary_records.iter().collect();
-        durable.push(&values_record);
-        durable.extend(&artifact_records);
-        let positions = match self.make_durable(&durable, "a values batch") {
-            Ok(positions) => positions,
-            Err(e) => {
-                reply.fail(e);
-                return;
-            }
-        };
-        let values_at = vocabulary_records.len();
-        let values_position = positions[values_at];
-        // At the tick, on the ingest door's rule: this is a data door and its batches arrive in
-        // runs.
-        self.apply_artifact_records(&artifact_records, &positions[values_at + 1..], Publish::AtTick);
-
-        // The cells reach the buffer's fill map, which is what the next flush writes into the
-        // family's entity-space extent and the record blob. The map is cloned with the buffer, on
-        // the immutable-snapshot rule every generation is built by.
-        let mut buffer = (*generation.buffer).clone();
-        let declared = &generation.bundle.manifest.declared_scalars;
-        let mut unique_live = (*generation.unique_live).clone();
-        unique_live.add(
-            declared,
-            planned
-                .fills
-                .iter()
-                .map(|(entity, fill)| (*entity, fill.scalars.as_slice())),
-        );
-        for (entity, fill) in planned.fills {
-            buffer.fill(entity, fill, |value| matches!(value, WalScalar::Null));
-            buffer.set_fill_wal_pos(entity, values_position);
-        }
-        for (entity, owner_view, fill) in planned.scoped_fills {
-            buffer.fill_scoped(entity, owner_view.clone(), fill, |value| {
-                matches!(value, WalScalar::Null)
-            });
-            buffer.set_scoped_fill_wal_pos(entity, &owner_view, values_position);
-        }
-        self.health
-            .buffered_items
-            .store(buffer.len(), Ordering::SeqCst);
-        // A values batch fills cells on rows the buffer already holds and buffers none of its own,
-        // so nothing joins the buffered-row lists here.
-        let suggest = generation.suggest.with_mints(
-            &tessera_analyse::SuggestionFold::new(),
-            &minted.vocabularies,
-            &minted.fresh,
-        );
-        let next = generation.with_buffer(Arc::new(buffer), &[], |g| {
-            g.vocabularies = Arc::new(minted.vocabularies);
-            g.suggest = suggest;
-            g.unique_live = Arc::new(unique_live);
-        });
-        self.publish(next, started);
-        // A values batch answers no `tessera_id`s, so the index records none: the batch id and
-        // the body hash are the whole of what a retry is answered off. Indexed at the values
-        // record's own position, so the rotation that reclaims that record forgets the id with
-        // it, the horizon a restart rebuilds.
-        self.live.record_accepted_batch(
-            request.batch_id.clone(),
-            request.body_hash,
-            Vec::new(),
-            values_position,
-        );
-        // What a batch minted is reported to the batch that minted it, and to the operator :
-        // the window close's own line, for its own reason: under `value_set = "open"` a typo
-        // creates a permanent object rather than being refused, and the mitigation is that it is
-        // visible.
-        if minted_count > 0 {
-            tracing::info!(
-                minted = minted_count,
-                artifacts = ?mints
-                    .iter()
-                    .flat_map(|record| match record {
-                        WalRecord::ArtifactPublish { layer, level, artifacts, .. } => artifacts
-                            .iter()
-                            .filter_map(|a| a.key.as_ref())
-                            .map(|key| format!("{key} in level {level} of {layer}"))
-                            .take(8)
-                            .collect::<Vec<_>>(),
-                        _ => Vec::new(),
-                    })
-                    .collect::<Vec<_>>(),
-                "a values batch named keys no artifact held, and these layers' value sets are \
-                 open, so the artifacts were created"
-            );
-        }
-        reply.ack(ValuesOutcome::Filled(ValuesReceipt {
-            filled: planned.filled,
-            held: planned.held,
-            joined,
-            minted: minted_count,
-        }));
-    }
-
     /// `PUT /control/attributes`: declare an attribute column while the service runs.
     ///
     /// The shape is [`Self::commit_view_create`]'s: resolve against state only this thread may
@@ -1051,11 +792,9 @@ impl Executor {
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
-        let resolved = crate::attributes::resolve(
-            &request,
-            &generation.bundle.manifest,
-            |name| self.live.registered_layer(name).is_some(),
-        );
+        let resolved = crate::attributes::resolve(&request, &generation.bundle.manifest, |name| {
+            self.live.registered_layer(name).is_some()
+        });
         let compiled = match resolved {
             Ok(crate::attributes::Resolution::Existing) => {
                 reply.ack(true);
@@ -1564,7 +1303,7 @@ impl Executor {
             return;
         }
         self.live.with_roster(|roster| roster.apply(&record));
-        let fills_dropped = self.publish_roster(&generation, started, &ids);
+        self.publish_roster(&generation, started, &ids);
         let served = self.generation.load_full();
         let retired = self.live.with_publication_state(|registry, store, _| {
             crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
@@ -1593,10 +1332,7 @@ impl Executor {
             self.cascade_dependents(&mut entries);
             self.commit_denies(entries);
         }
-        reply.ack(ViewDropped {
-            deleted,
-            fills_dropped,
-        });
+        reply.ack(ViewDropped { deleted });
     }
 
     /// Publish the generation a create or a drop makes: the bundle as the live roster describes
@@ -1609,10 +1345,6 @@ impl Executor {
     /// WAL member after it, for the life of the process. Their entities are untouched: an entity
     /// left in no view is exactly what a drop produces.
     ///
-    /// A group-scoped fill addressed to a dropped view goes the same way, and the answer is how
-    /// many did. An entity-scoped fill stays: its value is no view's, and a surviving view's flush
-    /// writes it.
-    ///
     /// The dropped views' group-scoped columns go with them, so a key created again opens its own
     /// base at its first flush rather than answering from its predecessor's.
     pub(super) fn publish_roster(
@@ -1620,42 +1352,18 @@ impl Executor {
         generation: &Arc<Generation>,
         started: std::time::Instant,
         dropped: &[String],
-    ) -> u64 {
+    ) {
         let (created, tombstones) = self.live.roster_for_publication();
         let manifest = generation
             .bundle
             .manifest
             .with_roster(&created, &tombstones);
         let bundle = generation.bundle.with_views(manifest);
-        let mut fills_dropped = 0;
         let buffer = if dropped.is_empty() {
             Arc::clone(&generation.buffer)
         } else {
             let mut buffer = (*generation.buffer).clone();
-            // Rows, not entities, and by (entity, view): an entity whose row in the dropped view
-            // was a join keeps the row it holds elsewhere, and `rows()` is what sees the join at
-            // all.
-            let orphaned: Vec<(EntityId, String)> = generation
-                .buffer
-                .rows()
-                .filter(|(_, item)| dropped.contains(&item.view))
-                .map(|(entity, item)| (*entity, item.view.clone()))
-                .collect();
-            for (entity, view) in orphaned {
-                buffer.remove_in_view(entity, &view);
-            }
-            let orphaned_fills: Vec<(EntityId, String)> = generation
-                .buffer
-                .scoped_fills()
-                .filter(|((_, owner_view), fill)| {
-                    dropped.contains(owner_view) || dropped.contains(&fill.view)
-                })
-                .map(|(cell, _)| cell.clone())
-                .collect();
-            fills_dropped = orphaned_fills.len() as u64;
-            for (entity, owner_view) in orphaned_fills {
-                buffer.remove_scoped_fill(entity, &owner_view);
-            }
+            buffer.remove_views(dropped);
             self.health
                 .buffered_items
                 .store(buffer.len(), Ordering::SeqCst);
@@ -1670,7 +1378,6 @@ impl Executor {
             }
         });
         self.publish(next, started);
-        fills_dropped
     }
 
 }

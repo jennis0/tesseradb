@@ -3300,6 +3300,71 @@ pub fn growth_record<'a>(
     })
 }
 
+impl ArtifactStore {
+    /// The growth that carries every membership and generating set holding an item's old entity
+    /// to its new one, for each `(old, new)` pair: one [`crate::wal::WalRecord::ArtifactGrow`] per
+    /// level that holds one. A membership gains the new entity and keeps the old, which the fold
+    /// removes with the entity. A generating set trades the old for the new, through the one
+    /// routine that changes a set, so its cardinality is unchanged and its content is never
+    /// withdrawn by the move.
+    pub fn carried_over(&self, moved: &[(EntityId, EntityId)]) -> Vec<crate::wal::WalRecord> {
+        if moved.is_empty() {
+            return Vec::new();
+        }
+        let old: Bitmap = moved.iter().map(|(old, _)| old.raw() as u32).collect();
+        let new_of: std::collections::BTreeMap<u32, u32> = moved
+            .iter()
+            .map(|(old, new)| (old.raw() as u32, new.raw() as u32))
+            .collect();
+        let replaced = |held: &Bitmap| -> (Bitmap, Bitmap) {
+            let leaving = held.and(&old);
+            let joining: Bitmap = leaving.iter().map(|e| new_of[&e]).collect();
+            (joining, leaving)
+        };
+        let mut records = Vec::new();
+        for ((layer, level), slots) in &self.levels {
+            let mut growth = Vec::new();
+            for (ordinal, record) in slots.iter().enumerate() {
+                let Some(record) = record else {
+                    continue;
+                };
+                if record.members.intersect(&old) {
+                    let (joining, _) = replaced(&record.members);
+                    growth.push(crate::wal::MembershipGrowth {
+                        ordinal: ordinal as u32,
+                        joining: serialise_members(&joining),
+                        leaving: Vec::new(),
+                        set: crate::wal::GrownSet::Membership,
+                    });
+                }
+                for (rank, content) in record.contents.iter().enumerate() {
+                    if !content.generated_from.intersect(&old) {
+                        continue;
+                    }
+                    let (joining, leaving) = replaced(&content.generated_from);
+                    growth.push(crate::wal::MembershipGrowth {
+                        ordinal: ordinal as u32,
+                        joining: serialise_members(&joining),
+                        leaving: serialise_members(&leaving),
+                        set: crate::wal::GrownSet::GeneratingSet {
+                            rank: rank as u16,
+                            cardinality: content.generated_from.cardinality(),
+                        },
+                    });
+                }
+            }
+            if !growth.is_empty() {
+                records.push(crate::wal::WalRecord::ArtifactGrow {
+                    layer: layer.clone(),
+                    level: *level,
+                    growth,
+                });
+            }
+        }
+        records
+    }
+}
+
 /// How many memberships `record` adds, read against `store` before the record is applied: every
 /// member of an artifact a publication creates, and every joining member a growth's artifact does
 /// not already hold. A write's `joined` is this summed over the records it appends, so an artifact

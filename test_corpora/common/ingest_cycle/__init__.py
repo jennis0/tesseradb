@@ -89,6 +89,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--equivalence-boxes", type=int, default=8)
     ap.add_argument("--write-cycle", action="store_true")
     ap.add_argument("--write-cycle-n", type=int, default=1000)
+    ap.add_argument(
+        "--reingest",
+        action="store_true",
+        help="last, send the whole hold-out again as it was ingested and then with one entity in "
+        "a hundred moved, as a nightly re-ingest of a changed source does",
+    )
     ap.add_argument("--reuse-base", action="store_true")
     ap.add_argument(
         "--all-in-bundle",

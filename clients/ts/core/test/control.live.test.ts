@@ -143,10 +143,10 @@ describe('Control against a live server', () => {
     expect(other.body).toMatchObject({created: 1});
   });
 
-  it('fills a declared column on rows it holds, which the item card then carries', async (ctx) => {
+  it('sets a declared column on rows it holds, which the item card then carries', async (ctx) => {
     live(ctx);
-    const filled = await control.values(notes(), {view: 's0'});
-    expect(filled).toMatchObject({status: 200, body: {rows: 4, filled: 4}});
+    const edited = await control.ingest(notes(), {view: 's0'});
+    expect(edited).toMatchObject({status: 200, body: {rows: 4, edited: 4}});
     await flushed();
     const rows = await byExternalId();
     expect(rows.size).toBe(4);

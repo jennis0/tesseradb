@@ -14,7 +14,6 @@ import pyarrow as pa
 import pytest
 
 from conftest import browse, item, viewport
-from tesseradb._refusal import Refusal
 
 pytest.importorskip("pyarrow")
 
@@ -78,8 +77,8 @@ def test_a_string_id_column_names_the_rows_the_members_name_and_reaches_the_dril
     assert base64.b64decode(record["external_id"]).decode().startswith("p")
 
 
-def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_is_refused(served, corpus):
-    """A delta names its rows the same way, and a row the database holds is a `409` per page."""
+def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_edits_them(served, corpus):
+    """A delta names its rows the same way, and a row naming an item the database holds edits it."""
     db = served(string_ids)
     fresh = [f"q{i}" for i in range(5)]
     db.insert("map", papers(fresh, x=25.0), id="paper", x="x", y="y", access="labels")
@@ -103,13 +102,13 @@ def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_is_refused(
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 25
     assert browse(db, "map", "clusters")["artifacts"][0]["masked_count"] == 25
 
-    # The same keys again, moved a little so the bytes are a batch the server has not replayed.
+    # The same keys again, moved a little: each row names its item and moves it.
     db.insert("map", papers(fresh, x=26.0), id="paper", x="x", y="y", access="labels")
-    with pytest.raises(Refusal) as raised:
-        db.commit()
-    again = raised.value.report
-    assert [r["status"] for r in again.refusals] == [409]
+    again = db.commit()
+    assert again.ok, again
+    assert again.rows_accepted == {"map": 0} and again.items_edited == len(fresh), again
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 25
+    assert browse(db, "map", "clusters")["artifacts"][0]["masked_count"] == 25
 
 
 def unnamed(db) -> None:

@@ -100,6 +100,8 @@ pub struct FoldSegmentInput {
     /// generation's directory, named by the fold's plan-time snapshot — not necessarily under the
     /// fold's own output prefix, since the fold reads the old generation and writes a new one.
     pub dir: PathBuf,
+    /// Where its rows' entities are read.
+    pub entities: crate::edited::RowEntities,
 }
 
 /// Everything [`fold_row_space`] needs beyond its inputs and where to write.
@@ -171,7 +173,12 @@ pub fn fold_row_space(
 ) -> Result<FoldRowSpaceOutput> {
     let mut cursors: Vec<SegmentCursor> = Vec::with_capacity(spec.inputs.len());
     for input in spec.inputs {
-        cursors.push(SegmentCursor::open(&input.dir, input.seg_id.clone(), OP)?);
+        cursors.push(SegmentCursor::open(
+            &input.dir,
+            input.seg_id.clone(),
+            OP,
+            input.entities.clone(),
+        )?);
     }
 
     std::fs::create_dir_all(output_dir).map_err(|source| StoreError::Io {
@@ -235,10 +242,9 @@ pub fn fold_row_space(
         .collect();
 
     // The merged order, from a heap over one key per live cursor — identical shape to
-    // `execute_merge`'s, and for the same reason: `tessera_id` is a bijection and each live
-    // entity has exactly one row across every live segment, so no two cursors can ever offer the
-    // same `(morton, tessera_id)` pair, and the `index` tiebreak exists only to give `BinaryHeap`
-    // a total order to work with.
+    // `execute_merge`'s. Two rows share a `tessera_id` only where an edit left an item's deleted
+    // entity beside its new one, and the deleted one is dropped below, so the `index` tiebreak
+    // gives `BinaryHeap` a total order and decides no surviving row's place.
     let mut heap: BinaryHeap<Reverse<(u32, u64, usize)>> = BinaryHeap::with_capacity(cursors.len());
     for (index, cursor) in cursors.iter().enumerate() {
         if let Some((morton, tessera_id)) = cursor.key() {
@@ -254,17 +260,7 @@ pub fn fold_row_space(
         let cursor = &mut cursors[index];
         let row = cursor.row;
         let tessera_id = TesseraId::new(tessera_raw);
-        let (shard, entity) = spec.identity_key.invert(tessera_id);
-        if shard != spec.shard_id {
-            return Err(StoreError::MalformedBundle {
-                detail: format!(
-                    "fold_row_space: segment '{}' row {row} inverts to shard {shard}, not this \
-                     bundle's {} — folding it would place another shard's entity in this view's \
-                     row space",
-                    cursor.seg_id, spec.shard_id
-                ),
-            });
-        }
+        let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
 
         // Advance the cursor and refill the heap before the drop decision below, so an early
         // `continue` (the tombstoned case) can never skip it and stall this cursor.
@@ -273,9 +269,7 @@ pub fn fold_row_space(
             heap.push(Reverse((next_morton, next_id, index)));
         }
 
-        // `entity.raw()` always fits `u32`: `IdentityKey::invert` builds it from the low half of
-        // a Feistel round, itself a `u32` (identity.rs), so this is not a truncating cast — and
-        // `croaring::Bitmap`'s domain is `u32` regardless.
+        // Entity ids are capped at `u32::MAX` (I9), and `croaring::Bitmap`'s domain is `u32`.
         let entity_u32 = entity.raw() as u32;
         if spec.tombstones.contains(entity_u32) {
             continue;
@@ -378,6 +372,7 @@ mod tests {
             .iter()
             .map(|(entity, x, score)| FlushRow {
                 entity_id: EntityId::new(*entity),
+                number: EntityId::new(*entity),
                 external_id: None,
                 x: *x,
                 y: 0.0,
@@ -408,6 +403,7 @@ mod tests {
         FoldSegmentInput {
             seg_id: seg_id.to_string(),
             dir: dir.join(format!("partitions/p/views/s/segments/{seg_id}")),
+            entities: crate::edited::RowEntities::Numbers,
         }
     }
 

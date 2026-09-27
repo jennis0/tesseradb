@@ -76,12 +76,12 @@ impl ShedCause {
             ShedCause::BulkGate => {
                 "the server is at its bulk-read admission bound; retry shortly".to_string()
             }
-            ShedCause::WriteQueue => format!(
-                "the write queue is full; retry after {retry_after_s}s"
-            ),
-            ShedCause::IngestAdmission => format!(
-                "the server is at its ingest-admission bound; retry after {retry_after_s}s"
-            ),
+            ShedCause::WriteQueue => {
+                format!("the write queue is full; retry after {retry_after_s}s")
+            }
+            ShedCause::IngestAdmission => {
+                format!("the server is at its ingest-admission bound; retry after {retry_after_s}s")
+            }
             ShedCause::SingleFlight => "a concurrent request is already building this session's \
                  row projection or mask fragment; retry shortly"
                 .to_string(),
@@ -226,9 +226,9 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         },
         // Unreachable in practice, since cancellation fires only when the handler future is
         // dropped. A 500 with a fixed detail in case it ever arrives on a live connection.
-        EngineError::Cancelled => ApiError::FailClosed(
-            "the request was cancelled before it completed".to_string(),
-        ),
+        EngineError::Cancelled => {
+            ApiError::FailClosed("the request was cancelled before it completed".to_string())
+        }
         // A 500, not an empty 200: an empty value set is a real answer for a principal who may see
         // none of the values, and must stay distinct from one that could not be read. The detail
         // can carry a store failure's text, so only the column is sent.
@@ -327,9 +327,7 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         }
         // Forwarded: the detail names a vocabulary and its declared width. Widening the code space
         // instead would recolour every coded row.
-        AcceptError::Exec(ExecError::VocabularyRefused { detail }) => {
-            ApiError::Contract(detail)
-        }
+        AcceptError::Exec(ExecError::VocabularyRefused { detail }) => ApiError::Contract(detail),
         // The detail names the caller's declaration against the published rules. Refused before any
         // allocation or WAL append, so nothing took effect.
         AcceptError::Exec(ExecError::LayerRefused { detail }) => ApiError::Contract(detail),
@@ -343,20 +341,12 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::ViewUnknown { detail }) => ApiError::Unknown(detail),
         // A refused declaration is corrected and resent. A name held under another identity cannot
         // be had, since a column's width is baked into every row. Neither took effect.
-        AcceptError::Exec(ExecError::AttributeRefused { detail }) => {
-            ApiError::Contract(detail)
-        }
-        AcceptError::Exec(ExecError::AttributeConflict { detail }) => {
-            ApiError::Conflict(detail)
-        }
+        AcceptError::Exec(ExecError::AttributeRefused { detail }) => ApiError::Contract(detail),
+        AcceptError::Exec(ExecError::AttributeConflict { detail }) => ApiError::Conflict(detail),
         // A cell held differently is a 409 whose detail never names the held value. A row naming a
         // missing subject or layer key is a 422 the caller fixes and resends. Neither took effect.
-        AcceptError::Exec(ExecError::ValueConflict { detail }) => ApiError::Conflict(detail),
-        AcceptError::Exec(ExecError::ValuesRefused { detail }) => ApiError::Contract(detail),
         // A vocabulary, or a value's title, held under another identity; as for attributes above.
-        AcceptError::Exec(ExecError::VocabularyConflict { detail }) => {
-            ApiError::Conflict(detail)
-        }
+        AcceptError::Exec(ExecError::VocabularyConflict { detail }) => ApiError::Conflict(detail),
         // The detail names the values and the holders' `tessera_id`s, never an entity id.
         AcceptError::Exec(ExecError::UniqueTaken { detail }) => ApiError::Conflict(detail),
         // Reached only where the handler's one re-check was stale too.
@@ -368,7 +358,7 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::UnknownView { view, .. } => {
             ApiError::Unknown(format!("unknown view '{view}'"))
         }
-        AcceptError::UniqueIndexUnreadable(detail) => {
+        AcceptError::Unreadable(detail) => {
             tracing::error!(%detail, "a unique index could not be read; answering fail-closed");
             ApiError::FailClosed(
                 "a unique column's index could not be read, so the batch was not applied"

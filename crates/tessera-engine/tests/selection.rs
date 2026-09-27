@@ -19,10 +19,10 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask};
-use tessera_engine::projection::RowProjection;
 use tessera_engine::occupancy::{
     occupied_tiles, occupied_tiles_ladder_with_precision, TileSketch, SKETCH_PRECISION,
 };
+use tessera_engine::projection::RowProjection;
 use tessera_engine::select::{
     cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
     SelectionParts, Threshold,
@@ -80,6 +80,7 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
 
     let data = SegmentData {
+        entities: tessera_store::edited::RowEntities::Numbers,
         seg_id: "seg0".to_string(),
         row_count: items.len() as u32,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),

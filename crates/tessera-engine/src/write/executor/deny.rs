@@ -49,7 +49,12 @@ impl Executor {
             let Ok(command) = self.queues.deny.try_recv() else {
                 break;
             };
-            let Command::Changes { changes, reply } = command else {
+            let Command::Changes {
+                mut changes,
+                stamp,
+                reply,
+            } = command
+            else {
                 // Any other command applies immediately, so the window gathered so far is
                 // committed first to keep append order equal to apply order.
                 if !entries.is_empty() {
@@ -58,6 +63,12 @@ impl Executor {
                 self.execute(command);
                 return true;
             };
+            if !self.follow_since(stamp, |generation| {
+                crate::edited::follow_changes(generation, &mut changes)
+            }) {
+                reply.fail(ExecError::Stale);
+                continue;
+            }
             held += changes.len();
             entries.push(DenyEntry {
                 changes,
@@ -71,6 +82,23 @@ impl Executor {
         self.cascade_dependents(&mut entries);
         self.commit_denies(entries);
         true
+    }
+
+    /// Whether a command resolved at `stamp` names its entities where their items are now,
+    /// `follow` having moved each that an edit committed since moved. `false` where a fold has
+    /// also retired entities since, which can drop the entry saying where an item went, or the
+    /// edited items cannot be read: the caller resolves the command's names again.
+    pub(super) fn follow_since(
+        &self,
+        stamp: crate::edited::Stamp,
+        follow: impl FnOnce(&crate::Generation) -> Result<(), tessera_store::StoreError>,
+    ) -> bool {
+        let generation = self.generation.load();
+        match stamp.since(&generation) {
+            crate::edited::Since::Still => true,
+            crate::edited::Since::Edited => follow(&generation).is_ok(),
+            crate::edited::Since::Folded => false,
+        }
     }
 
     /// Add one entry deleting every artifact that depends on one this window deletes. Only
@@ -221,10 +249,11 @@ impl Executor {
 
         // A deleted entity's rows leave the buffer here, or they would pin the WAL: `plan_flush`
         // never consumes a deleted row.
-        let (buffer, unique_live) = if !generation.buffer.holds_any(&deleted) {
+        let (buffer, unique_live, edited_live) = if !generation.buffer.holds_any(&deleted) {
             (
                 Arc::clone(&generation.buffer),
                 Arc::clone(&generation.unique_live),
+                Arc::clone(&generation.edited_live),
             )
         } else {
             let mut buffer = (*generation.buffer).clone();
@@ -234,10 +263,22 @@ impl Executor {
             self.health
                 .buffered_items
                 .store(buffer.len(), Ordering::SeqCst);
-            // A deleted entity names nothing, so its live unique entries go with its rows.
+            // A deleted entity names nothing, so its live unique entries and edited-item pair go
+            // with its rows.
             let mut unique_live = (*generation.unique_live).clone();
-            unique_live.remove_entities(&deleted.iter().filter_map(|e| u32::try_from(e.raw()).ok()).collect());
-            (Arc::new(buffer), Arc::new(unique_live))
+            unique_live.remove_entities(
+                &deleted
+                    .iter()
+                    .filter_map(|e| u32::try_from(e.raw()).ok())
+                    .collect(),
+            );
+            let mut edited_live = (*generation.edited_live).clone();
+            edited_live.remove(deleted.iter().filter_map(|e| u32::try_from(e.raw()).ok()));
+            (
+                Arc::new(buffer),
+                Arc::new(unique_live),
+                Arc::new(edited_live),
+            )
         };
 
         // A window of deletes and suppressions only grows the mask; an unsuppress re-derives it,
@@ -248,11 +289,13 @@ impl Executor {
                 g.overlay_version = overlay_version;
                 g.overlay = Arc::new(overlay);
                 g.unique_live = unique_live;
+                g.edited_live = edited_live;
             })
         } else {
-            generation.with_denies(Arc::new(overlay), &newly_denied, buffer, |g| {
+            generation.with_denies(Arc::new(overlay), &newly_denied, buffer, &[], |g| {
                 g.overlay_version = overlay_version;
                 g.unique_live = unique_live;
+                g.edited_live = edited_live;
             })
         };
         self.publish(next, started)

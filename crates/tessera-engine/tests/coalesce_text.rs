@@ -425,6 +425,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
         dict: prefix.join(&extent.dict),
         postings: prefix.join(&extent.postings),
         presence: presence.to_path_buf(),
+        prose: None,
     };
 
     // A layer this generation does not hold.

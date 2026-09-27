@@ -140,9 +140,9 @@ async fn rows_naming_items_change_nothing_and_rows_naming_none_create() {
     assert_eq!(body["tessera_ids"][0], created);
 }
 
-/// **A batch the rules refuse is `409` and writes nothing**: a row that would change an item, a
-/// row naming two items, two rows naming one, two rows setting one value, and a `tessera_id`
-/// nobody holds. Each refusal names the items by `tessera_id`, never an entity id.
+/// **A batch the rules refuse is `409` and writes nothing**: a row naming two items, two rows
+/// naming one, two rows setting one value, and a `tessera_id` nobody holds. Each refusal names the
+/// items by `tessera_id`, never an entity id.
 #[tokio::test]
 async fn refused_batches_are_conflicts_and_write_nothing() {
     let served = Served::build(fixture).await;
@@ -150,9 +150,14 @@ async fn refused_batches_are_conflicts_and_write_nothing() {
     let four = holder(&served, gid_of(4)).await;
 
     let refused = [
-        ("edit", json!([{ "tessera_id": three, "code": "changed" }])),
-        ("two-items", json!([{ "tessera_id": three, "gid": gid_of(4) }])),
-        ("one-item-twice", json!([{ "tessera_id": three }, { "gid": gid_of(3) }])),
+        (
+            "two-items",
+            json!([{ "tessera_id": three, "gid": gid_of(4) }]),
+        ),
+        (
+            "one-item-twice",
+            json!([{ "tessera_id": three }, { "gid": gid_of(3) }]),
+        ),
         (
             "one-value-twice",
             json!([
@@ -170,7 +175,7 @@ async fn refused_batches_are_conflicts_and_write_nothing() {
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(detail.contains(&three) && detail.contains(&four), "{detail}");
 
-    // Nothing was written: gid 9 names no item, and the edited item still carries its code.
+    // Nothing was written: gid 9 names no item.
     let (status, body) = ingest(
         &served,
         "after",

@@ -215,10 +215,30 @@ pub fn coalesce_dict_extents(inputs: &[PathBuf], out: &Path) -> io::Result<u64> 
     Ok(records)
 }
 
-/// Loads and queries a dictionary.
+/// Loads and queries a dictionary, in both directions.
+///
+/// The descriptors are held once, concatenated in ordinal order, so an ordinal's descriptor is a
+/// slice and a descriptor's ordinal is one hash probe checked against that slice. A descriptor
+/// whose hash an earlier one already holds is kept in a second map, which a 64-bit hash leaves
+/// empty in practice.
+#[derive(Clone)]
 pub struct Dict {
-    lookup_map: FxHashMap<Box<[u8]>, TermId>,
-    len: u32,
+    /// Every descriptor's bytes, in ordinal order.
+    bytes: Vec<u8>,
+    /// Where each ordinal's descriptor ends in `bytes`.
+    ends: Vec<u64>,
+    /// Descriptor hash to the first ordinal with that hash.
+    by_hash: FxHashMap<u64, TermId>,
+    /// The descriptors whose hash an earlier descriptor holds.
+    collided: FxHashMap<Box<[u8]>, TermId>,
+}
+
+fn descriptor_hash(descriptor: &[u8]) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = rustc_hash::FxHasher::default();
+    hasher.write(descriptor);
+    hasher.write_usize(descriptor.len());
+    hasher.finish()
 }
 
 impl Dict {
@@ -230,8 +250,10 @@ impl Dict {
     /// `len` is the count of distinct descriptors rather than of records.
     pub fn load(paths: &[PathBuf]) -> io::Result<Dict> {
         Dict {
-            lookup_map: FxHashMap::default(),
-            len: 0,
+            bytes: Vec::new(),
+            ends: Vec::new(),
+            by_hash: FxHashMap::default(),
+            collided: FxHashMap::default(),
         }
         .load_extending(paths)
     }
@@ -239,10 +261,19 @@ impl Dict {
     /// Give `descriptor` the next ordinal unless it already has one: skip-if-present, not
     /// insert-and-count. See [`Dict::load`]'s doc.
     fn intern(&mut self, descriptor: &[u8]) {
-        if !self.lookup_map.contains_key(descriptor) {
-            self.lookup_map
-                .insert(descriptor.to_vec().into_boxed_slice(), TermId::new(self.len));
-            self.len += 1;
+        if self.lookup(descriptor).is_some() {
+            return;
+        }
+        let id = TermId::new(self.ends.len() as u32);
+        self.bytes.extend_from_slice(descriptor);
+        self.ends.push(self.bytes.len() as u64);
+        match self.by_hash.entry(descriptor_hash(descriptor)) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(id);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                self.collided.insert(descriptor.into(), id);
+            }
         }
     }
 
@@ -251,10 +282,7 @@ impl Dict {
     /// are resolved once and never re-resolved, so renumbering one would evaluate against a
     /// different term than granted. A descriptor already present is not re-interned.
     pub fn load_extending(&self, paths: &[PathBuf]) -> io::Result<Dict> {
-        let mut extended = Dict {
-            lookup_map: self.lookup_map.clone(),
-            len: self.len,
-        };
+        let mut extended = self.clone();
         for path in paths {
             walk_dict_records(path, |record| {
                 extended.intern(&record[4..]);
@@ -268,10 +296,7 @@ impl Dict {
     /// flush's live dictionary is not routed through a disk round-trip. `descriptors` must be
     /// the same sequence, in the same order, that the extent file records.
     pub fn extended_with(&self, descriptors: &[Vec<u8>]) -> Dict {
-        let mut extended = Dict {
-            lookup_map: self.lookup_map.clone(),
-            len: self.len,
-        };
+        let mut extended = self.clone();
         for descriptor in descriptors {
             extended.intern(descriptor);
         }
@@ -280,17 +305,32 @@ impl Dict {
 
     /// Look up a descriptor and return its term ID if present.
     pub fn lookup(&self, descriptor: &[u8]) -> Option<TermId> {
-        self.lookup_map.get(descriptor).copied()
+        match self.by_hash.get(&descriptor_hash(descriptor)) {
+            Some(&id) if self.descriptor(id) == Some(descriptor) => Some(id),
+            Some(_) => self.collided.get(descriptor).copied(),
+            None => None,
+        }
+    }
+
+    /// The descriptor a term ID stands for, or `None` for an ID this dictionary does not hold.
+    pub fn descriptor(&self, id: TermId) -> Option<&[u8]> {
+        let at = id.raw() as usize;
+        let end = *self.ends.get(at)? as usize;
+        let start = match at {
+            0 => 0,
+            _ => self.ends[at - 1] as usize,
+        };
+        Some(&self.bytes[start..end])
     }
 
     /// Return the number of distinct terms.
     pub fn len(&self) -> u32 {
-        self.len
+        self.ends.len() as u32
     }
 
     /// Check if the dictionary is empty.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.ends.is_empty()
     }
 }
 
@@ -353,6 +393,21 @@ mod tests {
             Some(TermId::new(0)),
             "lookup(b'1207') should return TermId(0)"
         );
+    }
+
+    /// Every ordinal answers the descriptor it was given for, across an extension, and an
+    /// ordinal the dictionary does not hold answers nothing.
+    #[test]
+    fn a_term_id_answers_its_descriptor() {
+        let base = Dict::load(&[]).unwrap().extended_with(&[b"a".to_vec(), b"".to_vec()]);
+        let extended = base.extended_with(&[b"bb".to_vec(), b"a".to_vec(), b"ccc".to_vec()]);
+        for descriptor in [&b"a"[..], b"", b"bb", b"ccc"] {
+            let id = extended.lookup(descriptor).unwrap();
+            assert_eq!(extended.descriptor(id), Some(descriptor));
+        }
+        assert_eq!(extended.len(), 4);
+        assert_eq!(extended.descriptor(TermId::new(4)), None);
+        assert_eq!(base.descriptor(TermId::new(2)), None);
     }
 
     fn extent_of(dir: &std::path::Path, descriptors: &[&[u8]]) -> Vec<PathBuf> {

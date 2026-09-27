@@ -194,40 +194,17 @@ impl BatchArtifacts {
     }
 }
 
-/// One accepted `POST /control/values` batch as it reaches the executor (`ingest.md` §1.4).
-///
-/// **Columns are named, and a row's values are positional against that list.** A values batch
-/// carries whichever subset of the schema the caller has, in the caller's own order, so a
-/// positional tail against the whole declared order would make the wire depend on a schema the
-/// caller may not have read. The executor resolves each name once per batch — to a position in
-/// the declared scalar tail, or to one of the view's group-scoped families — and the log carries
-/// the same named form, so a replay resolves it the same way.
+/// An item a row edits, as the handler resolved it: the entity it leaves, its number, and the rows
+/// its new entity takes, awaiting that entity's id on the executor.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValuesRequest {
-    pub batch_id: String,
-    pub body_hash: [u8; 32],
-    /// The view this batch's fills belong to: the `x-tessera-view` header where one was given,
-    /// and the deployment's first view otherwise, which a batch filling only entity-scoped cells
-    /// may take since any view's pass writes those. It decides which flush pass writes the fills
-    /// and which view's column of a group-scoped family a scoped cell addresses. `None` on a batch
-    /// that fills no cell.
-    pub view: Option<String>,
-    /// The declared column names this batch carries, in the caller's order.
-    pub columns: Vec<String>,
-    /// One row per entity, values positional against `columns`.
-    pub rows: Vec<IncomingValues>,
-    /// The artifacts this batch's rows named in a column named for a layer (`ingest.md` §1.4): a
-    /// membership join for an entity that exists, resolved and grown in the same commit as the
-    /// cells, so there is no state in which a value is filled and its membership is not. Empty
-    /// for a batch that named none.
-    pub artifacts: BatchArtifacts,
-}
-
-/// One row of a [`ValuesRequest`]: the entity the values fill, already resolved, and its cells.
-#[derive(Debug, Clone, PartialEq)]
-pub struct IncomingValues {
-    pub entity: EntityId,
-    pub values: Vec<crate::wal::WalScalar>,
+pub struct UnallocatedEdit {
+    pub old: EntityId,
+    /// The entity the item was first given, which its `tessera_id` is taken from.
+    pub number: EntityId,
+    /// The first row carries the item's label and every declared value, and its `terms`; each
+    /// other row places the item in one more view and carries that view's position and
+    /// group-scoped values alone. Every `join` is `None`: all of them take the new entity.
+    pub rows: Vec<UnallocatedRow>,
 }
 
 /// Why a command did not come back with a receipt. Distinct from [`ExecError`], which is why an
@@ -516,21 +493,6 @@ pub enum ExecError {
     /// is one the caller cannot have under another identity, since a column's width and
     /// placement are baked into every row (`per-point-attributes.md` §2.2).
     AttributeConflict { detail: String },
-    /// A values row supplied a cell this deployment already holds a different value for
-    /// (`ingest.md` §1.1, §1.4) → **409**, the batch without effect.
-    ///
-    /// Evaluated on the serial writer: the sources it reads are the commit-window buffer and the
-    /// flushed homes, and only the executor moves either.
-    ///
-    /// **A rendered string, and it reaches the caller** — a row index and a column name, and for
-    /// a group-scoped column the key the cell is addressed by. It names **no held value**
-    /// (`ingest.md` §1.4), no entity id and no external id (**I10**).
-    ValueConflict { detail: String },
-    /// A values row named a subject that does not exist, or one this batch cannot fill →
-    /// **422**, the batch without effect. Separate from [`Self::ValueConflict`] because the
-    /// remedy differs: a conflicting cell is one the caller may not have, and an unresolved id is
-    /// one the caller ingests first (`ingest.md` §1.6).
-    ValuesRefused { detail: String },
     /// A vocabulary of this name exists with a different identity, or a value of this key is held
     /// with a different property → HTTP **409**, no effect (`ingest.md` §1.1: a part present and
     /// different). Separate from [`Self::VocabularyRefused`] on
@@ -544,8 +506,9 @@ pub enum ExecError {
     /// id.
     UniqueTaken { detail: String },
     /// What the handler resolved a batch against has changed since: an item a row names was
-    /// deleted or joined to the row's view, or a value a row carries has a new holder. Nothing
-    /// took effect, and the handler resolves the batch again.
+    /// deleted or joined to the row's view, or a value a row carries has a new holder, or an edit
+    /// moved an item a command names while a fold retired entities. Nothing took effect, and the
+    /// names are resolved again.
     Stale,
 }
 
@@ -568,8 +531,6 @@ impl std::fmt::Display for ExecError {
             | ExecError::AttributeRefused { detail }
             | ExecError::AttributeConflict { detail }
             | ExecError::ViewUnknown { detail }
-            | ExecError::ValueConflict { detail }
-            | ExecError::ValuesRefused { detail }
             | ExecError::UniqueTaken { detail } => write!(f, "{detail}"),
             ExecError::Stale => write!(
                 f,

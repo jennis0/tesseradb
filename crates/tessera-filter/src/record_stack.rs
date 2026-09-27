@@ -4,18 +4,13 @@
 //! A flush publishes the blob rows of the entities it created as its own extent — the same
 //! three-file shape as the base.
 //!
-//! **The layers are disjoint per column, not per entity** (`ingest.md` §1.4, §6.3). An entity
-//! holds a row in the layer that created it, and `POST /control/values` gives it a row in the
-//! layer that filled a column on it later, so two layers may hold a row for one entity. What
-//! cannot happen is two layers holding the same *column* of one entity: the fill rule leaves one
-//! claimant per cell — an absent cell is filled, a cell holding the identical value is a no-op,
-//! and a cell holding a different value refuses the batch — so a column has at most one layer
-//! that claims it and there is nothing for a merge to arbitrate.
+//! **The layers are disjoint per column, not per entity.** A later layer may carry columns of an
+//! entity an earlier one holds a row for, and never the same column, so there is nothing for a
+//! merge to arbitrate. An edit gives an item a new entity rather than a second row.
 //!
 //! A read therefore takes every layer holding a row for the entity and unions their fields, at a
-//! cost of **one block decode per column claimant**: one for an entity whose columns were all
-//! written by the layer that created it, which is what it paid when this was a first-layer-wins
-//! probe, and one more per later fill. Order still decides nothing about correctness; layers are
+//! cost of **one block decode per layer holding a row**: one for an entity whose columns were all
+//! written by the layer that created it. Order still decides nothing about correctness; layers are
 //! probed base-first because the base holds the overwhelming majority of entities.
 //!
 //! The wrapper adds no tolerance the single-layer reader lacks: every layer opens through
@@ -40,9 +35,8 @@ pub struct RecordExtentPaths {
 /// **Layers are `Arc` so a live generation can be extended without reopening the base.** A flush
 /// publishes one more extent; reopening the whole stack for it would remap a base that at 10⁹ is
 /// the largest artefact in the bundle, and the successor generation shares every layer the
-/// predecessor already had. Appending is sound because a layer is only ever added: an entity id
-/// is never reused, and the fill rule keeps one claimant per column, so a layer added later can
-/// carry columns of an entity an earlier layer already holds a row for but never the same column.
+/// predecessor already had. Appending is sound because a layer is only ever added and an entity
+/// id is never reused.
 pub struct RecordStack {
     layers: Vec<std::sync::Arc<RecordBlob>>,
     /// How many rows [`Self::fields_of`] has decoded from a layer, over this stack's life.
@@ -133,10 +127,9 @@ impl RecordStack {
     /// `Ok(None)` when no layer holds a row for it — the ordinary case for an entity all of whose
     /// fields live in the other two homes.
     ///
-    /// **One block decode per column claimant** (`ingest.md` §1.4): the layer that created the
-    /// entity, plus one per flush that filled a column on it through `POST /control/values`. The
-    /// first tag wins where two layers name one column, which the fill rule makes unreachable and
-    /// which is here so that a damaged pair answers one value rather than two.
+    /// **One block decode per layer holding a row.** The first tag wins where two layers name one
+    /// column, which no writer produces and which is here so that a damaged pair answers one
+    /// value rather than two.
     pub fn fields_of(&self, entity: u32) -> Result<Option<Vec<RecordField>>, RecordError> {
         let mut merged: Option<Vec<RecordField>> = None;
         for layer in &self.layers {
@@ -170,16 +163,15 @@ impl RecordStack {
     /// Ascending within a layer and layer by layer across the stack, so a caller wanting one
     /// global order must impose it.
     ///
-    /// **Each entity is visited exactly once**, which the per-layer walk alone no longer gives:
-    /// an entity a values page filled holds a row in two layers (`ingest.md` §1.4), and visiting
-    /// it twice would hand the caller two partial rows under one identity. The entities in more
+    /// **Each entity is visited exactly once**, which the per-layer walk alone does not give: an
+    /// entity may hold a row in two layers, and visiting it twice would hand the caller two
+    /// partial rows under one identity. The entities in more
     /// than one layer are taken out of the per-layer walk and answered by [`Self::fields_of`],
     /// which unions their columns; every other entity keeps the block-amortised walk.
     ///
     /// **Every bitmap built here is bounded by `wanted`**, never by a layer's own has-row, which
     /// is entity-space-sized and would put a 10⁹-entity clone on each drill-down and each
-    /// artifact-frame read. A single-layer stack — every bundle that has ingested no values page
-    /// — skips the overlap pass outright and costs exactly what it did.
+    /// artifact-frame read. A single-layer stack skips the overlap pass outright.
     pub fn for_each_row_in(
         &self,
         wanted: &croaring::Bitmap,

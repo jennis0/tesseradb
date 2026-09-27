@@ -15,13 +15,13 @@ use std::sync::Arc;
 
 use tessera_lifecycle::command::{
     AttributeRequest, BatchArtifacts, DeclaredValue, ExecError, MembershipGrown, SubmitError,
-    UnallocatedRow, ValuesRequest, VocabularyRequest,
+    UnallocatedEdit, UnallocatedRow, VocabularyRequest,
 };
 use tessera_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
 use tessera_lifecycle::wal::{ChangeOp, PlainViewDeclaration, ViewGroupDeclaration};
 use tessera_types::EntityId;
 
-use super::{AcceptError, ExecutorHealth, PublishedBatch, ValuesReceipt};
+use super::{AcceptError, ExecutorHealth, PublishedBatch};
 
 /// Where a command is answered. Every answer goes out through [`Reply::ack`] or [`Reply::fail`],
 /// so under fault injection every command's answer passes the `BeforeAck` pause and is recorded
@@ -116,6 +116,9 @@ pub(crate) struct Ingested {
     /// How many artifacts this batch's membership columns created: a key no artifact held, on a
     /// layer whose `value_set` is open. Reported because a minted artifact cannot be undone.
     pub(crate) minted: u64,
+    /// How many memberships this batch's membership columns added, to artifacts it created and to
+    /// held ones alike.
+    pub(crate) joined: u64,
     /// The batch id was accepted earlier with this body, and `receipt` is that acceptance's.
     pub(crate) replayed: bool,
 }
@@ -152,8 +155,6 @@ pub(crate) struct VocabularyValues {
 pub struct ViewDropped {
     /// Entities `delete_dangling` submitted for deletion.
     pub deleted: u64,
-    /// Group-scoped fills not yet flushed, which addressed the dropped view and went with it.
-    pub fills_dropped: u64,
 }
 
 /// One unit of work for the write executor, and the channel it is answered on.
@@ -167,8 +168,10 @@ pub struct ViewDropped {
 /// are boxed so one variant does not set the size of every command in the queue.
 /// One `/control/ingest` batch as its handler resolved it.
 pub(crate) struct IngestSubmission {
-    /// The rows the batch writes: items it creates, and items it adds to its view.
+    /// The rows the batch writes: items it creates, and items it adds to its view in place.
     pub(crate) rows: Vec<UnallocatedRow>,
+    /// The items the batch moves to new entities.
+    pub(crate) edits: Vec<SubmittedEdit>,
     /// One per row of the request: the written row it became, or the item it left unchanged.
     pub(crate) slots: Vec<tessera_lifecycle::Slot>,
     /// The unique values the created rows set, as `(declared position, key widened)`.
@@ -186,6 +189,14 @@ pub(crate) struct IngestSubmission {
     pub(crate) over_bound: Vec<u32>,
 }
 
+/// One item an ingest batch edits, and what the handler read of it: the executor refuses the
+/// edit as stale where the item's rows have moved since.
+pub(crate) struct SubmittedEdit {
+    pub(crate) edit: UnallocatedEdit,
+    /// Every view the old entity held a row in, as the handler read it.
+    pub(crate) held_views: Vec<String>,
+}
+
 pub(crate) enum Command {
     /// An accepted `/control/ingest` batch, resolved by its handler. `batch_id` and `body_hash`
     /// are the idempotency key. The answer is what each row of the request became.
@@ -197,6 +208,7 @@ pub(crate) enum Command {
     /// ([`Command::is_never_shed`]).
     Changes {
         changes: Vec<(EntityId, ChangeOp)>,
+        stamp: crate::edited::Stamp,
         reply: Reply<()>,
     },
     /// Register an annotation layer. The answer is the layer's own entity, which the handler turns
@@ -260,6 +272,7 @@ pub(crate) enum Command {
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
+        stamp: crate::edited::Stamp,
         reply: Reply<PublishedBatch>,
     },
     /// Add entities to the memberships of artifacts that exist, each named by its key. The whole
@@ -269,24 +282,9 @@ pub(crate) enum Command {
         layer: String,
         level: u32,
         joins: Vec<IncomingGrowth>,
+        stamp: crate::edited::Stamp,
         reply: Reply<Vec<MembershipGrown>>,
     },
-    /// An accepted `POST /control/values` batch: attribute values for entities that exist, filled
-    /// per cell. The answer says how many cells were filled, already held, joined and minted.
-    Values {
-        request: Box<ValuesRequest>,
-        /// The unique values' sequence number the handler checked them at.
-        unique_seq: u64,
-        reply: Reply<ValuesOutcome>,
-    },
-}
-
-/// What the executor did with a values batch.
-pub(crate) enum ValuesOutcome {
-    Filled(ValuesReceipt),
-    /// A value the handler checked may have been given since, and the executor cannot tell from
-    /// memory: the request comes back to be checked again.
-    Stale(Box<ValuesRequest>),
 }
 
 impl Command {
@@ -328,6 +326,7 @@ mod tests {
             );
             let cmd = Command::Changes {
                 changes: vec![(EntityId::new(1), op)],
+                stamp: Default::default(),
                 reply,
             };
             assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
@@ -340,6 +339,7 @@ mod tests {
         let ingest = Command::Ingest {
             submission: IngestSubmission {
                 rows: Vec::new(),
+                edits: Vec::new(),
                 slots: Vec::new(),
                 keys: Vec::new(),
                 batch_id: "b".into(),

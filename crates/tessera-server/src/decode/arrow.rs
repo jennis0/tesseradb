@@ -15,7 +15,7 @@ use super::json::JsonColumns;
 use super::membership::{membership_column, MembershipColumn, MembershipTally};
 use super::DecodeError;
 use super::{
-    scoped_as_declared, scoped_wire_type, Address, BodyEncoding, Fixed, EXTERNAL_ID_MAX_LEN,
+    scoped_as_declared, scoped_wire_type, BodyEncoding, Fixed, EXTERNAL_ID_MAX_LEN,
 };
 
 #[derive(Debug)]
@@ -75,8 +75,8 @@ fn category_code(
     })?;
     match minter.resolve(keys.at(row)) {
         Ok(Resolved::Code(code)) => Ok(code_value(declared.arrow_type, code)),
-        // The executor mints a novel key's code at a commit window's close or in a values batch's
-        // pass, before the WAL append.
+        // The executor mints a novel key's code at a commit window's close, before the WAL
+        // append.
         Ok(Resolved::Novel(key)) => Ok(WalScalar::Utf8(key.to_string())),
         Err(e) => Err(DecodeError(format!(
             "{body_name}: column '{}' {e}",
@@ -516,141 +516,6 @@ fn parse_tessera_id(body_name: &str, row: usize, text: &str) -> Result<TesseraId
             "{body_name}: row {row}'s tessera_id is not decimal digits; send it as a string of \
              digits"
         ))
-    })
-}
-
-/// One decoded `POST /control/values` batch, before its addresses are resolved.
-pub(crate) struct ParsedValues {
-    /// The declared and group-scoped column names this batch carries, in the order every row's
-    /// values are positional against.
-    pub(crate) columns: Vec<String>,
-    pub(crate) rows: Vec<ParsedValuesRow>,
-    pub(crate) artifacts: BatchArtifacts,
-}
-
-/// One values row: how it names its entity, and its cells.
-pub(crate) struct ParsedValuesRow {
-    pub(crate) address: Address,
-    pub(crate) values: Vec<WalScalar>,
-}
-
-/// Decodes a `/control/values` body into named columns and rows. A row carries no coordinates
-/// or `access` and names its entity by exactly one of `external_id` and `tessera_id`. A scoped
-/// column is refused unless `scoped`, which the caller resolves from the view header, holds it.
-pub(crate) fn parse_values_batch(
-    encoding: BodyEncoding,
-    body: &[u8],
-    declared: &[DeclaredScalar],
-    scoped: &[ScopedScalar],
-    vocabularies: &Vocabularies,
-    layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
-    // As on [`parse_ingest_batch`]; a batch that names no view is in no group.
-    view_in: &dyn Fn(&str) -> Option<String>,
-) -> Result<ParsedValues, DecodeError> {
-    let body_name = "values body";
-    let fixed = [Fixed::ExternalId, Fixed::TesseraId];
-    let batches = record_batches(
-        body_name,
-        encoding,
-        body,
-        &JsonColumns {
-            fixed: &fixed,
-            // A values row may leave a column out, which leaves that cell unfilled.
-            required: &[],
-            declared,
-            scoped,
-            layer_of,
-        },
-    )?;
-    let scoped_declared: Vec<DeclaredScalar> = scoped.iter().map(scoped_as_declared).collect();
-
-    let mut rows: Vec<ParsedValuesRow> = Vec::new();
-    let mut columns: Vec<String> = Vec::new();
-    let mut tally = MembershipTally::default();
-    for batch in batches {
-        let (batch, _) = batch?;
-        let offset = rows.len();
-
-        // The batch's cells, in one order for every row: declared columns, then scoped families.
-        let carried: Vec<&DeclaredScalar> = declared
-            .iter()
-            .chain(&scoped_declared)
-            .filter(|d| batch.column_by_name(&d.name).is_some())
-            .collect();
-        let names: Vec<String> = carried.iter().map(|d| d.name.clone()).collect();
-        if rows.is_empty() {
-            columns = names;
-        } else if columns != names {
-            return Err(DecodeError(
-                "values body: two record batches of one stream carry different columns; send \
-                 the same columns in every batch"
-                    .to_string(),
-            ));
-        }
-
-        let memberships =
-            check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
-
-        let ext = optional_binary_col(body_name, &batch, "external_id")?;
-        let tessera = tessera_id_col(body_name, &batch)?;
-
-        let cells: Vec<Cells> = carried
-            .iter()
-            .map(|d| {
-                let col = batch
-                    .column_by_name(&d.name)
-                    .expect("`carried` holds only the batch's own columns");
-                Cells::new(col, d)
-            })
-            .collect();
-
-        for i in 0..batch.num_rows() {
-            for column in &memberships.columns {
-                tally.read(body_name, column, memberships.levels, i, offset)?;
-            }
-            let external = match &ext {
-                Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
-                _ => None,
-            };
-            let named = match &tessera {
-                Some(arr) if !arr.is_null(i) => Some(arr.value(i)),
-                _ => None,
-            };
-            let address = match (external, named) {
-                (Some(_), Some(_)) => {
-                    return Err(DecodeError(format!(
-                        "values body: row {} names both an external_id and a tessera_id; send \
-                         one of them",
-                        rows.len()
-                    )))
-                }
-                (None, None) => {
-                    return Err(DecodeError(format!(
-                        "values body: row {} names no entity; send an external_id or a \
-                         tessera_id",
-                        rows.len()
-                    )))
-                }
-                (Some(external), None) => {
-                    check_external_id(&external)?;
-                    Address::External(external)
-                }
-                (None, Some(named)) => {
-                    Address::Tessera(parse_tessera_id(body_name, rows.len(), named)?)
-                }
-            };
-
-            let mut values = Vec::with_capacity(carried.len());
-            for (d, cells) in carried.iter().zip(&cells) {
-                values.push(cell(body_name, cells, i, offset + i, d, vocabularies)?);
-            }
-            rows.push(ParsedValuesRow { address, values });
-        }
-    }
-    Ok(ParsedValues {
-        columns,
-        rows,
-        artifacts: tally.into_artifacts(),
     })
 }
 

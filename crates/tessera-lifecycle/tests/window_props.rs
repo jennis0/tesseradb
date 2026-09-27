@@ -71,7 +71,8 @@ proptest! {
                     .collect();
                 window.push(
                     WindowEntry {
-                    slots: (0..rows.len() as u32).map(Slot::Written).collect(),
+                    edits: Vec::new(),
+                    slots: (0..rows.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
                     over_bound: Vec::new(),
                     rows,
                     batch_id: format!("w{w}-e{e}"),
@@ -126,7 +127,8 @@ proptest! {
         for (c, part) in rows.chunks(chunk).enumerate() {
             chunked.push(
                 WindowEntry {
-                slots: (0..part.len() as u32).map(Slot::Written).collect(),
+                edits: Vec::new(),
+                slots: (0..part.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
                 over_bound: Vec::new(),
                 rows: part.to_vec(),
                 batch_id: format!("c{c}"),
@@ -147,7 +149,8 @@ proptest! {
         let mut whole: CommitWindow<()> = CommitWindow::new(0);
         whole.push(
             WindowEntry {
-            slots: (0..rows.len() as u32).map(Slot::Written).collect(),
+            edits: Vec::new(),
+            slots: (0..rows.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
             over_bound: Vec::new(),
             rows,
             batch_id: "one".into(),
@@ -209,7 +212,8 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
             let mut window: CommitWindow<()> = CommitWindow::new(0);
             window.push(
                 WindowEntry {
-                slots: (0..group.len() as u32).map(Slot::Written).collect(),
+                edits: Vec::new(),
+                slots: (0..group.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
                 over_bound: Vec::new(),
                 rows: group.to_vec(),
                 batch_id: "b".into(),
@@ -303,7 +307,8 @@ fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_cei
             let mut window: CommitWindow<()> = CommitWindow::new(0);
             window.push(
                 WindowEntry {
-                slots: (0..group.len() as u32).map(Slot::Written).collect(),
+                edits: Vec::new(),
+                slots: (0..group.len() as u32).map(|row| Slot::Written { row, tessera_id: None }).collect(),
                 over_bound: Vec::new(),
                 rows: group.to_vec(),
                 batch_id: "b".into(),

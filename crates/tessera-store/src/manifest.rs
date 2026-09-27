@@ -1546,6 +1546,11 @@ pub struct TextExtent {
     /// and appears in no posting. Without this the layer would report it absent, and a later
     /// extent could claim it.
     pub presence: String,
+    /// The prose itself, one row per entity in [`Self::presence`]: `Some` exactly when
+    /// [`Self::view`] is. An entity-scoped column's prose is in the record blob; a group-scoped
+    /// column's is here, since the postings cannot give back the words they were made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prose: Option<RecordExtent>,
 }
 
 impl TextExtent {
@@ -1557,8 +1562,13 @@ impl TextExtent {
             self.presence.as_str(),
         ]
         .into_iter()
+        .chain(self.prose.iter().flat_map(RecordExtent::files))
     }
 }
+
+/// The directory under a group-scoped text column's base that holds its prose, as a record blob
+/// with one field per row.
+pub const SCOPED_PROSE_DIR: &str = "prose";
 
 /// One entry of `record_extents`: one flush's record-blob layer (`records-and-search.md` §3, §7).
 ///
@@ -1839,6 +1849,42 @@ impl UniqueIndexRuns {
     }
 }
 
+/// One index's runs in the key run format: the base runs a fold wrote, with their key ranges, and
+/// the live runs written since.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyRuns {
+    /// Ascending by key range with disjoint ranges.
+    pub base: Vec<BaseKeyRun>,
+    /// Prefix-relative, oldest first. Any key may be in any of them.
+    pub live: Vec<String>,
+}
+
+impl KeyRuns {
+    /// Every run file these runs name.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.base
+            .iter()
+            .map(|run| run.path.as_str())
+            .chain(self.live.iter().map(String::as_str))
+    }
+}
+
+/// The edited items' two indexes ([`crate::edited`]): number to entity, and entity to number.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditedItemsRuns {
+    pub by_number: KeyRuns,
+    pub by_entity: KeyRuns,
+}
+
+impl EditedItemsRuns {
+    /// Every run file both indexes name.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.by_number.files().chain(self.by_entity.files())
+    }
+}
+
 /// One base run of a unique index and its key range, so a lookup opens only the run whose range
 /// holds its key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2112,6 +2158,11 @@ pub struct SegmentsManifest {
     /// No `serde(default)`: an absent list would read as no column being unique, and the ingest
     /// refusal and the `eq` route would then stop without anything reporting it.
     pub unique_indexes: Vec<UniqueIndexRuns>,
+    /// Which entity holds each item an edit moved to a new entity ([`crate::edited`]).
+    ///
+    /// No `serde(default)`: an absent map would name every edited item's first entity, which a
+    /// fold has removed.
+    pub edited_items: EditedItemsRuns,
     /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
     /// a bundle straight out of `tessera build`, whose one `ext-locator.u32` covers every entity
     /// it knows about.
@@ -2261,6 +2312,7 @@ impl SegmentsManifest {
             text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             unique_indexes: Vec::new(),
+            edited_items: EditedItemsRuns::default(),
             locator_extents: Vec::new(),
             tombstones: DenySet::default(),
             deny: DenySet::default(),

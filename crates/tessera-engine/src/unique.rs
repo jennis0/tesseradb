@@ -2,7 +2,7 @@
 //! lookup every reader of a unique column goes through.
 //!
 //! A unique column's values reach its index in two steps. A row accepted into the ingest buffer
-//! (or a values fill) adds a live entry here at its window's close; the flush that writes the row
+//! adds a live entry here at its window's close; the flush that writes the row
 //! writes a run holding the same entries, and its publication removes them from here. A lookup
 //! gathers the runs' entities and the live entries' and drops deleted entities, so a value is
 //! found from its acknowledgement onwards whichever of the two holds it.
@@ -127,8 +127,8 @@ pub(crate) struct UniqueLive {
 }
 
 impl UniqueLive {
-    /// The live entries of every unique column `manifest` declares, from the rows and fills
-    /// `buffer` holds: what a restart or a declaration starts from.
+    /// The live entries of every unique column `manifest` declares, from the rows `buffer` holds:
+    /// what a restart or a declaration starts from.
     pub(crate) fn derive(manifest: &Manifest, buffer: &IngestBuffer) -> UniqueLive {
         let mut live = UniqueLive::default();
         for declared in manifest.declared_scalars.iter().filter(|d| d.unique) {
@@ -242,8 +242,8 @@ impl UniqueLive {
         }
     }
 
-    /// Make `attribute` unique, with the entries of every row and fill `buffer` holds, or stop it
-    /// being unique.
+    /// Make `attribute` unique, with the entries of every row `buffer` holds, or stop it being
+    /// unique.
     pub(crate) fn set_unique(
         &mut self,
         manifest: &Manifest,
@@ -338,11 +338,12 @@ pub(crate) fn holders(
 
 /// An item's `tessera_id` as a refusal names it.
 pub(crate) fn tessera_id_text(
-    key: &tessera_types::IdentityKey,
+    engine: &crate::Engine,
     generation: &Generation,
     entity: EntityId,
 ) -> String {
-    key.forward(generation.bundle.manifest.identity.shard_id, entity)
+    engine
+        .tessera_id_in(generation, entity)
         .map(|id| id.raw().to_string())
         .unwrap_or_else(|_| "unknown".to_string())
 }
@@ -381,172 +382,6 @@ pub(crate) fn moved_since(
             .into_iter()
             .any(|(_, holder)| !generation.overlay.is_deleted(holder))
     })
-}
-
-/// One row's value for one unique column, and the item the row names, if it joins or fills one.
-struct Setting<'a> {
-    row: usize,
-    target: Option<EntityId>,
-    key: UniqueKey,
-    value: &'a WalScalar,
-}
-
-/// Every unique column a batch sets, with the settings of its rows.
-type Settings<'a> = Vec<(&'a DeclaredScalar, Vec<Setting<'a>>)>;
-
-/// What a values batch's rows fill in each unique column it names.
-fn fill_settings<'a>(
-    declared: &'a [DeclaredScalar],
-    request: &'a tessera_lifecycle::ValuesRequest,
-) -> Settings<'a> {
-    request
-        .columns
-        .iter()
-        .enumerate()
-        .filter_map(|(position, name)| {
-            let d = declared.iter().find(|d| d.unique && d.name == *name)?;
-            let set = request
-                .rows
-                .iter()
-                .enumerate()
-                .filter_map(|(row, r)| {
-                    let value = r.values.get(position)?;
-                    key_of(d.arrow_type, value).map(|key| Setting {
-                        row,
-                        target: Some(r.entity),
-                        key,
-                        value,
-                    })
-                })
-                .collect();
-            Some((d, set))
-        })
-        .collect()
-}
-
-fn taken(
-    d: &DeclaredScalar,
-    setting: &Setting<'_>,
-    holder: EntityId,
-    identity: &tessera_types::IdentityKey,
-    generation: &Generation,
-) -> tessera_lifecycle::ExecError {
-    let id = tessera_id_text(identity, generation, holder);
-    tessera_lifecycle::ExecError::UniqueTaken {
-        detail: format!(
-            "row {}: '{}' = {} is held by item {id}; a unique value is held by one item, so send \
-             another value, or delete item {id} first",
-            setting.row,
-            d.name,
-            value_text(setting.value)
-        ),
-    }
-}
-
-/// Refuse settings that set one value on two items, or a value an item other than the row's own
-/// holds, against `generation`'s runs and live entries. Answers the live entries' sequence
-/// number the check was made at, for the executor's re-check.
-fn check_settings(
-    generation: &Generation,
-    settings: Settings<'_>,
-    identity: &tessera_types::IdentityKey,
-) -> Result<u64, crate::write::AcceptError> {
-    use crate::write::AcceptError;
-    let seq = generation.unique_live.seq();
-    for (d, set) in settings {
-        if set.is_empty() {
-            continue;
-        }
-        let mut seen: FxHashMap<UniqueKey, usize> = FxHashMap::default();
-        for (i, setting) in set.iter().enumerate() {
-            let Some(j) = seen.insert(setting.key, i) else {
-                continue;
-            };
-            let first = &set[j];
-            if first.target.is_none() || first.target != setting.target {
-                return Err(AcceptError::Exec(tessera_lifecycle::ExecError::UniqueTaken {
-                    detail: format!(
-                        "rows {} and {} both set '{}' = {}; a unique value is held by one item, \
-                         so send it in one row",
-                        first.row,
-                        setting.row,
-                        d.name,
-                        value_text(setting.value)
-                    ),
-                }));
-            }
-        }
-        let keys: Vec<UniqueKey> = set.iter().map(|s| s.key).collect();
-        let found = holders(generation, &d.name, &keys)
-            .map_err(|e| AcceptError::UniqueIndexUnreadable(e.to_string()))?;
-        if let Some((i, holder)) = found
-            .into_iter()
-            .find(|(i, holder)| set[*i].target != Some(*holder))
-        {
-            return Err(AcceptError::Exec(taken(d, &set[i], holder, identity, generation)));
-        }
-    }
-    Ok(seq)
-}
-
-/// Why the executor's re-check did not pass.
-pub(crate) enum Recheck {
-    /// A value is held by another item, or two items would hold it.
-    Refused(tessera_lifecycle::ExecError),
-    /// What was added since the handler's check is not all in memory, so the handler checks
-    /// again.
-    Stale,
-}
-
-/// The executor's half of a check: the settings against the live entries added after `seq`,
-/// from memory.
-fn recheck_settings(
-    generation: &Generation,
-    settings: Settings<'_>,
-    seq: u64,
-    identity: &tessera_types::IdentityKey,
-) -> Result<(), Recheck> {
-    if settings.iter().all(|(_, set)| set.is_empty()) {
-        return Ok(());
-    }
-    if generation.unique_live.stale_since(seq) {
-        return Err(Recheck::Stale);
-    }
-    for (d, set) in settings {
-        if set.is_empty() {
-            continue;
-        }
-        let keys: Vec<UniqueKey> = set.iter().map(|s| s.key).collect();
-        let found = generation.unique_live.added_since(&d.name, &keys, seq);
-        if let Some((i, holder)) = found.into_iter().find(|(i, holder)| {
-            set[*i].target != Some(*holder) && !generation.overlay.is_deleted(*holder)
-        }) {
-            return Err(Recheck::Refused(taken(d, &set[i], holder, identity, generation)));
-        }
-    }
-    Ok(())
-}
-
-/// Refuse a values batch whose fills set one unique value on two items, or a value another live
-/// or suppressed item holds. Answers the sequence number to re-check from.
-pub(crate) fn check_fills(
-    generation: &Generation,
-    request: &tessera_lifecycle::ValuesRequest,
-    identity: &tessera_types::IdentityKey,
-) -> Result<u64, crate::write::AcceptError> {
-    let declared = &generation.bundle.manifest.declared_scalars;
-    check_settings(generation, fill_settings(declared, request), identity)
-}
-
-/// [`check_fills`] on the executor, against what was added after `seq`.
-pub(crate) fn recheck_fills(
-    generation: &Generation,
-    request: &tessera_lifecycle::ValuesRequest,
-    seq: u64,
-    identity: &tessera_types::IdentityKey,
-) -> Result<(), Recheck> {
-    let declared = &generation.bundle.manifest.declared_scalars;
-    recheck_settings(generation, fill_settings(declared, request), seq, identity)
 }
 
 /// Every value `generation` has flushed for column `at` among `wanted`, to `visit`, deleted
@@ -787,16 +622,11 @@ pub(crate) fn build_round(input: RoundInput) -> Result<RoundOutput, String> {
     })
 }
 
-/// Every buffered row's and fill's entity-scoped scalars, with the entity.
+/// Every buffered item's entity-scoped scalars, with the entity.
 pub(crate) fn buffered_scalars(buffer: &IngestBuffer) -> Vec<(EntityId, &[WalScalar])> {
     buffer
         .iter()
         .map(|(entity, item)| (*entity, item.scalars.as_slice()))
-        .chain(
-            buffer
-                .fills()
-                .map(|(entity, fill)| (*entity, fill.scalars.as_slice())),
-        )
         .collect()
 }
 

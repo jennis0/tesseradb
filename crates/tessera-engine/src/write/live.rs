@@ -5,8 +5,7 @@ use super::*;
 // =================================================================================================
 
 /// One accepted batch, as the idempotency index holds it: what each row of the request became,
-/// so a byte-identical replay answers the `tessera_id`s the first acceptance did. An accepted
-/// values batch answers none and carries an empty receipt.
+/// so a byte-identical replay answers the `tessera_id`s the first acceptance did.
 #[derive(Clone)]
 pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) body_hash: [u8; 32],
@@ -18,7 +17,7 @@ pub(in crate::write) struct AcceptedBatch {
     pub(in crate::write) wal_pos: u64,
 }
 
-/// The `/control/ingest` and `/control/values` idempotency index: batch id -> what was accepted
+/// The `/control/ingest` idempotency index: batch id -> what was accepted
 /// under it.
 pub(in crate::write) type AcceptedBatches = FxHashMap<String, AcceptedBatch>;
 
@@ -451,7 +450,7 @@ impl LiveState {
     /// descriptor. Total for any id a flush plan can name: replay always re-interns a buffered
     /// item's descriptors before it re-enters the buffer, so `promote` may treat a miss as a
     /// failed flush rather than a dropped term.
-    pub(in crate::write) fn descriptors_of(&self, terms: &FxHashSet<TermId>) -> FxHashMap<TermId, Vec<u8>> {
+    pub(crate) fn descriptors_of(&self, terms: &FxHashSet<TermId>) -> FxHashMap<TermId, Vec<u8>> {
         let state = lock_recover(&self.resolver_state);
         state
             .0
@@ -476,7 +475,10 @@ impl LiveState {
         let state = lock_recover(&self.resolver_state);
         descriptors
             .iter()
-            .map(|d| dict.lookup(d).or_else(|| state.0.get(d.as_slice()).copied()))
+            .map(|d| {
+                dict.lookup(d)
+                    .or_else(|| state.0.get(d.as_slice()).copied())
+            })
             .collect()
     }
 

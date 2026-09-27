@@ -329,6 +329,14 @@ async fn ingest_json(served: &Served, batch_id: &str, view: &str, rows: Value) -
         .unwrap()
 }
 
+/// An accepted ingest response's body.
+async fn accepted(resp: reqwest::Response) -> Value {
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    body
+}
+
 /// A JSON record naming `id` at `(x, y)` and carrying no other column.
 fn located(id: &[u8], x: f32, y: f32) -> Value {
     use base64::Engine as _;
@@ -788,25 +796,35 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
          different in each"
     );
 
-    // And the second batch is now a duplicate *in that view*: positions are not updated in place.
-    assert_eq!(
+    // A row moving the item in a view it is in edits it, and it keeps its identity.
+    let moved = accepted(
         ingest(
             &served,
             "join-again",
             "quarter:2026-Q5",
             &[(id.clone(), 810.0, 310.0, &["0"][..], Some(7))]
         )
+        .await,
+    )
+    .await;
+    assert_eq!(moved["edited"], 1, "{moved}");
+    assert_eq!(ingested_ids(&moved), vec![joined]);
+    drain(&served.server).await;
+    assert!(points(&served, "world").await.iter().any(|p| p.0 == joined));
+    let moved_code = points(&served, "quarter:2026-Q5")
         .await
-        .status(),
-        409,
-        "already in the named view"
-    );
+        .into_iter()
+        .find(|p| p.0 == joined)
+        .expect("the edited item is placed in the view again")
+        .1;
+    assert_ne!(moved_code, q5_code, "at its new position");
 }
 
-/// The three arms a join refuses, each of which would otherwise be a way to change entity space
-/// through a second view's row (`views.md` §4).
+/// **A row naming an item and changing it edits it**, however it changes it: a second position in
+/// a view it is in, a new label, a different value, a null clearing one. Each keeps the item's
+/// `tessera_id`, and a row leaving every column out changes nothing.
 #[tokio::test]
-async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
+async fn a_second_row_a_relabel_and_a_changed_attribute_edit_the_item() {
     let served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
@@ -815,83 +833,37 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
         201
     );
     let id = b"arms".to_vec();
-    assert_eq!(
+    let first = accepted(
         ingest(
             &served,
             "first",
             "world",
-            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))]
+            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))],
         )
-        .await
-        .status(),
-        200
-    );
-
-    // Already in the named view — the buffer's half of the arm, before any flush has run.
-    assert_eq!(
-        ingest(
-            &served,
-            "same-view",
-            "world",
-            &[(id.clone(), 11.0, 11.0, &["0"][..], Some(7))]
-        )
-        .await
-        .status(),
-        409,
-        "'in the view' is the permutation AND the commit window's buffer"
-    );
-
-    // A different label on a known id: a re-label is a delete plus a re-ingest (decision 0047).
-    assert_eq!(
-        ingest(
-            &served,
-            "relabel",
-            "quarter:2026-Q5",
-            &[(id.clone(), 800.0, 300.0, &["1"][..], Some(7))]
-        )
-        .await
-        .status(),
-        409,
-        "a second view's row is not a route to a new access label"
-    );
-
-    // A different value for an entity-scoped attribute, refused naming the column.
-    let resp = ingest(
-        &served,
-        "reattribute",
-        "quarter:2026-Q5",
-        &[(id.clone(), 800.0, 300.0, &["0"][..], Some(9))],
+        .await,
     )
     .await;
-    assert_eq!(resp.status(), 409);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "conflict", "{body}");
-    assert!(
-        body["detail"].as_str().unwrap().contains("score"),
-        "the refusal names the column: {body}"
-    );
+    let tid = ingested_ids(&first)[0];
 
-    // A null would clear the value the item holds, which changes it.
-    assert_eq!(
-        ingest(
-            &served,
-            "attribute-null",
-            "quarter:2026-Q5",
-            &[(id.clone(), 800.0, 300.0, &["0"][..], None)]
+    for (batch_id, view, x, label, score) in [
+        ("same-view", "world", 11.0, "0", Some(7)),
+        ("relabel", "quarter:2026-Q5", 800.0, "1", Some(7)),
+        ("reattribute", "quarter:2026-Q5", 800.0, "1", Some(9)),
+        ("attribute-null", "quarter:2026-Q5", 800.0, "1", None),
+    ] {
+        let body = accepted(
+            ingest(&served, batch_id, view, &[(id.clone(), x, 300.0, &[label][..], score)]).await,
         )
-        .await
-        .status(),
-        409,
-        "a null clears a held value, and editing an item is not available yet"
-    );
-    // A row leaving the column and the label out keeps both, and the item is added to the view.
-    assert_eq!(
-        ingest_json(&served, "attribute-left-out", "quarter:2026-Q5", json!([located(&id, 800.0, 300.0)]))
-            .await
-            .status(),
-        200,
-        "a row adding the item carries the stored value or leaves it out"
-    );
+        .await;
+        assert_eq!(body["edited"], 1, "{batch_id}: {body}");
+        assert_eq!(ingested_ids(&body), vec![tid], "{batch_id} keeps the item's identity");
+    }
+    let unchanged = accepted(
+        ingest_json(&served, "left-out", "quarter:2026-Q5", json!([located(&id, 800.0, 300.0)]))
+            .await,
+    )
+    .await;
+    assert_eq!(unchanged["unchanged"], 1, "{unchanged}");
 }
 
 /// **A suppressed holder takes the same arms and stays hidden** (`views.md` §4) — the rule's edge,
@@ -1086,17 +1058,19 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         200,
         "a deleted holder is not a duplicate"
     );
-    assert_eq!(
+    let live = accepted(
         ingest(
             &served,
             "reingest-live",
             "world",
             &[(also_elsewhere.clone(), 30.0, 30.0, &["0"][..], Some(1))]
         )
-        .await
-        .status(),
-        409,
-        "the entity that was also in `world` was not deleted, and is still in `world`"
+        .await,
+    )
+    .await;
+    assert_eq!(
+        live["edited"], 1,
+        "the entity that was also in `world` was not deleted, and the row moves it there: {live}"
     );
     assert_eq!(
         ingest(
@@ -1160,18 +1134,17 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         "the dropped view's buffered row went with it, and the other stayed"
     );
     drain(&served.server).await;
-    assert_eq!(
+    let again = accepted(
         ingest(
             &served,
             "both-again",
             "world",
             &[(both.clone(), 70.0, 70.0, &["0"][..], Some(6))]
         )
-        .await
-        .status(),
-        409,
-        "and the entity is alive, in `world`"
-    );
+        .await,
+    )
+    .await;
+    assert_eq!(again["edited"], 1, "and the entity is alive, in `world`: {again}");
 
     // And the drop without the option deletes nothing at all, which is the default.
     assert_eq!(
@@ -1371,14 +1344,17 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
         "the same identity in two views, not a fresh entity in one: {joined} is not in \
          {in_world:?}"
     );
-    let resp = ingest(
-        &served,
-        "join-minted-world",
-        "world",
-        &[(known, 60.0, 60.0, &["0"][..], Some(3))],
+    let moved = accepted(
+        ingest(
+            &served,
+            "join-minted-world",
+            "world",
+            &[(known, 60.0, 60.0, &["0"][..], Some(3))],
+        )
+        .await,
     )
     .await;
-    assert_eq!(resp.status(), 409, "the entity is alive in `world` already");
+    assert_eq!(moved["edited"], 1, "the entity is in `world` already, so the row edits it");
 
     // **Drop**, and the key is freed — on a minted view exactly as on a declared one.
     let body = drop_view(&served, "quarter", "2026-Q1", false).await;
@@ -1636,72 +1612,6 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     );
 }
 
-/// **The join rule's label arm past its own flush** (`views.md` §4). Until the entity→term
-/// transpose existed the arm compared against the commit window's buffer alone, so a second view's
-/// row naming a *different* label for an already-flushed entity was accepted — inert, the row
-/// carrying no descriptors, but unreported. It is now the `409` the rule always specified.
-///
-/// The order matters and is the whole test: ingest, **flush** (so the buffer no longer holds the
-/// entity's own row), then join. A join before the flush is already refused by the old arm, so a
-/// test that skipped the flush would pass against the code this one exists to check.
-#[tokio::test]
-async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed() {
-    let served = Served::build(build_fixture_bundle).await;
-    assert_eq!(
-        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
-            .await
-            .status(),
-        201
-    );
-    let id = b"flushed-label".to_vec();
-    assert_eq!(
-        ingest(
-            &served,
-            "first",
-            "world",
-            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))]
-        )
-        .await
-        .status(),
-        200
-    );
-    drain(&served.server).await;
-
-    let resp = ingest(
-        &served,
-        "relabel-after-flush",
-        "quarter:2026-Q5",
-        &[(id.clone(), 800.0, 300.0, &["1"][..], Some(7))],
-    )
-    .await;
-    assert_eq!(
-        resp.status(),
-        409,
-        "a second view's row is not a route to a new access label, buffered or flushed"
-    );
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "conflict", "{body}");
-    let detail = body["detail"].as_str().unwrap();
-    assert!(
-        !detail.contains("'0'") && !detail.contains("'1'"),
-        "and names no descriptor: the refusal names the row, never either label: {detail}"
-    );
-
-    // **The same batch with the entity's own label still joins**, which is what keeps this a
-    // refusal of a re-label rather than a refusal of the join rule itself.
-    assert_eq!(
-        ingest(
-            &served,
-            "join-after-flush",
-            "quarter:2026-Q5",
-            &[(id.clone(), 800.0, 300.0, &["0"][..], Some(7))]
-        )
-        .await
-        .status(),
-        200,
-        "the label the entity already carries is not a change, and the join lands"
-    );
-}
 
 // ---------------------------------------------------------------------------------------------
 // The join rule's **attribute arm past the flush** (`views.md` §4) — its own fixture, because the
@@ -1902,11 +1812,11 @@ async fn families_ingest(
         .unwrap()
 }
 
-/// **The attribute arm is exact past the flush**, over all three homes and all three families
-/// (`views.md` §4): the same values join, a differing one is a 409 naming the column, and an
-/// absent one is not disagreement.
+/// **An edit after the flush carries what the item holds in every home and changes what the row
+/// names**, over all three homes and all three families: the same values add the item to a view,
+/// each differing value edits it, keeping every other value, and nulls clear what they name.
 #[tokio::test]
-async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
+async fn an_edit_after_the_flush_carries_every_home_and_changes_what_it_names() {
     let mut served = Served::build(build_families).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
@@ -1917,99 +1827,72 @@ async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
     served.reauthorise().await;
 
     let id = b"families".to_vec();
-    assert_eq!(
-        families_ingest(&served, "first", "world", &id, 10.0, 10.0, HELD)
-            .await
-            .status(),
-        200
-    );
-    // **The flush is the whole point**: past it the entity's own row is out of the buffer, and
-    // every comparison below is made against the bundle.
+    let first = accepted(families_ingest(&served, "first", "world", &id, 10.0, 10.0, HELD).await).await;
+    let tid = ingested_ids(&first)[0];
+    // Past the flush every value is read back from the bundle's homes.
     drain(&served.server).await;
     assert_eq!(served.server.state.engine.buffered_items(), 0);
 
-    // (a) The same values, in a view the entity is not in: a join.
-    assert_eq!(
-        families_ingest(&served, "same", "quarter:2026-Q5", &id, 800.0, 300.0, HELD)
-            .await
-            .status(),
-        200,
-        "a joining row that byte-matches every stored value is the join views §4 specifies"
-    );
+    let added = accepted(
+        families_ingest(&served, "same", "quarter:2026-Q5", &id, 800.0, 300.0, HELD).await,
+    )
+    .await;
+    assert_eq!(added["added"], 1, "the same values add the item to the view: {added}");
 
-    // (b) One differing value per home and per family, each a 409 naming its column. Each runs
-    // against `quarter:2026-Q1`, a view the entity is *also* not in, because the join above has
-    // now put it in `2026-Q5` and a second row there would be refused as a duplicate instead.
+    let mut held = HELD;
     for (column, differing) in [
-        (
-            "score",
-            Attrs {
-                score: Some(9),
-                ..HELD
-            },
-        ),
-        (
-            "depth",
-            Attrs {
-                depth: Some(9),
-                ..HELD
-            },
-        ),
-        (
-            "tag",
-            Attrs {
-                tag: Some("beta"),
-                ..HELD
-            },
-        ),
-        (
-            "note",
-            Attrs {
-                note: Some("other"),
-                ..HELD
-            },
-        ),
-        (
-            "archive",
-            Attrs {
-                archive: Some("hep"),
-                ..HELD
-            },
-        ),
+        ("score", Attrs { score: Some(9), ..HELD }),
+        ("depth", Attrs { depth: Some(8), ..HELD }),
+        ("tag", Attrs { tag: Some("beta"), ..HELD }),
+        ("note", Attrs { note: Some("other"), ..HELD }),
+        ("archive", Attrs { archive: Some("hep"), ..HELD }),
     ] {
-        let resp = families_ingest(
-            &served,
-            &format!("differ-{column}"),
-            "quarter:2026-Q1",
-            &id,
-            700.0,
-            200.0,
-            differing,
-        )
-        .await;
-        assert_eq!(
-            resp.status(),
-            409,
-            "a flushed entity's stored '{column}' is read back and compared"
-        );
-        let body: Value = resp.json().await.unwrap();
-        assert_eq!(body["error"], "conflict", "{body}");
-        assert!(
-            body["detail"].as_str().unwrap().contains(column),
-            "the refusal names the column: {body}"
-        );
+        // Only the column under test is sent; every other one is left to the stored value.
+        let mut row = json!({
+            "external_id": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &id),
+        });
+        row[column] = match column {
+            "score" => json!(differing.score),
+            "depth" => json!(differing.depth),
+            "tag" => json!(differing.tag),
+            "note" => json!(differing.note),
+            _ => json!(differing.archive),
+        };
+        let body = accepted(ingest_json(&served, &format!("differ-{column}"), "world", json!([row])).await).await;
+        assert_eq!(body["edited"], 1, "{column}: {body}");
+        assert_eq!(ingested_ids(&body), vec![tid]);
+        match column {
+            "score" => held.score = differing.score,
+            "depth" => held.depth = differing.depth,
+            "tag" => held.tag = differing.tag,
+            "note" => held.note = differing.note,
+            _ => held.archive = differing.archive,
+        }
+        drain(&served.server).await;
+        let card = item_card(&served, tid).await;
+        let field = |name: &str| card["fields"].get(name).cloned().unwrap_or(Value::Null);
+        assert_eq!(field("score"), json!(held.score), "after '{column}': {card}");
+        assert_eq!(field("depth"), json!(held.depth), "after '{column}': {card}");
+        assert_eq!(field("tag"), json!(held.tag), "after '{column}': {card}");
+        assert_eq!(field("note"), json!(held.note), "after '{column}': {card}");
+        assert_eq!(field("archive"), json!(held.archive), "after '{column}': {card}");
+        let views: Vec<&str> = card["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(views, ["quarter:2026-Q5", "world"], "after '{column}': {card}");
     }
 
-    // (c) A null for a held value clears it, for every family, a category included, whose
-    // absence is its reserved code rather than a null cell; left out, each keeps its value.
-    assert_eq!(
+    let cleared = accepted(
         families_ingest(
             &served,
             "nulls",
-            "quarter:2026-Q1",
+            "quarter:2026-Q5",
             &id,
-            700.0,
-            200.0,
+            800.0,
+            300.0,
             Attrs {
                 score: None,
                 depth: None,
@@ -2018,23 +1901,29 @@ async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
                 archive: None,
             },
         )
-        .await
-        .status(),
-        409,
-        "nulls clear held values, and editing an item is not available yet"
-    );
-    assert_eq!(
-        ingest_json(&served, "left-out", "quarter:2026-Q1", json!([located(&id, 700.0, 200.0)]))
-            .await
-            .status(),
-        200,
-        "a row adding the item carries the stored values or leaves them out"
-    );
+        .await,
+    )
+    .await;
+    assert_eq!(cleared["edited"], 1, "nulls clear held values: {cleared}");
 }
 
-/// (d) **A value for a column the item holds none of changes the item**: a row adding the item
-/// to a view and giving it that value is an edit, and editing an item is not built yet, so the
-/// row is refused. Left out, the row adds the item.
+/// The card `/v1/items/{tessera_id}` serves this server's principal.
+async fn item_card(served: &Served, tessera_id: u64) -> Value {
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url(&format!("/v1/items/{tessera_id}")))
+        .bearer_auth(&served.token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    resp.json().await.unwrap()
+}
+
+/// **A value for a column the item holds none of changes the item**: a row adding the item to a
+/// view and giving it that value edits it. A row carrying its position alone changes nothing.
 #[tokio::test]
 async fn a_row_giving_an_item_a_value_it_never_held_changes_it() {
     let mut served = Served::build(build_families).await;
@@ -2084,76 +1973,17 @@ async fn a_row_giving_an_item_a_value_it_never_held_changes_it() {
         )
         .await
         .status(),
-        409,
+        200,
         "a value the item never held is a change to it"
     );
-    assert_eq!(
+    let left_out = accepted(
         ingest_json(&served, "added", "quarter:2026-Q5", json!([located(&id, 800.0, 300.0)]))
-            .await
-            .status(),
-        200
-    );
-}
-
-/// **The two arms are one arm**: the refusal a *buffered* entity's mismatch produces is byte for
-/// byte the refusal a *flushed* entity's produces.
-///
-/// This is what stops the fix from being half a fix. Two arms with two messages would let an
-/// operator reading a report tell which side of a flush a batch landed on — a distinction the rule
-/// does not draw and an implementation detail no report should carry — and would be the first
-/// place the two comparisons drifted apart.
-#[tokio::test]
-async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
-    let mut served = Served::build(build_families).await;
+            .await,
+    )
+    .await;
     assert_eq!(
-        create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
-            .await
-            .status(),
-        201
-    );
-    served.reauthorise().await;
-
-    let flushed = b"arm-flushed".to_vec();
-    assert_eq!(
-        families_ingest(&served, "f-first", "world", &flushed, 30.0, 30.0, HELD)
-            .await
-            .status(),
-        200
-    );
-    drain(&served.server).await;
-
-    // The second entity is ingested *after* the flush, so its own row is still in the buffer.
-    let buffered = b"arm-buffered".to_vec();
-    assert_eq!(
-        families_ingest(&served, "b-first", "world", &buffered, 40.0, 40.0, HELD)
-            .await
-            .status(),
-        200
-    );
-
-    let differing = Attrs {
-        score: Some(9),
-        ..HELD
-    };
-    let mut bodies = Vec::new();
-    for (batch_id, id) in [("f-join", &flushed), ("b-join", &buffered)] {
-        let resp = families_ingest(
-            &served,
-            batch_id,
-            "quarter:2026-Q5",
-            id,
-            800.0,
-            300.0,
-            differing,
-        )
-        .await;
-        assert_eq!(resp.status(), 409);
-        bodies.push(resp.json::<Value>().await.unwrap()["error"].clone());
-    }
-    assert_eq!(
-        bodies,
-        [json!("conflict"), json!("conflict")],
-        "one rule: the flushed item's value is compared as the buffered item's is"
+        left_out["unchanged"], 1,
+        "a row carrying the item's position and nothing else changes nothing: {left_out}"
     );
 }
 
@@ -2225,107 +2055,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
     }
 }
 
-/// **The join rule's arms fire on a row that becomes a join between the handler and the apply**
-/// (`views.md` §4, decision 0116).
-///
-/// This is the race the relocation closes. Until 2026-09-01 the label and attribute arms ran in
-/// `/control/ingest`'s handler, and the map that decides which rows *are* joins is written at
-/// apply — a whole executor drain later. Two batches naming one external id in two views could
-/// therefore both pass the handler with `join = None`; the second was promoted to a join by
-/// `LiveState::established_collisions` on the writer, having been compared against nothing, and
-/// carried its own descriptors through into a re-label with no overlay entry.
-///
-/// **Driven by the executor's own ordering, not by sleeps.** The two batches are submitted
-/// concurrently, so which one applies first is the executor's business and the interleaving is
-/// whatever the queue produces — including the promoted case, which is why the pair is repeated.
-/// What is asserted is the property that holds under *every* ordering: exactly one of the two is
-/// taken, and the other is a `409` naming the label arm. Before the relocation the promoted
-/// ordering answered `200` to both.
-#[tokio::test]
-async fn a_row_promoted_to_a_join_after_its_handler_pass_still_meets_the_arms() {
-    let served = Served::build(build_fixture_bundle).await;
-    assert_eq!(
-        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
-            .await
-            .status(),
-        201
-    );
 
-    // Bounded, because the interleaving is the executor's: eight pairs is enough to reach the
-    // promoted ordering on this machine and costs a fraction of a second, and the assertion below
-    // is the one that must hold whichever ordering each pair took.
-    for round in 0..8u32 {
-        let id = format!("race-{round}").into_bytes();
-        let (world_batch, quarter_batch) = (
-            format!("race-world-{round}"),
-            format!("race-quarter-{round}"),
-        );
-        let world_rows = [(id.clone(), 10.0f32, 10.0f32, &["0"][..], Some(7))];
-        let quarter_rows = [(id.clone(), 400.0f32, 400.0f32, &["1"][..], Some(7))];
-        let (first, second) = tokio::join!(
-            ingest(&served, &world_batch, "world", &world_rows),
-            ingest(&served, &quarter_batch, "quarter:2026-Q5", &quarter_rows),
-        );
-        let mut statuses = [first.status().as_u16(), second.status().as_u16()];
-        let bodies = [first.text().await.unwrap(), second.text().await.unwrap()];
-        statuses.sort_unstable();
-        assert_eq!(
-            statuses,
-            [200, 409],
-            "round {round}: one batch is taken and the other meets the label arm, whichever \
-             order the executor ran them in — bodies {bodies:?}"
-        );
-        assert!(
-            bodies.iter().any(|body| body.contains("\"conflict\"")),
-            "round {round}: the refusal is a conflict: {bodies:?}"
-        );
-    }
-}
-
-/// **The attribute arm's refusal is a `conflict` naming the row and the column, and nothing else.**
-///
-/// `the_buffered_and_flushed_attribute_arms_refuse_identically` asserts the two *sources* agree;
-/// this asserts what a caller is given — the status, the error kind, the row index and the column
-/// name — and that neither the stored value nor the supplied one is in the body (**I10**).
-#[tokio::test]
-async fn the_join_rules_refusal_names_the_row_and_the_column() {
-    let served = Served::build(build_fixture_bundle).await;
-    assert_eq!(
-        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
-            .await
-            .status(),
-        201
-    );
-    let id = b"pinned-body".to_vec();
-    assert_eq!(
-        ingest(
-            &served,
-            "pin-first",
-            "world",
-            &[(id.clone(), 10.0, 10.0, &["0"][..], Some(7))]
-        )
-        .await
-        .status(),
-        200
-    );
-    let resp = ingest(
-        &served,
-        "pin-join",
-        "quarter:2026-Q5",
-        &[(id, 800.0, 300.0, &["0"][..], Some(9))],
-    )
-    .await;
-    assert_eq!(resp.status(), 409);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "conflict", "{body}");
-    let detail = body["detail"].as_str().unwrap();
-    assert!(
-        !detail
-            .split(|c: char| !c.is_ascii_digit())
-            .any(|number| number == "7" || number == "9"),
-        "neither value is in the body: {detail}"
-    );
-}
 
 /// **A row that stops being a join keeps its label** (`views.md` §4, decision 0116).
 ///
@@ -2903,30 +2633,11 @@ async fn a_plain_view_created_in_a_commit_serves_its_rows_at_the_number_it_was_p
     a_view_created_and_fed_publishes_in_one_cycle(&mut served, "extra", "world").await;
 }
 
-/// One `POST /control/values` row through `view`, accepted.
-async fn fill_depth(served: &Served, batch_id: &str, view: &str, id: &[u8], depth: i32) {
-    use base64::Engine as _;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/values"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
-        .json(&json!([{
-            "external_id": base64::engine::general_purpose::STANDARD.encode(id),
-            "depth": depth,
-        }]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "the fill is accepted");
-}
 
-/// An entity-scoped value belongs to no view, so one accepted through a view that is dropped
-/// before the next tick is still written, and does not hold the log.
+/// **An edit whose own row is in a view dropped before the tick loses nothing**: the item's row in
+/// the view it keeps takes its label and values, so the flush writes what the edit gave it.
 #[tokio::test]
-async fn an_entity_value_filled_through_a_view_dropped_before_the_tick_is_still_written() {
+async fn an_edit_in_a_view_dropped_before_the_tick_is_still_written() {
     const DEPTH: i32 = 4242;
     let mut served = Served::build(build_families).await;
     assert_eq!(
@@ -2937,7 +2648,7 @@ async fn an_entity_value_filled_through_a_view_dropped_before_the_tick_is_still_
     );
     served.reauthorise().await;
 
-    let id = b"filled-through-a-dropped-view".to_vec();
+    let id = b"edited-through-a-dropped-view".to_vec();
     let sparse = Attrs {
         score: None,
         depth: None,
@@ -2945,24 +2656,42 @@ async fn an_entity_value_filled_through_a_view_dropped_before_the_tick_is_still_
         note: None,
         archive: None,
     };
-    assert_eq!(
-        families_ingest(&served, "sparse", "world", &id, 20.0, 20.0, sparse)
-            .await
-            .status(),
-        200
-    );
+    let first = accepted(families_ingest(&served, "sparse", "world", &id, 20.0, 20.0, sparse).await).await;
+    let tid = ingested_ids(&first)[0];
     drain(&served.server).await;
 
-    fill_depth(&served, "fill", "quarter:2026-Q5", &id, DEPTH).await;
+    // The edit places the item in Q5, so its label and values travel in that view's row.
+    let edited = accepted(
+        families_ingest(
+            &served,
+            "edit",
+            "quarter:2026-Q5",
+            &id,
+            800.0,
+            300.0,
+            Attrs {
+                depth: Some(DEPTH),
+                ..sparse
+            },
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(edited["edited"], 1, "{edited}");
     drop_view(&served, "quarter", "2026-Q5", false).await;
     served.reauthorise().await;
     drain(&served.server).await;
 
     let holds_depth = json!({ "depth": { "eq": DEPTH } });
+    let holding: Vec<u64> = filtered_points(&served, "world", holds_depth.clone())
+        .await
+        .iter()
+        .map(|p| p.0)
+        .collect();
     assert_eq!(
-        filtered_points(&served, "world", holds_depth.clone()).await.len(),
-        1,
-        "the value is read under a surviving view"
+        holding,
+        vec![tid],
+        "the item is served in the view it kept, holding the edit's value"
     );
     assert_eq!(
         served.server.state.engine.generation().buffer.oldest_wal_pos(),
@@ -2975,10 +2704,5 @@ async fn an_entity_value_filled_through_a_view_dropped_before_the_tick_is_still_
         filtered_points(&served, "world", holds_depth).await.len(),
         1,
         "and after a restart"
-    );
-    assert_eq!(
-        served.server.state.engine.generation().buffer.oldest_wal_pos(),
-        None,
-        "and the replayed fill does not hold the log either"
     );
 }

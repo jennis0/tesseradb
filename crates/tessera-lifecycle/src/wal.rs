@@ -252,13 +252,15 @@ pub enum WalRecord {
     /// contract violation, never a silent overwrite).
     ///
     /// `rows` holds the rows the batch wrote: each item it created and each view it added an
-    /// item to. `receipt` holds one entry per row of the request, in request order, including the
-    /// rows that changed nothing and wrote no row, so a replay of the batch id answers the
-    /// `tessera_id`s the first acceptance did.
+    /// item to in place. `edits` holds each item the batch moved to a new entity, with everything
+    /// the item carries, so replay reads nothing from stored files. `receipt` holds one entry per
+    /// row of the request, in request order, including the rows that changed nothing and wrote no
+    /// row, so a replay of the batch id answers the `tessera_id`s the first acceptance did.
     IngestBatch {
         batch_id: String,
         body_hash: [u8; 32],
         rows: Vec<WalRow>,
+        edits: Vec<WalEdit>,
         receipt: Vec<RowReceipt>,
     },
     /// The whole live overlay, written so that the change records it was accumulated from can be
@@ -433,25 +435,6 @@ pub enum WalRecord {
         ordinal: u32,
         part: ArtifactPart,
     },
-    /// An accepted `POST /control/values` batch (`ingest.md` §1.4): attribute values for entities
-    /// that exist, one row per entity, applied per cell under the fill rule. `batch_id` and
-    /// `body_hash` are the idempotency key, as [`WalRecord::IngestBatch`]'s are. A layer column on
-    /// a values row is not carried here: it is a membership join and travels as an
-    /// [`WalRecord::ArtifactGrow`] in the same commit.
-    ValuesBatch {
-        batch_id: String,
-        body_hash: [u8; 32],
-        /// The view the batch's fills belong to: the `x-tessera-view` header where the caller
-        /// gave one, and the deployment's only view otherwise. It decides which flush pass writes
-        /// the fills and which view's column of a group-scoped family a scoped cell addresses, so
-        /// it is recorded for every batch and not only for one carrying a scoped column
-        /// (`ingest.md` §1.4). `None` on a batch that fills no cell.
-        view: Option<String>,
-        /// The columns the batch carries, by declared name, in the batch's own order. Every row's
-        /// values are positional to this list, so a batch may carry any subset of the schema.
-        columns: Vec<String>,
-        rows: Vec<ValuesRow>,
-    },
     /// An attribute column declared while the service runs (`PUT /control/attributes`,
     /// `ingest.md` §1.3, §6.3). The segments manifest is the declaration's durable home; this
     /// record is what puts it back between a publication and a restart. Replay appends the column
@@ -557,7 +540,6 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         // Listed rather than caught by a wildcard, so that a variant added later is a decision
         // here and not a default to "built".
         WalRecord::AttributeDeclare { .. }
-        | WalRecord::ValuesBatch { .. }
         | WalRecord::VocabularyDeclare { .. }
         | WalRecord::ViewGroupCreate { .. }
         | WalRecord::PlainViewCreate { .. }
@@ -579,9 +561,6 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
 /// What a record carries of the request that produced it: the id the client chose, the hash of the
 /// bytes it sent, and what the request did to each of its rows.
 ///
-/// The receipt is empty for a values batch, which answers no `tessera_id`s. That is a different
-/// statement from a record carrying no batch at all, and [`batch_identity`] draws that line by
-/// returning `None` for the second.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchIdentity<'a> {
     pub batch_id: &'a str,
@@ -613,6 +592,25 @@ pub enum RowOutcome {
     Added,
     /// The row named an item and every value it carried was the one stored.
     Unchanged,
+    /// The row changed an item it named, which moved to a new entity.
+    Edited,
+}
+
+/// One item an ingest batch moved to a new entity: the old entity is deleted and the new one
+/// holds everything the item carries, in the one record.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalEdit {
+    /// The entity the item leaves. This record deletes it.
+    pub old: EntityId,
+    /// The item's number: the entity it was first given, which its `tessera_id` is taken from.
+    pub number: EntityId,
+    /// The old entity was suppressed, so the new one is.
+    pub suppressed: bool,
+    /// The item's rows on its new entity, every one carrying that entity: the first carries its
+    /// label and every declared value, and each other is a join placing it in one more view.
+    pub rows: Vec<WalRow>,
 }
 
 /// The batch a record was written for, if it was written for one — **the one rule the accepted-batch
@@ -620,9 +618,7 @@ pub enum RowOutcome {
 ///
 /// The index that answers `x-tessera-batch-id` is a cache of this log: what it holds after a
 /// restart is whatever the retained members say, so anything that decides "does this record carry
-/// a batch id" twice can forget a kind of batch on one of the two paths and not the other. That is
-/// exactly what happened to `/control/values` (#154): the rebuild matched [`WalRecord::IngestBatch`]
-/// alone and a values id inside the retention window came back unknown.
+/// a batch id" twice can forget a kind of batch on one of the two paths and not the other.
 ///
 /// **A `match` with no wildcard arm**, on [`unbuilt_track`]'s rule: a record kind added later is a
 /// decision taken here, and the compiler asks for it rather than a default answering "carries no
@@ -638,16 +634,6 @@ pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
             batch_id,
             body_hash: *body_hash,
             receipt,
-        }),
-        WalRecord::ValuesBatch {
-            batch_id,
-            body_hash,
-            ..
-        } => Some(BatchIdentity {
-            batch_id,
-            body_hash: *body_hash,
-            // A values batch answers no `tessera_id`s, so a replay of it has none to repeat.
-            receipt: &[],
         }),
         // Listed rather than caught by a wildcard, for this function's whole reason.
         WalRecord::VocabularyMint { .. }
@@ -734,17 +720,6 @@ pub enum ArtifactPart {
     },
     /// The access label, as descriptors in [`crate::membership::canonical_access`]'s order.
     Access(Vec<Vec<u8>>),
-}
-
-/// One row of a [`WalRecord::ValuesBatch`]: the entity the values fill, resolved at admission from
-/// the external id or the `tessera_id` the caller named (I10), and its values positional to the
-/// batch's `columns`.
-///
-/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ValuesRow {
-    pub entity_id: EntityId,
-    pub values: Vec<WalScalar>,
 }
 
 /// An attribute column as `PUT /control/attributes` declares it: the `[[attribute]]` block minus
@@ -1087,7 +1062,9 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // log at 25 is refused.
 // **27**: `IngestBatch` gained `receipt`, what each request row became, and `ChangeBatch`, one
 // request's changes whole, replaced `ChangeByEntity`. A log at 26 is refused.
-const WAL_VERSION: u16 = 27;
+// **28**: `IngestBatch` gained `edits`, the items it moved to new entities, `RowOutcome` gained
+// `Edited`, and `ValuesBatch` left the variant table. A log at 27 is refused.
+const WAL_VERSION: u16 = 28;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1680,7 +1657,7 @@ impl Wal {
     /// lived in a member reclamation has deleted.
     ///
     /// **What a restart would find, said while the process is still running.** A replay-derived
-    /// index — the accepted-batch index of `/control/ingest` and `/control/values` — knows only
+    /// index — the accepted-batch index of `/control/ingest` — knows only
     /// what the surviving members carry, so a live process holding entries below this figure
     /// answers a replay one a restart would not. `Executor::rotate_wal` reads this after every
     /// rotation and forgets what fell below it, which is what makes the two agree.
@@ -2393,6 +2370,7 @@ mod tests {
             code: 31_337,
         };
         let batch = WalRecord::IngestBatch {
+            edits: Vec::new(),
             receipt: Vec::new(),
             batch_id: "b1".to_string(),
             body_hash: [7u8; 32],
@@ -2688,14 +2666,43 @@ mod tests {
                     entity: EntityId::new(4_294_836_223),
                 }),
             },
-            WalRecord::ValuesBatch {
+            WalRecord::IngestBatch {
                 batch_id: "sentiment-0".into(),
                 body_hash: [9u8; 32],
-                view: Some("quarter:2026-Q1".into()),
-                columns: vec!["sentiment".into(), "reviewed".into()],
-                rows: vec![ValuesRow {
-                    entity_id: EntityId::new(41),
-                    values: vec![WalScalar::F32(0.25), WalScalar::Null],
+                rows: Vec::new(),
+                edits: vec![WalEdit {
+                    old: EntityId::new(41),
+                    number: EntityId::new(7),
+                    suppressed: true,
+                    rows: vec![
+                        WalRow {
+                            external_id: None,
+                            entity_id: EntityId::new(90),
+                            view: "quarter:2026-Q1".into(),
+                            join: false,
+                            descriptors: vec![b"dept:eng".to_vec()],
+                            x: 0.5,
+                            y: 0.25,
+                            scalars: vec![WalScalar::F32(0.25), WalScalar::Null],
+                            scoped: Vec::new(),
+                        },
+                        WalRow {
+                            external_id: None,
+                            entity_id: EntityId::new(90),
+                            view: "quarter:2026-Q2".into(),
+                            join: true,
+                            descriptors: Vec::new(),
+                            x: 0.75,
+                            y: 0.5,
+                            scalars: Vec::new(),
+                            scoped: vec![WalScalar::Utf8("prose".into())],
+                        },
+                    ],
+                }],
+                receipt: vec![RowReceipt {
+                    outcome: RowOutcome::Edited,
+                    tessera_id: 12_345,
+                    over_bound: false,
                 }],
             },
             WalRecord::AttributeDeclare {
@@ -2777,10 +2784,10 @@ mod tests {
         ];
         // The growth's rank and leaving set are applied by `ArtifactStore::grow_set`, the four
         // fills by `ArtifactStore::fill`, the attribute declaration by
-        // `Executor::declare_attribute`, the values batch by `Executor::commit_values`, the
-        // vocabulary declaration by `Executor::commit_vocabulary_declare` and the two view
-        // declarations by `Executor::commit_view_group_create` and `commit_plain_view_create`.
-        // **Every record of the ingest design is applied now**, so no arm names a track.
+        // `Executor::declare_attribute`, the vocabulary declaration by
+        // `Executor::commit_vocabulary_declare` and the two view declarations by
+        // `Executor::commit_view_group_create` and `commit_plain_view_create`. **Every record of
+        // the ingest design is applied now**, so no arm names a track.
         let tracks: Vec<Option<&str>> = records
             .iter()
             .map(|record| unbuilt_track(record).map(|(_, track)| track))

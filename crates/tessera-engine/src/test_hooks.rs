@@ -10,9 +10,9 @@ use tessera_authz::{DeltaTier, Dict};
 #[cfg(feature = "fault-injection")]
 use tessera_types::EntityId;
 
-use crate::engine::Engine;
 #[cfg(feature = "fault-injection")]
 use crate::engine::open_rotation;
+use crate::engine::Engine;
 #[cfg(feature = "fault-injection")]
 use crate::error::{EngineError, Result};
 #[cfg(feature = "fault-injection")]
@@ -407,7 +407,7 @@ impl Engine {
         })
     }
 
-    /// Hold the next ingest or values batch whose handler's check passes, before it reaches the
+    /// Hold the next ingest batch whose handler's check passes, before it reaches the
     /// executor, so a test can change what it was checked against. [`Self::release_write_check_for_test`] lets
     /// it go.
     #[cfg(feature = "fault-injection")]

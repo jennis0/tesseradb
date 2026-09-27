@@ -1,6 +1,6 @@
 {
   "api_version": 1,
-  "bundle_format": 24,
+  "bundle_format": 25,
   "declared_scalars": [
     {
       "analyser": null,

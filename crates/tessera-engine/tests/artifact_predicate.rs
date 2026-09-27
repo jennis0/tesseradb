@@ -619,7 +619,7 @@ fn a_label_attached_to_a_predicate_artifact_follows_its_target() {
 
     // Suppress the band; the label goes with it, without anything being said about the label.
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[id])[0]
+    let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0]
         .expect("a served artifact's identifier names an entity");
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
@@ -647,7 +647,7 @@ fn a_suppressed_values_key_never_mints_again() {
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[id])[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0].unwrap();
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is accepted");
@@ -687,7 +687,7 @@ fn a_deleted_values_key_returns_as_a_new_artifact() {
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
     let before_id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[before_id])[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[before_id]).unwrap()[0].unwrap();
 
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)

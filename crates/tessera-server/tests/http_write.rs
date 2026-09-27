@@ -287,83 +287,89 @@ async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
     );
 }
 
-/// Dedup must consult `Engine::established`, not only the bundle's external-id sidecar. The
-/// sidecar covers only the bundle built at open time; an id ingested five minutes ago in a
-/// *separate*, already-accepted batch lives only in the live map, and a dedup check that misses it
-/// would silently allocate a second entity and orphan the first (see `write.rs`'s
-/// `WritePath::accept_ingest` doc).
-#[tokio::test]
-async fn ingest_rejects_an_external_id_ingested_after_the_build() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let first_body = build_ingest_batch_raw(&[(b"z".as_slice(), 1.0, 1.0, "0")]);
+/// Post one ingest batch and return its status and answer.
+async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, serde_json::Value) {
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "z-batch-1")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(first_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let high_water_after_first = control_status(&server).await["entity_id_high_water"].clone();
-
-    // A fresh batch id, re-ingesting the same external id: must be rejected, not silently
-    // allocate a second entity for "z".
-    let second_body = build_ingest_batch_raw(&[(b"z".as_slice(), 9.0, 9.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "z-batch-2")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(second_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "conflict");
-
-    assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_after_first,
-        "the rejected re-ingest must not have allocated a second entity"
-    );
-}
-
-/// The bundle's own external-id sidecar half of duplicate detection: an id already present in
-/// the built bundle (not merely ingested live) must also be rejected.
-#[tokio::test]
-async fn ingest_rejects_an_external_id_already_in_the_bundle() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
-
-    // `external_id_of(0)` names a real item baked into the fixture at build time.
-    let body = build_ingest_batch(&[(0, 5.0, 5.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "bundle-dup-batch")
+        .header("x-tessera-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 409);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "conflict");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
 
+/// A second row for an external id ingested at the running service edits that item: it keeps its
+/// `tessera_id` and takes one new entity id.
+#[tokio::test]
+async fn a_second_row_for_an_ingested_external_id_edits_its_item() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    let (status, first) = post_body(
+        &server,
+        "z-batch-1",
+        build_ingest_batch_raw(&[(b"z".as_slice(), 1.0, 1.0, "0")]),
+    )
+    .await;
+    assert_eq!(status, 200, "{first}");
+    let high_water = control_status(&server).await["entity_id_high_water"]
+        .as_u64()
+        .unwrap();
+
+    let (status, second) = post_body(
+        &server,
+        "z-batch-2",
+        build_ingest_batch_raw(&[(b"z".as_slice(), 9.0, 9.0, "0")]),
+    )
+    .await;
+    assert_eq!(status, 200, "{second}");
     assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_before
+        (second["created"].as_u64(), second["edited"].as_u64()),
+        (Some(0), Some(1)),
+        "{second}"
+    );
+    assert_eq!(
+        ingested_ids(&second),
+        ingested_ids(&first),
+        "the item keeps its tessera_id"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"].as_u64(),
+        Some(high_water + 1),
+        "the edit took one entity id"
+    );
+}
+
+/// A row for an external id the build stored edits that item, as one ingested at the service does.
+#[tokio::test]
+async fn a_row_for_an_external_id_in_the_bundle_edits_its_item() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let high_water = control_status(&server).await["entity_id_high_water"]
+        .as_u64()
+        .unwrap();
+
+    // `external_id_of(0)` names an item the build stored.
+    let (status, answer) = post_body(
+        &server,
+        "bundle-edit",
+        build_ingest_batch(&[(0, 5.0, 5.0, "0")]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        (answer["created"].as_u64(), answer["edited"].as_u64()),
+        (Some(0), Some(1)),
+        "{answer}"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"].as_u64(),
+        Some(high_water + 1)
     );
 }
 
@@ -635,8 +641,7 @@ fn concurrent_ingest_and_change_both_survive() {
                 artifacts: Default::default(),
             })
             .expect("ingest should be accepted");
-        engine_b.resolve_tessera_ids(&receipt.tessera_ids)[0]
-            .expect("the item it created")
+        engine_b.resolve_tessera_ids(&receipt.tessera_ids).unwrap()[0].expect("the item it created")
     });
 
     change_thread.join().unwrap();
@@ -730,11 +735,10 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
     assert_eq!(served, [tessera_id]);
 }
 
-/// Contracts §3.4 (r6): a batch mixing items with and without an external id is accepted whole,
-/// and duplicate detection considers only the supplied ones — the null-external-id rows have
-/// nothing to collide on and must not be rejected or interfere with the others' dedup check.
+/// A batch mixing items with and without an external id is accepted whole, and only the supplied
+/// ids name an item: the rows without one have nothing to collide on.
 #[tokio::test]
-async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
+async fn ingest_mixed_batch_only_supplied_external_ids_name_an_item() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
@@ -763,19 +767,16 @@ async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
     assert_eq!(json["created"], 4);
     assert_eq!(ingested_ids(&json).len(), 4);
 
-    // A follow-up batch re-using one of the *supplied* external ids must still be caught.
-    let dup_body = build_ingest_batch_optional(&[(Some(b"mixed-a".as_slice()), 9.0, 9.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "mixed-batch-dup")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(dup_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
+    // A follow-up batch re-using one of the supplied external ids names that item.
+    let (status, again) = post_body(
+        &server,
+        "mixed-batch-again",
+        build_ingest_batch_optional(&[(Some(b"mixed-a".as_slice()), 9.0, 9.0, "0")]),
+    )
+    .await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["edited"], 1, "{again}");
+    assert_eq!(ingested_ids(&again)[0], ingested_ids(&json)[0]);
 }
 
 /// Contracts §3.4 (r6): two items with no external id in the *same* batch must not collide with
@@ -3336,7 +3337,6 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
 
     let mounted = [
         ("POST", "/control/ingest"),
-        ("POST", "/control/values"),
         ("POST", "/control/changes"),
         ("GET", "/control/status"),
         ("POST", "/control/flush"),
@@ -3436,7 +3436,6 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
     // Every control route that reads a query, sent a parameter it does not define and no body, so
     // only the query can be refused.
     let queries = [
-        ("POST", "/control/values?wiat=visible"),
         ("POST", "/control/ingest?wiat=visible"),
         ("POST", "/control/changes?wiat=visible"),
         ("POST", "/control/flush?wiat=visible"),
@@ -3830,10 +3829,6 @@ const STATUS_SHAPE: &[(&str, &str)] = &[
     ("/limits/publish/max_excluded_per_request", "integer"),
     ("/limits/publish/max_shape_vertices", "integer"),
     ("/limits/publish/route", "string"),
-    ("/limits/values", "object"),
-    ("/limits/values/max_batch_bytes", "integer"),
-    ("/limits/values/max_batch_rows", "integer"),
-    ("/limits/values/route", "string"),
     ("/masked_count_cache", "object"),
     ("/masked_count_cache/bytes", "integer"),
     ("/masked_count_cache/entries", "integer"),

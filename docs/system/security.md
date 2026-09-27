@@ -84,6 +84,15 @@ rests on the code's shape and on review.
 A suppression applies to every request from the moment it is accepted, because the overlay is read
 fresh each time the visible set is composed. A deletion's rows leave the corpus only at
 compaction; until then they are removed from the visible set the same way a suppressed item's are.
+
+An edit moves an item to a new entity and deletes the old one, and none of it can widen what a
+viewer sees. A suppression standing against the old entity is copied to the new one in the same
+WAL record and never removed from the old. The item's label is the edit's from the
+acknowledgement: until a flush places the new entity's rows the item is in no view, and once
+placed it is served under the new label only. A content generated from the item keeps it among
+its generating items, so the content stays served, and still only to a viewer who can see every
+one of them.
+
 The content key on a response is advisory: it lets a client tell that the corpus has changed since
 its last request, but it carries no authorisation weight, and presenting an old one never restores
 access a newer request would refuse.
@@ -150,8 +159,8 @@ identifier naming nothing both answer `404 unknown`.
 The control plane answers differently, because its caller is the operator, who is trusted with
 every item. An ingest row carrying a unique value names the item that holds it, whether or not any
 viewer can see that item, and the receipt answers its `tessera_id`. An ingest row whose values name
-two items, or a values batch setting a unique value another item holds, is refused with `409`,
-naming the values and the holders' `tessera_id`s so that the operator can find the item to change.
+two items, as one setting a unique value another item holds does, is refused with `409`, naming
+the values and the holders' `tessera_id`s so that the operator can find the item to change.
 It names the `tessera_id`, never the entity id. A
 build or a declaration of `unique` refused because values are held twice names how many there are
 and up to ten of the values, and no item.
@@ -184,10 +193,13 @@ items by their map cell in the build's anchor view and then by source order, and
 them by external id, so a viewer who reads positions or external ids can see where one set ends and
 the next begins.
 
+An edit moves an item to a new entity, taken in the window that commits it, so an edited item
+reads as one arriving in that window.
+
 A viewer therefore learns which of their visible items share a full set of access terms, and
-roughly in which batch or window each arrived. Where two such groups show the same labels the
-viewer holds, the viewer learns that the items of at least one of them carry terms the viewer does
-not hold, which is what the item card withholds by serving only the labels the viewer holds. The
+roughly in which batch or window each arrived or was last edited. Where two such groups show the
+same labels the viewer holds, the viewer learns that the items of at least one of them carry terms
+the viewer does not hold, which is what the item card withholds by serving only the labels the viewer holds. The
 sets are ordered by the terms' internal numbers, which follow the order in which terms first
 appeared, so the order of the sets hints at which terms the viewer does not hold appeared first.
 The viewer learns no term's name, no count of the items they cannot see, and nothing about any one
@@ -226,7 +238,7 @@ reason given, and one, the per-tile timing channel, remains open.
 | A lower bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count from below | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
 | That their visible items in a region group together, a fact about structure that includes unseen items | A minimum-visible-count threshold a layer declares bounds how finely a grouping's presence is exposed against the viewer's own visible set, and filtering cannot deepen it | Low | The threshold decides whether a grouping's existence is announced, not whether its count is protected: a viewport and the density layer already serve exact masked counts over any region a viewer can name, whatever threshold a layer declares | C1 |
 | That an item they were never entitled to see has been deleted, when a permissive annotation layer's membership set loses it | Under a layer declared permissive, content generated from a deleted item keeps serving until compaction removes the deleted member from the generating set. At that point the content stops serving for every viewer who satisfies the surviving members, including one who never satisfied the original generating set, telling them an item they were never entitled to see has been deleted | Medium | Bounded by the caller's own declaration: strict is the default and never shrinks, so an undeclared layer never signals this. Permissive is a caller's choice for a set where losing one member changes nothing the content asserts | C7 |
-| Which of their visible items share a full set of access terms, and so, where two such groups show the same labels the viewer holds, that items in at least one of them carry terms the viewer does not hold; roughly in which build batch or ingest window each arrived; and a hint of the order in which terms they do not hold first appeared | A bulk read of items in stored order returns items in entity id order, which groups them by full term set, and their positions or external ids show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Medium | Bounded to how the viewer's own visible items group: no term's name, no count of the items the viewer cannot see, and nothing about any one item outside their visible set. Map order returns the same rows and fields and discloses none of it | none |
+| Which of their visible items share a full set of access terms, and so, where two such groups show the same labels the viewer holds, that items in at least one of them carry terms the viewer does not hold; roughly in which build batch or ingest window each arrived or was last edited; and a hint of the order in which terms they do not hold first appeared | A bulk read of items in stored order returns items in entity id order, which groups them by full term set, and their positions or external ids show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Medium | Bounded to how the viewer's own visible items group: no term's name, no count of the items the viewer cannot see, and nothing about any one item outside their visible set. Map order returns the same rows and fields and discloses none of it | none |
 
 A caller-declared quantity the service serves as declared, rather than a viewer's own inference, is
 not a residual channel and does not appear above: a caller-declared generating set, an authored

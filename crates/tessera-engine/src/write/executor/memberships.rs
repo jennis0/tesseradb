@@ -24,13 +24,22 @@ pub(super) struct HeldMembers<'a> {
     pub(super) restating: Option<&'a croaring::Bitmap>,
 }
 
-/// The entities of a window's join rows: the only rows that can restate a membership.
-pub(super) fn joining_entities<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> croaring::Bitmap {
+/// The entities of a window's join rows and of the items it places in artifacts in place: the
+/// only rows that can restate a membership.
+pub(super) fn joining_entities<W>(
+    closed: &[tessera_lifecycle::ClosedEntry<W>],
+) -> croaring::Bitmap {
     let mut restating = croaring::Bitmap::new();
     for entry in closed {
-        for row in entry.rows().iter().filter(|row| row.join) {
+        let joined = &entry.entity_ids[entry.rows().len() + entry.edits().len()..];
+        let entities = entry
+            .rows()
+            .iter()
+            .filter(|row| row.join)
+            .map(|row| row.entity_id);
+        for entity in entities.chain(joined.iter().copied()) {
             // Entity space is `u32`-wide, so the narrowing is total.
-            restating.add(row.entity_id.raw() as u32);
+            restating.add(entity.raw() as u32);
         }
     }
     restating
@@ -96,6 +105,51 @@ pub(super) fn grouped_growth<'a>(
                 .map(|record| (record, index))
         })
         .collect())
+}
+
+/// How many memberships each entry adds: an entity joining an artifact that did not hold it,
+/// counted for the first entry naming the pair. A key the close mints holds nothing yet. `store`
+/// is read only where a row can restate a membership, which `restating` says.
+pub(super) fn joined_per_entry<W>(
+    closed: &[tessera_lifecycle::ClosedEntry<W>],
+    store: Option<&tessera_lifecycle::ArtifactStore>,
+) -> Vec<u64> {
+    use std::collections::BTreeMap;
+    let mut seen: BTreeMap<(&str, u32, Option<&str>, &str), croaring::Bitmap> = BTreeMap::new();
+    closed
+        .iter()
+        .map(|entry| {
+            let mut joined = 0u64;
+            for join in &entry.memberships {
+                let at = (
+                    join.layer.as_str(),
+                    join.level,
+                    join.view.as_deref(),
+                    join.key.as_str(),
+                );
+                let held = join.ordinal.zip(store).and_then(|(ordinal, store)| {
+                    store
+                        .get(&join.layer, join.level, ordinal)
+                        .map(|record| store.members_of(record))
+                });
+                let counted = seen.entry(at).or_default();
+                for row in &join.rows {
+                    let Some(entity) = entry.entity_ids.get(*row as usize) else {
+                        continue;
+                    };
+                    // Entity space is `u32`-wide, so the narrowing is total.
+                    let entity = entity.raw() as u32;
+                    if held.is_some_and(|members| members.contains(entity)) {
+                        continue;
+                    }
+                    if counted.add_checked(entity) {
+                        joined += 1;
+                    }
+                }
+            }
+            joined
+        })
+        .collect()
 }
 
 /// The artifacts both write doors' resolved memberships named and no artifact holds, one per

@@ -215,8 +215,7 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
     The SDK keeps no record of what it sent, so the same frame inserted again is sent again, as a
     new request under a fresh batch id. Every row names by its id an item the database holds and
     carries what that item stores, so the page changes nothing and every row is already present.
-    The same rows moved a little would change the items' positions, and editing an item is not
-    available yet, so that page is a `409` on the whole of it.
+    The same rows moved a little change the items' positions, and edit them.
     """
     db = notebook(served, corpus)
     delta = new_papers(db)
@@ -236,10 +235,9 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
     insert_the_new_papers(db, x_offset=0.5)
-    with pytest.raises(Refusal) as raised:
-        db.commit()
-    assert [r["status"] for r in raised.value.report.refusals] == [409]
-    assert raised.value.report.rows_accepted == {}
+    moved = db.commit()
+    assert moved.ok, moved
+    assert moved.items_edited == len(NEW_IDS), moved
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
 
@@ -330,7 +328,7 @@ def test_a_commit_of_rows_and_values_flushes_between_them(served, corpus):
 
     report = db.commit()
     assert report.ok, report
-    assert report.rows_accepted == {"map": 2} and report.values_filled == 2
+    assert report.rows_accepted == {"map": 2} and report.items_edited == 2
     answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0],
                       filters={"score": {"range": {"gte": 2.0}}})
     assert answer["counts"]["matched"] == 2
@@ -342,9 +340,9 @@ def test_a_commit_of_rows_and_values_flushes_between_them(served, corpus):
 def test_a_second_clustering_over_held_rows_is_one_key_column(served, corpus):
     """python-sdk.md §10.4: a table with an id column and a key column, over rows it holds.
 
-    The values route reads a layer column by the ingest route's own rule: a key an artifact holds
-    joins the entity to it, and a key no artifact holds mints the artifact it names on a layer
-    whose value set is `open` (contracts §3.4). So the clustering is one insert.
+    Rows without coordinates carry a layer column by the ingest route's own rule: a key an
+    artifact holds places the item in it, and a key no artifact holds mints the artifact it names
+    on a layer whose value set is `open`. So the clustering is one insert.
     """
     db = notebook(served, corpus)
     held = [7, 8, 9, 10, 11]
@@ -367,9 +365,10 @@ def test_a_second_clustering_over_held_rows_is_one_key_column(served, corpus):
     report = db.commit()
     assert report.ok, report
     assert report.rows_accepted == {}
-    # The two keys no artifact held were minted at this commit, and the five rows joined them.
+    # The two keys no artifact held were minted at this commit, and the five items joined them
+    # without being edited.
     assert report.artifacts_minted == 2
-    assert report.memberships_joined == len(held)
+    assert report.memberships_joined == len(held) and report.items_edited == 0
 
     rows = {row["key"]: row["masked_count"]
             for row in browse(db, "s0", "clusters/second")["artifacts"]}
@@ -564,7 +563,7 @@ def test_an_insert_into_an_attribute_fills_it_and_a_filter_finds_it(served, corp
     assert any("values into 'score'" in line for line in plan.plan), plan
     report = db.commit()
     assert report.ok, report
-    assert report.values_filled == 3
+    assert report.items_edited == 3
 
     answer = viewport(db, "map", frame, filters={"score": {"range": {"gte": 0.0, "lte": 10.0}}})
     assert answer["counts"]["matched"] == 4
@@ -580,32 +579,27 @@ def test_a_values_cell_re_run_is_sent_again_and_lands_on_the_cells_it_landed_on(
     )
     db.insert("score", delta, id="id", value="score")
     first = db.commit()
-    assert first.ok and first.values_filled == 2
+    assert first.ok and first.items_edited == 2
 
     # The same frame inserted again is sent again: a value that matches the cell it names is
     # accepted with no effect, which is the route's own dedupe rather than a log in the SDK.
     db.insert("score", delta, id="id", value="score")
     again = db.commit()
     assert again.ok, again
-    assert again.values_filled == 0
+    assert again.items_edited == 0
 
-    # A changed value on a held cell is a `409` on that part, reported and not retried: an edit is
-    # a delete and a re-ingest (decision 0047), and the SDK does not do that for the user.
+    # A changed value edits the item.
     db.insert(
         "score",
         pa.table({"id": pa.array(["p4"], pa.string()), "score": pa.array([9.0], pa.float64())}),
         id="id",
         value="score",
     )
-    with pytest.raises(Refusal) as raised:
-        db.commit()
-    conflicted = raised.value.report
-    assert [r["status"] for r in conflicted.refusals] == [409]
-    assert "score" in conflicted.refusals[0]["detail"]
-    # And the cell still holds what it held.
+    edited = db.commit()
+    assert edited.ok and edited.items_edited == 1, edited
     answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0],
                       filters={"score": {"range": {"gte": 8.0}}})
-    assert answer["counts"]["matched"] == 0
+    assert answer["counts"]["matched"] == 1
 
 
 def test_a_partly_refused_commit_returns_its_report_and_serves_what_landed(served, corpus):
@@ -614,10 +608,10 @@ def test_a_partly_refused_commit_returns_its_report_and_serves_what_landed(serve
     db = served(small)
     frame = [-5.0, -5.0, 40.0, 40.0]
     before = viewport(db, "map", frame)["counts"]["visible"]
-    # `p0` holds 0.5, so a different value on it is a `409`.
+    # No item is named `nobody`, and a row without coordinates creates none, so it is a `422`.
     db.insert(
         "score",
-        pa.table({"id": pa.array(["p0"], pa.string()), "score": pa.array([9.0], pa.float64())}),
+        pa.table({"id": pa.array(["nobody"], pa.string()), "score": pa.array([9.0], pa.float64())}),
         id="id",
         value="score",
     )
@@ -639,13 +633,13 @@ def test_a_partly_refused_commit_returns_its_report_and_serves_what_landed(serve
     )
     report = db.commit()
     assert not report.ok
-    assert [r["status"] for r in report.refusals] == [409]
+    assert [r["status"] for r in report.refusals] == [422]
     assert report.rows_accepted == {"map": 2}
     assert viewport(db, "map", frame)["counts"]["visible"] == before + 2
 
 def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
     """§6.2 step 5: the closing flush waits for the publication it arms, and a commit whose only
-    work was filling cells reaches it like any other (decision 0144)."""
+    work was setting values reaches it like any other."""
     db = served(small)
     db.insert(
         "score",
@@ -810,8 +804,8 @@ def test_a_row_with_no_id_where_the_insert_names_one_is_listed(served, corpus):
     assert any("rows with no id" in str(f) for f in plan.findings), plan
 
 
-def test_a_rendered_column_filled_after_the_first_commit_refuses_the_commit(served, corpus):
-    """§6.3: the route refuses a rendered column, and the SDK does not send the page without it."""
+def test_a_rendered_column_set_after_the_first_commit_edits_the_item(served, corpus):
+    """A rendered value set on an item the database holds edits the item, which is drawn with it."""
 
     def with_a_rendered_score(db) -> None:
         db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
@@ -840,10 +834,11 @@ def test_a_rendered_column_filled_after_the_first_commit_refuses_the_commit(serv
         id="id",
         value="note",
     )
-    plan = db.check()
-    assert not plan.ok
-    assert any("rendered column" in str(f) for f in plan.findings), plan
-    assert plan.plan == []
+    report = db.commit()
+    assert report.ok, report
+    assert report.items_edited == 1, report
+    answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0], filters={"note": {"range": {"gte": 0.9}}})
+    assert answer["counts"]["matched"] == 1
 
 
 def test_a_column_no_target_reads_is_ignored_and_reported_as_ignored(served, corpus):
@@ -864,7 +859,7 @@ def test_a_column_no_target_reads_is_ignored_and_reported_as_ignored(served, cor
     assert insert.ignored == ["sentiment"]
     report = db.commit()
     assert report.ok, report
-    assert report.values_filled == 1
+    assert report.items_edited == 1
 
 
 def test_a_labels_insert_whose_clustering_is_neither_held_nor_inserted_is_refused(served, corpus):

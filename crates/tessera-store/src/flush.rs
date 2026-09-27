@@ -56,6 +56,9 @@ use crate::write::{write_segment, RunWriter};
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlushRow {
     pub entity_id: EntityId,
+    /// The item's number, which its `tessera_id` is taken from: `entity_id` for an item never
+    /// edited, and the entity it was first given for one an edit moved ([`crate::edited`]).
+    pub number: EntityId,
     /// `None` for an item ingested without one (contracts §3.4 r6): addressable only by its
     /// `tessera_id`, present in no external-id extent, and given the locator's absent sentinel.
     pub external_id: Option<Vec<u8>>,
@@ -170,7 +173,7 @@ pub fn write_flush_segment(
     let mut items: Vec<TilerItem> = Vec::with_capacity(input.rows.len());
     for row in &input.rows {
         items.push(TilerItem {
-            tessera_id: tessera_id_of(input.identity_key, input.shard_id, row.entity_id)?,
+            tessera_id: tessera_id_of(input.identity_key, input.shard_id, row.number)?,
             qx: fixed32(row.x, q.x_min, q.x_max),
             qy: fixed32(row.y, q.y_min, q.y_max),
             scalars: row.scalars.clone(),
@@ -233,6 +236,20 @@ pub fn write_flush_segment(
         extent_rows[(entity.raw() - entity_lo) as usize] = row as u32;
     }
 
+    // The rows whose entity is not their number, which their `tessera_id` cannot name.
+    let edited: Vec<(u32, u32)> = entity_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(row, entity)| {
+            let at = input
+                .rows
+                .binary_search_by_key(entity, |r| r.entity_id)
+                .expect("every sorted entity is an input row's");
+            (input.rows[at].number != *entity).then(|| (row as u32, entity.raw() as u32))
+        })
+        .collect();
+    let edited_written = crate::edited::write_edited_rows(&seg_dir, &edited)?;
+
     // ---- the external-id directions (§3.6) --------------------------------------------------
     //
     // Forward: external_id → entity, sorted by the id bytes, because the reader binary-searches
@@ -286,6 +303,10 @@ pub fn write_flush_segment(
     for column in presence_written {
         let name = format!("{RENDER_PRESENCE_DIR}/{column}.roaring");
         files.insert(rel(&name), digest_of(&seg_dir.join(&name))?);
+    }
+    if edited_written {
+        let name = crate::edited::EDITED_ROWS_FILE;
+        files.insert(rel(name), digest_of(&seg_dir.join(name))?);
     }
 
     Ok(FlushOutput {
@@ -463,6 +484,7 @@ mod tests {
     fn row(entity: u64, x: f64, score: ScalarValue) -> FlushRow {
         FlushRow {
             entity_id: EntityId::new(entity),
+            number: EntityId::new(entity),
             external_id: None,
             x,
             y: 0.0,

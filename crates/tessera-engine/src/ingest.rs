@@ -8,22 +8,26 @@
 //! - a row naming no item creates one, in the batch's view, at the row's position;
 //! - a row naming an item and changing nothing stored writes nothing and is counted unchanged;
 //! - a row naming an item that has no row in the batch's view, carrying a position there and
-//!   changing nothing else, adds the item to the view;
-//! - any other row would change the item, and editing an item is not built yet, so the batch is
-//!   refused.
+//!   changing nothing else, adds the item to the view in place where the item is newer than every
+//!   row the view has flushed;
+//! - any other row edits the item: its entity is deleted and a new one carries everything the item
+//!   holds, the row's values over the stored ones, in every view the item is in. The item keeps its
+//!   number and so its `tessera_id`.
 //!
-//! The rows that create or add are submitted with the unique entries' sequence number the handler
-//! read at. The executor re-checks, from memory, what can have moved since: a named item deleted
-//! or added to the view, a value given a holder. Where something has, nothing is written and the
-//! executor answers [`ExecError::Stale`]; the handler resolves the batch once more against a
-//! newer generation, and a second stale answer refuses the batch.
+//! The rows that create, add or edit are submitted with the unique entries' sequence number the
+//! handler read at, and each edit with the views its item held. The executor re-checks, from
+//! memory, what can have moved since: a named item deleted, edited or added to a view, a value
+//! given a holder. Where something has, nothing is written and the executor answers
+//! [`ExecError::Stale`]; the handler resolves the batch once more against a newer generation, and
+//! a second stale answer refuses the batch.
 
 use std::collections::BTreeMap;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_lifecycle::resolve::{self, Identifier, Key, Refusal, RowIdentity};
 use tessera_lifecycle::{
-    BatchArtifacts, ExecError, IngestRow, RowOutcome, RowReceipt, Slot, UnallocatedRow, WalScalar,
+    BatchArtifacts, ExecError, IngestRow, RowOutcome, RowReceipt, Slot, UnallocatedEdit,
+    UnallocatedRow, WalScalar,
 };
 use tessera_store::manifest::DeclaredScalar;
 use tessera_store::unique::{key_of, value_text, KeyKind, UniqueKey};
@@ -31,7 +35,7 @@ use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::engine::Engine;
 use crate::write::joined::{self, BlobRow};
-use crate::write::AcceptError;
+use crate::write::{AcceptError, SubmittedEdit};
 use crate::Generation;
 
 /// An ingest batch as the caller sent it.
@@ -53,7 +57,7 @@ pub struct IngestReceipt {
     /// One per row, in request order: the item the row created or named.
     pub tessera_ids: Vec<TesseraId>,
     pub created: u64,
-    /// Rows that changed an item. Zero: editing an item is not built yet.
+    /// Rows that changed an item they named.
     pub edited: u64,
     /// Rows that added an existing item to the batch's view.
     pub added: u64,
@@ -62,6 +66,10 @@ pub struct IngestReceipt {
     /// Artifacts the batch's membership columns created, for keys no artifact held on an open
     /// layer.
     pub minted: u64,
+    /// Memberships the batch's membership columns added, to artifacts it created and to held
+    /// ones alike. A row whose one change is a membership changes the artifact, not the item, and
+    /// is counted unchanged.
+    pub joined: u64,
     /// The batch id was accepted before with this body. The `tessera_id`s are the first
     /// acceptance's, and every count is zero, since this request changed nothing.
     pub replayed: bool,
@@ -71,7 +79,7 @@ pub struct IngestReceipt {
 }
 
 impl IngestReceipt {
-    fn of(receipt: &[RowReceipt], minted: u64, replayed: bool) -> IngestReceipt {
+    fn of(receipt: &[RowReceipt], minted: u64, joined: u64, replayed: bool) -> IngestReceipt {
         let count = |outcome| {
             if replayed {
                 return 0;
@@ -84,10 +92,11 @@ impl IngestReceipt {
                 .map(|r| TesseraId::new(r.tessera_id))
                 .collect(),
             created: count(RowOutcome::Created),
-            edited: 0,
+            edited: count(RowOutcome::Edited),
             added: count(RowOutcome::Added),
             unchanged: count(RowOutcome::Unchanged),
             minted: if replayed { 0 } else { minted },
+            joined: if replayed { 0 } else { joined },
             replayed,
             over_bound: receipt
                 .iter()
@@ -103,12 +112,13 @@ impl IngestReceipt {
 /// became.
 pub(crate) struct Planned {
     pub(crate) rows: Vec<UnallocatedRow>,
+    pub(crate) edits: Vec<SubmittedEdit>,
     pub(crate) slots: Vec<Slot>,
-    /// The unique values the created rows set, as `(declared position, key widened)`.
+    /// The unique values the created and edited rows set, as `(declared position, key widened)`.
     pub(crate) keys: Vec<(u16, u128)>,
     pub(crate) artifacts: BatchArtifacts,
-    /// The request rows creating an item whose label resolves to more terms than the plugin
-    /// declares an item carries.
+    /// The request rows creating or editing an item whose label resolves to more terms than the
+    /// plugin declares an item carries.
     pub(crate) over_bound: Vec<u32>,
 }
 
@@ -125,7 +135,7 @@ impl Engine {
         }
         if let Some((held_hash, receipt)) = self.write.live().accepted_batch(&request.batch_id) {
             if held_hash == request.body_hash {
-                return Ok(IngestReceipt::of(&receipt, 0, true));
+                return Ok(IngestReceipt::of(&receipt, 0, 0, true));
             }
             return Err(AcceptError::Exec(ExecError::BatchConflict {
                 batch_id: request.batch_id,
@@ -149,6 +159,7 @@ impl Engine {
                     return Ok(IngestReceipt::of(
                         &ingested.receipt,
                         ingested.minted,
+                        ingested.joined,
                         ingested.replayed,
                     ))
                 }
@@ -164,14 +175,6 @@ impl Engine {
             }
         }
         unreachable!("the second attempt answers")
-    }
-
-    /// An item's `tessera_id`. Every entity the allocator issues is inside the identity space.
-    fn issued_tessera_id(&self, generation: &Generation, entity: EntityId) -> u64 {
-        self.identity_key
-            .forward(generation.bundle.manifest.identity.shard_id, entity)
-            .expect("an issued entity is inside the identity space")
-            .raw()
     }
 
     /// Resolve and decide every row of `request` against `generation`.
@@ -245,10 +248,13 @@ impl Engine {
             .unwrap_or_default();
         let owner_view = view.map(|v| crate::write::scoped_owner_view_of(manifest, &v.id));
         let mut rows = Vec::new();
+        let mut edits: Vec<SubmittedEdit> = Vec::new();
         let mut slots = Vec::with_capacity(request.rows.len());
         let mut keys = Vec::new();
-        // The request row each written row came from, for the membership columns.
+        // The request row each written row came from, and each edit, for the membership columns.
         let mut written_from: Vec<usize> = Vec::new();
+        let mut edited_from: Vec<usize> = Vec::new();
+        let mut joined_from: Vec<usize> = Vec::new();
 
         // Named items in ascending entity order, so the stored reads walk each layer forwards.
         let mut order: Vec<(EntityId, usize)> = named
@@ -257,13 +263,13 @@ impl Engine {
             .filter_map(|(at, item)| item.map(|e| (e, at)))
             .collect();
         order.sort_unstable();
-        let stored = Stored {
+        let mut stored = Stored {
             bound: holdings.bound.into_inner(),
-            blobs: Self::read_blobs(generation, request, &order),
+            blobs: Self::read_blobs(generation, request, &order, false)?,
             not_members: self.memberships_not_held(request, &named),
         };
         let mut decided: FxHashMap<usize, Decided> = FxHashMap::default();
-        for (entity, at) in order {
+        for &(entity, at) in &order {
             let decision = self.decide(
                 generation,
                 request,
@@ -277,6 +283,46 @@ impl Engine {
             decided.insert(at, decision);
         }
 
+        // An edit carries every value the item holds, so the items edited are read whole.
+        let edited: Vec<(EntityId, usize)> = order
+            .iter()
+            .copied()
+            .filter(|(_, at)| matches!(decided.get(at), Some(Decided::Edited { .. })))
+            .collect();
+        // The first read took the rows carrying a blob-resident column; the rest are read here.
+        let unread: Vec<(EntityId, usize)> = match &stored.blobs {
+            Some(_) => edited
+                .iter()
+                .copied()
+                .filter(|(_, at)| !Self::carries_resident(generation, &request.rows[*at]))
+                .collect(),
+            None => edited.clone(),
+        };
+        if !unread.is_empty() {
+            let more = Self::read_blobs(generation, request, &unread, true)?.unwrap_or_default();
+            match stored.blobs.as_mut() {
+                Some(blobs) => blobs.extend(more),
+                None => stored.blobs = Some(more),
+            }
+        }
+        // Each named item's number, which its `tessera_id` is taken from and an edit keeps.
+        let entities: Vec<EntityId> = order.iter().map(|(entity, _)| *entity).collect();
+        let numbers: FxHashMap<EntityId, EntityId> = entities
+            .iter()
+            .copied()
+            .zip(
+                crate::edited::numbers_of(generation, &entities)
+                    .map_err(|e| AcceptError::Unreadable(e.to_string()))?,
+            )
+            .collect();
+        let shard = manifest.identity.shard_id;
+        let tid_of = |entity: &EntityId| -> Result<u64, AcceptError> {
+            self.identity_key
+                .forward(shard, numbers[entity])
+                .map(|id| id.raw())
+                .map_err(|e| AcceptError::Unreadable(e.to_string()))
+        };
+
         for (at, (row, item)) in request.rows.iter().zip(&named).enumerate() {
             match item {
                 None => {
@@ -289,7 +335,10 @@ impl Engine {
                     };
                     let descriptors = self.label_of(at, row.labels.as_deref(), view)?;
                     keys.extend(identities[at].unique.iter().copied());
-                    slots.push(Slot::Written(rows.len() as u32));
+                    slots.push(Slot::Written {
+                        row: rows.len() as u32,
+                        tessera_id: None,
+                    });
                     written_from.push(at);
                     rows.push(UnallocatedRow {
                         external_id: row.external_id.clone(),
@@ -306,19 +355,48 @@ impl Engine {
                     });
                 }
                 Some(entity) => match decided.remove(&at).expect("every named row was decided") {
-                    Decided::Unchanged => slots.push(Slot::Unchanged(*entity)),
+                    Decided::Unchanged => slots.push(Slot::Unchanged {
+                        entity: *entity,
+                        tessera_id: tid_of(entity)?,
+                    }),
+                    Decided::Joined => {
+                        slots.push(Slot::Joined {
+                            entity: *entity,
+                            tessera_id: tid_of(entity)?,
+                        });
+                        joined_from.push(at);
+                    }
                     Decided::Added(join) => {
-                        slots.push(Slot::Written(rows.len() as u32));
+                        slots.push(Slot::Written {
+                            row: rows.len() as u32,
+                            tessera_id: Some(tid_of(entity)?),
+                        });
                         written_from.push(at);
                         rows.push(*join);
                     }
-                    Decided::Changes(what) => {
-                        let tid = self.issued_tessera_id(generation, *entity);
-                        return Err(AcceptError::Conflict(format!(
-                            "row {at} would change item {tid}: {what}; editing an item is not \
-                             available yet, so send rows that create items, add them to a view \
-                             or carry what is stored"
-                        )));
+                    Decided::Edited { added } => {
+                        let blob = match &stored.blobs {
+                            Some(blobs) => BlobRow::of(blobs.get(entity).cloned()),
+                            None => BlobRow::default(),
+                        };
+                        let edit = self.carry(
+                            generation,
+                            &meta,
+                            request,
+                            at,
+                            *entity,
+                            numbers[entity],
+                            view,
+                            blob,
+                        )?;
+                        keys.extend(identities[at].unique.iter().copied());
+                        slots.push(Slot::Edited {
+                            edit: edits.len() as u32,
+                            added,
+                            tessera_id: tid_of(entity)?,
+                        });
+                        edited_from.push(at);
+                        edits.push(edit);
                     }
                 },
             }
@@ -326,22 +404,281 @@ impl Engine {
 
         let bound = self.declared_bounds().max_terms_per_item as usize;
         let mut over_bound = Vec::new();
+        let live = self.write.live();
         for (row, at) in rows.iter_mut().zip(&written_from) {
             if row.join.is_none() {
-                row.terms = self.write.live().resolve_terms(&generation.dict, &row.descriptors);
+                row.terms = live.resolve_terms(&generation.dict, &row.descriptors);
                 if row.terms.len() > bound {
                     over_bound.push(*at as u32);
                 }
             }
         }
-        let artifacts = Self::written_memberships(request, &written_from);
+        for (edit, at) in edits.iter_mut().zip(&edited_from) {
+            let first = &mut edit.edit.rows[0];
+            first.terms = live.resolve_terms(&generation.dict, &first.descriptors);
+            if first.terms.len() > bound {
+                over_bound.push(*at as u32);
+            }
+        }
+        let artifacts =
+            Self::written_memberships(request, &written_from, &edited_from, &joined_from);
         Ok(Planned {
             rows,
+            edits,
             slots,
             keys,
             artifacts,
             over_bound,
         })
+    }
+
+    /// The edit a row makes of `old`: every view the item holds a row in, and the batch's view
+    /// where the row places the item there; the row's label and values where it carries them and
+    /// the stored ones where it leaves them out; and the item's number, which its new entity keeps.
+    #[allow(clippy::too_many_arguments)]
+    fn carry(
+        &self,
+        generation: &Generation,
+        meta: &crate::viewport::EngineMeta,
+        request: &IngestRequest,
+        at: usize,
+        old: EntityId,
+        number: EntityId,
+        view: Option<&crate::viewport::MetaView>,
+        mut blob: BlobRow,
+    ) -> Result<SubmittedEdit, AcceptError> {
+        let row = &request.rows[at];
+        let manifest = &generation.bundle.manifest;
+        let declared = &manifest.declared_scalars;
+        let unreadable = |e: &dyn std::fmt::Display| AcceptError::Unreadable(e.to_string());
+        let held_views = joined::views_holding(generation, old);
+        let placing = view.zip(row.position);
+        let buffered = generation.buffer.get(old);
+        let own_view = match (placing, buffered) {
+            (Some((view, _)), _) => view.id.clone(),
+            (None, Some(item)) => item.view.clone(),
+            (None, None) => match held_views.first() {
+                Some(view) => view.clone(),
+                None => {
+                    let tid = self
+                        .tessera_id_in(generation, old)
+                        .map_err(|e| unreadable(&e))?
+                        .raw();
+                    return Err(AcceptError::Contract(format!(
+                        "row {at} changes item {tid}, which has a row in no view, and carries no \
+                         position; send its coordinates in a view"
+                    )));
+                }
+            },
+        };
+        let mut views: Vec<String> = vec![own_view.clone()];
+        views.extend(held_views.iter().filter(|v| **v != own_view).cloned());
+
+        let descriptors = match &row.labels {
+            Some(labels) => self
+                .plugin
+                .terms_of_labels(labels)
+                .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))?,
+            None => self.stored_label(generation, old)?,
+        };
+        let carried =
+            |position: usize| position < row.scalars.len() && !row.omitted.contains(&position);
+        let scalars: Vec<WalScalar> = declared
+            .iter()
+            .enumerate()
+            .map(|(position, d)| match carried(position) {
+                true => row.scalars[position].clone(),
+                false => {
+                    joined::held_entity_value(generation, old, position, d, buffered, &mut blob)
+                        .unwrap_or(WalScalar::Null)
+                }
+            })
+            .collect();
+        let external_id = match &row.external_id {
+            Some(id) => Some(id.clone()),
+            None => self.stored_external_id(generation, old)?,
+        };
+        // The batch's view's owner addresses the row's group-scoped values; every other view's
+        // cells are carried.
+        let batch_owner = view.map(|v| crate::write::scoped_owner_view_of(manifest, &v.id));
+        let declared_len = declared.len();
+
+        let mut rows = Vec::with_capacity(views.len());
+        // A key shared by several views is one cell per family, carried by the first row that
+        // addresses it.
+        let mut owners_carried: Vec<String> = Vec::new();
+        let mut addressed = false;
+        for view_id in &views {
+            let (x, y) = match placing {
+                Some((view, position)) if view.id == *view_id => position,
+                _ => {
+                    let frame = meta
+                        .views
+                        .iter()
+                        .find(|v| v.id == *view_id)
+                        .ok_or_else(|| AcceptError::UnknownView {
+                            index: at,
+                            view: view_id.clone(),
+                        })?;
+                    self.stored_xy(generation, old, frame)?.ok_or_else(|| {
+                        AcceptError::Unreadable(format!(
+                            "row {at}'s item has no readable row in view '{view_id}'"
+                        ))
+                    })?
+                }
+            };
+            let families = crate::write::scoped_families_of_view(manifest, view_id);
+            let owner = crate::write::scoped_owner_view_of(manifest, view_id);
+            let from_row = batch_owner.as_deref() == Some(owner.as_str());
+            addressed |= from_row;
+            let repeated = owners_carried.contains(&owner);
+            owners_carried.push(owner.clone());
+            let scoped: Vec<WalScalar> = families
+                .iter()
+                .enumerate()
+                .map(|(position, family)| {
+                    if repeated {
+                        return Ok(WalScalar::Null);
+                    }
+                    let supplied = row
+                        .scoped
+                        .get(position)
+                        .filter(|_| from_row && !row.omitted.contains(&(declared_len + position)));
+                    match supplied {
+                        Some(value) => Ok(value.clone()),
+                        None => Ok(joined::held_scoped_value(
+                            generation,
+                            old,
+                            position,
+                            family,
+                            &joined::declared_of_scoped(family),
+                            &owner,
+                        )?
+                        .unwrap_or(WalScalar::Null)),
+                    }
+                })
+                .collect::<Result<_, AcceptError>>()?;
+            let first = rows.is_empty();
+            // A join row carries the rendered values alone, as a row adding an item in place
+            // does: the item's own row holds the rest.
+            let scalars: Vec<WalScalar> = match first {
+                true => scalars.clone(),
+                false => declared
+                    .iter()
+                    .zip(&scalars)
+                    .map(|(d, value)| match d.render {
+                        true => value.clone(),
+                        false => WalScalar::Null,
+                    })
+                    .collect(),
+            };
+            rows.push(UnallocatedRow {
+                external_id: if first { external_id.clone() } else { None },
+                view: view_id.clone(),
+                join: None,
+                descriptors: if first {
+                    descriptors.clone()
+                } else {
+                    Vec::new()
+                },
+                x,
+                y,
+                scalars,
+                scoped,
+                terms: Vec::new(),
+            });
+        }
+        // The row's scoped values are the batch view's key's, which only a row in a view of that
+        // key holds.
+        if let (Some(view), false) = (view, addressed) {
+            let supplies = crate::write::scoped_families_of_view(manifest, &view.id)
+                .iter()
+                .enumerate()
+                .any(|(position, family)| {
+                    !row.omitted.contains(&(declared_len + position))
+                        && row.scoped.get(position).is_some_and(|value| {
+                            !joined::scalar_is_absent(value, &joined::declared_of_scoped(family))
+                        })
+                });
+            if supplies {
+                return Err(AcceptError::Contract(format!(
+                    "row {at} sets values scoped to view '{}' for an item with no row there; send \
+                     the item's position in that view with them",
+                    view.id
+                )));
+            }
+        }
+        Ok(SubmittedEdit {
+            edit: UnallocatedEdit { old, number, rows },
+            held_views,
+        })
+    }
+
+    /// An item's stored label as descriptors: its buffered row's terms, or the terms a flush wrote
+    /// for it, each read back to the descriptor it was resolved from.
+    fn stored_label(
+        &self,
+        generation: &Generation,
+        entity: EntityId,
+    ) -> Result<Vec<Vec<u8>>, AcceptError> {
+        let terms: Vec<TermId> = match generation.buffer.get(entity) {
+            Some(item) => item.terms.clone(),
+            None => joined::flushed_terms_of(generation, entity).ok_or_else(|| {
+                AcceptError::Unreadable("an edited item's label could not be read".to_string())
+            })?,
+        };
+        let novel: FxHashSet<TermId> = terms
+            .iter()
+            .copied()
+            .filter(|term| term.raw() >= generation.dict.len())
+            .collect();
+        let novel = if novel.is_empty() {
+            FxHashMap::default()
+        } else {
+            self.write.live().descriptors_of(&novel)
+        };
+        terms
+            .iter()
+            .map(|term| {
+                generation
+                    .dict
+                    .descriptor(*term)
+                    .map(<[u8]>::to_vec)
+                    .or_else(|| novel.get(term).cloned())
+                    .ok_or_else(|| {
+                        AcceptError::Unreadable(
+                            "an edited item's label names a term with no descriptor".to_string(),
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// The item's position in `view`'s frame, or `None` where it has no row there: a buffered
+    /// row's coordinates as sent, or the centre of a flushed row's cell, which quantises back to
+    /// the cell.
+    fn stored_xy(
+        &self,
+        generation: &Generation,
+        entity: EntityId,
+        view: &crate::viewport::MetaView,
+    ) -> Result<Option<(f64, f64)>, AcceptError> {
+        if let Some(item) = generation
+            .buffer
+            .rows_of(entity)
+            .find(|item| item.view == view.id)
+        {
+            return Ok(Some((item.x, item.y)));
+        }
+        let q = view.quantisation;
+        Ok(self
+            .stored_position(generation, entity, view)?
+            .map(|(fx, fy)| {
+                (
+                    tessera_spatial::unfixed32(fx, q.x_min, q.x_max),
+                    tessera_spatial::unfixed32(fy, q.y_min, q.y_max),
+                )
+            }))
     }
 
     /// A new item's label as descriptors: the row's, or the view's default where it leaves its
@@ -387,14 +724,13 @@ impl Engine {
         let manifest = &generation.bundle.manifest;
         let declared = &manifest.declared_scalars;
         let buffered = generation.buffer.get(entity);
-        let pending = generation.buffer.fill_of(entity);
         let mut blob = match &stored.blobs {
             Some(blobs) => BlobRow::of(blobs.get(&entity).cloned()),
             None => BlobRow::default(),
         };
-        let membership = || match stored.not_members.get(&at) {
-            Some(layer) => Decided::Changes(format!("the memberships of layer '{layer}'")),
-            None => Decided::Unchanged,
+        let membership = || match stored.not_members.contains_key(&at) {
+            true => Decided::Joined,
+            false => Decided::Unchanged,
         };
         let carried = |position: usize| !row.omitted.contains(&position);
 
@@ -420,7 +756,7 @@ impl Engine {
                 _ => false,
             };
             if !same {
-                return Ok(Decided::Changes("the label".to_string()));
+                return Ok(Decided::Edited { added: false });
             }
         }
 
@@ -428,7 +764,7 @@ impl Engine {
         // batch would have been refused as naming two.
         if let Some(external_id) = &row.external_id {
             if !stored.bound.contains(external_id) {
-                return Ok(Decided::Changes("the external_id".to_string()));
+                return Ok(Decided::Edited { added: false });
             }
         }
 
@@ -438,9 +774,8 @@ impl Engine {
                 continue;
             };
             let value = (!joined::scalar_is_absent(value, d)).then_some(value);
-            let held = joined::held_entity_value(
-                generation, entity, position, d, buffered, pending, &mut blob,
-            );
+            let held =
+                joined::held_entity_value(generation, entity, position, d, buffered, &mut blob);
             let same = match (value, &held) {
                 (Some(value), Some(held)) => {
                     joined::supplied_as_stored(generation, value, d).same_as(held)
@@ -449,17 +784,17 @@ impl Engine {
                 _ => false,
             };
             if !same {
-                return Ok(Decided::Changes(format!("'{}'", d.name)));
+                return Ok(Decided::Edited { added: false });
             }
         }
 
         let (Some(view), Some((x, y))) = (view, row.position) else {
             // No position: nothing about the item's views changes.
             if let Some(owner_view) = owner_view {
-                if let Err(what) =
-                    scoped_against_held(generation, entity, row, scoped_families, owner_view, false)
+                if scoped_against_held(generation, entity, row, scoped_families, owner_view, false)?
+                    .is_none()
                 {
-                    return Ok(Decided::Changes(what));
+                    return Ok(Decided::Edited { added: false });
                 }
             }
             return Ok(membership());
@@ -468,29 +803,24 @@ impl Engine {
         let adding = match self.stored_position(generation, entity, view)? {
             Some(held) => {
                 if held != fixed(view.quantisation, x, y) {
-                    return Ok(Decided::Changes(format!(
-                        "the position in view '{}'",
-                        view.id
-                    )));
+                    return Ok(Decided::Edited { added: false });
                 }
                 false
             }
             None => true,
         };
-        let repeated =
-            match scoped_against_held(generation, entity, row, scoped_families, owner_view, adding)
-            {
-                Ok(repeated) => repeated,
-                Err(what) => return Ok(Decided::Changes(what)),
-            };
+        let Some(repeated) =
+            scoped_against_held(generation, entity, row, scoped_families, owner_view, adding)?
+        else {
+            return Ok(Decided::Edited { added: false });
+        };
         if !adding {
             return Ok(membership());
         }
+        // A flush places rows only above a view's newest, so an item older than that moves to a
+        // new entity to join the view.
         if !joined::joins_in_place(generation, entity, &view.id) {
-            return Ok(Decided::Changes(format!(
-                "adding it to view '{}', which holds newer items, moves it",
-                view.id
-            )));
+            return Ok(Decided::Edited { added: true });
         }
         // The row a view gains carries the item's values. A rendered value is read from the item
         // where the row leaves it out, so the view renders what the item's other views do.
@@ -499,10 +829,10 @@ impl Engine {
             .enumerate()
             .map(|(position, d)| match row.scalars.get(position) {
                 Some(value) if carried(position) => value.clone(),
-                _ if d.render => joined::held_entity_value(
-                    generation, entity, position, d, buffered, pending, &mut blob,
-                )
-                .unwrap_or(WalScalar::Null),
+                _ if d.render => {
+                    joined::held_entity_value(generation, entity, position, d, buffered, &mut blob)
+                        .unwrap_or(WalScalar::Null)
+                }
                 _ => WalScalar::Null,
             })
             .collect();
@@ -568,14 +898,17 @@ impl Engine {
         })
     }
 
-    /// The record-blob rows of the named items, read in one walk over the blocks they sit in,
-    /// where a row carries a column stored there. `None` where the walk could not be made, and
-    /// each row is then read alone.
+    /// The record-blob rows of the named items, read in one walk over the blocks they sit in:
+    /// every item's where `whole`, for the edits that carry them, and otherwise only where a row
+    /// carries a column stored there, for the comparison. `None` where a comparison's walk could
+    /// not be made, and each row is then read alone; an edit's is refused, since it would carry
+    /// nothing where a value is stored.
     fn read_blobs(
         generation: &Generation,
         request: &IngestRequest,
         order: &[(EntityId, usize)],
-    ) -> Option<FxHashMap<EntityId, Vec<tessera_filter::RecordField>>> {
+        whole: bool,
+    ) -> Result<Option<FxHashMap<EntityId, Vec<tessera_filter::RecordField>>>, AcceptError> {
         let manifest = &generation.bundle.manifest;
         let resident: Vec<usize> = manifest
             .declared_scalars
@@ -586,27 +919,36 @@ impl Engine {
             .collect();
         let wanted: croaring::Bitmap = order
             .iter()
-            .filter(|(_, at)| {
-                let row = &request.rows[*at];
-                resident
-                    .iter()
-                    .any(|p| *p < row.scalars.len() && !row.omitted.contains(p))
-            })
+            .filter(|(_, at)| whole || Self::carries_resident(generation, &request.rows[*at]))
             .filter_map(|(entity, _)| u32::try_from(entity.raw()).ok())
             .collect();
         let mut blobs = FxHashMap::default();
-        if wanted.is_empty() {
-            return Some(blobs);
+        if wanted.is_empty() || resident.is_empty() {
+            return Ok(Some(blobs));
         }
-        generation
-            .filter_columns
-            .records()
-            .for_each_row_in(&wanted, &mut |entity, fields| {
-                blobs.insert(EntityId::new(u64::from(entity)), fields);
-                Ok(())
-            })
-            .ok()?;
-        Some(blobs)
+        let read =
+            generation
+                .filter_columns
+                .records()
+                .for_each_row_in(&wanted, &mut |entity, fields| {
+                    blobs.insert(EntityId::new(u64::from(entity)), fields);
+                    Ok(())
+                });
+        match read {
+            Ok(()) => Ok(Some(blobs)),
+            Err(e) if whole => Err(AcceptError::Unreadable(format!("the record blob: {e}"))),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Whether `row` carries a column whose value lives in the record blob.
+    fn carries_resident(generation: &Generation, row: &IngestRow) -> bool {
+        let manifest = &generation.bundle.manifest;
+        manifest.declared_scalars.iter().enumerate().any(|(at, d)| {
+            at < row.scalars.len()
+                && !row.omitted.contains(&at)
+                && crate::filter::blob_resident(d, &manifest.vocabularies)
+        })
     }
 
     /// The item's external id: its own buffered row's, or the one a flush bound.
@@ -619,7 +961,7 @@ impl Engine {
             return Ok(item.external_id.clone());
         }
         self.external_id_of_in(generation, entity)
-            .map_err(|e| AcceptError::UniqueIndexUnreadable(e.to_string()))
+            .map_err(|e| AcceptError::Unreadable(e.to_string()))
     }
 
     /// The item's position in `view`, quantised, or `None` where it has no row there.
@@ -641,7 +983,7 @@ impl Engine {
                 continue;
             };
             let found = crate::viewport::segment_row_of(&view.id, view_data, entity)
-                .map_err(|e| AcceptError::UniqueIndexUnreadable(e.to_string()))?;
+                .map_err(|e| AcceptError::Unreadable(e.to_string()))?;
             if let Some((segment, local)) = found {
                 return Ok(Some(tessera_spatial::unsplit32(
                     tessera_types::MortonCode::new(segment.morton.u32()[local]),
@@ -652,12 +994,20 @@ impl Engine {
         Ok(None)
     }
 
-    /// The batch's membership columns, over the rows it writes: a row writing nothing has been
-    /// found to be a member of every artifact it names already. `written_from` is the request row
-    /// each written row came from.
-    fn written_memberships(request: &IngestRequest, written_from: &[usize]) -> BatchArtifacts {
+    /// The batch's membership columns, over the rows it writes, edits and joins in place: an
+    /// unchanged row has been found to be a member of every artifact it names already.
+    /// `written_from` is the request row each written row came from, `edited_from` each edit's
+    /// and `joined_from` each join's in place, numbered on in that order.
+    fn written_memberships(
+        request: &IngestRequest,
+        written_from: &[usize],
+        edited_from: &[usize],
+        joined_from: &[usize],
+    ) -> BatchArtifacts {
         let position: BTreeMap<u32, u32> = written_from
             .iter()
+            .chain(edited_from)
+            .chain(joined_from)
             .enumerate()
             .map(|(written, at)| (*at as u32, written as u32))
             .collect();
@@ -692,9 +1042,7 @@ impl Engine {
         request: &IngestRequest,
         refusal: &Refusal,
     ) -> String {
-        let tid = |entity: EntityId| {
-            crate::unique::tessera_id_text(&self.identity_key, generation, entity)
-        };
+        let tid = |entity: EntityId| crate::unique::tessera_id_text(self, generation, entity);
         let value = |row: usize, field: Identifier| match field {
             Identifier::TesseraId => "its tessera_id".to_string(),
             Identifier::ExternalId => "its external_id".to_string(),
@@ -767,10 +1115,15 @@ struct Stored {
 /// What one row naming an item does to it.
 enum Decided {
     Unchanged,
-    /// The row adds the item to the batch's view, as this row.
+    /// The row places the item in artifacts that do not hold it, and changes nothing else.
+    Joined,
+    /// The row adds the item to the batch's view in place, as this row.
     Added(Box<UnallocatedRow>),
-    /// The row would change what this names.
-    Changes(String),
+    /// The row changes the item, which moves to a new entity. `added` where adding it to the
+    /// batch's view is the one change.
+    Edited {
+        added: bool,
+    },
 }
 
 /// The unique values a row carries, as the resolver takes them. A null never identifies an item.
@@ -795,9 +1148,8 @@ fn fixed(q: tessera_store::manifest::Quantisation, x: f64, y: f64) -> (u32, u32)
 }
 
 /// The group-scoped values a row carries against the cells they address: the positions whose held
-/// value the row repeats, or the first that differs, as a refusal names it. An empty cell takes a
-/// value where the row adds the item to the view (`adding`), and differs from one otherwise. A
-/// cell holding prose that a flush has made uncomparable differs from any value.
+/// value the row repeats, or `None` where one differs. An empty cell takes a value where the row
+/// adds the item to the view (`adding`), and differs from one otherwise.
 fn scoped_against_held(
     generation: &Generation,
     entity: EntityId,
@@ -805,9 +1157,8 @@ fn scoped_against_held(
     families: &[tessera_store::manifest::ScopedScalar],
     owner_view: &str,
     adding: bool,
-) -> Result<Vec<usize>, String> {
+) -> Result<Option<Vec<usize>>, AcceptError> {
     let declared_len = generation.bundle.manifest.declared_scalars.len();
-    let pending = generation.buffer.scoped_fill_of(entity, owner_view);
     let mut repeated = Vec::new();
     for (position, family) in families.iter().enumerate() {
         if row.omitted.contains(&(declared_len + position)) {
@@ -818,24 +1169,19 @@ fn scoped_against_held(
         };
         let d = joined::declared_of_scoped(family);
         let supplied = (!joined::scalar_is_absent(supplied, &d)).then_some(supplied);
-        let held = joined::held_scoped_value(
-            generation, entity, position, family, &d, owner_view, pending,
-        );
-        let prose = held.is_none()
-            && family.arrow_type == tessera_spatial::tiler::ScalarType::Text
-            && joined::flushed_scoped_text_present(generation, entity, family, owner_view);
+        let held = joined::held_scoped_value(generation, entity, position, family, &d, owner_view)?;
         match (supplied, held) {
-            (None, None) if !prose => {}
-            (Some(_), None) if adding && !prose => {}
+            (None, None) => {}
+            (Some(_), None) if adding => {}
             (Some(value), Some(held))
                 if joined::supplied_as_stored(generation, value, &d).same_as(&held) =>
             {
                 repeated.push(position)
             }
-            _ => return Err(format!("'{}' in view '{owner_view}'", family.name)),
+            _ => return Ok(None),
         }
     }
-    Ok(repeated)
+    Ok(Some(repeated))
 }
 
 /// Who holds what in one generation: the unique indexes and their live entries, the external ids
@@ -859,7 +1205,7 @@ impl resolve::Holdings for Held<'_> {
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
         let found = crate::unique::holders(self.generation, &d.name, &keys)
-            .map_err(|e| AcceptError::UniqueIndexUnreadable(e.to_string()))?;
+            .map_err(|e| AcceptError::Unreadable(e.to_string()))?;
         let mut out = vec![Vec::new(); keys.len()];
         for (at, entity) in found {
             out[at].push(entity);
@@ -874,7 +1220,7 @@ impl resolve::Holdings for Held<'_> {
         let found = self
             .engine
             .external_ids_in(self.generation, &owned)
-            .map_err(|e| AcceptError::UniqueIndexUnreadable(e.to_string()))?;
+            .map_err(|e| AcceptError::Unreadable(e.to_string()))?;
         let mut out = Vec::with_capacity(found.len());
         let mut bound = self.bound.borrow_mut();
         for (id, entity) in owned.into_iter().zip(found) {
@@ -893,14 +1239,14 @@ impl resolve::Holdings for Held<'_> {
         Ok(out)
     }
 
-    fn tessera_holders(&self, ids: &[TesseraId]) -> Vec<Option<EntityId>> {
+    fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, AcceptError> {
         let high_water = self.engine.allocator_high_water();
-        self.engine
+        Ok(self
+            .engine
             .tessera_ids_in(self.generation, ids)
+            .map_err(|e| AcceptError::Unreadable(e.to_string()))?
             .into_iter()
-            .map(|entity| {
-                entity.filter(|e| e.raw() < high_water && !self.generation.overlay.is_deleted(*e))
-            })
-            .collect()
+            .map(|entity| entity.filter(|e| e.raw() < high_water))
+            .collect())
     }
 }

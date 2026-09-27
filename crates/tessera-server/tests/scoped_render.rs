@@ -1687,24 +1687,56 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
     );
 }
 
-/// **One cell, one value: an identical second write dedupes and a differing one is a 409**
-/// (`views.md` §5, decision 0116).
-///
-/// This is what replaces the old one-door rule's argument. Two views of one key can both name the
-/// cell, so the writer settles it: the same value is dropped from the second row — one claimant, so
-/// the extents stay disjoint in entity space — and a different value is refused naming the column
-/// and the key, before the WAL append, whole batch without effect.
-///
-/// The refusal names neither group. A caller writing through `quarter_map` learns that the key
-/// already holds a value, which is its own request measured against the schema, and nothing about
-/// who owns the family.
+/// Parse an ingest answer the helpers return as text.
+fn answer(body: &str) -> Value {
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body}"))
+}
+
+/// A row naming an item by external id, with no coordinates, setting `tag` in `view`'s key.
+async fn edit_tag(
+    served: &Served,
+    batch_id: &str,
+    view: &str,
+    entity: u64,
+    tag: f32,
+) -> (u16, Value) {
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .json(&json!([{ "external_id": member(entity), "tag": tag }]))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// The entities `view` matches under `match` on `note`.
+async fn note_matches(served: &Served, view: &str, word: &str) -> BTreeSet<u64> {
+    filtered_entities(
+        served,
+        &served.token,
+        view,
+        json!({ "note": { "match": word } }),
+    )
+    .await
+}
+
+/// **One cell, one value, through either door** (`views.md` §5). Two views of one key both name
+/// the cell: the value it holds, sent through the other door, adds the item to that view and
+/// changes nothing else; a different value edits the item, and both views answer with the new
+/// one. The item keeps its `tessera_id` either way.
 #[tokio::test]
-async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_different_one() {
+async fn a_second_door_naming_one_cell_restates_its_value_or_edits_it() {
     let served = Served::build(build_with_families).await;
     const AGREES: u64 = 9_501;
     const DISAGREES: u64 = 9_502;
     const VALUE: f32 = 88.25;
-    ingest_with_heat(
+    let (status, first) = try_ingest_with_heat(
         &served,
         "cell-first",
         "quarter:2026-Q1",
@@ -1715,9 +1747,10 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
         &[Some(VALUE), Some(VALUE)],
     )
     .await;
+    assert_eq!(status, 200, "{first}");
+    let first = answer(&first);
 
-    // The same value through the other door: accepted, and the second copy is not written.
-    ingest_with_heat(
+    let (status, agrees) = try_ingest_with_heat(
         &served,
         "cell-agrees",
         "quarter_map:2026-Q1",
@@ -1725,9 +1758,14 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
         &[Some(VALUE)],
     )
     .await;
+    assert_eq!(status, 200, "{agrees}");
+    let agrees = answer(&agrees);
+    assert_eq!(
+        agrees["edited"], 0,
+        "the held value changes nothing: {agrees}"
+    );
 
-    // A different one: refused, naming the column and the key.
-    let (status, body) = try_ingest_with_heat(
+    let (status, disagrees) = try_ingest_with_heat(
         &served,
         "cell-disagrees",
         "quarter_map:2026-Q1",
@@ -1735,32 +1773,33 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
         &[Some(VALUE + 1.0)],
     )
     .await;
-    assert_eq!(status, 409, "one cell holds one value: {body}");
-    assert_eq!(error_code(&body), "conflict", "{body}");
-    assert!(
-        body.contains("'heat'") && body.contains("2026-Q1"),
-        "the refusal names the column and the key: {body}"
+    assert_eq!(status, 200, "{disagrees}");
+    let disagrees = answer(&disagrees);
+    assert_eq!(
+        disagrees["edited"], 1,
+        "a different value edits the item: {disagrees}"
     );
-    assert!(
-        !body.contains("quarter_map") && !body.contains("group 'quarter'"),
-        "and names no group: {body}"
-    );
+    assert_eq!(disagrees["tessera_ids"][0], first["tessera_ids"][1]);
 
     drain(&served.server).await;
-    // The deduped write left one value behind, and both views answer with it.
-    for view in ["quarter:2026-Q1", "quarter_map:2026-Q1"] {
-        let answer = filtered_entities(&served, &served.token, view, range("heat")).await;
-        assert!(
-            answer.contains(&AGREES),
-            "{view} answers the one value the cell holds: {answer:?}"
-        );
+    for (entity, expected) in [(AGREES, VALUE), (DISAGREES, VALUE + 1.0)] {
+        for view in ["quarter:2026-Q1", "quarter_map:2026-Q1"] {
+            let id = id_of(&served, &served.token, view, entity).await;
+            let card = item(&served, &served.token, id).await;
+            assert_eq!(
+                card["scoped"]["heat"]["2026-Q1"],
+                json!(f64::from(expected)),
+                "{view} serves the one value the cell holds: {card}"
+            );
+        }
     }
 }
 
-/// A cell filled through the values route and not yet flushed is held, so a joining row naming
-/// it dedupes an equal value and is refused a different one, and the flush that follows publishes.
+/// A cell an unflushed edit set is read from the buffer: a joining row naming it with the same
+/// value adds the item to its view, and with a different value edits it; the flush that follows
+/// publishes once.
 #[tokio::test]
-async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
+async fn a_join_naming_a_cell_an_unflushed_edit_set_restates_or_edits_it() {
     let served = Served::build(build_with_families).await;
     const AGREES: u64 = 9_601;
     const DISAGREES: u64 = 9_602;
@@ -1777,23 +1816,10 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
     )
     .await;
     drain(&served.server).await;
-
-    let id = |e: u64| member(e);
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/values"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "pending-fill")
-        .header("x-tessera-view", "quarter:2026-Q1")
-        .json(&json!([
-            {"external_id": id(AGREES), "tag": VALUE},
-            {"external_id": id(DISAGREES), "tag": VALUE},
-        ]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "the fill is accepted");
+    for (batch, entity) in [("pending-a", AGREES), ("pending-d", DISAGREES)] {
+        let (status, body) = edit_tag(&served, batch, "quarter:2026-Q1", entity, VALUE).await;
+        assert_eq!((status, body["edited"].clone()), (200, json!(1)), "{body}");
+    }
 
     let (status, body) = try_ingest_families(
         &served,
@@ -1805,7 +1831,8 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
         Some(&[Some(VALUE)]),
     )
     .await;
-    assert_eq!(status, 200, "an equal value joins: {body}");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(answer(&body)["edited"], 0, "an equal value joins: {body}");
     let (status, body) = try_ingest_families(
         &served,
         "pending-disagrees",
@@ -1816,7 +1843,12 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
         Some(&[Some(VALUE + 1.0)]),
     )
     .await;
-    assert_eq!(status, 409, "one cell holds one value: {body}");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        answer(&body)["edited"],
+        1,
+        "a different value edits: {body}"
+    );
 
     let failures = served.server.state.engine.write_executor_stats().flush_failures;
     drain(&served.server).await;
@@ -1825,210 +1857,142 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
         failures,
         "the flush publishes the cell once"
     );
+    let id = id_of(&served, &served.token, "quarter:2026-Q1", DISAGREES).await;
+    assert_eq!(
+        item(&served, &served.token, id).await["scoped"]["tag"]["2026-Q1"],
+        json!(f64::from(VALUE + 1.0))
+    );
 }
 
-/// **A cell of a family declaring neither flag holds its value too** (`views.md` §5, decision
-/// 0116).
-///
-/// `tag` is neither indexed nor rendered, so no filter and no tile reads it — but the build writes
-/// its value column and the drill-down serves it, so the cell holds a value and the write path has
-/// one to compare against. A second write naming a different value is refused as the rendered
-/// family's is ([`a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_different_one`]);
-/// one naming the value held is deduped.
-///
-/// The door is the values route rather than a joining row, because a built cell cannot be reached
-/// by one: every view of its key already holds the entity's row, and a second row in a view is
-/// refused before any cell is read.
+/// **A cell of a family declaring neither flag holds its value too** (`views.md` §5): `tag` is
+/// neither indexed nor rendered, and the build writes its value column, so a row restating the
+/// value changes nothing and a different one edits the item.
 #[tokio::test]
-async fn a_written_cell_of_an_unflagged_family_dedupes_or_is_refused() {
+async fn a_written_cell_of_an_unflagged_family_is_restated_or_edited() {
     let served = Served::build(build_with_families).await;
     // An entity the build placed in `2026-Q1`, whose `tag` the build wrote: slot 0, so `e * 2`.
     const CELL: u64 = 4;
     const HELD: f32 = (CELL * 2) as f32;
 
-    let (status, body) = fill(&served, "tag-agrees", "quarter:2026-Q1", CELL, HELD).await;
-    assert_eq!(status, 200, "the value the cell holds is deduped: {body}");
-    assert_eq!(body["filled"], json!(0), "and nothing is written: {body}");
-
-    let (status, body) = fill(&served, "tag-differs", "quarter:2026-Q1", CELL, HELD + 1.0).await;
-    assert_eq!(status, 409, "one cell holds one value: {body}");
-
-    // The cell still holds what the build wrote, neither write having reached it.
-    let id = id_of(&served, &served.token, "quarter:2026-Q1", CELL).await;
-    let body = item(&served, &served.token, id).await;
+    let (status, body) = edit_tag(&served, "tag-agrees", "quarter:2026-Q1", CELL, HELD).await;
+    assert_eq!(status, 200, "{body}");
     assert_eq!(
-        body["scoped"]["tag"]["2026-Q1"],
-        json!(f64::from(HELD)),
-        "the cell keeps the value the build wrote: {body}"
+        body["unchanged"],
+        json!(1),
+        "the value the cell holds changes nothing: {body}"
+    );
+
+    let (status, body) =
+        edit_tag(&served, "tag-differs", "quarter:2026-Q1", CELL, HELD + 1.0).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["edited"], json!(1), "{body}");
+
+    drain(&served.server).await;
+    let id = id_of(&served, &served.token, "quarter:2026-Q1", CELL).await;
+    let card = item(&served, &served.token, id).await;
+    assert_eq!(
+        card["scoped"]["tag"]["2026-Q1"],
+        json!(f64::from(HELD + 1.0)),
+        "{card}"
     );
 }
 
-/// One `tag` value for one entity through `POST /control/values`, with its status and body.
-async fn fill(served: &Served, batch_id: &str, view: &str, entity: u64, tag: f32) -> (u16, Value) {
-    let id = member(entity);
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/values"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", view)
-        .json(&json!([{ "external_id": id, "tag": tag }]))
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap())
-}
-
-/// **A `text` cell that has flushed takes no second value through either door** (`views.md` §5,
-/// decision 0116; review finding F1).
-///
-/// The cell arm compares a supplied value with the stored one and deduplicates or refuses. It
-/// cannot do that for prose once the value has flushed: a text column stores a token dictionary,
-/// positional postings and a presence bitmap, and no value per entity to read back. Admitting the
-/// row anyway would write a **second text layer stamped with the same view** — text layers have no
-/// coverage check, their disjointness having rested on I9, which two doors onto one cell
-/// invalidated — and `match` unions across them, so both sets of words would answer under one
-/// column with no symptom anywhere.
-///
-/// So occupancy is asked instead of equality and the answer is the same either way: **a supplied
-/// string is refused whether it agrees with the stored prose or not**, because agreement is exactly
-/// what cannot be established. Omitting the column passes, and leaves the cell as it stands.
+/// **Group-scoped prose is kept, so a text cell compares as any other** (`views.md` §5), flushed
+/// or still in the buffer: the same prose through the other door changes nothing, different
+/// prose edits the item and `match` answers the new words and not the old, and a row leaving the
+/// column out keeps what the cell holds. An edit of the item for another reason carries the prose
+/// to its new entity.
 #[tokio::test]
-async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
+async fn a_text_cell_is_restated_or_edited_flushed_or_not() {
     let served = Served::build(build_with_families).await;
     const A: u64 = 9_601;
     const B: u64 = 9_602;
     const C: u64 = 9_603;
     let prose = "the stored prose for this cell";
 
-    // Door one writes the cell, and it flushes.
-    let (status, body) = try_ingest_families(
-        &served,
-        "text-first",
-        "quarter:2026-Q1",
-        &[
-            (external_id_of(A), 250.0, 250.0, "0"),
-            (external_id_of(B), 251.0, 251.0, "0"),
-            (external_id_of(C), 252.0, 252.0, "0"),
-        ],
-        None,
-        Some(&[Some(prose), Some(prose), Some(prose)]),
-        None,
-    )
-    .await;
-    assert_eq!(status, 200, "the first door writes the cell: {body}");
-    drain(&served.server).await;
+    for (flushed, view) in [(true, "quarter:2026-Q1"), (false, "quarter:2026-Q2")] {
+        let sharing = view.replace("quarter:", "quarter_map:");
+        let key = |e: u64| e + if flushed { 0 } else { 100 };
+        let (status, body) = try_ingest_families(
+            &served,
+            &format!("text-first-{flushed}"),
+            view,
+            &[
+                (external_id_of(key(A)), 250.0, 250.0, "0"),
+                (external_id_of(key(B)), 251.0, 251.0, "0"),
+                (external_id_of(key(C)), 252.0, 252.0, "0"),
+            ],
+            None,
+            Some(&[Some(prose), Some(prose), Some(prose)]),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        if flushed {
+            drain(&served.server).await;
+        }
 
-    // Door two, differing prose: refused.
-    let (status, body) = try_ingest_families(
-        &served,
-        "text-differs",
-        "quarter_map:2026-Q1",
-        &[(external_id_of(A), 300.0, 300.0, "0")],
-        None,
-        Some(&[Some("different prose entirely")]),
-        None,
-    )
-    .await;
-    assert_eq!(status, 409, "a differing string is refused: {body}");
-    assert_eq!(error_code(&body), "conflict", "{body}");
-    assert!(
-        body.contains("'note'") && body.contains("2026-Q1"),
-        "the refusal names the column and the key: {body}"
-    );
+        let (status, body) = try_ingest_families(
+            &served,
+            &format!("text-differs-{flushed}"),
+            &sharing,
+            &[(external_id_of(key(A)), 300.0, 300.0, "0")],
+            None,
+            Some(&[Some("different words entirely")]),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(answer(&body)["edited"], 1, "flushed {flushed}: {body}");
 
-    // Door two, the *same* prose: refused too, and the message says why.
-    let (status, equal_body) = try_ingest_families(
-        &served,
-        "text-equal",
-        "quarter_map:2026-Q1",
-        &[(external_id_of(B), 301.0, 301.0, "0")],
-        None,
-        Some(&[Some(prose)]),
-        None,
-    )
-    .await;
+        let (status, body) = try_ingest_families(
+            &served,
+            &format!("text-equal-{flushed}"),
+            &sharing,
+            &[(external_id_of(key(B)), 301.0, 301.0, "0")],
+            None,
+            Some(&[Some(prose)]),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(answer(&body)["edited"], 0, "flushed {flushed}: {body}");
+
+        // C moves in its own view, the row carrying no family column, and its prose goes with it.
+        ingest_bare(
+            &served,
+            &format!("text-moved-{flushed}"),
+            view,
+            &[(external_id_of(key(C)), 262.0, 262.0, "0")],
+        )
+        .await;
+
+        drain(&served.server).await;
+        for door in [view, sharing.as_str()] {
+            assert_eq!(
+                note_matches(&served, door, "entirely").await,
+                BTreeSet::from([key(A)]),
+                "{door}: the new words match"
+            );
+            let stored = note_matches(&served, door, "stored").await;
+            assert!(
+                !stored.contains(&key(A)) && stored.contains(&key(B)),
+                "{door}: the old words left the edited item and stayed with the other: {stored:?}"
+            );
+            if door == view {
+                assert!(
+                    stored.contains(&key(C)),
+                    "{door}: the moved item kept its prose: {stored:?}"
+                );
+            }
+        }
+    }
+    fold(&served.server).await;
+    let served = served.restart().await;
     assert_eq!(
-        status, 409,
-        "an equal string is refused as well, equality being unverifiable: {equal_body}"
-    );
-    assert_eq!(
-        error_code(&equal_body),
-        "conflict",
-        "one rule: agreement is not something this arm can establish: {equal_body}"
-    );
-
-    // Door two, leaving the column out: accepted, and the cell stands as it was.
-    ingest_bare(
-        &served,
-        "text-absent",
-        "quarter_map:2026-Q1",
-        &[(external_id_of(C), 302.0, 302.0, "0")],
-    )
-    .await;
-}
-
-/// **In one window the buffer answers, so text compares exactly** (`views.md` §5, decision 0116).
-///
-/// The refusal above is a property of the *flushed* cell and of nothing else. While the first
-/// door's row is still in the commit-window buffer its value is right there to compare, so the two
-/// ordinary answers hold: an equal string deduplicates and a differing one is the 409. Without this
-/// the fail-closed arm above would read as the rule for text rather than as the cost of a flush.
-#[tokio::test]
-async fn a_same_window_text_cell_still_dedupes_and_refuses_exactly() {
-    let served = Served::build(build_with_families).await;
-    const AGREES: u64 = 9_701;
-    const DISAGREES: u64 = 9_702;
-    let prose = "prose still sitting in the buffer";
-
-    let (status, body) = try_ingest_families(
-        &served,
-        "text-window-first",
-        "quarter:2026-Q2",
-        &[
-            (external_id_of(AGREES), 250.0, 250.0, "0"),
-            (external_id_of(DISAGREES), 251.0, 251.0, "0"),
-        ],
-        None,
-        Some(&[Some(prose), Some(prose)]),
-        None,
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-
-    // No flush between: the first door's rows are in the buffer.
-    let (status, body) = try_ingest_families(
-        &served,
-        "text-window-equal",
-        "quarter_map:2026-Q2",
-        &[(external_id_of(AGREES), 300.0, 300.0, "0")],
-        None,
-        Some(&[Some(prose)]),
-        None,
-    )
-    .await;
-    assert_eq!(
-        status, 200,
-        "the buffer holds the value, so an equal string deduplicates: {body}"
-    );
-
-    let (status, body) = try_ingest_families(
-        &served,
-        "text-window-differs",
-        "quarter_map:2026-Q2",
-        &[(external_id_of(DISAGREES), 301.0, 301.0, "0")],
-        None,
-        Some(&[Some("other prose")]),
-        None,
-    )
-    .await;
-    assert_eq!(status, 409, "and a differing one is the 409: {body}");
-    assert_eq!(error_code(&body), "conflict", "{body}");
-    assert!(
-        body.contains("'note'") && body.contains("2026-Q2"),
-        "naming the column and the key: {body}"
+        note_matches(&served, "quarter:2026-Q1", "stored").await,
+        BTreeSet::from([B, C]),
+        "a fold and a restart keep the prose"
     );
 }
 
@@ -2328,36 +2292,23 @@ async fn a_gate_failed_view_is_absent_from_the_drill_down_and_its_key_is_not() {
     );
 }
 
-/// A group-scoped value is addressed by its view's key, so a fill waiting for the tick when that
-/// view is dropped goes with it: the drop says how many, and none of them holds the log.
+/// A group-scoped value is addressed by its view's key, so an edit waiting for the tick when that
+/// view is dropped goes with it: nothing buffered holds the log, before or after a restart.
 #[tokio::test]
-async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
+async fn an_edit_in_a_dropped_view_holds_nothing_in_the_log() {
     let served = Served::build(build_with_families).await;
-    // An entity ingested and published, so the cell this fills is empty and nothing else is
-    // buffered. A built cell holds the build's own value, which the fill would be refused for.
     const FRESH: u64 = 9_801;
     ingest_with_heat(
         &served,
-        "fill-then-drop-row",
+        "edit-then-drop-row",
         "quarter:2026-Q1",
         &[(external_id_of(FRESH), 270.0, 270.0, "0")],
         &[None],
     )
     .await;
     drain(&served.server).await;
-    let id = member(FRESH);
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/values"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "fill-then-drop")
-        .header("x-tessera-view", "quarter:2026-Q1")
-        .json(&json!([{ "external_id": id, "tag": 5.0 }]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "the fill is accepted");
+    let (status, body) = edit_tag(&served, "edit-then-drop", "quarter:2026-Q1", FRESH, 5.0).await;
+    assert_eq!((status, body["edited"].clone()), (200, json!(1)), "{body}");
 
     let resp = served
         .server
@@ -2368,8 +2319,6 @@ async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "the drop is accepted");
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["fills_dropped"], json!(1), "{body}");
     assert_eq!(
         served.server.state.engine.generation().buffer.oldest_wal_pos(),
         None,
@@ -2381,7 +2330,7 @@ async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
     assert_eq!(
         server.state.engine.generation().buffer.oldest_wal_pos(),
         None,
-        "and a restart does not buffer the fill again"
+        "and a restart does not buffer the edit again"
     );
 }
 

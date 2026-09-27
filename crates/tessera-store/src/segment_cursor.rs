@@ -29,12 +29,20 @@ pub(crate) struct SegmentCursor {
     pub(crate) columns: ColumnsRef,
     pub(crate) row: usize,
     pub(crate) rows: usize,
+    /// Where each row's entity is read ([`crate::edited`]).
+    entities: crate::edited::RowEntities,
 }
 
 impl SegmentCursor {
-    /// Map `dir`'s `morton.u32` and `columns.arrow`. `op` names the caller in any error this
-    /// raises — the one thing the two producers legitimately differ about.
-    pub(crate) fn open(dir: &Path, seg_id: String, op: &str) -> Result<Self> {
+    /// Map `dir`'s `morton.u32` and `columns.arrow`, the rows' entities read from `entities`.
+    /// `op` names the caller in any error this raises — the one thing the two producers
+    /// legitimately differ about.
+    pub(crate) fn open(
+        dir: &Path,
+        seg_id: String,
+        op: &str,
+        entities: crate::edited::RowEntities,
+    ) -> Result<Self> {
         let morton = MortonSlice::load(&dir.join("morton.u32"))?;
         let columns = ColumnsRef::load(&dir.join("columns.arrow"))?;
         // **Both of this cursor's callers stream, and neither shares these mappings with a
@@ -61,7 +69,23 @@ impl SegmentCursor {
             columns,
             row: 0,
             rows,
+            entities,
         })
+    }
+
+    /// The entity the current row belongs to.
+    pub(crate) fn entity(
+        &self,
+        key: &tessera_types::IdentityKey,
+        shard_id: u32,
+    ) -> Result<tessera_types::EntityId> {
+        self.entities.entity_of(
+            self.row as u32,
+            self.columns.tessera_id()[self.row],
+            key,
+            shard_id,
+            &self.seg_id,
+        )
     }
 
     /// This cursor's current `(morton, tessera_id)`, or `None` once it is spent.

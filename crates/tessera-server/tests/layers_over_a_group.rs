@@ -53,8 +53,16 @@ fn text(values: impl Iterator<Item = String>) -> ArrayRef {
 /// The points of both row spaces, and the member tables the build's layers read.
 fn write_sources(dir: &Path, keyed: &dyn Fn(u64) -> bool) {
     let ids = || 0..ENTITIES;
-    let xs = || Arc::new(Float64Array::from_iter_values(ids().map(|e| ((e * 37) % 1000) as f64)));
-    let ys = || Arc::new(Float64Array::from_iter_values(ids().map(|e| ((e * 53) % 1000) as f64)));
+    let xs = || {
+        Arc::new(Float64Array::from_iter_values(
+            ids().map(|e| ((e * 37) % 1000) as f64),
+        ))
+    };
+    let ys = || {
+        Arc::new(Float64Array::from_iter_values(
+            ids().map(|e| ((e * 53) % 1000) as f64),
+        ))
+    };
     let entity = || Arc::new(UInt64Array::from_iter_values(ids())) as ArrayRef;
     write(
         &dir.join("papers.parquet"),
@@ -233,8 +241,8 @@ fn build_side(layers: &str, keyed: &dyn Fn(u64) -> bool) -> Built {
     Built { _tmp: tmp, dir }
 }
 
-/// `POST /control/values` in Arrow: an id column and a column named for the layer, under the view
-/// header where `view` is given.
+/// `POST /control/ingest` in Arrow, rows without coordinates: an id column and a column named for
+/// the layer, under the view header where `view` is given.
 async fn post_keys(
     server: &TestServer,
     batch_id: &str,
@@ -261,7 +269,7 @@ async fn post_keys(
     let body = writer.into_inner().unwrap();
     let mut request = server
         .client
-        .post(server.control_url("/control/values"))
+        .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream");
@@ -418,7 +426,7 @@ fn of_year(year: &str) -> Vec<u64> {
 }
 
 /// **A key column on a group-scoped layer mints per view, at both paths.** The build reads the
-/// view off each member row; the values route reads it off the page's view header, which is how a
+/// view off each member row; an ingest of rows without coordinates reads it off the page's view header, which is how a
 /// client sends one page per view.
 #[tokio::test]
 async fn a_key_column_on_a_group_scoped_layer_mints_in_the_view_it_names() {
@@ -448,7 +456,7 @@ async fn a_key_column_on_a_group_scoped_layer_mints_in_the_view_it_names() {
         assert_eq!(
             browse(&reopened, &view, LAYER).await,
             expected,
-            "the values route, after a restart, {view}"
+            "rows without coordinates, after a restart, {view}"
         );
     }
 }

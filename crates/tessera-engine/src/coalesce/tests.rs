@@ -128,6 +128,7 @@ impl Fixture {
             .iter()
             .map(|&e| tessera_store::FlushRow {
                 entity_id: EntityId::new(e.into()),
+                number: EntityId::new(e.into()),
                 external_id: (e % 10 != 2).then(|| format!("ext-{e}").into_bytes()),
                 x: 0.5,
                 y: 0.5,
@@ -326,7 +327,25 @@ impl Fixture {
             dict: format!("{dir}/{seg}-dict.bin"),
             postings: format!("{dir}/{seg}-postings.arrow"),
             presence: format!("{dir}/{seg}-presence.roaring"),
+            prose: view.map(|_| RecordExtent {
+                blocks: format!("{dir}/{seg}-prose.blocks.bin"),
+                hasrow: format!("{dir}/{seg}-prose.hasrow.roaring"),
+                directory: format!("{dir}/{seg}-prose.directory.arrow"),
+            }),
         };
+        if let Some(prose) = &extent.prose {
+            let texts: Vec<String> = entities.iter().map(|e| format!("only-{e}")).collect();
+            tessera_filter_write::write_prose(
+                &self.path(&prose.blocks),
+                &self.path(&prose.hasrow),
+                &self.path(&prose.directory),
+                entities
+                    .iter()
+                    .copied()
+                    .zip(texts.iter().map(String::as_str)),
+            )
+            .unwrap();
+        }
         let words = terms.keys().map(String::as_str);
         tessera_filter::write_sorted_dict(&self.path(&extent.dict), words).unwrap();
         let per_term: Vec<Vec<u32>> = terms.into_values().collect();
@@ -435,7 +454,9 @@ impl Fixture {
                 .map(|d| tessera_filter::SortedDict::open(&self.path(d), access).unwrap());
             let column = out.entry((extent.column.clone(), extent.view.clone())).or_default();
             for e in flushed_entities() {
-                let Some(value) = values.value_of(e) else { continue };
+                let Some(value) = values.value_of(e) else {
+                    continue;
+                };
                 let value = match &dict {
                     Some(dict) => dict.key_of(value.raw(), &mut scratch).unwrap().to_string(),
                     None => value.raw().to_string(),
@@ -588,9 +609,16 @@ fn coalesced_runs_keep_every_binding() {
     let locators: Vec<&str> = m.consumed.iter().map(|e| e.path.as_str()).collect();
     assert_eq!(
         keys(&c.after.locator_extents, |e| &e.path),
-        replaced(&keys(&c.before().locator_extents, |e| &e.path), &locators, &m.output.path)
+        replaced(
+            &keys(&c.before().locator_extents, |e| &e.path),
+            &locators,
+            &m.output.path
+        )
     );
-    c.assert_files(m.consumed.iter().flat_map(LocatorExtent::files), m.output.files());
+    c.assert_files(
+        m.consumed.iter().flat_map(LocatorExtent::files),
+        m.output.files(),
+    );
     c.assert_reads_same(|fx, m| fx.external_ids(m));
 }
 
@@ -644,9 +672,16 @@ fn coalesced_records_keep_every_row() {
     let consumed: Vec<&str> = m.consumed.iter().map(|e| e.blocks.as_str()).collect();
     assert_eq!(
         keys(&c.after.record_extents, |e| &e.blocks),
-        replaced(&keys(&c.before().record_extents, |e| &e.blocks), &consumed, &m.output.blocks)
+        replaced(
+            &keys(&c.before().record_extents, |e| &e.blocks),
+            &consumed,
+            &m.output.blocks
+        )
     );
-    c.assert_files(m.consumed.iter().flat_map(RecordExtent::files), m.output.files());
+    c.assert_files(
+        m.consumed.iter().flat_map(RecordExtent::files),
+        m.output.files(),
+    );
     c.assert_reads_same(|fx, m| fx.record_fields(&m.record_extents));
 }
 
@@ -674,9 +709,16 @@ fn coalesced_entity_terms_keep_every_list() {
     let consumed: Vec<&str> = m.consumed.iter().map(|e| e.terms.as_str()).collect();
     assert_eq!(
         keys(&c.after.entity_terms_extents, |e| &e.terms),
-        replaced(&keys(&c.before().entity_terms_extents, |e| &e.terms), &consumed, &m.output.terms)
+        replaced(
+            &keys(&c.before().entity_terms_extents, |e| &e.terms),
+            &consumed,
+            &m.output.terms
+        )
     );
-    c.assert_files(m.consumed.iter().flat_map(EntityTermsExtent::files), m.output.files());
+    c.assert_files(
+        m.consumed.iter().flat_map(EntityTermsExtent::files),
+        m.output.files(),
+    );
     c.assert_reads_same(|fx, m| fx.entity_terms(&m.entity_terms_extents));
 }
 

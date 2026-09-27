@@ -480,12 +480,6 @@ impl Engine {
         self.write.health().buffered_items.load(Ordering::SeqCst)
     }
 
-    /// Unflushed `POST /control/values` fills the buffer holds, entity- and group-scoped together.
-    /// A figure that never falls after a restart is a fill pinning the log that will not release.
-    pub fn buffered_fills(&self) -> usize {
-        self.generation().buffer.fill_count()
-    }
-
     /// One past the lowest row-less entity ever allocated. Read beside the high-water mark:
     /// together they say how much of the entity space is left.
     pub fn allocator_low_water(&self) -> u64 {

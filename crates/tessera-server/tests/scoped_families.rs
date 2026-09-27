@@ -1674,11 +1674,12 @@ async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
     check_recreated(&served, "after a fold and a restart", &expected, &untouched).await;
 }
 
-/// An entity whose point lives in `2026-Q3` alone, for the fill below.
+/// An entity whose point lives in `2026-Q3` alone, for the edits below.
 const FILLED: u64 = 9_004;
 
-/// One `POST /control/values` JSON batch naming no view, addressed by external id.
-async fn values_without_view(
+/// One `POST /control/ingest` JSON row without coordinates and naming no view, addressed by
+/// external id.
+async fn row_without_view(
     served: &Served,
     batch_id: &str,
     wait: bool,
@@ -1691,9 +1692,9 @@ async fn values_without_view(
         row[name] = value.clone();
     }
     let path = if wait {
-        "/control/values?wait=visible"
+        "/control/ingest?wait=visible"
     } else {
-        "/control/values"
+        "/control/ingest"
     };
     let resp = served
         .server
@@ -1724,12 +1725,12 @@ async fn filled_answer(served: &Served, id: u64, column: &str, value: &str) -> (
 }
 
 /// **An entity-scoped cell needs no view header.** Its value is the entity's whichever view's
-/// flush writes it, so a values batch naming no view fills it on a deployment of five views, and
+/// flush writes it, so a row naming no view sets it on a deployment of five views, and
 /// the value is served under the one view the entity's point lives in: at once, after a restart
-/// that replays an unflushed fill from the log, and after a fold. A group-scoped column still
+/// that replays an unflushed edit from the log, and after a fold. A group-scoped column still
 /// needs the header, which is what says whose cell it is.
 #[tokio::test]
-async fn an_entity_scoped_fill_needs_no_view_header() {
+async fn an_entity_scoped_cell_needs_no_view_header() {
     let served = Served::build(build_families).await;
     for name in ["grade", "tier"] {
         let resp = served
@@ -1754,7 +1755,7 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
     drain(&served.server).await;
 
     let (status, answer) =
-        values_without_view(&served, "grade", true, json!({ "grade": "gold" })).await;
+        row_without_view(&served, "grade", true, json!({ "grade": "gold" })).await;
     assert_eq!(status, 200, "{answer}");
     assert_eq!(answer["visible"], json!(true), "{answer}");
     assert_eq!(
@@ -1763,12 +1764,15 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
     );
 
     let (status, answer) =
-        values_without_view(&served, "mood", false, json!({ "mood": "calm" })).await;
-    assert_eq!(status, 422, "a group-scoped cell still needs a view: {answer}");
+        row_without_view(&served, "mood", false, json!({ "mood": "calm" })).await;
+    assert_eq!(
+        status, 422,
+        "a group-scoped cell still needs a view: {answer}"
+    );
 
     // Left unflushed, so the restart has to replay it from the log.
     let (status, answer) =
-        values_without_view(&served, "tier", false, json!({ "tier": "upper" })).await;
+        row_without_view(&served, "tier", false, json!({ "tier": "upper" })).await;
     assert_eq!(status, 200, "{answer}");
     let served = served.restart().await;
     drain(&served.server).await;
@@ -1792,11 +1796,11 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
     );
 }
 
-/// **A group-scoped family's new key is minted by the values batch that names it**, on an open
+/// **A group-scoped family's new key is minted by the row without coordinates that names it**, on an open
 /// vocabulary no ingest has used, and the cell is served under its view after a flush and after a
 /// restart.
 #[tokio::test]
-async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
+async fn a_row_without_coordinates_mints_a_new_key_for_a_group_scoped_family() {
     let served = Served::build(build_families).await;
     let declarations = [
         (
@@ -1840,7 +1844,7 @@ async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
     let resp = served
         .server
         .client
-        .post(served.server.control_url("/control/values"))
+        .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "scoped-grade")
         .header("x-tessera-view", "quarter:2026-Q3")

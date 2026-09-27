@@ -68,9 +68,18 @@ pub struct GenerationParts {
     /// Every unique column's index runs, as the partition manifest lists them. Replaced by every
     /// publication that changes the list, sharing the runs it already opened.
     pub(crate) unique: Arc<tessera_store::unique::UniqueIndexes>,
-    /// The unique index entries of the rows and fills the buffer holds, published with the
-    /// buffer.
+    /// The unique index entries of the rows the buffer holds, published with the buffer.
     pub(crate) unique_live: Arc<crate::unique::UniqueLive>,
+    /// The edited-items map's runs, as the partition manifest lists them. Replaced by every
+    /// publication that changes the list, sharing the runs it already opened.
+    pub(crate) edited: Arc<tessera_store::edited::EditedIndex>,
+    /// The edited-items pairs no run holds yet, published with the buffer.
+    pub(crate) edited_live: Arc<crate::edited::EditedLive>,
+    /// How many commit windows have committed an edit, and how many folds have retired entities,
+    /// since the process started: what a command resolved against an earlier generation compares
+    /// to learn whether an entity it names has moved ([`crate::edited::Stamp`]).
+    pub(crate) edit_epoch: u64,
+    pub(crate) fold_epoch: u64,
     /// One sparse delta postings tier per flush segment, in publication order.
     ///
     /// A fragment build unions the base with every live tier over the session's satisfied terms
@@ -238,14 +247,15 @@ impl Generation {
 
     /// A copy whose overlay differs from this one's only by deletions and suppressions of
     /// `newly_denied`, so their rows are added to the mask without walking the whole overlay. An
-    /// unsuppress may not take this route: the entity may still be deleted. `buffer` is the deleted
-    /// entities' rows removed, which inserts nothing, so the buffered-row lists lose those entities
-    /// and gain none.
+    /// unsuppress may not take this route: the entity may still be deleted. `buffer` is this one's
+    /// with the deleted entities' rows removed and the rows of `inserted` added, so the
+    /// buffered-row lists lose the one and gain the other.
     pub(crate) fn with_denies(
         &self,
         overlay: Arc<Overlay>,
         newly_denied: &[EntityId],
         buffer: Arc<IngestBuffer>,
+        inserted: &[EntityId],
         change: impl FnOnce(&mut GenerationParts),
     ) -> Generation {
         let mut parts = self.parts.clone();
@@ -270,7 +280,7 @@ impl Generation {
                 && denied == crate::compose::derive_denied(&parts.overlay, &parts.bundle),
             "the incremental deny mask does not equal a fresh derivation"
         );
-        let buffered_rows = self.next_buffered_rows(&parts, &[]);
+        let buffered_rows = self.next_buffered_rows(&parts, inserted);
         Generation {
             parts,
             denied: Arc::new(denied),
@@ -408,6 +418,10 @@ impl Generation {
             external_index: Arc::new(external_index),
             unique: Arc::default(),
             unique_live: Arc::default(),
+            edited: Arc::default(),
+            edited_live: Arc::default(),
+            edit_epoch: 0,
+            fold_epoch: 0,
             delta_postings: Vec::new(),
             overlay_version: 0,
             overlay: Arc::new(overlay),

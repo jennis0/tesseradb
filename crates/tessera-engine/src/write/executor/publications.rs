@@ -93,21 +93,6 @@ pub(super) fn entity_terms_extent_paths(
     }
 }
 
-/// A text extent's three files, resolved against the prefix directory that holds them, under the
-/// column name a leaf resolves to.
-pub(super) fn text_extent_paths(
-    prefix_dir: &std::path::Path,
-    extent: &tessera_store::manifest::TextExtent,
-) -> crate::filter::TextExtentPaths {
-    crate::filter::TextExtentPaths {
-        column: crate::filter::extent_column_name(&extent.column, extent.view.as_deref()),
-        dict_rel: extent.dict.clone(),
-        dict: prefix_dir.join(&extent.dict),
-        postings: prefix_dir.join(&extent.postings),
-        presence: prefix_dir.join(&extent.presence),
-    }
-}
-
 /// The reader this process holds open for the tier `rel` names, or `None` if it holds none.
 ///
 /// The two lists are positional against each other: `tiers` was opened from `rels`, which is the
@@ -751,7 +736,7 @@ impl Executor {
             .iter()
             .map(|merged| crate::filter::CoalescedTextWindow {
                 consumed: merged.consumed.extents.iter().map(|e| e.dict.clone()).collect(),
-                paths: text_extent_paths(&prefix_dir, &merged.output),
+                paths: crate::filter::TextExtentPaths::of(&prefix_dir, &merged.output),
             })
             .collect();
         // The transpose's stack is re-derived from the rebased manifest, not patched. This is the
@@ -977,12 +962,36 @@ impl Executor {
                 }
             }
         };
+        let edited = if completed.edited.is_empty() {
+            Arc::clone(&live.edited)
+        } else {
+            let partition = next_bundle
+                .partitions
+                .get(&completed.partition)
+                .expect("the partition this publication just rebased");
+            match tessera_store::edited::EditedIndex::open(
+                &partition.manifest.edited_items,
+                &self.prefix_dir(&live),
+                Some(&live.edited),
+            ) {
+                Ok(edited) => Arc::new(edited),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a coalesce's manifest committed naming edited-item runs this \
+                         process could not open; a restart opens the committed manifest"
+                    );
+                    return;
+                }
+            }
+        };
         let next = live.with(|g| {
             // The live columns with each consumed window replaced by the layer that carries its
             // values, the same set of `(entity, value)` pairs in fewer files, so a request holding
             // the old and one holding the new agree on every answer.
             g.filter_columns = filter_columns;
             g.unique = unique;
+            g.edited = edited;
             g.bundle = next_bundle;
             // The sidecar rides the swap, rather than being stored beside it: a coalesce is
             // content-preserving, but a fold is not, since it drops the retired entities' keys and
@@ -1169,7 +1178,13 @@ impl Executor {
             // Where those families' columns live: the owner's view of the same key, which is
             // `view` itself under the owning group's own views.
             let scoped_view = scoped_owner_view_of(manifest, &view);
-            let Some(scoped_incarnation) = manifest.incarnation_of(&scoped_view) else {
+            // A view writing no family writes no scoped column, and its key may be one the owning
+            // group does not carry.
+            let owner_incarnation = match families.is_empty() {
+                true => Some(incarnation),
+                false => manifest.incarnation_of(&scoped_view),
+            };
+            let Some(scoped_incarnation) = owner_incarnation else {
                 // Fail closed: an owner view the manifest cannot place is a bundle whose halves
                 // disagree, and flushing under a guessed incarnation is how a dropped view's
                 // predecessor adopts rows.
@@ -1296,6 +1311,8 @@ impl Executor {
                     .filter(|(_, d)| d.unique)
                     .map(|(at, d)| (d.name.clone(), at, d.arrow_type))
                     .collect(),
+                edited: Arc::clone(&generation.edited),
+                edited_live: Arc::clone(&generation.edited_live),
             }
         };
         self.health
@@ -1985,7 +2002,7 @@ impl Executor {
         let text_paths: Vec<crate::filter::TextExtentPaths> = completed
             .text_extents
             .iter()
-            .map(|e| text_extent_paths(&record_dir, e))
+            .map(|e| crate::filter::TextExtentPaths::of(&record_dir, e))
             .collect();
         // The new columns first, then the extents that land on them. A flush of a view a family
         // had no column for wrote its base in the same unit as its extent, and the extent
@@ -2113,6 +2130,17 @@ impl Executor {
             }
         }
         manifest.files.extend(completed.files);
+        let edited = &completed.edited_runs;
+        manifest
+            .edited_items
+            .by_number
+            .live
+            .extend(edited.by_number.iter().map(|run| run.path.clone()));
+        manifest
+            .edited_items
+            .by_entity
+            .live
+            .extend(edited.by_entity.iter().map(|run| run.path.clone()));
         for flushed in &completed.unique_runs {
             if let Some(index) = manifest
                 .unique_indexes
@@ -2291,16 +2319,6 @@ impl Executor {
             // entity outright would lose a row that is in no segment and no buffer.
             buffer.remove_in_view(*entity, &completed.view);
         }
-        // The fills this flush's plan consumed, on the same rule. Every fill it looked at, not
-        // only the ones it wrote: a fill a restart re-buffered after its own flush writes nothing
-        // and must still leave the buffer, or it pins the log at its `ValuesBatch` record
-        // indefinitely.
-        for entity in &completed.filled {
-            buffer.remove_fill(*entity);
-        }
-        for (entity, owner_view) in &completed.filled_scoped {
-            buffer.remove_scoped_fill(*entity, owner_view);
-        }
         // The gauge follows the buffer here too. A flush is the other place occupancy changes: if
         // it were not stated here, a node that flushed and then took no ingest would report a
         // backlog it had already written, and `/control/ingest`'s occupancy bound is measured
@@ -2398,6 +2416,34 @@ impl Executor {
             }
             _ => Arc::clone(&live.unique),
         };
+        // And the edited items' runs, whose pairs leave the live map.
+        let (edited, edited_live) = if completed.edited_runs.entities.is_empty() {
+            (Arc::clone(&live.edited), Arc::clone(&live.edited_live))
+        } else {
+            let Some(partition) = next_bundle.partitions.get(&completed.partition) else {
+                return false;
+            };
+            match tessera_store::edited::EditedIndex::open(
+                &partition.manifest.edited_items,
+                &self.prefix_dir(&live),
+                Some(&live.edited),
+            ) {
+                Ok(index) => {
+                    let mut edited_live = (*live.edited_live).clone();
+                    edited_live.remove(completed.edited_runs.entities.iter().copied());
+                    (Arc::new(index), Arc::new(edited_live))
+                }
+                Err(e) => {
+                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a flush's side-manifest was committed naming edited-item runs \
+                         this process could not open; a restart opens the committed manifest"
+                    );
+                    return false;
+                }
+            }
+        };
         let unique_live = if completed.unique_runs.is_empty() {
             Arc::clone(&live.unique_live)
         } else {
@@ -2439,8 +2485,7 @@ impl Executor {
             self.superseded_sidecars
                 .push(Arc::downgrade(&live.external_index));
         }
-        self.unique_declarations
-            .flushed(&completed.consumed, &completed.filled);
+        self.unique_declarations.flushed(&completed.consumed);
         let next = Arc::new(live.with(|g| {
             // The live columns with this flush's extents composed on: the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
@@ -2453,6 +2498,8 @@ impl Executor {
             g.buffer = Arc::new(buffer);
             g.unique = unique;
             g.unique_live = unique_live;
+            g.edited = edited;
+            g.edited_live = edited_live;
             g.external_index = external_index;
         }));
         // Armed before the swap, and that ordering is the mechanism. A request landing between
@@ -2550,9 +2597,6 @@ mod dispatch_rules_tests {
         };
         crate::flush::FlushPlan {
             items: vec![(EntityId::new(oldest), item)],
-            fills: Vec::new(),
-            consumed_fills: Vec::new(),
-            consumed_scoped_fills: Vec::new(),
             recorded_joins: Vec::new(),
         }
     }

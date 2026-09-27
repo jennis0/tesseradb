@@ -91,13 +91,20 @@ impl ClosingWindow {
     /// Committed: every waiter of an entry gets that entry's receipt and the artifacts it
     /// created. A death partway leaves some waiters unacked; each gets a 500, not a 503, since
     /// durable.
-    pub(super) fn ack(self, health: &ExecutorHealth, minted_per_entry: Vec<u64>) {
-        for (entry, minted) in self.closed.into_iter().zip(minted_per_entry) {
+    pub(super) fn ack(
+        self,
+        health: &ExecutorHealth,
+        minted_per_entry: Vec<u64>,
+        joined_per_entry: Vec<u64>,
+    ) {
+        let counts = minted_per_entry.into_iter().zip(joined_per_entry);
+        for (entry, (minted, joined)) in self.closed.into_iter().zip(counts) {
             let receipt = entry.receipt().to_vec();
             for waiter in entry.waiters {
                 waiter.ack(Ingested {
                     receipt: receipt.clone(),
                     minted,
+                    joined,
                     replayed: false,
                 });
             }
@@ -106,7 +113,7 @@ impl ClosingWindow {
     }
 }
 
-/// What a vocabulary pass drew, over a commit window's rows or a values batch's cells.
+/// What a vocabulary pass drew over a commit window's rows.
 pub(super) struct MintedCodes {
     /// The bindings published if the write commits: the live ones plus whatever the pass drew.
     pub(super) vocabularies: Vocabularies,
@@ -197,48 +204,6 @@ fn mint_cells<'a>(
         cells[index] = tessera_store::vocabulary::code_value(arrow_type, code);
     }
     Ok(())
-}
-
-/// Draw a code for every novel vocabulary key a values batch carries, by the ingest window's
-/// rule, and rewrite each cell to its code. `columns` is where each named column landed.
-pub(super) fn mint_values_codes(
-    generation: &Generation,
-    request: &mut tessera_lifecycle::ValuesRequest,
-    columns: &[ValuesColumn],
-) -> std::result::Result<MintedCodes, MintError> {
-    let manifest = &generation.bundle.manifest;
-    let families = request
-        .view
-        .as_deref()
-        .map(|view| scoped_families_of_view(manifest, view))
-        .unwrap_or_default();
-    let targets: Vec<(&str, Option<&str>, ScalarType)> = columns
-        .iter()
-        .map(|column| match column {
-            ValuesColumn::Entity(at) => {
-                let d = &manifest.declared_scalars[*at];
-                (d.name.as_str(), d.vocabulary.as_deref(), d.arrow_type)
-            }
-            ValuesColumn::Scoped(at) => {
-                let f = &families[*at];
-                (f.name.as_str(), f.vocabulary.as_deref(), f.arrow_type)
-            }
-        })
-        .collect();
-    let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
-    let mut fresh: Vec<(String, String, u32)> = Vec::new();
-    for row in &mut request.rows {
-        mint_cells(
-            &mut row.values,
-            targets.iter().copied(),
-            &mut vocabularies,
-            &mut fresh,
-        )?;
-    }
-    Ok(MintedCodes {
-        vocabularies,
-        fresh,
-    })
 }
 
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
@@ -337,14 +302,18 @@ impl Executor {
                     continue;
                 }
             };
-            let Command::Ingest { submission, reply } = command
-            else {
-                // A values batch and a declaration read the unique values the window holds and has
-                // not yet applied, so the window closes first. Every other command is tolerable
-                // while a window is open: none of them touch the buffer or the swap.
+            let Command::Ingest { submission, reply } = command else {
+                // A declaration reads the unique values the window has not applied, and a change
+                // to the view roster changes the views the window's rows are going into, so the
+                // window closes first. Every other command is tolerable while a window is open: an
+                // edit's close carries the memberships and generating sets it finds then.
                 if matches!(
                     command,
-                    Command::Values { .. } | Command::DeclareAttribute { .. }
+                    Command::DeclareAttribute { .. }
+                        | Command::CreateView { .. }
+                        | Command::DropView { .. }
+                        | Command::CreateViewGroup { .. }
+                        | Command::CreatePlainView { .. }
                 ) && !window.is_empty()
                 {
                     window = self.close_and_reopen(window);
@@ -402,6 +371,7 @@ impl Executor {
                     reply.ack(Ingested {
                         receipt,
                         minted: 0,
+                        joined: 0,
                         replayed: true,
                     });
                 } else {
@@ -435,8 +405,19 @@ impl Executor {
                 let mut admission = Admission::Admitted;
                 // What the open window touches is written at its close, and the re-check below
                 // reads what was written.
-                let claims =
-                    tessera_lifecycle::WindowClaims::of(&submission.rows, submission.keys.clone());
+                let joined = submission.slots.iter().filter_map(|slot| match slot {
+                    tessera_lifecycle::Slot::Joined { entity, .. } => Some(*entity),
+                    _ => None,
+                });
+                let claims = tessera_lifecycle::WindowClaims::of(
+                    &submission.rows,
+                    submission.edits.iter().map(|e| e.edit.old).chain(joined),
+                    submission
+                        .edits
+                        .iter()
+                        .filter_map(|e| e.edit.rows.first()?.external_id.as_deref()),
+                    submission.keys.clone(),
+                );
                 if window.conflicts(&claims) {
                     window = self.close_and_reopen(window);
                     admission = Admission::YieldedAfterClose;
@@ -462,6 +443,7 @@ impl Executor {
     ) -> Option<WindowEntry<Reply<Ingested>>> {
         let IngestSubmission {
             rows,
+            edits,
             slots,
             keys,
             batch_id,
@@ -471,20 +453,37 @@ impl Executor {
             over_bound,
         } = submission;
         let generation = self.generation.load();
-        let creates = rows.iter().any(|row| row.join.is_none());
+        let creates = rows.iter().any(|row| row.join.is_none()) || !edits.is_empty();
+        let bound_elsewhere = |id: &[u8], item: Option<EntityId>| {
+            self.live.established_entity(id).is_some_and(|holder| {
+                Some(holder) != item && !generation.overlay.is_deleted(holder)
+            })
+        };
         let stale = crate::unique::moved_since(&generation, &keys, unique_seq, creates)
-            || slots.iter().any(|slot| {
-                matches!(slot, tessera_lifecycle::Slot::Unchanged(entity) if generation.overlay.is_deleted(*entity))
+            || edits.iter().any(|submitted| {
+                let old = submitted.edit.old;
+                generation.overlay.is_deleted(old)
+                    || crate::write::joined::views_holding(&generation, old) != submitted.held_views
+                    || submitted.edit.rows[0]
+                        .external_id
+                        .as_deref()
+                        .is_some_and(|id| bound_elsewhere(id, Some(old)))
+            })
+            || slots.iter().any(|slot| match slot {
+                tessera_lifecycle::Slot::Unchanged { entity, .. }
+                | tessera_lifecycle::Slot::Joined { entity, .. } => {
+                    generation.overlay.is_deleted(*entity)
+                }
+                _ => false,
             })
             || rows.iter().any(|row| match row.join {
                 Some(entity) => {
                     generation.overlay.is_deleted(entity)
                         || !crate::write::joined::joins_in_place(&generation, entity, &row.view)
                         || self.flush.outstanding()
-                            && self
-                                .flush_flight
-                                .as_ref()
-                                .is_some_and(|(view, floor)| *view == row.view && entity.raw() < *floor)
+                            && self.flush_flight.as_ref().is_some_and(|(view, floor)| {
+                                *view == row.view && entity.raw() < *floor
+                            })
                         || generation.bundle.partitions.values().any(|partition| {
                             partition
                                 .views
@@ -493,11 +492,10 @@ impl Executor {
                         })
                         || generation.buffer.contains_in_view(entity, &row.view)
                 }
-                None => row.external_id.as_deref().is_some_and(|id| {
-                    self.live
-                        .established_entity(id)
-                        .is_some_and(|holder| !generation.overlay.is_deleted(holder))
-                }),
+                None => row
+                    .external_id
+                    .as_deref()
+                    .is_some_and(|id| bound_elsewhere(id, None)),
             });
         drop(generation);
         if stale {
@@ -514,6 +512,7 @@ impl Executor {
 
         Some(WindowEntry {
             rows,
+            edits: edits.into_iter().map(|e| e.edit).collect(),
             slots,
             over_bound,
             batch_id,
@@ -538,7 +537,11 @@ impl Executor {
             scoped_families_by_view(&generation.bundle.manifest);
         let mut fresh: Vec<(String, String, u32)> = Vec::new();
         for entry in closing.entries_mut() {
-            for row in entry.rows_mut() {
+            let (rows, edits) = entry.rows_and_edits_mut();
+            for row in rows
+                .iter_mut()
+                .chain(edits.iter_mut().flat_map(|e| e.rows.iter_mut()))
+            {
                 // A column declared since admission is appended at the tail of `declared_scalars`.
                 crate::attributes::pad_to_schema(&mut row.scalars, declared_scalars);
                 mint_cells(
@@ -633,10 +636,14 @@ impl Executor {
             }
         };
         // After the vocabulary mint above, since an artifact's key is a code only once drawn.
-        let rows = closing
-            .entries()
-            .iter()
-            .flat_map(|entry| entry.rows().iter().map(|row| row.scalars.as_slice()));
+        let rows = closing.entries().iter().flat_map(|entry| {
+            entry
+                .rows()
+                .iter()
+                .chain(entry.edits().iter().filter_map(|edit| edit.rows.first()))
+                .filter(|row| !row.join)
+                .map(|row| row.scalars.as_slice())
+        });
         match self.derive_records(rows, &vocabularies) {
             Ok(records) => mint_records.extend(records),
             Err(detail) => {
@@ -649,16 +656,22 @@ impl Executor {
 
         // A window carrying no join row reads no artifact.
         let restating = joining_entities(closing.entries());
-        let prepared = if restating.is_empty() {
-            growth_records(closing.entries(), None)
+        let (prepared, joined_per_entry) = if restating.is_empty() {
+            (
+                growth_records(closing.entries(), None),
+                joined_per_entry(closing.entries(), None),
+            )
         } else {
             self.live.with_artifacts(|store| {
-                growth_records(
-                    closing.entries(),
-                    Some(HeldMembers {
-                        store,
-                        restating: Some(&restating),
-                    }),
+                (
+                    growth_records(
+                        closing.entries(),
+                        Some(HeldMembers {
+                            store,
+                            restating: Some(&restating),
+                        }),
+                    ),
+                    joined_per_entry(closing.entries(), Some(store)),
                 )
             })
         };
@@ -672,16 +685,35 @@ impl Executor {
             }
         };
 
+        // An edited item keeps its suppression and every membership and generating set it is in,
+        // read here, on the thread that changes them, so nothing can move between the read and
+        // the append.
+        let generation = self.generation.load_full();
+        let mut moved: Vec<(EntityId, EntityId)> = Vec::new();
+        let mut first_edit: Option<usize> = None;
+        for (index, entry) in closing.entries_mut().iter_mut().enumerate() {
+            let (_, edits) = entry.rows_and_edits_mut();
+            for edit in edits.iter_mut() {
+                edit.suppressed = generation.overlay.is_suppressed(edit.old);
+                moved.push((edit.old, edit.rows[0].entity_id));
+                first_edit.get_or_insert(index);
+            }
+        }
+        drop(generation);
+        let carried = self.live.with_artifacts(|store| store.carried_over(&moved));
+
         mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
         let entries_at = vocabulary_records.len();
         let artifacts_at = entries_at + closing.entries().len();
         let growth_at = artifacts_at + mint_records.len();
+        let carried_at = growth_at + growth.len();
         let durable: Vec<&WalRecord> = vocabulary_records
             .iter()
             .chain(closing.entries().iter().map(|entry| &entry.record))
             .chain(mint_records.iter())
             .chain(growth.iter().map(|(record, _)| record))
+            .chain(carried.iter())
             .collect();
 
         let positions = match self.append_and_sync(&durable, Some(mark)) {
@@ -692,6 +724,7 @@ impl Executor {
                     Undurable::Append { at, .. } if (entries_at..artifacts_at).contains(&at) => {
                         at - entries_at
                     }
+                    Undurable::Append { at, .. } if at >= carried_at => first_edit.unwrap_or(0),
                     Undurable::Append { at, .. } if at >= growth_at => growth[at - growth_at].1,
                     _ => 0,
                 };
@@ -715,12 +748,13 @@ impl Executor {
         let artifact_records: Vec<&WalRecord> = mint_records
             .iter()
             .chain(growth.iter().map(|(record, _)| record))
+            .chain(carried.iter())
             .collect();
         self.apply_artifact_records(&artifact_records, &positions[artifacts_at..], Publish::AtTick);
 
         self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
         log_minted_artifacts(&minted_per_entry, &mint_records);
-        closing.ack(&self.health, minted_per_entry);
+        closing.ack(&self.health, minted_per_entry, joined_per_entry);
     }
 
     /// Index every entry of a committed window by its batch id, after the swap.
@@ -746,6 +780,10 @@ impl Executor {
     /// Clone the buffer once, insert every entry in the window, publish once. The clone is
     /// O(total buffered items), so a window of k entries pays it once. `vocabularies` is
     /// `close_window`'s own mutated copy, published verbatim, not cloned from the published `Arc`.
+    ///
+    /// An edit deletes its old entity and gives the new one the old one's suppression in the same
+    /// swap that buffers the new one's rows, so the item is hidden from its acknowledgement until
+    /// the new rows flush, and nobody who loses access by the edit keeps it past the ack.
     pub(super) fn apply_window(
         &self,
         closed: &mut [ClosedEntry<Reply<Ingested>>],
@@ -769,12 +807,28 @@ impl Executor {
 
         // What the buffered-row lists grow by: every entity this window buffered a row for.
         let mut inserted: Vec<EntityId> = Vec::new();
+        let mut overlay: Option<tessera_lifecycle::Overlay> = None;
+        let mut deleted: Vec<EntityId> = Vec::new();
+        let mut newly_denied: Vec<EntityId> = Vec::new();
+        let mut pairs: Vec<(u32, u32)> = Vec::new();
         let mut established = lock_recover(&self.live.established);
         // Updated together in one critical section, so the two can never disagree about an item.
         let mut established_inverse = lock_recover(&self.live.established_inverse);
         for (entry, wal_pos) in closed.iter_mut().zip(positions) {
             let terms = std::mem::take(&mut entry.terms);
-            for (row, row_terms) in entry.rows().iter().zip(terms) {
+            let edit_terms = std::mem::take(&mut entry.edit_terms);
+            let rows = entry.rows().iter().zip(terms);
+            let edit_rows = entry
+                .edits()
+                .iter()
+                .zip(edit_terms)
+                .flat_map(|(edit, terms)| {
+                    let mut terms = Some(terms);
+                    edit.rows
+                        .iter()
+                        .map(move |row| (row, terms.take().unwrap_or_default()))
+                });
+            for (row, row_terms) in rows.chain(edit_rows) {
                 // No external id means nothing to establish.
                 let mut m = StageMark::now();
                 if let Some(external_id) = &row.external_id {
@@ -789,21 +843,49 @@ impl Executor {
                 self.health.lap(WriteStage::RowWalPos, m);
                 inserted.push(row.entity_id);
             }
+            for edit in entry.edits() {
+                let new = edit.rows[0].entity_id;
+                let overlay = overlay.get_or_insert_with(|| (*generation.overlay).clone());
+                overlay.apply(edit.old, tessera_lifecycle::ChangeOp::Delete);
+                deleted.push(edit.old);
+                newly_denied.push(edit.old);
+                if edit.suppressed {
+                    overlay.apply(new, tessera_lifecycle::ChangeOp::Suppress);
+                    newly_denied.push(new);
+                }
+                buffer.remove(edit.old);
+                pairs.push((edit.number.raw() as u32, new.raw() as u32));
+            }
         }
         drop(established);
         drop(established_inverse);
-        // A joining row's values are its item's, whose entries are held already.
+        // A joining row's values are its item's, whose entries are held already. An edited item's
+        // old entity names nothing, so its entries go.
         let unique_live = unique.then(|| {
             let mut unique_live = (*generation.unique_live).clone();
+            if !deleted.is_empty() {
+                unique_live.remove_entities(&deleted.iter().map(|e| e.raw() as u32).collect());
+            }
             unique_live.add(
                 declared,
                 closed
                     .iter()
-                    .flat_map(|entry| entry.rows())
+                    .flat_map(|entry| {
+                        entry
+                            .rows()
+                            .iter()
+                            .chain(entry.edits().iter().flat_map(|edit| &edit.rows))
+                    })
                     .filter(|row| !row.join)
                     .map(|row| (row.entity_id, row.scalars.as_slice())),
             );
             unique_live
+        });
+        let edited_live = (!pairs.is_empty()).then(|| {
+            let mut edited_live = (*generation.edited_live).clone();
+            edited_live.remove(deleted.iter().map(|e| e.raw() as u32));
+            edited_live.add(&pairs);
+            edited_live
         });
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
@@ -812,14 +894,28 @@ impl Executor {
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
 
-        let next = generation.with_buffer(Arc::new(buffer), &inserted, |g| {
+        let change = |g: &mut crate::GenerationParts| {
             g.overlay_version = generation.overlay_version + 1;
             g.vocabularies = Arc::new(vocabularies);
             g.suggest = suggest;
             if let Some(unique_live) = unique_live {
                 g.unique_live = Arc::new(unique_live);
             }
-        });
+            if let Some(edited_live) = edited_live {
+                g.edited_live = Arc::new(edited_live);
+                g.edit_epoch = generation.edit_epoch + 1;
+            }
+        };
+        let next = match overlay {
+            None => generation.with_buffer(Arc::new(buffer), &inserted, change),
+            Some(overlay) => generation.with_denies(
+                Arc::new(overlay),
+                &newly_denied,
+                Arc::new(buffer),
+                &inserted,
+                change,
+            ),
+        };
         self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);
     }

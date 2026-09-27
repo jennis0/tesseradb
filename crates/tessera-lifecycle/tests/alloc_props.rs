@@ -64,6 +64,7 @@ proptest! {
                     prop_assert!(!used.contains(&id), "id {} reused across a simulated crash", id);
                     used.insert(id);
                     wal_records.push(WalRecord::IngestBatch {
+                        edits: Vec::new(),
                         receipt: Vec::new(),
                         batch_id: format!("batch-{id}"),
                         body_hash: [0u8; 32],
@@ -130,6 +131,7 @@ proptest! {
                 prop_assert!(!used.contains(&id), "entity id {} reissued", id);
                 used.insert(id);
                 wal.push(WalRecord::IngestBatch {
+                    edits: Vec::new(),
                     receipt: Vec::new(),
                     batch_id: format!("batch-{id}"),
                     body_hash: [0u8; 32],

@@ -1762,9 +1762,8 @@ class Database:
           answer's `deleted` says how many. A deletion cannot be undone.
         - `wait`: as for `drop_layer`.
 
-        Without `delete_dangling`, no item is deleted. The answer's `fills_dropped` counts the
-        items whose values for the view were sent and not yet published; those values are
-        dropped with the view.
+        Without `delete_dangling`, no item is deleted. Rows sent for the view and not yet published
+        are dropped with it.
         """
         self._refuse_before_the_first_commit("drop_view")
         return _accepted(

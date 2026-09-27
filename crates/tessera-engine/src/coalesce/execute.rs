@@ -143,9 +143,14 @@ pub(super) fn coalesce_attr_window(
     let presence_path = ctx.prefix_dir.join(&extent.presence);
     let dict_path = extent.dict.as_ref().map(|rel| ctx.prefix_dir.join(rel));
     match &dict_path {
-        Some(dict_path) => {
-            merge_keyword_window(window, &inputs, ctx, &values_path, &presence_path, dict_path)?
-        }
+        Some(dict_path) => merge_keyword_window(
+            window,
+            &inputs,
+            ctx,
+            &values_path,
+            &presence_path,
+            dict_path,
+        )?,
         None => merge_values_window(column, &inputs, &values_path, &presence_path)?,
     }
     digest_outputs(files, ctx, extent.files())?;
@@ -217,9 +222,24 @@ pub(super) fn coalesce_records(
     ctx: &CoalesceContext,
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<RecordExtent, MaintenanceFailed> {
-    let record_rel = format!("{}/attrs/record", ctx.out_rel);
-    std::fs::create_dir_all(ctx.prefix_dir.join(&record_rel))
-        .map_err(failed("coalesce dir for the record blob"))?;
+    coalesce_record_blobs(
+        records,
+        &format!("{}/attrs/record", ctx.out_rel),
+        ctx,
+        files,
+    )
+}
+
+/// Record blobs merged by entity into one under `record_rel`, re-blocked toward the format's
+/// target block size.
+fn coalesce_record_blobs(
+    records: &[RecordExtent],
+    record_rel: &str,
+    ctx: &CoalesceContext,
+    files: &mut BTreeMap<String, FileDigest>,
+) -> Result<RecordExtent, MaintenanceFailed> {
+    std::fs::create_dir_all(ctx.prefix_dir.join(record_rel))
+        .map_err(failed(format!("coalesce dir {record_rel}")))?;
     let open = |extent: &RecordExtent| {
         tessera_filter::RecordBlob::open(
             &ctx.prefix_dir.join(&extent.blocks),
@@ -307,6 +327,29 @@ pub(super) fn coalesce_text_window(
         )
         .collect();
 
+    // A group-scoped column's prose, merged as the record blob is.
+    let prose = match window.view {
+        None => None,
+        Some(_) => {
+            let consumed: Vec<RecordExtent> = window
+                .extents
+                .iter()
+                .map(|extent| {
+                    extent.prose.clone().ok_or_else(|| {
+                        MaintenanceFailed(format!(
+                            "a text extent of group-scoped column '{column}' names no prose"
+                        ))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            Some(coalesce_record_blobs(
+                &consumed,
+                &format!("{column_rel}/{}", tessera_store::manifest::SCOPED_PROSE_DIR),
+                ctx,
+                files,
+            )?)
+        }
+    };
     let extent = TextExtent {
         column: column.clone(),
         view: window.view.clone(),
@@ -314,6 +357,7 @@ pub(super) fn coalesce_text_window(
         dict: format!("{column_rel}/{}", tessera_filter::DICT_FILE),
         postings: format!("{column_rel}/postings.arrow"),
         presence: format!("{column_rel}/presence.roaring"),
+        prose,
     };
     let dict_path = ctx.prefix_dir.join(&extent.dict);
     let postings_path = ctx.prefix_dir.join(&extent.postings);
@@ -329,7 +373,11 @@ pub(super) fn coalesce_text_window(
         &spool_path,
     )
     .map_err(failed(format!("text coalesce for '{column}'")))?;
-    digest_outputs(files, ctx, extent.files())?;
+    digest_outputs(
+        files,
+        ctx,
+        [&extent.dict, &extent.postings, &extent.presence].map(String::as_str),
+    )?;
 
     // A dictionary and postings that disagree would give ordinals that name the wrong words.
     let no_reopen = "the coalesced text extent does not reopen";
@@ -397,6 +445,38 @@ pub(super) fn coalesce_entity_terms(
     digest_outputs(files, ctx, extent.files())?;
     open(&extent).map_err(failed("the coalesced entity-terms extent does not reopen"))?;
     Ok(extent)
+}
+
+/// One direction's window of live edited-items runs merged into new runs, nothing dropped.
+pub(super) fn coalesce_edited_window(
+    window: &super::EditedWindow,
+    ctx: &CoalesceContext,
+    files: &mut BTreeMap<String, FileDigest>,
+) -> Result<Vec<String>, MaintenanceFailed> {
+    let what = format!("edited-item runs ({})", window.direction.name());
+    let inputs: Vec<PathBuf> = window
+        .runs
+        .iter()
+        .map(|rel| ctx.prefix_dir.join(rel))
+        .collect();
+    let out_rel = format!("{}/edited/{}", ctx.out_rel, window.direction.name());
+    let written = tessera_store::edited::merge_edited_runs(
+        window.direction,
+        &inputs,
+        &croaring::Bitmap::new(),
+        &ctx.prefix_dir.join(&out_rel),
+        "merged",
+    )
+    .map_err(failed(&what))?;
+    let paths: Vec<PathBuf> = written.iter().map(|run| run.path.clone()).collect();
+    tessera_store::fsync_written(&paths).map_err(failed(&what))?;
+    let rels: Vec<String> = written
+        .iter()
+        .map(|run| tessera_store::unique::relative(&ctx.prefix_dir, &run.path))
+        .collect::<Result<_, _>>()
+        .map_err(failed(&what))?;
+    digest_outputs(files, ctx, rels.iter().map(String::as_str))?;
+    Ok(rels)
 }
 
 /// One unique column's window of live runs merged into new runs, nothing dropped: an entry names

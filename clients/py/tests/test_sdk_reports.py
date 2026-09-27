@@ -153,13 +153,14 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
     refused = raised.value.report
     assert all(str(finding) in str(refused) for finding in refused.findings)
 
-    # `p0` holds 0.5, so another value on it is refused, and the two new rows land. The refused
-    # commit left its rows pending, so this is a second database.
+    # No item is named `nobody`, and a row without coordinates creates none, so it is refused, and
+    # the two new rows land. The refused commit left its rows pending, so this is a second
+    # database.
     db = served(small)
     capsys.readouterr()
     db.insert(
         "score",
-        pa.table({"id": pa.array(["p0"], pa.string()), "score": pa.array([9.0], pa.float64())}),
+        pa.table({"id": pa.array(["nobody"], pa.string()), "score": pa.array([9.0], pa.float64())}),
         id="id",
         value="score",
     )

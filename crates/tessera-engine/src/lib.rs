@@ -22,6 +22,7 @@ pub mod containment;
 mod control;
 pub mod cut;
 pub mod derived;
+mod edited;
 mod engine;
 mod error;
 pub mod filter;
@@ -171,7 +172,7 @@ pub use tessera_store::utf8;
 pub use bundle_lock::BundleLockError;
 pub use write::{
     AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, FoldRefusal,
-    PendingChange, PublishGeometryError, ValuesReceipt, WalGauge, WriteStage,
+    PendingChange, PublishGeometryError, WalGauge, WriteStage,
     DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES, FOLD_GATES,
 };
 // The flush's own laps, beside `WriteStage`'s and read by the same status block.
@@ -193,8 +194,8 @@ pub use write::{
 // `PUT /control/attributes`' body as the executor resolves it, re-exported so the server sees
 // engine API types only (SA §3).
 pub use tessera_lifecycle::AttributeRequest;
-// `POST /control/values`' body as the executor takes it, re-exported on `AttributeRequest`'s rule.
-pub use tessera_lifecycle::{IncomingValues, IngestRow, ValuesRequest};
+// `POST /control/ingest`'s row as the engine takes it, re-exported on `AttributeRequest`'s rule.
+pub use tessera_lifecycle::IngestRow;
 // The two vocabulary routes' bodies, and the two view declarations', on the same rule.
 pub use tessera_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupDeclaration};
 pub use tessera_lifecycle::{DeclaredValue, VocabularyRequest};

@@ -1,11 +1,8 @@
-//! **`POST /control/values`** (`ingest.md` §1.4; decision 0136, track T3): a batch of attribute
-//! values over entities that already exist, addressed by `external_id` or `tessera_id`, in JSON
-//! by default and Arrow by content type. What this file pins is the wire — the status codes and
-//! bodies the route answers, the two encodings landing identical values, the view header a
-//! group-scoped column needs, the two pagination units, and the identifier the route refuses.
-//!
-//! The engine-level cases — every family's fill, the claimant read, the values-only tick, the
-//! fold and the replay — are `tessera-engine/tests/values_fill.rs`.
+//! **Ingest rows without coordinates**: rows naming items that exist, by `external_id` or
+//! `tessera_id`, carrying only the values they change, in JSON by default and Arrow by content
+//! type. Such a row edits the item it names and places it nowhere new; one naming no item creates
+//! nothing and is refused. What this file pins is the wire: the counts each answer carries, the two
+//! encodings landing identical values, and the rows the route refuses.
 
 mod common;
 
@@ -45,10 +42,14 @@ index  = true
 "#;
 
 /// A served fixture with two runtime columns declared: an indexed keyword and an indexed
-/// category, each of which a values batch can fill.
+/// category, each of which a row without coordinates can set.
 async fn serve() -> Served {
     let served = Served::build(|dir| build_scored(dir, N, SCHEMA_TOML)).await;
-    declare(&served, json!({"name": "tag", "type": "keyword", "index": true})).await;
+    declare(
+        &served,
+        json!({"name": "tag", "type": "keyword", "index": true}),
+    )
+    .await;
     declare(
         &served,
         json!({"name": "dept", "type": "category", "vocabulary": "dept", "index": true}),
@@ -76,7 +77,7 @@ async fn declare(served: &Served, body: Value) {
 }
 
 /// Ingest one point and answer its `tessera_id`. The runtime columns [`serve`] declares are
-/// null, since a values batch fills them.
+/// null, since a later row sets them.
 async fn ingest_point(served: &Served, batch_id: &str, external_id: &str) -> u64 {
     ingest_point_with(served, batch_id, external_id, json!({})).await
 }
@@ -123,17 +124,13 @@ fn base64_of(text: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
 }
 
-/// One `POST /control/values` request, with the view header where `view` says so.
-async fn values(
-    served: &Served,
-    batch_id: &str,
-    view: Option<&str>,
-    body: Value,
-) -> (u16, Value) {
+/// One `POST /control/ingest` request of rows without coordinates, with the view header where
+/// `view` says so.
+async fn values(served: &Served, batch_id: &str, view: Option<&str>, body: Value) -> (u16, Value) {
     let mut request = served
         .server
         .client
-        .post(served.server.control_url("/control/values"))
+        .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id);
     if let Some(view) = view {
@@ -182,27 +179,14 @@ async fn item_fields(served: &Served, id: u64) -> Value {
     body["fields"].clone()
 }
 
-async fn status(served: &Served) -> Value {
-    let resp = served
-        .server
-        .client
-        .get(served.server.control_url("/control/status"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    resp.json().await.unwrap()
-}
-
 // ---------------------------------------------------------------------------------------------
 
-/// **The route fills, restates and refuses on the wire** (`ingest.md` §1.1, §1.4). A `200` names
-/// what the batch did; a restatement fills nothing; a cell supplied with a different value is a
-/// `409` naming the column and never the held value; a row naming an entity this deployment does
-/// not hold is a `422`.
+/// **A row without coordinates edits the item it names, restates, and names nothing it cannot
+/// place.** A `200` counts what the batch did; a restatement changes nothing and is counted
+/// unchanged; a different value edits the item again; a row naming no item and carrying no
+/// position is a `422` naming the row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_values_route_fills_restates_and_refuses() {
+async fn rows_without_coordinates_edit_restate_and_create_nothing() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", "subject").await;
     tick(&served.server).await;
@@ -214,17 +198,26 @@ async fn the_values_route_fills_restates_and_refuses() {
         json!([{"external_id": base64_of("subject"), "tag": "alpha", "dept": "ops"}]),
     )
     .await;
-    assert_eq!(status, 200, "the fill is accepted: {answer}");
+    assert_eq!(status, 200, "the row is accepted: {answer}");
     assert_eq!(answer["rows"], 1);
-    assert_eq!(answer["filled"], 2, "one cell per column: {answer}");
-    assert_eq!(answer["held"], 0);
+    assert_eq!(answer["edited"], 1, "{answer}");
+    assert_eq!(
+        ingested_ids(&answer),
+        vec![id],
+        "the item keeps its tessera_id"
+    );
     tick(&served.server).await;
 
     let fields = item_fields(&served, id).await;
     assert_eq!(fields["tag"], json!("alpha"), "{fields}");
     assert_eq!(fields["dept"], json!("ops"), "{fields}");
+    assert_eq!(
+        fields["score"],
+        json!(1.0),
+        "a value the row left out is kept: {fields}"
+    );
 
-    // A restatement under a fresh batch id fills nothing and is counted as held.
+    // A restatement under a fresh batch id changes nothing and is counted unchanged.
     let (status, answer) = values(
         &served,
         "values-2",
@@ -233,28 +226,22 @@ async fn the_values_route_fills_restates_and_refuses() {
     )
     .await;
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer["filled"], 0);
-    assert_eq!(answer["held"], 1);
+    assert_eq!(answer["unchanged"], 1, "{answer}");
 
-    // A different value is a 409 naming the column, and never either value.
+    // A different value edits the item again.
     let (status, answer) = values(
         &served,
         "values-3",
-        Some("s0"),
+        None,
         json!([{"external_id": base64_of("subject"), "tag": "beta"}]),
     )
     .await;
-    assert_eq!(status, 409, "{answer}");
-    assert_eq!(answer["error"], "conflict", "{answer}");
-    let detail = answer.to_string();
-    assert!(detail.contains("'tag'"), "{detail}");
-    assert!(
-        !detail.contains("alpha") && !detail.contains("beta"),
-        "the body names neither value (`ingest.md` §1.4): {detail}"
-    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["edited"], 1, "{answer}");
+    tick(&served.server).await;
+    assert_eq!(item_fields(&served, id).await["tag"], json!("beta"));
 
-    // A row naming an entity this deployment does not hold is a 422: a values batch creates
-    // nothing, so the remedy is to ingest the point first.
+    // A row naming no item and carrying no position creates nothing and is refused.
     let (status, answer) = values(
         &served,
         "values-4",
@@ -265,7 +252,10 @@ async fn the_values_route_fills_restates_and_refuses() {
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
     assert!(
-        answer["detail"].as_str().unwrap_or_default().contains("row 0"),
+        answer["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("row 0"),
         "the refusal names the row and not the id: {answer}"
     );
 }
@@ -299,11 +289,11 @@ async fn assert_minted_key_is_listed(served: &Served, key: &str) {
     }
 }
 
-/// A key of an open vocabulary that no ingest has used is minted by the values batch that names
-/// it, and the cell is served after a flush and after a restart. A closed vocabulary's unknown key
-/// is refused with nothing written, and the next flush still publishes.
+/// A key of an open vocabulary that no ingest has used is minted by the row without coordinates
+/// that names it, and the cell is served after a flush and after a restart. A closed vocabulary's
+/// unknown key is refused with nothing written, and the next flush still publishes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
+async fn a_row_without_coordinates_mints_a_new_key_of_an_open_vocabulary() {
     let served = serve().await;
     declare(
         &served,
@@ -321,7 +311,7 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
     )
     .await;
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer["filled"], 1, "{answer}");
+    assert_eq!(answer["edited"], 1, "{answer}");
 
     let (status, answer) = values(
         &served,
@@ -330,12 +320,18 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
         json!([{"external_id": base64_of("subject"), "dept": "legal"}]),
     )
     .await;
-    assert_eq!(status, 422, "a closed vocabulary's unknown key is refused: {answer}");
+    assert_eq!(
+        status, 422,
+        "a closed vocabulary's unknown key is refused: {answer}"
+    );
 
     tick(&served.server).await;
     let fields = item_fields(&served, id).await;
     assert_eq!(fields["grade"], json!("g0"), "{fields}");
-    assert!(fields["dept"].is_null(), "the refused batch wrote nothing: {fields}");
+    assert!(
+        fields["dept"].is_null(),
+        "the refused batch wrote nothing: {fields}"
+    );
     assert_minted_key_is_listed(&served, "g0").await;
 
     let served = served.restart().await;
@@ -377,9 +373,9 @@ async fn served_keys(served: &Served, layer: &str) -> Vec<String> {
 }
 
 /// A layer whose artifacts are the values of a column gets an artifact for a new value whether
-/// the value arrives by ingest or by a values batch, and both survive a restart.
+/// the value arrives with a new item or by an edit of one, and both survive a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() {
+async fn a_value_an_edit_gives_derives_its_artifact_as_a_create_does() {
     let served = serve().await;
     declare(
         &served,
@@ -419,9 +415,9 @@ async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() 
     assert_eq!(served_keys(&served, "grades").await, ["g1", "g2"]);
 }
 
-/// **The same batch as JSON and as Arrow lands identical values** (`ingest.md` §1.2). Nothing
-/// about the route's semantics depends on which encoding carried it: the Arrow batch fills the
-/// cell, and the JSON restatement of it is the fill rule's no-op rather than a second claimant.
+/// **The same batch as JSON and as Arrow lands identical values**. Nothing about the route's
+/// semantics depends on which encoding carried it: the Arrow batch sets the value, and the JSON
+/// restatement of it changes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_two_encodings_land_identical_values() {
     let served = serve().await;
@@ -431,7 +427,7 @@ async fn the_two_encodings_land_identical_values() {
     let resp = served
         .server
         .client
-        .post(served.server.control_url("/control/values"))
+        .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "values-arrow")
         .header("x-tessera-view", "s0")
@@ -443,11 +439,11 @@ async fn the_two_encodings_land_identical_values() {
     let status = resp.status().as_u16();
     let answer: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "the Arrow batch is accepted: {answer}");
-    assert_eq!(answer["filled"], 1);
+    assert_eq!(answer["edited"], 1);
     tick(&served.server).await;
     assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
 
-    // The JSON spelling of the same batch: the cell is held identically, so it is a no-op.
+    // The JSON spelling of the same batch: the value is held identically, so it changes nothing.
     let (status, answer) = values(
         &served,
         "values-json",
@@ -456,11 +452,10 @@ async fn the_two_encodings_land_identical_values() {
     )
     .await;
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer["filled"], 0, "{answer}");
-    assert_eq!(answer["held"], 1, "{answer}");
+    assert_eq!(answer["unchanged"], 1, "{answer}");
 }
 
-/// **A row may name its entity by `tessera_id`** (`ingest.md` §1.4), on `/control/changes`' rule.
+/// **A row may name its item by `tessera_id`**, on `/control/changes`' rule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_row_may_name_its_entity_by_tessera_id() {
     let served = serve().await;
@@ -475,10 +470,10 @@ async fn a_row_may_name_its_entity_by_tessera_id() {
     )
     .await;
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer["filled"], 1);
+    assert_eq!(answer["edited"], 1);
 }
 
-/// One Arrow values batch naming its entity by `tessera_id`.
+/// One Arrow batch of one row naming its item by `tessera_id`.
 fn arrow_values_by_tessera_id(id: u64, tag: &str) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("tessera_id", DataType::Utf8, true),
@@ -507,7 +502,7 @@ async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
     let resp = served
         .server
         .client
-        .post(served.server.control_url("/control/values"))
+        .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "values-arrow")
         .header("x-tessera-view", "s0")
@@ -519,32 +514,41 @@ async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
     let status = resp.status().as_u16();
     let answer: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "{answer}");
-    assert_eq!(answer["filled"], 1);
+    assert_eq!(answer["edited"], 1);
     tick(&served.server).await;
     assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
 }
 
-/// A row names its entity by exactly one form: both and neither are each refused, and the batch
-/// has no effect.
+/// A row may name its item by both forms where they agree, and a row naming it by neither and
+/// carrying no position is refused with no effect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_row_naming_its_entity_by_both_forms_or_neither_is_refused() {
+async fn a_row_naming_its_item_by_both_forms_or_neither() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", "subject").await;
     tick(&served.server).await;
 
-    let rows = [
-        json!({"external_id": base64_of("subject"), "tessera_id": id.to_string(),
-               "tag": "alpha"}),
-        json!({"tag": "alpha"}),
-    ];
-    for (i, row) in rows.into_iter().enumerate() {
-        let (status, answer) =
-            values(&served, &format!("values-{i}"), Some("s0"), json!([row])).await;
-        assert_eq!(status, 422, "{answer}");
-        assert_eq!(answer["error"], "contract", "{answer}");
-    }
+    let (status, answer) = values(
+        &served,
+        "values-both",
+        Some("s0"),
+        json!([{"external_id": base64_of("subject"), "tessera_id": id.to_string(),
+                "tag": "alpha"}]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(ingested_ids(&answer), vec![id]);
+
+    let (status, answer) = values(
+        &served,
+        "values-neither",
+        Some("s0"),
+        json!([{"tag": "beta"}]),
+    )
+    .await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
     tick(&served.server).await;
-    assert_eq!(item_fields(&served, id).await["tag"], Value::Null);
+    assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
 }
 
 /// **A group-scoped column is nameable only on a batch that carries the view header**
@@ -566,7 +570,10 @@ async fn an_undeclared_column_is_refused_naming_the_column() {
     .await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
-    assert!(answer["detail"].as_str().unwrap().contains("'sentiment'"), "{answer}");
+    assert!(
+        answer["detail"].as_str().unwrap().contains("'sentiment'"),
+        "{answer}"
+    );
 
     // And a batch that names no view at all takes the same refusal, which is what keeps a scoped
     // column un-nameable without a header.
@@ -578,34 +585,4 @@ async fn an_undeclared_column_is_refused_naming_the_column() {
     )
     .await;
     assert_eq!(status, 422, "{answer}");
-}
-
-/// **The route publishes its two pagination units and enforces them** (`ingest.md` §2.1): a
-/// record count and a byte cap on `/control/status`, each a `422` naming the unit rather than a
-/// truncation.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_limits_are_published_and_enforced() {
-    let served = serve().await;
-    let limits = status(&served).await["limits"]["values"].clone();
-    assert_eq!(limits["route"], json!("POST /control/values"));
-    let max_rows = limits["max_batch_rows"].as_u64().expect("a record count");
-    assert!(
-        limits["max_batch_bytes"].as_u64().is_some(),
-        "and a byte cap: {limits}"
-    );
-
-    ingest_point(&served, "points-1", "subject").await;
-    tick(&served.server).await;
-
-    // One row over the published count, refused naming the unit before anything is appended.
-    let rows: Vec<Value> = (0..=max_rows)
-        .map(|i| json!({"external_id": base64_of(&format!("row-{i}")), "tag": "alpha"}))
-        .collect();
-    let (status, answer) = values(&served, "values-1", Some("s0"), Value::Array(rows)).await;
-    assert_eq!(status, 422, "{answer}");
-    assert_eq!(answer["error"], "contract", "{answer}");
-    assert!(
-        answer["detail"].as_str().unwrap_or_default().contains("ingest_max_batch_rows"),
-        "the refusal names the unit: {answer}"
-    );
 }

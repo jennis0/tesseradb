@@ -141,6 +141,8 @@ pub const RECORD_BLOCK_TARGET: usize = 256 * 1024;
 /// The blob's three base files, under `attrs/record/` (records §7). `record` is a reserved column
 /// name at schema parse precisely so this namespace cannot collide with a declaration (review N10).
 pub const RECORD_BLOCKS_FILE: &str = "blocks.bin";
+/// The one field of a group-scoped text column's prose blob.
+pub const PROSE_TAG: u16 = 0;
 pub const RECORD_HASROW_FILE: &str = "hasrow.roaring";
 pub const RECORD_DIRECTORY_FILE: &str = "directory.arrow";
 
@@ -1317,6 +1319,24 @@ impl RecordBlob {
         let mut scan = BlockScan::start(&header);
         self.row_at(&bytes, block, &header, &mut scan, rank, entity)
             .map(Some)
+    }
+
+    /// The prose a group-scoped text column's blob holds for `entity`: its one field,
+    /// [`PROSE_TAG`]. `None` where the blob holds no row for it.
+    pub fn prose_of(&self, entity: u32) -> Result<Option<String>, RecordError> {
+        let Some(fields) = self.fields_of(entity)? else {
+            return Ok(None);
+        };
+        match fields
+            .into_iter()
+            .find(|f| f.tag == PROSE_TAG)
+            .map(|f| f.value)
+        {
+            Some(RecordValue::Utf8(prose)) => Ok(Some(prose)),
+            other => Err(malformed(format!(
+                "entity {entity}'s prose row holds {other:?} where one string belongs"
+            ))),
+        }
     }
 
     /// The rows of the entities in `wanted` that this blob holds, **decompressing each block it

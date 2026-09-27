@@ -53,7 +53,12 @@ pub(super) fn open_scoped_column(
     let declared_index = usize::MAX;
     if scoped_family == Family::Text {
         let analyser = resolve_analyser(&family.name, family.analyser.as_deref())?;
-        let text = vec![TextLayer::open_base(&name, &dir, request_access(mmap))?];
+        let text = vec![TextLayer::open_base(
+            &name,
+            &dir,
+            true,
+            request_access(mmap),
+        )?];
         return Ok((
             name,
             placement,
@@ -125,17 +130,12 @@ fn open_value_base(
 fn text_extent_layers<'a>(
     prefix_dir: &Path,
     extents: impl Iterator<Item = &'a tessera_store::manifest::TextExtent>,
-    column: &str,
     mmap: bool,
 ) -> Result<Vec<TextLayer>, ComposeError> {
     extents
         .map(|extent| {
             TextLayer::open(
-                column,
-                &extent.dict,
-                &prefix_dir.join(&extent.dict),
-                &prefix_dir.join(&extent.postings),
-                &prefix_dir.join(&extent.presence),
+                &crate::filter::TextExtentPaths::of(prefix_dir, extent),
                 request_access(mmap),
             )
         })
@@ -151,8 +151,9 @@ fn entity_text_layers(
 ) -> Result<Vec<TextLayer>, ComposeError> {
     text_extent_layers(
         prefix_dir,
-        texts.iter().filter(|e| e.column == column && e.view.is_none()),
-        column,
+        texts
+            .iter()
+            .filter(|e| e.column == column && e.view.is_none()),
         mmap,
     )
 }
@@ -328,6 +329,7 @@ impl FilterColumns {
                 let mut text_layers = vec![TextLayer::open_base(
                     &scalar.name,
                     &dir,
+                    false,
                     request_access(mmap),
                 )?];
                 text_layers.extend(entity_text_layers(
@@ -397,7 +399,6 @@ impl FilterColumns {
                                     e.incarnation,
                                 )
                         }),
-                        &name,
                         mmap,
                     )?);
                 }

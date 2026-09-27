@@ -477,6 +477,45 @@ impl RecordBlobWriter {
     }
 }
 
+/// A group-scoped text column's prose as a record blob, one row per entity holding
+/// [`tessera_filter::PROSE_TAG`]. `rows` ascend in the entity; a repeated entity keeps its first
+/// value, the one a cell holds.
+pub fn write_prose<'a>(
+    blocks_path: &Path,
+    hasrow_path: &Path,
+    directory_path: &Path,
+    rows: impl IntoIterator<Item = (u32, &'a str)>,
+) -> io::Result<()> {
+    let mut writer = RecordBlobWriter::create(
+        blocks_path,
+        hasrow_path,
+        directory_path,
+        tessera_filter::RECORD_BLOCK_TARGET,
+    )?;
+    let mut last: Option<u32> = None;
+    for (entity, prose) in rows {
+        if last.is_some_and(|l| entity <= l) {
+            if last == Some(entity) {
+                continue;
+            }
+            return Err(invalid(format!(
+                "prose rows must ascend in the entity; {entity} follows {}",
+                last.unwrap_or_default()
+            )));
+        }
+        writer.push_row(
+            entity,
+            &[RecordFieldRef {
+                tag: tessera_filter::PROSE_TAG,
+                value: tessera_filter::RecordValueRef::Utf8(prose),
+            }],
+        )?;
+        last = Some(entity);
+    }
+    writer.finish()?;
+    Ok(())
+}
+
 /// A window of record-blob extents merged into one by entity, for the entity-space coalesce.
 /// `inputs` are in manifest order, oldest first.
 ///

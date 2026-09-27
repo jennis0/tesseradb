@@ -30,8 +30,8 @@ VIEWS_ALL = "__views_all__"
 ANCHOR = "__anchor__"
 
 #: An attribute declared at a running service, kept beside the block and never written. Such a
-#: column has no acquisition half: it is filled by `POST /control/values` rather than read from a
-#: file, so the block names no source.
+#: column has no acquisition half: its values arrive on rows of `POST /control/ingest` rather than
+#: from a file, so the block names no source.
 FILLED = "__filled__"
 
 #: `value_set` as the caller chose it, kept beside the block and never written: where the caller
@@ -157,8 +157,8 @@ class Declaration:
             document["vocabulary"] = [dict(b) for b in self.blocks["vocabulary"]]
         if self.blocks["attribute"]:
             # `FILLED` is the SDK's own mark on a column declared at a running service and is
-            # never written: such a block names no source, its cells being filled by the values
-            # route rather than read from a file.
+            # never written: such a block names no source, its values arriving on ingested rows
+            # rather than from a file.
             document["attribute"] = [
                 {k: v for k, v in block.items() if k != FILLED}
                 for block in self.blocks["attribute"]

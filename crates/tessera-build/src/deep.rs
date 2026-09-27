@@ -70,6 +70,8 @@ use sha2::{Digest, Sha256};
 use tessera_authz::{DeltaTier, PostingRef, PostingsReader};
 use tessera_store::manifest::{FileDigest, Manifest, SegmentsManifest};
 
+use tessera_types::{IdentityKey, TesseraId};
+
 use crate::error::{BuildError, Result};
 use crate::VerifyReport;
 
@@ -129,6 +131,11 @@ pub struct VerifyDeepReport {
     /// Unique index entries confirmed to agree with their column's values in both directions,
     /// at most one live entity to a key ([`check_unique_indexes`]); 0 where no column is unique.
     pub unique_entries: u64,
+    /// Edited-item pairs confirmed to be held by both directions of the map
+    /// ([`check_edited_items`]); 0 where no item has been edited.
+    pub edited_pairs: u64,
+    /// Segment rows whose entity is not their number, each confirmed to be a pair of the map.
+    pub edited_rows: u64,
 }
 
 /// Deep-verify the bundle at `root`: the shallow [`crate::verify`] pass, then §11's structural
@@ -159,6 +166,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         scoped_render_lanes: 0,
         cells: 0,
         unique_entries: 0,
+        edited_pairs: 0,
+        edited_rows: 0,
     };
 
     // Sorted so two runs over the same defective bundle refuse with the same message.
@@ -197,9 +206,120 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             partition,
             &mut report,
         )?;
+        check_edited_items(&prefix_dir, phash, &bundle.manifest, partition, &mut report)?;
     }
 
     Ok(report)
+}
+
+/// **The edited-items map agrees with itself and with the rows.** Its two directions hold the same
+/// pairs, an entity holds one number, a number has at most one live entity, and every row an edit
+/// moved is a pair of the map, its number being what its `tessera_id` inverts to.
+fn check_edited_items(
+    prefix_dir: &Path,
+    phash: &str,
+    manifest: &tessera_store::manifest::Manifest,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let runs = &partition.manifest.edited_items;
+    let unreadable = |e: tessera_store::StoreError| {
+        BuildError::Invalid(format!("partition {phash}: the edited items' runs: {e}"))
+    };
+    let forward: BTreeSet<(u32, u32)> = tessera_store::edited::entries(&runs.by_number, prefix_dir)
+        .map_err(unreadable)?
+        .into_iter()
+        .collect();
+    let mut number_of: BTreeMap<u32, u32> = BTreeMap::new();
+    for (entity, number) in
+        tessera_store::edited::entries(&runs.by_entity, prefix_dir).map_err(unreadable)?
+    {
+        if let Some(held) = number_of.insert(entity, number) {
+            if held != number {
+                return Err(BuildError::Invalid(format!(
+                    "partition {phash}: the edited items give entity {entity} two numbers, \
+                     {held} and {number}"
+                )));
+            }
+        }
+    }
+    let backward: BTreeSet<(u32, u32)> = number_of.iter().map(|(e, n)| (*n, *e)).collect();
+    if let Some((number, entity)) = forward.symmetric_difference(&backward).next() {
+        let (held, missing) = match forward.contains(&(*number, *entity)) {
+            true => ("by number", "by entity"),
+            false => ("by entity", "by number"),
+        };
+        return Err(BuildError::Invalid(format!(
+            "partition {phash}: the edited items hold number {number} and entity {entity} {held} \
+             and not {missing}"
+        )));
+    }
+    report.edited_pairs += forward.len() as u64;
+
+    // A number's live entity is one no deletion names that has a row: an edit deletes the entity
+    // it moves an item away from.
+    let deleted = partition
+        .manifest
+        .tombstones
+        .entities()
+        .cloned()
+        .unwrap_or_default();
+    let live = |entity: u32| {
+        !deleted.contains(entity)
+            && partition.views.values().any(|data| {
+                data.row_space
+                    .row_of(tessera_types::EntityId::new(u64::from(entity)))
+                    .is_some()
+            })
+    };
+    let mut entities_of: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for &(number, entity) in &forward {
+        entities_of.entry(number).or_default().push(entity);
+    }
+    for (number, entities) in &entities_of {
+        let alive: Vec<u32> = std::iter::once(*number)
+            .chain(entities.iter().copied())
+            .filter(|entity| live(*entity))
+            .collect();
+        if alive.len() > 1 {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} has {} live entities, {alive:?}; an item is \
+                 held by one",
+                alive.len()
+            )));
+        }
+    }
+
+    let key = IdentityKey::from_hex(&manifest.identity.key)
+        .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
+    let mut views: Vec<_> = partition.views.iter().collect();
+    views.sort_by(|a, b| a.0.cmp(b.0));
+    for (view, data) in views {
+        for segment in &data.segments {
+            let ids = segment.columns.tessera_id();
+            for (row, entity) in segment.entities.moved(ids, &key) {
+                let tessera_id = ids.get(row as usize).copied().ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "view {view}, segment {}: moved row {row} is past its {} rows",
+                        segment.seg_id,
+                        ids.len()
+                    ))
+                })?;
+                let (_, number) = key.invert(TesseraId::new(tessera_id));
+                if !u32::try_from(number.raw()).is_ok_and(|n| forward.contains(&(n, entity))) {
+                    return Err(BuildError::Invalid(format!(
+                        "view {view}, segment {}: row {row} holds entity {entity}, which the \
+                         edited items do not give number {}",
+                        segment.seg_id,
+                        number.raw()
+                    )));
+                }
+                report.edited_rows += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// **Every unique index agrees with its column, and no key names two live entities.**
@@ -864,9 +984,8 @@ impl PairsCursor {
                 path: self.path.clone(),
                 detail: e.to_string(),
             })?;
-            let malformed = |detail: &str| {
-                BuildError::Invalid(format!("{}: {detail}", self.path.display()))
-            };
+            let malformed =
+                |detail: &str| BuildError::Invalid(format!("{}: {detail}", self.path.display()));
             let entities = batch
                 .column_by_name("entity_id")
                 .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())

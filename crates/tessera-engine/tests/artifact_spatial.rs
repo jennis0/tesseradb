@@ -614,7 +614,7 @@ fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
     // Inverted through the admin plane's own resolver, the way `/control/changes` does — so the
     // suppression below exercises the misdirection guard rather than going round it.
     engine
-        .resolve_tessera_ids(&[row.tessera_id])[0]
+        .resolve_tessera_ids(&[row.tessera_id]).unwrap()[0]
         .expect("an artifact identifier names the entity this deployment issued for it")
 }
 

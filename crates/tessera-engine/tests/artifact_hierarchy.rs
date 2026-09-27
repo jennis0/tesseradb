@@ -390,7 +390,7 @@ fn a_suppressed_parent_does_not_take_its_child_with_it() {
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
     let root_entity = engine
-        .resolve_tessera_ids(&[served[0].tessera_id])[0]
+        .resolve_tessera_ids(&[served[0].tessera_id]).unwrap()[0]
         .expect("it names what was issued");
     engine
         .accept_change(root_entity, tessera_lifecycle::wal::ChangeOp::Suppress)
@@ -445,7 +445,7 @@ fn a_deleted_parent_leaves_its_child_a_root() {
     let served = artifacts_of(&engine, &credential, Some(1));
     assert_eq!(keys(&served), vec!["root"]);
     let root_entity = engine
-        .resolve_tessera_ids(&[served[0].tessera_id])[0]
+        .resolve_tessera_ids(&[served[0].tessera_id]).unwrap()[0]
         .expect("it names what was issued");
 
     engine

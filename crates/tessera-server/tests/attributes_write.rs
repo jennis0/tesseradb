@@ -596,7 +596,7 @@ async fn write_json(served: &Served, route: &str, batch_id: &str, body: Value) -
 }
 
 /// A text column declared at a running service matches the same items after a restart as it did
-/// before, whether its prose arrived by ingest or by a values fill.
+/// before, whether its prose arrived with the item or by a later edit.
 #[tokio::test]
 async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
     let served = Served::build(fixture).await;
@@ -623,8 +623,8 @@ async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
     drain(&served.server).await;
     write_json(
         &served,
-        "/control/values",
-        "values",
+        "/control/ingest",
+        "edit",
         json!([{ "external_id": b64(b"n3"), "note": "cedar bark" }]),
     )
     .await;

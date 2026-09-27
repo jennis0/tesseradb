@@ -8,6 +8,16 @@ use crate::Generation;
 pub(crate) struct PlannedSegment {
     pub(crate) seg_id: String,
     pub(crate) dir: String,
+    /// Where its rows' entities are read: the view's row-to-entity file, prefix-relative, for a
+    /// base that has one; whether the manifest lists the segment's edited rows otherwise.
+    pub(crate) entities: PlannedEntities,
+}
+
+/// A [`PlannedSegment`]'s rows' entities, as the manifest says where they are.
+pub(crate) enum PlannedEntities {
+    Numbers,
+    Listed(bool),
+    Table(String),
 }
 
 pub(crate) struct FoldViewPlan {
@@ -37,6 +47,8 @@ pub(crate) struct FoldPlan {
     pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
     /// Every unique column's index runs at the snapshot, each folded into new base runs.
     pub(crate) unique: Vec<tessera_store::manifest::UniqueIndexRuns>,
+    /// The edited-items runs the fold merges, base and live.
+    pub(crate) edited: tessera_store::manifest::EditedItemsRuns,
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity with a row in this partition at the snapshot.
     pub(crate) entity_bound: u64,
@@ -237,13 +249,37 @@ pub(crate) fn plan_fold(
             segments: view_data
                 .segments
                 .iter()
-                .map(|segment| PlannedSegment {
-                    dir: format!(
+                .map(|segment| {
+                    let dir = format!(
                         "partitions/{partition}/{}/segments/{}",
                         tessera_store::view_rel(view),
                         segment.seg_id
-                    ),
-                    seg_id: segment.seg_id.clone(),
+                    );
+                    let base = !row_space
+                        .extents()
+                        .iter()
+                        .any(|e| e.seg_id == segment.seg_id);
+                    let entities = match (base, row_space.row_entity()) {
+                        (true, Some(_)) => PlannedEntities::Table(format!(
+                            "partitions/{partition}/{}/{}",
+                            tessera_store::view_rel(view),
+                            tessera_store::ROW_ENTITY_FILE
+                        )),
+                        (true, None) => PlannedEntities::Numbers,
+                        (false, _) => {
+                            let rel = format!("{dir}/{}", tessera_store::edited::EDITED_ROWS_FILE);
+                            // A segment a fold carried is listed in the bundle's manifest.
+                            PlannedEntities::Listed(
+                                manifest.files.contains_key(&rel)
+                                    || generation.bundle.manifest.files.contains_key(&rel),
+                            )
+                        }
+                    };
+                    PlannedSegment {
+                        dir,
+                        seg_id: segment.seg_id.clone(),
+                        entities,
+                    }
                 })
                 .collect(),
             permutation_bound,
@@ -312,6 +348,7 @@ pub(crate) fn plan_fold(
         entity_terms_extents: manifest.entity_terms_extents.clone(),
         text_extents: manifest.text_extents.clone(),
         unique: manifest.unique_indexes.clone(),
+        edited: manifest.edited_items.clone(),
         tombstones,
         entity_bound,
         external_id_bound,

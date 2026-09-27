@@ -54,6 +54,14 @@ pub(crate) fn rebased(
         let at = contiguous(&index.live, &m.consumed.runs, |rel| rel)?;
         index.live.splice(at, m.output.iter().cloned());
     }
+    for m in &completed.edited {
+        let runs = match m.consumed.direction {
+            tessera_store::edited::Direction::ByNumber => &mut next.edited_items.by_number,
+            tessera_store::edited::Direction::ByEntity => &mut next.edited_items.by_entity,
+        };
+        let at = contiguous(&runs.live, &m.consumed.runs, |rel| rel)?;
+        runs.live.splice(at, m.output.iter().cloned());
+    }
 
     for rel in completed.consumed_files() {
         next.files.remove(rel);
@@ -120,8 +128,13 @@ impl CompletedCoalesce {
             .unique
             .iter()
             .flat_map(|m| m.consumed.runs.iter().map(String::as_str));
+        let edited = self
+            .edited
+            .iter()
+            .flat_map(|m| m.consumed.runs.iter().map(String::as_str));
         tiers
             .chain(unique)
+            .chain(edited)
             .chain(runs.flat_map(LocatorExtent::files))
             .chain(dicts.flat_map(DictExtent::files))
             .chain(attrs.flat_map(AttrExtent::files))

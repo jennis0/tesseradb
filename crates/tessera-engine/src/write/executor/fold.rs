@@ -278,6 +278,10 @@ pub(super) fn fold_rebases(
         })
         // An index removed during the flight takes nothing; one still held must still list every
         // run the fold consumed.
+        && {
+            let listed: FxHashSet<&str> = live_manifest.edited_items.files().collect();
+            plan.edited.files().all(|rel| listed.contains(rel))
+        }
         && plan.unique.iter().all(|consumed| {
             live_manifest
                 .unique_indexes
@@ -330,6 +334,8 @@ pub(super) struct CarriedExtents<'a> {
     /// Every unique index the live manifest holds, less what the fold consumed: a folded
     /// column's base runs are the fold's own and are left out here.
     unique: Vec<tessera_store::manifest::UniqueIndexRuns>,
+    /// The edited-items live runs written during the fold's flight; the fold's own are its base.
+    edited: tessera_store::manifest::EditedItemsRuns,
     /// The dropped views whose segments were left behind, and how many segments that was.
     omitted_views: Vec<String>,
     omitted_segments: usize,
@@ -464,6 +470,23 @@ pub(super) fn carried_forward<'a>(
                 }
             })
             .collect(),
+        edited: {
+            let consumed: FxHashSet<&str> = plan.edited.files().collect();
+            let unconsumed =
+                |runs: &tessera_store::manifest::KeyRuns| tessera_store::manifest::KeyRuns {
+                    base: Vec::new(),
+                    live: runs
+                        .live
+                        .iter()
+                        .filter(|rel| !consumed.contains(rel.as_str()))
+                        .cloned()
+                        .collect(),
+                };
+            tessera_store::manifest::EditedItemsRuns {
+                by_number: unconsumed(&live_manifest.edited_items.by_number),
+                by_entity: unconsumed(&live_manifest.edited_items.by_entity),
+            }
+        },
         omitted_views,
         omitted_segments,
     }
@@ -475,8 +498,12 @@ pub(super) fn carried_forward<'a>(
 pub(super) fn carried_files(
     partition: &str,
     live_manifest: &SegmentsManifest,
+    bundle_files: &std::collections::BTreeMap<String, tessera_store::manifest::FileDigest>,
     forward: &CarriedExtents,
 ) -> std::collections::BTreeSet<String> {
+    // A segment an earlier fold carried has its files listed in the bundle's manifest.
+    let listed =
+        |rel: &str| live_manifest.files.contains_key(rel) || bundle_files.contains_key(rel);
     let mut rels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for descriptor in &forward.segments {
         let segment_prefix = format!(
@@ -497,9 +524,17 @@ pub(super) fn carried_files(
             live_manifest
                 .files
                 .keys()
+                .chain(bundle_files.keys())
                 .filter(|rel| rel.starts_with(&presence_prefix))
                 .cloned(),
         );
+        let edited_rows = format!(
+            "{segment_prefix}/{}",
+            tessera_store::edited::EDITED_ROWS_FILE
+        );
+        if listed(&edited_rows) {
+            rels.insert(edited_rows);
+        }
     }
     rels.extend(forward.runs.iter().cloned());
     rels.extend(forward.locators.iter().map(|e| e.path.clone()));
@@ -519,6 +554,7 @@ pub(super) fn carried_files(
     for index in &forward.unique {
         rels.extend(index.files().map(String::from));
     }
+    rels.extend(forward.edited.files().map(String::from));
     rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
     rels
 }
@@ -1169,6 +1205,16 @@ impl Executor {
                     index
                 })
                 .collect(),
+            edited_items: tessera_store::manifest::EditedItemsRuns {
+                by_number: tessera_store::manifest::KeyRuns {
+                    base: completed.edited.by_number.base.clone(),
+                    live: forward.edited.by_number.live.clone(),
+                },
+                by_entity: tessera_store::manifest::KeyRuns {
+                    base: completed.edited.by_entity.base.clone(),
+                    live: forward.edited.by_entity.live.clone(),
+                },
+            },
             ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);
@@ -1176,7 +1222,12 @@ impl Executor {
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
         let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, plan);
 
-        let carried_rels = carried_files(&plan.partition, live_manifest, &forward);
+        let carried_rels = carried_files(
+            &plan.partition,
+            live_manifest,
+            &live.bundle.manifest.files,
+            &forward,
+        );
         for rel in &carried_rels {
             let Some(digest) = live_manifest
                 .files
@@ -2400,10 +2451,33 @@ pub(super) fn fold_segments(
         let dir = tessera_store::view_path(&partition_dir, &descriptor.view)
             .join("segments")
             .join(&descriptor.seg_id);
+        // A fold writes each view's base, whose rows name their entities in the view's table.
+        let table = dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map(|view| view.join(tessera_store::ROW_ENTITY_FILE))
+            .filter(|path| path.exists())
+            .map(|path| tessera_store::RowToEntity::load(&path));
+        let entities = match table {
+            Some(Ok(table)) => {
+                tessera_store::edited::RowEntities::Table(std::sync::Arc::new(table))
+            }
+            Some(Err(e)) => {
+                tracing::warn!(
+                    view = %descriptor.view,
+                    error = %e,
+                    "the fold could not reopen a row-to-entity file it just wrote; its spatial \
+                     memberships are resolved at the flip instead"
+                );
+                continue;
+            }
+            None => tessera_store::edited::RowEntities::Numbers,
+        };
         match tessera_store::read::SegmentData::load(
             &dir,
             &descriptor.seg_id,
             descriptor.row_count,
+            entities,
         ) {
             Ok(segment) => out.push((descriptor.view.clone(), segment)),
             Err(e) => tracing::warn!(

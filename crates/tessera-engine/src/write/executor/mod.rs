@@ -8,26 +8,22 @@ mod manifest;
 mod memberships;
 mod publications;
 mod unique;
-mod values;
 mod wal;
 mod window;
 
-pub(super) use background::Background;
 pub(crate) use background::outstanding;
+pub(super) use background::Background;
 pub(super) use manifest::SideManifests;
 pub(in crate::write) use unique::UniqueDeclarations;
 pub(super) use wal::ExecutorLog;
 
-pub use commands::*;
+pub(in crate::write) use commands::*;
 pub use deny::*;
 pub(in crate::write) use fold::*;
 use manifest::*;
 use memberships::*;
 pub(in crate::write) use publications::*;
 use wal::*;
-use values::*;
-use window::mint_values_codes;
-
 
 /// How long after a failed cycle the next retry may come, so it does not retry on every wake.
 pub(super) const FAILED_CYCLE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -360,8 +356,12 @@ impl Executor {
                 g.fragments = Arc::clone(&r.fragments);
                 g.external_index = Arc::clone(&r.external_index);
                 g.unique = Arc::clone(&r.unique);
+                g.edited = Arc::clone(&r.edited);
             }
             g.delta_postings = delta_postings;
+            if rotation.as_ref().is_some_and(|r| !r.retired.is_empty()) {
+                g.fold_epoch = previous.fold_epoch + 1;
+            }
             g.overlay_version = overlay_version;
             g.overlay = overlay;
         });

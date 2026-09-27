@@ -32,6 +32,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
     let rows: Vec<FlushRow> = (entity_lo..entity_lo + count)
         .map(|e| FlushRow {
             entity_id: EntityId::new(e),
+            number: EntityId::new(e),
             external_id: Some(format!("ext-{e}").into_bytes()),
             x: (((e * stride) % 97) as f64) / 97.0,
             y: (((e * 53) % 89) as f64) / 89.0,
@@ -58,6 +59,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
         seg_id: seg_id.to_string(),
         entity_lo,
         entity_hi: entity_lo + count - 1,
+        edited_rows: false,
     }
 }
 
