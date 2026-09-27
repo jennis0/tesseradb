@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use arrow::record_batch::RecordBatch;
 
 use crate::cancel::CancelToken;
+use crate::compose::MaskedSet;
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::filter::FilterExpr;
@@ -609,8 +610,11 @@ impl Engine {
 }
 
 impl Pager for ItemsPager<'_> {
-    /// The view's visible items, and of them the ones the filter matches, by one evaluation of
-    /// the filter over the whole view on the route every page takes, under the first page's mask.
+    /// The view's visible items, and of them the ones the filter matches, under the first page's
+    /// mask. Where the read is driven from its matches, the count is taken from the first driven
+    /// stretch, which the first page then takes its rows from. Otherwise, and always under
+    /// `keep_unmatched`, whose read walks the view, it is one evaluation of the filter over the
+    /// whole view on the route every page takes.
     fn count(
         &mut self,
         engine: &Engine,
@@ -629,13 +633,26 @@ impl Pager for ItemsPager<'_> {
                 None,
             ));
         };
+        if let Some(matched) = self.walk.count_driven(&cx, &req.cancel)? {
+            return Ok((
+                RecordsCounts {
+                    served: visible,
+                    matched,
+                },
+                None,
+            ));
+        }
         let total = u32::try_from(open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
-        let whole_view = std::iter::once(0..total).collect::<Vec<_>>();
-        let routed = filter_rows(&cx, expr, None, &whole_view, false, &req.cancel)?;
-        let matched = open
-            .mask
-            .rows_in_range(0..total)
-            .and_cardinality(routed.rows.rows());
+        let whole_view = 0..total;
+        let routed = filter_rows(
+            &cx,
+            expr,
+            None,
+            std::slice::from_ref(&whole_view),
+            false,
+            &req.cancel,
+        )?;
+        let matched = open.mask.count_intersection(routed.rows.rows());
         Ok((
             RecordsCounts {
                 served: visible,

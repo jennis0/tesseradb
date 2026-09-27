@@ -113,14 +113,40 @@ pub fn candidate(
     buffer: &IngestBuffer,
 ) -> Bitmap {
     let mut live = fragment.view().andnot(&overlay.denied());
+    add_buffered(&mut live, satisfied, overlay, buffer, |_| true);
+    live
+}
+
+/// [`candidate`]'s members among `within`, at the cost of `within` and the buffer rather than of
+/// the whole fragment.
+pub fn candidate_within(
+    fragment: &FrozenFragment,
+    satisfied: &FxHashSet<TermId>,
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+    within: &Bitmap,
+) -> Bitmap {
+    let mut live = fragment.view().and(within);
+    live.andnot_inplace(&overlay.denied());
+    add_buffered(&mut live, satisfied, overlay, buffer, |entity| within.contains(entity));
+    live
+}
+
+/// Add to `live` each buffered entity `keep` names whose verdict passes.
+fn add_buffered(
+    live: &mut Bitmap,
+    satisfied: &FxHashSet<TermId>,
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+    keep: impl Fn(u32) -> bool,
+) {
     for (&entity, item) in buffer.iter() {
-        if let Some(true) = verdict_of(overlay, satisfied, entity, Some(item)) {
-            // Entity ids are bounded by the allocator, so this cannot truncate; asserting it here
-            // rather than casting keeps the cap a checked property at the one place entity space
-            // meets a bitmap.
-            let raw = u32::try_from(entity.raw()).expect("entity ids are bounded by the allocator");
+        // Entity ids are bounded by the allocator, so this cannot truncate; asserting it here
+        // rather than casting keeps the cap a checked property at the one place entity space
+        // meets a bitmap.
+        let raw = u32::try_from(entity.raw()).expect("entity ids are bounded by the allocator");
+        if keep(raw) && verdict_of(overlay, satisfied, entity, Some(item)) == Some(true) {
             live.add(raw);
         }
     }
-    live
 }

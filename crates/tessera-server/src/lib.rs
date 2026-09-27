@@ -21,6 +21,8 @@ pub mod viewer;
 use std::path::Path;
 use std::sync::Arc;
 
+use axum::serve::ListenerExt;
+
 use parking_lot::Mutex;
 
 use tessera_engine::{Engine, EngineConfig};
@@ -202,6 +204,16 @@ pub async fn run(prepared: Prepared) -> Result<(), BoxError> {
     serve_announcing(prepared, std::io::stdout()).await
 }
 
+/// Turn off Nagle's algorithm on an accepted connection. A streamed response is several writes,
+/// and on a kept-alive connection the kernel otherwise holds each write after the first until
+/// the client acknowledges the one before, which a client delaying its acknowledgements answers
+/// about 40 ms later.
+fn send_at_once(stream: &mut tokio::net::TcpStream) {
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::warn!(error = %e, "TCP_NODELAY could not be set on a connection");
+    }
+}
+
 /// [`run`], with the announce line written somewhere a test can read. Stdout carries only that
 /// line, a JSON object written and flushed once every plane is bound and every router built, so
 /// a supervisor that reads it can send a request at once. Diagnostics go to stderr.
@@ -253,12 +265,15 @@ pub async fn serve_announcing<W: std::io::Write>(
     writeln!(announce_to, "{}", serde_json::to_string(&listening)?)?;
     announce_to.flush()?;
 
+    let viewer_listener = viewer_listener.tap_io(send_at_once);
+    let session_listener = session_listener.tap_io(send_at_once);
     let viewer_task =
         tokio::spawn(async move { axum::serve(viewer_listener, viewer_router).await });
     let session_task =
         tokio::spawn(async move { axum::serve(session_listener, session_router).await });
     let control_task = match control_bound {
         ControlBound::Tcp(listener) => {
+            let listener = listener.tap_io(send_at_once);
             tokio::spawn(async move { axum::serve(listener, control_router).await })
         }
         ControlBound::Unix(listener, _) => {
