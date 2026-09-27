@@ -1179,8 +1179,47 @@ struct ExtentSlots {
     rel: String,
     entity_lo: u64,
     entity_hi: u64,
+    /// How many `(entity, slot)` pairs follow the dense slots.
+    listed: u64,
     run: usize,
     slots: Slots,
+}
+
+impl ExtentSlots {
+    fn span(&self) -> usize {
+        (self.entity_hi + 1).saturating_sub(self.entity_lo) as usize
+    }
+
+    /// The `i`th listed pair.
+    fn listed_pair(&self, i: usize) -> (u64, u32) {
+        let at = self.span() + 2 * i;
+        (u64::from(self.slots.get(at)), self.slots.get(at + 1))
+    }
+
+    /// The slot `entity` has here, where the extent covers it.
+    fn slot_of(&self, entity: u64) -> Option<u32> {
+        if entity >= self.entity_lo && entity <= self.entity_hi {
+            return Some(self.slots.get((entity - self.entity_lo) as usize));
+        }
+        let (mut lo, mut hi) = (0usize, self.listed as usize);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let (held, slot) = self.listed_pair(mid);
+            match held.cmp(&entity) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(slot),
+            }
+        }
+        None
+    }
+
+    /// Every `(entity, slot)` the extent covers.
+    fn slots(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        (0..self.span())
+            .map(|i| (self.entity_lo + i as u64, self.slots.get(i)))
+            .chain((0..self.listed as usize).map(|i| self.listed_pair(i)))
+    }
 }
 
 /// One file of the sidecar family, mapped.
@@ -1350,7 +1389,7 @@ fn check_external_ids(
     let mut extents: Vec<ExtentSlots> =
         Vec::with_capacity(partition_manifest.locator_extents.len());
     for extent in &partition_manifest.locator_extents {
-        if extent.entity_hi < extent.entity_lo {
+        if extent.entity_hi + 1 < extent.entity_lo {
             return Err(BuildError::Invalid(format!(
                 "{}: entity span {}..={} is inverted",
                 extent.path, extent.entity_lo, extent.entity_hi
@@ -1366,15 +1405,33 @@ fn check_external_ids(
                     extent.path, extent.external_id_run
                 ))
             })?;
-        let span = extent.entity_hi - extent.entity_lo + 1;
-        let slots = Slots::over(&extent.path, verified_map(&extent.path)?, span)?;
-        extents.push(ExtentSlots {
+        let span = extent.entity_hi + 1 - extent.entity_lo;
+        let slots = Slots::over(
+            &extent.path,
+            verified_map(&extent.path)?,
+            span + 2 * extent.listed,
+        )?;
+        let slots = ExtentSlots {
             rel: extent.path.clone(),
             entity_lo: extent.entity_lo,
             entity_hi: extent.entity_hi,
+            listed: extent.listed,
             run,
             slots,
-        });
+        };
+        let listed: Vec<u64> = (0..slots.listed as usize)
+            .map(|i| slots.listed_pair(i).0)
+            .collect();
+        if !listed.windows(2).all(|w| w[0] < w[1])
+            || listed.last().is_some_and(|&e| e >= slots.entity_lo)
+        {
+            return Err(BuildError::Invalid(format!(
+                "{}: its listed entities do not ascend below the span beginning at {}, so a \
+                 lookup could miss one",
+                slots.rel, slots.entity_lo
+            )));
+        }
+        extents.push(slots);
     }
 
     // Direction one: every locator slot addresses a row bound to exactly its entity.
@@ -1401,12 +1458,10 @@ fn check_external_ids(
         }
     }
     for extent in &extents {
-        for i in 0..extent.slots.len() {
-            let slot = extent.slots.get(i);
+        for (entity, slot) in extent.slots() {
             if slot == LOCATOR_NONE {
                 continue;
             }
-            let entity = extent.entity_lo + i as u64;
             let run = &runs[extent.run];
             if slot as u64 >= run.rows {
                 return Err(BuildError::Invalid(format!(
@@ -1435,20 +1490,21 @@ fn check_external_ids(
             let entity = bound.get((run.offset + i) as usize) as u64;
             let mut covered = false;
             let agrees = tessera_store::locators_covering(entity, base_len, &extents, |x| {
-                (x.entity_lo, x.entity_hi)
+                (x.entity_lo, x.entity_hi, x.listed)
             })
-            .any(|locator| {
-                covered = true;
-                match locator {
-                    tessera_store::Locator::Base => {
-                        let slot = base.get(entity as usize);
-                        slot != LOCATOR_NONE && slot as u64 == run.offset + i
-                    }
-                    tessera_store::Locator::Extent(x) => {
-                        let extent = &extents[x];
-                        extent.run == r
-                            && extent.slots.get((entity - extent.entity_lo) as usize) as u64 == i
-                    }
+            .any(|locator| match locator {
+                tessera_store::Locator::Base => {
+                    covered = true;
+                    let slot = base.get(entity as usize);
+                    slot != LOCATOR_NONE && slot as u64 == run.offset + i
+                }
+                tessera_store::Locator::Extent(x) => {
+                    let extent = &extents[x];
+                    let Some(slot) = extent.slot_of(entity) else {
+                        return false;
+                    };
+                    covered = true;
+                    extent.run == r && slot as u64 == i
                 }
             });
             if !covered {

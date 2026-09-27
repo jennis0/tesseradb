@@ -213,6 +213,16 @@ impl Executor {
         match self.log.wal.rotate(&snapshot, reclaim_below) {
             Ok(deleted) => {
                 self.log.mark_rotated();
+                let freed = self
+                    .live
+                    .with_allocator(|alloc| alloc.promote(self.log.wal.retained_from()));
+                if freed > 0 {
+                    tracing::info!(
+                        freed,
+                        "entity ids a fold freed are issued again: the log keeps no record of \
+                         their previous holders"
+                    );
+                }
                 if !deleted.is_empty() {
                     // The idempotency index follows the log it caches, or a replay could be
                     // answered as unknown after a restart.

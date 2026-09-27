@@ -277,6 +277,34 @@ fn across_partitions<'a, T, I: IntoIterator<Item = T>>(
         .collect()
 }
 
+/// The freed entity ids the newest served side-manifest records, and the sets it holds back.
+/// "Newest" is the partition whose served manifest has the highest number, which is meaningful
+/// while a bundle has one partition, as every bundle has.
+///
+/// Every publication records the allocator's sets, which shrink as ids are issued and grow only at
+/// a fold, so an older manifest can list an id issued since. A stepped-down partition serves a
+/// manifest older than one it wrote, so nothing is taken where one is: the ids stay unissued.
+fn freed_of(bundle: &Bundle) -> (croaring::Bitmap, Vec<(u64, croaring::Bitmap)>) {
+    if bundle.partitions.values().any(|p| p.stepped_down()) {
+        return (croaring::Bitmap::new(), Vec::new());
+    }
+    let Some(newest) = bundle.partitions.values().max_by_key(|p| p.segments_n) else {
+        return (croaring::Bitmap::new(), Vec::new());
+    };
+    let manifest = &newest.manifest;
+    let free = manifest
+        .free_entities
+        .entities()
+        .cloned()
+        .unwrap_or_default();
+    let held = manifest
+        .held_entities
+        .iter()
+        .filter_map(|h| Some((h.position, h.entities.entities()?.clone())))
+        .collect();
+    (free, held)
+}
+
 /// The filter artefact of the bundle's first partition: the build's columns plus every extent that
 /// partition's side manifest names.
 fn open_filter_columns(
@@ -520,6 +548,7 @@ fn reconstruct_writes(
     // The row-less mark's homes are the side manifests only; `MANIFEST.json` carries no such
     // field.
     let side_manifest_low_waters: Vec<u64> = across_partitions(bundle, |m| [m.entity_id_low_water]);
+    let (free, held) = freed_of(bundle);
     // One partition today, so this concatenation is the whole registry; at more than one it is
     // the union.
     let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> =
@@ -562,6 +591,8 @@ fn reconstruct_writes(
                 tessera_types::layer::ROWLESS_CEILING,
                 &side_manifest_low_waters,
             ),
+            free,
+            held,
             layers: &manifest_layers,
             tombstones: &manifest_layer_tombstones,
             registry_version: across_partitions(bundle, |m| [m.layer_registry_version])

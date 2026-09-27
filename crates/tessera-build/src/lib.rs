@@ -82,7 +82,7 @@ use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
 use tessera_types::{
     EntityId, IdentityKey, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
-    ROW_ABSENT, SMALL_TERM_THRESHOLD_DEFAULT,
+    SMALL_TERM_THRESHOLD_DEFAULT,
 };
 
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
@@ -2651,12 +2651,9 @@ fn claim_rows(
         claim(row.raw(), entity)
     })?;
     for extent in view.row_space.extents() {
-        for (offset, &slot) in extent.rows.iter().enumerate() {
-            if slot == ROW_ABSENT {
-                continue;
-            }
+        for (entity, slot) in extent.pairs() {
             claimed += 1;
-            claim(extent.row_base + slot, extent.entity_lo + offset as u64)?;
+            claim(extent.row_base + slot, entity)?;
         }
     }
     Ok(claimed)

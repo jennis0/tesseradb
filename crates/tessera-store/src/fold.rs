@@ -397,6 +397,7 @@ mod tests {
                 shard_id: 0,
                 scalar_schema: &schema(),
                 row_base: 0,
+                entity_floor: 0,
             }, &[],
         )
         .expect("flush");

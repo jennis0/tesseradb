@@ -11,6 +11,10 @@ pub(crate) struct ManifestSeed<'a> {
     /// `min(ceiling, side manifests)`: the row-less region's ceiling. A build sets this whenever
     /// its declaration carried layers, or the first online registration reissues their ids.
     pub low_water: u64,
+    /// The newest served side-manifest's freed ids, and the sets it holds back with their
+    /// positions; empty where no manifest can be trusted to be the newest.
+    pub free: croaring::Bitmap,
+    pub held: Vec<(u64, croaring::Bitmap)>,
     pub layers: &'a [tessera_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],
     /// The highest layer registry version counter any partition's manifest saved.
@@ -177,7 +181,7 @@ impl WritePath {
         // `try_with_marks`, not `with_marks`: the seeds come from durable state this run did not
         // write, so a corrupt or hand-edited pair must be refused here, not as a later opaque
         // exhaustion error.
-        let allocator = Allocator::try_with_marks(high_water, low_water).map_err(|e| {
+        let mut allocator = Allocator::try_with_marks(high_water, low_water).map_err(|e| {
             EngineError::Malformed(format!(
                 "entity-ID allocator seed from durable state (MANIFEST high-water {}, WAL \
                  high-water {}; MANIFEST low-water {}, WAL low-water {}): {e}",
@@ -432,6 +436,13 @@ impl WritePath {
         // win, so seeding first and replaying on top reverts an acked unsuppress otherwise.
         let (overlay, mut buffer, established, resolver) =
             replay(&records, dict, initial_deny.clone(), view_ids_of_key);
+
+        // An id the manifest records as free and a kept record or the overlay names was issued
+        // since the manifest was written.
+        let mut named = tessera_lifecycle::alloc::entities_named(&records);
+        named.or_inplace(overlay.deleted_set());
+        named.or_inplace(overlay.suppressed_set());
+        allocator.seed_freed(seed.free, seed.held, wal.retained_from(), &named);
         // Re-hashed once at open: `replay` builds this with `FxHashMap`, the live index does not
         // (see `WritePath::established`'s doc).
         let established: std::collections::HashMap<Vec<u8>, EntityId> =

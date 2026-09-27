@@ -29,8 +29,7 @@
 //! Drop tombstones the name for ever. Bookmarks, edges and suppressions all travel by it, so a name
 //! that once meant something must not come to mean something else — a recreated `clusters/topics`
 //! would silently inherit every stale reference to the old one. The ids do not come back either:
-//! the allocator is monotone with no free list, and reclaiming them is decision 0072's work, which
-//! is settled and unbuilt.
+//! the allocator frees no row-less id.
 
 use std::collections::{BTreeMap, BTreeSet};
 

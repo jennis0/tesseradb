@@ -301,8 +301,8 @@ pub(crate) fn held_scoped_value(
     }
 }
 
-/// Whether `entity` can gain a row in `view` where it is: a flush places rows only above the
-/// view's newest, so an item older than that is added to the view by moving it.
+/// Whether `entity` can be added to `view` in place: where it is at or above the view's entity
+/// floor. An item older than that is added to the view by moving it to a new entity.
 pub(crate) fn joins_in_place(generation: &Generation, entity: EntityId, view: &str) -> bool {
     generation.bundle.partitions.values().all(|partition| {
         partition

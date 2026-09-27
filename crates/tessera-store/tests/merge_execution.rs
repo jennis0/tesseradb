@@ -52,6 +52,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
             shard_id: 0,
             scalar_schema: &[],
             row_base: 0,
+            entity_floor: 0,
         }, &[],
     )
     .expect("the input segment writes");

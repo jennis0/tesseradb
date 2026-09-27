@@ -10,12 +10,10 @@
 //! rows' IDs." Amortising the fsync and the generation swap is a welcome side effect; the allocation
 //! scope is the point.
 //!
-//! **I9 — entity IDs are issued once, monotonically, and never reused — is untouched, and this is
-//! the site that has to say so.** "The window allocates" reads like
-//! an allocator change and is not one. IDs are still issued monotonically from the high-water by one
-//! [`Allocator::allocate`] call, still never reused, still assigned in `(signature, external_id)`
-//! order by the unchanged [`assign_sorted`]. The window changes only *how many* are assigned in one
-//! sorted run (lifecycle §5.1: "the window changes only *how many* are assigned in one sorted run").
+//! "The window allocates" reads like an allocator change and is not one. IDs are issued by one
+//! [`Allocator::allocate`] call, freed ids first and then from the high-water, and assigned in
+//! `(signature, external_id)` order by [`assign_sorted`]. The window changes only *how many* are
+//! assigned in one sorted run.
 //!
 //! ## Calibrate the win honestly
 //!
@@ -695,9 +693,8 @@ impl<W> CommitWindow<W> {
     ///
     /// Gather every entry's rows into one `Vec<PendingItem>` in `(entry, row)` order, hand it to the
     /// unchanged [`assign_sorted`], and scatter the ids back by position. One
-    /// [`Allocator::allocate`] call for the whole window, so ids stay strictly monotone and a window
-    /// that cannot allocate has **no effect at all** — `allocate` leaves the high-water mark
-    /// unchanged on its error path (I9).
+    /// [`Allocator::allocate`] call for the whole window, so a window that cannot allocate has **no
+    /// effect at all** — `allocate` leaves the allocator unchanged on its error path.
     ///
     /// **No per-row clone.** `external_id` and `terms` are *moved* out of each row into its
     /// `PendingItem` and moved back out afterwards, rather than copied ([`UnallocatedRow::take_pending`]

@@ -54,7 +54,9 @@ use crate::read::decode_single_batch;
 use crate::write::RunWriter;
 
 /// Coalesce `runs` — prefix-relative order, **oldest first** — into one run and one locator
-/// under `out_dir`, covering `[entity_lo, entity_hi]`. Returns the coalesced run's row count.
+/// under `out_dir`, covering `[entity_lo, entity_hi]` and listing every entity below it that a run
+/// binds or `below` names ([`crate::manifest::LocatorExtent`]). Returns the coalesced run's row
+/// count and how many entities the locator lists.
 ///
 /// The entity-space publication's whole file-writing half — the **ordinary maintenance** entry
 /// point; see [`fold_external_id_runs`] for the fold's own, over the whole corpus rather than one
@@ -70,15 +72,16 @@ pub fn coalesce_external_id_runs(
     runs: &[PathBuf],
     entity_lo: u64,
     entity_hi: u64,
+    below: &[u32],
     out_dir: &Path,
-) -> Result<usize> {
+) -> Result<(usize, u64)> {
     merge_runs_core(
         &open_runs(runs)?,
         entity_lo,
         entity_hi,
         out_dir,
         None,
-        LocatorStorage::Buffered,
+        LocatorStorage::Buffered(below),
     )
 }
 
@@ -113,6 +116,42 @@ pub fn fold_external_id_runs(
         // The fold's span is the whole entity space, whether or not `D₀` is empty this round.
         LocatorStorage::Mapped,
     )
+    .map(|(rows, _)| rows)
+}
+
+/// The entities a flush or coalesced locator extent lists below its span, ascending, read from its
+/// file under `prefix_dir` ([`crate::manifest::LocatorExtent`]).
+pub fn listed_entities(
+    prefix_dir: &Path,
+    extent: &crate::manifest::LocatorExtent,
+) -> Result<Vec<u32>> {
+    if extent.listed == 0 {
+        return Ok(Vec::new());
+    }
+    let path = prefix_dir.join(&extent.path);
+    let bytes = std::fs::read(&path).map_err(|source| StoreError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let span = (extent.entity_hi + 1).saturating_sub(extent.entity_lo);
+    let expected = (span + 2 * extent.listed) * 4;
+    if bytes.len() as u64 != expected {
+        return Err(StoreError::InvalidSidecar {
+            path,
+            detail: format!(
+                "this locator extent holds {} bytes where its span and {} listed entities need \
+                 {expected}",
+                bytes.len(),
+                extent.listed
+            ),
+        });
+    }
+    Ok(bytes[(span * 4) as usize..]
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|pair| u32::from_le_bytes([pair[0], pair[1], pair[2], pair[3]]))
+        .collect())
 }
 
 /// Open each run as a cursor, **oldest first**, holding only its mapped batches and a position.
@@ -242,10 +281,12 @@ fn merge_runs_core(
     entity_hi: u64,
     out_dir: &Path,
     tombstones: Option<&Bitmap>,
-    storage: LocatorStorage,
-) -> Result<usize> {
-    let span =
-        usize::try_from(entity_hi - entity_lo + 1).map_err(|_| StoreError::MalformedBundle {
+    storage: LocatorStorage<'_>,
+) -> Result<(usize, u64)> {
+    let span = (entity_hi + 1)
+        .checked_sub(entity_lo)
+        .and_then(|d| usize::try_from(d).ok())
+        .ok_or_else(|| StoreError::MalformedBundle {
             detail: format!("coalesce: entity span {entity_lo}..={entity_hi} is too wide"),
         })?;
 
@@ -278,7 +319,7 @@ fn merge_runs_core(
     let mut writer = RunWriter::create(&out_dir.join("external-ids.arrow")).map_err(io)?;
     let mut locator = match storage {
         LocatorStorage::Mapped => LocatorSink::mapped(&locator_path, span as u64)?,
-        LocatorStorage::Buffered => LocatorSink::buffered(span),
+        LocatorStorage::Buffered(below) => LocatorSink::buffered(span, below),
     };
     let mut pending: Option<(Vec<u8>, u32)> = None;
     let mut rows = 0usize;
@@ -293,17 +334,17 @@ fn merge_runs_core(
         // entity ingested without an external id has no pair here at all, so a span taken from the
         // pairs would end short of it, and an entity past every locator extent but below the live
         // high-water is an *inconsistency* to the drill-down rather than an absent external id.
-        let slot = (entity as u64).checked_sub(entity_lo).and_then(|i| {
-            let i = usize::try_from(i).ok()?;
-            (i < span).then_some(i)
-        });
-        let slot = slot.ok_or_else(|| StoreError::MalformedBundle {
-            detail: format!(
-                "coalesce: entity {entity} holds an external id but falls outside the locator \
-                 span {entity_lo}..={entity_hi} — the reverse direction would have no home for it"
-            ),
-        })?;
-        locator.set(&locator_path, slot, *rows as u32)?;
+        // An entity below the span is listed, where the sink lists.
+        if (entity as u64) > entity_hi {
+            return Err(StoreError::MalformedBundle {
+                detail: format!(
+                    "coalesce: entity {entity} holds an external id but lies above the locator \
+                     span {entity_lo}..={entity_hi} — the reverse direction would have no home \
+                     for it"
+                ),
+            });
+        }
+        locator.set(&locator_path, entity, entity_lo, *rows as u32)?;
         writer
             .append(key, entity)
             .map_err(|source| StoreError::Io {
@@ -353,8 +394,8 @@ fn merge_runs_core(
             ),
         });
     }
-    locator.finish(&locator_path)?;
-    Ok(rows)
+    let listed = locator.finish(&locator_path)?;
+    Ok((rows, listed))
 }
 
 /// Where a merge's (or the fold's) surviving `entity → ordinal` pairs go while the merge runs.
@@ -366,25 +407,30 @@ fn merge_runs_core(
 /// [`Self::Mapped`] instead — see [`crate::locator`]'s module doc for why that is a distinct
 /// writer rather than a generalisation of `PermutationWriter`.
 enum LocatorSink {
-    Buffered(Vec<u32>),
+    /// The dense span, and the slot of every entity below it that the locator lists.
+    Buffered(Vec<u32>, std::collections::BTreeMap<u32, u32>),
     Mapped(LocatorWriter),
 }
 
 /// Which of the two [`LocatorSink`]s a caller wants — chosen by the **span**, never inferred from
 /// whether that caller also filters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocatorStorage {
+enum LocatorStorage<'a> {
     /// A span bounded by the maintenance policy that caps run count: an in-memory `Vec` costs
-    /// nothing worth avoiding.
-    Buffered,
+    /// nothing worth avoiding. Lists the entities it names below the span, and every entity
+    /// below it that a run binds.
+    Buffered(&'a [u32]),
     /// A corpus-sized span — 4 GB at 10⁹ — where a `Vec` is anonymous memory the kernel can only
     /// page to swap, and a mapping is reclaimable page cache.
     Mapped,
 }
 
 impl LocatorSink {
-    fn buffered(span: usize) -> Self {
-        LocatorSink::Buffered(vec![ROW_ABSENT; span])
+    fn buffered(span: usize, below: &[u32]) -> Self {
+        LocatorSink::Buffered(
+            vec![ROW_ABSENT; span],
+            below.iter().map(|&entity| (entity, ROW_ABSENT)).collect(),
+        )
     }
 
     fn mapped(path: &Path, span: u64) -> Result<Self> {
@@ -396,29 +442,51 @@ impl LocatorSink {
             })
     }
 
-    fn set(&mut self, path: &Path, slot: usize, ordinal: u32) -> Result<()> {
+    /// Record `entity`'s ordinal, for a span beginning at `entity_lo`, which the caller has
+    /// checked `entity` does not lie above.
+    fn set(&mut self, path: &Path, entity: u32, entity_lo: u64, ordinal: u32) -> Result<()> {
+        let below = || StoreError::MalformedBundle {
+            detail: format!(
+                "coalesce: entity {entity} lies below the locator span beginning at {entity_lo}, \
+                 and this locator lists nothing"
+            ),
+        };
         match self {
-            LocatorSink::Buffered(v) => {
-                v[slot] = ordinal;
+            LocatorSink::Buffered(dense, listed) => {
+                match u64::from(entity).checked_sub(entity_lo) {
+                    Some(slot) => dense[slot as usize] = ordinal,
+                    None => {
+                        listed.insert(entity, ordinal);
+                    }
+                }
                 Ok(())
             }
             LocatorSink::Mapped(w) => {
-                w.set(slot as u64, ordinal)
-                    .map_err(|source| StoreError::Io {
-                        path: path.to_path_buf(),
-                        source,
-                    })
+                let slot = u64::from(entity).checked_sub(entity_lo).ok_or_else(below)?;
+                w.set(slot, ordinal).map_err(|source| StoreError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })
             }
         }
     }
 
-    fn finish(self, path: &Path) -> Result<()> {
+    /// Write what was recorded, returning how many entities are listed.
+    fn finish(self, path: &Path) -> Result<u64> {
         match self {
-            LocatorSink::Buffered(v) => write_u32_array(path, &v),
-            LocatorSink::Mapped(w) => w.finish().map_err(|source| StoreError::Io {
-                path: path.to_path_buf(),
-                source,
-            }),
+            LocatorSink::Buffered(mut dense, listed) => {
+                let count = listed.len() as u64;
+                dense.extend(listed.into_iter().flat_map(|(entity, slot)| [entity, slot]));
+                write_u32_array(path, &dense)?;
+                Ok(count)
+            }
+            LocatorSink::Mapped(w) => w
+                .finish()
+                .map(|()| 0)
+                .map_err(|source| StoreError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                }),
         }
     }
 }

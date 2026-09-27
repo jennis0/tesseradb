@@ -50,8 +50,8 @@ impl std::fmt::Display for ManifestCommitRefused {
 /// rather than carried forward, as two separate sets and never their union: publishing the union
 /// would make every deletion look retirable by an unsuppress.
 pub(super) fn write_deny_state(manifest: &mut SegmentsManifest, overlay: &Overlay) {
-    manifest.deny = DenySet::of(overlay.suppressed_set());
-    manifest.tombstones = DenySet::of(overlay.deleted_set());
+    manifest.deny = EntitySet::of(overlay.suppressed_set());
+    manifest.tombstones = EntitySet::of(overlay.deleted_set());
 }
 
 /// Carry the live vocabulary bindings into a manifest's `vocabulary_extensions`. Unioned, never
@@ -184,6 +184,9 @@ impl Executor {
     ) -> Result<(), ManifestCommitRefused> {
         let live_manifest = &partition_data.manifest;
         self.write_live_state(next, fold.is_some());
+        if let Some(fold) = &fold {
+            next.held_entities.push(fold.freed.clone());
+        }
         let (derived, pending) = match &fold {
             Some(fold) => (fold.written, Some(fold.pending_retirement)),
             None => (self.side_manifests.derived_extents.as_slice(), None),
@@ -238,6 +241,7 @@ impl Executor {
         manifest.entity_id_high_water = manifest
             .entity_id_high_water
             .max(self.live.allocator_high_water());
+        (manifest.free_entities, manifest.held_entities) = self.live.allocator_freed();
         manifest.layers = registry.layers;
         manifest.layer_tombstones = registry.tombstones;
         manifest.layer_registry_version = registry.version;

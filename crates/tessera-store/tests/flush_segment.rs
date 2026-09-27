@@ -47,6 +47,7 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
             shard_id: 0,
             scalar_schema: &[],
             row_base,
+            entity_floor: 0,
         }, &[],
     )
     .unwrap()
@@ -238,6 +239,7 @@ fn unordered_rows_are_refused() {
             shard_id: 0,
             scalar_schema: &[],
             row_base: 50,
+            entity_floor: 0,
         }, &[],
     );
     assert!(result.is_err());

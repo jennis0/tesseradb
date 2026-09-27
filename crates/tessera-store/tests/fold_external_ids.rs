@@ -73,6 +73,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
             shard_id: 0,
             scalar_schema: &[],
             row_base: 0,
+            entity_floor: 0,
         }, &[],
     )
     .expect("the input segment writes");
@@ -316,6 +317,7 @@ fn a_post_snapshot_entity_resolves_through_its_carried_forward_extent() {
             shard_id: 0,
             scalar_schema: &[],
             row_base: n as u32,
+            entity_floor: 0,
         }, &[],
     )
     .expect("the post-snapshot flush writes");

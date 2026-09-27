@@ -2,9 +2,9 @@
 //!
 //! Fail-closed durability machinery: an unpersisted deny entry fails open, and the [`wal`]
 //! module's positional CRC rule is the difference between ordinary crash recovery and silent
-//! loss of acked security state. [`alloc`] is the append-only, never-reusing entity-ID allocator
-//! (I9) plus the signature-sorted assignment helper appended items go through. [`overlay`] and
-//! [`buffer`] are the replayed WAL's live authorisation-relevant state: the overlay's two
+//! loss of acked security state. [`alloc`] is the entity-ID allocator, which issues the ids a fold
+//! frees before new ones, plus the signature-sorted assignment helper appended items go through.
+//! [`overlay`] and [`buffer`] are the replayed WAL's live authorisation-relevant state: the overlay's two
 //! independent deny facts and the ingest buffer.
 //!
 //! [`command`] is what a write command carries and [`window`] the commit window ingest is gathered

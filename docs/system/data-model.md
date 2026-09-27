@@ -100,7 +100,7 @@ Four identifiers name an item or a view, one for each party that needs to addres
 
 | Identifier | Assigned by | Held by | What changes it |
 |---|---|---|---|
-| entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; an id is never reissued |
+| entity id | the server, at ingest | never leaves the server | an edit, which moves the item to a new one; the id an edit left is issued again once a compaction has removed its rows and the log has rotated past that compaction |
 | `tessera_id` | derived from the entity id by a keyed permutation, at the same time | the client | a rebuild, which creates a new bundle with a new key |
 | external id | the operator, before ingest | the operator, and any record of a write naming it | nothing, for the item's life |
 | view key | the operator, when a view of a group is created | any request naming that view | a drop frees the key; a later create under it starts a new, empty view |
@@ -110,7 +110,11 @@ in an order that groups together the items sharing the same access terms. A buil
 in batches sized to its memory budget, each a dense range sorted that way, and a build that fits in
 one batch sorts the whole corpus as one range. A later ingest commits its own new items above what
 already exists, in a range sorted the same way within itself but appended after the corpus already
-on disc rather than interleaved with it.
+on disc rather than interleaved with it. The exception is an id a compaction has freed: an edit
+leaves the item's old entity deleted, the compaction that removes its rows frees the id, and the
+allocator issues freed ids, lowest first, before new ones. An item's first entity id is never
+freed, because its `tessera_id` is derived from it, and neither is one a suppression stands
+against ([freed entity ids](write-path.md#freed-entity-ids) has the rules).
 
 The `tessera_id` is what a client receives and holds instead of the entity id. The key of the
 permutation is drawn at random by `tessera build` each time it creates a bundle and is stored in
@@ -300,10 +304,6 @@ arrived first.
 
 - **Not built yet: list-valued fields.** A field holds at most one value per item. Declaring more
   than one is refused when the corpus is built.
-- **Not built yet: entity id reuse.** Compaction that removes a deleted item does not return its
-  entity id to the allocator; the id space only grows, which costs capacity rather than
-  correctness. Reusing a freed id after compaction is a ruled design and is not built: the
-  allocator stays append-only today, and no entity id is reissued.
 - **Not built yet: amending a vocabulary value's properties without a rebuild.** No control-plane
   route exists for it; changing a value's label or colour today needs a rebuild.
 

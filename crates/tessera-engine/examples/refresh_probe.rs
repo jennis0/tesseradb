@@ -137,6 +137,7 @@ fn p1(dir: &std::path::Path, entities: u64, grant: f64) {
             seg_id: format!("flush-{i}"),
             row_base,
             rows: (0..FLUSH_ROWS as u32).collect(),
+            below: Vec::new(),
         };
         for e in lo..lo + FLUSH_ROWS {
             if e % stride == 0 {

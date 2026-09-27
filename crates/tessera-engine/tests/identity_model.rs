@@ -3,8 +3,10 @@
 //! from two items, then runs a random sequence of ingest batches, change batches, flushes, folds,
 //! restarts, resent batches and declarations of `unique` on and off one column. After every step
 //! it compares what the service serves with what a model of the items says it should: every
-//! view's points for two principals, `in` over every unique value, every item's card, and the
-//! artifact's content.
+//! view's points for two principals, `in` over every unique value, every item's card, the
+//! artifact's content, and that no two items' `tessera_id`s name one entity. A second strategy
+//! runs long sequences that edit the same items again and again, so that folds free the entities
+//! the edits leave and later edits take them.
 //!
 //! An ingest row names an item by its `tessera_id`, its external id or a unique value, and carries
 //! any of the item's fields, its label and a position in the batch's view. The model decides each
@@ -824,6 +826,12 @@ enum Op {
     Changes(Vec<(u16, u8)>),
     Flush,
     Fold,
+    /// A fold with a batch into view 0 or 1 sent while it is in flight and left unflushed, so the
+    /// log is kept from before the fold's publication.
+    PinnedFold {
+        view: u8,
+        rows: Vec<RowGen>,
+    },
     Restart,
     /// Send an earlier batch again, under its own batch id and body.
     Resend(u16),
@@ -871,6 +879,8 @@ fn op() -> impl Strategy<Value = Op> {
         12 => prop::collection::vec((any::<u16>(), 0u8..3), 1..4).prop_map(Op::Changes),
         12 => Just(Op::Flush),
         4 => Just(Op::Fold),
+        2 => (0u8..2, prop::collection::vec(row_gen(), 1..3))
+            .prop_map(|(view, rows)| Op::PinnedFold { view, rows }),
         8 => Just(Op::Restart),
         8 => any::<u16>().prop_map(Op::Resend),
         4 => any::<bool>().prop_map(Op::DoiUnique),
@@ -895,6 +905,10 @@ struct Run {
     model: Model,
     sent: Vec<Sent>,
     batches: u64,
+    /// One past the highest entity an item has been given so far.
+    highest: u64,
+    /// How many times an item was given an entity below `highest`: an id a fold freed.
+    reused: u64,
 }
 
 fn hash_of(batch_id: &str) -> [u8; 32] {
@@ -1167,9 +1181,14 @@ impl Run {
             .collect();
         let ids: Vec<TesseraId> = moved.iter().map(|t| TesseraId::new(*t)).collect();
         let entities = self.engine().resolve_tessera_ids(&ids).unwrap();
+        let highest = self.highest;
         for (tid, entity) in moved.iter().zip(entities) {
             let entity = entity.expect("an accepted row's item is named by its tessera_id");
             self.model.items.get_mut(tid).unwrap().made = entity.raw();
+            if entity.raw() < highest {
+                self.reused += 1;
+            }
+            self.highest = self.highest.max(entity.raw() + 1);
         }
     }
 
@@ -1393,16 +1412,25 @@ impl Run {
 
     // ---- what is served ----------------------------------------------------------------------
 
+    /// A viewport's points. `ProjectionBuilding` is the shed a fold's refresh window can answer
+    /// with, which a caller retries, so it is retried here on a bounded deadline.
     fn served(&self, session: &Session, view: &str, filter: Option<FilterExpr>) -> BTreeSet<u64> {
-        let mut req = ViewportRequest::new(view, 0, VIEWPORT, 10_000);
-        req.filter = filter;
-        self.engine()
-            .viewport(session, req)
-            .unwrap()
-            .points
-            .iter()
-            .map(|(id, _)| id.raw())
-            .collect()
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let mut req = ViewportRequest::new(view, 0, VIEWPORT, 10_000);
+            req.filter = filter.clone();
+            match self.engine().viewport(session, req) {
+                Ok(out) => return out.points.iter().map(|(id, _)| id.raw()).collect(),
+                Err(tessera_engine::EngineError::ProjectionBuilding)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => {
+                    panic!("the viewport of {view} neither answered nor kept shedding: {e:?}")
+                }
+            }
+        }
     }
 
     fn check(&self, after: &str) {
@@ -1513,6 +1541,36 @@ impl Run {
         }
         self.check_cards(&principals, after);
         self.check_content(after);
+        self.check_entities(after);
+    }
+
+    /// Every live item's `tessera_id` names an entity, and no two name the same one: an id a fold
+    /// freed serves one item at a time. A deleted item's names nothing.
+    fn check_entities(&self, after: &str) {
+        let model = &self.model;
+        let tids: Vec<u64> = model.items.keys().copied().collect();
+        let ids: Vec<TesseraId> = tids.iter().map(|t| TesseraId::new(*t)).collect();
+        let entities = self.engine().resolve_tessera_ids(&ids).unwrap();
+        let mut held: BTreeMap<u64, u64> = BTreeMap::new();
+        for (tid, entity) in tids.iter().zip(entities) {
+            let entity = entity
+                .unwrap_or_else(|| panic!("item {tid} names no entity, after {after}"))
+                .raw();
+            if let Some(other) = held.insert(entity, *tid) {
+                panic!("items {other} and {tid} name entity {entity}, after {after}");
+            }
+        }
+        let deleted: Vec<TesseraId> = model.deleted.iter().map(|t| TesseraId::new(*t)).collect();
+        for (tid, entity) in deleted
+            .iter()
+            .zip(self.engine().resolve_tessera_ids(&deleted).unwrap())
+        {
+            assert!(
+                entity.is_none(),
+                "deleted item {} names entity {entity:?}, after {after}",
+                tid.raw()
+            );
+        }
     }
 
     /// The artifact serves its content to a principal who can see every item it was generated
@@ -1679,6 +1737,30 @@ impl Run {
                 // fold or during its flight.
                 self.flush();
             }
+            Op::PinnedFold { view, rows } => {
+                // Everything buffered is placed first, so the fold's tick places nothing.
+                self.flush();
+                let engine = self.engine();
+                let before = engine.write_executor_stats();
+                engine.set_fold_paused_for_test(true);
+                engine.request_fold();
+                wait_until("the fold holds", Duration::from_secs(60), || {
+                    engine.fold_is_holding_for_test()
+                });
+                self.ingest(*view, rows);
+                let engine = self.engine();
+                engine.set_fold_paused_for_test(false);
+                wait_until("the fold publishes", Duration::from_secs(60), || {
+                    let now = engine.write_executor_stats();
+                    assert_eq!(
+                        (now.fold_failures, now.fold_refusals),
+                        (before.fold_failures, before.fold_refusals),
+                        "the fold was refused or discarded: {:?}",
+                        now.last_fold_refusal
+                    );
+                    now.folds > before.folds
+                });
+            }
             Op::Restart => self.restart(),
             Op::Resend(which) => self.resend(*which),
             Op::DoiUnique(unique) => self.doi_unique(*unique),
@@ -1766,7 +1848,7 @@ fn publish_content(engine: &Engine, root: &Path) -> BTreeSet<u64> {
         .collect()
 }
 
-fn run(ops: &[Op]) {
+fn run(ops: &[Op]) -> Run {
     if std::env::var_os("MODEL_TRACE").is_some() {
         eprintln!("TRACE case");
     }
@@ -1775,12 +1857,15 @@ fn run(ops: &[Op]) {
     engine.set_merge_for_test(false);
     let mut model = Model::built(&engine, &fx.root);
     model.content_from = publish_content(&engine, &fx.root);
+    let highest = run_highest(&model);
     let mut run = Run {
         fx,
         engine: Some(engine),
         model,
         sent: Vec::new(),
         batches: 0,
+        highest,
+        reused: 0,
     };
     run.check("the build");
     for op in ops {
@@ -1790,6 +1875,11 @@ fn run(ops: &[Op]) {
     run.restart();
     run.flush();
     run.check("the last restart and flush");
+    run
+}
+
+fn run_highest(model: &Model) -> u64 {
+    model.items.values().map(|i| i.made + 1).max().unwrap_or(0)
 }
 
 proptest! {
@@ -1810,6 +1900,127 @@ proptest! {
     fn writes_agree_with_the_model(ops in prop::collection::vec(op(), 1..200)) {
         run(&ops);
     }
+}
+
+proptest! {
+    #![proptest_config({
+        let config = ProptestConfig::default();
+        ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(2),
+            rng_seed: match config.rng_seed {
+                proptest::test_runner::RngSeed::Random => proptest::test_runner::RngSeed::Fixed(11),
+                seed => seed,
+            },
+            ..config
+        }
+    })]
+
+    /// Long sequences that edit the same items again and again, with flushes, folds and restarts
+    /// between: a fold frees the entities the edits left, and later edits take them again.
+    #[test]
+    fn edit_heavy_sequences_reuse_ids_and_agree_with_the_model(
+        ops in prop::collection::vec(edit_heavy_op(), 100..300),
+    ) {
+        let run = run(&ops);
+        prop_assert!(run.reused > 0, "no edit took an id a fold freed");
+    }
+}
+
+/// An edit of an existing item in view 0 or 1, by `tessera_id`, with a new score or a new
+/// position.
+fn edit_row() -> impl Strategy<Value = RowGen> {
+    (any::<u16>(), any::<u16>(), prop_oneof![Just(0u8), Just(2u8)]).prop_map(
+        |(about, seed, position)| RowGen {
+            about: Some(about),
+            by: 0,
+            carry: 4,
+            differ: 4,
+            null: 0,
+            position,
+            seed,
+            extra_carry: 0,
+            extra_differ: 0,
+            extra_null: 0,
+        },
+    )
+}
+
+fn edit_heavy_op() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        40 => (0u8..2, prop::collection::vec(edit_row(), 1..6))
+            .prop_map(|(view, rows)| Op::Ingest { view, rows }),
+        6 => (0u8..2, prop::collection::vec(row_gen(), 1..3))
+            .prop_map(|(view, rows)| Op::Ingest { view, rows }),
+        3 => prop::collection::vec((any::<u16>(), 0u8..3), 1..3).prop_map(Op::Changes),
+        14 => Just(Op::Flush),
+        8 => Just(Op::Fold),
+        4 => (0u8..2, prop::collection::vec(edit_row(), 1..3))
+            .prop_map(|(view, rows)| Op::PinnedFold { view, rows }),
+        5 => Just(Op::Restart),
+    ]
+}
+
+/// **The id space stops growing under repeated edits.** Every item is edited in every round, with
+/// a flush and a fold between rounds and restarts among them. An item's first edit takes a new
+/// id, and each later one takes the id its edit before last left, which the fold between freed:
+/// after the second round no round takes an id from the high-water.
+#[test]
+fn repeated_edits_and_folds_stop_the_id_space_growing() {
+    let edit_everything = |seed: u16, position: u8| Op::Ingest {
+        view: 0,
+        rows: (0..BUILT as u16)
+            .map(|i| RowGen {
+                about: Some(i),
+                by: 0,
+                carry: 4,
+                differ: 4,
+                null: 0,
+                position,
+                seed: seed.wrapping_add(i),
+                extra_carry: 0,
+                extra_differ: 0,
+                extra_null: 0,
+            })
+            .collect(),
+    };
+    let fx = fixture();
+    let engine = open(&fx);
+    engine.set_merge_for_test(false);
+    let mut model = Model::built(&engine, &fx.root);
+    model.content_from = publish_content(&engine, &fx.root);
+    let highest = run_highest(&model);
+    let mut run = Run {
+        fx,
+        engine: Some(engine),
+        model,
+        sent: Vec::new(),
+        batches: 0,
+        highest,
+        reused: 0,
+    };
+    let mut high_waters = Vec::new();
+    for round in 0..8u16 {
+        run.step(&edit_everything(round * 100, (round % 2) as u8 * 2));
+        run.step(&Op::Flush);
+        if round % 3 == 2 {
+            run.step(&Op::Restart);
+        }
+        run.step(&Op::Fold);
+        high_waters.push(run.engine().allocator_high_water());
+    }
+    run.restart();
+    run.flush();
+    run.check("the last restart and flush");
+    assert_eq!(
+        high_waters[2..].iter().collect::<BTreeSet<_>>().len(),
+        1,
+        "the high-water grew after the second round: {high_waters:?}"
+    );
+    assert!(
+        run.reused >= 6 * BUILT,
+        "every edit after the second round takes a freed id; {} did",
+        run.reused
+    );
 }
 
 /// A fixed sequence through each kind of row, so the model's rules are met on every run whatever

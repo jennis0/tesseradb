@@ -440,6 +440,9 @@ pub(crate) struct FlushContext {
     pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     pub(crate) seg_id: String,
     pub(crate) row_base: u32,
+    /// The view's entity floor when planned: the rows of entities below it are listed in the
+    /// segment's extent.
+    pub(crate) entity_floor: u64,
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
     pub(crate) quantisation: Quantisation,
@@ -640,6 +643,7 @@ fn execute_flush_stages(
                     shard_id: ctx.shard_id,
                     scalar_schema: &ctx.scalar_schema,
                     row_base: ctx.row_base,
+                    entity_floor: ctx.entity_floor,
                 },
                 &plan.recorded_joins,
             )
@@ -2180,7 +2184,7 @@ mod tests {
         assert_eq!(plan.items[0].0, EntityId::new(7));
     }
 
-    /// A deletion's ID stays burned (I9), no row is created, and the deny entry stands.
+    /// A deleted entity acquires no row, and the deny entry stands.
     #[test]
     fn a_deleted_entity_acquires_no_row() {
         let generation = generation_with(
