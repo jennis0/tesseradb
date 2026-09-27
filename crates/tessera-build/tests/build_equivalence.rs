@@ -7,7 +7,7 @@
 //! corpus*, and every posting, permutation and handle derived from it would be invalid. Byte
 //! equality against `build_in_memory` is how that is proved, and it covers the derived files
 //! too: the dictionary's term-id assignment, the postings' tag choice and Roaring encoding, the
-//! `(term, entity)` order in `pairs.parquet`, the external-ids byte sort, the tiler's
+//! `(term, entity)` order in `pairs.parquet`, the tiler's
 //! `(morton, priority, entity)` order and the permutation.
 //!
 //! Two files are compared after normalisation rather than raw: `MANIFEST.json` carries a
@@ -381,7 +381,6 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
@@ -768,12 +767,11 @@ fn tie_group_shapes_are_byte_identical_to_the_reference_build() {
     assert_bundles_identical(&reference_out, &streaming_out, "tie-group shapes");
 }
 
-/// The spec-conformant default build — no minted external IDs (contracts §2.4), and here also
-/// no oracle `pairs.parquet` — must hold the same byte-identity between the two
-/// implementations, produce a bundle with no sidecar or pairs files at all, and still pass
-/// `verify` (MANIFEST lists only what was written, so nothing is unverifiable).
+/// A build writing no oracle `pairs.parquet` must hold the same byte-identity between the two
+/// implementations, produce a bundle with no pairs file, and still pass `verify` (MANIFEST lists
+/// only what was written, so nothing is unverifiable).
 #[test]
-fn conformant_no_mint_no_pairs_build_is_byte_identical_and_verifiable() {
+fn a_build_without_pairs_is_byte_identical_and_verifiable() {
     let temp = tempfile::TempDir::new().unwrap();
     let points = temp.path().join("points.parquet");
     let pairs = temp.path().join("pairs.parquet");
@@ -782,7 +780,6 @@ fn conformant_no_mint_no_pairs_build_is_byte_identical_and_verifiable() {
 
     let make_args = |out: PathBuf| {
         let mut args = args_for(&points, &pairs, out);
-        args.mint_external_ids = false;
         args.emit_oracle_pairs = false;
         args
     };
@@ -791,23 +788,13 @@ fn conformant_no_mint_no_pairs_build_is_byte_identical_and_verifiable() {
     let streaming_out = temp.path().join("streaming");
     build_in_memory(&make_args(reference_out.clone())).unwrap();
     build(&make_args(streaming_out.clone())).unwrap();
-    assert_bundles_identical(&reference_out, &streaming_out, "conformant no-mint");
+    assert_bundles_identical(&reference_out, &streaming_out, "no pairs");
 
     let files = collect(&streaming_out);
     for name in files.keys() {
         assert!(
-            !name.contains("external-ids-")
-                && !name.contains("ext-locator")
-                && !name.ends_with("pairs.parquet"),
-            "a no-mint, no-oracle-pairs bundle must not contain {name}"
-        );
-    }
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&files["v00000/MANIFEST.json"]).unwrap();
-    for listed in manifest["files"].as_object().unwrap().keys() {
-        assert!(
-            !listed.contains("external-ids-") && !listed.contains("ext-locator"),
-            "MANIFEST must not list an unwritten file: {listed}"
+            !name.ends_with("pairs.parquet"),
+            "a no-oracle-pairs bundle must not contain {name}"
         );
     }
 
@@ -1051,7 +1038,6 @@ fn reference_build_at_scale() {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,

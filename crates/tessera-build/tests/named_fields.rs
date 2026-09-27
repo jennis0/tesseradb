@@ -66,7 +66,7 @@ fn write_moved_points(path: &Path) {
 
 fn write_pairs(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new("term_id", DataType::UInt32, false),
     ]));
     let ids: Vec<u64> = (0..N).collect();
@@ -86,18 +86,16 @@ fn write_pairs(path: &Path) {
 
 /// One view, one open vocabulary and one category over it, all read from moved names.
 ///
-/// **The identity column is moved once, in `[defaults]`.** The points file spells it `id`, so the
-/// view and the attribute both join on `id` without either saying so — which is what
-/// `entity_id_field` is for. The exploded relation is not reached by it and keeps the canonical
-/// `(entity_id, term_id)` (`configuration.md` §8), which is what the pairs file here carries.
+/// **The join field is named once, in `[defaults]`.** The points file spells it `id`, so the view,
+/// the attribute and the exploded relation all join on `id` without saying so.
 const MOVED: &str = r#"
 [sources]
 points = "points.parquet"
 pairs  = "pairs.parquet"
 
 [defaults]
-source          = "points"
-entity_id_field = "id"
+source     = "points"
+join_field = "id"
 
 [[view]]
 name             = "s0"
@@ -117,6 +115,11 @@ field      = "dept"
 type       = "category"
 vocabulary = "departments"
 render     = true
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
 "#;
 
 fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
@@ -147,7 +150,6 @@ fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

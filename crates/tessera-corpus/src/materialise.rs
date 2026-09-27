@@ -2,7 +2,7 @@
 //! [`Corpus::write_points_parquet`] and [`Corpus::write_pairs_parquet`] are the build's two
 //! inputs; [`Corpus::config_toml`] is the declaration `tessera build --config` compiles;
 //! [`Corpus::ingest_batch`] is `/control/ingest`'s body, in the wire shape
-//! `(external_id, x, y, access, the declared scalars)`, using no engine type.
+//! `(id, x, y, access, the declared scalars)`, using no engine type.
 //!
 //! Every writer calls [`Corpus::item`] and [`Corpus::terms`], so values agree across
 //! materialisers. The parquet writers stream in bounded chunks because `n` may be 10^9.
@@ -14,8 +14,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryBuilder, Float64Array, ListBuilder, StringArray, StringBuilder,
-    TimestampMicrosecondArray, UInt32Array, UInt64Array,
+    ArrayRef, Float64Array, ListBuilder, StringArray, StringBuilder, TimestampMicrosecondArray,
+    UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -57,7 +57,8 @@ treed_artifacts     = "treed_artifacts.parquet"
 treed_members       = "treed_members.parquet"
 
 [defaults]
-source = "points"
+source     = "points"
+join_field = "id"
 
 [[view]]
 name             = "s0"
@@ -120,6 +121,13 @@ name   = "partition"
 type   = "u32"
 render = true
 index  = true
+
+# The join field: every file names an item by its `entity_id`, which is `e`.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 # Enumerated, over the flat kind's membership: the layer whose membership overlaps within a level.
 [[layer]]
@@ -318,11 +326,11 @@ impl Corpus {
         Ok(())
     }
 
-    /// One `/control/ingest` body for items `range`, in the wire shape: `external_id`, `x`, `y`,
-    /// `access` (a list of labels), then every declared scalar. `range` may start at `n`, letting
-    /// a driver ingest items beyond the built prefix.
+    /// One `/control/ingest` body for items `range`, in the wire shape: the join field `id`, `x`,
+    /// `y`, `access` (a list of labels), then every declared scalar. `range` may start at `n`,
+    /// letting a driver ingest items beyond the built prefix.
     pub fn ingest_batch(&self, range: Range<u64>) -> RecordBatch {
-        let mut fields = vec![Field::new("external_id", DataType::Binary, false)];
+        let mut fields = vec![Field::new("id", DataType::UInt64, false)];
         fields.extend(position_fields());
         fields.push(Field::new(
             "access",
@@ -332,16 +340,15 @@ impl Corpus {
         fields.extend(scalar_fields());
 
         let items = self.items(range);
-        let mut external_id = BinaryBuilder::new();
+        let id: UInt64Array = items.iter().map(|item| Some(item.e)).collect();
         let mut access = ListBuilder::new(StringBuilder::new());
         for item in &items {
-            external_id.append_value(item.e.to_le_bytes());
             for term in self.terms(item.e) {
                 access.values().append_value(term.raw().to_string());
             }
             access.append(true);
         }
-        let mut columns: Vec<ArrayRef> = vec![Arc::new(external_id.finish())];
+        let mut columns: Vec<ArrayRef> = vec![Arc::new(id)];
         columns.extend(position_columns(&items));
         columns.push(Arc::new(access.finish()));
         columns.extend(self.scalar_columns(&items));

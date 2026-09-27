@@ -31,7 +31,14 @@ const DECLARATION: &str = r#"
 points = "points.parquet"
 
 [defaults]
-source = "points"
+source     = "points"
+join_field = "id"
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 [[view]]
 name             = "s0"

@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -20,6 +20,8 @@ use tessera_build::{build, build_in_memory, BuildArgs};
 use tessera_spatial::Bounds;
 use tessera_store::{open_bundle, ScalarSlice};
 use tessera_types::{EntityId, IdentityKey};
+
+mod common;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -118,6 +120,7 @@ fn parse_schema(text: &str, values: &HashMap<String, PathBuf>) -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
+    let schema = common::with_id(schema);
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -143,7 +146,6 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -152,43 +154,13 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
     }
 }
 
-/// Every `(source_id, entity_id)` pair, read from a built bundle's external-id sidecar — the
-/// join a test needs to find which row a source item landed at, since entity IDs are
-/// signature-sorted rather than source order (§11.1).
-fn source_to_entity(out: &Path) -> HashMap<u64, u64> {
-    let bundle = open_bundle(out).unwrap();
-    let part = bundle.partitions.values().next().unwrap();
-    let prefix = current_prefix(out);
-    let mut map = HashMap::new();
-    for rel in &part.manifest.external_id_runs {
-        let path = out.join(&prefix).join(rel);
-        let reader =
-            arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
-        for batch in reader {
-            let batch = batch.unwrap();
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap();
-            let ent = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
-                map.insert(source, ent.value(i) as u64);
-            }
-        }
-    }
-    map
-}
-
-fn current_prefix(out: &Path) -> String {
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
-    current["prefix"].as_str().unwrap().to_string()
+/// Every `(source_id, entity_id)` pair of the first `n` source ids, through the unique `id`
+/// column: entity IDs are signature-sorted rather than source order (§11.1).
+fn source_to_entity(out: &Path, n: u64) -> HashMap<u64, u64> {
+    common::entities_of(out, "id", 0..n)
+        .into_iter()
+        .map(|(source, entity)| (source, u64::from(entity)))
+        .collect()
 }
 
 /// The `department` **key** a built bundle records for `source_id`, decoded through that
@@ -310,7 +282,7 @@ fn discovered_vocabulary_mints_every_novel_key_and_records_it() {
     assert_eq!(codes.len(), before, "no two keys may share a code");
 
     // And the rows agree with the source data, decoded back through the minted codes.
-    let entity_of_source = source_to_entity(&out);
+    let entity_of_source = source_to_entity(&out, N);
     for e in 0..N {
         assert_eq!(
             department_key_of(&out, e, &entity_of_source),
@@ -691,8 +663,8 @@ fn both_implementations_agree_on_keys_though_fresh_codes_differ() {
     // Row-for-row, by source id (entity assignment itself is already proven identical between
     // the two implementations by build_equivalence.rs; this test only needs each bundle's own
     // key-level content to agree, not the codes).
-    let reference_entities = source_to_entity(&reference_out);
-    let streaming_entities = source_to_entity(&streaming_out);
+    let reference_entities = source_to_entity(&reference_out, 60);
+    let streaming_entities = source_to_entity(&streaming_out, 60);
     for e in 0..60u64 {
         assert_eq!(
             department_key_of(&reference_out, e, &reference_entities),

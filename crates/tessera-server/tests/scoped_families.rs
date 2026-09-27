@@ -428,7 +428,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                 family_views.clone(),
                 Some(ScopedAttributeFile {
                     path: score_source.clone(),
-                    entity_id: "entity_id".to_string(),
+                    join_column: "entity_id".to_string(),
                     view_field: "quarter".to_string(),
                 }),
             ),

@@ -91,7 +91,7 @@ operator_credential_file = "operator.cred"
     )
     .unwrap();
     let built = tessera()
-        .args(["build", "--mint-external-ids"])
+        .arg("build")
         .current_dir(dir)
         .output()
         .unwrap();

@@ -135,7 +135,6 @@ fn bundle(dir: &Path, absent_every: Option<u64>) -> Engine {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

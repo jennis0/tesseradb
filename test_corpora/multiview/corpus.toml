@@ -31,9 +31,10 @@ clusters_q      = "clusters-quarter.parquet" # key, quarter, contents, members
 
 [defaults]
 source           = "world"
-entity_id_field  = "entity_id"
+# Every file names its place by the GeoNames id, in the `entity_id` column `prepare.py` writes.
+join_field       = "geonameid"
 # The anchor view (decision 0112): within a signature group, entity ids are ordered by the item's
-# Morton code *here*, then by external id. Required because this declaration carries more than one
+# Morton code *here*, then by join value. Required because this declaration carries more than one
 # view, and explicit so that reordering the blocks below cannot silently re-key a rebuild — the
 # ids are permanent (I9).
 allocation_view  = "world"
@@ -153,6 +154,15 @@ width      = "u8"
 value_set  = "closed"
 visibility = "public"
 source     = "vocab_kind"
+
+# The join field. Read from `attrs_constant`, which carries every place; `world` does not.
+[[attribute]]
+name   = "geonameid"
+title  = "GeoNames id"
+type   = "i64"
+unique = true
+field  = "entity_id"
+source = "attrs_constant"
 
 [[attribute]]
 name   = "importance"

@@ -1,30 +1,23 @@
-//! How a declaration names a row, and what an external id is made of.
+//! How a declaration names a row: the join field every source file joins on.
 //!
-//! A build joins every source it reads on one value per row: the column
-//! `[defaults].entity_id_field` names, or a view's `fields.entity_id` (`configuration.md` §1, §8).
-//! That column may hold an integer, a string or binary bytes. Whatever it holds is the row's
-//! **external id**, contracts §2.4's caller-supplied namespace, taken as supplied and never
-//! manufactured.
+//! `[defaults].join_field` names a declared unique attribute, and every file a build reads rows
+//! of — each view's points, each attribute source, each layer's members, an access relation —
+//! names its item by that field's value, in the column the block's `fields` resolve to it
+//! (`crate::config::JOIN_COLUMN`). The column holds an integer or a string.
 //!
 //! **The ordinal space is the key's rank, so nothing below this module changes.** Every pass in
 //! the build joins on a `u64` source id, and pass one's cheapest arrangement is a contiguous range
-//! of them (`pipeline::SourceIds`). A supplied key is therefore interned once, before the first
-//! pass: the keys of every view's points file are collected, sorted bytewise and deduplicated, and
-//! a key's source id is its rank in that order. The ranks are `0..n`, so the union is contiguous
-//! and every consumer reads the same `u64` it always did: the entity-id assignment, the attribute
-//! join, the member join, the external-id write.
+//! of them (`pipeline::SourceIds`). An integer is its own source id. A string is interned once,
+//! before the first pass: the keys of every view's points file are collected, sorted bytewise and
+//! deduplicated, and a key's source id is its rank in that order. The ranks are `0..n`, so the
+//! union is contiguous and every consumer reads the same `u64`: the entity-id assignment, the
+//! attribute join and the member join.
 //!
-//! **Sorting by bytes rather than by arrival is what makes the external-id index fall out.** The
-//! index is `(external_id, entity_id)` sorted by the id's bytes (contracts §2.4), and a rank walk
-//! is already in that order, so the supplied route writes it without a sort. The integer route
-//! keeps its own sort, eight little-endian bytes not being in the integer's order, which is what
-//! `ExternalIdRow`'s byte-swapped key is for.
+//! **A value a points file does not carry resolves to [`NO_SOURCE_ID`]**, which no rank can be. A
+//! member row naming one is a refusal naming the value, and an attribute row naming one is a row
+//! the join did not match, counted and reported (`configuration.md` §8).
 //!
-//! **An id a points file does not carry resolves to [`NO_SOURCE_ID`]**, which no rank can be. A
-//! member row naming one is a refusal naming the key, and an attribute row naming one is a row the
-//! join did not match, counted and reported (`configuration.md` §8).
-//!
-//! ## What the supplied route costs
+//! ## What the string route costs
 //!
 //! **The keys are resident for the length of the build, and there is no spill route for them.**
 //! A key costs its `Box<[u8]>` in the interned vector, 16 bytes, plus its own heap allocation,
@@ -32,17 +25,13 @@
 //! measured: at a 20-byte mean key that is 16 + 32 = 48 B/item, so 10⁸ keys are 4.5 GiB and 10⁹
 //! are 45. `residency::disk` charges it as a named term, so the pre-flight refuses a build that
 //! would not fit rather than the kernel killing it. The integer route allocates nothing here.
-//!
-//! The sidecar the same route writes is charged beside it, at `12 + mean` bytes an item: a 4-byte
-//! Arrow offset, the key's own bytes, a 4-byte entity, a 4-byte locator slot, and a quarter byte
-//! an item of Arrow framing.
 
 use std::path::Path;
 
 use arrow::array::{Array, Int32Array, Int64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::DataType;
 
-use crate::config::ENTITY_ID;
+use crate::config::JOIN_COLUMN;
 use crate::error::{BuildError, Result};
 
 /// The source id of a row whose key no points file carries.
@@ -54,17 +43,13 @@ pub const NO_SOURCE_ID: u64 = u64::MAX;
 /// How this build's declaration names a row.
 #[derive(Debug)]
 pub enum IdSpace {
-    /// The id column holds an integer, which is both the join key and the external id's eight
-    /// little-endian bytes. Every test corpus takes this route.
+    /// The join column holds an integer, which is the row's source id.
     Integer,
-    /// The id column holds supplied keys. A row's join key is the key's rank; its external id is
-    /// the key's bytes.
+    /// The join column holds strings. A row's source id is its key's rank.
     Supplied(SuppliedIds),
-    /// **The points file carries no identity column.** The caller supplied no external id, so the
-    /// bundle writes no extent and no locator and a row is addressable by its `tessera_id` alone
-    /// (contracts §2.4). A row's join key is its position in the points file, which is why this
-    /// route is admitted only where every reader walks that one file whole and in order. The
-    /// refusals that hold it to that are in [`IdSpace::prepare`].
+    /// **The declaration names no join field.** A row's source id is its position in the points
+    /// file, which is why this route is admitted only where every reader walks that one file
+    /// whole and in order. The refusals that hold it to that are in [`Addressing`].
     Positional,
 }
 
@@ -111,14 +96,13 @@ impl SuppliedIds {
         (total / self.keys.len()) as u64
     }
 
-    /// **A second source must spell identity in the same family**, and the refusal is made once
-    /// against the column rather than once per row.
+    /// **A second source must hold the join value in the same family**, and the refusal is made
+    /// once against the column rather than once per row.
     ///
     /// An integer column read against interned keys resolves every row to an unknown key: a
     /// members table would refuse row by row on the first one, and an attribute source would
     /// report zero coverage over a join that was never going to match. Both are answers to the
-    /// wrong question. The declaration named one identity, and a column in the other family is a
-    /// producer that has not been rewritten yet.
+    /// wrong question.
     pub fn require_same_family(
         &self,
         path: &Path,
@@ -133,30 +117,11 @@ impl SuppliedIds {
             path: path.to_path_buf(),
             detail: format!(
                 "{object}: the column '{column}' naming each row holds {found:?}, and this \
-                 declaration's points file spells identity at {:?}. One identity is one type \
-                 (configuration.md §8): a column in the other family names none of the rows this \
-                 build loaded",
+                 declaration's points file holds the join field at {:?}. Write the join value at \
+                 the points file's type",
                 self.spelled
             ),
         })
-    }
-}
-
-/// An item's external id, as it goes into the index (contracts §2.4).
-///
-/// An owning variant for the integer route so that route allocates nothing per row, and a borrow
-/// for the supplied one so its keys are written straight out of the arena.
-pub enum ExternalId<'a> {
-    Integer([u8; 8]),
-    Supplied(&'a [u8]),
-}
-
-impl AsRef<[u8]> for ExternalId<'_> {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            ExternalId::Integer(bytes) => bytes,
-            ExternalId::Supplied(key) => key,
-        }
     }
 }
 
@@ -169,7 +134,7 @@ impl IdSpace {
     /// would be two entities with no error anywhere.
     pub fn prepare(args: &crate::BuildArgs) -> Result<IdSpace> {
         if let Some(view) = args.views.first() {
-            if !crate::input::has_id_column(&view.points, &view.point_fields)? {
+            if !view.point_fields.joins() {
                 return positional(args, view);
             }
         }
@@ -179,11 +144,9 @@ impl IdSpace {
             let kind = IdKind::of(&found).ok_or_else(|| BuildError::Schema {
                 path: view.points.clone(),
                 detail: format!(
-                    "the identity column '{}' holds {found:?}, which is neither an integer nor \
-                     bytes. A row is named by an integer, a string or binary bytes, and whatever \
-                     that column holds is the row's external id (configuration.md §8, contracts \
-                     §2.4)",
-                    view.point_fields.of(ENTITY_ID)
+                    "the join column '{}' holds {found:?}, which is neither an integer nor a \
+                     string. Join on a `keyword` or an integer column",
+                    view.point_fields.of(JOIN_COLUMN)
                 ),
             })?;
             match &spelling {
@@ -202,9 +165,9 @@ impl IdSpace {
         // nobody asked for.
         if args.limit.is_some() {
             return Err(BuildError::Invalid(
-                "`--limit` keeps the rows whose identity is below it, and this declaration's \
-                 identity column holds supplied keys rather than integers. Build the whole \
-                 corpus, or select the rows in the points file"
+                "`--limit` keeps the rows whose join value is below it, and this declaration's \
+                 join field is a string. Build the whole corpus, or select the rows in the points \
+                 file"
                     .to_string(),
             ));
         }
@@ -217,8 +180,7 @@ impl IdSpace {
                 |key| keys.push(key.into()),
             )?;
         }
-        // Bytewise, which is the order the external-id index is written in (contracts §2.4), and
-        // deduplicated across views: a point has one identity in every view it appears in.
+        // Deduplicated across views: a point has one identity in every view it appears in.
         keys.sort_unstable();
         keys.dedup();
         Ok(IdSpace::Supplied(SuppliedIds { keys, spelled }))
@@ -235,17 +197,6 @@ impl IdSpace {
     /// Whether a row is named by its position in the points file rather than by a column.
     pub fn positional(&self) -> bool {
         matches!(self, IdSpace::Positional)
-    }
-
-    /// The external id a source id carries: the supplied key's own bytes, or the integer's eight
-    /// little-endian bytes.
-    ///
-    /// The positional route reaches this nowhere, [`writes_external_ids`] being false for it.
-    pub fn external_id(&self, source_id: u64) -> ExternalId<'_> {
-        match self.supplied() {
-            Some(keys) => ExternalId::Supplied(keys.key(source_id)),
-            None => ExternalId::Integer(source_id.to_le_bytes()),
-        }
     }
 
     /// How the points file names the item a source id stands for: the integer, the supplied key,
@@ -311,32 +262,32 @@ impl Addressing<'_> {
         if self.several_views || self.selection {
             return Ok(Some(
                 "This build materialises several views, whose rows are several files' or a \
-                 selection of one file's. Positions name rows of one whole file. Declare an \
-                 identity column"
+                 selection of one file's. Positions name rows of one whole file. Declare a \
+                 `[defaults].join_field`"
                     .to_string(),
             ));
         }
         if self.limit {
             return Ok(Some(
-                "`--limit` keeps the rows whose identity is below it, and a position is not an \
-                 identity the caller wrote. Build the whole corpus"
+                "`--limit` keeps the rows whose join value is below it, and a position is not a \
+                 value the caller wrote. Build the whole corpus"
                     .to_string(),
             ));
         }
         if let Some(path) = self.visibility_source {
             return Ok(Some(format!(
-                "The access relation {} names each point's terms by its entity id, and there is \
-                 none to name. Read the labels from a column of the points file, or declare an \
-                 identity column",
+                "The access relation {} names each point's terms by its join value, and there is \
+                 none to name. Read the labels from a column of the points file, or declare a \
+                 `[defaults].join_field`",
                 path.display()
             )));
         }
         for group in self.attribute_sources {
             if group.path != self.points {
                 return Ok(Some(format!(
-                    "Attribute source {} is a second file, whose rows are joined by the identity \
-                     they name. Read the columns from the points file, or declare an identity \
-                     column",
+                    "Attribute source {} is a second file, whose rows are joined by the value \
+                     they name. Read the columns from the points file, or declare a \
+                     `[defaults].join_field`",
                     group.path.display()
                 )));
             }
@@ -345,7 +296,7 @@ impl Addressing<'_> {
             if let Some(members) = &input.members {
                 return Ok(Some(format!(
                     "Layer '{}' reads its members from {}, one row per (artifact, entity), and \
-                     there is no entity to name. Declare an identity column",
+                     there is no entity to name. Declare a `[defaults].join_field`",
                     input.name,
                     members.path.display()
                 )));
@@ -369,7 +320,7 @@ impl Addressing<'_> {
                     {
                         return Ok(Some(format!(
                             "Layer '{}' writes its artifacts' memberships inline, and a \
-                             membership names entities. Declare an identity column",
+                             membership names entities. Declare a `[defaults].join_field`",
                             input.name
                         )));
                     }
@@ -379,7 +330,7 @@ impl Addressing<'_> {
                     if let Some(column) = crate::input::first_column_present(path, &named)? {
                         return Ok(Some(format!(
                             "Layer '{}' reads its artifacts from {}, which carries a '{column}' \
-                             column, and a membership names entities. Declare an identity column",
+                             column, and a membership names entities. Declare a `[defaults].join_field`",
                             input.name,
                             path.display()
                         )));
@@ -396,21 +347,15 @@ impl Addressing<'_> {
 fn positional(args: &crate::BuildArgs, view: &crate::ViewArgs) -> Result<IdSpace> {
     let refuse = |detail: String| -> Result<IdSpace> {
         Err(BuildError::Invalid(format!(
-            "{}: the points file carries no column named '{}', so each row is named by its \
-             position in it and the bundle mints no external ids (contracts §2.4). {detail}",
+            "{}: the declaration names no join field, so each row of the points file is an item \
+             of its own. {detail}",
             view.points.display(),
-            view.point_fields.of(ENTITY_ID)
         )))
     };
-    // **Which view carries one is worth naming**, and only a build knows: a check reads the same
-    // several-views sentence out of [`Addressing`].
-    for other in &args.views {
-        if !crate::input::has_id_column(&other.points, &other.point_fields)? {
-            continue;
-        }
+    if let Some(other) = args.views.iter().find(|other| other.point_fields.joins()) {
         return refuse(format!(
-            "View '{}' does carry one, and a position in one file names no row of another. \
-             Declare the identity column on every view, or on none",
+            "View '{}' joins on a column, and a position in one file names no row of another. \
+             Join every view, or none",
             other.view_id
         ));
     }
@@ -442,9 +387,9 @@ fn mixed(
     BuildError::Schema {
         path: view.points.clone(),
         detail: format!(
-            "view '{}' spells identity at {found:?} and view '{}' spells it at {held:?}. The \
-             views share one entity space (views §7), so one column at two types is two key \
-             spaces under one name and a row in both views would be two entities",
+            "view '{}' holds the join field at {found:?} and view '{}' holds it at {held:?}. \
+             The views share one entity space, so a row in both views would be two items. Write \
+             the join value at one type in every view",
             view.view_id, first.view_id
         ),
     }
@@ -472,22 +417,32 @@ impl IdKind {
     }
 }
 
-/// Whether an identity column at `ty` holds integers.
+/// Whether a join column at `ty` holds integers.
 pub fn is_integer_id(ty: &DataType) -> bool {
-    matches!(
-        ty,
-        DataType::UInt64 | DataType::UInt32 | DataType::Int64 | DataType::Int32
-    )
+    ty.is_integer()
 }
 
-/// An integer identity column as its ids, a null staying null, or `None` where the column is not
+/// An integer join column as its ids, a null staying null, or `None` where the column is not
 /// one [`is_integer_id`] takes.
 ///
-/// **An integer id is its value's eight little-endian bytes, so a negative id and its
-/// two's-complement unsigned value are the same id.** A signed value is sign-extended to 64 bits
-/// and its bits read as unsigned, which is what the running service and the clients store.
+/// **A signed value is sign-extended to 64 bits and its bits read as unsigned**, so a negative
+/// value and its two's-complement unsigned value are the same id. Only one type is read in one
+/// build ([`IdSpace::prepare`]), so the two never meet.
 pub fn integer_ids(column: &dyn Array) -> Option<UInt64Array> {
+    use arrow::array::{Int16Array, Int8Array, UInt16Array, UInt8Array};
     let any = column.as_any();
+    if let Some(ids) = any.downcast_ref::<UInt8Array>() {
+        return Some(ids.unary(u64::from));
+    }
+    if let Some(ids) = any.downcast_ref::<UInt16Array>() {
+        return Some(ids.unary(u64::from));
+    }
+    if let Some(ids) = any.downcast_ref::<Int8Array>() {
+        return Some(ids.unary(|id| i64::from(id) as u64));
+    }
+    if let Some(ids) = any.downcast_ref::<Int16Array>() {
+        return Some(ids.unary(|id| i64::from(id) as u64));
+    }
     if let Some(ids) = any.downcast_ref::<UInt64Array>() {
         return Some(ids.clone());
     }
@@ -503,10 +458,8 @@ pub fn integer_ids(column: &dyn Array) -> Option<UInt64Array> {
     None
 }
 
-/// One row's key from an identity column of any accepted type, or `None` where the row is null.
-///
-/// **An integer is read as its id's eight little-endian bytes** ([`integer_ids`]), which is what
-/// the integer route writes as an external id.
+/// One row's key from a join column of any accepted type, or `None` where the row is null. An
+/// integer is read as its id's eight little-endian bytes ([`integer_ids`]).
 pub fn key_at(column: &dyn Array, row: usize) -> Option<Vec<u8>> {
     use arrow::array::{
         BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, StringArray,
@@ -543,8 +496,8 @@ pub fn key_at(column: &dyn Array, row: usize) -> Option<Vec<u8>> {
     None
 }
 
-/// One row's identity as a refusal should print it: an integer as its number, supplied bytes as
-/// their text, and a row the column cannot be read at as its position in the file.
+/// One row's join value as a refusal should print it: an integer as its number, a string as its
+/// text, and a row the column cannot be read at as its position in the file.
 pub fn display_at(column: &dyn Array, row: usize) -> String {
     let any = column.as_any();
     macro_rules! integer {
@@ -559,6 +512,10 @@ pub fn display_at(column: &dyn Array, row: usize) -> String {
         integer!(UInt32Array);
         integer!(Int64Array);
         integer!(Int32Array);
+        integer!(arrow::array::UInt16Array);
+        integer!(arrow::array::UInt8Array);
+        integer!(arrow::array::Int16Array);
+        integer!(arrow::array::Int8Array);
         if let Some(key) = key_at(column, row) {
             return String::from_utf8_lossy(&key).into_owned();
         }
@@ -566,29 +523,49 @@ pub fn display_at(column: &dyn Array, row: usize) -> String {
     format!("row {row}")
 }
 
-/// Refuse a null in the column a row's identity is read from.
+/// Refuse a null in the column a row's join value is read from.
 pub fn null_id(path: &Path, name: &str) -> BuildError {
     BuildError::Schema {
         path: path.to_path_buf(),
         detail: format!(
-            "the identity column '{name}' has a null in it, and a row that names no entity has no \
-             identity. Every row is named by the bytes this column holds (contracts §2.4)"
+            "the join column '{name}' has a null in it, and a row whose join value is null names \
+             no item. Give every row a value"
         ),
     }
 }
 
-/// Whether this build writes the external-id index and the locator (contracts §2.4).
+/// Refuse a view whose points name one join value on two rows, naming how many values are held
+/// more than once and up to ten of them. `sorted` is the view's source ids, ascending.
 ///
-/// **A supplied id column is an external id, so it is written without a flag.** The caller named
-/// every row, and contracts §2.4's rule is that an item's identifier is the caller's where the
-/// caller supplies one. `--mint-external-ids` keeps its meaning for the other route: an integer
-/// `entity_id` column is a source-corpus number rather than a namespace the caller owns, so
-/// minting one is opt-in and a build that does not ask writes no sidecar at all.
-pub fn writes_external_ids(args: &crate::BuildArgs, ids: &IdSpace) -> bool {
-    if ids.positional() {
-        // Nothing in the build or the ingest path may manufacture an external id for an item that
-        // has none (contracts §2.4), and a position is not one.
-        return false;
+/// A row is unique per `(join value, view)`: the same value in two views' points is one item in
+/// both, and is not refused.
+pub(crate) fn refuse_duplicates(
+    view: &crate::ViewArgs,
+    ids: &IdSpace,
+    sorted: impl IntoIterator<Item = u64>,
+) -> Result<()> {
+    let mut previous: Option<u64> = None;
+    let mut counted: Option<u64> = None;
+    let mut values = 0u64;
+    let mut shown = Vec::new();
+    for id in sorted {
+        if previous == Some(id) && counted != Some(id) {
+            counted = Some(id);
+            values += 1;
+            if shown.len() < 10 {
+                shown.push(ids.display(id));
+            }
+        }
+        previous = Some(id);
     }
-    args.mint_external_ids || ids.supplied().is_some()
+    if values == 0 {
+        return Ok(());
+    }
+    Err(BuildError::Invalid(format!(
+        "view '{}': {values} join value(s) name more than one row of {}: {}. Each row of one \
+         view's points is a different item; give each its own value",
+        view.view_id,
+        view.points.display(),
+        shown.join(", ")
+    )))
 }

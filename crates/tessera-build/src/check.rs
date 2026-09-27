@@ -33,7 +33,7 @@ use tessera_spatial::tiler::ScalarType;
 use tessera_store::scalar_column;
 
 use crate::config::{
-    ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, ENTITY_ID,
+    ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, JOIN_COLUMN,
 };
 use crate::ids::Addressing;
 use crate::input::TERM_ID;
@@ -235,14 +235,19 @@ fn require(
     fields: &Fields,
     canonical: &str,
 ) -> bool {
-    if column_type(schema, fields, canonical).is_some() {
+    let join = canonical == JOIN_COLUMN;
+    if (join && !fields.joins()) || column_type(schema, fields, canonical).is_some() {
         return true;
     }
+    let field = match join {
+        true => "the join field".to_string(),
+        false => format!("field `{canonical}`"),
+    };
     report.note(
         object,
         format!(
-            "field `{canonical}` is read from a column named '{}', which the source does not \
-             carry. Its columns are: {}",
+            "{field} is read from a column named '{}', which the source does not carry. Its \
+             columns are: {}",
             fields.of(canonical),
             columns(schema)
         ),
@@ -345,7 +350,7 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
         // attributes.** The group is the view's own points file, and the build joins the columns
         // of that file by position (`ids::Addressing`).
         if !positional.contains(&group.path) {
-            require(report, &object, &schema, &group.fields, ENTITY_ID);
+            require(report, &object, &schema, &group.fields, JOIN_COLUMN);
         }
         // **Every declared attribute against the field that must carry it.** Presence and family,
         // not fit: a `u8` column whose data carries 300 is a per-row refusal no schema can
@@ -437,7 +442,7 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
             continue;
         };
         for (what, column) in [
-            ("the entity id", source.entity_id.as_str()),
+            ("the join field", source.join_column.as_str()),
             ("the value", attribute.column()),
             ("the view discriminator", source.view_field.as_str()),
         ] {
@@ -475,32 +480,26 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
     }
 }
 
-/// The plain views whose points file carries no identity column, by path.
+/// The plain views whose rows join on nothing, by path.
 ///
-/// A row of one of those files is named by its position in it (`configuration.md` §8), and so is
-/// that file's own attribute column, so [`check_attribute_sources`] does not require an identity
-/// column of it either. Whether the positional route is admissible at all is
-/// [`check_identity`]'s question, asked per view.
+/// A row of one of those files is an item of its own, and so is that file's own attribute
+/// column, so [`check_attribute_sources`] does not require a join column of it either. Whether
+/// the positional route is admissible at all is [`check_identity`]'s question, asked per view.
 fn positional_points(config: &Config) -> Vec<PathBuf> {
     config
         .views
         .iter()
-        .filter_map(|view| {
-            let path = view.source.as_ref()?;
-            let schema = schema_of(path).ok()?;
-            column_type(&schema, &view.fields, ENTITY_ID)
-                .is_none()
-                .then(|| path.clone())
-        })
+        .filter(|view| !view.fields.joins())
+        .filter_map(|view| view.source.clone())
         .collect()
 }
 
-/// A view's identity column, required only where something else in the declaration names a row by
-/// it.
+/// A view's join column, or, where the declaration names no join field, whether anything else in
+/// the declaration names a row by one.
 ///
 /// **The list is the build's own** (`ids::Addressing`), so a declaration this leaves clean is one
-/// the build accepts. A points file carrying no identity column and nothing to name it for is a
-/// warning saying how its rows are addressed, and the check stays clean.
+/// the build accepts. A declaration with no join field and nothing that needs one is a warning
+/// saying how its rows are addressed, and the check stays clean.
 fn check_identity(
     config: &Config,
     view: &crate::config::View,
@@ -508,7 +507,8 @@ fn check_identity(
     object: &Object,
     report: &mut CheckReport,
 ) {
-    if column_type(schema, &view.fields, ENTITY_ID).is_some() {
+    if view.fields.joins() {
+        require(report, object, schema, &view.fields, JOIN_COLUMN);
         return;
     }
     let Some(points) = &view.source else {
@@ -518,7 +518,7 @@ fn check_identity(
         points,
         several_views: config.views.len() > 1 || !config.view_groups.is_empty(),
         // A plain view's rows are its file's, whole. A selection belongs to a group's view, which
-        // requires the identity column here whatever else the declaration says.
+        // requires a join field here whatever else the declaration says.
         selection: false,
         // `tessera check` takes no `--limit`. The build refuses one against this route.
         limit: false,
@@ -536,15 +536,13 @@ fn check_identity(
     match needed {
         None => report.warn(
             object,
-            "no identity column: rows addressable by tessera_id only",
+            "no join field: each row is an item of its own, addressable by tessera_id",
         ),
         Some(detail) => report.note(
             object,
             format!(
-                "field `{ENTITY_ID}` is read from a column named '{}', which the source does not \
-                 carry, so each row would be named by its position in it (contracts §2.4). \
-                 {detail}",
-                view.fields.of(ENTITY_ID)
+                "the declaration names no join field, so each row would be an item of its own. \
+                 {detail}"
             ),
         ),
     }
@@ -724,7 +722,7 @@ fn check_points(
     discriminator: bool,
     report: &mut CheckReport,
 ) {
-    require(report, object, schema, fields, ENTITY_ID);
+    require(report, object, schema, fields, JOIN_COLUMN);
     let names_morton = fields.names("morton") || fields.names("residual");
     let names_xy = fields.names("x") || fields.names("y");
     let has_morton = column_type(schema, fields, "morton").is_some();
@@ -801,8 +799,11 @@ fn check_point_visibility(
         let Some(schema) = open(report, &object, path) else {
             return;
         };
-        let fields = Fields::canonical(object.to_string());
-        require(report, &object, &schema, &fields, ENTITY_ID);
+        let fields = Fields::moved(
+            object.to_string(),
+            [(JOIN_COLUMN, view.fields.of(JOIN_COLUMN))],
+        );
+        require(report, &object, &schema, &fields, JOIN_COLUMN);
         require(report, &object, &schema, &fields, TERM_ID);
     }
 }

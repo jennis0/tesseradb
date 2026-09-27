@@ -42,10 +42,10 @@ use tessera_spatial::{fixed32, Bounds, Projection};
 use tessera_store::scalar_column::ScalarColumn;
 use tessera_store::vocabulary::{code_value, Resolved, Unresolved, VocabularyMinter};
 
-use crate::config::{Fields, ViewSelector, ENTITY_ID};
+use crate::config::{Fields, ViewSelector, JOIN_COLUMN};
 use crate::error::{BuildError, Result};
 
-/// One input point: its source-corpus entity ID (which becomes the external ID) and geometry.
+/// One input point: its source id (the join value, or its rank) and geometry.
 ///
 /// Geometry is carried **already quantised**, as 32-bit fixed point per axis against the build's
 /// extent ([`tessera_spatial::fixed32`]), rather than as the coordinates the file held. Three
@@ -228,7 +228,7 @@ impl<'a> Source<'a> {
     fn id_index(&self, schema: &arrow::datatypes::Schema) -> Result<Option<usize>> {
         match self.ids.positional() {
             true => Ok(None),
-            false => field_index(self.path, schema, self.fields, ENTITY_ID).map(Some),
+            false => field_index(self.path, schema, self.fields, JOIN_COLUMN).map(Some),
         }
     }
 
@@ -270,7 +270,7 @@ impl<'a> Source<'a> {
 
     /// The column name a refusal should quote for the identity.
     fn id_name(&self) -> &'a str {
-        self.fields.of(ENTITY_ID)
+        self.fields.of(JOIN_COLUMN)
     }
 }
 
@@ -372,10 +372,10 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     // everything it left alone. Every index below — in this schema and in each worker's projected
     // one — is looked up by these, never by the canonical name.
     let wanted: Vec<&str> = match geometry_kind {
-        GeometryKind::Xy => vec![fields.of(ENTITY_ID), fields.of("x"), fields.of("y")],
-        GeometryKind::Morton => vec![fields.of(ENTITY_ID), fields.of("morton")],
+        GeometryKind::Xy => vec![fields.of(JOIN_COLUMN), fields.of("x"), fields.of("y")],
+        GeometryKind::Morton => vec![fields.of(JOIN_COLUMN), fields.of("morton")],
         GeometryKind::MortonResidual => vec![
-            fields.of(ENTITY_ID),
+            fields.of(JOIN_COLUMN),
             fields.of("morton"),
             fields.of("residual"),
         ],
@@ -386,7 +386,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     // its own `ProjectionMask` from these root indices against its own reader.
     let mut roots = Vec::with_capacity(wanted.len() + 1);
     for canonical in geometry_kind.canonical_fields() {
-        if *canonical == ENTITY_ID && ids.positional() {
+        if *canonical == JOIN_COLUMN && ids.positional() {
             continue;
         }
         roots.push(field_index(path, &schema, fields, canonical)?);
@@ -411,7 +411,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
         .collect();
     // Resolved once, on this thread, and copied into each worker: a worker re-resolves its own
     // indices against its own projected schema, and it must do so under the same names.
-    let (id_name, x_name, y_name) = (fields.of(ENTITY_ID), fields.of("x"), fields.of("y"));
+    let (id_name, x_name, y_name) = (fields.of(JOIN_COLUMN), fields.of("x"), fields.of("y"));
     let (morton_name, residual_name) = (fields.of("morton"), fields.of("residual"));
 
     /// One decoded batch's columns, extracted on a worker thread, with the rows this view's
@@ -553,7 +553,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             let placed = place(projection, Some(extent), xs[i], ys[i]).map_err(
                                 |e| BuildError::Schema {
                                     path: path.to_path_buf(),
-                                    detail: format!("{} {} {e}", fields.of(ENTITY_ID), ids[i]),
+                                    detail: format!("{} {} {e}", fields.of(JOIN_COLUMN), ids[i]),
                                 },
                             )?;
                             if visit(PointRow {
@@ -663,9 +663,9 @@ pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
-    let id_idx = field_index(path, &schema, fields, ENTITY_ID)?;
+    let id_idx = field_index(path, &schema, fields, JOIN_COLUMN)?;
     let term_idx = field_index(path, &schema, fields, TERM_ID)?;
-    let (id_name, term_name) = (fields.of(ENTITY_ID), fields.of(TERM_ID));
+    let (id_name, term_name) = (fields.of(JOIN_COLUMN), fields.of(TERM_ID));
 
     let keep = prunable_row_groups(builder.metadata(), id_idx, limit);
     drop(builder);
@@ -978,7 +978,7 @@ fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(src: Source<'_>, mut visit: F
     // points file holding Morton codes carrying no `x` at all.
     if roots.is_empty() {
         for canonical in geometry_kind(path, &schema, fields)?.canonical_fields() {
-            if *canonical == ENTITY_ID {
+            if *canonical == JOIN_COLUMN {
                 continue;
             }
             roots.push(field_index(path, &schema, fields, canonical)?);
@@ -1331,7 +1331,7 @@ pub fn survey_points(
     // (`crate::ids`): a points file naming no row is the positional route, and the survey's use of
     // the column is a `--limit` and two refusals' wording.
     let id_idx_in_file = schema
-        .column_with_name(fields.of(ENTITY_ID))
+        .column_with_name(fields.of(JOIN_COLUMN))
         .map(|(i, _)| i);
     let keep = match id_idx_in_file {
         Some(idx) => prunable_row_groups(builder.metadata(), idx, limit),
@@ -1359,7 +1359,7 @@ pub fn survey_points(
         .map_err(|e| BuildError::parquet(path, e))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
     let id_idx = match id_idx_in_file {
-        Some(_) => Some(column_index(path, &projected, fields.of(ENTITY_ID))?),
+        Some(_) => Some(column_index(path, &projected, fields.of(JOIN_COLUMN))?),
         None => None,
     };
     let x_idx = column_index(path, &projected, x_name)?;
@@ -1397,12 +1397,12 @@ pub fn survey_points(
                             "`--limit` keeps the rows whose identity is below it, and the \
                              identity column '{}' holds {:?} rather than an integer. Build \
                              the whole corpus, or select the rows in the points file",
-                            fields.of(ENTITY_ID),
+                            fields.of(JOIN_COLUMN),
                             batch.column(idx).data_type()
                         ),
                     });
                 }
-                Some(read_integer_ids(path, &batch, idx, fields.of(ENTITY_ID))?)
+                Some(read_integer_ids(path, &batch, idx, fields.of(JOIN_COLUMN))?)
             }
             (Some(_), None) => {
                 return Err(BuildError::Schema {
@@ -1410,12 +1410,12 @@ pub fn survey_points(
                     detail: format!(
                         "`--limit` keeps the rows whose identity is below it, and this file \
                          carries no column named '{}'. Build the whole corpus",
-                        fields.of(ENTITY_ID)
+                        fields.of(JOIN_COLUMN)
                     ),
                 })
             }
         };
-        let name_of = |i: usize| row_name(&batch, id_idx, fields.of(ENTITY_ID), i);
+        let name_of = |i: usize| row_name(&batch, id_idx, fields.of(JOIN_COLUMN), i);
         let xs = read_coordinate_column(path, &batch, x_idx, x_name, &name_of)?;
         let ys = read_coordinate_column(path, &batch, y_idx, y_name, &name_of)?;
         let keep = match (select, select_idx) {
@@ -1488,9 +1488,9 @@ impl GeometryKind {
     /// against to build the projection.
     fn canonical_fields(self) -> &'static [&'static str] {
         match self {
-            GeometryKind::Xy => &[ENTITY_ID, "x", "y"],
-            GeometryKind::Morton => &[ENTITY_ID, "morton"],
-            GeometryKind::MortonResidual => &[ENTITY_ID, "morton", "residual"],
+            GeometryKind::Xy => &[JOIN_COLUMN, "x", "y"],
+            GeometryKind::Morton => &[JOIN_COLUMN, "morton"],
+            GeometryKind::MortonResidual => &[JOIN_COLUMN, "morton", "residual"],
         }
     }
 }
@@ -1619,7 +1619,7 @@ pub fn id_bounds(path: &Path, fields: &Fields) -> Result<Option<(u64, u64)>> {
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
-    let id_idx = field_index(path, &schema, fields, ENTITY_ID)?;
+    let id_idx = field_index(path, &schema, fields, JOIN_COLUMN)?;
     let meta = builder.metadata();
     let mut bounds: Option<(u64, u64)> = None;
     for rg in 0..meta.num_row_groups() {
@@ -1706,17 +1706,6 @@ pub(crate) fn first_column_present(path: &Path, names: &[&str]) -> Result<Option
         .map(|name| (*name).to_string()))
 }
 
-/// Whether the points file carries the column a row's identity would be read from.
-pub(crate) fn has_id_column(path: &Path, fields: &Fields) -> Result<bool> {
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    Ok(builder
-        .schema()
-        .column_with_name(fields.of(ENTITY_ID))
-        .is_some())
-}
-
 /// `rows` source ids from `cursor` onward: the positional route's names for one batch's rows.
 ///
 /// **Every reader on this route walks the same file whole and in order**, which `IdSpace::prepare`
@@ -1733,7 +1722,7 @@ pub(crate) fn id_column_type(path: &Path, fields: &Fields) -> Result<DataType> {
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
-    let idx = field_index(path, &schema, fields, ENTITY_ID)?;
+    let idx = field_index(path, &schema, fields, JOIN_COLUMN)?;
     Ok(schema.field(idx).data_type().clone())
 }
 
@@ -1752,7 +1741,7 @@ pub(crate) fn scan_id_keys<F: FnMut(&[u8])>(
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
-    let mut roots = vec![field_index(path, &schema, fields, ENTITY_ID)?];
+    let mut roots = vec![field_index(path, &schema, fields, JOIN_COLUMN)?];
     if let Some(select) = select {
         roots.push(discriminator_index(path, &schema, select)?);
     }
@@ -1763,7 +1752,7 @@ pub(crate) fn scan_id_keys<F: FnMut(&[u8])>(
         .build()
         .map_err(|e| BuildError::parquet(path, e))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let name = fields.of(ENTITY_ID);
+    let name = fields.of(JOIN_COLUMN);
     let id_idx = column_index(path, &projected, name)?;
     let select_idx = match select {
         Some(select) => Some(column_index(path, &projected, &select.column)?),

@@ -377,7 +377,6 @@ fn build_scan_fixture(dir: &Path, rows: u64) -> PathBuf {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

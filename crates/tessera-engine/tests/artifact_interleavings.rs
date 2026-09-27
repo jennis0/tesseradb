@@ -1183,7 +1183,6 @@ fn built_fixture() -> Fixture {
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,

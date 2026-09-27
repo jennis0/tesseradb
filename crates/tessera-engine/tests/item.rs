@@ -96,7 +96,6 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

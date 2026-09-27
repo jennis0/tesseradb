@@ -68,11 +68,10 @@
 //! exist, because reading it as a relative path would turn a typo into a missing file rather than
 //! a declaration that does not resolve.
 //!
-//! **`[defaults]` is what `[corpus]` was, with the constraint removed** ([`Defaults`]). It carries
-//! a `source` and an `entity_id_field`, and any block that reads either may write its own — so an
-//! attribute may name its own file and its own identity column, because a file that carries entity
-//! ids can be joined whatever it calls them. What `[corpus]` guaranteed, that every attribute lands
-//! in one entity space, is guaranteed by the entity id and never was by the file.
+//! **`[defaults]` carries a `source` and the `join_field`** ([`Defaults`]). A block may name its
+//! own file, and its `fields` may say where that file keeps the join field, because a file that
+//! carries the join value can be joined whatever it calls the column. What puts every attribute in
+//! one entity space is the join value, not the file.
 //!
 //! **`--file` is an override, never a binding.** Its key is the *source's own name*, so one
 //! override moves every block reading that file at once — where the previous object-keyed form
@@ -129,7 +128,7 @@
 //!
 //! A view says where each point's access terms are and what a point carrying none gets
 //! ([`AccessInput`]): a `list<string>` field of its own source, a separate exploded
-//! `(entity_id, term_id)` relation, or neither — every point taking the default, which is the
+//! `(join value, term_id)` relation, or neither — every point taking the default, which is the
 //! corpus with no permission model. `default` is optional (decision 0133): where a view declares
 //! one, a point carrying no label takes it at the build and on `/control/ingest` alike; where it
 //! declares none, both entry points refuse such a point naming the count. A view declaring neither
@@ -178,12 +177,12 @@ pub fn declaration_error(detail: impl Into<String>) -> BuildError {
 pub const ABSENT_CODE: u32 = 0;
 
 use tessera_types::label::{is_inherited, INHERITED};
-/// **The canonical identity field** (`configuration.md` §8), which
-/// `[defaults].entity_id_field` moves for this declaration and each reader of one may move again.
-/// It is entity-space and shared: a point has one identity across every view it appears in, and it
-/// is what a member row names. Not `entity`, which names the object rather than the value, and not
-/// `id`, which collides with `tessera_id` and with an external id.
-pub const ENTITY_ID: &str = "entity_id";
+/// The key a [`Fields`] map holds the join column under, and the column a caller building
+/// [`crate::BuildArgs`] without a declaration reads the join value from.
+///
+/// A declaration never writes this name: its join column is the column of its join field, which
+/// each block's `fields` moves under the join field's own name ([`check_fields`]).
+pub const JOIN_COLUMN: &str = "entity_id";
 
 // ---------------------------------------------------------------------------------------------
 // The file, as written
@@ -212,7 +211,7 @@ struct ConfigFile {
     /// Default: not set.
     #[serde(default)]
     sources: Option<BTreeMap<String, String>>,
-    /// The source and entity id column a block takes when it names none.
+    /// The source a block takes when it names none, and the field every source joins on.
     ///
     /// Default: not set.
     #[serde(default)]
@@ -234,9 +233,10 @@ struct ConfigFile {
     layer: Vec<LayerBlock>,
 }
 
-/// What a block takes when it names no source or entity id column of its own. `source` reaches a
-/// `[[view]]` and an entity-scoped `[[attribute]]`, and nothing else: a vocabulary, a layer, a
-/// view group and `point_visibility` with no source of their own read no file.
+/// What a block takes when it names no source of its own, and the field a build joins its files
+/// on. `source` reaches a `[[view]]` and an entity-scoped `[[attribute]]`, and nothing else: a
+/// vocabulary, a layer, a view group and `point_visibility` with no source of their own read no
+/// file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DefaultsBlock {
@@ -246,12 +246,21 @@ struct DefaultsBlock {
     /// Default: not set.
     #[serde(default)]
     source: Option<String>,
-    /// The column holding the entity id in a view's points and an attribute's source, where the
-    /// block does not name one itself. An empty name is refused.
+    /// The `[[attribute]]` a build joins its files on: a row of a view's points, an attribute's
+    /// source, a layer's members or an access relation names its item by this field's value.
+    /// The attribute must be declared `unique`, and be a `keyword` or an integer. Every file
+    /// carries it in the attribute's own column (its `field`, or its name), and a block whose
+    /// file calls it something else says so in its `fields`, under the join field's name. One
+    /// value twice in one view's points is refused, naming how many values and up to ten of
+    /// them; one value in two views' points is one item in both views.
     ///
-    /// Default: `"entity_id"`.
+    /// Without it, each row of the points file is an item of its own. The build then reads
+    /// every attribute from that file, and refuses a second view, a second attribute file, a
+    /// members file, an access relation and `--limit`, which would need a join.
+    ///
+    /// Default: not set.
     #[serde(default)]
-    entity_id_field: Option<String>,
+    join_field: Option<String>,
     /// The view whose map positions order the entity ids a build assigns to items with the same
     /// access labels. A build of more than one view, counting each view of a group, is refused
     /// without it. A view of a group is named `<group>:<key>`, and a name that is not one of the
@@ -290,11 +299,11 @@ struct ViewBlock {
     /// Default: the value of `[defaults].source`.
     #[serde(default)]
     source: Option<String>,
-    /// Where the points file keeps each field, as `field = "column"`. The fields are `entity_id`
-    /// with either `x` and `y` or `morton` and `residual`; a projected view's are `entity_id`,
-    /// `lon` and `lat`. A field not named here is read from the column of its own name. A field
-    /// the view does not have, both kinds of position, `residual` without `morton`, and `fields`
-    /// where the view has no source are refused.
+    /// Where the points file keeps each field, as `field = "column"`. The fields are the join
+    /// field, under its own name, with either `x` and `y` or `morton` and `residual`; a projected
+    /// view's are the join field, `lon` and `lat`. A field not named here is read from the column
+    /// of its own name. A field the view does not have, both kinds of position, `residual`
+    /// without `morton`, and `fields` where the view has no source are refused.
     ///
     /// Default: not set.
     #[serde(default)]
@@ -449,7 +458,7 @@ struct PointVisibilityBlock {
     /// Default: not set.
     #[serde(default)]
     field: Option<String>,
-    /// A name in `[sources]`: a file of integer `entity_id` and `term_id` columns, one row per
+    /// A name in `[sources]`: a file of the join field and an integer `term_id`, one row per
     /// point and access term. If one view of a build reads labels this way, every view must, from
     /// the same file.
     ///
@@ -641,19 +650,14 @@ struct AttributeBlock {
     /// Default: the attribute's `name`.
     #[serde(default)]
     field: Option<String>,
-    /// A name in `[sources]`: the file the values are read from, joined to the points by entity
-    /// id. A build refuses an entity-scoped attribute with no source here or in `[defaults]`. A
-    /// group-scoped attribute with none reads each view's own points file, and `[defaults]` does
-    /// not reach it.
+    /// A name in `[sources]`: the file the values are read from, joined to the points on the
+    /// join field. A build refuses an entity-scoped attribute with no source here or in
+    /// `[defaults]`. A group-scoped attribute with none reads each view's own points file, and
+    /// `[defaults]` does not reach it.
     ///
     /// Default: the value of `[defaults].source`.
     #[serde(default)]
     source: Option<String>,
-    /// The column of `source` holding the entity id. An empty name is refused.
-    ///
-    /// Default: the value of `[defaults].entity_id_field`.
-    #[serde(default)]
-    entity_id_field: Option<String>,
     /// The type of value the column holds, one of the types below.
     ///
     /// Required.
@@ -689,9 +693,11 @@ struct AttributeBlock {
     // A `toml::Value` matched by `compile_scope`, which names the mistake in either spelling.
     #[serde(default)]
     scope: Option<toml::Value>,
-    /// On a group-scoped attribute with a `source` of its own, `view` names the column saying
-    /// which view each row's value is for, `view` if absent. Refused on any other attribute, and
-    /// any other field is refused.
+    /// Where this attribute's `source` keeps two fields, as `field = "column"`. The join field,
+    /// under its own name, where the source calls its column something else; and on a
+    /// group-scoped attribute, `view`, the column saying which view each row's value is for,
+    /// `view` if absent. Any other field, and `fields` on an attribute with no `source`, is
+    /// refused.
     ///
     /// Default: not set.
     #[serde(default)]
@@ -897,7 +903,7 @@ pub struct InlineArtifact {
     /// The level the artifact is at: 0 on a layer with no levels.
     #[serde(default)]
     pub level: u32,
-    /// The members, as the integer values of the view's `entity_id` field. Only on an
+    /// The members, as integer values of the join field. Only on an
     /// `enumerated` layer, and refused beside `excluding`.
     ///
     /// Default: not set.
@@ -1260,8 +1266,8 @@ pub struct AttributeSource {
     pub name: String,
     /// The file itself, resolved against the declaring document and after any `--file` override.
     pub path: PathBuf,
-    /// Where this source's identity field sits. Canonical is `entity_id`; `[defaults]` and each
-    /// attribute's own `entity_id_field` move it.
+    /// Where this source keeps the join field: the join field's column, or where the attribute's
+    /// `fields` moved it.
     pub fields: Fields,
     /// Which of [`Schema::attributes`] this file carries, by index, in declaration order. Indices
     /// rather than names because the scalar tail is stored positionally: the declaration's order
@@ -1342,12 +1348,12 @@ pub struct View {
     /// (`projections.md` §5). [`Projection::None`] — the default — transforms nothing, and the
     /// coordinates keep exactly the meaning they have in the file.
     pub projection: Projection,
-    /// This view's geometry: `entity_id` with either `x`/`y` or `morton`/`residual`. `None` when
+    /// This view's geometry: the join field with either `x`/`y` or `morton`/`residual`. `None` when
     /// the view declares no source, which is legal to *declare* and refused at a build that would
     /// have to read it.
     pub source: Option<PathBuf>,
-    /// Where the identity and geometry fields sit in that file. Canonical is `entity_id` with
-    /// either `x`/`y` or `morton`/`residual`.
+    /// Where the join and geometry fields sit in that file: the join field with either `x`/`y`
+    /// or `morton`/`residual`.
     ///
     /// **A projected view's coordinate columns are `lon` and `lat`** (`projections.md` §2), and
     /// they resolve onto the canonical `x`/`y` here: what differs is the axis's *meaning* before
@@ -1550,8 +1556,8 @@ pub struct ScopedAttribute {
 pub struct ScopedAttributeFile {
     /// The resolved path of the `[sources]` entry the column named.
     pub path: PathBuf,
-    /// The column that file spells the entity id in — `entity_id_field`, or the default.
-    pub entity_id: String,
+    /// The column that file carries the join field in.
+    pub join_column: String,
     /// The discriminator column — the attribute's `fields.view`, resolved; `view` by default.
     pub view_field: String,
 }
@@ -2393,7 +2399,7 @@ pub struct AccessInput {
 /// The acquisition half of [`AccessInput`].
 #[derive(Debug, Clone)]
 pub enum AccessSource {
-    /// `point_visibility.source`: a separate exploded `(entity_id, term_id)` relation, one row per
+    /// `point_visibility.source`: a separate exploded `(join value, term_id)` relation, one row per
     /// `(point, term)`. The shape the probe generators produce natively at 10⁹.
     Relation(PathBuf),
     /// `point_visibility.field`: a `list<string>` — or a plain `string`, where a point carries one
@@ -2422,7 +2428,7 @@ impl AccessInput {
 pub struct PointVisibility {
     /// A column of the view's own source, carrying one label or a list per point.
     pub field: Option<String>,
-    /// The exploded `(entity_id, term_id)` relation, bound.
+    /// The exploded `(join value, term_id)` relation, bound.
     pub source: Option<PathBuf>,
     /// **Never `inherited`.** A point carrying no terms is in no posting list and so in no
     /// principal's mask, and a gate narrows rather than widens — so there is nothing for a point to
@@ -2626,7 +2632,7 @@ impl Config {
         // the working directory — which is what `Path::new("")` joins to.
         let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
         let sources = Sources::compile(&base, file.sources.as_ref(), overrides)?;
-        let defaults = Defaults::compile(file.defaults.as_ref(), &sources)?;
+        let defaults = Defaults::compile(file.defaults.as_ref(), &file.attribute, &sources)?;
         let views = compile_views(&file.view, &sources, &defaults)?;
         let vocabularies = compile_vocabularies(&file.vocabulary, &sources)?;
         // Groups after the vocabularies a category's metadata draws on, and after the views whose
@@ -2712,7 +2718,7 @@ impl Config {
             return Err(declaration_error(format!(
                 "{} attribute(s) name no `source` and `[defaults]` declares none: {}. The \
                  attribute pass reads each column from the file its source names, joined to the \
-                 view's geometry by the entity id, so there is no file for these to be read from. \
+                 view's geometry by the join field, so there is no file for these to be read from. \
                  Name a `[sources]` key on each, or write `[defaults]` with `source = \"<name>\"` \
                  for every column that does not. ⊘ Declaring a column with no source is legal and \
                  means the schema is declared and empty, which is a bundle with no rows in it (§2) \
@@ -2738,7 +2744,7 @@ pub fn acquire_view(view: &BuildView) -> Result<ViewAcquisition> {
     let points = view.source.clone().ok_or_else(|| {
         declaration_error(format!(
             "view '{}': `source` is required to build from a file (configuration.md §1). \
-             It is the path — relative to this config — of this view's geometry: `entity_id` \
+             It is the path — relative to this config — of this view's geometry: the join field \
              with either `x`/`y` or `morton`/`residual`. ⊘ Declaring no source is legal and \
              means the view is declared and empty, which is a bundle with no rows in it (§2) \
              and is not built",
@@ -2959,34 +2965,49 @@ impl Sources {
     }
 }
 
-/// `[defaults]` — the source and the identity column a block takes when it names neither.
+/// `[defaults]`: the source a block takes when it names none, and the field every file joins on.
 ///
-/// **Two defaults, and they reach different blocks on purpose.** `entity_id_field` reaches every
-/// source read under the canonical `entity_id`: it says how this caller spells identity, and a
-/// corpus does not spell it three ways across three files. `source` reaches only the two blocks
-/// whose absent source is *nothing at all* — a `[[view]]`'s geometry and an `[[attribute]]`'s
-/// column, each of which a build has to read from somewhere. It deliberately does **not** reach a
-/// vocabulary, a layer, a `[layer.members]` block or a `point_visibility`, because there an absent
-/// source is itself a declaration: a vocabulary that mints rather than reads, a layer declared and
-/// empty, a membership that is not stored, labels that ride the points' own column. Filling one of
-/// those in would turn a declaration into an acquisition nobody wrote.
+/// **`source` reaches only the two blocks whose absent source is *nothing at all*** — a
+/// `[[view]]`'s geometry and an `[[attribute]]`'s column, each of which a build has to read from
+/// somewhere. It does not reach a vocabulary, a layer, a `[layer.members]` block or a
+/// `point_visibility`, because there an absent source is itself a declaration: a vocabulary that
+/// mints rather than reads, a layer declared and empty, a membership that is not stored, labels
+/// that ride the points' own column. Filling one of those in would turn a declaration into an
+/// acquisition nobody wrote.
 #[derive(Debug, Clone)]
 struct Defaults {
     /// The `[sources]` name, already checked to exist.
     source: Option<String>,
-    /// The column an entity id is read from. `entity_id` where the declaration says nothing.
-    entity_id_field: String,
+    /// The join field and its column, or `None` where each points row is an item of its own.
+    join: Option<Join>,
     /// `[defaults].allocation_view` as written. Resolved against the built view registry by
     /// [`Config::anchor_view`], not here: the groups are compiled after `[defaults]` is.
     allocation_view: Option<String>,
 }
 
+/// The declared unique attribute a build joins its files on, and the column a file carries it in
+/// where the block reading that file does not move it.
+#[derive(Debug, Clone)]
+struct Join {
+    field: String,
+    column: String,
+}
+
+/// The types a join field may have: the unique types whose values an identity column holds.
+const JOIN_TYPES: [&str; 9] = [
+    "keyword", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64",
+];
+
 impl Defaults {
-    fn compile(block: Option<&DefaultsBlock>, sources: &Sources) -> Result<Defaults> {
+    fn compile(
+        block: Option<&DefaultsBlock>,
+        attributes: &[AttributeBlock],
+        sources: &Sources,
+    ) -> Result<Defaults> {
         let Some(block) = block else {
             return Ok(Defaults {
                 source: None,
-                entity_id_field: ENTITY_ID.to_string(),
+                join: None,
                 allocation_view: None,
             });
         };
@@ -2996,21 +3017,43 @@ impl Defaults {
             // took it.
             sources.path("[defaults]", source)?;
         }
-        let entity_id_field =
-            match block.entity_id_field.as_deref() {
-                None => ENTITY_ID.to_string(),
-                Some(field) if field.trim().is_empty() => return Err(declaration_error(
-                    "[defaults]: `entity_id_field` is empty, so it names no column. Omit it to \
-                     read the entity id under its own name, `entity_id`",
-                )),
-                Some(field) => field.to_string(),
-            };
+        let join = match block.join_field.as_deref() {
+            None => None,
+            Some(name) => Some(compile_join(name, attributes)?),
+        };
         Ok(Defaults {
             source: block.source.clone(),
-            entity_id_field,
+            join,
             allocation_view: block.allocation_view.clone(),
         })
     }
+}
+
+/// `[defaults].join_field`, checked against the attribute it names.
+fn compile_join(name: &str, attributes: &[AttributeBlock]) -> Result<Join> {
+    let Some(attribute) = attributes.iter().find(|a| a.name == name) else {
+        return Err(declaration_error(format!(
+            "[defaults]: `join_field = \"{name}\"` names no `[[attribute]]`. Declare the \
+             attribute the files join on, with `unique = true`"
+        )));
+    };
+    if !attribute.unique {
+        return Err(declaration_error(format!(
+            "[defaults]: the join field '{name}' is not declared `unique`, and a value the files \
+             join on must name one item. Write `unique = true` on attribute '{name}'"
+        )));
+    }
+    let ty = attribute.ty.as_deref().unwrap_or_default();
+    if !JOIN_TYPES.contains(&ty) {
+        return Err(declaration_error(format!(
+            "[defaults]: the join field '{name}' is a `{ty}`, and a join field is a `keyword` or \
+             an integer. Join on a column of one of those types"
+        )));
+    }
+    Ok(Join {
+        field: name.to_string(),
+        column: attribute.field.clone().unwrap_or_else(|| name.to_string()),
+    })
 }
 
 /// One field an object's `fields` map may name.
@@ -3061,6 +3104,8 @@ impl KnownField {
 pub struct Fields {
     object: String,
     map: BTreeMap<String, String>,
+    /// The declaration names no join field, so the file's rows join on nothing.
+    unjoined: bool,
 }
 
 impl Fields {
@@ -3069,7 +3114,20 @@ impl Fields {
         Fields {
             object: object.into(),
             map: BTreeMap::new(),
+            unjoined: false,
         }
+    }
+
+    /// These names, for a file whose rows join on nothing: each row of a points file is an item
+    /// of its own.
+    pub fn unjoined(mut self) -> Fields {
+        self.unjoined = true;
+        self
+    }
+
+    /// Whether the file's rows name their items by a join column.
+    pub fn joins(&self) -> bool {
+        !self.unjoined
     }
 
     /// A map built outright rather than parsed — for a caller binding a reader programmatically,
@@ -3084,6 +3142,7 @@ impl Fields {
                 .into_iter()
                 .map(|(k, v)| (k.into(), v.into()))
                 .collect(),
+            unjoined: false,
         }
     }
 
@@ -3117,70 +3176,79 @@ impl Fields {
 
 /// Check one object's `fields` map — every name known, every name declared — and resolve it.
 ///
-/// `entity_id` is where this declaration spells the identity column — `[defaults]`'s, or the
-/// canonical name. **Folded into the resolved map rather than consulted by the reader**, so an
-/// object whose own map moves `entity_id` keeps its own answer and every reader below this asks
-/// one question instead of two.
+/// An object whose known fields include [`JOIN_COLUMN`] reads the join field: the map moves it
+/// under the join field's own name, and where it does not, it is read from `join`'s column. With
+/// no join declared the object's rows join on nothing ([`Fields::unjoined`]).
 fn check_fields(
     object: &str,
     source: Option<&PathBuf>,
     known: &[KnownField],
     map: Option<&BTreeMap<String, String>>,
-    entity_id: &str,
+    join: Option<&Join>,
 ) -> Result<Fields> {
-    let takes_entity_id = known.iter().any(|f| f.name == ENTITY_ID);
-    let Some(map) = map else {
-        let mut fields = Fields::canonical(object);
-        if takes_entity_id && entity_id != ENTITY_ID {
-            fields
-                .map
-                .insert(ENTITY_ID.to_string(), entity_id.to_string());
-        }
-        return Ok(fields);
+    let takes_join = known.iter().any(|f| f.name == JOIN_COLUMN);
+    // The names a map may write: the join field's, where the object reads one, and the others.
+    let written = || {
+        let join = join.filter(|_| takes_join).map(|join| join.field.as_str());
+        names(
+            join.into_iter().chain(
+                known
+                    .iter()
+                    .map(|f| f.name.as_str())
+                    .filter(|n| *n != JOIN_COLUMN),
+            ),
+        )
     };
+    let empty = BTreeMap::new();
+    let declared = map.unwrap_or(&empty);
     // A map with no source names the fields of nothing. Refused rather than kept for a source that
     // may arrive later: the object reads no file at all, so every entry in it is inert.
-    if source.is_none() {
+    if map.is_some() && source.is_none() {
         return Err(declaration_error(format!(
             "{object}: `fields` without a `source`. The map locates this object's fields in the \
              file its source names, and this object names none — so there is no file for the names \
              to be read out of"
         )));
     }
-    for (canonical, actual) in map {
-        let Some(field) = known.iter().find(|f| f.name == *canonical) else {
+    let mut resolved = BTreeMap::new();
+    for (name, actual) in declared {
+        let is_join = takes_join && join.is_some_and(|join| join.field == *name);
+        let canonical = if is_join { JOIN_COLUMN } else { name.as_str() };
+        let field = known
+            .iter()
+            .find(|f| f.name == canonical && (is_join || f.name != JOIN_COLUMN));
+        let Some(field) = field else {
             return Err(declaration_error(format!(
-                "{object}: `fields.{canonical}` is not one of this object's fields. They are: {}. \
+                "{object}: `fields.{name}` is not one of this object's fields. They are: {}. \
                  The map says where a field is and never whether there is one, so a name outside \
                  the set is refused rather than passed to the reader",
-                names(known.iter().map(|f| f.name.as_str()))
+                written()
             )));
         };
         if let Some(why) = &field.undeclared {
             return Err(declaration_error(format!(
-                "{object}: `fields.{canonical}` names a field this object never declared — {why}. \
+                "{object}: `fields.{name}` names a field this object never declared — {why}. \
                  `fields` says *where* a field is, never *whether* there is one, so locating one \
                  nothing declared is refused rather than read as the declaration"
             )));
         }
         if actual.trim().is_empty() {
             return Err(declaration_error(format!(
-                "{object}: `fields.{canonical}` is empty, so it names no column. Omit the entry to \
-                 read `{canonical}` under its own name"
+                "{object}: `fields.{name}` is empty, so it names no column. Omit the entry to \
+                 read `{name}` under its own name"
             )));
         }
+        resolved.insert(canonical.to_string(), actual.clone());
     }
-    let mut resolved = map.clone();
-    if takes_entity_id && entity_id != ENTITY_ID {
-        // The object's own map wins: `[defaults]` says how this declaration usually spells
-        // identity, and a block naming its own column has said otherwise.
+    if let (true, Some(join)) = (takes_join, join) {
         resolved
-            .entry(ENTITY_ID.to_string())
-            .or_insert_with(|| entity_id.to_string());
+            .entry(JOIN_COLUMN.to_string())
+            .or_insert_with(|| join.column.clone());
     }
     Ok(Fields {
         object: object.to_string(),
         map: resolved,
+        unjoined: takes_join && join.is_none(),
     })
 }
 
@@ -3335,11 +3403,8 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
 
 /// Group the declared attributes by the file each is read from, and the column each joins on.
 ///
-/// **The grouping is what replaced `[corpus]`.** That block named one file every attribute was
-/// read from, and the constraint was arbitrary: what it guaranteed — that every attribute lands in
-/// one entity space — is guaranteed by the entity id and never was by the file. So a column may
-/// name its own `source` and its own `entity_id_field`, and the build runs the attribute pass once
-/// per `(source, identity column)` pair rather than once over one file.
+/// A column may name its own `source`, and its `fields` may move the join column in that file, so
+/// the build runs the attribute pass once per `(source, join column)` pair.
 ///
 /// Groups come out in the order each group's **first** attribute was declared, and each group's
 /// indices ascend. That order is not cosmetic anywhere it is read: the scalar tail is stored
@@ -3375,35 +3440,33 @@ fn compile_attribute_sources(
         // and the empty bundle is what carries the schema. A build that has to read the column is
         // where that becomes a refusal ([`Config::acquire`]), naming the columns with nowhere to
         // read from.
-        let name = match (&block.source, &defaults.source) {
-            (Some(declared), _) => declared.clone(),
-            (None, Some(fallback)) => fallback.clone(),
-            (None, None) => continue,
+        let name = block.source.as_ref().or(defaults.source.as_ref());
+        let path = match name {
+            Some(name) => Some(sources.path(&object, name)?),
+            None => None,
         };
-        let path = sources.path(&object, &name)?;
-        let entity_id = match block.entity_id_field.as_deref() {
-            None => defaults.entity_id_field.clone(),
-            Some(field) if field.trim().is_empty() => {
-                return Err(declaration_error(format!(
-                    "{object}: `entity_id_field` is empty, so it names no column. Omit it to join \
-                     on '{}', which is what this declaration spells the entity id",
-                    defaults.entity_id_field
-                )))
-            }
-            Some(field) => field.to_string(),
+        let fields = check_fields(
+            &object,
+            path.as_ref(),
+            &[KnownField::always(JOIN_COLUMN)],
+            block.fields.as_ref(),
+            defaults.join.as_ref(),
+        )?;
+        let (Some(name), Some(path)) = (name, path) else {
+            continue;
         };
         match groups
             .iter_mut()
-            .find(|g| g.name == name && g.fields.of(ENTITY_ID) == entity_id)
+            .find(|g| g.name == *name && g.fields.of(JOIN_COLUMN) == fields.of(JOIN_COLUMN))
         {
             Some(group) => group.attributes.push(index),
             None => groups.push(AttributeSource {
                 name: name.clone(),
                 path,
-                fields: Fields::moved(
-                    format!("source '{name}'"),
-                    [(ENTITY_ID.to_string(), entity_id)],
-                ),
+                fields: Fields {
+                    object: format!("source '{name}'"),
+                    ..fields
+                },
                 attributes: vec![index],
             }),
         }
@@ -3511,7 +3574,7 @@ fn compile_projection(object: &str, declared: Option<&str>) -> Result<Projection
     })
 }
 
-/// An unprojected view's or group's `fields`: `entity_id` with either `x`/`y` or
+/// An unprojected view's or group's `fields`: the join field with either `x`/`y` or
 /// `morton`/`residual` (`configuration.md` §1), plus whatever `extra` its own block declares.
 ///
 /// **The two geometry shapes are mutually exclusive**: a row carries coordinates or a code, so a
@@ -3541,7 +3604,7 @@ fn compile_unprojected_fields(
     }
     let (x, y) = axis_names(Projection::None);
     let mut known = vec![
-        KnownField::always(ENTITY_ID),
+        KnownField::always(JOIN_COLUMN),
         KnownField::always(x),
         KnownField::always(y),
         KnownField::always("morton"),
@@ -3553,7 +3616,7 @@ fn compile_unprojected_fields(
         source,
         &known,
         declared_fields,
-        &defaults.entity_id_field,
+        defaults.join.as_ref(),
     )?;
     if let Some(declared) = declared_fields {
         let quantised = declared.contains_key("x") || declared.contains_key("y");
@@ -3576,7 +3639,7 @@ fn compile_unprojected_fields(
     Ok(fields)
 }
 
-/// A projected view's `fields`: `entity_id` with `lon` and `lat`, and nothing else
+/// A projected view's `fields`: the join field with `lon` and `lat`, and nothing else
 /// (`projections.md` §2).
 ///
 /// **The resolved map keys the coordinates on the canonical `x`/`y`**, so every reader below this
@@ -3619,7 +3682,7 @@ fn compile_projected_fields(
     }
     let (lon, lat) = axis_names(projection);
     let mut known = vec![
-        KnownField::always(ENTITY_ID),
+        KnownField::always(JOIN_COLUMN),
         KnownField::always(lon),
         KnownField::always(lat),
     ];
@@ -3629,21 +3692,18 @@ fn compile_projected_fields(
         source,
         &known,
         declared_fields,
-        &defaults.entity_id_field,
+        defaults.join.as_ref(),
     )?;
     // `lon` and `lat` become the canonical `x` and `y`, defaulting to their own names — which is
     // what makes `lon`/`lat` the columns a projected view reads with no `fields` map at all.
-    let mut map = fields.map;
+    let mut map = fields.map.clone();
     for (axis, geographic) in other_axis_names(projection) {
         let column = map
             .remove(geographic)
             .unwrap_or_else(|| geographic.to_string());
         map.insert(axis.to_string(), column);
     }
-    Ok(Fields {
-        object: fields.object,
-        map,
-    })
+    Ok(Fields { map, ..fields })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4004,7 +4064,7 @@ fn compile_point_visibility(
             "{object}: `point_visibility` declares both a `field` and a `source`, and a point's \
              label comes from one or the other (configuration.md §1). `field` is a column of this \
              view's own source, one value or a list per point; `source` is a separate exploded \
-             `(entity_id, term_id)` relation. Declaring both leaves which one carries a point's \
+             `(join value, term_id)` relation. Declaring both leaves which one carries a point's \
              terms to the reader"
         )));
     }
@@ -4424,7 +4484,7 @@ fn compile_roster_table(
         Some(&path),
         &known,
         table.fields.as_ref(),
-        &defaults.entity_id_field,
+        defaults.join.as_ref(),
     )?;
     Ok(RosterTable {
         source: path,
@@ -4582,7 +4642,7 @@ fn compile_vocabularies(
                 KnownField::always("title"),
             ],
             block.fields.as_ref(),
-            ENTITY_ID,
+            None,
         )?;
         let declared = match (&block.values, source.as_ref()) {
             (Some(_), Some(_)) => {
@@ -4804,15 +4864,7 @@ fn compile_attributes(
         // A group-scoped column is one column per view of its group, so it is kept apart from
         // the bundle-wide columns.
         match scopes.get(name) {
-            None => {
-                if decl.fields.is_some() {
-                    return Err(declaration_error(format!(
-                        "attribute '{name}': `fields` applies to a group-scoped column's own \
-                         `source` only"
-                    )));
-                }
-                attributes.push(attribute)
-            }
+            None => attributes.push(attribute),
             Some(group) => {
                 // Its own source holds one row per (entity, view); `fields.view` names the column
                 // saying which view a row is for.
@@ -4838,57 +4890,28 @@ fn compile_attributes(
 ///
 /// The discriminator column is `fields.view`, defaulting to `view` — the same key and the same
 /// default a scoped layer's artifacts source takes, so one word means one thing across the
-/// declaration. Every other key in the map is refused: `view` is the only field this source
-/// resolves, the entity id being `entity_id_field` beside it.
+/// declaration. The map may also move the join field; any other key is refused.
 fn compile_scoped_attribute_source(
     decl: &AttributeBlock,
     sources: &Sources,
     defaults: &Defaults,
 ) -> Result<Option<ScopedAttributeFile>> {
     let object = format!("attribute '{}'", decl.name);
-    let Some(name) = decl.source.as_deref() else {
-        if decl.fields.is_some() {
-            return Err(declaration_error(format!(
-                "{object}: `fields` names the view discriminator on this column's own `source` \
-                 (views §5), and there is no `source` here — the column is read from each view's \
-                 own points file, where the view is the file rather than a column of it"
-            )));
-        }
-        return Ok(None);
+    let path = match decl.source.as_deref() {
+        Some(name) => Some(sources.path(&object, name)?),
+        None => None,
     };
-    let path = sources.path(&object, name)?;
-    let entity_id = match decl.entity_id_field.as_deref() {
-        None => defaults.entity_id_field.clone(),
-        Some(field) if field.trim().is_empty() => {
-            return Err(declaration_error(format!(
-                "{object}: `entity_id_field` is empty, so it names no column. Omit it to join on \
-                 '{}', which is what this declaration spells the entity id",
-                defaults.entity_id_field
-            )))
-        }
-        Some(field) => field.to_string(),
-    };
-    let mut view_field = "view".to_string();
-    for (key, value) in decl.fields.iter().flatten() {
-        if key != "view" {
-            return Err(declaration_error(format!(
-                "{object}: `fields.{key}` is not a field of a group-scoped attribute's source, \
-                 which resolves `view` alone — the column saying which view each row's value is \
-                 for. The entity id is `entity_id_field`"
-            )));
-        }
-        if value.trim().is_empty() {
-            return Err(declaration_error(format!(
-                "{object}: `fields.view` is empty, so it names no column. Omit it to read the \
-                 discriminator from 'view'"
-            )));
-        }
-        view_field = value.clone();
-    }
-    Ok(Some(ScopedAttributeFile {
+    let fields = check_fields(
+        &object,
+        path.as_ref(),
+        &[KnownField::always(JOIN_COLUMN), KnownField::always("view")],
+        decl.fields.as_ref(),
+        defaults.join.as_ref(),
+    )?;
+    Ok(path.map(|path| ScopedAttributeFile {
         path,
-        entity_id,
-        view_field,
+        join_column: fields.of(JOIN_COLUMN).to_string(),
+        view_field: fields.of("view").to_string(),
     }))
 }
 
@@ -5375,7 +5398,7 @@ fn compile_layers(
                 ),
             ],
             block.fields.as_ref(),
-            ENTITY_ID,
+            None,
         )?;
 
         let members = match members_block {
@@ -5426,7 +5449,7 @@ fn compile_layers(
                         ),
                     ],
                     members.fields.as_ref(),
-                    ENTITY_ID,
+                    None,
                 )?;
                 path.map(|path| MemberSource { path, fields })
             }
@@ -6430,7 +6453,7 @@ fn insert_some<T: serde::Serialize>(
 /// One `PUT /control/attributes` body per declared column, entity-scoped and group-scoped alike,
 /// in declaration order.
 ///
-/// **`field`, `source`, `entity_id_field` and `fields` are the acquisition half** — where a build
+/// **`field`, `source` and `fields` are the acquisition half** — where a build
 /// reads the column from — and are gone by this point: an [`Attribute`] carries `field` because a
 /// build needs it, and nothing else here does.
 fn attribute_payloads(config: &Config) -> Vec<serde_json::Value> {
@@ -6743,7 +6766,7 @@ clusters = "clusters.parquet"
 
 [defaults]
 source          = "points"
-entity_id_field = "id"
+join_field      = "id"
 allocation_view = "world"
 
 [[view]]
@@ -6798,7 +6821,7 @@ name            = "importance"
 title           = "Importance"
 field           = "pop"
 source          = "extra"
-entity_id_field = "row_id"
+fields          = { id = "row_id" }
 type            = "u32"
 index           = true
 render          = true
@@ -6820,9 +6843,13 @@ index    = true
 name            = "coverage"
 type            = "f32"
 source          = "quarters"
-entity_id_field = "id"
 fields          = { view = "quarter" }
 scope           = { group = "quarter" }
+
+[[attribute]]
+name   = "id"
+type   = "keyword"
+unique = true
 
 [[layer]]
 name       = "clusters/a"
@@ -6861,7 +6888,7 @@ source = "members"
         // an acquisition key of this one.
         for kind in ["attributes", "vocabularies", "views", "view_groups"] {
             let text = serde_json::to_string(&payloads[kind]).unwrap();
-            for key in ["field", "entity_id_field", "fields", "source"] {
+            for key in ["field", "fields", "source"] {
                 assert!(
                     !text.contains(&format!("\"{key}\"")),
                     "the acquisition key `{key}` reached a {kind} payload: {text}"
@@ -6895,7 +6922,7 @@ source = "members"
             .collect();
         assert_eq!(
             names,
-            vec!["importance", "feature", "note", "coverage"],
+            vec!["importance", "feature", "note", "coverage", "id"],
             "declaration order, the group-scoped column in its own place"
         );
 

@@ -220,7 +220,6 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

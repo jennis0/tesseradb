@@ -18,7 +18,6 @@ fn build_without_external_ids(dir: &Path) {
     write_points_n(&points, 64);
     write_pairs_n(&pairs, 64);
     let args = BuildArgs {
-        mint_external_ids: false,
         ..build_args(
             &dir.join("bundle"),
             vec![view_args("s0", &points, AccessInput::relation(pairs))],

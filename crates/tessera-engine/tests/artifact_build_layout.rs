@@ -196,7 +196,6 @@ fn fixture() -> Fixture {
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

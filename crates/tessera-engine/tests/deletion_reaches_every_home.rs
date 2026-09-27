@@ -266,7 +266,6 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

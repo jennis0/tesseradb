@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use arrow::array::{
-    Array, ArrayAccessor, BinaryArray, Float64Array, StringArray, TimestampMicrosecondArray,
-    UInt32Array, UInt64Array,
+    Array, ArrayAccessor, Float64Array, StringArray, TimestampMicrosecondArray, UInt32Array,
+    UInt64Array,
 };
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -152,7 +152,7 @@ fn pairs_parquet_rows_are_the_terms() {
     }
 }
 
-/// The ingest batch is the wire shape, `(external_id, x, y, access, the declared scalars)`. A
+/// The ingest batch is the wire shape, `(id, x, y, access, the declared scalars)`. A
 /// range past `n` draws from the same functions, letting a driver ingest beyond the built prefix.
 #[test]
 fn ingest_batch_is_the_wire_shape_of_the_same_items() {
@@ -167,7 +167,7 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
             .map(|f| f.name().clone())
             .collect::<Vec<_>>(),
         [
-            "external_id",
+            "id",
             "x",
             "y",
             "access",
@@ -181,7 +181,7 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
         ]
     );
 
-    let external_id = column::<BinaryArray>(&batch, "external_id");
+    let id = column::<UInt64Array>(&batch, "id");
     let x = column::<Float64Array>(&batch, "x");
     let access = column::<arrow::array::ListArray>(&batch, "access");
     let fx_key = column::<UInt64Array>(&batch, "fx_key");
@@ -190,7 +190,7 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
     for i in 0..batch.num_rows() {
         let e = 10 + i as u64;
         let item = c.item(e);
-        assert_eq!(external_id.value(i), e.to_le_bytes());
+        assert_eq!(id.value(i), e);
         assert_eq!(x.value(i), item.x);
         assert_eq!(
             u64::from(partition.value(i)),

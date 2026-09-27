@@ -20,7 +20,7 @@
 //!   miscomputed across a batch boundary gives every later row of the chunk another row's
 //!   values.
 //! * **A source id is not its own entity id** (§11.1), which is what every read-back below goes
-//!   through the external-id sidecar for.
+//!   through the unique `id` column for.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    BinaryArray, BooleanArray, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
-    UInt32Array, UInt64Array, UInt8Array,
+    BooleanArray, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt32Array,
+    UInt64Array, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -42,6 +42,8 @@ use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::Bounds;
 use tessera_store::open_bundle;
 use tessera_types::IdentityKey;
+
+mod common;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -204,7 +206,8 @@ fn write_empty_pairs(path: &Path) {
 }
 
 /// Six columns, none rendered and none indexed, so every one of them is blob-resident and can be
-/// read back per entity without a serving path (records §3). Tags follow declared position.
+/// read back per entity without a serving path (records §3), and the unique `id` a read-back finds
+/// each item by. Tags follow declared position.
 fn schema() -> Schema {
     let neither = |name: &str, ty: ScalarType| Attribute {
         field: None,
@@ -226,6 +229,11 @@ fn schema() -> Schema {
             neither("small", ScalarType::U8),
             neither("flag", ScalarType::Bool),
             neither("when", ScalarType::TimestampUs),
+            Attribute {
+                field: Some("entity_id".to_string()),
+                unique: true,
+                ..neither("id", ScalarType::U64)
+            },
         ],
         vocabularies: HashMap::new(),
     }
@@ -262,7 +270,6 @@ fn args(dir: &Path, out: PathBuf) -> BuildArgs {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -283,39 +290,6 @@ fn current_prefix(out: &Path) -> String {
     current["prefix"].as_str().unwrap().to_string()
 }
 
-/// Source id → entity id through the external-id sidecar.
-fn source_to_entity(out: &Path) -> HashMap<u64, u32> {
-    let bundle = open_bundle(out).unwrap();
-    let part = bundle.partitions.values().next().unwrap();
-    let prefix = current_prefix(out);
-    let mut map = HashMap::new();
-    for rel in &part.manifest.external_id_runs {
-        let path = out.join(&prefix).join(rel);
-        let reader =
-            arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
-        for batch in reader {
-            let batch = batch.unwrap();
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap();
-            let ent = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                map.insert(
-                    u64::from_le_bytes(ext.value(i).try_into().unwrap()),
-                    ent.value(i),
-                );
-            }
-        }
-    }
-    map
-}
-
 fn record_dir(out: &Path) -> PathBuf {
     let bundle = open_bundle(out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap().clone();
@@ -326,9 +300,9 @@ fn record_dir(out: &Path) -> PathBuf {
         .join("record")
 }
 
-/// Every entity's blob row, keyed by **source** id: tag → value, absent tags omitted.
+/// Every entity's blob row, keyed by **source** id: tag → value, absent tags and `id` omitted.
 fn rows_by_source(out: &Path) -> BTreeMap<u64, BTreeMap<u16, RecordValue>> {
-    let entity_of = source_to_entity(out);
+    let entity_of = common::entities_of(out, "id", 0..N);
     let blob = RecordBlob::open_dir(&record_dir(out), Access::Read).expect("the blob opens");
     blob.self_check().expect("the artefact is self-consistent");
     let mut rows = BTreeMap::new();
@@ -338,12 +312,16 @@ fn rows_by_source(out: &Path) -> BTreeMap<u64, BTreeMap<u16, RecordValue>> {
             .expect("a well-formed read")
             .unwrap_or_default()
             .into_iter()
+            .filter(|f| f.tag != ID_TAG)
             .map(|f| (f.tag, f.value))
             .collect();
         rows.insert(source, read);
     }
     rows
 }
+
+/// The `id` column's tag.
+const ID_TAG: u16 = 6;
 
 /// What the fixture says each column's presence tally must be, in declared order.
 fn expected_present() -> Vec<u64> {
@@ -355,6 +333,7 @@ fn expected_present() -> Vec<u64> {
         carried_ids().filter(|&e| small_of(e).is_some()).count() as u64,
         carried_ids().filter(|&e| flag_of(e).is_some()).count() as u64,
         carried_ids().filter(|&e| when_of(e).is_some()).count() as u64,
+        N,
     ]
 }
 
@@ -374,7 +353,7 @@ fn assert_coverage(coverage: &[AttributeCoverage], which: &str) {
     let names: Vec<&str> = source.columns.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(
         names,
-        ["note", "score", "count", "small", "flag", "when"],
+        ["note", "score", "count", "small", "flag", "when", "id"],
         "{which}: the columns are reported in declared order"
     );
     let tallies: Vec<u64> = source.columns.iter().map(|(_, c)| *c).collect();

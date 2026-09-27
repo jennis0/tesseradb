@@ -200,7 +200,6 @@ fn bundle(dir: &Path, n: u64, note_of: impl Fn(u64) -> usize) -> Engine {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

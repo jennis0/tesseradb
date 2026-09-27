@@ -1,10 +1,8 @@
-//! Attributes read from **more than one file**, joined by the entity id and reported on
+//! Attributes read from **more than one file**, joined on the join field and reported on
 //! (`configuration.md` §1's `[sources]` and `[defaults]`, §8's coverage report).
 //!
-//! What `[corpus]` guaranteed — that every attribute lands in one entity space — is guaranteed by
-//! the entity id and never was by the file, and this is where that claim is made to pay: a column
-//! read from a second file, joined on a column that file spells differently, lands on exactly the
-//! entities it names and on no others.
+//! A column read from a second file, joined on a column that file spells differently, lands on
+//! exactly the items it names and on no others.
 //!
 //! **Every item the build creates has a row in each attribute source**, as a new item at a running
 //! service carries every declared column; a null in that row is how the source says it has no
@@ -18,7 +16,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, Int64Array, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, Int64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -30,10 +28,12 @@ use tessera_spatial::Bounds;
 use tessera_store::open_bundle;
 use tessera_types::IdentityKey;
 
+mod common;
+
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
 
-/// The points file: identity spelled `id`, geometry, and one column of its own.
+/// The points file: the join field `id`, geometry, and one column of its own.
 fn write_points(path: &Path) {
     write_points_counting(path, Count::Values(|e| Some((e * 11) as i64)));
 }
@@ -117,7 +117,7 @@ fn score_of(e: u64) -> f64 {
 
 fn write_empty_pairs(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new("term_id", DataType::UInt32, false),
     ]));
     let batch = RecordBatch::try_new(
@@ -133,8 +133,8 @@ fn write_empty_pairs(path: &Path) {
     w.close().unwrap();
 }
 
-/// Two sources, two identity columns, neither column placed anywhere but the record blob — which
-/// is what lets the values be read back per entity without a serving path.
+/// Two sources, two join columns, no column placed anywhere but the record blob — which is what
+/// lets the values be read back per entity without a serving path.
 const DECLARATION: &str = r#"
 [sources]
 points = "points.parquet"
@@ -142,8 +142,8 @@ scores = "scores.parquet"
 pairs  = "pairs.parquet"
 
 [defaults]
-source          = "points"
-entity_id_field = "id"
+source     = "points"
+join_field = "id"
 
 [[view]]
 name             = "s0"
@@ -155,10 +155,15 @@ name = "count"
 type = "i64"
 
 [[attribute]]
-name            = "score"
-type            = "f64"
-source          = "scores"
-entity_id_field = "doc_id"
+name   = "score"
+type   = "f64"
+source = "scores"
+fields = { id = "doc_id" }
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
 "#;
 
 /// Write the declaration and both data files into `dir`, with `scores` holding a row for each of
@@ -204,7 +209,6 @@ fn args(config: &Config, out: PathBuf) -> BuildArgs {
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -217,41 +221,6 @@ fn current_prefix(out: &Path) -> String {
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
     current["prefix"].as_str().unwrap().to_string()
-}
-
-/// Source id → entity id through the external-id sidecar: entity ids are signature-sorted
-/// (§11.1), so a source id is emphatically not its own entity id — and a pass that indexed by
-/// source id would hand every item another item's values.
-fn source_to_entity(out: &Path) -> HashMap<u64, u32> {
-    let bundle = open_bundle(out).unwrap();
-    let part = bundle.partitions.values().next().unwrap();
-    let prefix = current_prefix(out);
-    let mut map = HashMap::new();
-    for rel in &part.manifest.external_id_runs {
-        let path = out.join(&prefix).join(rel);
-        let reader =
-            arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
-        for batch in reader {
-            let batch = batch.unwrap();
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap();
-            let ent = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                map.insert(
-                    u64::from_le_bytes(ext.value(i).try_into().unwrap()),
-                    ent.value(i),
-                );
-            }
-        }
-    }
-    map
 }
 
 fn record_dir(out: &Path) -> PathBuf {
@@ -267,7 +236,7 @@ fn record_dir(out: &Path) -> PathBuf {
 /// Every entity's blob row, keyed by **source** id, as `(tag, value)` pairs. Tag 0 is `count` and
 /// tag 1 is `score` — declared position, which is what the tail is stored by.
 fn rows_by_source(out: &Path) -> BTreeMap<u64, Vec<(u16, RecordValue)>> {
-    let entity_of = source_to_entity(out);
+    let entity_of = common::entities_of(out, "id", 0..N);
     let blob = RecordBlob::open_dir(&record_dir(out), Access::Read).expect("the blob opens");
     blob.self_check().expect("the artefact is self-consistent");
     let mut rows = BTreeMap::new();
@@ -285,7 +254,7 @@ fn rows_by_source(out: &Path) -> BTreeMap<u64, Vec<(u16, RecordValue)>> {
 }
 
 /// **A column from a second file lands on exactly the entities that file names.** The join is the
-/// entity id — spelled `doc_id` there and `id` here — and nothing about the file decides which
+/// join field — spelled `doc_id` there and `id` here — and nothing about the file decides which
 /// entity space a value belongs to.
 #[test]
 fn a_column_from_a_second_source_lands_on_the_entities_it_names() {

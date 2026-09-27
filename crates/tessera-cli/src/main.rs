@@ -74,12 +74,6 @@ enum Command {
         /// flag replaces a source's path and cannot add a source.
         #[arg(long = "file", value_name = "NAME=PATH", value_parser = parse_file_binding)]
         file: Vec<(String, PathBuf)>,
-        /// Write an external id for every item, made from its identity column's integer value.
-        ///
-        /// An identity column of strings or bytes writes external ids without
-        /// this flag. Rows with no identity column get no external ids, with or without it.
-        #[arg(long)]
-        mint_external_ids: bool,
         /// Do not write `pairs.parquet`.
         ///
         /// The server does not read the file. The conformance suite and `tessera verify --deep`
@@ -1051,7 +1045,6 @@ fn main() -> ExitCode {
             limit,
             config,
             file,
-            mint_external_ids,
             no_oracle_pairs,
             batch_items,
             memory_budget,
@@ -1311,7 +1304,6 @@ fn main() -> ExitCode {
                 limit,
                 identity_key: IdentityKey::generate(),
                 shard_id: 0,
-                mint_external_ids,
                 emit_oracle_pairs: !no_oracle_pairs,
                 batch_items,
                 memory_budget,
@@ -1455,14 +1447,13 @@ fn main() -> ExitCode {
                         print_shallow(&report.shallow);
                         println!(
                             "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
-                             record(s), {} external-id binding(s), {} record blob row(s), {} \
-                             scoped render lane(s), {} Morton cell(s), {} unique index entr(ies), \
-                             {} edited item(s) over {} row(s)",
+                             record(s), {} record blob row(s), {} scoped render lane(s), {} \
+                             Morton cell(s), {} unique index entr(ies), {} edited item(s) over {} \
+                             row(s)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
                             report.dict_records,
-                            report.external_id_bindings,
                             report.record_rows,
                             report.scoped_render_lanes,
                             report.cells,

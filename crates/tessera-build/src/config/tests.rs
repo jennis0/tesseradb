@@ -1879,33 +1879,35 @@ fn defaults_reach_a_view_and_a_column_and_no_other_block() {
     );
 }
 
-/// **A column may name its own source and its own identity column**, which is what `[corpus]`
-/// could not express: the entity id is what puts a value in this entity space, and the file it
-/// arrived in never was.
+/// `ACQUIRED` joining its files on a declared unique attribute, `doc`.
+fn joined() -> String {
+    ACQUIRED.replace(
+        "[defaults]\nsource = \"corpus\"",
+        "[defaults]\nsource = \"corpus\"\njoin_field = \"doc\"",
+    ) + "\n[[attribute]]\nname = \"doc\"\ntype = \"u64\"\nunique = true\n"
+}
+
+/// **A column may name its own source, and its `fields` may move the join column there.**
 #[test]
-fn an_attribute_may_name_its_own_source_and_identity_column() {
+fn an_attribute_may_name_its_own_source_and_join_column() {
     let dir = tempfile::tempdir().expect("tempdir");
     let text = format!(
-        "{ACQUIRED}\n[[attribute]]\nname            = \"sentiment\"\nfield           = \"score\"\n\
-         type            = \"f32\"\nsource          = \"other\"\nentity_id_field = \"doc_id\"\n"
+        "{}\n[[attribute]]\nname   = \"sentiment\"\nfield  = \"score\"\ntype   = \"f32\"\n\
+         source = \"other\"\nfields = {{ doc = \"doc_id\" }}\n",
+        joined()
     );
     let config = parse_at(dir.path(), &text, &HashMap::new()).expect("a parse");
     assert_eq!(config.attribute_sources.len(), 2, "two files, two passes");
     assert_eq!(config.attribute_sources[0].name, "corpus");
-    assert_eq!(config.attribute_sources[0].attributes, vec![0]);
+    assert_eq!(config.attribute_sources[0].attributes, vec![0, 1]);
     assert_eq!(config.attribute_sources[1].name, "other");
-    assert_eq!(config.attribute_sources[1].attributes, vec![1]);
+    assert_eq!(config.attribute_sources[1].attributes, vec![2]);
     assert_eq!(
         config.attribute_sources[1].path,
         dir.path().join("other.parquet")
     );
-    assert_eq!(config.attribute_sources[1].fields.of("entity_id"), "doc_id");
-    // The first group joins on whatever this declaration spells identity, which is the canonical
-    // name here because `[defaults]` says nothing else.
-    assert_eq!(
-        config.attribute_sources[0].fields.of("entity_id"),
-        "entity_id"
-    );
+    assert_eq!(config.attribute_sources[1].fields.of(JOIN_COLUMN), "doc_id");
+    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "doc");
 }
 
 /// **Columns sharing a source share a pass**, in declaration order — which is load-bearing, the
@@ -1928,35 +1930,73 @@ fn columns_sharing_a_source_share_one_pass() {
     assert_eq!(config.attribute_sources[1].attributes, vec![2]);
 }
 
-/// **`[defaults].entity_id_field` says how this declaration spells identity**, and every block
-/// that reads one may say otherwise.
+/// **The join column is the join field's own column in every file**, and every block that reads
+/// a file may move it under the join field's name.
 #[test]
-fn the_identity_column_defaults_once_and_each_reader_may_override_it() {
-    let text = ACQUIRED.replace(
-        "[defaults]\nsource = \"corpus\"",
-        "[defaults]\nsource = \"corpus\"\nentity_id_field = \"id\"",
-    );
+fn the_join_column_defaults_once_and_each_reader_may_move_it() {
+    let text = joined().replace("unique = true\n", "unique = true\nfield = \"id\"\n");
     let config = bound_ok(&text, &[]);
-    assert_eq!(config.views[0].fields.of("entity_id"), "id");
-    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
+    assert_eq!(config.views[0].fields.of(JOIN_COLUMN), "id");
+    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "id");
 
     // The view says otherwise through its own map…
     let moved = text.replace(
         "source           = \"geometry\"",
+        "source           = \"geometry\"\nfields           = { doc = \"gid\" }",
+    );
+    let config = bound_ok(&moved, &[]);
+    assert_eq!(config.views[0].fields.of(JOIN_COLUMN), "gid");
+    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "id");
+
+    // …and a column through its own.
+    let moved = text.replace(
+        "vocabulary = \"severity\"\n",
+        "vocabulary = \"severity\"\nfields = { doc = \"doc_id\" }\n",
+    );
+    let config = bound_ok(&moved, &[]);
+    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "doc_id");
+    assert_eq!(config.views[0].fields.of(JOIN_COLUMN), "id");
+}
+
+/// **The join field is a declared unique attribute whose values an identity column holds.**
+#[test]
+fn a_join_field_must_be_a_declared_unique_keyword_or_integer() {
+    let undeclared = joined().replace("name = \"doc\"", "name = \"other_doc\"");
+    assert!(
+        bound_err(&undeclared, &[]).contains("names no `[[attribute]]`"),
+        "{}",
+        bound_err(&undeclared, &[])
+    );
+    let not_unique = joined().replace("unique = true\n", "");
+    assert!(
+        bound_err(&not_unique, &[]).contains("is not declared `unique`"),
+        "{}",
+        bound_err(&not_unique, &[])
+    );
+    let timestamp = joined().replace("type = \"u64\"", "type = \"timestamp_us\"");
+    assert!(
+        bound_err(&timestamp, &[]).contains("is a `keyword` or an integer"),
+        "{}",
+        bound_err(&timestamp, &[])
+    );
+    let keyword = joined().replace("type = \"u64\"", "type = \"keyword\"");
+    assert!(bound_ok(&keyword, &[]).views[0].fields.joins());
+}
+
+/// **Without a join field no file joins**: each points row is an item of its own, and a map may
+/// not move a join column there is none of.
+#[test]
+fn without_a_join_field_no_file_joins() {
+    let config = bound_ok(ACQUIRED, &[]);
+    assert!(!config.views[0].fields.joins());
+    assert!(!config.attribute_sources[0].fields.joins());
+    let moved = ACQUIRED.replace(
+        "source           = \"geometry\"",
         "source           = \"geometry\"\nfields           = { entity_id = \"gid\" }",
     );
-    let config = bound_ok(&moved, &[]);
-    assert_eq!(config.views[0].fields.of("entity_id"), "gid");
-    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
-
-    // …and a column through its own key.
-    let moved = text.replace(
-        "vocabulary = \"severity\"",
-        "vocabulary = \"severity\"\nentity_id_field = \"doc_id\"",
+    assert!(
+        bound_err(&moved, &[]).contains("`fields.entity_id` is not one of this object's fields")
     );
-    let config = bound_ok(&moved, &[]);
-    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "doc_id");
-    assert_eq!(config.views[0].fields.of("entity_id"), "id");
 }
 
 /// `[defaults].source` naming nothing is refused once, quoting `[defaults]`, rather than once per
@@ -1999,7 +2039,7 @@ fn a_field_map_may_not_name_a_field_the_object_does_not_have() {
         "{message}"
     );
     assert!(
-        message.contains("entity_id"),
+        message.contains("morton"),
         "the refusal must list them: {message}"
     );
 }
@@ -2050,12 +2090,12 @@ fn a_field_map_without_a_source_is_refused() {
 /// A map *moves* a field, and the reader takes the name it moved it to.
 #[test]
 fn a_renamed_field_reaches_the_reader() {
-    let text = ACQUIRED.replace(
-        "vocabulary = \"severity\"",
-        "vocabulary = \"severity\"\nentity_id_field = \"id\"",
+    let text = joined().replace(
+        "vocabulary = \"severity\"\n",
+        "vocabulary = \"severity\"\nfields = { doc = \"id\" }\n",
     );
     let config = bound_ok(&text, &[]);
-    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
+    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "id");
 
     // An attribute's own one-field map is the same rule, spelled for one field.
     let text = with_line(SEVERITY, "field = \"sev\"");
@@ -2074,11 +2114,11 @@ fn a_renamed_field_reaches_the_reader() {
 /// A field map entry naming no column at all is refused rather than read as *the canonical name*.
 #[test]
 fn an_empty_field_name_is_refused() {
-    let text = ACQUIRED.replace(
+    let text = joined().replace(
         "source           = \"geometry\"",
-        "source           = \"geometry\"\nfields           = { entity_id = \"\" }",
+        "source           = \"geometry\"\nfields           = { doc = \"\" }",
     );
-    assert!(bound_err(&text, &[]).contains("entity_id"));
+    assert!(bound_err(&text, &[]).contains("`fields.doc` is empty"));
 
     let text = with_line(SEVERITY, "field = \"  \"");
     assert!(err(&text).contains("`field` is empty"));
@@ -3213,17 +3253,21 @@ fn a_scope_naming_a_members_group_points_at_the_owner() {
 /// view's values as every view's.
 #[test]
 fn a_scoped_attribute_may_read_its_own_source_through_fields_view() {
-    let text = with_group(
-        "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
-         scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
-         fields = { view = \"quarter\" }\nentity_id_field = \"doc\"\n",
+    let text = format!(
+        "[defaults]\njoin_field = \"id\"\n{}",
+        with_group(
+            "\n[[attribute]]\nname = \"id\"\ntype = \"keyword\"\nunique = true\n\
+             \n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+             scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
+             fields = { view = \"quarter\", id = \"doc\" }\n",
+        )
     );
     let config = ok(&text);
     let scoped = &config.scoped_attributes[0];
     assert_eq!(scoped.group, "quarter");
     let source = scoped.source.as_ref().expect("its own source is recorded");
     assert_eq!(source.view_field, "quarter");
-    assert_eq!(source.entity_id, "doc");
+    assert_eq!(source.join_column, "doc");
     assert!(source.path.ends_with("other.parquet"));
     assert!(
         !config
@@ -3236,7 +3280,7 @@ fn a_scoped_attribute_may_read_its_own_source_through_fields_view() {
 
     // `fields.view` is optional and defaults to `view`, the same default a scoped layer's
     // artifacts source takes — one word, one meaning, across the declaration.
-    let defaulted = text.replace("fields = { view = \"quarter\" }\n", "");
+    let defaulted = text.replace("view = \"quarter\", ", "");
     assert_eq!(
         ok(&defaulted).scoped_attributes[0]
             .source
@@ -3256,7 +3300,7 @@ fn fields_on_an_attribute_that_has_no_view_to_choose_is_refused() {
          source = \"other\"\nfields = { view = \"quarter\" }\n",
     );
     assert!(
-        err(&entity_scope).contains("group-scoped"),
+        err(&entity_scope).contains("`fields.view` is not one of this object's fields"),
         "{}",
         err(&entity_scope)
     );
@@ -3266,7 +3310,7 @@ fn fields_on_an_attribute_that_has_no_view_to_choose_is_refused() {
          scope = { group = \"quarter\" }\nindex = true\nfields = { view = \"quarter\" }\n",
     );
     assert!(
-        err(&no_source).contains("there is no `source` here"),
+        err(&no_source).contains("`fields` without a `source`"),
         "{}",
         err(&no_source)
     );
@@ -3274,10 +3318,10 @@ fn fields_on_an_attribute_that_has_no_view_to_choose_is_refused() {
     let stray = with_group(
         "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
          scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
-         fields = { entity_id = \"doc\" }\n",
+         fields = { nonesuch = \"doc\" }\n",
     );
     assert!(
-        err(&stray).contains("`fields.entity_id` is not a field"),
+        err(&stray).contains("`fields.nonesuch` is not one of this object's fields"),
         "{}",
         err(&stray)
     );
