@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, Float32Array, Float64Array,
+    Array, ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array,
     Int32Array, Int64Array, ListArray, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Int32Type, Schema, TimeUnit};

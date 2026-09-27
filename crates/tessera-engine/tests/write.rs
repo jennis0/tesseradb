@@ -1523,12 +1523,12 @@ fn each_waiter_gets_its_own_ids() {
         "each waiter's ids must be its own rows', in its own row order"
     );
 
-    // And the live map agrees, which is what a later deny resolves through.
-    for (b, (name, rows)) in batches.iter().enumerate() {
-        for i in 0..rows.len() {
+    // And the unique index agrees, which is what a later deny by value resolves through.
+    for ((name, _), told) in batches.iter().zip(&ids) {
+        for (i, id) in told.iter().enumerate() {
             assert_eq!(
                 item_of_key(&engine, &format!("{name}-{i}")).map(|e| e.raw()),
-                Some(ids[b][i]),
+                Some(*id),
                 "the row's `id` must name the item its own caller was told"
             );
         }

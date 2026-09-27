@@ -205,7 +205,6 @@ mod tests {
         let row = RowIdentity {
             tessera_id: Some(TesseraId::new(102)),
             unique: vec![(0, 17)],
-            ..RowIdentity::default()
         };
         assert_eq!(
             resolved(&[RowIdentity::default(), row]),
