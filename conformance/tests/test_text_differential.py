@@ -186,7 +186,7 @@ def column(catalogue_bundle) -> txt.TextColumn:
     planted the prose on; every set this column is compared against is in entity space. The two
     coincided until decision 0073 made the within-signature tiebreak the Morton code.
     """
-    entity_of = catalogue_bundle.entities_by_source()
+    entity_of = cat.entities_by_source(catalogue_bundle)
     prose = {
         entity_of[source]: value
         for source in range(cat.N_ITEMS)
@@ -247,7 +247,7 @@ def test_the_text_column_has_the_shapes_its_catalogue_entries_need(
 
     # A word exactly one entity carries — the family's single-item answer.
     assert carriers[cat.ABSTRACT_SOLE_WORD] == 1
-    sole = catalogue_bundle.entity_of_source(cat.ABSTRACT_SOLE_ID)
+    sole = cat.entity_of_source(catalogue_bundle, cat.ABSTRACT_SOLE_ID)
     assert column.tokens[sole].count(cat.ABSTRACT_SOLE_WORD) == 1
 
     # The sentinel is genuinely absent from the whole corpus.

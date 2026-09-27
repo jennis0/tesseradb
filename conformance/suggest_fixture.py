@@ -45,7 +45,14 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from oracle.harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
+from oracle.harness import (
+    CLI_BIN,
+    JOIN_FIELD,
+    REPO_ROOT,
+    ensure_cli_built,
+    join_attribute_toml,
+    write_deployment,
+)
 
 # ---------------------------------------------------------------------------------------------
 # The fold — the Python oracle's own implementation of value-suggestion.md §4
@@ -384,8 +391,10 @@ topicvalues   = "topicvalues.parquet"
 archivevalues = "archivevalues.parquet"
 
 [defaults]
-source = "points"
+source     = "points"
+join_field = "{JOIN_FIELD}"
 
+{join_attribute_toml("points")}
 [[view]]
 name             = "{VIEW_ID}"
 extent           = {{ x = [0.0, {EXTENT_MAX}], y = [0.0, {EXTENT_MAX}] }}

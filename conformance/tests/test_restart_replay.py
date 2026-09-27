@@ -132,7 +132,6 @@ allow 422 on ambiguity but Phase 1 ships one view, so this is never exercised).
 
 from __future__ import annotations
 
-import base64
 import io
 from pathlib import Path
 
@@ -142,10 +141,9 @@ import pytest
 
 from oracle import catalogue
 from oracle import mask as mask_mod
-from oracle.catalogue import catalogue_points_path, ingest_fx_keys
+from oracle.catalogue import ingest_fx_keys, open_catalogue_bundle
 from oracle.harness import (
     kill_server,
-    open_bundle_with_source,
     spawn_server,
     stop_server,
 )
@@ -157,32 +155,24 @@ BATCH_ID = "conformance-restart-replay-batch-1"
 
 
 def _build_ingest_batch(*, access: str = "999002") -> bytes:
-    """One small Arrow IPC stream, schema `(external_id: binary, x: float32, y: float32,
-    access: list<utf8>)` (R5) — three brand-new items, external ids far outside the fixture's own
-    source-id range (the catalogue's is `< 150,000`), so there's no collision.
+    """One small Arrow IPC stream, schema `(fx_key: uint64, x: float32, y: float32,
+    access: list<utf8>, ...)` (R5) — three brand-new items: no row carries the catalogue's unique
+    `serial`, so each row creates an item.
     `access` (the third item's one label) is a parameter so a caller can build a body that
     differs from the original under the SAME batch id, for the conflict/replay-evidence check."""
-    external_ids = [
-        (900_000_001).to_bytes(8, "little"),
-        (900_000_002).to_bytes(8, "little"),
-        (900_000_003).to_bytes(8, "little"),
-    ]
+    fx_keys = ingest_fx_keys(3)
     xs = [1000.0, 2000.0, 3000.0]
     ys = [1000.0, 2000.0, 3000.0]
     accesses = ["999001", "999001", access]
 
     schema = pa.schema(
         [
-            pa.field("external_id", pa.binary()),
+            # The catalogue's handle on a served point; the fixture chooses the values.
+            pa.field("fx_key", pa.uint64()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
             pa.field("access", pa.list_(pa.utf8())),
-            # The catalogue declares `fx_key`, and a declared column must be present in every
-            # batch (contracts §2.2) — the tail is read back positionally, so an omission shifts
-            # every later scalar rather than defaulting. The fixture chooses the values.
-            pa.field("fx_key", pa.uint64()),
-            # The catalogue's filter columns, present for the same reason. "alpha" is a declared
-            # key; the values are inert here — nothing in this module filters, and attribute
+            # The catalogue's filter columns. "alpha" is a declared key; the values are inert here — nothing in this module filters, and attribute
             # ingest writes no artefact today (filter-index §5 ⊘).
             pa.field("department", pa.utf8()),
             pa.field("archive", pa.utf8()),
@@ -203,24 +193,23 @@ def _build_ingest_batch(*, access: str = "999002") -> bytes:
     )
     batch = pa.record_batch(
         [
-            pa.array(external_ids, type=pa.binary()),
+            pa.array(fx_keys, type=pa.uint64()),
             pa.array(xs, type=pa.float32()),
             pa.array(ys, type=pa.float32()),
             pa.array([[label] for label in accesses], type=pa.list_(pa.utf8())),
-            pa.array(ingest_fx_keys(len(external_ids)), type=pa.uint64()),
-            pa.array(["alpha"] * len(external_ids), type=pa.utf8()),
-            pa.array(["red"] * len(external_ids), type=pa.utf8()),
-            pa.array([f"ingested-{i}" for i in range(len(external_ids))], type=pa.utf8()),
-            pa.array([f"relay-restart-{i}" for i in range(len(external_ids))], type=pa.utf8()),
-            pa.array(["north"] * len(external_ids), type=pa.utf8()),
+            pa.array(["alpha"] * len(fx_keys), type=pa.utf8()),
+            pa.array(["red"] * len(fx_keys), type=pa.utf8()),
+            pa.array([f"ingested-{i}" for i in range(len(fx_keys))], type=pa.utf8()),
+            pa.array([f"relay-restart-{i}" for i in range(len(fx_keys))], type=pa.utf8()),
+            pa.array(["north"] * len(fx_keys), type=pa.utf8()),
             pa.array(
-                [f"an ingested abstract ref{i}" for i in range(len(external_ids))],
+                [f"an ingested abstract ref{i}" for i in range(len(fx_keys))],
                 type=pa.utf8(),
             ),
             pa.array(
-                [f"ingested-note-{i}" for i in range(len(external_ids))], type=pa.utf8()
+                [f"ingested-note-{i}" for i in range(len(fx_keys))], type=pa.utf8()
             ),
-            pa.array([100 + i for i in range(len(external_ids))], type=pa.uint32()),
+            pa.array([100 + i for i in range(len(fx_keys))], type=pa.uint32()),
         ],
         schema=schema,
     )
@@ -308,9 +297,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
 
     Then the survival questions, against a WAL truncated to what the engine claims is durable.
     """
-    oracle_bundle = open_bundle_with_source(
-        catalogue_bundle_root, catalogue_points_path()
-    )
+    oracle_bundle = open_catalogue_bundle(catalogue_bundle_root)
     cache_dir = restart_paths["cache"]
     wal_path = restart_paths["wal"]
     tmp_dir = restart_paths["root"]
@@ -335,15 +322,11 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         assert len(base_mask) >= 3, "fixture must have >= 3 members in its first block"
         delete_entity, suppress_a, suppress_b = sorted(base_mask)[:3]
 
-        def ext_b64(entity_id: int) -> str:
-            return base64.b64encode(oracle_bundle.external_id_of(entity_id)).decode()
+        def item(entity_id: int, op: str) -> dict:
+            return {"tessera_id": str(oracle_bundle.tessera_id_of(entity_id)), "op": op}
 
         resp = srv.changes(
-            [
-                {"external_id": ext_b64(delete_entity), "op": "delete"},
-                {"external_id": ext_b64(suppress_a), "op": "suppress"},
-                {"external_id": ext_b64(suppress_b), "op": "suppress"},
-            ]
+            [item(delete_entity, "delete"), item(suppress_a, "suppress"), item(suppress_b, "suppress")]
         )
         assert resp.status_code == 200, resp.text
 
@@ -419,9 +402,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
 
 
 def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Path, restart_paths):
-    oracle_bundle = open_bundle_with_source(
-        catalogue_bundle_root, catalogue_points_path()
-    )
+    oracle_bundle = open_catalogue_bundle(catalogue_bundle_root)
     cache_dir = restart_paths["cache"]
     wal_path = restart_paths["wal"]
     tmp_dir = restart_paths["root"]
@@ -452,14 +433,14 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
         ordered = sorted(base_mask)
         delete_entity, suppress_entity_a, suppress_entity_b = ordered[0], ordered[1], ordered[2]
 
-        def ext_b64(entity_id: int) -> str:
-            return base64.b64encode(oracle_bundle.external_id_of(entity_id)).decode()
+        def item(entity_id: int, op: str) -> dict:
+            return {"tessera_id": str(oracle_bundle.tessera_id_of(entity_id)), "op": op}
 
         resp = srv.changes(
             [
-                {"external_id": ext_b64(delete_entity), "op": "delete"},
-                {"external_id": ext_b64(suppress_entity_a), "op": "suppress"},
-                {"external_id": ext_b64(suppress_entity_b), "op": "suppress"},
+                item(delete_entity, "delete"),
+                item(suppress_entity_a, "suppress"),
+                item(suppress_entity_b, "suppress"),
             ]
         )
         assert resp.status_code == 200, resp.text

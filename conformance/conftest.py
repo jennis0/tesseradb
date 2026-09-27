@@ -55,12 +55,11 @@ def catalogue_bundle(catalogue_bundle_root: Path):
 
     Attached, not optional: `columns.arrow` stores a residual rather than coordinates, so the
     oracle's geometry comes from the points file the build consumed and a driver has to supply it
-    (`harness.open_bundle_with_source`).
+    (`catalogue.open_catalogue_bundle`).
     """
-    from oracle.catalogue import catalogue_points_path  # noqa: PLC0415
-    from oracle.harness import open_bundle_with_source  # noqa: PLC0415
+    from oracle.catalogue import open_catalogue_bundle  # noqa: PLC0415
 
-    return open_bundle_with_source(catalogue_bundle_root, catalogue_points_path())
+    return open_catalogue_bundle(catalogue_bundle_root)
 
 
 @pytest.fixture(scope="session")
@@ -77,12 +76,12 @@ def catalogue_filter_columns(catalogue_bundle):
     entity space. Those coincided until decision 0073 made the within-signature tiebreak the Morton
     code, and the equality was written into this docstring as something `verify()` re-derived — it
     did not: its block check compares sets, and a within-block permutation preserves one. Joining
-    through `Bundle.entities_by_source` is what makes each entity's planted value its own.
+    through `catalogue.entities_by_source` is what makes each entity's planted value its own.
     """
     from oracle import catalogue as cat  # noqa: PLC0415
     from oracle.filters import CategoryColumn, KeywordColumn  # noqa: PLC0415
 
-    entity_of = catalogue_bundle.entities_by_source()
+    entity_of = cat.entities_by_source(catalogue_bundle)
 
     def planted(generate):
         """`entity -> value` for every source the generator gives a value to."""
@@ -223,7 +222,12 @@ def multiview_bundle(multiview_bundle_root: Path):
     # answer for the principal who passes it.
     for view_id in mv.ALL_VIEW_IDS:
         bundle.attach_source_geometry(
-            read_source_geometry(mv.points_path(view_id), mv.extent_of(view_id)),
+            read_source_geometry(
+                mv.points_path(view_id),
+                mv.extent_of(view_id),
+                field=mv.JOIN_FIELD,
+                column=mv.JOIN_COLUMN,
+            ),
             view_id=view_id,
         )
     return bundle

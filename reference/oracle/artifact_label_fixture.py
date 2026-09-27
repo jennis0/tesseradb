@@ -28,7 +28,6 @@ publication at a running service, and both must answer as this module says.
 
 from __future__ import annotations
 
-import base64
 import json
 import random
 import subprocess
@@ -37,7 +36,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
+from .harness import CLI_BIN, JOIN_FIELD, REPO_ROOT, ensure_cli_built, join_toml, write_deployment
 
 N_ITEMS = 200
 VIEW_ID = "s0"
@@ -145,12 +144,6 @@ def served(terms: list[str]) -> Served:
     return out
 
 
-def external_id(source_id: int) -> str:
-    """A point's external id as the publication route takes it: the build's own convention, the
-    source id as eight bytes little-endian, base64."""
-    return base64.b64encode(source_id.to_bytes(8, "little")).decode()
-
-
 def _write_points(path: Path) -> None:
     rng = random.Random(SEED)
     pq.write_table(
@@ -225,6 +218,7 @@ def _config(with_layers: bool) -> str:
         f"extent = {{ x = [0.0, {EXTENT_MAX}], y = [0.0, {EXTENT_MAX}] }}\n"
         'source = "points"\npoint_visibility = { source = "pairs", default = "public" }\n'
     )
+    text += "\n" + join_toml("points")
     if not with_layers:
         return text
     text += _layer_toml(TEAMS, visibility="public", field="team", default="inherited",
@@ -268,8 +262,7 @@ def build_bundle(work_dir: Path, *, with_layers: bool) -> Path:
     bundle = work_dir / "bundle"
     deployment = write_deployment(work_dir / "tessera.toml", bundle=bundle, schema=config)
     subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle),
-         "--mint-external-ids"],
+        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
         cwd=REPO_ROOT,
         check=True,
     )
@@ -311,7 +304,7 @@ def publish(server) -> None:
         assert response.status_code == 201, response.text
 
     def record(key, members, labels, parent=None):
-        out = {"key": key, "members": [external_id(m) for m in members]}
+        out = {"key": key, "members": [str(m) for m in members]}
         # Stated on every record, `None` for no label of its own: the layers read labels.
         out["access"] = labels if labels and key != FILLED_LATER else None
         if parent:
@@ -320,12 +313,11 @@ def publish(server) -> None:
 
     for layer, rows in ((TEAMS, TEAM_ROWS), (SEALED, SEALED_ROWS), (GATED, GATED_ROWS)):
         response = server.publish_artifacts(
-            layer, addressing="external", artifacts=[record(*row) for row in rows]
+            layer, field=JOIN_FIELD, artifacts=[record(*row) for row in rows]
         )
         assert response.status_code == 201, response.text
     response = server.publish_artifacts(
         NAMES,
-        addressing="external",
         artifacts=[
             {"key": key, "attached_to": {"layer": TEAMS, "key": team}, "content": [{"values": [text]}]}
             for key, team, text in NAME_ROWS
@@ -344,7 +336,7 @@ def fill(server, layer: str, key: str, labels: list[str]):
     response = requests.patch(
         f"{server.control_base}/control/layers/{layer}/artifacts",
         headers={"Authorization": f"Bearer {server.operator_credential}"},
-        json={"addressing": "external", "artifacts": [{"key": key, "access": labels}]},
+        json={"artifacts": [{"key": key, "access": labels}]},
         timeout=60,
     )
     assert response.status_code == 200, response.text

@@ -23,9 +23,8 @@ N = 8
 
 @pytest.fixture(scope="module")
 def corpus_dir(tmp_path_factory) -> Path:
-    """One tiny corpus for every case: 8 items, one term, a `margin` column for the control
-    schema's attribute, and a `record` column so the reserved-name case names a column that
-    exists."""
+    """One tiny corpus for every case: 8 items, a `margin` column for the control schema's
+    attribute, and a `record` column so the reserved-name case names a column that exists."""
     work = tmp_path_factory.mktemp("schema-refusals")
     pq.write_table(
         pa.table(
@@ -39,15 +38,6 @@ def corpus_dir(tmp_path_factory) -> Path:
         ),
         work / "points.parquet",
     )
-    pq.write_table(
-        pa.table(
-            {
-                "entity_id": pa.array(range(N), type=pa.uint64()),
-                "term_id": pa.array([0] * N, type=pa.uint32()),
-            }
-        ),
-        work / "pairs.parquet",
-    )
     return work
 
 
@@ -58,7 +48,6 @@ def corpus_dir(tmp_path_factory) -> Path:
 SCHEMA_HEAD = """\
 [sources]
 points = "points.parquet"
-pairs  = "pairs.parquet"
 
 [defaults]
 source = "points"
@@ -66,7 +55,7 @@ source = "points"
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 100.0 }
-point_visibility = { source = "pairs", default = "public" }
+point_visibility = { default = "public" }
 
 """
 

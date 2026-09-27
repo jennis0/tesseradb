@@ -109,7 +109,7 @@ def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_ro
     # The planted oversize entity is the one carrying such a row. `NOTE_OVERSIZE_ID` is the
     # **source** id the note was planted on, so it crosses to entity space here rather than being
     # compared as though the two were one number.
-    oversize_entity = catalogue_bundle.entity_of_source(cat.NOTE_OVERSIZE_ID)
+    oversize_entity = cat.entity_of_source(catalogue_bundle, cat.NOTE_OVERSIZE_ID)
     oversize_entities = {b["first_entity"] for b in oversized}
     assert oversize_entities == {oversize_entity}, (
         f"the oversized rows belong to {sorted(oversize_entities)}, not entity "

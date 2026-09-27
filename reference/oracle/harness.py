@@ -40,6 +40,10 @@ DEFAULT_PAIRS = "data/scaled/pairs/categories-subclass.pairs.parquet"
 DEFAULT_LIMIT = 250_000
 DEFAULT_EXTENT = "0,65536,0,65536"
 DEFAULT_VIEW = "s0"
+#: The unique attribute the default fixture joins its two files on, and the column both carry it
+#: in. Its value is the corpus's own item number.
+JOIN_FIELD = "source_id"
+JOIN_COLUMN = "entity_id"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -48,8 +52,8 @@ DEFAULT_VIEW = "s0"
 #
 # A fixture bundle is built once per `tessera` binary ([`fixture_dir`]) and reused. Deciding
 # *whether* it may be reused by inspecting the bundle is the construction that failed twice in this
-# file's own history — once on the r6 `identity` object, once on `--mint-external-ids` — and each
-# time the fix was to extend the predicate by one more clause. That is an allowlist, and the input
+# file's own history — once on the r6 `identity` object, once on a build flag — and each time the
+# fix was to extend the predicate by one more clause. That is an allowlist, and the input
 # that is not on it is precisely the one that goes wrong silently.
 #
 # The receipt inverts it: the builder writes down **the whole input set** it built from, and the
@@ -176,8 +180,8 @@ def ensure_cli_built() -> None:
 
     That is not hypothetical. On 2026-07-30 the tail-discrimination probe built a
     `--features tessera-engine/skip-id-index` binary into this same path. Every
-    subsequent run of this suite silently reused it, so the external-ID index was
-    disabled and every `/control/changes` request panicked the server — surfacing as
+    subsequent run of this suite silently reused it, so an index was disabled and every
+    `/control/changes` request panicked the server — surfacing as
     two `RemoteDisconnected` failures that looked like a code regression and survived
     a `git stash` (stashing sources does not rebuild a binary), which made them look
     pre-existing on master. They were an artefact.
@@ -253,7 +257,12 @@ def run_build(args: list[str]) -> subprocess.CompletedProcess:
 
 
 def open_bundle_with_source(
-    bundle_root: Path, points: Path | str, limit: int | None = None
+    bundle_root: Path,
+    points: Path | str,
+    limit: int | None = None,
+    *,
+    field: str = JOIN_FIELD,
+    column: str | None = JOIN_COLUMN,
 ) -> "object":
     """Open `bundle_root` as an oracle [`Bundle`] with its **source geometry attached**.
 
@@ -268,6 +277,9 @@ def open_bundle_with_source(
     is the tautology the third input exists to remove, and it would fire silently exactly when a
     harness forgot to wire the source up.
 
+    `field` is the unique attribute the points file names its items by and `column` the column it
+    is in; the defaults are the default fixture's.
+
     `limit` must match the `--limit` the bundle was built with: the corpus is 10⁹ rows and the
     fixture is a prefix of it, so reading the whole file to check a prefix would exhaust the
     machine (`read_source_geometry`).
@@ -279,7 +291,9 @@ def open_bundle_with_source(
     from .bundle import Bundle, read_source_geometry  # noqa: PLC0415 — avoids an import cycle
 
     bundle = Bundle(bundle_root)
-    bundle.attach_source_geometry(read_source_geometry(points, bundle.extent, limit))
+    bundle.attach_source_geometry(
+        read_source_geometry(points, bundle.extent, limit, field=field, column=column)
+    )
     return bundle
 
 
@@ -302,10 +316,6 @@ def ensure_fixture_bundle(
 
     Every build generates the bundle's identity key, so the fixture's `tessera_id`s differ between
     rebuilds, which is why nothing may persist them across runs.
-
-    `--mint-external-ids` is passed because every test that addresses an item over
-    `/control/changes` needs an external id to address it by, so this fixture must carry them:
-    opt-in in the product, mandatory here.
 
     The receipt above, not this docstring, keeps a flag from being forgotten: reuse is decided by
     comparing the full argument set against the stamp.
@@ -353,8 +363,8 @@ def _extent_toml(extent: str) -> str:
 
 
 def _fixture_config_text(view_id: str, extent: str) -> str:
-    """One view, its frame, its geometry, and the relation its points' labels are in. No
-    attributes: this fixture's corpus is the scaled geometry file, which carries none.
+    """One view, its frame, its geometry, and the relation its points' labels are in. The one
+    attribute is the item number both files carry, which the build joins them on.
 
     The two sources are named relatively **and overridden on the command line**: the files live
     under `data/scaled/`, which is a path this document may not carry (§3), and an override is
@@ -369,8 +379,25 @@ def _fixture_config_text(view_id: str, extent: str) -> str:
         '[sources]\npoints = "points.parquet"\npairs = "pairs.parquet"\n\n'
         f'[[view]]\nname = "{view_id}"\n{_extent_toml(extent)}\n'
         'source = "points"\n'
-        'point_visibility = { source = "pairs", default = "public" }\n'
+        'point_visibility = { source = "pairs", default = "public" }\n\n'
+        + join_toml("points")
     )
+
+
+def join_attribute_toml(source: str) -> str:
+    """The `[[attribute]]` block declaring [`JOIN_FIELD`] unique, read from each file's
+    [`JOIN_COLUMN`] and from `source` for its values. A declaration naming it in
+    `[defaults].join_field` joins its files on it."""
+    return (
+        f'[[attribute]]\nname = "{JOIN_FIELD}"\ntype = "u64"\nunique = true\n'
+        f'field = "{JOIN_COLUMN}"\nsource = "{source}"\n'
+    )
+
+
+def join_toml(source: str) -> str:
+    """[`join_attribute_toml`] with the `[defaults]` table naming it the join field, for a
+    declaration with no `[defaults]` of its own."""
+    return f'[defaults]\njoin_field = "{JOIN_FIELD}"\n\n' + join_attribute_toml(source)
 
 
 def _write_fixture_config(bundle_root: Path, view_id: str, extent: str) -> Path:
@@ -403,7 +430,6 @@ def _fixture_build_argv(
     ]
     if limit is not None:
         args += ["--limit", str(limit)]
-    args += ["--mint-external-ids"]
     return args
 
 
@@ -660,8 +686,9 @@ class Server:
             timeout=10,
         )
 
-    def change(self, external_id_b64: str, op: str) -> requests.Response:
-        item = {"external_id": external_id_b64, "op": op}
+    def change(self, tessera_id: int | str, op: str) -> requests.Response:
+        """One `/control/changes` item, addressed by the item's `tessera_id`."""
+        item = {"tessera_id": str(tessera_id), "op": op}
         return requests.post(
             f"{self.control_base}/control/changes",
             headers={"Authorization": f"Bearer {self.operator_credential}"},

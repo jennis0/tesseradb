@@ -40,8 +40,10 @@ import pytest
 
 from oracle.harness import (
     CLI_BIN,
+    JOIN_FIELD,
     REPO_ROOT,
     ensure_cli_built,
+    join_attribute_toml,
     spawn_server,
     stop_server,
     write_deployment,
@@ -247,7 +249,8 @@ points = "points.parquet"
 pairs  = "pairs.parquet"
 
 [defaults]
-source = "points"
+source     = "points"
+join_field = "{JOIN_FIELD}"
 
 [[view]]
 name             = "{VIEW_ID}"
@@ -256,6 +259,7 @@ extent           = {{ lon = [-180.0, 180.0], lat = [-{MAX_LAT}, {MAX_LAT}] }}
 source           = "points"
 point_visibility = {{ source = "pairs", default = "public" }}
 
+{join_attribute_toml("points")}
 [[attribute]]
 name   = "fx_key"
 type   = "u64"
@@ -314,7 +318,6 @@ def build_bundle(work: Path, points) -> Path:
             str(deployment),
             "--out",
             str(bundle),
-            "--mint-external-ids",
         ],
         cwd=REPO_ROOT,
         check=True,

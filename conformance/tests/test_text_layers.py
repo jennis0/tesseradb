@@ -265,7 +265,7 @@ def _served_fx(raw: bytes) -> frozenset[int]:
     return frozenset(decode_viewport_points(raw).column("fx_key").to_pylist())
 
 
-def _ingest_body(prose: list[str | None], fx: list[int], external_base: int) -> bytes:
+def _ingest_body(prose: list[str | None], fx: list[int]) -> bytes:
     """One `/control/ingest` batch carrying the catalogue's whole declared column set.
 
     Every declared column must be present (contracts §2.2) — the scalar tail is read back
@@ -283,11 +283,10 @@ def _ingest_body(prose: list[str | None], fx: list[int], external_base: int) -> 
     n = len(prose)
     schema = pa.schema(
         [
-            pa.field("external_id", pa.binary()),
+            pa.field("fx_key", pa.uint64()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
             pa.field("access", pa.list_(pa.utf8())),
-            pa.field("fx_key", pa.uint64()),
             pa.field("department", pa.utf8()),
             pa.field("archive", pa.utf8()),
             pa.field("title", pa.utf8()),
@@ -300,13 +299,12 @@ def _ingest_body(prose: list[str | None], fx: list[int], external_base: int) -> 
     )
     batch = pa.record_batch(
         [
-            pa.array([(external_base + i).to_bytes(8, "little") for i in range(n)], pa.binary()),
+            pa.array(fx, pa.uint64()),
             # Well inside the extent, and spread far enough apart that no two rows share a depth-3
             # tile boundary. Geometry is not what this module tests; being served is.
             pa.array([4_000.0 + 37.0 * i for i in range(n)], pa.float32()),
             pa.array([9_000.0 + 53.0 * i for i in range(n)], pa.float32()),
             pa.array([[INGEST_ACCESS]] * n, pa.list_(pa.utf8())),
-            pa.array(fx, pa.uint64()),
             pa.array(["alpha"] * n, pa.utf8()),
             pa.array(["red"] * n, pa.utf8()),
             # Offset past the entity-id range for `test_byte_scan`'s reason: a planted value that
@@ -400,8 +398,8 @@ def layers(tmp_path_factory, private_catalogue_bundle, base_column):
             segments=srv.status()["segments"][0]["count"],
         )
 
-    def submit(batch: list[str | None], fx: list[int], external_base: int, offset: int) -> None:
-        resp = srv.ingest(_ingest_body(batch, fx, external_base), f"text-layers-{offset}")
+    def submit(batch: list[str | None], fx: list[int], offset: int) -> None:
+        resp = srv.ingest(_ingest_body(batch, fx), f"text-layers-{offset}")
         assert resp.status_code == 200, resp.text
         assert resp.json()["created"] == len(batch)
         # One subprocess for the batch, through the same analyser the flush is about to use.
@@ -421,9 +419,9 @@ def layers(tmp_path_factory, private_catalogue_bundle, base_column):
 
     try:
         base_visible = len(case.entities)
-        submit(BATCH_A, ingest_fx[: len(BATCH_A)], 970_000_000, 0)
+        submit(BATCH_A, ingest_fx[: len(BATCH_A)], 0)
         observe("base+A", base_visible + len(BATCH_A))
-        submit(BATCH_B, ingest_fx[len(BATCH_A) :], 980_000_000, len(BATCH_A))
+        submit(BATCH_B, ingest_fx[len(BATCH_A) :], len(BATCH_A))
         observe("base+A+B", base_visible + len(BATCH_A) + len(BATCH_B))
         srv.compact()
         observe("folded", base_visible + len(BATCH_A) + len(BATCH_B))

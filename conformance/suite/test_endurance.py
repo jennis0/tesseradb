@@ -38,9 +38,9 @@ What only accumulation shows, and where this module looks for it:
   one — confirming the settle needs enough unfolded merges to reach it, which is what the
   fold-free ladder phase at the head of the plan provides.
 - **The six axes the coalesce bounds** — delta tiers, dictionary extents, attribute extents,
-  record extents, text extents, and external-id runs with their locator extents — over hundreds
-  of cycles rather than the soak's five. Attribute extents are bounded per
-  column, a keyword column among them: its coalesce merges the window's dictionaries and
+  record extents, text extents, and the key runs of the unique indexes and the edited-items map —
+  over hundreds of cycles rather than the soak's five. Attribute extents are bounded per column, a
+  keyword column among them: its coalesce merges the window's dictionaries and
   installs the merged one beside the renumbered ordinals (filter-index §5.2, records §7).
 - **The allocator floor and the entity high-water** — monotone across every reload, fold and the
   kill, never re-minting — and the **WAL's reclaim bound**: rotation's steady state is two
@@ -569,15 +569,17 @@ def observe(
             )
         segments = manifest["segments"]
         seg_count += len(segments)
-        runs = len(manifest["external_id_runs"])
-        locators = len(manifest["locator_extents"])
-        assert runs <= AXIS_CEILING, (
-            f"{label}: `external_id_runs` reached {runs} entries (ceiling {AXIS_CEILING}) — "
-            f"only the entity-space coalesce bounds this axis, and it has stopped"
-        )
-        assert locators <= AXIS_CEILING, (
-            f"{label}: `locator_extents` reached {locators} entries (ceiling {AXIS_CEILING})"
-        )
+        key_runs = {
+            f"unique index `{index['attribute']}`": index["live"]
+            for index in manifest["unique_indexes"]
+        }
+        for direction in ("by_number", "by_entity"):
+            key_runs[f"edited items {direction}"] = manifest["edited_items"][direction]["live"]
+        for axis, live in key_runs.items():
+            assert len(live) <= AXIS_CEILING, (
+                f"{label}: the {axis} reached {len(live)} live runs (ceiling {AXIS_CEILING}) — "
+                f"only the entity-space coalesce bounds this axis, and it has stopped"
+            )
 
     non_base = dict(view.segment_bytes)
     if non_base:
@@ -675,7 +677,9 @@ def observe(
         "attrs": sum(len(m["attr_extents"]) for m in view.latest.values()),
         "records": sum(len(m["record_extents"]) for m in view.latest.values()),
         "texts": sum(len(m["text_extents"]) for m in view.latest.values()),
-        "runs": sum(len(m["external_id_runs"]) for m in view.latest.values()),
+        "runs": sum(
+            len(index["live"]) for m in view.latest.values() for index in m["unique_indexes"]
+        ),
         "side_n": max((n for (_pfx, _p, n) in t.side_seen if _pfx == view.live_prefix), default=0),
         "overlay": f"{overlay['depth']}/{overlay['retirable']}",
         "alarms": overlay["soft_limit_alarms"],

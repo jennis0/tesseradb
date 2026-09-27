@@ -27,7 +27,7 @@ at the executor's tick. The driver therefore sequences by eligibility (§12.3):
 through `tessera-config`. The config written below sets them only when a harness asks
 (`merge_tier_width`, `coalesce_width`); otherwise the defaults hold, four and eight, with a 16 MiB
 merge floor: merge eligibility is four same-tier segments, coalesce eligibility eight same-tier
-entries on each axis. The coalesce takes external-id runs four at a time under a 16 MiB floor
+entries on each axis. The coalesce takes unique-index key runs four at a time under a 16 MiB floor
 whatever the config says, so at fixture size a merge tick at the default width also dispatches
 that coalesce. The base segment is in no merge window whatever ``max_merged_segment_bytes`` says:
 a merge selects from the flushed segments only.
@@ -585,7 +585,7 @@ class SuiteHarness:
     automatic_folds: bool = True
     #: Segments a merge takes; None leaves the engine's default of four.
     merge_tier_width: int | None = None
-    #: Entries a coalesce takes on every axis but the external-id runs; None leaves eight.
+    #: Entries a coalesce takes on every axis but the key runs; None leaves eight.
     coalesce_width: int | None = None
     #: Whether a stage that pulls a tick must be the only publication on it. A plan that lets
     #: merges, coalesces and folds ride its ticks turns this off; a stray flush still fails.
@@ -1216,7 +1216,7 @@ class Coalesce(_TickStage):
 
 class MergeAndCoalesce(Merge):
     """A merge and a coalesce published on one tick, as every deployment at the default widths
-    meets them: the segments and the external-id runs both come due every fourth flush. One
+    meets them: the segments and the key runs both come due every fourth flush. One
     stage, entitled to change nothing."""
 
     own = ("merges", "coalesces")
@@ -1250,8 +1250,8 @@ class Deny(Stage):
         self._fx: int | None = None
 
     def apply(self, h: SuiteHarness) -> None:
-        external_id_b64, self._fx = self._pick(h)
-        resp = h.server.change(external_id_b64, self.op)
+        tessera_id, self._fx = self._pick(h)
+        resp = h.server.change(tessera_id, self.op)
         if resp.status_code != 200:
             raise RuntimeError(f"{self.op} refused ({resp.status_code}): {resp.text}")
 

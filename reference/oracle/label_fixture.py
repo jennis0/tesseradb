@@ -47,7 +47,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
+from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, join_toml, write_deployment
 
 N_ITEMS = 200
 VIEW_ID = "s0"
@@ -200,16 +200,15 @@ artifacts = [
   name = "topic"
   type = "text"
   require_member_visibility = "all"
-"""
+
+""" + join_toml("points")
 
 
 def build_label_bundle(work_dir: Path) -> Path:
     """Write the corpus and its declaration under `work_dir` and build the bundle; return its root.
 
-    `--mint-external-ids` is passed because the cache half of §4.4's row addresses one entity over
-    `/control/changes`, which takes an external id. This fixture's items are synthesised here, so
-    saying they have caller-supplied ids is a statement about this corpus and not a manufactured
-    one (contracts §2.4).
+    Every file names its items by source id, which the declaration makes the unique field the
+    build joins on, so a test can address one item by it over `/control/changes`.
     """
     ensure_cli_built()
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -229,7 +228,6 @@ def build_label_bundle(work_dir: Path) -> Path:
             str(deployment),
             "--out",
             str(bundle),
-            "--mint-external-ids",
         ],
         cwd=REPO_ROOT,
         check=True,

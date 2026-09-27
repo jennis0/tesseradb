@@ -104,16 +104,12 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
 
     resp = server.register_layer(_layer())
     assert resp.status_code == 201, resp.text
-    resp = server.publish_artifacts(
-        LAYER, addressing="tessera", artifacts=[{"key": "whole", "members": slices[0]}]
-    )
+    resp = server.publish_artifacts(LAYER, artifacts=[{"key": "whole", "members": slices[0]}])
     assert resp.status_code == 201, resp.text
     tessera_id = resp.json()["artifacts"][0]["tessera_id"]
 
     for joining in slices[1:]:
-        resp = grow(
-            server, addressing="tessera", artifacts=[{"key": "whole", "members": joining}]
-        )
+        resp = grow(server, artifacts=[{"key": "whole", "members": joining}])
         assert resp.status_code == 200, resp.text
         (row,) = resp.json()["artifacts"]
         assert (row["key"], row["tessera_id"], row["joined"]) == ("whole", tessera_id, len(joining)), row
@@ -123,7 +119,7 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
         assert served_count(server, terms) == expected, terms
 
     # Re-sending a slice names the artifact and adds nothing.
-    resp = grow(server, addressing="tessera", artifacts=[{"key": "whole", "members": slices[1]}])
+    resp = grow(server, artifacts=[{"key": "whole", "members": slices[1]}])
     assert resp.status_code == 200, resp.text
     assert resp.json()["artifacts"][0]["joined"] == 0
     assert served_count(server, ["1", "2"]) == len(points)
@@ -139,7 +135,6 @@ def test_an_unknown_key_refuses_the_batch_with_nothing_applied(growth_server):
 
     resp = grow(
         server,
-        addressing="tessera",
         artifacts=[
             {"key": "whole", "members": ids[:5]},
             {"key": "never-published", "members": ids[5:10]},

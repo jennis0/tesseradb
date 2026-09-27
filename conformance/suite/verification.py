@@ -86,7 +86,6 @@ surface.
 
 from __future__ import annotations
 
-import base64
 import io
 import os
 import re
@@ -256,9 +255,9 @@ def materialise_corpus(
 
 def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
     """`tessera build` over the materialised inputs — the same invocation shape as the catalogue's
-    (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output,
-    external ids minted from the source entity id (the denies address items by exactly those
-    bytes), and the identity-key decision stated through the environment.
+    (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output.
+    The declaration joins every file on `id`, the item's number `e`, which is also what the denies
+    address items by.
 
     Nothing names a source or an extent here: the generator's own declaration sits beside the two
     parquet files it names, and carries the grid extent this corpus's expected answers are stated
@@ -276,7 +275,6 @@ def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
             str(CLI_BIN), "build",
             "--deployment", str(deployment),
             "--out", str(bundle_root),
-            "--mint-external-ids",
         ],
         cwd=REPO_ROOT,
         check=True,
@@ -416,7 +414,12 @@ def expected_items(seed: int, fx_keys: Iterable[int]) -> dict[int, Expected]:
             fx_key=fx,
             x=columns["x"][i],
             y=columns["y"][i],
-            fields={"fx_key": fx, **{name: columns[name][i] for name in field_names}},
+            # `id` is the join field, which the materialisers write as `e` itself.
+            fields={
+                "fx_key": fx,
+                "id": columns["e"][i],
+                **{name: columns[name][i] for name in field_names},
+            },
         )
     if set(expected) != set(keys):
         raise TotalVerificationFailure(
@@ -460,8 +463,7 @@ def terms_of(files: CorpusFiles, es: Iterable[int]) -> dict[int, frozenset[int]]
     if files.ingest is not None:
         with ipc.open_stream(io.BytesIO(files.ingest.read_bytes())) as reader:
             batch = reader.read_all()
-        ids = [int.from_bytes(v, "little") for v in batch.column("external_id").to_pylist()]
-        for e, labels in zip(ids, batch.column("access").to_pylist()):
+        for e, labels in zip(batch.column("id").to_pylist(), batch.column("access").to_pylist()):
             if e in wanted:
                 terms[e].update(int(label) for label in labels)
     missing = [e for e in wanted if not terms[e]]
@@ -608,7 +610,8 @@ def check_item(
     reasons: list[str],
 ) -> int:
     """One drill-down against its item: every declared field from whichever home holds it, the
-    404 exactly at the harness's own denies, and the external-id join. Returns rows verified."""
+    404 exactly at the harness's own denies, and the join field `id`, which is the item's `e`.
+    Returns rows verified."""
     status = canon.payload["status"]
     if denied:
         if status != 404:
@@ -641,12 +644,6 @@ def check_item(
     undeclared = set(fields) - set(declaration.names())
     if undeclared:
         reasons.append(f"{label}: item {item.e} serves undeclared fields {sorted(undeclared)}")
-    want_external = base64.b64encode(item.e.to_bytes(8, "little")).decode()
-    if body.get("external_id") != want_external:
-        reasons.append(
-            f"{label}: item {item.e} serves external_id {body.get('external_id')!r} where the "
-            f"fixture's convention (the source id's little-endian bytes) says {want_external!r}"
-        )
     return 1
 
 

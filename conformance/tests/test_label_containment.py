@@ -31,13 +31,12 @@ frame carries the key at all, never that its content list is empty.
 
 from __future__ import annotations
 
-import base64
 import shutil
 
 import pytest
 
 from oracle import label_fixture as lf
-from oracle.harness import spawn_server, stop_server
+from oracle.harness import JOIN_FIELD, spawn_server, stop_server
 from oracle.wire import decode_viewport_artifacts
 
 #: The whole extent, so every artifact's members are inside every request's tiles and an absence is
@@ -204,11 +203,9 @@ def test_no_cache_above_the_containment_check_outlives_an_overlay_change(
             warm = served(server, token, zoom)
             assert warm["l-whole"][1] == (WHOLE_SET_TEXT,), "warming must serve the label"
 
-        # The external id is the source id's eight little-endian bytes (contracts §2.4), which is
-        # what `--mint-external-ids` wrote — so the entity this addresses is named by the fixture
-        # rather than looked up through a bundle read.
-        external_id = base64.b64encode(lf.SPLIT.to_bytes(8, "little")).decode()
-        assert server.change(external_id, "suppress").status_code == 200
+        # Addressed by its source id, the unique field every file of the fixture names it by, so
+        # the entity is named by the fixture rather than looked up through a bundle read.
+        assert _change(server, lf.SPLIT, "suppress").status_code == 200
 
         after = served(server, token, warming[-1])
         assert "l-whole" not in after, (
@@ -236,10 +233,10 @@ def test_no_cache_above_the_containment_check_outlives_an_overlay_change(
 
 
 def _ingest_batch(rows: list[tuple[int, list[str]]]) -> bytes:
-    """A `/control/ingest` body for this fixture's bundle: `(external_id, x, y, access)`.
+    """A `/control/ingest` body for this fixture's bundle: `(source_id, x, y, access)`.
 
-    The external id is the source id's eight little-endian bytes, as `--mint-external-ids` writes
-    them, so an ingested member is addressed the same way a built one is.
+    Each row names its item by source id, so an ingested member is addressed the same way a built
+    one is.
     """
     import io  # noqa: PLC0415
 
@@ -248,7 +245,7 @@ def _ingest_batch(rows: list[tuple[int, list[str]]]) -> bytes:
 
     schema = pa.schema(
         [
-            pa.field("external_id", pa.binary()),
+            pa.field(JOIN_FIELD, pa.uint64()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
             pa.field("access", pa.list_(pa.utf8())),
@@ -256,7 +253,7 @@ def _ingest_batch(rows: list[tuple[int, list[str]]]) -> bytes:
     )
     batch = pa.record_batch(
         [
-            pa.array([source_id.to_bytes(8, "little") for source_id, _ in rows], pa.binary()),
+            pa.array([source_id for source_id, _ in rows], pa.uint64()),
             pa.array([100.0 + i for i in range(len(rows))], pa.float32()),
             pa.array([200.0 + i for i in range(len(rows))], pa.float32()),
             pa.array([terms for _, terms in rows], pa.list_(pa.utf8())),
@@ -270,7 +267,12 @@ def _ingest_batch(rows: list[tuple[int, list[str]]]) -> bytes:
 
 
 def _member(source_id: int) -> str:
-    return base64.b64encode(source_id.to_bytes(8, "little")).decode()
+    return str(source_id)
+
+
+def _change(server, source_id: int, op: str):
+    """One `/control/changes` item addressing an item by its source id, the fixture's join field."""
+    return server.changes([{"field": JOIN_FIELD, "value": str(source_id), "op": op}])
 
 
 #: Source ids for the two items this case ingests. Above the fixture's own range, so neither can
@@ -315,7 +317,7 @@ def test_a_generating_set_holding_an_ingested_member_is_served_on_the_same_rule(
         # Published while its members are still buffered: the set names two entities with no rows.
         resp = server.publish_artifacts(
             lf.LAYER.replace("/", "%2F"),
-            addressing="external",
+            field=JOIN_FIELD,
             artifacts=[
                 {
                     "key": "l-ingested",
@@ -351,9 +353,9 @@ def test_a_generating_set_holding_an_ingested_member_is_served_on_the_same_rule(
 
         # A suppression of the ingested member withholds it from the wider principal too, and an
         # unsuppress restores it: a deny reaches an extent row as it reaches a base row.
-        assert server.change(_member(INGESTED_SHARED), "suppress").status_code == 200
+        assert _change(server, INGESTED_SHARED, "suppress").status_code == 200
         assert "l-ingested" not in served(server, whole_token)
-        assert server.change(_member(INGESTED_SHARED), "unsuppress").status_code == 200
+        assert _change(server, INGESTED_SHARED, "unsuppress").status_code == 200
         assert "l-ingested" in served(server, whole_token)
     finally:
         stop_server(proc)

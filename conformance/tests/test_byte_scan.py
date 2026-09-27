@@ -11,8 +11,8 @@ only re-subdivide tiles already covered by shallower ones).
 The server's response for every request, `/v1/items/{tessera_id}` for a sample of tessera ids, AND
 the full RUST_LOG=info log the server process wrote across the whole run (server spawned with its
 stdout/stderr redirected to a file, so nothing is lost to an unread pipe) must contain no encoding
-of any admitted or denied entity id, no encoding of the bundle's identity key, and no caller
-external id anywhere except the one designed exception — within the scan scope described below.
+of any admitted or denied entity id and no encoding of the bundle's identity key — within the scan
+scope described below.
 
 **Which corpus, and what changing it cost.** This scan ran against a 250,000-item prefix of the
 Phase 0 corpus, which lives outside the repository and runs to tens of gigabytes — so the suite
@@ -42,10 +42,8 @@ construction.md`; contracts §2.6, §3.2): `columns.arrow`/the points batch no l
 previously scanned for is retired from the viewer plane (design r21, Appendix C's new C17). The
 wire now carries `tessera_id: u64`, a keyed Feistel permutation of `(shard_id, entity_id)` that is
 stable across sessions by design (C17) and inverted only inside the trust boundary. This rewrite
-(Task 13) re-derives the scan against that column instead of `handle`, and adds two sweeps the
-old design had no column for: the bundle's identity key (never leaves the server) and caller
-external ids (admin-plane identifiers, SA D14, legitimate in exactly one viewer-plane place: the
-`/v1/items` drill-down response, D4).
+(Task 13) re-derives the scan against that column instead of `handle`, and adds a sweep the old
+design had no column for: the bundle's identity key, which never leaves the server.
 
 **Why the entity-id scan of the `tessera_id` column is 8 bytes wide, aligned to the column's own
 8-byte element stride — not a 4-byte pass, and not a sliding window.** The bug shape this must
@@ -119,7 +117,7 @@ alignment padding, continuation markers) is full of small, unremarkable integers
 entity-id space. A generic sliding-byte-window scan over the whole framed payload matches those
 constantly (verified empirically while writing the original version of this test); the scan is
 restricted to the `tessera_id`/`code` columns' actual decoded value buffers, the only place the
-wire format could ever legitimately carry an entity id, an identity key, or an external id.
+wire format could ever legitimately carry an entity id or an identity key.
 
 **`SAFE_ID_FLOOR`, re-derived rather than inherited (brief step 1.2).** The constant survives, but
 its job changes completely, because its old job no longer exists.
@@ -175,23 +173,11 @@ needed here — these are two fixed, specific values, not a dense target set, so
 `tessera_id` (or anything else on the wire) coincidentally equals `k0`/`k1` is the same
 `1 / 2^64`-scale argument as above.
 
-**The external-id sweep (brief step 1, new in this revision).** Caller external ids are admin-
-plane identifiers (SA D14) that legitimately appear on the viewer plane in exactly one place: the
-`/v1/items/{tessera_id}` drill-down response's `external_id` field (contracts §3.2, D4 — "the only
-place a caller external id appears on the viewer plane", per that field's own doc in
-`tessera-server/src/viewer.rs`). This test resolves a sample of admitted entities' external ids via
-the independent oracle (`Bundle.external_id_of`), confirms each one's *own* drill-down response
-does carry it (the positive control that D4's one designed exception actually works, and that the
-oracle's own encoding assumption is right), and then confirms that exact byte string appears
-nowhere else this run touches: no viewport payload, no log line, and not as an accidental
-substring of any other requested item's response body.
-
-**Why `/v1/items/{tessera_id}` gets a separate, textual (decimal / base64) scan, not the binary
-one.** Unaffected by this revision: it returns JSON — a leaked id there would appear as an ASCII
-decimal string, not as 8 raw LE bytes, so the binary scan is structurally blind to it. A sample of
+**Why `/v1/items/{tessera_id}` gets a separate, textual (decimal) scan, not the binary one.**
+Unaffected by this revision: it returns JSON — a leaked id there would appear as an ASCII decimal
+string, not as 8 raw LE bytes, so the binary scan is structurally blind to it. A sample of
 `tessera_id`s actually returned by the viewport fetches above is queried via `/v1/items/
-{tessera_id}`, and the raw response bytes are decimal-string- and byte-substring-scanned exactly
-like the log.
+{tessera_id}`, and the raw response bytes are decimal-string-scanned exactly like the log.
 
 **The drill-down's positions are trimmed from the decimal sweep, and only they are** (owner
 ruling 2026-09-01; contracts §3.2 r68). `POST /v1/items/{tessera_id}` now carries a `views` array
@@ -225,17 +211,15 @@ decimal substring, never as a raw little-endian integer in the general case. Bot
 the binary scan in case anything ever writes raw bytes to the log, and the decimal scan as the one
 that actually matches how a text logger would leak an id.
 
-**`POST /v1/items` is swept whole.** It is the second viewer route that returns an external id,
-and it returns rows by the thousand, so a read is taken in both orders with every declared field,
-the three system fields, two pages a response and the cursor carried across responses to the end.
+**`POST /v1/items` is swept whole.** It returns rows by the thousand, so a read is taken in both
+orders with every declared field, both system fields, two pages a response and the cursor carried
+across responses to the end.
 Every frame is swept. A records frame's `tessera_id` column is swept as the points batch's is, at
 its own 8-byte stride against the unfiltered target set, and its `tessera:x` and `tessera:y`
 columns at their own stride against the floor-filtered set, since a position at the extent origin
 is `0.0`, whose bits are entity id 0. The declared fields' columns are corpus values the fixture
-planted and are not swept, as the points batch's `fx_key` is not. Each row's `tessera:external_id`
-must be the external id of the item its `tessera_id` names, which is the one place an external id
-may appear on this route; `tessera:labels` and the head, page-end and trailer JSON get the decimal
-sweep. A cursor is opaque and encrypted under a fresh nonce, so its decoded bytes are uniform:
+planted and are not swept, as the points batch's `fx_key` is not. `tessera:labels` and the head,
+page-end and trailer JSON get the decimal sweep. A cursor is opaque and encrypted under a fresh nonce, so its decoded bytes are uniform:
 every 8-byte window at every offset is swept against the unfiltered set and the identity key's
 halves, at the same `~1e-9` coincidence rate the `tessera_id` column's sweep argues. A 4-byte
 sweep of the cursor is not run, for the chance-collision reason the `tessera_id` column gets none.
@@ -271,7 +255,7 @@ the accepted behaviour, checked directly, rather than a retired prohibition kept
 
 **Known limitation, stated in the file:** absence of a matching byte or decimal-string pattern is
 necessary but not sufficient evidence for I10. This is a black-box scan; it cannot see whether some
-future change reintroduces an entity id, the identity key or an external id under a width, encoding
+future change reintroduces an entity id or the identity key under a width, encoding
 or obfuscation that defeats every scan here, and it cannot prove no code path ever *could* leak —
 only that this particular run's outputs, scanned these particular ways, didn't. The gather/wire
 code review (`tessera-wire`'s module docs: `columns.arrow` carries no entity-id column at all post-
@@ -307,8 +291,8 @@ import requests
 from oracle import catalogue
 from oracle import identity as identity_mod
 from oracle import mask as mask_mod
-from oracle.catalogue import catalogue_points_path
-from oracle.harness import open_bundle_with_source, spawn_server, stop_server
+from oracle.catalogue import open_catalogue_bundle
+from oracle.harness import spawn_server, stop_server
 from oracle import wire
 from oracle.wire import decode_viewport_with_subcells, split_frames
 
@@ -330,9 +314,10 @@ ITEM_SAMPLE_SIZE = 25  # tessera ids sampled for the /v1/items/{tessera_id} text
 # `POST /v1/items`: every declared field, the three system fields, and pages small enough that a
 # read spans several responses carried by the cursor.
 ITEMS_FIELDS = [
-    "fx_key", "department", "archive", "title", "shelf", "submitter", "abstract", "note", "pages",
+    "serial", "fx_key", "department", "archive", "title", "shelf", "submitter", "abstract", "note",
+    "pages",
 ]
-ITEMS_SYSTEM_FIELDS = ["position", "external_id", "labels"]
+ITEMS_SYSTEM_FIELDS = ["position", "labels"]
 ITEMS_PAGE_ROWS = 4_999
 ITEMS_PAGES_PER_RESPONSE = 2
 # `POST /v1/artifacts`: a layer the sweep publishes, read with every property.
@@ -340,7 +325,7 @@ ARTIFACTS_LAYER = "byte-scan-groups"
 ARTIFACTS_FIELDS = [
     "key", "level", "parents", "target", "masked_count", "content", "centroid", "box", "shape",
 ]
-EXTERNAL_ID_SAMPLE_SIZE = 5  # admitted entities sampled for the external-id sweep
+CARD_SAMPLE_SIZE = 5  # admitted entities whose cards are compared across two sessions
 
 
 def _le_windows(data: bytes, width: int, *, stride: int = 1) -> set[int]:
@@ -519,8 +504,6 @@ class RecordsScan(NamedTuple):
     #: 8-byte windows of the `tessera:x` and `tessera:y` value buffers, at their own stride.
     position_windows: set[int]
     tessera_ids: list[int]
-    #: Each row's `tessera:external_id`, positional to `tessera_ids`; empty without the column.
-    external_ids: list[bytes | None]
     labels: list[str]
 
 
@@ -534,7 +517,7 @@ def _value_buffer(column, width: int) -> bytes:
 def _records_scan(payload: bytes) -> RecordsScan:
     """One records frame's swept columns, decoded from the Arrow stream rather than read from the
     framed bytes, for the reason the points sweep gives."""
-    scan = RecordsScan(set(), set(), [], [], [])
+    scan = RecordsScan(set(), set(), [], [])
     with ipc.open_stream(io.BytesIO(payload)) as reader:
         for batch in reader:
             names = batch.schema.names
@@ -546,8 +529,6 @@ def _records_scan(payload: bytes) -> RecordsScan:
                     scan.position_windows.update(
                         _le_windows(_value_buffer(batch.column(name), 8), 8, stride=8)
                     )
-            if "tessera:external_id" in names:
-                scan.external_ids.extend(batch.column("tessera:external_id").to_pylist())
             if "tessera:labels" in names:
                 for row in batch.column("tessera:labels").to_pylist():
                     scan.labels.extend(row)
@@ -895,13 +876,11 @@ def byte_scan_server(tmp_path_factory, private_catalogue_bundle):
     stop_server(proc)
 
 
-def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_in_logs(
+def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
     byte_scan_server, catalogue_bundle_root: Path
 ):
     server, log_path = byte_scan_server
-    oracle_bundle = open_bundle_with_source(
-        catalogue_bundle_root, catalogue_points_path()
-    )
+    oracle_bundle = open_catalogue_bundle(catalogue_bundle_root)
     assert oracle_bundle.identity_key is not None, "fixture must be a post-r6 bundle"
 
     # The grant set is **named, not sliced**. A "first half of the dictionary" grant admits and
@@ -987,21 +966,9 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
             tessera_id_windows |= tid_w
             code_windows |= code_w
             sampled_ids.update(_decode_tessera_ids(payload))
-    # Used for checks (identity key, external ids) that need to look at the whole points batch,
-    # not just the entity-id sweep's column-specific split above.
-    all_points_windows = tessera_id_windows | code_windows
-
     # The identity key must not appear ANYWHERE, sub-cell stream included — it is a 128-bit random
     # value, so there is no chance-collision hazard in widening the haystack for it.
-    #
-    # The external-id check below deliberately does **not** widen: the sub-cell batch's `count`
-    # column holds small integers by construction, so it genuinely contains 1, 2, 3..., and a
-    # low-valued external id (entity 0's is the 8-byte encoding of 1) collides with them by pure
-    # arithmetic rather than by leaking. That is the same hazard the external-id check's own comment
-    # already records for flatbuffer framing; including sub-cell counts turns it from unlikely into
-    # certain. The sub-cell columns are checked against the floor-filtered entity-id set above, which
-    # is the check that actually bears on I10 here.
-    all_windows_including_underlay = all_points_windows | subcell_windows
+    all_windows_including_underlay = tessera_id_windows | code_windows | subcell_windows
 
     # --- explicit negative control: the scan must find a REAL tessera_id, or it proves nothing ---
     assert sampled_ids, "must have decoded at least one tessera_id to exercise the scan at all"
@@ -1050,37 +1017,13 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     for raw in all_raw_responses:
         assert identity_key_raw not in raw, "identity key's raw 16 bytes found in a viewport response"
 
-    # --- external ids: legitimate in exactly one place (drill-down), nowhere else ----------------
-    ext_sample = sorted(admitted)[:EXTERNAL_ID_SAMPLE_SIZE]
-    assert ext_sample, "must have at least one admitted entity to exercise the external-id sweep"
-    for entity_id in ext_sample:
-        tessera_id = oracle_bundle.tessera_id_of(entity_id)
-        ext_bytes = oracle_bundle.external_id_of(entity_id)
-        ext_int = int.from_bytes(ext_bytes, "little")
-
-        # Positive control (D4): the item's OWN drill-down response does carry it.
-        resp = server.item(token, tessera_id)
+    card_sample = sorted(admitted)[:CARD_SAMPLE_SIZE]
+    assert card_sample, "must have at least one admitted entity to open its card"
+    first_cards = {}
+    for entity_id in card_sample:
+        resp = server.item(token, oracle_bundle.tessera_id_of(entity_id))
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body.get("external_id") is not None, "admitted item with a known external id must return one"
-        assert base64.b64decode(body["external_id"]) == ext_bytes, (
-            "drill-down external_id did not round-trip to the oracle's own encoding"
-        )
-
-        # Never on the viewer plane's viewport payloads. Checked against the decoded VALUE
-        # BUFFERS only (`all_points_windows`, built from trimmed column buffers), not the raw
-        # framed response bytes wholesale — an `ext_bytes in raw` substring check across the
-        # whole Arrow IPC frame (flatbuffer schema/record-batch metadata included) is exactly the
-        # "framing is full of small, unremarkable integers" trap this module's own docstring warns
-        # about: this fixture's external ids are 8 raw bytes of a small source-corpus integer
-        # (`Bundle.external_id_of`'s doc), so a low-valued one (e.g. entity 0's external id, the
-        # 8-byte encoding of the small integer 1) is a length/flag-shaped value very likely to
-        # appear somewhere in ordinary flatbuffer framing by pure coincidence — caught empirically
-        # while writing this test, the same way the padding-tail zero collision above was.
-        assert ext_int not in all_points_windows, (
-            f"external id for entity {entity_id} found as an 8-byte-aligned integer in a "
-            "viewport points batch"
-        )
+        first_cards[entity_id] = resp.json()
 
     # --- C17: tessera_id is stable across sessions — the property that replaces the retired,
     # now-false "handle values are uncorrelated across sessions" check (conformance design §4.3,
@@ -1092,15 +1035,14 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     auth2 = server.authorise([d.decode("ascii") for d in granted_descriptors])
     token2 = auth2["token"]
     assert token2 != token, "two independent authorisations must not share a session token"
-    for entity_id in ext_sample:
+    for entity_id in card_sample:
         tessera_id = oracle_bundle.tessera_id_of(entity_id)
         resp2 = server.item(token2, tessera_id)
         assert resp2.status_code == 200, (
             f"entity {entity_id}'s tessera_id must resolve identically under a second, "
             f"independently-authorised session with the same visibility (C17): {resp2.text}"
         )
-        ext_bytes = oracle_bundle.external_id_of(entity_id)
-        assert base64.b64decode(resp2.json()["external_id"]) == ext_bytes, (
+        assert resp2.json() == first_cards[entity_id], (
             "the SAME tessera_id must resolve to the SAME item across sessions (C17), but the "
             "second session's drill-down disagreed with the first's"
         )
@@ -1109,50 +1051,28 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     sample = sorted(sampled_ids)[:ITEM_SAMPLE_SIZE]
     assert sample, "must have sampled at least one tessera_id to exercise /v1/items"
     item_decimal_hits: set[int] = set()
-    item_bodies: list[bytes] = []
     for tid in sample:
         resp = server.item(token, tid)
         # A tessera_id may legitimately be denied-by-race or already retired; any 2xx/4xx body is
         # still text worth scanning either way, so no status-code assertion is made here.
         # The positions are trimmed and nothing else is — see `_item_body_without_positions`.
-        # The **untrimmed** bytes go on `item_bodies`, which is the external-id substring sweep
-        # below: an external id is bytes rather than a decimal run, and the trim is the decimal
-        # sweep's alone.
         item_decimal_hits |= _decimal_windows(
             _item_body_without_positions(resp.content), SAFE_ID_FLOOR
         )
-        item_bodies.append(resp.content)
     leaked_items = item_decimal_hits & target_ids_high
     assert not leaked_items, (
         f"found {len(leaked_items)} entity id(s) as an ASCII decimal string in a /v1/items/"
         f"{{tessera_id}} response body: {sorted(leaked_items)[:20]}"
     )
-    for entity_id in ext_sample:
-        ext_bytes = oracle_bundle.external_id_of(entity_id)
-        own_tessera_id = oracle_bundle.tessera_id_of(entity_id)
-        for tid, body in zip(sample, item_bodies):
-            if tid == own_tessera_id:
-                continue  # this is the one designed exception (D4) — checked above already
-            assert ext_bytes not in body, (
-                f"external id for entity {entity_id} found in a /v1/items response for a "
-                f"different tessera_id ({tid})"
-            )
 
     # --- POST /v1/items: a whole read in each order, every frame swept ---------------------------
     visible = sum(tile[1] for tile in decode_viewport_with_subcells(all_raw_responses[0])[0])
-
-    def external_of(entity: int) -> bytes | None:
-        try:
-            return oracle_bundle.external_id_of(entity)
-        except KeyError:
-            return None
 
     items_tessera_windows: set[int] = set()
     items_position_windows: set[int] = set()
     items_cursor_windows: set[int] = set()
     items_json = b""
     items_labels: list[str] = []
-    external_ids_checked = 0
     read_sets = []
     for order in ("map", "stored"):
         body = {
@@ -1181,15 +1101,6 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
                 items_tessera_windows |= scan.tessera_windows
                 items_position_windows |= scan.position_windows
                 items_labels.extend(scan.labels)
-                assert len(scan.external_ids) == len(scan.tessera_ids)
-                # The one place an external id may appear on this route: its own row.
-                for tessera_id, external_id in zip(scan.tessera_ids, scan.external_ids):
-                    _shard, entity = identity_mod.invert(identity_key, tessera_id)
-                    assert external_id == external_of(entity), (
-                        f"the row for tessera_id {tessera_id} carries an external id that is not "
-                        "its item's"
-                    )
-                    external_ids_checked += 1
                 rows.extend(scan.tessera_ids)
             next_cursor = decoded.trailer["next"]
             if next_cursor is None:
@@ -1202,7 +1113,6 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         )
         read_sets.append(set(rows))
     assert read_sets[0] == read_sets[1], "the two orders returned different rows"
-    assert external_ids_checked > 0
 
     # The scan finds a real identifier where one was sent, or its silence proves nothing.
     assert next(iter(read_sets[0])) in items_tessera_windows
@@ -1222,10 +1132,6 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     items_text_str = items_text.decode("utf-8", errors="replace")
     assert identity_key_hex not in items_text_str
     assert str(identity_key.k0) not in items_text_str and str(identity_key.k1) not in items_text_str
-    for entity_id in ext_sample:
-        assert oracle_bundle.external_id_of(entity_id) not in items_json, (
-            f"external id for entity {entity_id} found in an items JSON frame"
-        )
 
     # --- POST /v1/artifacts: a layer published over the catalogue, read whole, every frame swept -
     shard = oracle_bundle.manifest["identity"].get("shard_id", 0)
@@ -1267,7 +1173,7 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
             }
         )
     resp = server.publish_artifacts(
-        ARTIFACTS_LAYER, addressing="tessera", artifacts=planted_artifacts
+        ARTIFACTS_LAYER, artifacts=planted_artifacts
     )
     assert resp.status_code == 201, resp.text
     # A publication's memberships are served from the tick that publishes them, which a flush
@@ -1374,7 +1280,3 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     assert str(identity_key.k1) not in log_text_for_substrings, "identity key half k1 found as decimal text in the log"
     assert identity_key_hex not in log_text_for_substrings, "identity key hex form found in the log"
     assert identity_key_raw not in log_bytes, "identity key raw bytes found in the log"
-
-    for entity_id in ext_sample:
-        ext_bytes = oracle_bundle.external_id_of(entity_id)
-        assert ext_bytes not in log_bytes, f"external id for entity {entity_id} found raw in the log"

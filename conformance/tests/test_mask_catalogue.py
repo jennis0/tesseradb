@@ -148,7 +148,7 @@ def test_fx_keys_are_unique_and_not_derived_from_the_entity_id():
 
 def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogue_server):
     """The join `AckedJournal` and the I2 canonicalisation both need: a served point names its
-    fixture item, with no reverse map, no extra endpoint, and no external ID on the viewer plane.
+    fixture item, with no reverse map and no extra endpoint on the viewer plane.
 
     **The assertion is on the served column, not on MANIFEST.** An earlier version of this body
     checked only that MANIFEST declared a scalar named `fx_key`, and carried a strict xfail while
@@ -180,9 +180,9 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
     assert points.num_rows > 0, "no points were served, so nothing was checked"
 
     # The fixture planted `source_id -> fx_key`, so the join is identity -> entity -> **source**.
-    # The middle hop comes from the segment and the last from the external-ID sidecar; both are
-    # translations only the fixture may make, because on the viewer plane an identity is opaque
-    # (I10) and this test is the fixture, not a viewer.
+    # The middle hop comes from the segment and the last from the bundle's index of the join field
+    # (`catalogue.entities_by_source`); both are translations only the fixture may make, because on
+    # the viewer plane an identity is opaque (I10) and this test is the fixture, not a viewer.
     #
     # **The last hop used to be an equality**, `entity_id == source_id`, and it stopped being one
     # when decision 0073 made the within-signature tiebreak the Morton code. What that cost is
@@ -190,10 +190,11 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
     # which is a comparison that fails loudly here and would have failed *silently* anywhere the
     # values were not unique per item.
     planted = cat.fx_keys()
+    source_of = {e: s for s, e in cat.entities_by_source(catalogue_bundle).items()}
     seg = catalogue_bundle.segment(cat.VIEW_ID)
     entity_of = {int(seg.tessera_id[row]): int(seg.entity_id[row]) for row in range(seg.row_count)}
     for ident, key in zip(points.column("tessera_id").to_pylist(), points.column("fx_key").to_pylist()):
-        source = catalogue_bundle.source_of_entity(entity_of[ident])
+        source = source_of[entity_of[ident]]
         assert key == planted[source], (
             f"served fx_key {key} for tessera_id {ident} (entity {entity_of[ident]}, source "
             f"{source}) is not the planted key {planted[source]} — the join the whole catalogue "
