@@ -9,7 +9,7 @@
 use tempfile::TempDir;
 
 use tessera_authz::Dict;
-use tessera_lifecycle::overlay::replay;
+use tessera_lifecycle::overlay::Replay;
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use tessera_lifecycle::Overlay;
 use tessera_types::EntityId;
@@ -120,7 +120,7 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     before.apply(EntityId::new(7), ChangeOp::Suppress);
 
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::ChangeBatch {
             changes: vec![(EntityId::new(8), ChangeOp::Delete)],
         })
@@ -132,13 +132,13 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
         wal.fsync().unwrap();
     }
 
-    let (_wal, records) = Wal::open(&path).unwrap();
-    let (overlay, _buffer, _resolver) = replay(
-        &records,
-        &dict,
-        Overlay::new(),
-        &tessera_lifecycle::owner_id_only,
-    );
+    let wal = Wal::open(&path).unwrap();
+    let mut replay = Replay::new(&dict, Overlay::new(), &tessera_lifecycle::owner_id_only);
+    for record in wal.records() {
+        let (position, record) = record.unwrap();
+        replay.apply(&record, position, |_, _| false);
+    }
+    let (overlay, _buffer, _resolver) = replay.finish();
 
     assert!(
         overlay.is_suppressed(EntityId::new(7)),

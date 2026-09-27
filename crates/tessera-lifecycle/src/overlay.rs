@@ -264,21 +264,8 @@ pub(crate) fn as_u32(entity: EntityId) -> u32 {
         .expect("entity ids are capped at u32::MAX by the I9 allocator (contracts §2.6 r6)")
 }
 
-/// Replay a WAL's records into an `Overlay` and an `IngestBuffer`.
-///
-/// Single left-to-right pass over `records`, in on-disk order (the order changes and ingests
-/// were accepted in — WAL append order is causal order):
-/// - `IngestBatch` rows populate `IngestBuffer` (term descriptors resolved via `dict` plus a
-///   deterministic, replay-order in-memory extension — see [`DescriptorResolver`]).
-/// - `ChangeBatch` records apply their disposition directly. **No resolution happens here at
-///   all**: the entity was fixed at admission, which is what makes replay infallible.
-/// - `OverlaySnapshot` records are applied **at the position they occupy**, never used as a
-///   starting state the walk then resumes from. Those are different algorithms: recovery walks
-///   every surviving file in sequence order, and a file older than the one holding the snapshot may
-///   still carry change records above the point the snapshot was taken at. Starting *at* the
-///   snapshot would skip them — which looks like an optimisation and is a silent un-deny.
-///
-/// The `view_ids_of_key` a caller with **no manifest** passes [`replay`]: the owner's id alone.
+/// The `view_ids_of_key` a caller with **no manifest** passes [`Replay::new`]: the owner's id
+/// alone.
 ///
 /// Correct exactly where there is no `members` relation to expand — the unit tests here, and a
 /// bundle whose groups share nothing. `Engine::open` passes `Manifest::view_ids_for_key` instead,
@@ -291,67 +278,109 @@ pub fn owner_id_only(group: &str, key: &str) -> Vec<String> {
     )]
 }
 
+/// Replays a WAL's records into an `Overlay` and an `IngestBuffer`, one record at a time.
+///
+/// Single left-to-right pass over the records, in on-disk order (the order changes and ingests
+/// were accepted in — WAL append order is causal order):
+/// - `IngestBatch` rows populate `IngestBuffer` (term descriptors resolved via `dict` plus a
+///   deterministic, replay-order in-memory extension — see [`DescriptorResolver`]).
+/// - `ChangeBatch` records apply their disposition directly. **No resolution happens here at
+///   all**: the entity was fixed at admission, which is what makes replay infallible.
+/// - `OverlaySnapshot` records are applied **at the position they occupy**, never used as a
+///   starting state the walk then resumes from. Those are different algorithms: recovery walks
+///   every surviving file in sequence order, and a file older than the one holding the snapshot may
+///   still carry change records above the point the snapshot was taken at. Starting *at* the
+///   snapshot would skip them — which looks like an optimisation and is a silent un-deny.
+///
 /// `view_ids_of_key` turns a `ViewDrop`'s `(owner group, key)` into every view id it names — the
 /// owner's and every sharing group's (`views.md` §3.3). It is a parameter rather than a derivation
 /// because the `members` relation lives in the bundle manifest and this crate does not depend on
 /// `tessera-store`; `Engine::open` supplies `Manifest::view_ids_for_key`, and a caller with no
 /// manifest supplies the owner's id alone.
 ///
-/// Returns, alongside the overlay and buffer, the `DescriptorResolver` in its final state,
-/// borrowed from `dict` for exactly as long as this call. `Engine::open` immediately detaches it
-/// (`.into_state()`) into owned data it keeps for the process's lifetime, so a live
-/// `/control/ingest` acceptance can keep resolving novel descriptors from exactly where replay left
-/// off, rather than restarting the sequence (see [`DescriptorResolver::resume`]'s doc for why
-/// restarting descriptor extension ids would be fail-open).
-pub fn replay<'a>(
-    records: &[WalRecord],
-    dict: &'a Dict,
-    seed: Overlay,
-    view_ids_of_key: &dyn Fn(&str, &str) -> Vec<String>,
-) -> (Overlay, IngestBuffer, DescriptorResolver<'a>) {
-    // **The seed is the starting state, and replay runs over it — that order is load-bearing.**
-    // `seed` is what the partition manifests carry (`initial_deny_of`); every WAL record postdates
-    // it, because a manifest is only ever written above WAL durability and a member is only
-    // reclaimed after a manifest reflecting it is durable at a higher `n`. So a later record must
-    // win, and the one op that needs it to is `Unsuppress`: publication is deliberately off the ack
-    // path, so there is always a gap in which the newest manifest predates a durable, acked
-    // unsuppress. Seeding *after* replay would re-apply the retired suppression on every restart in
-    // that gap, and the next manifest write would make the reversion permanent — an acked
-    // disposition silently reverted. Fail-closed in direction (an item hidden, never leaked), but a
-    // violation of what the 200 asserts.
-    //
-    // Deletes are indifferent: nothing un-sets them, so either order gives the same answer. The
-    // idempotency the previous ordering rested on is untouched — applying a disposition twice still
-    // folds to the same state.
-    let mut overlay = seed;
-    let mut buffer = IngestBuffer::new();
-    let mut resolver = DescriptorResolver::new(dict);
+/// [`Replay::finish`] returns, alongside the overlay and buffer, the `DescriptorResolver` in its
+/// final state, borrowed from `dict`. `Engine::open` immediately detaches it (`.into_state()`) into
+/// owned data it keeps for the process's lifetime, so a live `/control/ingest` acceptance can keep
+/// resolving novel descriptors from exactly where replay left off, rather than restarting the
+/// sequence (see [`DescriptorResolver::resume`]'s doc for why restarting descriptor extension ids
+/// would be fail-open).
+pub struct Replay<'a> {
+    overlay: Overlay,
+    buffer: IngestBuffer,
+    resolver: DescriptorResolver<'a>,
+    view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
+}
 
-    for record in records {
+impl<'a> Replay<'a> {
+    pub fn new(
+        dict: &'a Dict,
+        seed: Overlay,
+        view_ids_of_key: &'a dyn Fn(&str, &str) -> Vec<String>,
+    ) -> Self {
+        // **The seed is the starting state, and replay runs over it — that order is load-bearing.**
+        // `seed` is what the partition manifests carry (`initial_deny_of`); every WAL record postdates
+        // it, because a manifest is only ever written above WAL durability and a member is only
+        // reclaimed after a manifest reflecting it is durable at a higher `n`. So a later record must
+        // win, and the one op that needs it to is `Unsuppress`: publication is deliberately off the ack
+        // path, so there is always a gap in which the newest manifest predates a durable, acked
+        // unsuppress. Seeding *after* replay would re-apply the retired suppression on every restart in
+        // that gap, and the next manifest write would make the reversion permanent — an acked
+        // disposition silently reverted. Fail-closed in direction (an item hidden, never leaked), but a
+        // violation of what the 200 asserts.
+        //
+        // Deletes are indifferent: nothing un-sets them, so either order gives the same answer. The
+        // idempotency the previous ordering rested on is untouched — applying a disposition twice still
+        // folds to the same state.
+        Replay {
+            overlay: seed,
+            buffer: IngestBuffer::new(),
+            resolver: DescriptorResolver::new(dict),
+            view_ids_of_key,
+        }
+    }
+
+    /// Applies `record`, which sits at `position` in the log, and stamps each row it buffers with
+    /// that position. `flushed` names the rows that already have geometry: they are not buffered,
+    /// though their descriptors are still resolved.
+    pub fn apply(
+        &mut self,
+        record: &WalRecord,
+        position: u64,
+        flushed: impl Fn(EntityId, &str) -> bool,
+    ) {
         match record {
             WalRecord::IngestBatch { rows, edits, .. } => {
                 // An edit deletes the entity its item leaves and gives the new one the old one's
                 // suppression, both in the record that creates the new one.
                 for edit in edits {
-                    overlay.apply(edit.old, ChangeOp::Delete);
+                    self.overlay.apply(edit.old, ChangeOp::Delete);
                     if let Some(first) = edit.rows.first() {
                         if edit.suppressed {
-                            overlay.apply(first.entity_id, ChangeOp::Suppress);
+                            self.overlay.apply(first.entity_id, ChangeOp::Suppress);
                         }
                     }
                 }
                 for row in rows.iter().chain(edits.iter().flat_map(|edit| &edit.rows)) {
-                    buffer.insert_row(row, &mut resolver);
+                    if flushed(row.entity_id, &row.view) {
+                        // Resolved all the same, so the extension sequence is the one the live
+                        // path took.
+                        for descriptor in &row.descriptors {
+                            self.resolver.resolve(descriptor);
+                        }
+                        continue;
+                    }
+                    self.buffer.insert_row(row, &mut self.resolver);
+                    self.buffer.set_wal_pos(row.entity_id, &row.view, position);
                 }
             }
             WalRecord::ChangeBatch { changes } => {
                 // No resolution at all: each entity was fixed at admission.
                 for (entity_id, op) in changes {
-                    overlay.apply(*entity_id, *op);
+                    self.overlay.apply(*entity_id, *op);
                 }
             }
             WalRecord::OverlaySnapshot { entries } => {
-                overlay.apply_snapshot(entries);
+                self.overlay.apply_snapshot(entries);
             }
             // **Applied by the caller, against the live vocabularies, not here.** This replay
             // builds the overlay and the buffer, and reaches neither the bundle manifest a binding
@@ -389,9 +418,10 @@ pub fn replay<'a>(
                 // leave the sharing group's buffered rows to be flushed into whatever takes the
                 // key next. The expansion is `Manifest::view_ids_for_key`'s, passed in because
                 // this crate holds no manifest.
-                buffer.remove_views(&view_ids_of_key(&view.group, &view.key));
+                self.buffer
+                    .remove_views(&(self.view_ids_of_key)(&view.group, &view.key));
                 for entity in deleted {
-                    overlay.apply(*entity, ChangeOp::Delete);
+                    self.overlay.apply(*entity, ChangeOp::Delete);
                 }
             }
             // A view create is the roster's, rebuilt by the caller in that same second pass, and
@@ -411,8 +441,11 @@ pub fn replay<'a>(
         }
     }
 
-    drop_deleted(&overlay, &mut buffer);
-    (overlay, buffer, resolver)
+    /// The overlay, the buffer and the resolver the records replayed to.
+    pub fn finish(mut self) -> (Overlay, IngestBuffer, DescriptorResolver<'a>) {
+        drop_deleted(&self.overlay, &mut self.buffer);
+        (self.overlay, self.buffer, self.resolver)
+    }
 }
 
 /// Drop every row the buffer holds for an entity the overlay has deleted, in every view — **the
@@ -552,18 +585,13 @@ mod tests {
             changes: vec![(entity, ChangeOp::Suppress)],
         };
 
-        let (once, _, _) = replay(
-            std::slice::from_ref(&suppress),
-            &dict,
-            Overlay::new(),
-            &owner_id_only,
-        );
-        let (twice, _, _) = replay(
-            &[suppress.clone(), suppress],
-            &dict,
-            Overlay::new(),
-            &owner_id_only,
-        );
+        let mut once = Replay::new(&dict, Overlay::new(), &owner_id_only);
+        once.apply(&suppress, 0, |_, _| false);
+        let (once, _, _) = once.finish();
+        let mut twice = Replay::new(&dict, Overlay::new(), &owner_id_only);
+        twice.apply(&suppress, 0, |_, _| false);
+        twice.apply(&suppress, 1, |_, _| false);
+        let (twice, _, _) = twice.finish();
 
         assert_eq!(
             once.is_suppressed(entity),

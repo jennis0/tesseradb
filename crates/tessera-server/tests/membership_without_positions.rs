@@ -547,7 +547,8 @@ async fn a_restated_page_appends_no_growth_record() {
     tick(&server).await;
 
     server.shutdown().await;
-    let (_wal, records) = tessera_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
+    let wal = tessera_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     let growths = records
         .iter()
         .filter(|record| {
@@ -623,7 +624,8 @@ async fn a_partly_restated_page_appends_only_the_new_members() {
     );
 
     server.shutdown().await;
-    let (_wal, records) = tessera_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
+    let wal = tessera_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     let growths: Vec<&Vec<tessera_lifecycle::wal::MembershipGrowth>> = records
         .iter()
         .filter_map(|record| match record {

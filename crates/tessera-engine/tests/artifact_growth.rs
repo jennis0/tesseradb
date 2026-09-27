@@ -479,6 +479,69 @@ fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
     );
 }
 
+/// Every point the whole-map viewport serves a principal who can see everything.
+fn visible(engine: &Engine) -> u64 {
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 4, [0.0, 0.0, 1000.0, 1000.0], 2 * N_ITEMS as usize),
+        )
+        .expect("a viewport over the whole map")
+        .tiles
+        .iter()
+        .map(|t| t.visible)
+        .sum()
+}
+
+/// **A log the growth holds comes back whole.** Every batch since the growth stays in the log,
+/// flushed or not, across every member the rotations sealed, so the restart replays batches a flush
+/// has already given geometry beside one still buffered. It serves what the stopped process
+/// served, holds the unflushed row for the next flush, and gives no flushed row a second one.
+#[test]
+fn a_log_the_growth_holds_replays_to_what_was_served() {
+    let fx = fixture();
+    let (served, buffered) = {
+        let engine = fx.open();
+        publish(&fx, &engine, 0..300);
+        grow(&fx, &engine, 300..310);
+        for batch in 0..4 {
+            for row in 0..5 {
+                ingest(&engine, &format!("batch-{batch}-{row}"));
+            }
+            publish_buffered(&engine);
+            rotate(&engine);
+        }
+        let buffered = ingest(&engine, "unflushed");
+        assert!(
+            wal_members(&fx.wal).len() > 2,
+            "the rotations sealed members the growth holds: {:?}",
+            wal_members(&fx.wal)
+        );
+        (visible(&engine), buffered)
+    };
+
+    let engine = fx.open();
+    assert_eq!(count(&engine), 310, "the join replays");
+    assert_eq!(visible(&engine), served, "the restart serves what was served");
+    assert!(
+        engine.generation().buffer.contains(buffered),
+        "the row no flush reached is buffered again"
+    );
+    assert_eq!(
+        engine.generation().buffer.len(),
+        1,
+        "and it is the only one: a flushed row is not buffered again"
+    );
+
+    publish_buffered(&engine);
+    assert_eq!(
+        visible(&engine),
+        N_ITEMS + 21,
+        "the next flush writes the unflushed row once and no flushed row again"
+    );
+}
+
 /// **The pin the case above proves, as the number an operator reads.**
 ///
 /// A log that cannot rotate and a log that is merely busy are the same size, and until the gauge

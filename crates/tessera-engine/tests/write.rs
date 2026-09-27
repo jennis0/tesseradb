@@ -2069,7 +2069,8 @@ fn crash_parent() {
 
 /// The entity ids the WAL's `IngestBatch` record for [`CRASH_BATCH_ID`] carries, in row order.
 fn crash_batch_ids(wal_path: &std::path::Path) -> Vec<EntityId> {
-    let (_wal, records) = tessera_lifecycle::Wal::open(wal_path).expect("the WAL reopens");
+    let wal = tessera_lifecycle::Wal::open(wal_path).expect("the WAL reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     records
         .iter()
         .filter_map(|r| match r {
@@ -2193,7 +2194,8 @@ fn every_id_a_window_issues_is_in_the_wal() {
         ids
     }; // the engine is dropped, which joins the executor and closes the WAL
 
-    let (_wal, records) = tessera_lifecycle::Wal::open(&wal_path).expect("the WAL reopens");
+    let wal = tessera_lifecycle::Wal::open(&wal_path).expect("the WAL reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     let mut framed: Vec<u64> = Vec::new();
     for record in &records {
         if let tessera_lifecycle::WalRecord::IngestBatch { rows, .. } = record {

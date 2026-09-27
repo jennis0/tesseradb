@@ -308,7 +308,7 @@ impl Allocator {
 /// `Allocator::new(manifest_hw.max(high_water_from(&replayed)))` rather than carrying a
 /// pre-crash `Allocator::high_water()` value across a restart, since the allocator itself does
 /// not persist: only what actually made it into the WAL (or the bundle manifest) did.
-pub fn high_water_from(records: &[WalRecord]) -> u64 {
+pub fn high_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> u64 {
     let mut hw = 0u64;
     for rec in records {
         match rec {
@@ -367,7 +367,7 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
 /// Every point entity `records` name: the rows an ingest allocated or joined, the entities its
 /// edits left, every entity a change or an overlay snapshot names, and every member an artifact
 /// publication or growth names. [`Allocator::seed_freed`] takes these out of the freed ids.
-pub fn entities_named(records: &[WalRecord]) -> Bitmap {
+pub fn entities_named<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> Bitmap {
     let mut named = Bitmap::new();
     let mut sets: Vec<&Vec<u8>> = Vec::new();
     let mut add = |entity: EntityId| {
@@ -441,7 +441,7 @@ pub fn entities_named(records: &[WalRecord]) -> Bitmap {
 /// **A drop does not raise it.** The name is tombstoned and the ids are not reclaimed (decision
 /// 0072 is settled and unbuilt), so a dropped layer's run must stay below the mark: raising it
 /// would reissue exactly the ids whose bookmarks and suppressions are still live.
-pub fn low_water_from(records: &[WalRecord]) -> u64 {
+pub fn low_water_from<'r>(records: impl IntoIterator<Item = &'r WalRecord>) -> u64 {
     let mut lw = ROWLESS_CEILING;
     for rec in records {
         match rec {

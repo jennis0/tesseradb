@@ -13,7 +13,6 @@
 //! the number itself.
 
 use rustc_hash::FxHashMap;
-use tessera_lifecycle::WalRecord;
 use tessera_store::StoreError;
 use tessera_types::{EntityId, TesseraId};
 
@@ -27,26 +26,19 @@ pub(crate) struct EditedLive {
 }
 
 impl EditedLive {
-    /// The pairs of the edits `records` carry whose new entity `buffer` still holds a row of, or
-    /// `overlay` deletes before a flush wrote its pair: what a restart starts from.
+    /// The `(number, new entity)` pairs of the replayed edits whose new entity `buffer` still
+    /// holds a row of, or `overlay` deletes before a flush wrote its pair: what a restart starts
+    /// from.
     pub(crate) fn derive(
-        records: &[WalRecord],
+        edits: &[(EntityId, EntityId)],
         buffer: &tessera_lifecycle::IngestBuffer,
         overlay: &tessera_lifecycle::Overlay,
     ) -> EditedLive {
         let mut live = EditedLive::default();
-        let pairs: Vec<(u32, u32)> = records
+        let pairs: Vec<(u32, u32)> = edits
             .iter()
-            .filter_map(|record| match record {
-                WalRecord::IngestBatch { edits, .. } => Some(edits),
-                _ => None,
-            })
-            .flatten()
-            .filter_map(|edit| {
-                let entity = edit.rows.first()?.entity_id;
-                (buffer.contains(entity) || overlay.is_deleted(entity))
-                    .then(|| (narrow(edit.number), narrow(entity)))
-            })
+            .filter(|(_, entity)| buffer.contains(*entity) || overlay.is_deleted(*entity))
+            .map(|&(number, entity)| (narrow(number), narrow(entity)))
             .collect();
         live.add(&pairs);
         live

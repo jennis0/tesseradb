@@ -24,7 +24,7 @@ fn a_wal_row_round_trips_its_view() {
         scoped: Vec::new(),
     };
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),
@@ -35,7 +35,8 @@ fn a_wal_row_round_trips_its_view() {
         .unwrap();
         wal.fsync().unwrap();
     }
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     match &records[0] {
         WalRecord::IngestBatch { rows, .. } => assert_eq!(rows[0], row),
         other => panic!("expected an IngestBatch, got {other:?}"),
@@ -104,7 +105,7 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
         scoped: Vec::new(),
     };
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),
@@ -115,7 +116,8 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
         .unwrap();
         wal.fsync().unwrap();
     }
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     match &records[0] {
         WalRecord::IngestBatch { rows, .. } => {
             assert_eq!(rows[0].x, x);
@@ -209,7 +211,7 @@ fn view_create_and_drop_round_trip() {
         incarnation: 2,
     };
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::ViewCreate {
             view: created.clone(),
         })
@@ -221,7 +223,8 @@ fn view_create_and_drop_round_trip() {
         .unwrap();
         wal.fsync().unwrap();
     }
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(records.len(), 2);
     match (&records[0], &records[1]) {
         (WalRecord::ViewCreate { view }, WalRecord::ViewDrop { view: stone, deleted }) => {
@@ -265,7 +268,7 @@ fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
         scoped: vec![WalScalar::U8(1)],
     };
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::IngestBatch {
             edits: Vec::new(),
             receipt: Vec::new(),

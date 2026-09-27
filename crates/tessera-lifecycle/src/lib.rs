@@ -47,7 +47,7 @@ pub use membership::{
     ArtifactRecord, ArtifactStore, FillOutcome, FixedParts, IncomingArtifact, IncomingGrowth,
     Members,
 };
-pub use overlay::{owner_id_only, replay, Overlay};
+pub use overlay::{owner_id_only, Overlay, Replay};
 pub use registry::{
     no_pending, EdgeCheck, GroupViews, LayerRegistry, PreparedGrow, PreparedPut, RegistryError,
     ResolvedLayers,

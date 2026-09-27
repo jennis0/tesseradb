@@ -46,7 +46,7 @@ use tessera_lifecycle::buffer::DescriptorResolver;
 use tessera_lifecycle::command::{ExecError, SubmitError};
 use tessera_lifecycle::faults::WalMeter;
 use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
-use tessera_lifecycle::overlay::replay;
+use tessera_lifecycle::overlay::Replay;
 use tessera_lifecycle::registry::LayerRegistry;
 use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalScalar};
 use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
