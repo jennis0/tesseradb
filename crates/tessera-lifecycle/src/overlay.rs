@@ -443,9 +443,9 @@ pub fn replay<'a>(
 /// **Composition-neutral, which is what makes the removal safe rather than merely cheap.**
 /// `compose::verdict` answers `Some(false)` from `overlay.is_deleted` before it ever consults the
 /// buffer, and a deletion retires only at the fold that executes it (Rule F), so nothing downstream
-/// can observe the difference. Under decision 0047 the entity is *forgotten* — its id stays burned
-/// (I9), a re-ingest of its external id binds a new one — so the end state after reclamation, no
-/// row and no buffer entry, is the ruled one and not a loss.
+/// can observe the difference. Under decision 0047 the entity is *forgotten*, and a re-ingest of its
+/// external id binds a new one, so the end state after reclamation, no row and no buffer entry, is
+/// the ruled one and not a loss.
 ///
 /// Applied as an end-of-pass rule rather than at each `Delete`, because the manifests' deny seed
 /// is applied *before* the walk: a tombstone the seed carries would otherwise miss the

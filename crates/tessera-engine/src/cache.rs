@@ -250,8 +250,8 @@ impl RowProjectionCache {
     /// `RowSpace::project` would return over the whole space. Four premises hold it up, each a
     /// thing this design must maintain rather than happen to have (write-path §4.6):
     ///
-    /// 1. The flushed entity range is contiguous, disjoint from everything below, and entirely at
-    ///    or above the pre-flush watermark — I9's append-only allocation.
+    /// 1. No entity a flush gives a row holds one in the row space the projection covers: a new id
+    ///    lies above it, and an id a fold freed lost its rows at that fold.
     /// 2. A flush never rewrites the base `permutation.bin` or any earlier extent.
     /// 3. The session's `satisfied` set is fixed at authorise and never re-resolved, so the
     ///    fragment the projection is taken over is the same one throughout.

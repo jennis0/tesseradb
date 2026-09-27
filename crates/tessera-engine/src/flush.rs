@@ -2184,7 +2184,7 @@ mod tests {
         assert_eq!(plan.items[0].0, EntityId::new(7));
     }
 
-    /// A deletion's ID stays burned (I9), no row is created, and the deny entry stands.
+    /// A deleted entity acquires no row, and the deny entry stands.
     #[test]
     fn a_deleted_entity_acquires_no_row() {
         let generation = generation_with(

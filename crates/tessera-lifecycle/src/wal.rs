@@ -358,10 +358,7 @@ pub enum WalRecord {
     /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
     /// meant something must not come to mean something else.
     ///
-    /// The ids do not come back either — the allocator is monotone with no free list
-    /// ([decision 0072](../../../docs/decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)
-    /// is settled and unbuilt). Reclaiming them is that decision's work, and its condition is that
-    /// the membership-reconciliation clause ships with it.
+    /// The ids do not come back either: the allocator frees no row-less id.
     LayerDrop {
         name: String,
         /// The registry version this drop moved the counter to, on `LayerCreate::version`'s rule.
