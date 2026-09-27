@@ -122,12 +122,18 @@ identifier, about 42 bytes a row and not required by GBIF to be unique, and stor
 would add on the order of 140 GB to the bundle.
 
 **Held rows for an ingest.** `--holdout N` writes N rows that have no coordinate to
-`holdout.parquet`, each given the coordinate of a placed row of the same part, so its `gbifid` is
-one the build never saw. `--duplicates N` copies N placed rows to `duplicates.parquet`, each
-setting a `gbifid` an item holds. `--reuse-taxonomy` keeps the member file and the kingdom
-vocabulary already in the output directory, after checking that the member file has one row for
-each placed row and the vocabulary names every kingdom seen, and saves reading the three rank
-columns and writing 23 GB.
+`holdout.parquet`, so each `gbifid` is one the build never saw. A held-out row keeps its own
+country and attributes and takes its coordinate from a placed row of the same part. It joins no
+taxonomy artifact: `holdout.parquet` carries no rank columns. `--duplicates N` copies N placed rows
+to `duplicates.parquet`, each setting a `gbifid` an item holds.
+
+**Reusing the taxonomy.** `--reuse-taxonomy` keeps the member file and the kingdom vocabulary
+already in the output directory, and saves reading the three rank columns and writing 23 GB. The
+member file names each row by its position in the part sequence, so the run refuses before it
+starts unless the manifest beside the files names the same dataset, the same number of parts and
+the same selection. It refuses at the end unless it placed as many rows as that manifest and the
+member file hold, and the kept vocabulary names every kingdom it saw. The new manifest carries the
+old one's `taxonomy` block.
 
 ⊘ **`locality` is not taken, and this is the hook for it.** It is 48.45 GiB compressed, the
 corpus's largest column at 14.2 B/row, and a text index over it is deferred past the first build.

@@ -20,6 +20,7 @@ import struct
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK = 1, 0
 PERF_SAMPLE_IP, PERF_SAMPLE_TID = 1, 2
@@ -62,7 +63,7 @@ def drain(ring: mmap.mmap, counts: collections.Counter) -> None:
 
 def symbols(executable: str) -> tuple[list[int], list[str]]:
     out = subprocess.run(["nm", "-C", "--defined-only", "-n", executable], capture_output=True,
-                         text=True).stdout
+                         text=True, check=True).stdout
     addrs, names = [], []
     for line in out.splitlines():
         parts = line.split(" ", 2)
@@ -75,7 +76,7 @@ def symbols(executable: str) -> tuple[list[int], list[str]]:
 def main() -> None:
     pid, seconds, executable = int(sys.argv[1]), float(sys.argv[2]), sys.argv[3]
     maps = []
-    for line in open(f"/proc/{pid}/maps"):
+    for line in Path(f"/proc/{pid}/maps").read_text().splitlines():
         fields = line.split()
         lo, hi = (int(x, 16) for x in fields[0].split("-"))
         maps.append((lo, hi, int(fields[2], 16), fields[5] if len(fields) > 5 else "[anon]"))

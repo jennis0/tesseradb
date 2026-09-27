@@ -307,6 +307,11 @@
   "exit": "killed by SIGTERM",
   "read_bytes": 424173850624,
   "rchar": 311250696364,
+  "rchar_wchar_earlier": {
+   "rchar": 311250696364,
+   "wchar": 51143027479,
+   "note": "read from /proc/<pid>/io earlier in the run; rchar equals the figure at the stop, so the reads had already ended"
+  },
   "write_bytes": 51173584896,
   "peak_anon_gib": 0.52,
   "vmhwm_gib": 29.94,

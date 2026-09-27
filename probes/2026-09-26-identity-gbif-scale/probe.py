@@ -1,14 +1,17 @@
 """The identity measurements on a served GBIF bundle: `in` and `eq` on the unique `gbifid`, an
 ingest of held-out and duplicate rows, a runtime `unique` declaration, a flush and a fold.
 
-    python3 probe.py --corpus data/ladder/gbif --results results.json --phases open,lookups,...
+    python3 probe.py --corpus data/ladder/gbif --scratch <dir> --port0 <port>
+        --results results.json --phases open,lookups,...
 
-Each phase appends its figures to `--results` as soon as it ends. The server runs under
-`MemoryMax=--cap`, `MemorySwapMax=2G`, and is sampled once a second: `VmRSS`, `RssAnon` and the
-scope's `memory.current`. A cold figure is taken on a freshly started server after the unique
-index's files were dropped from the page cache with `posix_fadvise(POSIX_FADV_DONTNEED)`; the
-residency before and after is `fincore`'s. Under WSL2 the host may still hold the bytes, so a cold
-read is a read from the host's cache, not necessarily from the disk.
+Each phase appends its figures to `--results` as soon as it ends. The server is a
+`test_corpora/common/deployment.py` deployment over the rung's bundle, on its own ports and with
+its own cache and WAL under `--scratch`, in a scope capped at `--cap-bytes`. It is sampled once a
+second: `VmRSS`, `RssAnon` and the scope's `memory.current`. A cold figure is taken on a freshly
+started server after the unique index's files were dropped from the page cache with
+`posix_fadvise(POSIX_FADV_DONTNEED)`; the residency before and after is `fincore`'s. Under WSL2
+the host may still hold the bytes, so a cold read is a read from the host's cache, not
+necessarily from the disk.
 """
 
 from __future__ import annotations
@@ -20,7 +23,6 @@ import json
 import os
 import random
 import shutil
-import signal
 import statistics
 import struct
 import subprocess
@@ -33,11 +35,15 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
+from pyarrow import ipc
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from test_corpora.common.deployment import Deployment  # noqa: E402
 
 HEAD, RECORDS, PAGE_END, TRAILER = 6, 7, 8, 4
-BINARY = Path(__file__).resolve().parents[2] / "target" / "release" / "tessera"
+BINARY = REPO / "target" / "release" / "tessera"
 
 
 # ----------------------------------------------------------------------------------- the server
@@ -56,64 +62,50 @@ def status_kib(pid: int) -> dict:
 
 
 class Server:
-    """`tessera serve` in `corpus`, capped, with a sampler thread."""
+    """A capped deployment over `corpus`'s bundle, with a sampler thread."""
 
-    def __init__(self, corpus: Path, cap: str):
-        self.corpus, self.cap = corpus, cap
-        env = dict(os.environ)
-        for line in (corpus / ".env").read_text().splitlines():
-            if "=" in line:
-                key, value = line.split("=", 1)
-                env[key] = value
-        self.env = env
-        self.session_cred = env["TESSERA_GBIF_SESSION_CRED"]
-        self.operator_cred = env["TESSERA_GBIF_OPERATOR_CRED"]
-        text = (corpus / "tessera.toml").read_text()
-        self.viewer = "http://" + text.split('viewer  = "')[1].split('"')[0]
-        self.session = "http://" + text.split('session = "')[1].split('"')[0]
-        self.control = "http://" + text.split('control = "')[1].split('"')[0]
+    def __init__(self, corpus: Path, cap_bytes: int, scratch: Path, port0: int):
+        self.corpus = corpus
+        self.deployment = Deployment(corpus, corpus / "bundle", scratch,
+                                     (port0, port0 + 1, port0 + 2), BINARY, cap_bytes=cap_bytes)
+        self.viewer = self.deployment.viewer
+        self.session = self.deployment.session
+        self.control = self.deployment.control
+        self.session_cred = self.deployment.credential("session")
+        self.operator_cred = self.deployment.credential("operator")
         self.samples: list[list] = []
-        self.child = None
+        self.stop_sampling = threading.Event()
+
+    @property
+    def pid(self) -> int | None:
+        d = self.deployment
+        return d.pid or (d.proc.pid if d.proc is not None else None)
 
     def start(self) -> dict:
-        cmd = ["systemd-run", "--user", "--scope", "--collect", "-p", f"MemoryMax={self.cap}",
-               "-p", "MemorySwapMax=2G", "--", str(BINARY), "serve"]
-        log = open(self.corpus / "serve.log", "ab")
         began = time.time()
-        self.child = subprocess.Popen(cmd, cwd=self.corpus, env=self.env, stdout=subprocess.PIPE,
-                                      stderr=log, start_new_session=True)
-        print(f"serve pid {self.child.pid}", flush=True)
         self.began = began
         self.samples = []
         self.stop_sampling = threading.Event()
-        threading.Thread(target=self._sample, args=(self.child, self.stop_sampling),
-                         daemon=True).start()
-        line = self.child.stdout.readline()
-        announced = time.time() - began
-        if not line:
-            raise SystemExit(f"tessera serve exited {self.child.wait()}; see {self.corpus}/serve.log")
-        while True:
-            try:
-                with urllib.request.urlopen(self.viewer + "/readyz", timeout=5) as r:
-                    if r.status == 200:
-                        break
-            except (urllib.error.URLError, ConnectionError):
-                pass
-            time.sleep(0.2)
-        ready = time.time() - began
-        return {"announced_s": round(announced, 1), "ready_s": round(ready, 1),
-                "memory_at_ready": self.memory()}
+        threading.Thread(target=self._sample, args=(self.stop_sampling,), daemon=True).start()
+        self.deployment.start(log=self.deployment.scratch / "serve.log")
+        print(f"serve pid {self.deployment.pid}", flush=True)
+        return {"ready_s": round(time.time() - began, 1), "memory_at_ready": self.memory()}
 
-    def _sample(self, child: subprocess.Popen, stop: threading.Event) -> None:
+    def _sample(self, stop: threading.Event) -> None:
+        """Samples from the moment the process exists, so an open that is killed is seen."""
         group = None
-        while not stop.is_set() and child.poll() is None:
+        while not stop.is_set():
+            pid = self.pid
+            if pid is None:
+                time.sleep(0.1)
+                continue
             if group is None or not group.name.endswith(".scope"):
                 try:
-                    rel = Path(f"/proc/{child.pid}/cgroup").read_text().strip().split("::")[1]
+                    rel = Path(f"/proc/{pid}/cgroup").read_text().strip().split("::")[1]
                     group = Path("/sys/fs/cgroup") / rel.lstrip("/")
                 except (FileNotFoundError, IndexError):
                     group = None
-            kib = status_kib(child.pid)
+            kib = status_kib(pid)
             current = None
             if group is not None:
                 try:
@@ -125,23 +117,21 @@ class Server:
             time.sleep(1.0)
 
     def memory(self) -> dict:
-        kib = status_kib(self.child.pid)
+        kib = status_kib(self.pid)
         return {"rss_gib": round(kib.get("VmRSS", 0) / 2**20, 2),
                 "anon_gib": round(kib.get("RssAnon", 0) / 2**20, 2),
                 "hwm_gib": round(kib.get("VmHWM", 0) / 2**20, 2)}
 
     def peaks_since(self, t0: float) -> dict:
         window = [s for s in self.samples if s[0] >= t0 - self.began - 1]
-        return {
-            "peak_rss_gib": round(max((s[1] or 0) for s in window) / 2**20, 2) if window else None,
-            "peak_anon_gib": round(max((s[2] or 0) for s in window) / 2**20, 2) if window else None,
-            "peak_scope_gib": round(max((s[3] or 0) for s in window) / 2**20, 2) if window else None,
-        }
+
+        def peak(i: int) -> float | None:
+            return round(max((s[i] or 0) for s in window) / 2**20, 2) if window else None
+
+        return {"peak_rss_gib": peak(1), "peak_anon_gib": peak(2), "peak_scope_gib": peak(3)}
 
     def stop(self) -> None:
-        if self.child and self.child.poll() is None:
-            os.kill(self.child.pid, signal.SIGTERM)
-            self.child.wait(timeout=120)
+        self.deployment.stop()
         self.stop_sampling.set()
 
     # --------------------------------------------------------------------------- requests
@@ -223,7 +213,7 @@ def over_limit(url: str, body: bytes, headers: dict) -> str:
     try:
         cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--data-binary", f"@{path}",
                *[x for k, v in headers.items() for x in ("-H", f"{k}: {v}")], url]
-        return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+        return subprocess.run(cmd, capture_output=True, text=True, check=False).stdout.strip()
     finally:
         path.unlink()
 
@@ -262,7 +252,7 @@ def drop_cache(paths: list[Path]) -> dict:
         total = 0
         for p in paths:
             out = subprocess.run(["fincore", "-b", "-n", "-o", "RES", str(p)],
-                                 capture_output=True, text=True).stdout.strip()
+                                 capture_output=True, text=True, check=True).stdout.strip()
             total += int(out or 0)
         return total
     before = resident()
@@ -309,18 +299,23 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", type=Path, required=True)
     ap.add_argument("--results", type=Path, required=True)
-    ap.add_argument("--cap", default="24G")
+    ap.add_argument("--cap-bytes", type=int, default=24 << 30, help="the server's MemoryMax")
+    ap.add_argument("--scratch", type=Path, required=True,
+                    help="where the deployment file, cache and WAL go; kept across restarts")
+    ap.add_argument("--port0", type=int, required=True,
+                    help="the viewer port; the session and control planes take the next two")
     ap.add_argument("--phases", default="open,lookups,ingest,flush,declare,fold,reopen")
     ap.add_argument("--sizes", default="1000,100000,1000000")
     ap.add_argument("--warm", type=int, default=3)
     ap.add_argument("--batch-rows", type=int, default=0,
                     help="rows an ingest batch; 0 takes the server's own row cap")
     ap.add_argument("--declare", default="",
-                    help="a field to declare unique at the running service, in the declare phase")
+                    help="a field to declare unique at the running service, in the declare phase, "
+                         "as name,title,type")
     args = ap.parse_args()
     corpus = args.corpus.resolve()
     phases = args.phases.split(",")
-    server = Server(corpus, args.cap)
+    server = Server(corpus, args.cap_bytes, args.scratch.resolve(), args.port0)
     all_terms = [r["term"] for r in json.loads((corpus / "country-ranks.json").read_text())]
     small, small_rows, total_rows = one_percent_term(corpus)
 
@@ -354,8 +349,9 @@ def main() -> int:
 
             for size in sizes:
                 values = gbifids[:size]
+                seen_by_one = zip(values, countries[:size], strict=True)
                 expected = {"all": sorted(values),
-                            "one": sorted(v for v, c in zip(values, countries[:size]) if c == small)}
+                            "one": sorted(v for v, c in seen_by_one if c == small)}
                 for name, terms in principals.items():
                     key = f"in_{size}_{name}"
                     counted = {"view": "geo", "fields": ["gbifid"], "count": True,
@@ -387,10 +383,11 @@ def main() -> int:
 
             # One value by `eq`: for the whole-corpus principal, and for the small principal a
             # value held by an item it cannot see, which must answer as a value nobody holds.
-            hidden = next(v for v, c in zip(gbifids, countries) if c != small)
+            hidden = next(v for v, c in zip(gbifids, countries, strict=True) if c != small)
             for name, terms, value in (("all", all_terms, gbifids[0]),
                                        ("one_hidden", [small], hidden)):
-                payload = {"view": "geo", "filters": {"gbifid": {"eq": value}}, "fields": ["gbifid"]}
+                payload = {"view": "geo", "filters": {"gbifid": {"eq": value}},
+                           "fields": ["gbifid"]}
                 dropped = fresh("gbifid")["dropped"]
                 token = server.authorise(terms)
                 runs = [server.items(token, payload) for _ in range(1 + args.warm)]
@@ -423,7 +420,8 @@ def main() -> int:
                     accepted += min(batch_rows, holdout.num_rows - start)
                 else:
                     refused += min(batch_rows, holdout.num_rows - start)
-                    out.setdefault("holdout_refusals", []).append(data[:400].decode(errors="replace"))
+                    detail = data[:400].decode(errors="replace")
+                    out.setdefault("holdout_refusals", []).append(detail)
             wall = time.time() - t0
             out.update(holdout_accepted=accepted, holdout_refused=refused,
                        holdout_answers=answers, holdout_wall_s=round(wall, 1),
@@ -481,20 +479,20 @@ def main() -> int:
                 record(args.results, "flush", flushed)
 
         if "declare" in phases and args.declare:
+            name, title, kind = args.declare.split(",")
             before = shutil.disk_usage(corpus).free
             t0 = time.time()
             code, _, data, took = server.control_call(
                 "/control/attributes",
-                json.dumps({"name": args.declare, "title": "Occurrence ID", "type": "keyword",
-                            "unique": True}).encode(),
+                json.dumps({"name": name, "title": title, "type": kind, "unique": True}).encode(),
                 method="PUT", headers={"content-type": "application/json"})
             record(args.results, "declare", {
-                "field": args.declare, "status": code,
+                "field": name, "status": code,
                 "answer": data[:3000].decode(errors="replace"), "wall_s": round(took, 1),
                 "memory": server.peaks_since(t0), "free_before_gib": before >> 30,
                 "free_after_gib": shutil.disk_usage(corpus).free >> 30,
                 "index_files": {str(p.relative_to(corpus)): p.stat().st_size
-                                for p in unique_files(corpus, args.declare)}})
+                                for p in unique_files(corpus, name)}})
 
         if "fold" in phases:
             before = server.status().get("compaction")

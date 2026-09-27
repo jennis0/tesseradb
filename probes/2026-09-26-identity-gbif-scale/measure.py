@@ -6,15 +6,15 @@ The command runs in a transient systemd scope with `MemoryMax` and `MemorySwapMa
 sample reads the process's `VmRSS` and its scope's `memory.current`, so a figure includes the
 page cache the scope charged as well as the process's own pages, and the free space on `--disk`
 (which other processes on the machine also move). A sample is `[seconds, VmRSS KiB, memory.current
-KiB, free MiB, RssAnon KiB]` (builds measured before RssAnon was added carry four).
-With `--stages` naming a `--stage-timings-json` file, each stage's peak is the largest sample
-taken between its start and end.
+KiB, free MiB, RssAnon KiB]`. With `--stages` naming a `--stage-timings-json` file, each stage's
+peak is the largest sample taken between its start and end.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -67,24 +67,25 @@ def main() -> int:
 
     scoped = ["systemd-run", "--user", "--scope", "--collect", "-p", f"MemoryMax={args.cap}",
               "-p", "MemorySwapMax=2G", "--", *cmd]
-    log = open(args.log, "wb") if args.log else None
     free_before = shutil.disk_usage(args.disk).free >> 20
     began = time.time()
-    child = subprocess.Popen(scoped, stdout=log or None, stderr=subprocess.STDOUT if log else None)
     samples = []
     group = None
     peak = None
-    while child.poll() is None:
-        if group is None or not group.name.endswith(".scope"):
-            group = cgroup_of(child.pid)
-        rss = read_kib(child.pid, "VmRSS")
-        anon = read_kib(child.pid, "RssAnon")
-        current = read_int(group / "memory.current") if group else None
-        peak = read_int(group / "memory.peak") if group else peak
-        free = shutil.disk_usage(args.disk).free
-        samples.append([round(time.time() - began, 2), rss, current // 1024 if current else None,
-                        free >> 20, anon])
-        time.sleep(1.0)
+    with open(args.log or os.devnull, "wb") as log:
+        child = subprocess.Popen(scoped, stdout=log if args.log else None,
+                                 stderr=subprocess.STDOUT if args.log else None)
+        while child.poll() is None:
+            if group is None or not group.name.endswith(".scope"):
+                group = cgroup_of(child.pid)
+            rss = read_kib(child.pid, "VmRSS")
+            anon = read_kib(child.pid, "RssAnon")
+            current = read_int(group / "memory.current") if group else None
+            peak = read_int(group / "memory.peak") if group else peak
+            free = shutil.disk_usage(args.disk).free
+            samples.append([round(time.time() - began, 2), rss,
+                            current // 1024 if current else None, free >> 20, anon])
+            time.sleep(1.0)
     wall = time.time() - began
     code = child.returncode
 
