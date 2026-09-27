@@ -100,7 +100,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `segment_floor_bytes` | integer | `16777216` (16 MiB) | Segments at or below this size are treated as one size tier when choosing which to merge. |
 | `tier_width` | integer | `4` | How many segments of one size tier are merged together. `tessera serve` refuses to start with a value below 2. |
 | `max_merged_segment_bytes` | integer | not set, and the server merges up to 268435456 bytes (256 MiB) | The largest segment a merge may produce, in bytes. |
-| `coalesce_width` | integer | `8` | How many small files of one size tier, which flushes write for attribute values, records, text indexes and access terms, are combined into one. External-id files are combined four at a time whatever this says. `tessera serve` refuses to start with a value below 2. |
+| `coalesce_width` | integer | `8` | How many small files of one size tier, which flushes write for attribute values, records, text indexes and access terms, are combined into one. Unique index runs are combined four at a time whatever this says. `tessera serve` refuses to start with a value below 2. |
 
 ## `[ingest]`
 

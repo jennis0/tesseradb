@@ -62,14 +62,14 @@ tessera verify [OPTIONS] <BUNDLE>
 
 Verify a bundle's files and its identity column.
 
-It opens the bundle as the server does. That checks every manifest digest, the size and SHA-256 of every file except the external-id files and their locator, and that each segment's permutation maps one-to-one onto its rows. `--deep` hashes the external-id files too. It then confirms that the row space holds exactly the rows the segments claim, and computes each row's `tessera_id` again from the identity key, failing on the first row that differs.
+It opens the bundle as the server does. That checks every manifest digest, the size and SHA-256 of every file except the unique indexes' runs, and that each segment's permutation maps one-to-one onto its rows. `--deep` hashes those runs too. It then confirms that the row space holds exactly the rows the segments claim, and computes each row's `tessera_id` again from the identity key, failing on the first row that differs.
 
 It also prints to stderr each indexed keyword column's count of distinct values against its rows, with a warning for a column whose values are unique per row. A warning does not fail the verify.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `BUNDLE` |  |  | The bundle directory, the one holding `CURRENT`. |
-| `--deep` |  |  | Also check the bundle's internal structures. The external-id files and their locator are hashed against the manifest. The term lists must be sorted, free of duplicates and in range; the external-id index and its locator must agree in both directions; dictionary records must not repeat; record blobs and Morton cells must agree with their indexes; each group-scoped render column must be present in every segment; each unique column's index must be hashed against the manifest, name at most one live item for a value and agree with the column's values in both directions; and `pairs.parquet`, when present, must match the term lists it was written with. Run it on a bundle no running server is writing to. |
+| `--deep` |  |  | Also check the bundle's internal structures. The term lists must be sorted, free of duplicates and in range; dictionary records must not repeat; record blobs and Morton cells must agree with their indexes; each group-scoped render column must be present in every segment; each unique column's index must be hashed against the manifest, name at most one live item for a value and agree with the column's values in both directions; and `pairs.parquet`, when present, must match the term lists it was written with. Run it on a bundle no running server is writing to. |
 
 ## `tessera tokenise`
 
@@ -122,13 +122,13 @@ The columns are `tessera_id`, the fields in the order named, the system fields i
 
 A read cut short leaves the whole pages read before it in the output, exits 1 and prints the cursor to read the rest with. The first response's head, with the counts under `--count`, is printed on stderr at the end.
 
-For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields title,year --system-fields external_id --out papers.parquet`.
+For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields title,year --system-fields labels --out papers.parquet`.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--view` | `VIEW` |  | The view to read, as `/v1/meta` names it. An item with no position in it is not returned. |
 | `--fields` | `NAMES` |  | The declared fields to return, comma-separated, in the order wanted. `--fields ''` returns `tessera_id` alone. A field declared for a view group, read under a view outside that group, is named `<field>@<key>`. An undeclared or repeated field is refused. |
-| `--system-fields` | `NAMES` |  | Any of `position`, `external_id` and `labels`, comma-separated, in the order wanted: the columns `tessera:x` and `tessera:y`, `tessera:external_id` and `tessera:labels`. Any other name is refused. |
+| `--system-fields` | `NAMES` |  | Any of `position` and `labels`, comma-separated, in the order wanted: the columns `tessera:x` and `tessera:y`, and `tessera:labels`. Any other name is refused. |
 | `--filters` | `JSON` |  | A filter expression as JSON, such as `{"year": {"range": {"gte": 2020}}}`. Only the items that match are returned. |
 | `--keep-unmatched` |  |  | Return every item, with a `tessera:matched` column saying whether it matches `--filters`. |
 | `--count` |  |  | Count the items the token may see in the view and those that match. The counts are printed on stderr at the end. Refused with `--cursor`. |
