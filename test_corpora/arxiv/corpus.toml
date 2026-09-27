@@ -27,12 +27,12 @@ hdbscan_members       = "clusters-hdbscan-members.parquet"
 
 [defaults]
 source          = "points"
-entity_id_field = "entity_id"
+join_field      = "id"
 
 # **Required, this declaration carrying more than one view** (decision 0112): within a signature
-# group, entity ids are ordered by the item's Morton code in the *anchor* view, then by external
-# id. Written explicitly so that reordering the view blocks below cannot silently re-key a rebuild
-# — the ids are permanent (I9). `knn` is the anchor because it is the layout the clusterings are
+# group, entity ids are ordered by the item's Morton code in the *anchor* view, then by join
+# value. Written explicitly so that reordering the view blocks below cannot silently re-key a
+# rebuild — the ids are permanent (I9). `knn` is the anchor because it is the layout the clusterings are
 # computed over; what matters is that it is named rather than inferred.
 allocation_view = "knn"
 
@@ -92,6 +92,13 @@ source     = "primary_category"
 # The attribute columns are **entity-space** and ride the anchor view's file alone: a paper's title
 # is not a property of a projection, and the second view's file carries identity, position and the
 # access column and nothing else.
+
+# The join field: the row number `prepare.py` gives each paper (`entity` in the member files).
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 [[attribute]]
 name       = "archive"

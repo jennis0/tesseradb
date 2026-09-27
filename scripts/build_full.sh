@@ -36,8 +36,8 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 # The declaration this build compiles: one view over the scaled geometry, its points' labels in the
-# exploded relation beside it, and the identity extent the Morton branch requires. No attributes —
-# the geometry file carries none, so nothing declares a `[[attribute]]`. Written into
+# exploded relation beside it, and the identity extent the Morton branch requires. One attribute,
+# the join field the relation names each point by; the geometry file carries no other. Written into
 # `data/scaled/` rather than checked in because the paths `[sources]` writes sit there, and a path
 # there is relative to the document declaring it (configuration.md §3).
 CONFIG="$ROOT/data/scaled/build-full.config.toml"
@@ -45,6 +45,17 @@ cat > "$CONFIG" <<'TOML'
 [sources]
 geometry = "geometry.parquet"
 labels   = "pairs/categories-subclass.pairs.parquet"
+
+[defaults]
+source     = "geometry"
+join_field = "id"
+
+# The join field: the dense `entity_id` the geometry and every label relation carry.
+[[attribute]]
+name   = "id"
+type   = "u32"
+unique = true
+field  = "entity_id"
 
 [[view]]
 name             = "s0"
@@ -78,9 +89,6 @@ control = "127.0.0.1:45721"
 TOML
 
 echo "Building the 10^9 bundle at $OUT (no --limit)..."
-# --mint-external-ids keeps this bundle byte-comparable with the pre-flag 10^9 builds and the
-# bench fixtures (memo 2026-07-30 §3.2 D1 — the default build is spec-conformant and mints none).
 /usr/bin/time -v "$BIN" build \
   --deployment "$DEPLOYMENT" \
-  --out "$OUT" \
-  --mint-external-ids
+  --out "$OUT"

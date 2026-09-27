@@ -99,7 +99,8 @@ declare -A CAP=( [hiterms]=10000000 [hiterms-ov0.5]=10000000 [hiterms-ov0.9]=100
 mkdir -p "$FIXTURES" "$LOG_DIR"
 
 # One declaration for every fixture: one view over the scaled geometry, its points' labels in the
-# exploded relation each label set supplies, and the identity extent the Morton branch requires.
+# exploded relation each label set supplies, the identity extent the Morton branch requires, and
+# the join field the relation and `--limit` both read.
 # The label set differs per build, so that source is overridden on the command line by its own
 # name (`--file labels=…`, configuration.md §8); the geometry is the same file every time and its
 # path is written here.
@@ -108,6 +109,17 @@ cat > "$CONFIG" <<'TOML'
 [sources]
 geometry = "geometry.parquet"
 labels   = "pairs/categories-subclass.pairs.parquet"
+
+[defaults]
+source     = "geometry"
+join_field = "id"
+
+# The join field: the dense `entity_id` the geometry and every label relation carry.
+[[attribute]]
+name   = "id"
+type   = "u32"
+unique = true
+field  = "entity_id"
 
 [[view]]
 name             = "s0"
@@ -192,13 +204,10 @@ for scale in "${SCALES[@]}"; do
     echo "BUILD scale=$scale set=$set_name -> $out"
     rm -rf "$out"; mkdir -p "$out"
     started=$(date +%s)
-    # --mint-external-ids: fixtures keep carrying the external-ID family's cost realistically
-    # (memo 2026-07-30 §3.2 D1 — the default build is now spec-conformant and writes none).
     if "$TESSERA" build \
         --deployment "$DEPLOYMENT" \
         --file "labels=$pairs" --out "$out" \
-        --limit "$scale" \
-        --mint-external-ids >"$log" 2>&1; then
+        --limit "$scale" >"$log" 2>&1; then
       elapsed=$(( $(date +%s) - started ))
       bytes=$(du -sb "$out" | cut -f1)
       echo "  ok  ${elapsed}s  $(numfmt --to=iec "$bytes")"

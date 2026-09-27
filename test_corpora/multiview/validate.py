@@ -47,7 +47,7 @@ def main() -> None:
 
     checks = 0
 
-    # --- per-(entity, view) row uniqueness (views.md §7: "a row is unique per (external_id, view)") ---
+    # --- per-(entity, view) row uniqueness: one join value names one row of a view ---
     def assert_unique(table, label):
         nonlocal checks
         ids = table["entity_id"].to_pylist()
