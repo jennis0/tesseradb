@@ -371,7 +371,8 @@ With `count` on its first request, a read's head carries two exact counts taken 
 the response. On items they are the visible items in the view, which is the count the viewport
 serves, and those the filter matches. On artifacts they are the artifacts served after `level`,
 `parent` and `q`, and those with a matching member. A count costs one evaluation of the filter over
-the whole view.
+the whole view. A read driven from its matches ([filters across pages](#filters-across-pages))
+takes the count from its first stretch instead, at no cost beyond what its first page spends.
 
 ### Filters across pages
 
@@ -389,12 +390,32 @@ projection of the session's visible set changes the set. After any of these duri
 the next page evaluates its stretch again. Every page tests every row against the visible set
 composed for it, and nothing about the filter is kept between requests.
 
+A filter can bound its matches through an index: a unique field's `eq` or `in` names the items
+holding those values, and a `member_of` names the artifact's members. An `all_of` is bounded by the
+rows every bounded clause in it admits, and an `any_of` by the union of its clauses where every
+one is bounded. The bound is taken inside the viewer's visible set: each holder of a unique value
+is tested against it before any is counted, and a `member_of` answers with the members the viewer
+may see. Where the bound holds no more rows than `max_page_bytes` allows a driven stretch, about
+one row for every 40 bytes and at least 4,096 rows, the response is driven from those rows. One
+stretch runs from the cursor to the end of the view and holds only them, in the read's order, and
+the filter is evaluated over them alone. Each row is taken, tested against the visible set and the
+filter, and paged as the walk over the view would take it, so the response has the same rows,
+pages, page ends, counts, region verdict and trailer. A response stopped by its time budget is the
+exception: the two routes take different time, so each may stop at a different row, and the read
+continues from wherever the trailer's cursor says. A read driven from its matches costs the index
+lookups, twice, and the rows the bound holds, once per response and again after a flush, merge,
+compaction or change to the visible set during the response, and none of the rest of the view.
+Otherwise the response walks the view in stretches as above. Which route answers depends on the
+filter, `max_page_bytes` and how many rows of the bound the viewer may see, and on nothing the
+viewer cannot see.
+
 What a filter costs across a whole read depends on its leaves:
 
 | Leaf | Cost across a read |
 |---|---|
 | number, date and keyword leaves; a category leaf on a derived vocabulary; any leaf on a rendered field | one pass over the rows of the stretches covered, in total |
 | text `match` and `phrase`; `eq` and `in` on a category that is not rendered and whose vocabulary is public | the leaf's index entries, read once per stretch evaluated |
+| `eq` and `in` on a unique field, and `member_of`, where they drive the read | the index lookups and the visible rows they name, once per response and again after a change the stretch was held under |
 | `member_of` | the artifact's visible members, once per page that evaluates a stretch |
 | `region` | the shape's cells, once per page that evaluates a stretch |
 

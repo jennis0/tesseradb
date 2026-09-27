@@ -213,6 +213,14 @@ impl Engine {
         self.switches.merge_enabled.store(enabled, Ordering::SeqCst);
     }
 
+    /// Turn off driving a bulk read from its filter's matches, so the same request is answered
+    /// by walking the view in stretches, for a test to compare the two.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_driven_reads_for_test(&self, enabled: bool) {
+        self.switches.driven_reads_enabled.store(enabled, Ordering::SeqCst);
+    }
+
     /// Turn the entity-space coalesce off, so a soak can show the axes it bounds keep growing
     /// with the pass stopped.
     #[cfg(feature = "fault-injection")]

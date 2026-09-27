@@ -20,6 +20,8 @@ pub(crate) struct ServeCounters {
     /// `member_of` leaves that read the level's row column rather than an artifact-major
     /// membership, whose walk is measurably slower.
     pub(crate) member_of_column_walks: AtomicU64,
+    /// Bulk-read stretches driven from their filter's matches rather than walked over the view.
+    pub(crate) driven_stretches: AtomicU64,
     /// Requests served from a one-generation-stale entry.
     pub(crate) stale_serves: AtomicU64,
     /// Entries the background refresh has produced.
@@ -156,6 +158,11 @@ impl Engine {
     /// membership.
     pub fn member_of_column_walks(&self) -> u64 {
         self.counters.member_of_column_walks.load(Ordering::Relaxed)
+    }
+
+    /// Bulk-read stretches driven from their filter's matches rather than walked over the view.
+    pub fn driven_stretches(&self) -> u64 {
+        self.counters.driven_stretches.load(Ordering::Relaxed)
     }
 
     /// Delegates to `WritePath::allocator_high_water`, which owns the allocator.
