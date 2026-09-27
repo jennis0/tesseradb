@@ -643,13 +643,10 @@ pub struct Degradation {
 ///
 /// # What a view may and may not do
 ///
-/// A view is never written. A growth over one keeps the view and holds what joined beside it on
-/// the heap ([`Members::join`]), so a join costs the heap what joined and not the artifact: a
-/// taxonomy whose every top rank gains a member would otherwise copy each level whole between
-/// folds. The fold's rewrite, read back through [`ArtifactStore::rehouse_members`], replaces the
-/// pair with a view of their union. Other writes take [`Members::to_mut`], which materialises the
-/// whole membership on the heap first, so retirement behaves identically on every form, which is
-/// what keeps write-path §5.4's two removal rules the only routes a bit leaves a membership.
+/// A view is never written. A growth over one keeps the view and holds only the members the view
+/// lacks, on the heap beside it ([`Members::join`]). The fold's rewrite, read back through
+/// [`ArtifactStore::rehouse_members`], replaces the pair with a view of their union. Any other
+/// write takes [`Members::to_mut`], which first materialises the whole membership on the heap.
 ///
 /// Reads go through this type's own methods and answer over the whole membership, the view and
 /// what joined it alike. There is no `Deref` to a bitmap, because a membership with joins is not
@@ -2967,8 +2964,8 @@ impl ArtifactStore {
     /// Zero on a node whose every membership has been published and read back. Above zero for a
     /// membership a publication has not reached yet, one a retirement has rewritten since, and one
     /// the mapping refused — which is the fault the seed and the fold both alarm on. A growth
-    /// leaves a mapped membership mapped, holding what joined beside it ([`Members::join`]). Counts only, and
-    /// no per-layer form, on [`Self::total`]'s rule.
+    /// leaves a mapped membership mapped, holding what joined beside it ([`Members::join`]).
+    /// Counts only, and no per-layer form, on [`Self::total`]'s rule.
     pub fn owned_memberships(&self) -> usize {
         self.levels
             .values()
@@ -3648,7 +3645,10 @@ mod tests {
         let mut hops = Vec::new();
         let record = store.get("glosses/y", 0, 0).expect("the record");
         assert_eq!(
-            store.members_of_tracked(record, &mut hops).iter().collect::<Vec<u32>>(),
+            store
+                .members_of_tracked(record, &mut hops)
+                .iter()
+                .collect::<Vec<u32>>(),
             vec![1, 2, 3]
         );
         assert_eq!(
@@ -3934,7 +3934,10 @@ mod tests {
         let mut members =
             unsafe { Members::mapped(&bytes, owner) }.expect("the bytes are a bitmap");
         members.join(&Bitmap::of(&[3, 70_000]));
-        assert!(members.joined().is_none(), "what the view holds is not a join");
+        assert!(
+            members.joined().is_none(),
+            "what the view holds is not a join"
+        );
         members.join(&Bitmap::of(&[2, 3, 200_000]));
         members.join(&Bitmap::of(&[0]));
 
@@ -3943,11 +3946,17 @@ mod tests {
         assert_eq!(members.joined(), Some(&Bitmap::of(&[0, 2, 200_000])));
         assert_eq!(members, union);
         assert_eq!(members.cardinality(), 6);
-        assert_eq!(members.iter().collect::<Vec<u32>>(), union.iter().collect::<Vec<u32>>());
+        assert_eq!(
+            members.iter().collect::<Vec<u32>>(),
+            union.iter().collect::<Vec<u32>>()
+        );
         assert!(members.contains(2) && members.contains(1) && !members.contains(4));
         assert_eq!(members.and_cardinality(&Bitmap::of(&[0, 1, 4])), 2);
         assert!(members.intersect(&Bitmap::of(&[200_000])));
-        assert_eq!(members.projected(|part| part.and(&Bitmap::of(&[1, 2]))), Bitmap::of(&[1, 2]));
+        assert_eq!(
+            members.projected(|part| part.and(&Bitmap::of(&[1, 2]))),
+            Bitmap::of(&[1, 2])
+        );
         let mut outside = Bitmap::of(&[0, 1, 4]);
         members.remove_from(&mut outside);
         assert_eq!(outside, Bitmap::of(&[4]));
@@ -4173,7 +4182,10 @@ mod tests {
         assert_eq!(restored.view.as_deref(), Some("q1"));
         assert_eq!(restored.incarnation, 7);
         let blob = encode_record(&scoped, None);
-        assert_eq!(members_bytes(&blob), Some(&serialise_members(&scoped.members.whole())[..]));
+        assert_eq!(
+            members_bytes(&blob),
+            Some(&serialise_members(&scoped.members.whole())[..])
+        );
         assert_eq!(restored.key.as_deref(), Some("c1"));
         assert_eq!(restored.members, scoped.members);
 

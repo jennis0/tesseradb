@@ -1069,7 +1069,9 @@ fn a_restart_serves_denials_written_since_the_fold_to_a_restricted_viewer() {
     fold(&engine);
     grow(&engine, "a0", joining);
     for (entity, op) in denied {
-        engine.accept_change(entity, op).expect("the change is accepted");
+        engine
+            .accept_change(entity, op)
+            .expect("the change is accepted");
     }
     tick(&engine);
 
@@ -1201,8 +1203,14 @@ fn a_growth_over_a_mapped_membership_keeps_it_mapped_live_and_after_a_restart() 
     let held = |engine: &Engine, when: &str| {
         let level = engine.level_memberships_for_test(LAYER, 0);
         let (_, members, mapped) = &level[0];
-        assert_eq!(members, &expected, "{when}: a0 holds its members and the joined");
-        assert!(*mapped, "{when}: a0's membership is still read through its extent");
+        assert_eq!(
+            members, &expected,
+            "{when}: a0 holds its members and the joined"
+        );
+        assert!(
+            *mapped,
+            "{when}: a0's membership is still read through its extent"
+        );
         assert_eq!(engine.owned_memberships_for_test(), 0, "{when}");
     };
     held(&engine, "live");
@@ -1213,6 +1221,87 @@ fn a_growth_over_a_mapped_membership_keeps_it_mapped_live_and_after_a_restart() 
     held(&reopened, "replayed");
     assert_eq!(served(&reopened), before);
     assert_eq!(reopened.columns_composed(), 0);
+}
+
+/// **A fold after members joined a mapped membership carries the joins, and a deletion among
+/// them, into the membership it maps back.** The first fold maps a0; the joins are held beside
+/// the mapping; the second fold retires the deleted one and reads a0 back through its own pack,
+/// leaving nothing on the heap. Served to the subset viewer and the full viewer, before a restart
+/// and after it.
+#[test]
+fn a_fold_after_joins_to_a_mapped_membership_maps_back_their_union() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let (joining, deleted) = (fx.members(100..150), fx.members(102..103)[0]);
+    fold(&engine);
+    grow(&engine, "a0", joining);
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("the delete is accepted");
+    fold(&engine);
+
+    // The subset viewer sees the source ids divisible by three: 50 of a0's 150 less the deleted
+    // 102, and 33 of a1's 100.
+    let subset = vec![("a0".to_string(), 49), ("a1".to_string(), 33)];
+    let whole = vec![("a0".to_string(), 149), ("a1".to_string(), 100)];
+    let check = |engine: &Engine, when: &str| {
+        assert_eq!(counts_for(engine, &subset_credential()), subset, "{when}");
+        assert_eq!(served(engine), whole, "{when}");
+        let level = engine.level_memberships_for_test(LAYER, 0);
+        assert_eq!(level[0].1.len(), 149, "{when}: a0 holds its joins less the deleted");
+        assert!(level[0].2, "{when}: a0 is read through the pack the fold wrote");
+        assert_eq!(engine.owned_memberships_for_test(), 0, "{when}");
+    };
+    check(&engine, "after the fold");
+    drop(engine);
+    check(&fx.open(), "after a restart");
+}
+
+/// **Members joining while a fold is in flight survive the fold and a restart.** The fold packed
+/// a0 before the join, so what it wrote is short of the membership the store holds; the swap
+/// that would map a0 back through that pack is refused and the joins stay held.
+#[test]
+fn a_join_while_a_fold_is_in_flight_survives_the_fold_and_a_restart() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let (first, second) = (fx.members(100..130), fx.members(130..150));
+    fold(&engine);
+    grow(&engine, "a0", first);
+
+    let folds = engine.write_executor_stats().folds;
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    wait_until("the fold holds", std::time::Duration::from_secs(60), || {
+        engine.fold_is_holding_for_test()
+    });
+    grow(&engine, "a0", second);
+    engine.set_fold_paused_for_test(false);
+    wait_until(
+        "the fold publishes",
+        std::time::Duration::from_secs(60),
+        || engine.write_executor_stats().folds > folds,
+    );
+    tick(&engine);
+
+    let subset = vec![("a0".to_string(), 50), ("a1".to_string(), 33)];
+    let whole = vec![("a0".to_string(), 150), ("a1".to_string(), 100)];
+    assert_eq!(counts_for(&engine, &subset_credential()), subset);
+    assert_eq!(served(&engine), whole);
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(counts_for(&reopened, &subset_credential()), subset, "after a restart");
+    assert_eq!(served(&reopened), whole, "after a restart");
 }
 
 /// **A level whose generating sets are paged is maintained into the form a build produces.**

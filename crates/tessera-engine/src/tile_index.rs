@@ -191,7 +191,9 @@ impl TileIndex {
                 for (ordinal, record) in artifacts() {
                     visit(
                         ordinal,
-                        &store.members_of(record).projected(|part| space.project_base(part)),
+                        &store
+                            .members_of(record)
+                            .projected(|part| space.project_base(part)),
                     );
                 }
             },

@@ -449,9 +449,9 @@ pub fn run(
                     }
                     visit(
                         ordinal,
-                        &store
-                            .members_of(record)
-                            .projected(|part| space.project_base_with(part, &mut scratch.borrow_mut())),
+                        &store.members_of(record).projected(|part| {
+                            space.project_base_with(part, &mut scratch.borrow_mut())
+                        }),
                     );
                 }
             },

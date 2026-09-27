@@ -1990,7 +1990,9 @@ impl Executor {
                         for (ordinal, record) in pending.records(store, &layer, level) {
                             visit(
                                 ordinal,
-                                &store.members_of(record).projected(|part| space.project_base(part)),
+                                &store
+                                    .members_of(record)
+                                    .projected(|part| space.project_base(part)),
                             );
                         }
                     })
@@ -2125,9 +2127,11 @@ impl Executor {
                             &|visit| {
                                 for (ordinal, record) in pending.records(store, layer, *level) {
                                     visit(
-                                ordinal,
-                                &store.members_of(record).projected(|part| space.project_base(part)),
-                            );
+                                        ordinal,
+                                        &store
+                                            .members_of(record)
+                                            .projected(|part| space.project_base(part)),
+                                    );
                                 }
                             },
                         )

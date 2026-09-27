@@ -2,7 +2,7 @@ use super::*;
 
 /// Every level's version, and the derived files of `held` still adoptable at it. A file whose
 /// level has moved is dropped, so a manifest never names one nothing could adopt, except the row
-/// column of a layer in `completed`: an enumerated membership only grows between folds, and an
+/// column of a layer in `enumerated`: an enumerated membership only grows between folds, and an
 /// open completes a column the level has moved past
 /// ([`crate::artifacts::ArtifactProjections::adopt_columns`]). A spatial layer's column is read
 /// only at its level's version, so it is dropped like any other file.
@@ -10,7 +10,7 @@ pub(super) fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[tessera_store::manifest::DerivedExtent],
     pending: Option<&PendingRetirement>,
-    completed: &std::collections::BTreeSet<String>,
+    enumerated: &std::collections::BTreeSet<String>,
 ) -> (
     Vec<tessera_store::manifest::LevelVersion>,
     Vec<tessera_store::manifest::DerivedExtent>,
@@ -33,7 +33,7 @@ pub(super) fn artifact_coordinates(
             let now = expected(&entry.layer, entry.level);
             match entry.form {
                 tessera_store::manifest::DerivedForm::RowColumn { .. }
-                    if completed.contains(&entry.layer) =>
+                    if enumerated.contains(&entry.layer) =>
                 {
                     entry.level_version <= now
                 }
@@ -206,19 +206,21 @@ impl Executor {
             Some(fold) => (fold.written, Some(fold.pending_retirement)),
             None => (self.side_manifests.derived_extents.as_slice(), None),
         };
-        let completed = derived
+        let enumerated = derived
             .iter()
             .filter(|entry| {
-                self.live.registered_layer(&entry.layer).is_some_and(|registered| {
-                    registered.declaration.membership
-                        == tessera_types::layer::MembershipSource::Enumerated
-                })
+                self.live
+                    .registered_layer(&entry.layer)
+                    .is_some_and(|registered| {
+                        registered.declaration.membership
+                            == tessera_types::layer::MembershipSource::Enumerated
+                    })
             })
             .map(|entry| entry.layer.clone())
             .collect();
         let (level_versions, derived_extents) = self
             .live
-            .with_artifacts(|store| artifact_coordinates(store, derived, pending, &completed));
+            .with_artifacts(|store| artifact_coordinates(store, derived, pending, &enumerated));
         next.level_versions = level_versions;
         next.derived_extents = derived_extents;
         // The clone may predate these extents, so they are restated from the held lists.

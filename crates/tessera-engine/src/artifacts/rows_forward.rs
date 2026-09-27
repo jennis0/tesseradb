@@ -145,7 +145,9 @@ impl ArtifactRows {
         let mut taken = 0u64;
         for (ordinal, record) in artifacts {
             self.extend_generating_of(ordinal, record, space, from);
-            let rows = record.members.projected(|part| space.project_extents_from(part, from));
+            let rows = record
+                .members
+                .projected(|part| space.project_extents_from(part, from));
             if rows.is_empty() {
                 continue;
             }
@@ -362,7 +364,9 @@ impl ArtifactRows {
         let mut taken = 0u64;
         for (ordinal, record) in artifacts {
             Self::rebase_generating_of(&mut self.membership, ordinal, record, space, start, lo, hi);
-            let rows = record.members.projected(|part| space.project_extent(part, start));
+            let rows = record
+                .members
+                .projected(|part| space.project_extent(part, start));
             if self.membership.rebase_rows(ordinal as usize, lo, hi, &rows) {
                 taken += rows.cardinality();
                 if self.layout.is_row_major() {

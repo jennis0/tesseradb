@@ -613,12 +613,11 @@ impl ArtifactProjections {
     /// only grows between folds, so such a column labels a subset of the level and can be
     /// completed. One held for another prefix is left for [`Self::adopt_columns`] to purge.
     ///
-    /// The key names no view incarnation, and a view dropped and created again keeps its id. An
-    /// open adopts only the columns stamped with a view's live incarnation
-    /// (`adopt_derived_structures`), and in a running engine a view created since the fold has no
-    /// base rows until the next fold replaces the prefix, so [`ArtifactRows::build_from_column`]
-    /// refuses the old column on its base row count; where the old view had none either, the
-    /// column labels nothing.
+    /// The key names no view incarnation, and a view dropped and created again keeps its id. Two
+    /// guards keep a recreated view off its predecessor's column: an open adopts only columns
+    /// stamped with the view's live incarnation (`adopt_derived_structures`), and
+    /// [`ArtifactRows::build_from_column`] refuses a column whose base row count is not the
+    /// view's.
     fn claim_column(&self, at: &Coordinate<'_>) -> Option<(RowColumn, bool)> {
         let held = self.columns_held.lock().unwrap_or_else(|e| e.into_inner());
         let (key, column) = held.get(&at.address())?;

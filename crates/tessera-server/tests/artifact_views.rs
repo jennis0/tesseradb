@@ -995,7 +995,11 @@ async fn a_global_row_major_level_over_a_recreated_view_answers_the_same_after_a
     );
 
     let server = restart(server, &tmp).await;
-    assert_eq!(served(&server, "quarter:q1", PLAIN).await, q1, "q1 after a restart");
+    assert_eq!(
+        served(&server, "quarter:q1", PLAIN).await,
+        q1,
+        "q1 after a restart"
+    );
     assert_eq!(
         served(&server, "quarter:q2", PLAIN).await,
         q2,

@@ -109,7 +109,12 @@ impl ArtifactRows {
             records.put(idx, record);
             membership.put_generating(idx, record, space);
             if !column_only && space.extent_count() > 0 {
-                above.push((idx, record.members.projected(|part| space.project_extents_from(part, 0))));
+                above.push((
+                    idx,
+                    record
+                        .members
+                        .projected(|part| space.project_extents_from(part, 0)),
+                ));
             }
         }
         // The column answers candidacy, counts and declared sizes; a column-only level builds no
@@ -304,8 +309,10 @@ impl ArtifactRows {
                 self.membership =
                     MembershipRows::build(store.level_in_view(layer, level, view), space);
             }
-            self.membership
-                .put_rows(ordinal as usize, members.projected(|part| space.project(part)));
+            self.membership.put_rows(
+                ordinal as usize,
+                members.projected(|part| space.project(part)),
+            );
             taken += 1;
             for hop in hops {
                 let version = store.level_version(&hop.0, hop.1);
