@@ -134,13 +134,11 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
-import requests
 
 from oracle import catalogue
 from oracle import mask as mask_mod

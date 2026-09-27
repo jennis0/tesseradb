@@ -448,7 +448,7 @@ impl EditedRows {
 
     /// Every pair, ascending by row.
     pub fn iter(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
-        self.flat().chunks_exact(2).map(|pair| (pair[0], pair[1]))
+        self.flat().as_chunks::<2>().0.iter().map(|&[row, entity]| (row, entity))
     }
 
     /// The entity `row` lists, if it is one an edit moved.
