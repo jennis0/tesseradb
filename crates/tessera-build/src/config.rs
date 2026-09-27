@@ -2994,11 +2994,6 @@ struct Join {
     column: String,
 }
 
-/// The types a join field may have: the unique types whose values an identity column holds.
-const JOIN_TYPES: [&str; 9] = [
-    "keyword", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64",
-];
-
 impl Defaults {
     fn compile(
         block: Option<&DefaultsBlock>,
@@ -3044,10 +3039,21 @@ fn compile_join(name: &str, attributes: &[AttributeBlock]) -> Result<Join> {
              join on must name one item. Write `unique = true` on attribute '{name}'"
         )));
     }
-    let ty = attribute.ty.as_deref().unwrap_or_default();
-    if !JOIN_TYPES.contains(&ty) {
+    // A join field is any type a unique field may be, bar a timestamp.
+    let joinable = attribute
+        .ty
+        .as_deref()
+        .and_then(ScalarType::parse)
+        .is_some_and(|ty| {
+            tessera_store::unique::allows_unique(ty) && ty != ScalarType::TimestampUs
+        });
+    if !joinable {
+        let written = match attribute.ty.as_deref() {
+            Some(ty) => format!("is a `{ty}`"),
+            None => "declares no type".to_string(),
+        };
         return Err(declaration_error(format!(
-            "[defaults]: the join field '{name}' is a `{ty}`, and a join field is a `keyword` or \
+            "[defaults]: the join field '{name}' {written}, and a join field is a `keyword` or \
              an integer. Join on a column of one of those types"
         )));
     }
