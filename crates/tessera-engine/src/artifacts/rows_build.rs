@@ -79,7 +79,9 @@ impl ArtifactRows {
     /// Nothing is transposed where the level can be served from the column alone: the form is then
     /// column-only, avoiding tens of gigabytes retained at scale per level ([`MembershipRows::rows_held`]).
     /// Such a form covers the base rows alone, whatever extents `space` carries: the caller attaches
-    /// the column and brings it over the rest ([`Self::brought_over`]), as a flush and a growth do.
+    /// the column and brings it over the rest
+    /// ([`ArtifactProjections::brought_over`](super::ArtifactProjections)), as a flush and a growth
+    /// do.
     /// Its extents come off the column and never off a second file, since a fold-written extent
     /// column would be a separate artefact whose agreement with the column nothing checks.
     ///
@@ -107,7 +109,7 @@ impl ArtifactRows {
             records.put(idx, record);
             membership.put_generating(idx, record, space);
             if !column_only && space.extent_count() > 0 {
-                above.push((idx, space.project_extents_from(&record.members, 0)));
+                above.push((idx, record.members.projected(|part| space.project_extents_from(part, 0))));
             }
         }
         // The column answers candidacy, counts and declared sizes; a column-only level builds no
@@ -303,7 +305,7 @@ impl ArtifactRows {
                     MembershipRows::build(store.level_in_view(layer, level, view), space);
             }
             self.membership
-                .put_rows(ordinal as usize, space.project(members));
+                .put_rows(ordinal as usize, members.projected(|part| space.project(part)));
             taken += 1;
             for hop in hops {
                 let version = store.level_version(&hop.0, hop.1);

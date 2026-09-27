@@ -582,7 +582,7 @@ impl RowColumn {
     {
         let each = |visit: &mut dyn FnMut(u32, &Bitmap)| {
             for (ordinal, record) in level() {
-                visit(ordinal, &space.project_base(&record.members));
+                visit(ordinal, &record.members.projected(|part| space.project_base(part)));
             }
         };
         Self::assemble(ordinals, space.base_rows(), layout, scratch, &each)

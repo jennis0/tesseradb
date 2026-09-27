@@ -189,7 +189,10 @@ impl TileIndex {
             space.base_rows(),
             &|visit| {
                 for (ordinal, record) in artifacts() {
-                    visit(ordinal, &space.project_base(store.members_of(record)));
+                    visit(
+                        ordinal,
+                        &store.members_of(record).projected(|part| space.project_base(part)),
+                    );
                 }
             },
         ))

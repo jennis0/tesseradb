@@ -130,7 +130,7 @@ fn main() -> ExitCode {
                     ) else {
                         continue;
                     };
-                    let visible = view.row_space.project_base(&record.members);
+                    let visible = record.members.projected(|part| view.row_space.project_base(part));
                     if visible.is_empty() {
                         continue;
                     }

@@ -392,7 +392,7 @@ impl Engine {
     /// Every artifact of one level as `(ordinal, members, mapped)`, where `mapped` says the
     /// membership is read through the extent that carries it rather than from the heap. Answers
     /// memberships in entity space with no mask, a shape no serving route may use: every reader
-    /// otherwise goes through `Deref` and cannot tell heap-held from mapped apart, so without
+    /// otherwise asks `Members` a question and cannot tell heap-held from mapped apart, so without
     /// this a form that stopped mapping would show up only in a memory measurement.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]

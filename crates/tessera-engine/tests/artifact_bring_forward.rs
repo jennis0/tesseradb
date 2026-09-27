@@ -20,7 +20,7 @@ mod common;
 use common::*;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
+use tessera_lifecycle::{ChangeOp, IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
@@ -104,7 +104,12 @@ impl Fixture {
 /// Every served artifact's key and masked count, ascending by key — what a viewer is told, which
 /// is what every assertion here is finally about.
 fn served(engine: &Engine) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
+    counts_for(engine, &full_coverage_credential())
+}
+
+/// [`served`], to the principal `credential` authorises.
+fn counts_for(engine: &Engine, credential: &[u8]) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = artifacts_of(engine, credential)
         .into_iter()
         .map(|a| (a.key.unwrap_or_default(), a.masked_count))
         .collect();
@@ -1035,6 +1040,179 @@ fn a_restart_after_writes_brings_the_folds_column_forward_without_holding_rows()
             );
         }
     }
+}
+
+/// **A deletion and a suppression written between a fold and a restart are served to a viewer who
+/// sees part of the level, before the restart and after it.** The level has also taken a growth,
+/// so the restart completes the fold's column; the denied members are on both sides of it, in the
+/// rows the column labels and in the rows the growth added.
+#[test]
+fn a_restart_serves_denials_written_since_the_fold_to_a_restricted_viewer() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let member = |source: u64| fx.members(source..source + 1)[0];
+    let (joining, denied) = (
+        fx.members(100..150),
+        [
+            (member(3), ChangeOp::Delete),
+            (member(6), ChangeOp::Suppress),
+            (member(102), ChangeOp::Delete),
+            (member(105), ChangeOp::Suppress),
+            (member(501), ChangeOp::Suppress),
+        ],
+    );
+    fold(&engine);
+    grow(&engine, "a0", joining);
+    for (entity, op) in denied {
+        engine.accept_change(entity, op).expect("the change is accepted");
+    }
+    tick(&engine);
+
+    // The subset viewer sees the source ids divisible by three: 50 of a0's 150 and 33 of a1's
+    // 100, each less the denials among them. Every denial above is one of those.
+    let subset = vec![("a0".to_string(), 46), ("a1".to_string(), 32)];
+    let whole = vec![("a0".to_string(), 146), ("a1".to_string(), 99)];
+    assert_eq!(counts_for(&engine, &subset_credential()), subset);
+    assert_eq!(served(&engine), whole);
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(counts_for(&reopened, &subset_credential()), subset);
+    assert_eq!(served(&reopened), whole);
+    assert!(
+        !reopened
+            .held_artifact_form_for_test("s0", LAYER, 0)
+            .expect("the level's form is held")
+            .membership()
+            .rows_held(),
+        "the level is served from its column"
+    );
+}
+
+/// **A growth into rows another artifact's base already labels, between a fold and a restart,
+/// takes the label column past a partition.** The restart brings the column over the joined
+/// rows, cannot hold them in the label form, and recomposes the level as a list, as the live
+/// engine did when the growth arrived. The answers are the same on both sides of the restart.
+#[test]
+fn a_restart_after_a_growth_into_anothers_base_rows_serves_the_level_as_a_list() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let joining = fx.members(50..60);
+    fold(&engine);
+    grow(&engine, "a1", joining);
+    let before = served(&engine);
+    assert_eq!(
+        before,
+        vec![("a0".to_string(), 100), ("a1".to_string(), 110)]
+    );
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(served(&reopened), before);
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the level's form is held");
+    assert_eq!(
+        form.layout(),
+        ServingLayout::RowMajorList,
+        "a row carrying two artifacts is held by the list form"
+    );
+    assert!(
+        !form.membership().rows_held(),
+        "and the level is still served from its column"
+    );
+    assert_eq!(counts_for(&reopened, &subset_credential()), {
+        // 0, 3, ... 99 is 34; 501 ... 597 is 33, and 51 ... 57 joined it.
+        vec![("a0".to_string(), 34), ("a1".to_string(), 36)]
+    });
+}
+
+/// **A layer that derives a hull holds its level's rows, so a restart does not complete a column
+/// the level has moved past: it projects the level and composes the column over what it built.**
+/// Taking the fold's column would have transposed it into rows that lack the growth.
+#[test]
+fn a_restart_of_a_hull_level_behind_its_column_projects_the_level() {
+    let fx = fixture();
+    let engine = fx.open();
+    let mut hulled = declaration(LAYER, Some(ServingLayout::RowMajorLabel));
+    hulled.content.computed = vec!["hull".into()];
+    engine.register_layer(hulled).unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let joining = fx.members(100..130);
+    fold(&engine);
+    grow(&engine, "a0", joining);
+    let before = served(&engine);
+    assert_eq!(
+        before,
+        vec![("a0".to_string(), 130), ("a1".to_string(), 100)]
+    );
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(served(&reopened), before);
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the level's form is held");
+    assert!(form.membership().rows_held(), "a hull level holds its rows");
+    assert_eq!(form.layout(), ServingLayout::RowMajorLabel);
+    let restarted = form_of(&reopened, LAYER);
+    reopened.forget_artifact_forms_for_test(LAYER);
+    assert_eq!(served(&reopened), before);
+    assert_eq!(
+        form_of(&reopened, LAYER),
+        restarted,
+        "the restart's form is the one built from scratch"
+    );
+}
+
+/// **Members joining a mapped membership are held beside the mapping, on the live engine and when
+/// a restart replays them.** Holding the membership whole on the heap for every join is what a
+/// taxonomy whose every top rank gains a member cannot afford; the join is what is held.
+#[test]
+fn a_growth_over_a_mapped_membership_keeps_it_mapped_live_and_after_a_restart() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let joining = fx.members(100..150);
+    let mut expected: Vec<u32> = fx
+        .members(0..150)
+        .iter()
+        .map(|entity| entity.raw() as u32)
+        .collect();
+    expected.sort_unstable();
+    fold(&engine);
+    grow(&engine, "a0", joining);
+
+    let held = |engine: &Engine, when: &str| {
+        let level = engine.level_memberships_for_test(LAYER, 0);
+        let (_, members, mapped) = &level[0];
+        assert_eq!(members, &expected, "{when}: a0 holds its members and the joined");
+        assert!(*mapped, "{when}: a0's membership is still read through its extent");
+        assert_eq!(engine.owned_memberships_for_test(), 0, "{when}");
+    };
+    held(&engine, "live");
+    let before = served(&engine);
+    drop(engine);
+
+    let reopened = fx.open();
+    held(&reopened, "replayed");
+    assert_eq!(served(&reopened), before);
+    assert_eq!(reopened.columns_composed(), 0);
 }
 
 /// **A level whose generating sets are paged is maintained into the form a build produces.**

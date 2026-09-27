@@ -614,7 +614,7 @@ pub struct Degradation {
 }
 
 /// One artifact's membership — **the bitmap, or a read-only view of the same bitmap's bytes
-/// somewhere the heap is not**.
+/// somewhere the heap is not, with what has joined since beside it**.
 ///
 /// # Why the field is not simply a `Bitmap`
 ///
@@ -643,10 +643,18 @@ pub struct Degradation {
 ///
 /// # What a view may and may not do
 ///
-/// Reads go through [`Deref`](std::ops::Deref), so every caller that asks a membership a question is unchanged and
-/// cannot tell the two apart. A *write* takes [`Members::to_mut`], which materialises an owned
-/// bitmap first — growth and retirement therefore behave identically on either form, which is what
-/// keeps write-path §5.4's two removal rules the only routes a bit leaves a membership.
+/// A view is never written. A growth over one keeps the view and holds what joined beside it on
+/// the heap ([`Members::join`]), so a join costs the heap what joined and not the artifact: a
+/// taxonomy whose every top rank gains a member would otherwise copy each level whole between
+/// folds. The fold's rewrite, read back through [`ArtifactStore::rehouse_members`], replaces the
+/// pair with a view of their union. Other writes take [`Members::to_mut`], which materialises the
+/// whole membership on the heap first, so retirement behaves identically on every form, which is
+/// what keeps write-path §5.4's two removal rules the only routes a bit leaves a membership.
+///
+/// Reads go through this type's own methods and answer over the whole membership, the view and
+/// what joined it alike. There is no `Deref` to a bitmap, because a membership with joins is not
+/// one bitmap anywhere: [`Members::whole`] builds it where a reader needs a single bitmap, and
+/// [`Members::projected`] maps the parts separately where the map distributes over a union.
 ///
 /// ⊘ **The mapping's lifetime is the owner's, and the owner is held here.** `bytes` points into an
 /// allocation `owner` keeps alive — the mapped extent file, at a build and at a serving open alike
@@ -661,13 +669,16 @@ enum MembersInner {
         view: BitmapView<'static>,
         bytes: &'static [u8],
         owner: Arc<dyn Any + Send + Sync>,
+        /// The members joined since the bytes were written, disjoint from the view. `None` where
+        /// nothing has joined.
+        joined: Option<Box<Bitmap>>,
     },
 }
 
 /// `Bitmap` carries croaring's own `Send`/`Sync`, and a view over bytes nothing else may write is
-/// no weaker: every operation reachable through [`Deref`](std::ops::Deref) is a read of a `roaring_bitmap_t` and of
-/// the immutable slice behind it, and the one route to a mutation ([`Members::to_mut`]) needs
-/// `&mut self`. The owner is `Send + Sync` by its own bound.
+/// no weaker: every read is a read of a `roaring_bitmap_t` and of the immutable slice behind it,
+/// and every write ([`Members::to_mut`], [`Members::join`]) needs `&mut self`. The owner is
+/// `Send + Sync` by its own bound.
 unsafe impl Send for Members {}
 unsafe impl Sync for Members {}
 
@@ -701,18 +712,41 @@ impl Members {
         // moved into the value that holds the view, so the two cannot be separated.
         let bytes: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
         let view = unsafe { BitmapView::deserialize::<Portable>(bytes) };
-        Some(Members(MembersInner::Mapped { view, bytes, owner }))
+        Some(Members(MembersInner::Mapped {
+            view,
+            bytes,
+            owner,
+            joined: None,
+        }))
     }
 
-    /// The membership as something that can be written to, materialising an owned copy where this
-    /// was a view. Every mutation in this module goes through it.
+    /// The whole membership as something that can be written to, materialising it on the heap
+    /// where it was a view. Every write in this module but a join goes through it.
     pub fn to_mut(&mut self) -> &mut Bitmap {
-        if let MembersInner::Mapped { view, .. } = &self.0 {
-            self.0 = MembersInner::Owned(view.to_bitmap());
+        if let MembersInner::Mapped { .. } = &self.0 {
+            self.0 = MembersInner::Owned(self.whole().into_owned());
         }
         match &mut self.0 {
             MembersInner::Owned(bitmap) => bitmap,
             MembersInner::Mapped { .. } => unreachable!("the arm above replaced it"),
+        }
+    }
+
+    /// Add `joining` to the membership. Over a view, only the members the view does not hold are
+    /// kept, beside it, so what this costs the heap is the join rather than the artifact.
+    pub fn join(&mut self, joining: &Bitmap) {
+        match &mut self.0 {
+            MembersInner::Owned(bitmap) => bitmap.or_inplace(joining),
+            MembersInner::Mapped { view, joined, .. } => {
+                let new = joining.andnot(view);
+                if new.is_empty() {
+                    return;
+                }
+                match joined {
+                    Some(held) => held.or_inplace(&new),
+                    None => *joined = Some(Box::new(new)),
+                }
+            }
         }
     }
 
@@ -722,16 +756,99 @@ impl Members {
     pub fn is_mapped(&self) -> bool {
         matches!(self.0, MembersInner::Mapped { .. })
     }
-}
 
-impl std::ops::Deref for Members {
-    type Target = Bitmap;
+    /// The members joined since the mapped bytes were written, disjoint from them. `None` where
+    /// nothing has, and always for a membership on the heap, which holds its joins in itself.
+    pub fn joined(&self) -> Option<&Bitmap> {
+        match &self.0 {
+            MembersInner::Mapped {
+                joined: Some(joined),
+                ..
+            } => Some(joined),
+            _ => None,
+        }
+    }
 
-    fn deref(&self) -> &Bitmap {
+    /// The bitmap written or mapped, without what [`Self::joined`] holds.
+    fn base(&self) -> &Bitmap {
         match &self.0 {
             MembersInner::Owned(bitmap) => bitmap,
             MembersInner::Mapped { view, .. } => view,
         }
+    }
+
+    /// The membership as one bitmap: borrowed where nothing has joined a view, and otherwise the
+    /// union built on the heap.
+    pub fn whole(&self) -> std::borrow::Cow<'_, Bitmap> {
+        match self.joined() {
+            None => std::borrow::Cow::Borrowed(self.base()),
+            Some(joined) => std::borrow::Cow::Owned(self.base().or(joined)),
+        }
+    }
+
+    /// `map` of the whole membership, for a `map` that distributes over a union, such as a
+    /// projection into row space: each part is mapped separately and the results unioned, so the
+    /// membership is never built whole.
+    pub fn projected(&self, map: impl Fn(&Bitmap) -> Bitmap) -> Bitmap {
+        let mut out = map(self.base());
+        if let Some(joined) = self.joined() {
+            out.or_inplace(&map(joined));
+        }
+        out
+    }
+
+    pub fn cardinality(&self) -> u64 {
+        self.base().cardinality() + self.joined().map_or(0, Bitmap::cardinality)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.base().is_empty() && self.joined().is_none()
+    }
+
+    pub fn contains(&self, entity: u32) -> bool {
+        self.base().contains(entity) || self.joined().is_some_and(|j| j.contains(entity))
+    }
+
+    /// How many of `other`'s members this membership holds.
+    pub fn and_cardinality(&self, other: &Bitmap) -> u64 {
+        self.base().and_cardinality(other) + self.joined().map_or(0, |j| j.and_cardinality(other))
+    }
+
+    /// Whether this membership shares a member with `other`.
+    pub fn intersect(&self, other: &Bitmap) -> bool {
+        self.base().intersect(other) || self.joined().is_some_and(|j| j.intersect(other))
+    }
+
+    /// `set` without this membership's members.
+    pub fn remove_from(&self, set: &mut Bitmap) {
+        set.andnot_inplace(self.base());
+        if let Some(joined) = self.joined() {
+            set.andnot_inplace(joined);
+        }
+    }
+
+    /// The members in ascending order.
+    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        let mut base = self.base().iter().peekable();
+        let mut joined = self.joined().map(|j| j.iter().peekable());
+        std::iter::from_fn(move || {
+            let Some(joined) = joined.as_mut() else {
+                return base.next();
+            };
+            match (base.peek(), joined.peek()) {
+                (Some(b), Some(j)) if j < b => joined.next(),
+                (Some(_), _) => base.next(),
+                (None, _) => joined.next(),
+            }
+        })
+    }
+
+    /// How many Roaring containers hold the membership, the view's and what joined it.
+    pub fn containers(&self) -> u64 {
+        self.base().statistics().n_containers as u64
+            + self
+                .joined()
+                .map_or(0, |j| j.statistics().n_containers as u64)
     }
 }
 
@@ -752,12 +869,18 @@ impl Clone for Members {
     fn clone(&self) -> Self {
         match &self.0 {
             MembersInner::Owned(bitmap) => Members::owned(bitmap.clone()),
-            MembersInner::Mapped { bytes, owner, .. } => Members(MembersInner::Mapped {
+            MembersInner::Mapped {
+                bytes,
+                owner,
+                joined,
+                ..
+            } => Members(MembersInner::Mapped {
                 // SAFETY: `bytes` is the slice this value's own view already addresses, and
                 // `owner` — cloned beside it — is what keeps it alive.
                 view: unsafe { BitmapView::deserialize::<Portable>(bytes) },
                 bytes,
                 owner: Arc::clone(owner),
+                joined: joined.clone(),
             }),
         }
     }
@@ -776,7 +899,7 @@ impl std::fmt::Debug for Members {
 
 impl PartialEq for Members {
     fn eq(&self, other: &Self) -> bool {
-        **self == **other
+        self.cardinality() == other.cardinality() && *self.whole() == *other.whole()
     }
 }
 
@@ -784,13 +907,13 @@ impl Eq for Members {}
 
 impl PartialEq<Bitmap> for Members {
     fn eq(&self, other: &Bitmap) -> bool {
-        **self == *other
+        self.cardinality() == other.cardinality() && *self.whole() == *other
     }
 }
 
 impl PartialEq<Members> for Bitmap {
     fn eq(&self, other: &Members) -> bool {
-        *self == **other
+        other == self
     }
 }
 
@@ -1809,7 +1932,7 @@ impl ArtifactStore {
         else {
             return;
         };
-        record.members.to_mut().or_inplace(joining);
+        record.members.join(joining);
     }
 
     /// **The one way a generating set changes**, taken by the live page and by replay alike
@@ -2436,7 +2559,7 @@ impl ArtifactStore {
         self.levels
             .values()
             .flat_map(|slots| slots.iter().flatten())
-            .map(|record| record.members.statistics().n_containers as u64)
+            .map(|record| record.members.containers())
             .sum()
     }
 
@@ -2842,8 +2965,9 @@ impl ArtifactStore {
     /// carries it.
     ///
     /// Zero on a node whose every membership has been published and read back. Above zero for a
-    /// membership a publication has not reached yet, one a growth has rewritten since, and one the
-    /// mapping refused — which is the fault the seed and the fold both alarm on. Counts only, and
+    /// membership a publication has not reached yet, one a retirement has rewritten since, and one
+    /// the mapping refused — which is the fault the seed and the fold both alarm on. A growth
+    /// leaves a mapped membership mapped, holding what joined beside it ([`Members::join`]). Counts only, and
     /// no per-layer form, on [`Self::total`]'s rule.
     pub fn owned_memberships(&self) -> usize {
         self.levels
@@ -2926,7 +3050,7 @@ impl ArtifactStore {
 /// mean, and the bitmap library stays on one side of the boundary.
 pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) -> Vec<u8> {
     let key = record.key.as_deref().unwrap_or_default().as_bytes();
-    let members = serialise_members(&record.members);
+    let members = serialise_members(&record.members.whole());
     let sets: Vec<Vec<u8>> = record
         .contents
         .iter()
@@ -3329,7 +3453,7 @@ impl ArtifactStore {
                     continue;
                 };
                 if record.members.intersect(&old) {
-                    let (joining, _) = replaced(&record.members);
+                    let (joining, _) = replaced(&record.members.projected(|part| part.and(&old)));
                     growth.push(crate::wal::MembershipGrowth {
                         ordinal: ordinal as u32,
                         joining: serialise_members(&joining),
@@ -3389,7 +3513,7 @@ pub fn members_added(record: &crate::wal::WalRecord, store: &ArtifactStore) -> u
             .filter_map(|delta| {
                 let joining = deserialise_members(&delta.joining)?;
                 let held = store.get(layer, *level, delta.ordinal)?;
-                Some(joining.andnot_cardinality(&held.members))
+                Some(joining.cardinality() - held.members.and_cardinality(&joining))
             })
             .sum(),
         _ => 0,
@@ -3497,7 +3621,7 @@ mod tests {
 
         let members_of = |layer: &str, ordinal: u32| {
             let record = store.get(layer, 0, ordinal).expect("the record");
-            store.members_of(record).to_vec()
+            store.members_of(record).iter().collect::<Vec<u32>>()
         };
         assert_eq!(
             members_of("topics/x", 0),
@@ -3524,7 +3648,7 @@ mod tests {
         let mut hops = Vec::new();
         let record = store.get("glosses/y", 0, 0).expect("the record");
         assert_eq!(
-            store.members_of_tracked(record, &mut hops).to_vec(),
+            store.members_of_tracked(record, &mut hops).iter().collect::<Vec<u32>>(),
             vec![1, 2, 3]
         );
         assert_eq!(
@@ -3799,6 +3923,42 @@ mod tests {
         assert_eq!(deserialise_members(&bytes).expect("still a bitmap"), bitmap);
     }
 
+    /// **Members joining a view are held beside it, and the membership answers as the union.**
+    /// A join the view already holds adds nothing; a write through `to_mut` then materialises the
+    /// whole of it, joins included.
+    #[test]
+    fn a_mapped_membership_that_grows_answers_as_the_union() {
+        let bitmap = Bitmap::of(&[1, 3, 70_000]);
+        let bytes: Arc<Vec<u8>> = Arc::new(serialise_members(&bitmap));
+        let owner: Arc<dyn Any + Send + Sync> = bytes.clone();
+        let mut members =
+            unsafe { Members::mapped(&bytes, owner) }.expect("the bytes are a bitmap");
+        members.join(&Bitmap::of(&[3, 70_000]));
+        assert!(members.joined().is_none(), "what the view holds is not a join");
+        members.join(&Bitmap::of(&[2, 3, 200_000]));
+        members.join(&Bitmap::of(&[0]));
+
+        let union = Bitmap::of(&[0, 1, 2, 3, 70_000, 200_000]);
+        assert!(members.is_mapped());
+        assert_eq!(members.joined(), Some(&Bitmap::of(&[0, 2, 200_000])));
+        assert_eq!(members, union);
+        assert_eq!(members.cardinality(), 6);
+        assert_eq!(members.iter().collect::<Vec<u32>>(), union.iter().collect::<Vec<u32>>());
+        assert!(members.contains(2) && members.contains(1) && !members.contains(4));
+        assert_eq!(members.and_cardinality(&Bitmap::of(&[0, 1, 4])), 2);
+        assert!(members.intersect(&Bitmap::of(&[200_000])));
+        assert_eq!(members.projected(|part| part.and(&Bitmap::of(&[1, 2]))), Bitmap::of(&[1, 2]));
+        let mut outside = Bitmap::of(&[0, 1, 4]);
+        members.remove_from(&mut outside);
+        assert_eq!(outside, Bitmap::of(&[4]));
+        assert_eq!(members.clone(), union);
+
+        members.to_mut().add(9);
+        assert!(!members.is_mapped());
+        assert_eq!(members.cardinality(), 7);
+        assert_eq!(deserialise_members(&bytes).expect("still a bitmap"), bitmap);
+    }
+
     /// **Bytes that are not a bitmap are refused rather than read as containers.** The view
     /// constructor is unchecked in croaring; this is the check in front of it, and it is the same
     /// refusal [`deserialise_members`] makes for the same reason.
@@ -4013,7 +4173,7 @@ mod tests {
         assert_eq!(restored.view.as_deref(), Some("q1"));
         assert_eq!(restored.incarnation, 7);
         let blob = encode_record(&scoped, None);
-        assert_eq!(members_bytes(&blob), Some(&serialise_members(&scoped.members)[..]));
+        assert_eq!(members_bytes(&blob), Some(&serialise_members(&scoped.members.whole())[..]));
         assert_eq!(restored.key.as_deref(), Some("c1"));
         assert_eq!(restored.members, scoped.members);
 

@@ -316,7 +316,9 @@ pub fn run(
                 }
                 visit(
                     ordinal,
-                    &space.project_base_with(store.members_of(record), &mut scratch.borrow_mut()),
+                    &store
+                        .members_of(record)
+                        .projected(|part| space.project_base_with(part, &mut scratch.borrow_mut())),
                 );
             }
         });
@@ -392,10 +394,9 @@ pub fn run(
                         }
                         visit(
                             ordinal,
-                            &space.project_base_with(
-                                store.members_of(record),
-                                &mut scratch.borrow_mut(),
-                            ),
+                            &store.members_of(record).projected(|part| {
+                                space.project_base_with(part, &mut scratch.borrow_mut())
+                            }),
                         );
                     }
                 },
@@ -448,8 +449,9 @@ pub fn run(
                     }
                     visit(
                         ordinal,
-                        &space
-                            .project_base_with(store.members_of(record), &mut scratch.borrow_mut()),
+                        &store
+                            .members_of(record)
+                            .projected(|part| space.project_base_with(part, &mut scratch.borrow_mut())),
                     );
                 }
             },
