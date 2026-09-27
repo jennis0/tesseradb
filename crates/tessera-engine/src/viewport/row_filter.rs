@@ -4,6 +4,17 @@ use super::*;
 use crate::filter::{as_f64, narrow_hi, narrow_lo, NativeBound, Narrowed};
 
 impl Engine {
+    /// `f`, the per-tile crossing of `rows` rows, on the engine's pool; or on the calling thread
+    /// where the rows are no more than one chunk, which the crossing walks there without the pool
+    /// and for which the handoff to the pool would cost more than the walk.
+    fn on_pool<R: Send>(&self, rows: u64, f: impl FnOnce() -> R + Send) -> R {
+        if rows <= u64::from(CROSSING_CHUNK_MIN_ROWS) {
+            f()
+        } else {
+            self.pool.install(f)
+        }
+    }
+
     /// Cross a filter's entity-space result into one view's row space, by whichever of two routes
     /// is cheaper: projecting the whole result, or walking the request's own tiles and testing
     /// each row's entity. [`PER_TILE_CROSSING_RATIO`] picks between them, and the two agree
@@ -24,10 +35,9 @@ impl Engine {
         if per_tile_looks_cheaper && row_space.can_invert() {
             // `None` is the row space declining to invert a row; falling through to the exact
             // route costs latency only, where trusting a partial answer would drop rows.
-            if let Some(rows) = self
-                .pool
-                .install(|| per_tile_crossing(row_space, entities, domain, rows_in_ranges))
-            {
+            if let Some(rows) = self.on_pool(rows_in_ranges, || {
+                per_tile_crossing(row_space, entities, domain, rows_in_ranges)
+            }) {
                 self.counters
                     .filter_crossings_per_tile
                     .fetch_add(1, Ordering::Relaxed);
@@ -114,7 +124,7 @@ impl Engine {
                 || total_matched > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
             let walked = (per_tile_looks_cheaper && row_space.can_invert())
                 .then(|| {
-                    self.pool.install(|| {
+                    self.on_pool(rows_in_ranges, || {
                         per_tile_crossing_multi(row_space, &verdicts, domain, rows_in_ranges)
                     })
                 })
@@ -750,23 +760,23 @@ fn scan_rows(
         .collect::<Result<Vec<_>>>()?;
 
     let chunks = domain_chunks(domain, domain.iter().map(|r| r.len() as u64).sum());
-    let parts: Vec<croaring::Bitmap> = chunks
-        .par_iter()
-        .map(|chunk| {
-            let mut rows = croaring::Bitmap::new();
-            let mut buf: Vec<u32> = Vec::with_capacity(1024);
-            // The segment owning `chunk.start`, advanced as the walk crosses a boundary: a merged
-            // range can span two adjacent segments even though no domain range spans one.
-            let (mut seg, _) = segment_holding(segments, chunk.start)
-                .expect("the first segment's rows begin at 0");
-            let mut row = chunk.start;
-            while row < chunk.end {
+    let parts: Vec<croaring::Bitmap> = over_chunks(&chunks, |chunk| {
+        let mut rows = croaring::Bitmap::new();
+        let mut buf: Vec<u32> = Vec::with_capacity(1024);
+        // The segment owning the chunk's first row, advanced as the walk crosses a boundary: a
+        // merged range can span two adjacent segments even though no domain range spans one, and
+        // the chunk's ranges ascend.
+        let (mut seg, _) = segment_holding(segments, chunk[0].start)
+            .expect("the first segment's rows begin at 0");
+        for range in chunk {
+            let mut row = range.start;
+            while row < range.end {
                 while seg + 1 < slices.len() && slices[seg + 1].row_base <= row {
                     seg += 1;
                 }
                 let seg_end = slices
                     .get(seg + 1)
-                    .map_or(chunk.end, |next| next.row_base.min(chunk.end));
+                    .map_or(range.end, |next| next.row_base.min(range.end));
                 let segment = &slices[seg];
                 if let Some(values) = &segment.values {
                     scan_run(
@@ -780,9 +790,9 @@ fn scan_rows(
                 }
                 row = seg_end;
             }
-            rows
-        })
-        .collect();
+        }
+        rows
+    });
     let refs: Vec<&croaring::Bitmap> = parts.iter().collect();
     Ok(croaring::Bitmap::fast_or(&refs))
 }
@@ -1301,39 +1311,35 @@ fn per_tile_crossing_multi(
 ) -> Option<Vec<croaring::Bitmap>> {
     let chunks = domain_chunks(domain, rows_in_ranges);
 
-    let parts: Option<Vec<Vec<croaring::Bitmap>>> = chunks
-        .par_iter()
-        .map(|chunk| {
-            // Buffered so `add_many` appends a sorted run, where a per-row `add` re-locates it.
-            let mut rows: Vec<croaring::Bitmap> = entity_sets
-                .iter()
-                .map(|_| croaring::Bitmap::new())
-                .collect();
-            let mut bufs: Vec<Vec<u32>> = entity_sets
-                .iter()
-                .map(|_| Vec::with_capacity(1024))
-                .collect();
-            for row in chunk.clone() {
-                let entity = row_space.entity_of(RowId::new(row))?;
-                let raw = entity.raw() as u32;
-                for (i, set) in entity_sets.iter().enumerate() {
-                    if set.contains(raw) {
-                        bufs[i].push(row);
-                        if bufs[i].len() == 1024 {
-                            rows[i].add_many(&bufs[i]);
-                            bufs[i].clear();
-                        }
+    let parts = over_chunks(&chunks, |chunk| {
+        // Buffered so `add_many` appends a sorted run, where a per-row `add` re-locates it.
+        let mut rows: Vec<croaring::Bitmap> = entity_sets
+            .iter()
+            .map(|_| croaring::Bitmap::new())
+            .collect();
+        let mut bufs: Vec<Vec<u32>> = entity_sets
+            .iter()
+            .map(|_| Vec::with_capacity(1024))
+            .collect();
+        for row in chunk.iter().flat_map(Range::clone) {
+            let entity = row_space.entity_of(RowId::new(row))?;
+            let raw = entity.raw() as u32;
+            for (i, set) in entity_sets.iter().enumerate() {
+                if set.contains(raw) {
+                    bufs[i].push(row);
+                    if bufs[i].len() == 1024 {
+                        rows[i].add_many(&bufs[i]);
+                        bufs[i].clear();
                     }
                 }
             }
-            for (image, buf) in rows.iter_mut().zip(&bufs) {
-                image.add_many(buf);
-            }
-            Some(rows)
-        })
-        .collect();
-
-    let parts = parts?;
+        }
+        for (image, buf) in rows.iter_mut().zip(&bufs) {
+            image.add_many(buf);
+        }
+        Some(rows)
+    });
+    let parts: Vec<Vec<croaring::Bitmap>> = parts.into_iter().collect::<Option<_>>()?;
     let images = (0..entity_sets.len())
         .map(|i| {
             let refs: Vec<&croaring::Bitmap> = parts.iter().map(|p| &p[i]).collect();
@@ -1343,21 +1349,48 @@ fn per_tile_crossing_multi(
     Some(images)
 }
 
-/// Cut `domain` into parallel chunks by row count, shared by the crossing walk and the
-/// render-column scan so the two fan out identically.
-fn domain_chunks(domain: &[Range<u32>], rows_in_ranges: u64) -> Vec<Range<u32>> {
+/// Cut `domain` into chunks of about one share of its rows each, shared by the crossing walk and
+/// the render-column scan so the two fan out identically. Consecutive ranges are gathered into a
+/// chunk until it holds its share and a range longer than a share is split, so a domain of many
+/// short ranges is as few chunks as one long range of the same rows, and a domain of no more
+/// rows than one share is one chunk.
+fn domain_chunks(domain: &[Range<u32>], rows_in_ranges: u64) -> Vec<Vec<Range<u32>>> {
     let threads = rayon::current_num_threads().max(1) as u64;
-    let target = (rows_in_ranges / (threads * 8))
+    let share = (rows_in_ranges / (threads * 8))
         .max(CROSSING_CHUNK_MIN_ROWS as u64)
         .min(u32::MAX as u64) as u32;
-    domain
-        .iter()
-        .flat_map(|range| {
-            (range.start..range.end)
-                .step_by(target as usize)
-                .map(move |start| start..range.end.min(start.saturating_add(target)))
-        })
-        .collect()
+    let mut chunks = Vec::new();
+    let mut chunk: Vec<Range<u32>> = Vec::new();
+    let mut held = 0u32;
+    for range in domain {
+        let mut start = range.start;
+        while start < range.end {
+            let take = (range.end - start).min(share - held);
+            chunk.push(start..start + take);
+            held += take;
+            start += take;
+            if held == share {
+                chunks.push(std::mem::take(&mut chunk));
+                held = 0;
+            }
+        }
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
+/// `f` over each chunk, in order: on the calling thread where there is one, and in parallel on
+/// the current pool otherwise.
+fn over_chunks<T: Send>(
+    chunks: &[Vec<Range<u32>>],
+    f: impl Fn(&[Range<u32>]) -> T + Sync + Send,
+) -> Vec<T> {
+    match chunks {
+        [one] => vec![f(one)],
+        _ => chunks.par_iter().map(|chunk| f(chunk)).collect(),
+    }
 }
 
 #[cfg(test)]
