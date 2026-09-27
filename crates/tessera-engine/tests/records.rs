@@ -5,7 +5,7 @@
 //! carries and which terms it holds are functions of its source id, restated here and never read
 //! back from the bundle. Map order is `(cell, tessera_id)`, with the cell computed from the
 //! generator's position through the build's own quantisation, and stored order is ascending item
-//! number, read from the build's external-id sidecar.
+//! number, read from the index of the unique `id` the build joins on.
 
 mod common;
 

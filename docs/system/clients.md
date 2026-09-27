@@ -209,9 +209,8 @@ as given, choosing no fields and no order on the caller's behalf.
 | Python | `db.items`, `db.artifacts` and `selection.items`, and the same reads on a `Viewer` | one `pyarrow` table of the whole read, or with `batches=True` the pages one at a time; a read that stops part-way raises `PartialRead`, which holds the rows read and the cursor to read on from |
 | CLI | `tessera items` and `tessera artifacts` | Arrow IPC or Parquet, to a file or to standard output, written page by page; a read cut short leaves whole pages and names the cursor to read on from |
 
-A Python `Database` gives `tessera:external_id` back as the type of its id column, as its item card
-does. `selection.items` sends the selection's own filters and box as the read's filter, so
-its rows are the items the selection counts.
+`selection.items` sends the selection's own filters and box as the read's filter, so its rows are
+the items the selection counts.
 
 ## Not built
 

@@ -256,7 +256,7 @@ fn scalars_with_partition(value: u32, columns: usize, at: usize) -> Vec<WalScala
 #[allow(clippy::too_many_arguments)]
 fn ingest_point_into(
     engine: &Engine,
-    external_id: &str,
+    batch: &str,
     value: u32,
     term: u32,
     x: f64,
@@ -266,7 +266,7 @@ fn ingest_point_into(
 ) -> u64 {
     let descriptors = vec![term.to_string().into_bytes()];
     let mut hash = [0u8; 32];
-    for (slot, byte) in hash.iter_mut().zip(external_id.as_bytes()) {
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
     let ids = engine
@@ -281,7 +281,7 @@ fn ingest_point_into(
                 terms: engine.resolve_terms(&descriptors),
                 scoped: Vec::new(),
             }],
-            external_id.to_string(),
+            batch.to_string(),
             hash,
         )
         .expect("an ordinary point with a declared scalar is an ordinary write");
@@ -289,13 +289,13 @@ fn ingest_point_into(
 }
 
 /// The generator's own schema: seven declared columns, `partition` at [`PARTITION_SCALAR`].
-fn ingest_point(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
-    ingest_point_into(engine, external_id, value, term, x, y, 7, PARTITION_SCALAR)
+fn ingest_point(engine: &Engine, batch: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
+    ingest_point_into(engine, batch, value, term, x, y, 7, PARTITION_SCALAR)
 }
 
 /// This file's own declaration: one column, so `partition` is at 0.
-fn ingest_own(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
-    ingest_point_into(engine, external_id, value, term, x, y, 1, 0)
+fn ingest_own(engine: &Engine, batch: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
+    ingest_point_into(engine, batch, value, term, x, y, 1, 0)
 }
 
 /// **A point ingested with value *v* counts against *v*'s artifact on the next request, with

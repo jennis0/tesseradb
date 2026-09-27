@@ -185,7 +185,7 @@ fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
     engine
 }
 
-fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId {
+fn ingest_row(engine: &Engine, batch: &str, scalar: WalScalar) -> EntityId {
     engine
         .ingest_rows(
             vec![UnallocatedRow {
@@ -198,7 +198,7 @@ fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
                 scoped: Vec::new(),
             }],
-            format!("batch-{external_id}"),
+            format!("batch-{batch}"),
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0]

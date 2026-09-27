@@ -328,8 +328,8 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     // against a build that gave every item another item's attributes.** Entity ids are assigned
     // in signature-sorted order (§11.1), so the map is a permutation with no fixed points to
     // speak of — but a fixture whose items all carry one signature has an *identity* permutation,
-    // which is what let the wrong assertion look right. It is read from the external-id sidecar,
-    // which is the bundle's own record of the assignment rather than a second guess at it.
+    // which is what let the wrong assertion look right. It is read from the index of the unique
+    // `id` the build joins on, which is the bundle's own record of the assignment rather than a second guess at it.
     let tail = tail_by_identity(&root);
     assert_eq!(tail.len(), N_ITEMS as usize);
     let entity_of_source = source_to_new_map(&root, "v00000");

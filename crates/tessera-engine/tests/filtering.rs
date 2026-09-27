@@ -636,7 +636,7 @@ fn ingest_and_flush_with(
             // `bonus` is the nullable numeric: the default above passes `WalScalar::Null`, which is
             // how an ingested item says it carries no value for a column (decision 0064).
             bonus,
-            // The analysed column, keyed off the external id so each flushed item carries a word
+            // The analysed column, keyed off the batch name so each flushed item carries a word
             // no other item holds.
             WalScalar::Utf8(format!("shared {external}")),
         ],

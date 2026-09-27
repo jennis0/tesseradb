@@ -66,7 +66,7 @@ fn fixture(tmp: &Path) -> PathBuf {
 }
 
 /// Ingest one item at (5, 5) carrying the fixture's `ALL_TERM`.
-fn ingest(engine: &Engine, external_id: &str) -> EntityId {
+fn ingest(engine: &Engine, batch: &str) -> EntityId {
     let row = UnallocatedRow {
         view: "s0".to_string(),
         join: None,
@@ -78,7 +78,7 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .ingest_rows(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0]
 }
 
@@ -541,7 +541,7 @@ fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
     let unentitled = subset_credential();
 
     // One row into each view, in one window, so both views have a plan at the same tick. The
-    // anchor holds the older entity id — ids are assigned by signature then external id, and
+    // anchor holds the older entity id — ids are assigned by signature then batch name, and
     // "anchor" sorts below "joiner" — so `s1`'s plan is the one the dispatch sends first.
     let joiner = {
         let (engine, faults) = engine_flushing_only_on_request(tmp.path(), &root);

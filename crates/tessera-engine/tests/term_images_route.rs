@@ -1175,7 +1175,7 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
 // Ingest
 // -------------------------------------------------------------------------------------------
 
-fn ingest(engine: &Engine, external_id: &str, terms: &[u32], x: f64) {
+fn ingest(engine: &Engine, batch: &str, terms: &[u32], x: f64) {
     let descriptors: Vec<Vec<u8>> = terms.iter().copied().map(label).collect();
     let row = UnallocatedRow {
         view: VIEW.to_string(),
@@ -1188,6 +1188,6 @@ fn ingest(engine: &Engine, external_id: &str, terms: &[u32], x: f64) {
         scoped: Vec::new(),
     };
     engine
-        .ingest_rows(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
         .expect("the ingest is accepted");
 }

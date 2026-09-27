@@ -202,10 +202,10 @@ fn page(engine: &Engine, fx: &Fixture, key: &str, rank: u16, joining: Vec<u64>, 
 
 /// One ingested point, under a batch key used once — a second ingest under a key already seen is
 /// *replayed* rather than accepted, so a fixed key would silently ingest nothing the second time.
-fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
+fn ingest(engine: &Engine, batch: &[u8]) -> EntityId {
     let descriptors = vec![b"0".to_vec()];
     let mut key = [0u8; 32];
-    for (slot, byte) in key.iter_mut().zip(external_id) {
+    for (slot, byte) in key.iter_mut().zip(batch) {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
@@ -221,7 +221,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
     engine
         .ingest_rows(
             vec![row],
-            String::from_utf8_lossy(external_id).into_owned(),
+            String::from_utf8_lossy(batch).into_owned(),
             key,
         )
         .expect("the ingest is accepted")[0]

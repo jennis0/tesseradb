@@ -734,8 +734,7 @@ fn a_join_that_becomes_a_create_is_checked_as_one() {
 }
 
 /// **A create that becomes a join on the executor carries its own value.** The handler found no
-/// item for the row's external id, and another batch then created that item with the row's
-/// value; the row joins it and is accepted.
+/// item holding the row's value, and another batch then created an item with that value; the row joins it and is accepted.
 #[test]
 fn a_create_that_becomes_a_join_carries_its_own_value() {
     let fx = fixture_of(true, &["s0", "s1"]);
@@ -745,7 +744,7 @@ fn a_create_that_becomes_a_join_carries_its_own_value() {
     let created = ingest(&engine, "early", vec![row_into(&engine, "s0", "x", doi, None)])[0];
     engine.release_write_check_for_test();
     let joined = held.join().unwrap().expect("the row joins the item holding its value");
-    assert_eq!(joined, vec![created], "the row joined the item its external id names");
+    assert_eq!(joined, vec![created], "the row joined the item its value names");
     assert_eq!(holders_of(&engine, doi), 1);
 }
 
