@@ -287,7 +287,7 @@ impl Engine {
         let edited: Vec<(EntityId, usize)> = order
             .iter()
             .copied()
-            .filter(|(_, at)| matches!(decided.get(at), Some(Decided::Edited { .. })))
+            .filter(|(_, at)| matches!(decided.get(at), Some(Decided::Edited)))
             .collect();
         // The first read took the rows carrying a blob-resident column; the rest are read here.
         let unread: Vec<(EntityId, usize)> = match &stored.blobs {

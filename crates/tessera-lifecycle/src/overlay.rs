@@ -138,12 +138,11 @@ impl Overlay {
     /// How many deletions stand — **the gauge a compaction trigger keys on**, and not the same
     /// number as [`Self::len`].
     ///
-    /// `len` is `|deleted ∪ suppressed|`, and a standing suppression leaves only by its unsuppress,
-    /// so a deployment holding 500,000 standing suppressions is permanently over any limit expressed in
-    /// those terms — and a trigger reading it would dispatch a **full no-op fold every interval,
-    /// for ever**, rewriting the corpus to retire nothing (compaction §9; r3, memory F5). A
-    /// trigger keys on what a fold can actually reduce; the *alarm* stays on total depth, which is
-    /// the right thing for an operator to see.
+    /// `len` is `|deleted ∪ suppressed|`, and a standing suppression leaves only by its
+    /// unsuppress, so a deployment holding 500,000 standing suppressions is permanently over any
+    /// limit expressed in those terms, and a trigger reading it would dispatch a full no-op fold
+    /// every interval, rewriting the corpus to retire nothing. A trigger keys on what a fold can
+    /// reduce; the alarm stays on total depth, which is the right thing for an operator to see.
     pub fn deleted_len(&self) -> u64 {
         self.deleted.cardinality()
     }

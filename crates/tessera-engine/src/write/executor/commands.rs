@@ -1252,7 +1252,12 @@ impl Executor {
     /// and the probe that finds them runs on this thread with no yield before the append: a batch
     /// acked between them could give an item a row elsewhere, and the deletion would then destroy
     /// a row the caller was told had landed.
-    pub(super) fn commit_view_drop(&mut self, group: String, key: String, reply: Reply<ViewDropped>) {
+    pub(super) fn commit_view_drop(
+        &mut self,
+        group: String,
+        key: String,
+        reply: Reply<ViewDropped>,
+    ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         // The owner's key, whatever group the request named: a key belongs to the group that owns
