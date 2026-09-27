@@ -28,6 +28,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::ops::Range;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,12 +36,10 @@ use croaring::Bitmap;
 use tessera_store::read::SegmentData;
 use tessera_types::EntityId;
 
-use std::sync::atomic::Ordering;
-
 use super::cursor::{Key, Position};
 use super::{RecordsOrder, ResponseEndedBy};
 use crate::cancel::CancelToken;
-use crate::compose::{for_each_run_in, FilterRows};
+use crate::compose::{for_each_run_in, FilterRows, MaskedSet};
 use crate::engine::Engine;
 use crate::error::Result;
 use crate::filter::FilterExpr;
@@ -61,9 +60,13 @@ const STRETCH_GROWTH: u32 = 4;
 /// the stretch's rows, their ranges and the filter's rows beside them: about 16.3 bytes a row at
 /// its peak. A map stretch keeps its items, one `u32` a row while it is evaluated, and their
 /// bitmap: about 4.2. Seventeen bytes a row bounds either, so a stretch holds no more than the
-/// page ceiling it is derived from. A driven stretch holds what a stored one does for each of its
-/// rows: the item with its row, the rows, their ranges and the filter's rows.
+/// page ceiling it is derived from.
 const STRETCH_BYTES_PER_ROW: usize = 17;
+/// The most a driven stretch holds per row it holds, modelled and not measured: each item with
+/// its row, eight bytes; the rows' ranges, one a row where the rows are scattered, held twice
+/// while the filter is evaluated, sixteen; and four bitmaps of the rows or their items, the
+/// candidate among them and the filter's rows, up to four bytes each.
+const DRIVEN_BYTES_PER_ROW: usize = 40;
 
 /// What one page is walked in: the engine, the view resolved and its mask composed for the page,
 /// and the generation that resolution came from.
@@ -174,9 +177,11 @@ pub(super) struct Walk {
     /// The rows the next stretch spans, across every segment.
     pub(super) target: u32,
     /// The rows a stretch may span, from the byte ceiling a stretch is held to.
-    pub(super) ceiling: u32,
+    ceiling: u32,
+    /// The rows a driven stretch may hold, from the same byte ceiling.
+    driven_most: u32,
     /// Whether the next stretch may be driven from the filter's matches: cleared once the filter
-    /// is found to bound none, or more than a stretch at the ceiling spans.
+    /// is found to bound none, or more than `driven_most`.
     driving: bool,
     stretch: Option<Stretch>,
     pub(super) position: Position,
@@ -304,11 +309,15 @@ impl Walk {
         let ceiling = u32::try_from(stretch_bytes / STRETCH_BYTES_PER_ROW)
             .unwrap_or(u32::MAX)
             .max(STRETCH_MIN);
+        let driven_most = u32::try_from(stretch_bytes / DRIVEN_BYTES_PER_ROW)
+            .unwrap_or(u32::MAX)
+            .max(STRETCH_MIN);
         Walk {
             filter,
             keep_unmatched,
             target: stretch.clamp(STRETCH_MIN, ceiling),
             ceiling,
+            driven_most,
             driving: true,
             stretch: None,
             origin: position.scan,
@@ -342,10 +351,9 @@ impl Walk {
                         break Walked::Stopped(reason);
                     }
                 }
+                self.note_regions(cx, &clock.cancel)?;
                 let opened = match self.driving_rows(cx)? {
-                    Some((rows, candidate)) => {
-                        self.open_driven_stretch(cx, scan, &rows, &candidate, &clock.cancel)?
-                    }
+                    Some(rows) => self.open_driven_stretch(cx, scan, &rows, &clock.cancel)?,
                     None => match order {
                         RecordsOrder::Map => self.open_map_stretch(cx, scan, &clock.cancel)?,
                         RecordsOrder::Stored => {
@@ -478,9 +486,7 @@ impl Walk {
                 );
                 let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
                 let domain = crossing_domain(&[parts], &row_bases);
-                let routed = filter_rows(cx, expr, Some(&candidate), &domain, true, cancel)?;
-                self.region = RegionVerdict::coarsest(self.region, routed.region);
-                Some(routed.rows)
+                Some(filter_rows(cx, expr, Some(&candidate), &domain, true, cancel)?.rows)
             }
         };
         Ok(Some(Stretch {
@@ -545,9 +551,7 @@ impl Walk {
                 let mut domain: Vec<Range<u32>> = Vec::new();
                 let total = u32::try_from(row_space.total_rows()).unwrap_or(u32::MAX);
                 for_each_run_in(&rows, 0..total, &mut |run| domain.push(run));
-                let routed = filter_rows(cx, expr, Some(&range), &domain, true, cancel)?;
-                self.region = RegionVerdict::coarsest(self.region, routed.region);
-                Some(routed.rows)
+                Some(filter_rows(cx, expr, Some(&range), &domain, true, cancel)?.rows)
             }
         };
         Ok(Some(Stretch {
@@ -561,31 +565,62 @@ impl Walk {
         }))
     }
 
-    /// The rows the next stretch is driven from, with the viewer's candidate set, or `None`
-    /// where it walks the view: under `keep_unmatched`, which serves every visible row, and
-    /// wherever [`driving_rows`] declines.
-    fn driving_rows(&mut self, cx: &PageCx<'_>) -> Result<Option<(Bitmap, Bitmap)>> {
+    /// The verdicts of the filter's region leaves under this page, noted wherever a stretch is
+    /// opened on either route, so the head's verdict does not depend on which route answers or on
+    /// whether any row remains.
+    fn note_regions(&mut self, cx: &PageCx<'_>, cancel: &Option<CancelToken>) -> Result<()> {
+        if let Some(expr) = &self.filter {
+            let verdict = region_verdict(cx, expr, cancel)?;
+            self.region = RegionVerdict::coarsest(self.region, verdict);
+        }
+        Ok(())
+    }
+
+    /// The rows the next stretch is driven from, or `None` where it walks the view: under
+    /// `keep_unmatched`, which serves every visible row, and wherever [`driving_rows`] declines.
+    fn driving_rows(&mut self, cx: &PageCx<'_>) -> Result<Option<Bitmap>> {
         let Some(expr) = self.filter.as_ref().filter(|_| self.driving && !self.keep_unmatched)
         else {
             return Ok(None);
         };
-        let candidate = cx
-            .engine
-            .filter_candidate(cx.open.served.session, cx.generation)?;
-        let rows = driving_rows(cx, expr, &candidate, self.ceiling)?;
+        let rows = driving_rows(cx, expr, self.driven_most)?;
         self.driving = rows.is_some();
-        Ok(rows.map(|rows| (rows, candidate)))
+        Ok(rows)
     }
 
-    /// The driven stretch past `scan`: every row of `rows` whose item is in `candidate` and
-    /// whose key lies past `scan`, running to the end of the view, with the filter evaluated
-    /// over those rows alone under their items. `None` where no row lies past `scan`.
+    /// The matching rows the mask admits, for the head of a read not yet begun, where its first
+    /// stretch is driven. That stretch is opened here, under the first page's mask, and kept for
+    /// the first page, so the count costs no evaluation the read would not make. `None` where the
+    /// read walks the view.
+    pub(super) fn count_driven(
+        &mut self,
+        cx: &PageCx<'_>,
+        cancel: &Option<CancelToken>,
+    ) -> Result<Option<u64>> {
+        let Some(rows) = self.driving_rows(cx)? else {
+            return Ok(None);
+        };
+        self.note_regions(cx, cancel)?;
+        let Some(stretch) = self.open_driven_stretch(cx, self.position.scan, &rows, cancel)? else {
+            return Ok(Some(0));
+        };
+        let filter = stretch.filter.as_ref().expect("a driven stretch has a filter");
+        let matched = cx.open.mask.count_intersection(filter.rows());
+        self.stretch = Some(stretch);
+        Ok(Some(matched))
+    }
+
+    /// The driven stretch past `scan`: the rows of `rows` whose key lies past `scan`, running to
+    /// the end of the view, with the filter evaluated over those rows alone under the viewer's
+    /// candidate set among their items. In stored order only items in that set are taken, as the
+    /// stored walk takes them; in map order every row is, and the mask tests it, as the map walk
+    /// does. The filter's rows are held to the stretch's rows. `None` where no row lies past
+    /// `scan`.
     fn open_driven_stretch(
         &mut self,
         cx: &PageCx<'_>,
         scan: Option<Key>,
         rows: &Bitmap,
-        candidate: &Bitmap,
         cancel: &Option<CancelToken>,
     ) -> Result<Option<Stretch>> {
         cx.engine
@@ -594,16 +629,12 @@ impl Walk {
             .fetch_add(1, Ordering::Relaxed);
         let order = self.position.order;
         let segments = cx.segments();
-        let mut ahead = Bitmap::new();
         let mut items: Vec<(u32, u32)> = Vec::new();
         for row in rows.iter() {
             let (seg, local) =
                 segment_holding(segments, row).expect("the first segment's rows begin at 0");
             let (segment, _) = segments[seg];
             let entity = cx.entity_of(segment, local);
-            if !candidate.contains(entity) {
-                continue;
-            }
             let key = match order {
                 RecordsOrder::Map => (
                     segment.morton.u32()[local as usize],
@@ -611,76 +642,117 @@ impl Walk {
                 ),
                 RecordsOrder::Stored => (entity, 0),
             };
-            if scan.is_some_and(|scan| key <= scan) {
-                continue;
+            if scan.is_none_or(|scan| key > scan) {
+                items.push((entity, row));
             }
-            ahead.add(row);
-            items.push((entity, row));
+        }
+        items.sort_unstable();
+        let entities: Bitmap = items.iter().map(|&(entity, _)| entity).collect();
+        let candidate =
+            cx.engine
+                .filter_candidate_within(cx.open.served.session, cx.generation, &entities)?;
+        drop(entities);
+        if order == RecordsOrder::Stored {
+            items.retain(|&(entity, _)| candidate.contains(entity));
         }
         if items.is_empty() {
             return Ok(None);
         }
-        items.sort_unstable();
-        let entities = Bitmap::of(&items.iter().map(|&(entity, _)| entity).collect::<Vec<_>>());
+        let ahead: Bitmap = items.iter().map(|&(_, row)| row).collect();
+        if order == RecordsOrder::Map {
+            items = Vec::new();
+        }
         let total = u32::try_from(cx.open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
         let mut domain: Vec<Range<u32>> = Vec::new();
         for_each_run_in(&ahead, 0..total, &mut |run| domain.push(run));
         let expr = self.filter.as_ref().expect("only a filter drives a stretch");
-        let routed = filter_rows(cx, expr, Some(&entities), &domain, true, cancel)?;
-        self.region = RegionVerdict::coarsest(self.region, routed.region);
-        if order == RecordsOrder::Map {
-            items = Vec::new();
-        }
+        let filter = match filter_rows(cx, expr, Some(&candidate), &domain, true, cancel)?.rows {
+            FilterRows::Viewport { rows, domain } => FilterRows::Viewport {
+                rows: rows.and(&ahead),
+                domain,
+            },
+            FilterRows::Complete(rows) => FilterRows::Viewport {
+                rows: rows.and(&ahead),
+                domain,
+            },
+        };
         Ok(Some(Stretch {
             under: Arc::clone(cx.generation),
             mask: cx.open.served.mask_identity,
             from: scan,
             until: None,
-            filter: Some(routed.rows),
+            filter: Some(filter),
             items,
             driven: true,
         }))
     }
 }
 
+/// The coarsest verdict `expr`'s region leaves reach under this page, each resolved once a page.
+fn region_verdict(
+    cx: &PageCx<'_>,
+    expr: &FilterExpr,
+    cancel: &Option<CancelToken>,
+) -> Result<Option<RegionVerdict>> {
+    Ok(match expr {
+        FilterExpr::Region(leaf) => Some(
+            cx.engine
+                .region_rows(leaf, &cx.open.served, &cx.open.mask, &cx.resolved, cancel)
+                .map_err(filter_refusal)?
+                .verdict,
+        ),
+        FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) | FilterExpr::NoneOf(kids) => {
+            let mut out = None;
+            for kid in kids {
+                out = RegionVerdict::coarsest(out, region_verdict(cx, kid, cancel)?);
+            }
+            out
+        }
+        FilterExpr::Leaf { .. } | FilterExpr::MemberOf(_) => None,
+    })
+}
+
 /// The rows of the view `expr` can match, where they are no more than `most`, or `None` where
 /// the filter's matches must be found by walking the view. This is the one rule that decides
 /// between the two routes: a walk costs the visible rows it passes, and a driven read costs the
 /// rows returned here, so a read is driven wherever an index bounds its matches to what one
-/// stretch at the ceiling may hold. Each bound is taken inside the viewer's visible set before it
-/// is counted, so which route answers depends only on what the viewer can see.
-pub(super) fn driving_rows(
-    cx: &PageCx<'_>,
-    expr: &FilterExpr,
-    candidate: &Bitmap,
-    most: u32,
-) -> Result<Option<Bitmap>> {
+/// driven stretch may hold. Each bound is taken inside the viewer's visible set before it is
+/// counted, so which route answers depends only on what the viewer can see.
+fn driving_rows(cx: &PageCx<'_>, expr: &FilterExpr, most: u32) -> Result<Option<Bitmap>> {
     if !cx.engine.switches.driven_reads_enabled.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    Ok(bounded_rows(cx, expr, candidate)?.filter(|rows| rows.cardinality() <= u64::from(most)))
+    Ok(bounded_rows(cx, expr)?.filter(|rows| rows.cardinality() <= u64::from(most)))
 }
 
 /// The rows of the view an index says `expr` can match at most, or `None` where no index bounds
-/// them: a unique field's `eq` or `in`, as the rows of the items in `candidate` holding the values
-/// named; a `member_of`, as the artifact's members the page's mask admits; an `all_of`, as the
-/// rows every bounded kid admits; and an `any_of` whose every kid is bounded, as their union.
-fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr, candidate: &Bitmap) -> Result<Option<Bitmap>> {
+/// them: a unique field's `eq` or `in`, as the rows of the items holding the values named that
+/// are in the viewer's candidate set; a `member_of`, as the artifact's members the page's mask
+/// admits; an `all_of`, as the rows every bounded kid admits; and an `any_of` whose every kid is
+/// bounded, as their union. The candidate set is tested only at the holders.
+fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr) -> Result<Option<Bitmap>> {
     Ok(match expr {
         FilterExpr::Leaf { column, operand } => {
             let Some(keys) = cx.generation.filter_columns.unique_keys(column, operand) else {
                 return Ok(None);
             };
+            let holders: Bitmap = unique_holders(cx.generation, column, &keys)
+                .map_err(filter_refusal)?
+                .into_iter()
+                .collect();
+            let visible = cx.engine.filter_candidate_within(
+                cx.open.served.session,
+                cx.generation,
+                &holders,
+            )?;
             let row_space = &cx.open.served.data.row_space;
-            let mut rows = Bitmap::new();
-            for entity in unique_holders(cx.generation, column, &keys).map_err(filter_refusal)? {
-                if candidate.contains(entity) {
-                    if let Some(row) = row_space.row_of(EntityId::new(u64::from(entity))) {
-                        rows.add(row.raw());
-                    }
-                }
-            }
-            Some(rows)
+            Some(
+                visible
+                    .iter()
+                    .filter_map(|entity| row_space.row_of(EntityId::new(u64::from(entity))))
+                    .map(|row| row.raw())
+                    .collect(),
+            )
         }
         FilterExpr::MemberOf(leaf) => Some(
             cx.engine
@@ -690,7 +762,7 @@ fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr, candidate: &Bitmap) -> Resul
         FilterExpr::AllOf(kids) => {
             let mut out: Option<Bitmap> = None;
             for kid in kids {
-                if let Some(rows) = bounded_rows(cx, kid, candidate)? {
+                if let Some(rows) = bounded_rows(cx, kid)? {
                     out = Some(match out {
                         Some(held) => held.and(&rows),
                         None => rows,
@@ -702,7 +774,7 @@ fn bounded_rows(cx: &PageCx<'_>, expr: &FilterExpr, candidate: &Bitmap) -> Resul
         FilterExpr::AnyOf(kids) => {
             let mut out = Bitmap::new();
             for kid in kids {
-                match bounded_rows(cx, kid, candidate)? {
+                match bounded_rows(cx, kid)? {
                     Some(rows) => out.or_inplace(&rows),
                     None => return Ok(None),
                 }

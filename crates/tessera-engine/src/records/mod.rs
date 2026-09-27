@@ -21,14 +21,13 @@ mod cursor;
 mod plan;
 mod walk;
 
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::record_batch::RecordBatch;
 
 use crate::cancel::CancelToken;
-use crate::compose::{for_each_run_in, MaskedSet};
+use crate::compose::MaskedSet;
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::filter::FilterExpr;
@@ -43,7 +42,7 @@ pub(crate) use cursor::CursorKey;
 use cursor::{Binding, ItemsCursor, Position, Route};
 use columns::{empty_page, read_page};
 use plan::FieldPlan;
-use walk::{driving_rows, filter_rows, Clock, Collected, PageCx, Walk, Walked};
+use walk::{filter_rows, Clock, Collected, PageCx, Walk, Walked};
 
 /// The order a read returns its rows in. Both return the same rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -611,9 +610,11 @@ impl Engine {
 }
 
 impl Pager for ItemsPager<'_> {
-    /// The view's visible items, and of them the ones the filter matches, by one evaluation of
-    /// the filter on the route every page takes, under the first page's mask: over the rows that
-    /// drive the read where [`driving_rows`] gives them, and over the whole view otherwise.
+    /// The view's visible items, and of them the ones the filter matches, under the first page's
+    /// mask. Where the read is driven from its matches, the count is taken from the first driven
+    /// stretch, which the first page then takes its rows from. Otherwise, and always under
+    /// `keep_unmatched`, whose read walks the view, it is one evaluation of the filter over the
+    /// whole view on the route every page takes.
     fn count(
         &mut self,
         engine: &Engine,
@@ -632,16 +633,25 @@ impl Pager for ItemsPager<'_> {
                 None,
             ));
         };
-        let total = u32::try_from(open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
-        let candidate = engine.filter_candidate(open.served.session, generation)?;
-        let driving = driving_rows(&cx, expr, &candidate, self.walk.ceiling)?;
-        let mut domain: Vec<Range<u32>> = Vec::new();
-        match &driving {
-            Some(rows) => for_each_run_in(rows, 0..total, &mut |run| domain.push(run)),
-            None => domain.push(0..total),
+        if let Some(matched) = self.walk.count_driven(&cx, &req.cancel)? {
+            return Ok((
+                RecordsCounts {
+                    served: visible,
+                    matched,
+                },
+                None,
+            ));
         }
-        let routed =
-            filter_rows(&cx, expr, Some(&candidate), &domain, driving.is_some(), &req.cancel)?;
+        let total = u32::try_from(open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
+        let whole_view = 0..total;
+        let routed = filter_rows(
+            &cx,
+            expr,
+            None,
+            std::slice::from_ref(&whole_view),
+            false,
+            &req.cancel,
+        )?;
         let matched = open.mask.count_intersection(routed.rows.rows());
         Ok((
             RecordsCounts {

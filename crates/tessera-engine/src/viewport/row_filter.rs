@@ -1023,6 +1023,23 @@ impl Engine {
         ))
     }
 
+    /// [`Self::filter_candidate`]'s members among `within`, without composing the whole set.
+    pub(crate) fn filter_candidate_within(
+        &self,
+        session: &Session,
+        generation: &Generation,
+        within: &croaring::Bitmap,
+    ) -> Result<croaring::Bitmap> {
+        let fragment = self.fragment_for(session, generation)?;
+        Ok(crate::filter::candidate_within(
+            &fragment,
+            session.satisfied(),
+            &generation.overlay,
+            &generation.buffer,
+            within,
+        ))
+    }
+
     /// [`Self::route_filters`] under a candidate the caller composed: a subset of
     /// [`Self::filter_candidate`]'s set, never wider, since every scan returns a subset of it.
     /// A region or `member_of` leaf `resolved` holds is answered from it, and one it does not is
@@ -1040,18 +1057,7 @@ impl Engine {
         ) -> Result<T>,
     ) -> Result<T> {
         let regions = |leaf: &crate::filter::RegionLeaf| {
-            let held = resolved
-                .regions
-                .borrow()
-                .iter()
-                .find(|(held, _)| held == leaf)
-                .map(|(_, rows)| rows.clone());
-            if let Some(rows) = held {
-                return Ok(rows);
-            }
-            let rows = self.resolve_region(leaf, served, mask, cancel)?;
-            resolved.regions.borrow_mut().push((leaf.clone(), rows.clone()));
-            Ok(rows)
+            self.region_rows(leaf, served, mask, resolved, cancel)
         };
         let members =
             |leaf: &crate::filter::MemberOfLeaf| self.member_rows(leaf, served, mask, resolved);
@@ -1072,6 +1078,30 @@ impl Engine {
                 .evaluate_routed(expr, candidate, prefer_row, &resolvers)
                 .map_err(filter_refusal)
         })
+    }
+
+    /// A region leaf's rows under `mask`, from `resolved` where it holds them, and resolved and
+    /// kept there otherwise.
+    pub(crate) fn region_rows(
+        &self,
+        leaf: &crate::filter::RegionLeaf,
+        served: &ServedView<'_>,
+        mask: &EffectiveMask,
+        resolved: &ResolvedLeaves,
+        cancel: &Option<CancelToken>,
+    ) -> std::result::Result<crate::region::RegionRows, crate::filter::FilterError> {
+        let held = resolved
+            .regions
+            .borrow()
+            .iter()
+            .find(|(held, _)| held == leaf)
+            .map(|(_, rows)| rows.clone());
+        if let Some(rows) = held {
+            return Ok(rows);
+        }
+        let rows = self.resolve_region(leaf, served, mask, cancel)?;
+        resolved.regions.borrow_mut().push((leaf.clone(), rows.clone()));
+        Ok(rows)
     }
 
     /// A `member_of` leaf's rows under `mask`, from `resolved` where it holds them, and resolved
