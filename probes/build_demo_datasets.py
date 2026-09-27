@@ -180,7 +180,8 @@ archive          = "archive.parquet"
 primary_category = "primary_category.parquet"
 
 [defaults]
-source = "points"
+source     = "points"
+join_field = "id"
 
 [[view]]
 name             = "s0"
@@ -206,6 +207,14 @@ width      = "u16"
 value_set  = "closed"
 visibility = "public"
 source     = "primary_category"
+
+# The join field: each paper's row number, which the points file and the label relation both
+# carry as `entity_id`.
+[[attribute]]
+name   = "id"
+type   = "u32"
+unique = true
+field  = "entity_id"
 
 [[attribute]]
 name       = "archive"

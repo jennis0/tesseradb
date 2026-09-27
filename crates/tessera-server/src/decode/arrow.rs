@@ -489,8 +489,8 @@ fn tessera_id_col<'a>(
 fn parse_tessera_id(body_name: &str, row: usize, text: &str) -> Result<TesseraId, DecodeError> {
     text.parse::<u64>().map(TesseraId::new).map_err(|_| {
         DecodeError(format!(
-            "{body_name}: row {row}'s tessera_id is not decimal digits; send it as a string of \
-             digits"
+            "{body_name}: row {row}, column 'tessera_id' is not decimal digits; send it as a \
+             string of digits"
         ))
     })
 }
