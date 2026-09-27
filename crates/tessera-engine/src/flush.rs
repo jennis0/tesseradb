@@ -2173,9 +2173,9 @@ mod tests {
         plan_flush(generation, VIEW, false, false)
     }
 
-    /// **A suppression never touches postings and retires only on unsuppress**, so a flush that
-    /// skipped it would leave a later unsuppress with nothing to reveal: no row would exist, and
-    /// unsuppressing the item would show nothing at all.
+    /// **A suppression never touches postings, and an item's is lifted only by an unsuppress**, so
+    /// a flush that skipped it would leave a later unsuppress with nothing to reveal: no row would
+    /// exist, and unsuppressing the item would show nothing at all.
     #[test]
     fn a_suppressed_entity_is_flushed_so_a_later_unsuppress_has_something_to_reveal() {
         let generation = generation_with(&[(7, item(&[1]))], &[(7, ChangeOp::Suppress)]);

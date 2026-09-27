@@ -21,98 +21,43 @@ pub(super) fn roster_error(e: tessera_lifecycle::RosterError) -> ExecError {
 /// `views` is every id the dropped key resolves to (`Manifest::view_ids_for_key`), not the one
 /// the request happened to name: a key is a view of the group that owns it and one of every group
 /// sharing its views, so a probe over a single spelling reads the wrong row space when the drop
-/// was addressed to the other, and counts an entity dangling that holds a row under the key's own
+/// was addressed to the other, and would delete an entity that holds a row under the key's own
 /// second name.
 ///
-/// The buffer counts as a view's rows: a row accepted but not yet flushed is in no permutation, so
-/// a probe that read the permutations alone would call an entity dangling that a caller was told
-/// had landed elsewhere, and then delete it. An item whose only row is buffered in `views` is
-/// dangling, since the drop discards that row.
-///
-/// Row space is walked, entity space only where it cannot be. A view's rows invert to their
-/// entities directly wherever the row space can be inverted, which is every view a flush created
-/// and every built view that published a `row-entity.u32`; where it cannot, the fallback asks
-/// each entity below the high-water whether this view holds it, which is `O(entity space)` and is
-/// reported rather than hidden, because a silent one would look like an idle service.
+/// A row accepted but not yet flushed counts as a row in its view. An item whose only row is
+/// buffered in `views` is deleted, since the drop discards that row, and one with a buffered row in
+/// another view is kept. The cost is [`view_entities`]'s walk, then a `row_of` per other view and
+/// a buffer lookup per entity found.
 pub(super) fn dangling_entities(generation: &Generation, views: &[String]) -> Vec<EntityId> {
-    let mut candidates: Vec<EntityId> = Vec::new();
-    for view in views {
-        for partition in generation.bundle.partitions.values() {
-            let Some(view_data) = partition.views.get(view) else {
-                continue;
-            };
-            let rows = view_data.row_space.total_rows();
-            if view_data.row_space.can_invert() {
-                for row in 0..rows {
-                    if let Some(entity) = view_data
-                        .row_space
-                        .entity_of(tessera_types::RowId::new(row as u32))
-                    {
-                        candidates.push(entity);
-                    }
-                }
-            } else {
-                let bound = view_data.row_space.base().bound();
-                tracing::warn!(
-                    view = %view,
-                    entities = bound,
-                    "this view publishes no row→entity table, so a drop walks entity space to \
-                     find the items it leaves in no view"
-                );
-                for raw in 0..bound {
-                    let entity = EntityId::new(raw);
-                    if view_data.row_space.row_of(entity).is_some() {
-                        candidates.push(entity);
-                    }
-                }
-            }
-        }
-    }
-    // Every buffered row, joins included (`rows()`, not `iter()`): the question here is which
-    // entities have a row *in one of these views*, which is geometry, and a join is a row.
-    for (entity, item) in generation.buffer.rows() {
-        if views.iter().any(|view| view == &item.view) {
-            candidates.push(*entity);
-        }
-    }
-    candidates.sort_unstable_by_key(|e| e.raw());
-    candidates.dedup();
-    candidates.retain(|entity| {
-        // Already deleted is already gone: a second deletion of the same entity is a no-op the
-        // overlay would absorb, and counting it would report work the drop did not do.
-        if generation.overlay.is_deleted(*entity) {
-            return false;
-        }
-        let in_another_view = generation.bundle.partitions.values().any(|partition| {
-            partition
-                .views
-                .iter()
-                .any(|(id, data)| !views.contains(id) && data.row_space.row_of(*entity).is_some())
-        });
-        let buffered_elsewhere = generation.buffer.rows().any(|(buffered, item)| {
-            buffered == entity && !views.iter().any(|view| view == &item.view)
-        });
-        !in_another_view && !buffered_elsewhere
-    });
-    candidates
+    let in_views = |view: &String| views.contains(view);
+    view_entities(generation, views)
+        .iter()
+        .map(|raw| EntityId::new(u64::from(raw)))
+        .filter(|entity| {
+            let in_another_view = generation.bundle.partitions.values().any(|partition| {
+                partition.views.iter().any(|(id, data)| {
+                    !in_views(id) && data.row_space.row_of(*entity).is_some()
+                })
+            });
+            let buffered_elsewhere = generation
+                .buffer
+                .rows_of(*entity)
+                .any(|item| !in_views(&item.view));
+            !in_another_view && !buffered_elsewhere
+        })
+        .collect()
 }
 
 /// Every entity holding a row in one of these views, or buffered for one, minus the deleted: the
-/// set an exclusion is complemented against.
-///
-/// [`dangling_entities`]'s walk without its second question: that one asks which entities would
-/// be left with no row if these views went away, and this asks which have a row in them now. A
-/// view that publishes no row→entity table is walked over entity space, and the warning there is
-/// that walk's, not repeated here.
+/// set an exclusion is complemented against, and the one a drop's deletions are found in.
 ///
 /// A deleted entity is excluded and a suppressed one is not. A deletion is irreversible and its
 /// entity can contribute to no count again, where a suppression is a live member temporarily
 /// outside every mask, which the inclusion spelling would have named and this one keeps.
 ///
-/// The cost is a walk of the view's rows, on the executor loop, once per publication that carries
-/// an exclusion: a row→entity inversion per row, or a `row_of` per entity where the view publishes
-/// no inversion table. The bound on the list is what makes the operation admissible at all, and
-/// the complement cannot be taken before the whole list is in.
+/// The cost is a walk of the views' own slots, on the executor loop: the base permutation's
+/// present pages ([`tessera_store::permutation::Permutation::try_for_each_slot`]) and each
+/// extent's rows, then the buffer once.
 pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croaring::Bitmap {
     let mut entities = croaring::Bitmap::new();
     for view in views {
@@ -120,30 +65,15 @@ pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croari
             let Some(view_data) = partition.views.get(view) else {
                 continue;
             };
-            let rows = view_data.row_space.total_rows();
-            if view_data.row_space.can_invert() {
-                for row in 0..rows {
-                    if let Some(entity) = view_data
-                        .row_space
-                        .entity_of(tessera_types::RowId::new(row as u32))
-                    {
-                        entities.add(entity.raw() as u32);
-                    }
-                }
-            } else {
-                let bound = view_data.row_space.base().bound();
-                tracing::warn!(
-                    view = %view,
-                    entities = bound,
-                    "this view publishes no row→entity table, so an exclusion's complement walks \
-                     entity space to enumerate its rows"
-                );
-                for raw in 0..bound {
-                    let entity = EntityId::new(raw);
-                    if view_data.row_space.row_of(entity).is_some() {
-                        entities.add(raw as u32);
-                    }
-                }
+            let row_space = &view_data.row_space;
+            let _ = row_space
+                .base()
+                .try_for_each_slot(|entity, _| -> Result<(), std::convert::Infallible> {
+                    entities.add(entity as u32);
+                    Ok(())
+                });
+            for extent in row_space.extents() {
+                entities.extend(extent.pairs().map(|(entity, _)| entity as u32));
             }
         }
     }
@@ -156,14 +86,7 @@ pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croari
             entities.add(entity.raw() as u32);
         }
     }
-    entities.remove_run_compression();
-    let deleted: Vec<u32> = entities
-        .iter()
-        .filter(|raw| generation.overlay.is_deleted(EntityId::new(*raw as u64)))
-        .collect();
-    for raw in deleted {
-        entities.remove(raw);
-    }
+    entities.andnot_inplace(generation.overlay.deleted_set());
     entities
 }
 

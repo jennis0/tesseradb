@@ -472,7 +472,8 @@ export class Control {
    * `deleted`.
    */
   dropView(group: string, key: string, options: WriteOptions = {}): Promise<Answer> {
-    return this.send('DELETE', withQuery(`/control/views/${segment(group)}/${segment(key)}`, waiting(options)), options);
+    const path = withQuery(`/control/views/${segment(group)}/${segment(key)}`, waiting(options));
+    return this.send('DELETE', path, options);
   }
 
   /**

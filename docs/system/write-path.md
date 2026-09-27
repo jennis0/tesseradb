@@ -521,8 +521,9 @@ entity. An id is freed only where it is no item's number. An item's first entity
 from which its `tessera_id` is derived, and it stays reserved after the item is deleted, so a
 `tessera_id` a client holds never comes to name another item. An entity a suppression stands
 against is freed like any other, since the compaction drops its suppression with its rows, and the
-item that takes the id is not suppressed. An item edited again and again therefore holds its number and at most two other ids: the entity it is in, and the
-one its last edit left, until a compaction frees it. Under repeated edits of the same items the
+item that takes the id is not suppressed. An item edited again and again therefore holds its
+number and at most two other ids: the entity it is in, and the one its last edit left, until a
+compaction frees it. Under repeated edits of the same items the
 high point of the id space stops rising after the second compaction.
 
 A freed id is held back until the WAL has rotated past the compaction's publication. Until then a

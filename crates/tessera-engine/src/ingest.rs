@@ -455,10 +455,10 @@ impl Engine {
         let own_view = match (placing, buffered) {
             (Some((view, _)), _) => view.id.clone(),
             (None, Some(item)) => item.view.clone(),
-            // A view drop deletes the items it leaves in no view, so an item holds a row somewhere.
-            (None, None) => held_views.first().cloned().ok_or_else(|| {
-                AcceptError::Unreadable(format!("row {at}'s item has no readable row in any view"))
-            })?,
+            (None, None) => held_views.first().cloned().expect(
+                "a live item holds a row in some view: a view drop deletes the items it leaves in \
+                 none",
+            ),
         };
         let mut views: Vec<String> = vec![own_view.clone()];
         views.extend(held_views.iter().filter(|v| **v != own_view).cloned());

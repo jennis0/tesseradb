@@ -178,10 +178,11 @@ pub struct WalRow {
     pub scoped: Vec<WalScalar>,
 }
 
-/// The disposition change carried by each entry of a [`WalRecord::ChangeBatch`] record. The two removal rules
-/// (write-path §5.4; ruled 2026-08-03) are distinct and must not be conflated: suppressions retire
-/// only on `Unsuppress` (never touching postings — Rule S); deletions retire at the compaction fold
-/// that executes them (Rule F).
+/// The disposition change carried by each entry of a [`WalRecord::ChangeBatch`] record. The two
+/// removal rules (write-path §5.4) are distinct and must not be conflated: a suppression retires on
+/// `Unsuppress`, or with an entity an edit moved its item away from at the fold that removes its
+/// rows, and never touches postings (Rule S); a deletion retires at the compaction fold that
+/// executes it (Rule F). A fold logs the suppressions it retires as `Unsuppress` entries.
 ///
 /// A fourth variant, `Predicate`, was deleted with `WAL_VERSION` 5: decision 0047 withdrew the op
 /// at the boundary (an edit is a delete plus a re-ingest) and decision 0048 deleted the machinery
@@ -1732,8 +1733,9 @@ impl Wal {
     ///
     /// **The snapshot is durable before anything is deleted**, because the overlay's only durable
     /// home is the WAL: the `Change` records inside the members about to go are the sole record
-    /// that an item was suppressed, and a suppression retires only on unsuppress. Deleting first
-    /// and snapshotting after would re-expose every denied item on the next restart.
+    /// that an item was suppressed, and a live item's suppression retires only on unsuppress.
+    /// Deleting first and snapshotting after would re-expose every denied item on the next
+    /// restart.
     ///
     /// **Deletion is oldest-first**, because a crash midway through an unordered deletion leaves a
     /// *gap* in the sequence, and [`Wal::open`] fails closed on a gap — turning a benign crash into

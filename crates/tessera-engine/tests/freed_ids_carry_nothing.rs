@@ -627,6 +627,96 @@ fn a_moved_entitys_suppression_stays_withdrawn_after_a_restart_replays_it() {
     check(&engine, "a second fold");
 }
 
+/// **A fold discarded after it logged the suppressions leaving with its entities hides nothing
+/// less.** The fold is parked before its `CURRENT` flip, with the unsuppression of the suppressed
+/// item's old entities already in the log, and the flip then fails. Those entities are still
+/// deleted, before and after a restart that replays the unsuppression over rows the discarded fold
+/// never removed, so the item stays hidden; the next fold completes and leaves the item suppressed
+/// through the entity it holds.
+#[test]
+fn a_fold_discarded_after_logging_the_unsuppression_hides_nothing_less() {
+    use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        tessera_engine::EngineConfig {
+            flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
+            ..config_uncapped()
+        },
+    )
+    .expect("the engine opens");
+    let faults = Arc::new(FaultSwitchboard::new());
+    engine
+        .start_write_executor_with_faults(8, Arc::clone(&faults))
+        .expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    engine.set_merge_for_test(false);
+    publish(&engine, &root);
+    let number = EntityId::new(source_to_new_map(&root, "v00000")[&W]);
+    let w = engine.tessera_id_of(number).unwrap();
+    engine.accept_change(number, ChangeOp::Suppress).unwrap();
+    send(&engine, "w1", "s0", vec![rescore(w, 601)]);
+    publish_buffered(&engine);
+    let middle = entity_of(&engine, w);
+    send(&engine, "w2", "s0", vec![rescore(w, 602)]);
+    publish_buffered(&engine);
+    let holds = entity_of(&engine, w);
+
+    let failures = engine.write_executor_stats().fold_failures;
+    faults.arm_pause(PauseSite::BeforeCurrentFlip, PauseAction::Stall);
+    engine.request_fold();
+    faults.await_arrivals(PauseSite::BeforeCurrentFlip, 1, Duration::from_secs(60));
+    // A directory where the flip writes its temporary file fails the flip.
+    let blocker = root.join("CURRENT.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    faults.release();
+    wait_until("the fold is discarded", Duration::from_secs(60), || {
+        engine.write_executor_stats().fold_failures > failures
+    });
+    std::fs::remove_dir(&blocker).unwrap();
+
+    let hidden = |engine: &Engine, after: &str| {
+        let overlay = Arc::clone(&engine.generation().overlay);
+        assert!(
+            overlay.is_deleted(number) && overlay.is_deleted(middle),
+            "the old entities stay deleted, after {after}"
+        );
+        assert!(overlay.is_suppressed(holds), "w's own entity is suppressed, after {after}");
+        for credential in [full_coverage_credential(), subset_credential()] {
+            let session = engine.authorise(&credential).unwrap();
+            assert!(
+                !served(engine, &session, "s0", None).contains(&w.raw()),
+                "w stays hidden, after {after}"
+            );
+            assert!(engine.item(&session, w).unwrap().is_none(), "w has no card, after {after}");
+        }
+    };
+    hidden(&engine, "the discarded fold");
+    drop(engine);
+    let engine = open(tmp.path(), &root);
+    hidden(&engine, "a restart");
+    let overlay = Arc::clone(&engine.generation().overlay);
+    assert!(
+        !overlay.is_suppressed(number) && !overlay.is_suppressed(middle),
+        "the restart replayed the unsuppression the discarded fold logged"
+    );
+
+    fold(&engine);
+    let overlay = Arc::clone(&engine.generation().overlay);
+    assert!(
+        !overlay.touches(number) && !overlay.touches(middle),
+        "the next fold removes the old entities and their deny records"
+    );
+    assert!(overlay.is_suppressed(holds));
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    assert!(!served(&engine, &full, "s0", None).contains(&w.raw()), "w stays suppressed");
+}
+
 /// **An edit resolved to an entity before it was freed does not reach the item that took it.**
 /// The edit is held after its handler resolved the item to its entity; the item moves on, a fold
 /// frees the entity, and a new item in the same views takes it. Released, the edit is decided
