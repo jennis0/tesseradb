@@ -104,6 +104,14 @@ struct Fixture {
 
 async fn fixture_with(compute_gate: ComputeGate, tune: impl FnOnce(&mut ServeLimits)) -> Fixture {
     static BUILT: OnceLock<TempDir> = OnceLock::new();
+    fixture_with_gates(compute_gate, generous_bulk_gate(), tune).await
+}
+
+async fn fixture_with_gates(
+    compute_gate: ComputeGate,
+    bulk_gate: ComputeGate,
+    tune: impl FnOnce(&mut ServeLimits),
+) -> Fixture {
     let tmp = TempDir::new().unwrap();
     let bundle = copy_built(&BUILT, tmp.path(), build_bundle);
     let server = spawn_server_with_bulk_reads(
@@ -111,7 +119,7 @@ async fn fixture_with(compute_gate: ComputeGate, tune: impl FnOnce(&mut ServeLim
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
         compute_gate,
-        generous_bulk_gate(),
+        bulk_gate,
         tune,
     )
     .await;
@@ -759,6 +767,7 @@ async fn every_refusal_has_its_status() {
         (json!({ "view": "s0", "groupings": [{ "unknown": 1 }] }), None),
         (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 33 } }] }), None),
         (json!({ "view": "s0", "groupings": [{ "cells": { "zoom": 3 } }] }), None),
+        (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 300 } }] }), None),
         (by(json!({ "top": 2 })), None),
         (by(json!({ "field": "archive", "layer": LAYER, "top": 2 })), None),
         (by(json!({ "field": "archive" })), None),
@@ -767,7 +776,6 @@ async fn every_refusal_has_its_status() {
         (by(json!({ "field": "archive", "top": 6 })), Some("max_aggregate_top")),
         (by(json!({ "field": "archive", "values": [] })), None),
         (by(json!({ "field": "archive", "values": ["a", "b", "c", "d"] })), Some("max_aggregate_named")),
-        (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 300 } }] }), None),
         (by(json!({ "field": "archive", "artifacts": [1] })), None),
         (by(json!({ "field": "archive", "top": 1, "level": 0 })), None),
         (by(json!({ "field": "archive", "top": 1, "unknown": 1 })), None),
@@ -826,26 +834,30 @@ async fn refusal_detail(server: &TestServer, token: &str, field: &str) -> String
     body["detail"].as_str().unwrap().replace(field, "<field>")
 }
 
-/// **The route takes its slot from the viewport's gate**, not the bulk-read lane: with the
-/// viewport's gate full it is shed, with the bulk lane full it is served.
+/// **A request without cells takes its slot from the viewport's gate, and one with cells from the
+/// bulk-read lane**: each is shed with its own gate full and served with the other's full.
 #[tokio::test]
-async fn the_route_is_admitted_as_the_viewport_is() {
-    let f = fixture_with(ComputeGate::new(1, 0, 250), |_| {}).await;
+async fn a_request_is_admitted_by_whether_it_asks_for_cells() {
+    let f = fixture_with_gates(ComputeGate::new(1, 0, 250), ComputeGate::for_bulk_reads(1), |_| {})
+        .await;
     let token = token_for(&f.server, &["0"]).await;
-    let body = json!({ "view": "s0", "groupings": [{}] });
+    let counts = json!({ "view": "s0", "groupings": [{}, { "by": { "field": "archive", "top": 2 } }] });
+    let cells = json!({ "view": "s0", "groupings": [{}, { "cells": { "depth": 6 } }] });
+
     let held = hold(&f.server.state.compute_gate).await;
-    let resp = post(&f.server, "/v1/aggregate", &token, &body).await;
+    let resp = post(&f.server, "/v1/aggregate", &token, &counts).await;
     assert!(resp.headers().contains_key("retry-after"));
     assert_eq!(refused(resp, 429).await, "backpressure");
     drop(held);
-    let held: Vec<_> = {
-        let mut held = Vec::new();
-        for _ in 0..16 {
-            held.push(hold(&f.server.state.bulk_gate).await);
-        }
-        held
-    };
-    aggregate_ok(&f.server, &token, &body).await;
+    aggregate_ok(&f.server, &token, &cells).await;
+
+    let held = hold(&f.server.state.bulk_gate).await;
+    let started = Instant::now();
+    let resp = post(&f.server, "/v1/aggregate", &token, &cells).await;
+    assert!(resp.headers().contains_key("retry-after"));
+    assert_eq!(refused(resp, 429).await, "backpressure");
+    assert!(started.elapsed() < Duration::from_secs(5), "a cell request waited for the lane");
+    aggregate_ok(&f.server, &token, &counts).await;
     drop(held);
 }
 
@@ -864,12 +876,12 @@ async fn hold(gate: &ComputeGate) -> tessera_server::state::GatePermits {
 }
 
 /// **A client that goes away stops the work and frees the slot.** The response is far larger
-/// than the sockets buffer, so its producer waits on the reader holding the viewport's only slot,
-/// and a viewport is shed; once the reader goes, a viewport is served well inside the stall budget
-/// the producer would otherwise wait out.
+/// than the sockets buffer, so its producer waits on the reader holding the bulk lane's only slot,
+/// and a second cell request is shed; once the reader goes, one is served well inside the stall
+/// budget the producer would otherwise wait out.
 #[tokio::test]
 async fn a_client_that_goes_away_stops_the_work() {
-    let f = fixture_with(ComputeGate::new(1, 0, 250), |limits| {
+    let f = fixture_with_gates(generous_test_gate(), ComputeGate::for_bulk_reads(1), |limits| {
         limits.stream_write_stall_ms = 120_000;
     })
     .await;
@@ -887,8 +899,8 @@ async fn a_client_that_goes_away_stops_the_work() {
     assert_eq!(reader.status().as_u16(), 200);
     assert!(reader.chunk().await.unwrap().is_some());
 
-    let viewport = json!({ "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 0 });
-    let resp = post(&f.server, "/v1/viewport", &token, &viewport).await;
+    let small = json!({ "view": "s0", "groupings": [{ "cells": { "depth": 1 } }] });
+    let resp = post(&f.server, "/v1/aggregate", &token, &small).await;
     assert_eq!(
         refused(resp, 429).await,
         "backpressure",
@@ -898,7 +910,7 @@ async fn a_client_that_goes_away_stops_the_work() {
     drop(reader);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let resp = post(&f.server, "/v1/viewport", &token, &viewport).await;
+        let resp = post(&f.server, "/v1/aggregate", &token, &small).await;
         if resp.status().as_u16() == 200 {
             break;
         }

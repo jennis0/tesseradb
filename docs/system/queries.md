@@ -468,8 +468,11 @@ The response is framed as a bulk read is, with a table head before each table's 
 table larger than a page continues through a cursor. Every page composes the visible set again,
 so a deletion or suppression accepted during a read applies from the next page. The groups a
 table lists under `top` are fixed at its first page and carried in the cursor, so a table read
-across a changing corpus keeps its groups. The route runs under the viewport's admission and
-stops its work when the client disconnects.
+across a changing corpus keeps its groups, and a response's trailer says when a page counted a
+different state of the corpus from the page before it. A request with no cells runs under the
+viewport's admission, since its tables hold only the listed groups and `rest` and `none`. A
+request with cells can hold a row per item, so it runs under the bulk reads' admission and memory
+budget. Either stops its work when the client disconnects.
 
 **Not built yet:** histograms, minimum, maximum and mean of number and timestamp fields;
 breakdowns of keyword and integer fields; a grouping of one kind inside another of the same kind,

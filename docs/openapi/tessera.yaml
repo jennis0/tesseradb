@@ -1094,8 +1094,16 @@ paths:
         **Cursor.** As `POST /v1/items`' cursor, bound also to this route and to the request's
         `filters`, `reference` and `groupings`: a cursor sent with any of them changed is `422`.
 
-        Runs under the viewport's admission, since a client sends it beside viewport requests,
-        and holds its place until the response ends. A client that disconnects stops the work.
+        **Admission.** A request whose groupings have no `cells` runs under the viewport's
+        admission, since a client sends it beside viewport requests and its tables hold at most
+        the listed groups and `rest` and `none`. A request with `cells` in any grouping can hold a
+        row per item, so it runs under the bulk reads' admission limit, `serve.bulk_admission`,
+        and within their memory budget: one past that limit is refused at once with `429`. Either
+        holds its place until the response ends, and a client that disconnects stops the work.
+
+        **The trailer** carries `recomposed: true` where a page of this response counted a
+        different state of the corpus from the page before it, in this response or in the one
+        the cursor came from.
       security:
         - sessionToken: []
       requestBody:

@@ -2,9 +2,9 @@
 //! of exact counts per grouping, framed as `/v1/items` frames its pages with a table head before
 //! each table's first page in a response.
 //!
-//! It is sent beside viewport requests, so it runs under the viewport's admission, and its
-//! response is held to the bulk reads' page and response budgets and ends with a cursor where
-//! they cut it.
+//! A request whose groupings have no cells runs under the viewport's admission, since it is sent
+//! beside viewport requests; one with cells runs in the bulk-read lane. Either is held to the bulk
+//! reads' page and response budgets and ends with a cursor where they cut it.
 
 use std::sync::Arc;
 
@@ -127,10 +127,17 @@ pub(crate) async fn aggregate(
     ApiJson(req): ApiJson<AggregateReq>,
 ) -> Result<Response, ApiError> {
     let compression = req.compression;
+    // A table without cells holds at most its listed groups and `rest` and `none`; one with
+    // cells can hold a row per item, so it takes the bulk reads' admission and memory budget.
+    let lane = if req.groupings.iter().any(|g| g.cells.is_some()) {
+        Lane::Bulk
+    } else {
+        Lane::Compute
+    };
     let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
         run_aggregate(state, session, req, cancel, sink)
     };
-    bulk_read(state, session, Lane::Compute, "aggregate", "", compression, read).await
+    bulk_read(state, session, lane, "aggregate", "", compression, read).await
 }
 
 fn run_aggregate(
