@@ -838,3 +838,148 @@ fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
         "and an artifact the fold did not touch counts what it counted"
     );
 }
+
+/// **A row with no text of its own is named by the label attached to it, where this viewer is
+/// served that label, and the search form reads that name.**
+///
+/// `clusters/bare` carries no text. Two label layers attach to it. `labels/a` serves a label
+/// while one of its own members is visible, and the label on `b1` holds only members the subset
+/// viewer cannot see. `labels/b` comes after `labels/a` in the order `/v1/meta` lists layers, so
+/// it names only the cluster `labels/a` leaves unnamed.
+#[test]
+fn an_attached_label_names_a_row_only_where_this_viewer_is_served_it() {
+    use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
+
+    const BARE: &str = "clusters/bare";
+    let fx = fixture(None);
+    let map = source_to_new_map(&fx._dir.path().join("bundle"), "v00000");
+    let members = |sources: Vec<u64>| -> Vec<EntityId> {
+        sources.into_iter().map(|s| EntityId::new(map[&s])).collect()
+    };
+    let mut bare = declaration(None);
+    bare.name = BARE.into();
+    bare.hierarchy.kind = HierarchyKind::Flat;
+    bare.content = ContentDeclaration::default();
+    fx.engine.register_layer(bare).unwrap();
+    let clusters: Vec<IncomingArtifact> = (0..4u64)
+        .map(|b| {
+            IncomingArtifact::from_entities(
+                Some(format!("b{b}")),
+                members((b * 100..b * 100 + 100).collect()),
+            )
+        })
+        .collect();
+    fx.engine.publish_artifacts(BARE.into(), 0, clusters).unwrap();
+
+    let label = |key: &str, target: &str, text: &str, sources: Vec<u64>| {
+        let mut label = IncomingArtifact::from_entities(Some(key.into()), members(sources));
+        label.attached_to = Some(IncomingAttachment {
+            layer: BARE.into(),
+            level: 0,
+            key: target.into(),
+        });
+        label.contents = vec![IncomingContent {
+            values: vec![text.into()],
+            generated_from: Default::default(),
+        }];
+        label
+    };
+    let hidden_from_subset: Vec<u64> = (100..130).filter(|&s| !subset_sees(s)).collect();
+    for (name, labels) in [
+        (
+            "labels/a",
+            vec![
+                label("a0", "b0", "Spin magnetic effect", (0..30).collect()),
+                label("a1", "b1", "Quantum dots", hidden_from_subset),
+                label("a2", "b2", "Alpha topic", (200..230).collect()),
+            ],
+        ),
+        (
+            "labels/b",
+            vec![
+                label("x2", "b2", "Beta topic", (200..230).collect()),
+                label("x3", "b3", "Only topic", (300..330).collect()),
+            ],
+        ),
+    ] {
+        let mut declared = declaration(Some(ExistenceCriterion::Count(1)));
+        declared.name = name.into();
+        declared.hierarchy.kind = HierarchyKind::Flat;
+        declared.depends_on = vec![BARE.into()];
+        fx.engine.register_layer(declared).unwrap();
+        fx.engine.publish_artifacts(name.into(), 0, labels).unwrap();
+    }
+
+    let ask = |credential: &[u8], form: BrowseForm| {
+        let session = fx.engine.authorise(credential).unwrap();
+        fx.engine
+            .browse(
+                &session,
+                BrowseRequest {
+                    view: "s0",
+                    layer: BARE,
+                    level: None,
+                    form,
+                    filter: None,
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .expect("a browse answers")
+    };
+    let names = |out: &BrowseOut| -> Vec<(String, Option<String>)> {
+        let mut names: Vec<_> = out
+            .artifacts
+            .iter()
+            .map(|row| (row.key.clone().unwrap_or_default(), row.name.clone()))
+            .collect();
+        names.sort();
+        names
+    };
+    let named = |pairs: &[(&str, Option<&str>)]| -> Vec<(String, Option<String>)> {
+        pairs
+            .iter()
+            .map(|(key, name)| (key.to_string(), name.map(str::to_string)))
+            .collect()
+    };
+
+    let broad = full_coverage_credential();
+    let subset = subset_credential();
+    assert_eq!(
+        names(&ask(&broad, BrowseForm::Roots)),
+        named(&[
+            ("b0", Some("Spin magnetic effect")),
+            ("b1", Some("Quantum dots")),
+            ("b2", Some("Alpha topic")),
+            ("b3", Some("Only topic")),
+        ])
+    );
+    assert_eq!(
+        names(&ask(&subset, BrowseForm::Roots)),
+        named(&[
+            ("b0", Some("Spin magnetic effect")),
+            ("b1", None),
+            ("b2", Some("Alpha topic")),
+            ("b3", Some("Only topic")),
+        ]),
+        "a label the viewer is not served names nothing"
+    );
+
+    for credential in [&broad, &subset] {
+        let found = ask(credential, BrowseForm::Search("spin MAGNETIC".into()));
+        assert_eq!(names(&found), named(&[("b0", Some("Spin magnetic effect"))]));
+        assert!(
+            ask(credential, BrowseForm::Search("beta".into())).artifacts.is_empty(),
+            "a label that is not the row's name is not searched"
+        );
+    }
+    assert_eq!(
+        names(&ask(&broad, BrowseForm::Search("quantum".into()))),
+        named(&[("b1", Some("Quantum dots"))])
+    );
+    assert_eq!(
+        ask(&subset, BrowseForm::Search("quantum".into())),
+        ask(&subset, BrowseForm::Search("no such text anywhere".into())),
+        "a withheld label's text finds what text nobody wrote finds"
+    );
+}
