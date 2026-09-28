@@ -4,7 +4,9 @@ import type {Table} from 'apache-arrow';
 import {afterAll, beforeAll, describe, expect, it, type TestContext} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import {Control} from '../src/control.js';
+import {artifactName} from '../src/names.js';
 import {refusalOf} from '../src/presented.js';
+import {createStore} from '../src/store.js';
 import type {RecordsRead} from '../src/records.js';
 import type {ArtifactsRequest, BrowseRow, ItemsRequest, Meta, Session, ViewportRequest} from '../src/types.js';
 import {rejectsAsRefused} from './support.js';
@@ -328,6 +330,38 @@ describe('bulk reads against a live server', () => {
         parents: sorted(row.parentIds)
       });
     }
+  });
+
+  it('names a clustering’s artifacts by the labels attached to them, as each viewer is served them', async (ctx) => {
+    live(ctx);
+    const labelsFor = async (token: string) => {
+      const store = createStore({viewerUrl: (served as Served).viewerUrl, token, client, prefetch: false});
+      try {
+        return await store.attachedText('clusters/hdbscan');
+      } finally {
+        store.dispose();
+      }
+    };
+    // A label's text is read only by a viewer who can see every paper it was drawn from. A paper
+    // carries its primary category among its terms, so a viewer holding every primary category
+    // sees every paper, and one without `hep-ph` does not.
+    const primary = (await client.categories(session.token, 'primary_category', {limit: 1000})).map((v) => v.key);
+    const everything = (await client.authorise(primary)).token;
+    const broad = await labelsFor(everything);
+    const {tables} = await readAll(() => client.artifacts(everything, {view: 's0', layer: 'topics/hdbscan', fields: ['target']}));
+    expect(broad.size).toBeGreaterThan(0);
+    expect(new Set(broad.keys())).toEqual(new Set(column(tables, 'target') as bigint[]));
+    // The roots carry no text of their own and are named by their labels.
+    const roots = await client.browse(everything, {view: 's0', layer: 'clusters/hdbscan'});
+    expect(roots.artifacts.length).toBeGreaterThan(0);
+    for (const row of roots.artifacts) {
+      expect(row.name).toBeNull();
+      expect(artifactName(row, broad)).toBe(broad.get(row.tesseraId)!);
+    }
+
+    const narrow = await labelsFor((await client.authorise(primary.filter((k) => k !== 'hep-ph'))).token);
+    expect(narrow.size).toBeLessThan(broad.size);
+    for (const target of narrow.keys()) expect(broad.has(target)).toBe(true);
   });
 
   it('refuses a bad request with a TesseraError before any page', async (ctx) => {

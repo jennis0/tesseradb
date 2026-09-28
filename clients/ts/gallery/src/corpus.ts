@@ -1,5 +1,5 @@
 import {GRID32, WORLD_SIZE, composeFilters, type Artifact, type ArtifactsProjection, type Band, type BrowseRow, type CategoryValue, type ColumnDraft, type FilterDraft, type FiltersProjection, type ItemDetail, type Layer, type LegendProjection, type MarksProjection, type Meta, type PaletteScheme, type Rgba, type SuggestValue, type TilesProjection, type ViewInfo, type ViewProjection} from '@tesseradb/client';
-import {SessionArtifactTable, artifactColours, compose, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
+import {SessionArtifactTable, artifactColours, attachedTextOf, compose, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
 import {meta as baseMeta, scalar} from '../../components/test/fake-store.js';
 
 /**
@@ -61,7 +61,8 @@ const CLUSTERS: Cluster[] = [
   {name: 'Holography and quantum gravity', area: 1, centre: [420, 254], spread: 24, n: 540, fields: [7, 8], labels: 'AdS/CFT · entanglement'},
   {name: 'Causal inference with panel data', area: 2, centre: [340, 398], spread: 22, n: 480, fields: [10, 4], labels: 'difference in differences · synthetic control'},
   {name: 'Epidemic spreading on networks', area: 2, centre: [446, 424], spread: 18, n: 380, fields: [11, 9], labels: 'SIR · percolation'},
-  {name: null, area: 2, centre: [70, 440], spread: 14, n: 160, fields: [9], labels: ''}
+  {name: null, area: 2, centre: [70, 440], spread: 14, n: 160, fields: [9], labels: ''},
+  {name: null, area: 0, centre: [318, 226], spread: 16, n: 300, fields: [1, 3], labels: 'attention · sparse transformers'}
 ];
 
 const AREAS = ['Learning, vision and language', 'Physical sciences', 'Quantitative social science'];
@@ -347,6 +348,7 @@ export function mapState(opts: MapOptions = {}): {marks: MarksProjection; tiles:
       served,
       colourServed: [...areas, ...topics],
       lineage: servedLineage(served),
+      attached: attachedTextOf(served),
       status: 'shown',
       refusal: null,
       version: 1,

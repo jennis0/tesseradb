@@ -15,6 +15,7 @@ import {HeldViews, type ViewMachinery} from './heldViews.js';
 import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
 import {CLUSTER_PREFIX, Legend, type LegendProjection} from './legend.js';
 import {withMembers, type MemberClause} from './members.js';
+import {attachedTextOf} from './names.js';
 import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
 import {worldBbox} from './prefetch.js';
 import {rectContainsTile} from './rects.js';
@@ -324,6 +325,12 @@ export type ArtifactsProjection = {
   /** The forest `served` forms through its parent links. */
   lineage: ServedLineage;
   /**
+   * The text of each attached artifact the channel serves (a clustering's topic labels), keyed by
+   * the artifact it is attached to, over the drawn layers and the colour layer. The names
+   * {@link artifactName} gives the artifacts in `served` and `colourServed`.
+   */
+  attached: ReadonlyMap<bigint, string>;
+  /**
    * `idle` before the first answer and while no layer is asked for; `loading` while a request is
    * out; `shown` when `served` answers the current camera; `refused` when the request was refused,
    * `served` then being empty.
@@ -531,6 +538,16 @@ export interface Store {
    */
   browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage>;
   /**
+   * The text of the artifacts attached to `layer`'s (a clustering's topic labels) that this viewer
+   * is served in the current view, keyed by the artifact each is attached to: what
+   * {@link artifactName} needs to name a {@link Store.browse} row. Read through `POST /v1/artifacts`
+   * for each layer attached to `layer`, without the map's filters. Waits for `/v1/meta`.
+   *
+   * @throws {@link TesseraError} where the server refuses a read, or where the store's read of
+   *   `/v1/meta` was refused.
+   */
+  attachedText(layer: string): Promise<Map<bigint, string>>;
+  /**
    * The `filters` expression every request carries: the filter-position controls, the `member_of`
    * clauses in that position and the selected region's leaf, joined by `all_of`. `null` where none
    * is set. The expression is JSON-safe: an artifact in a `member_of` or `region` leaf is a decimal
@@ -554,8 +571,9 @@ export interface Store {
   /**
    * Colour points by a declared column, by `cluster:<layer>` for a layer {@link colourLayers} lists,
    * or `null` for uniform. Publishes `legend`. Colouring by a layer fetches its artifacts into
-   * `artifacts.colourServed` without drawing them. A `cluster:` layer that `meta` does not list as
-   * one that can colour is named in no request, and the points draw uniform.
+   * `artifacts.colourServed`, and its labels into `artifacts.attached`, without drawing them. A
+   * `cluster:` layer that `meta` does not list as one that can colour is named in no request, and
+   * the points draw uniform.
    */
   setColourBy(column: string | null): void;
   /**
@@ -804,7 +822,7 @@ export function createStore(options: StoreOptions): Store {
     view: noFrame(''),
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: colours.palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), attached: new Map(), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: colours.palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: emptyDraft([]), expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
@@ -1298,6 +1316,7 @@ export function createStore(options: StoreOptions): Store {
       served,
       colourServed: coloured === null ? [] : state.artifacts.filter((a) => a.layer === coloured),
       lineage: servedLineage(served),
+      attached: attachedTextOf(state.artifacts),
       status: state.status,
       refusal: state.refusal,
       version: state.version,
@@ -1479,12 +1498,13 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /**
-   * The layers a viewport request names: the drawn layers with their closure, and the colour
-   * layer alone. The colour layer's dependents are not asked for, since nothing of it is drawn.
+   * The layers a viewport request names: the drawn layers and the colour layer, each with its
+   * closure, so the colour layer's labels name the legend's rows.
    */
   function layersAsked(): string[] {
     const coloured = colourLayer();
-    return coloured === null || layersOn.includes(coloured) ? layersOn : [...layersOn, coloured];
+    if (coloured === null || layersOn.includes(coloured) || !meta) return layersOn;
+    return [...layersOn, ...drawnOnly(layerClosure(meta.layers, [coloured])).filter((l) => !layersOn.includes(l))];
   }
 
   /**
@@ -1549,6 +1569,24 @@ export function createStore(options: StoreOptions): Store {
     const filters = 'filters' in req ? (req.filters ?? null) : requestFilters();
     // Not a spread alone: a caller's `view: undefined` would replace the store's view.
     return client.browse(asked.token, {...req, view: req.view ?? asked.view, filters});
+  }
+
+  async function attachedText(layer: string): Promise<Map<bigint, string>> {
+    const asked = await viewed();
+    const rows: {target: bigint | null; content: string[]}[] = [];
+    for (const labels of meta?.layers ?? []) {
+      if (!labels.depsOn.includes(layer) || !labels.views.includes(asked.view)) continue;
+      const read = await client.artifacts(asked.token, {view: asked.view, layer: labels.name, fields: ['target', 'content']});
+      for await (const page of read) {
+        const target = page.getChild('target');
+        const content = page.getChild('content');
+        for (let i = 0; i < page.numRows; i++) {
+          const texts = content?.get(i) as {toArray(): (string | null)[]} | null | undefined;
+          rows.push({target: (target?.get(i) as bigint | null | undefined) ?? null, content: (texts?.toArray() ?? []).map((t) => t ?? '')});
+        }
+      }
+    }
+    return attachedTextOf(rows);
   }
 
   function setMembers(clauses: readonly MemberClause[]): void {
@@ -1767,6 +1805,7 @@ export function createStore(options: StoreOptions): Store {
     },
     setView,
     browse,
+    attachedText,
     requestFilters,
     setFilters,
     setMembers,

@@ -1,11 +1,10 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, colourLayers, composeFilters, type CategoryValue, type ClauseVerb, type FilterDraft, type Masked, type Meta, type Rgba, type Store} from '@tesseradb/client';
+import {CLUSTER_PREFIX, artifactName, colourLayers, composeFilters, type CategoryValue, type ClauseVerb, type FilterDraft, type Masked, type Meta, type Rgba, type Store} from '@tesseradb/client';
 import {NEUTRAL} from '@tesseradb/client/internal';
 import {CATEGORY_PALETTES, RAMPS, type CategoryPaletteName, type Colouring, type RampName, type RampScale} from '@tesseradb/deck';
 import {
   UNMAPPED,
-  artifactName,
   clusterLayerOf,
   colourOfFraction,
   colourOfRank,
@@ -103,7 +102,7 @@ type Picking = {column: string; key: string; title: string};
  *   value the column's filter leaves out; for one it keeps, `lit` or `dim` while the column is
  *   highlighted, else `filtered` while it is filtered; else empty.
  * @csspart swatch - A row's colour: for a category value, the button that opens the colour picker.
- * @csspart name - A row's name.
+ * @csspart name - A row's name, with `data-unnamed` on a cluster that has none.
  * @csspart highlight - A row's Highlight button, with `aria-pressed`.
  * @csspart filter - A row's Filter button, with `aria-pressed`.
  * @csspart count - A row's exact count, where the store holds one.
@@ -724,12 +723,18 @@ export class TesseraLegend extends TesseraElement {
     if (!this.readout && this.selectable) return wrap(html`<span part="state" data-state="shown"></span>`);
     if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);
 
-    const plain = (c: Rgba | readonly number[], text: string, title = text) =>
-      html`<div part="entry" role="listitem"><span part="swatch" style=${`--c:${rgb(c as Rgba)}`}></span><span part="name" title=${title}>${text}</span></div>`;
+    const plain = (c: Rgba | readonly number[], text: string, title = text, unnamed = false) =>
+      html`<div part="entry" role="listitem"><span part="swatch" style=${`--c:${rgb(c as Rgba)}`}></span><span part="name" title=${title} ?data-unnamed=${unnamed}>${text}</span></div>`;
     if (cluster) {
       const named = artifacts.colourServed;
       return wrap(html`<span part="state" data-state="shown"></span>${this.rows(
-        [...named.map((a) => plain(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, artifactName(a) ?? UNNAMED)), plain(NEUTRAL, 'Not yet coloured')],
+        [
+          ...named.map((a) => {
+            const name = artifactName(a, artifacts.attached);
+            return plain(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, name ?? UNNAMED, name ?? UNNAMED, name === null);
+          }),
+          plain(NEUTRAL, 'Not yet coloured')
+        ],
         false
       )}`);
     }

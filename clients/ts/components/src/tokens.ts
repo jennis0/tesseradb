@@ -136,6 +136,9 @@ export const chrome = css`
   .faint {
     color: var(--_tessera-ink-3);
   }
+  [data-unnamed] {
+    color: var(--_tessera-ink-3);
+  }
   .sm {
     font-size: 12px;
   }
