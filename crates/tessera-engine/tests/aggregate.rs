@@ -7,6 +7,7 @@
 //! matched count and `/v1/items`' count, which the size of a set must equal.
 
 mod common;
+#[path = "homes/fixture.rs"]
 mod homes;
 
 use std::collections::{BTreeMap, HashMap};
@@ -111,11 +112,11 @@ impl Item {
 
 fn built(s: u64) -> Item {
     let kind = ["a", "b", "c", "d", "e", "f"][(s % 7) as usize % 6];
-    let kind = (s % 11 != 0).then(|| kind.to_string());
+    let kind = (!s.is_multiple_of(11)).then(|| kind.to_string());
     // `hidden` is carried only by items the subset viewer cannot see.
-    let shade = if s % 3 != 0 && s % 5 == 1 {
+    let shade = if !s.is_multiple_of(3) && s % 5 == 1 {
         Some("hidden".to_string())
-    } else if s % 13 == 0 {
+    } else if s.is_multiple_of(13) {
         None
     } else {
         Some(["x", "y", "z"][(s % 4) as usize % 3].to_string())
@@ -149,9 +150,15 @@ fn write_points(path: &Path) {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(UInt64Array::from_iter_values(items.iter().map(|i| i.source))),
-            Arc::new(Float64Array::from_iter_values(items.iter().map(|i| i.position.0))),
-            Arc::new(Float64Array::from_iter_values(items.iter().map(|i| i.position.1))),
+            Arc::new(UInt64Array::from_iter_values(
+                items.iter().map(|i| i.source),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                items.iter().map(|i| i.position.0),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                items.iter().map(|i| i.position.1),
+            )),
             text(&|i| i.kind.clone()),
             text(&|i| i.shade.clone()),
             text(&|i| i.mark.clone()),
@@ -388,9 +395,12 @@ fn rows_of(batch: &RecordBatch) -> Vec<Row> {
             .clone()
     });
     let key = column("key");
-    let title = column("title")
-        .map(|c| c.as_any().downcast_ref::<StringArray>().unwrap().clone());
-    let (cell, count, reference) = (u64s("cell"), u64s("count").unwrap(), u64s("reference_count"));
+    let title = column("title").map(|c| c.as_any().downcast_ref::<StringArray>().unwrap().clone());
+    let (cell, count, reference) = (
+        u64s("cell"),
+        u64s("count").unwrap(),
+        u64s("reference_count"),
+    );
     let lift = column("lift").map(|c| c.as_any().downcast_ref::<Float64Array>().unwrap().clone());
     (0..batch.num_rows())
         .map(|i| Row {
@@ -464,7 +474,9 @@ fn read_all(
 
 /// One table read whole.
 fn table(engine: &Engine, session: &Session, req: AggregateRequest<'_>) -> (TableHead, Vec<Row>) {
-    read_all(engine, session, req).remove(&0).expect("the table")
+    read_all(engine, session, req)
+        .remove(&0)
+        .expect("the table")
 }
 
 fn field(column: &str, pick: Pick<String>) -> Grouping {
@@ -500,7 +512,8 @@ fn expected_values(
     let tally = |items: &[&Item]| {
         let mut by: BTreeMap<Option<String>, u64> = BTreeMap::new();
         for item in items {
-            *by.entry(item.value(column).map(str::to_string)).or_default() += 1;
+            *by.entry(item.value(column).map(str::to_string))
+                .or_default() += 1;
         }
         by
     };
@@ -517,7 +530,12 @@ fn expected_values(
         listed_counts.0 += count;
         listed_counts.1 += reference_count.unwrap_or(0);
         if count > 0 || reference_count.unwrap_or(0) > 0 || always(key) {
-            out.push(("listed".to_string(), Some(key.to_string()), count, reference_count));
+            out.push((
+                "listed".to_string(),
+                Some(key.to_string()),
+                count,
+                reference_count,
+            ));
         }
     }
     let carried = |by: &BTreeMap<Option<String>, u64>| {
@@ -695,7 +713,10 @@ fn the_size_of_a_set_is_what_the_viewport_and_items_count() {
         "the region is answered by its cover"
     );
     let size = size_of(engine, &session, Some(region.clone()));
-    assert_eq!(size, viewport_matched(engine, &session, Some(region.clone())));
+    assert_eq!(
+        size,
+        viewport_matched(engine, &session, Some(region.clone()))
+    );
     assert_eq!(size, items_count(engine, &session, Some(region)));
 }
 
@@ -707,7 +728,8 @@ fn the_size_of_a_set_is_what_the_viewport_and_items_count() {
 fn value_rows_are_the_oracles_on_every_route() {
     let fx = fixture();
     let engine = &fx.engine;
-    let filters: Vec<(&str, Option<FilterExpr>, Box<dyn Fn(&Item) -> bool>)> = vec![
+    type Keep = Box<dyn Fn(&Item) -> bool>;
+    let filters: Vec<(&str, Option<FilterExpr>, Keep)> = vec![
         ("no filter", None, Box::new(|_| true)),
         (
             "an entity-routed filter",
@@ -769,7 +791,9 @@ fn value_rows_are_the_oracles_on_every_route() {
                 let listable = |key: &str| {
                     minted(key)
                         || (column == "shade"
-                            && fx.visible(broad, &|_| true).any(|i| i.shade.as_deref() == Some(key)))
+                            && fx
+                                .visible(broad, &|_| true)
+                                .any(|i| i.shade.as_deref() == Some(key)))
                 };
                 assert_eq!(
                     simplified(&tables[&1].1),
@@ -798,7 +822,11 @@ fn a_reference_counts_the_same_groups_and_gives_the_lift() {
         let items: Vec<&Item> = fx.visible(true, &inside).collect();
         let everything: Vec<&Item> = fx.visible(true, &|_| true).collect();
         assert!(head.total > 0 && (head.total as usize) < everything.len());
-        assert_eq!(head.total, items.len() as u64, "the region's items all lie inside it");
+        assert_eq!(
+            head.total,
+            items.len() as u64,
+            "the region's items all lie inside it"
+        );
         assert_eq!(head.reference_total, Some(everything.len() as u64));
         let top = top_keys(&items, column, 3);
         let top: Vec<&str> = top.iter().map(String::as_str).collect();
@@ -887,8 +915,15 @@ fn a_suppression_applies_from_the_next_page() {
     req.cursor = trailer.next.as_deref();
     req.pages = None;
     let (collect, trailer) = respond(engine, &session, req).unwrap();
-    assert!(trailer.recomposed, "the page after the suppression counted a new state");
-    let rest: Vec<Row> = collect.pages.iter().flat_map(|(_, b, _)| rows_of(b)).collect();
+    assert!(
+        trailer.recomposed,
+        "the page after the suppression counted a new state"
+    );
+    let rest: Vec<Row> = collect
+        .pages
+        .iter()
+        .flat_map(|(_, b, _)| rows_of(b))
+        .collect();
     let expected: Vec<Row> = before[1..]
         .iter()
         .map(|row| Row {
@@ -943,7 +978,12 @@ fn pages_join_to_the_whole_table_and_a_cursor_is_bound_to_its_request() {
     let first = rows_of(&first.pages[0].1);
     let leader = first[0].key.clone().unwrap();
     let mut suppressed = 0;
-    for item in fx.items.iter().filter(|i| i.kind.as_deref() == Some(&leader)).take(450) {
+    for item in fx
+        .items
+        .iter()
+        .filter(|i| i.kind.as_deref() == Some(&leader))
+        .take(450)
+    {
         let entity = item_of_id(engine, item.source).unwrap().unwrap();
         engine.accept_change(entity, ChangeOp::Suppress).unwrap();
         suppressed += 1;
@@ -961,7 +1001,10 @@ fn pages_join_to_the_whole_table_and_a_cursor_is_bound_to_its_request() {
             .filter(|r| r.group.as_deref() == Some("listed"))
             .map(|r| r.key.clone())
             .collect::<Vec<_>>(),
-        whole_before[1..3].iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+        whole_before[1..3]
+            .iter()
+            .map(|r| r.key.clone())
+            .collect::<Vec<_>>(),
         "the resumed table lists the values chosen at its first page"
     );
 
@@ -1018,12 +1061,16 @@ fn a_request_past_a_limit_or_naming_what_cannot_be_counted_is_refused() {
     let refused = |groupings: &[Grouping]| respond(engine, &session, request(groupings)).err();
     assert!(matches!(
         refused(&[]),
-        Some(EngineError::AggregateRefused(tessera_engine::AggregateRefused::NoGroupings))
+        Some(EngineError::AggregateRefused(
+            tessera_engine::AggregateRefused::NoGroupings
+        ))
     ));
     let many = vec![size(); 9];
     assert!(matches!(
         refused(&many),
-        Some(EngineError::AggregateRefused(tessera_engine::AggregateRefused::OverCap { .. }))
+        Some(EngineError::AggregateRefused(
+            tessera_engine::AggregateRefused::OverCap { .. }
+        ))
     ));
     for bad in [
         field("kind", Pick::Top(0)),
@@ -1037,7 +1084,10 @@ fn a_request_past_a_limit_or_naming_what_cannot_be_counted_is_refused() {
         },
     ] {
         assert!(
-            matches!(refused(&[bad.clone()]), Some(EngineError::AggregateRefused(_))),
+            matches!(
+                refused(std::slice::from_ref(&bad)),
+                Some(EngineError::AggregateRefused(_))
+            ),
             "{bad:?}"
         );
     }
@@ -1113,7 +1163,9 @@ fn a_live_corpus_is_counted_as_the_map_shows_it() {
 
     let flushes = fx.engine.write_executor_stats().flushes;
     fx.engine.request_flush();
-    wait_for("the flush", || fx.engine.write_executor_stats().flushes > flushes);
+    wait_for("the flush", || {
+        fx.engine.write_executor_stats().flushes > flushes
+    });
     for item in fx.items.iter_mut() {
         item.flushed = true;
     }
@@ -1125,7 +1177,9 @@ fn a_live_corpus_is_counted_as_the_map_shows_it() {
 
     let before = fx.engine.write_executor_stats();
     fx.engine.request_fold();
-    wait_for("the fold", || fx.engine.write_executor_stats().folds > before.folds);
+    wait_for("the fold", || {
+        fx.engine.write_executor_stats().folds > before.folds
+    });
     wait_for("the map after the fold", || {
         viewport_matched(&fx.engine, &session, None) == all
     });
@@ -1135,7 +1189,10 @@ fn a_live_corpus_is_counted_as_the_map_shows_it() {
 fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while !cond() {
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -1145,7 +1202,7 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
 /// the same counts as the set's rows, whether the set is routed in entity space or row space.
 #[test]
 fn a_view_counts_only_the_items_with_a_row_in_it() {
-    use homes::fixture::{band_of, build_homes, open, score_of, QUARTERS};
+    use homes::{band_of, build_homes, open, score_of, QUARTERS};
     use tessera_engine::filter::{Endpoint, Scalar};
     let tmp = tempfile::tempdir().unwrap();
     let root = build_homes(tmp.path());
@@ -1154,8 +1211,17 @@ fn a_view_counts_only_the_items_with_a_row_in_it() {
     let views: Vec<(&str, Vec<u64>)> = QUARTERS
         .iter()
         .map(|(key, members)| (key, members.clone().collect::<Vec<u64>>()))
-        .map(|(key, members)| (if *key == "q1" { "quarter:q1" } else { "quarter:q2" }, members))
-        .chain([("s0", (0..homes::fixture::N).collect())])
+        .map(|(key, members)| {
+            (
+                if *key == "q1" {
+                    "quarter:q1"
+                } else {
+                    "quarter:q2"
+                },
+                members,
+            )
+        })
+        .chain([("s0", (0..homes::N).collect())])
         .collect();
     let every_score = FilterExpr::Leaf {
         column: "score".to_string(),
@@ -1187,13 +1253,23 @@ fn a_view_counts_only_the_items_with_a_row_in_it() {
             req.view = view;
             req.filter = filter;
             let tables = read_all(&engine, &session, req);
-            assert_eq!(tables[&1].1[0].count, members.len() as u64, "{view}, {what}");
+            assert_eq!(
+                tables[&1].1[0].count,
+                members.len() as u64,
+                "{view}, {what}"
+            );
             let counted: BTreeMap<&str, u64> = tables[&0]
                 .1
                 .iter()
                 .map(|r| {
                     let key = r.key.as_deref().unwrap();
-                    (["low", "mid", "high"].into_iter().find(|k| *k == key).unwrap(), r.count)
+                    (
+                        ["low", "mid", "high"]
+                            .into_iter()
+                            .find(|k| *k == key)
+                            .unwrap(),
+                        r.count,
+                    )
                 })
                 .collect();
             assert_eq!(counted, expected, "{view}, {what}");
@@ -1209,12 +1285,13 @@ fn with_cells(mut grouping: Grouping, depth: u8) -> Grouping {
 /// Every row this viewer may see in the view, as the stored geometry holds it: its 64-bit
 /// position and the item it belongs to.
 fn stored_rows<'a>(fx: &'a Fx, session: &Session) -> Vec<(u64, &'a Item)> {
-    use tessera_engine::compose::MaskedSet;
     let (generation, mask) = fx.engine.composed_mask(session, "s0").unwrap();
     let view_data = &generation.bundle.partitions["default"].views["s0"];
-    let segments =
-        tessera_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
-    let tables = view_data.row_space.row_entities().expect("a row-to-entity table");
+    let segments = tessera_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
+    let tables = view_data
+        .row_space
+        .row_entities()
+        .expect("a row-to-entity table");
     let item_of: HashMap<u64, &Item> = source_to_new_map(&fx.root, "v00000")
         .into_iter()
         .map(|(source, entity)| (entity, &fx.items[source as usize]))
@@ -1256,12 +1333,14 @@ fn every_cell_table_is_the_one_counted_row_by_row() {
     let rows = stored_rows(&fx, &session);
     let kinds = ["a", "c"];
     for (what, filter, keep) in [
-        ("no filter", None, &(|_: &Item| true) as &dyn Fn(&Item) -> bool),
         (
-            "a filter",
-            Some(fx.is_in("kind", &kinds)),
-            &|i: &Item| kinds.contains(&i.kind.as_deref().unwrap_or("")),
+            "no filter",
+            None,
+            &(|_: &Item| true) as &dyn Fn(&Item) -> bool,
         ),
+        ("a filter", Some(fx.is_in("kind", &kinds)), &|i: &Item| {
+            kinds.contains(&i.kind.as_deref().unwrap_or(""))
+        }),
     ] {
         let kept: Vec<(u64, &Item)> = rows.iter().filter(|(_, i)| keep(i)).cloned().collect();
         let items: Vec<&Item> = kept.iter().map(|(_, i)| *i).collect();
@@ -1274,7 +1353,9 @@ fn every_cell_table_is_the_one_counted_row_by_row() {
             let mut req = request(&groupings);
             req.filter = filter.clone();
             let mut sink = Collect::default();
-            let trailer = engine.aggregate_stream(&session, req.clone(), &mut sink).unwrap();
+            let trailer = engine
+                .aggregate_stream(&session, req.clone(), &mut sink)
+                .unwrap();
             let cells = (1u64 << (2 * u32::from(depth.min(16)))).min(N);
             let ranges = depth <= 16 && cells * 64 <= kept.len() as u64;
             let method = if ranges { "ranges" } else { "pass" };
@@ -1301,9 +1382,10 @@ fn every_cell_table_is_the_one_counted_row_by_row() {
             for (grouping, column) in [(1u32, "kind"), (2, "shade")] {
                 let listed = top_keys(&items, column, 2);
                 let group_of = |item: &Item| match item.value(column) {
-                    Some(v) if listed.iter().any(|k| k == v) => {
-                        (listed.iter().position(|k| k == v).unwrap(), Some(v.to_string()))
-                    }
+                    Some(v) if listed.iter().any(|k| k == v) => (
+                        listed.iter().position(|k| k == v).unwrap(),
+                        Some(v.to_string()),
+                    ),
                     Some(_) => (2, None),
                     None => (3, None),
                 };
@@ -1325,14 +1407,24 @@ fn every_cell_table_is_the_one_counted_row_by_row() {
                 let served: Vec<(String, Option<String>, u64, u64)> = tables[&grouping]
                     .1
                     .iter()
-                    .map(|r| (r.group.clone().unwrap(), r.key.clone(), r.cell.unwrap(), r.count))
+                    .map(|r| {
+                        (
+                            r.group.clone().unwrap(),
+                            r.key.clone(),
+                            r.cell.unwrap(),
+                            r.count,
+                        )
+                    })
                     .collect();
                 assert_eq!(served, expected, "{what}, depth {depth}, {column}");
                 let mut added: BTreeMap<u64, u64> = BTreeMap::new();
                 for (_, _, cell, n) in &served {
                     *added.entry(*cell).or_default() += n;
                 }
-                assert_eq!(added, density, "{what}, depth {depth}, {column}: groups add up");
+                assert_eq!(
+                    added, density,
+                    "{what}, depth {depth}, {column}: groups add up"
+                );
             }
         }
     }
@@ -1356,7 +1448,9 @@ fn a_cell_table_pages_from_any_cell() {
     let whole = read_all(engine, &session, req.clone());
     for (_, rows) in whole.values() {
         assert!(rows.len() > 20, "each table spans many pages");
-        assert!(rows.iter().any(|r| r.count == 0 && r.reference.unwrap() > 0));
+        assert!(rows
+            .iter()
+            .any(|r| r.count == 0 && r.reference.unwrap() > 0));
     }
     for page_rows in [17u32, 64, 500] {
         for pages in [Some(1u32), Some(3)] {
@@ -1428,7 +1522,10 @@ fn plant(
         .map(|(key, members, label)| {
             let mut artifact = IncomingArtifact::from_entities(
                 Some(key.into()),
-                members.iter().map(|s| tessera_types::EntityId::new(map[s])).collect::<Vec<_>>(),
+                members
+                    .iter()
+                    .map(|s| tessera_types::EntityId::new(map[s]))
+                    .collect::<Vec<_>>(),
             );
             artifact.access = Some(label.map_or_else(Vec::new, |l| vec![l.as_bytes().to_vec()]));
             artifact
@@ -1436,7 +1533,11 @@ fn plant(
         .collect();
     let ids = engine.publish_artifacts(name.into(), 0, artifacts).unwrap();
     tick(engine);
-    planted().into_iter().map(|(key, _, _)| key).zip(ids).collect()
+    planted()
+        .into_iter()
+        .map(|(key, _, _)| key)
+        .zip(ids)
+        .collect()
 }
 
 fn layer(name: &str, pick: Pick<tessera_types::TesseraId>) -> Grouping {
@@ -1476,7 +1577,11 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
             Some(_) => false,
         };
         for (what, filter, keep) in [
-            ("no filter", None, &(|_: &Item| true) as &dyn Fn(&Item) -> bool),
+            (
+                "no filter",
+                None,
+                &(|_: &Item| true) as &dyn Fn(&Item) -> bool,
+            ),
             (
                 "a filter",
                 Some(fx.is_in("kind", &["a", "b"])),
@@ -1493,11 +1598,19 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
             let count = |key: &str| members[key].iter().filter(|s| set.contains(s)).count() as u64;
             let mut ranked: Vec<&str> = served.iter().copied().filter(|k| count(k) > 0).collect();
             ranked.sort_by(|a, b| count(b).cmp(&count(a)).then(ids[a].cmp(&ids[b])));
-            let expected = |listed: &[&str], ids: &BTreeMap<&str, tessera_types::TesseraId>, always: bool| {
+            let expected = |listed: &[&str],
+                            ids: &BTreeMap<&str, tessera_types::TesseraId>,
+                            always: bool| {
                 let mut out: Vec<(String, Option<String>, u64)> = listed
                     .iter()
                     .filter(|k| always || count(k) > 0)
-                    .map(|k| ("listed".to_string(), Some(ids[k].raw().to_string()), count(k)))
+                    .map(|k| {
+                        (
+                            "listed".to_string(),
+                            Some(ids[k].raw().to_string()),
+                            count(k),
+                        )
+                    })
                     .collect();
                 let in_any = |s: &u64, keys: &[&str]| keys.iter().any(|k| members[k].contains(s));
                 let rest = set
@@ -1583,7 +1696,11 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
         assert!(!major.is_empty());
         assert_eq!(major, read("topics/rows"), "depth {depth}");
     }
-    assert_eq!(engine.layout_fallbacks(), 0, "the row-major level kept its column");
+    assert_eq!(
+        engine.layout_fallbacks(),
+        0,
+        "the row-major level kept its column"
+    );
     assert!(engine.columns_composed() >= 1);
 }
 
@@ -1603,13 +1720,19 @@ fn a_member_of_set_is_what_the_viewport_and_items_count() {
                 artifact: ids[key],
             }));
             let size = size_of(engine, &session, filter.clone());
-            assert_eq!(size, viewport_matched(engine, &session, filter.clone()), "{key}");
+            assert_eq!(
+                size,
+                viewport_matched(engine, &session, filter.clone()),
+                "{key}"
+            );
             assert_eq!(size, items_count(engine, &session, filter), "{key}");
         }
         let groupings = [layer("topics/nowhere", Pick::Top(2))];
         assert!(matches!(
             respond(engine, &session, request(&groupings)),
-            Err(EngineError::RecordsRefused(tessera_engine::RecordsRefused::UnknownLayer(_)))
+            Err(EngineError::RecordsRefused(
+                tessera_engine::RecordsRefused::UnknownLayer(_)
+            ))
         ));
     }
 }

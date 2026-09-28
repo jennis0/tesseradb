@@ -229,10 +229,9 @@ impl std::fmt::Display for AggregateRefused {
                 f,
                 "cells depth {depth} is past the stored resolution; ask for a depth from 0 to 32"
             ),
-            AggregateRefused::LevelRequired(layer) => write!(
-                f,
-                "layer '{layer}' has several levels; name one with level"
-            ),
+            AggregateRefused::LevelRequired(layer) => {
+                write!(f, "layer '{layer}' has several levels; name one with level")
+            }
         }
     }
 }
@@ -299,7 +298,9 @@ impl Engine {
             .groupings
             .iter()
             .enumerate()
-            .map(|(index, grouping)| Plan::of(self, session, &generation, req.view, index, grouping))
+            .map(|(index, grouping)| {
+                Plan::of(self, session, &generation, req.view, index, grouping)
+            })
             .collect::<Result<Vec<_>>>()?;
         let reaches = |layer: &str| self.reaches_layer(session, layer);
         for expr in req.filter.iter().chain(match &req.reference {
@@ -346,6 +347,7 @@ impl Engine {
         let mut recomposed = false;
         // The table whose head this response has sent.
         let mut table_sent: Option<u32> = None;
+        let mut spill = None;
         let tables = req.groupings.len() as u32;
         let ended_by = loop {
             if position.table >= tables {
@@ -390,7 +392,8 @@ impl Engine {
                     identity_key: Some(open.coordinates.identity_key),
                     region: page_region,
                 };
-                sink.head(&head).map_err(|SinkClosed| EngineError::Cancelled)?;
+                sink.head(&head)
+                    .map_err(|SinkClosed| EngineError::Cancelled)?;
             }
             let stamp = (generation.segments_version, generation.overlay_version);
             if position.stamp.is_some_and(|held| held != stamp) {
@@ -401,7 +404,14 @@ impl Engine {
             let grouping = position.table;
             let plan = &planned.plans[grouping as usize];
             let cx = set::Cx::new(self, &open, &generation, &sets, &req.cancel);
-            let page = match plan.page(&cx, &position, planned.page_rows, limits, &mut timings) {
+            let page = match plan.page(
+                &cx,
+                &position,
+                planned.page_rows,
+                limits,
+                &mut timings,
+                &mut spill,
+            ) {
                 Err(EngineError::Cancelled) => break ResponseEndedBy::Deadline,
                 page => page?,
             };

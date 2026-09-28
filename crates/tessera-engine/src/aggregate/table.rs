@@ -8,23 +8,23 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, DictionaryArray, Float64Builder, Int8Array, StringArray, StringBuilder,
-    UInt64Array, UInt64Builder,
+    ArrayRef, DictionaryArray, Float64Builder, Int8Array, StringArray, StringBuilder, UInt64Array,
+    UInt64Builder,
 };
 use arrow::datatypes::{Field as ArrowField, Int8Type, Schema};
 use arrow::record_batch::RecordBatch;
 
 use rayon::prelude::*;
 
+use super::artifacts::Layer;
 use super::cursor::Position;
 use super::set::Cx;
-use super::artifacts::Layer;
 use super::values::Field;
 use super::{AggregateTimings, By, Grouping, TableHead};
 use crate::cells::{count_chunk, count_chunk_by_ranges, CellCount, CellSet, GroupTable, RowGroups};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
-use crate::records::RecordsLimits;
+use crate::records::{same_publication, RecordsLimits};
 use crate::session::Session;
 use crate::Generation;
 
@@ -77,12 +77,34 @@ pub(super) enum Key {
     Id(u64),
 }
 
+/// The rows a page of a cell table counted past its end, held for the next page of the same
+/// response while the publication and the mask they were counted under hold.
+pub(super) struct Spill {
+    at: Position,
+    under: Arc<Generation>,
+    mask: crate::histogram::MaskIdentity,
+    rows: Vec<Row>,
+    /// Whether the rows run to the table's end.
+    complete: bool,
+}
+
+impl Spill {
+    /// Whether these rows are the next page's from `position` under `cx`, and enough for it.
+    fn holds(&self, cx: &Cx<'_>, position: &Position, limit: usize) -> bool {
+        self.at == *position
+            && same_publication(&self.under, cx.generation)
+            && self.mask == cx.open.served.mask_identity
+            && (self.complete || self.rows.len() > limit)
+    }
+}
+
 /// One row of a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Row {
     /// The group, as a position in the listed groups followed by the rest and none.
     group: u32,
-    cell: Option<u64>,
+    /// The cell, on a table with cells; 0 otherwise.
+    cell: u64,
     count: u64,
     reference: u64,
 }
@@ -129,6 +151,7 @@ impl Plan {
         page_rows: u32,
         limits: &RecordsLimits,
         timings: &mut AggregateTimings,
+        spill: &mut Option<Spill>,
     ) -> Result<Page> {
         cx.check_cancelled()?;
         let mut served = None;
@@ -149,60 +172,64 @@ impl Plan {
             resumed: position.chosen.is_some(),
         };
         let limit = page_rows as usize;
-        let (rows, complete) = match self.cells {
+        let (mut rows, complete) = match self.cells {
             None => listed_rows(&groups, position.group, limit),
-            Some(depth) => {
-                let started = std::time::Instant::now();
-                let table;
-                let codes;
-                let labels;
-                let parts;
-                let source = match &self.outer {
-                    Outer::None => Source::Split(vec![(
-                        cx.sets.set.cells(cx),
-                        cx.sets.reference.as_ref().map(|r| r.cells(cx)),
-                    )]),
-                    Outer::Field(field) => {
-                        let listed: Vec<u32> = groups.chosen.iter().map(|&c| c as u32).collect();
-                        table = GroupTable::new(&listed);
-                        codes = field.entity_codes(cx.generation)?;
-                        Source::Grouped(field.row_groups(cx, &table, &codes)?)
-                    }
-                    Outer::Layer(_) => {
-                        let served = served.as_ref().expect("a layer's groups were read");
-                        labels = served.label_table();
-                        match &labels {
-                            Some(labels) => Source::Grouped(served.row_groups(labels)),
-                            None => {
-                                let set = served.group_rows(cx, cx.sets.set.rows(cx));
-                                let reference = cx
-                                    .sets
-                                    .reference
-                                    .as_ref()
-                                    .map(|r| served.group_rows(cx, r.rows(cx)));
-                                parts = (set, reference);
-                                Source::Split(
-                                    parts
-                                        .0
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(g, rows)| {
-                                            (
-                                                CellSet::Rows(rows),
-                                                parts.1.as_ref().map(|r| CellSet::Rows(&r[g])),
-                                            )
-                                        })
-                                        .collect(),
-                                )
+            Some(depth) => match spill.take().filter(|held| held.holds(cx, position, limit)) {
+                Some(held) => (held.rows, held.complete),
+                None => {
+                    let started = std::time::Instant::now();
+                    let table;
+                    let codes;
+                    let labels;
+                    let parts;
+                    let source = match &self.outer {
+                        Outer::None => Source::Split(vec![(
+                            cx.sets.set.cells(cx),
+                            cx.sets.reference.as_ref().map(|r| r.cells(cx)),
+                        )]),
+                        Outer::Field(field) => {
+                            let listed: Vec<u32> =
+                                groups.chosen.iter().map(|&c| c as u32).collect();
+                            table = GroupTable::new(&listed);
+                            codes = field.entity_codes(cx.generation)?;
+                            Source::Grouped(field.row_groups(cx, &table, &codes)?)
+                        }
+                        Outer::Layer(_) => {
+                            let served = served.as_ref().expect("a layer's groups were read");
+                            labels = served.label_table();
+                            match &labels {
+                                Some(labels) => Source::Grouped(served.row_groups(labels)),
+                                None => {
+                                    let set = served.group_rows(cx, cx.sets.set.rows(cx));
+                                    let reference = cx
+                                        .sets
+                                        .reference
+                                        .as_ref()
+                                        .map(|r| served.group_rows(cx, r.rows(cx)));
+                                    parts = (set, reference);
+                                    Source::Split(
+                                        parts
+                                            .0
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(g, rows)| {
+                                                (
+                                                    CellSet::Rows(rows),
+                                                    parts.1.as_ref().map(|r| CellSet::Rows(&r[g])),
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                }
                             }
                         }
-                    }
-                };
-                let counted =
-                    self.cell_rows(cx, &groups, &source, position, depth, limit, timings);
-                timings.cells_ns += started.elapsed().as_nanos() as u64;
-                counted?
-            }
+                    };
+                    let counted =
+                        self.cell_rows(cx, &groups, &source, position, depth, limit, timings);
+                    timings.cells_ns += started.elapsed().as_nanos() as u64;
+                    counted?
+                }
+            },
         };
         let mut bytes = 0usize;
         let mut kept = 0usize;
@@ -228,11 +255,20 @@ impl Plan {
                 } else {
                     last.group + 1
                 },
-                after_cell: last.cell,
+                after_cell: self.cells.map(|_| last.cell),
                 stamp: position.stamp,
             }
         };
         let batch = self.batch(&groups, &head, &rows[..kept])?;
+        if self.cells.is_some() && kept < rows.len() {
+            *spill = Some(Spill {
+                at: next.clone(),
+                under: Arc::clone(cx.generation),
+                mask: cx.open.served.mask_identity,
+                rows: rows.split_off(kept),
+                complete,
+            });
+        }
         Ok(Page {
             head,
             batch,
@@ -267,12 +303,7 @@ impl Plan {
     }
 
     /// The rows as one batch, in the contract's column order.
-    fn batch(
-        &self,
-        groups: &Groups,
-        head: &TableHead,
-        rows: &[Row],
-    ) -> Result<RecordBatch> {
+    fn batch(&self, groups: &Groups, head: &TableHead, rows: &[Row]) -> Result<RecordBatch> {
         let mut fields: Vec<ArrowField> = Vec::new();
         let mut arrays: Vec<ArrayRef> = Vec::new();
         let mut push = |name: &str, array: ArrayRef, nullable: bool| {
@@ -281,12 +312,10 @@ impl Plan {
         };
         let listed = groups.keys.len() as u32;
         if !matches!(self.outer, Outer::None) {
-            let kinds = Int8Array::from_iter_values(rows.iter().map(|row| {
-                match row.group {
-                    g if g < listed => 0i8,
-                    g if g == listed => 1,
-                    _ => 2,
-                }
+            let kinds = Int8Array::from_iter_values(rows.iter().map(|row| match row.group {
+                g if g < listed => 0i8,
+                g if g == listed => 1,
+                _ => 2,
             }));
             let values = Arc::new(StringArray::from(vec!["listed", "rest", "none"]));
             let group = DictionaryArray::<Int8Type>::try_new(kinds, values)
@@ -317,7 +346,7 @@ impl Plan {
             if let Some(titles) = &groups.titles {
                 let mut b = StringBuilder::new();
                 for row in rows {
-                    b.append_option(titles.get(row.group as usize).cloned().flatten());
+                    b.append_option(titles.get(row.group as usize).and_then(Option::as_deref));
                 }
                 push("title", Arc::new(b.finish()), true);
             }
@@ -326,7 +355,7 @@ impl Plan {
             push(
                 "cell",
                 Arc::new(UInt64Array::from_iter_values(
-                    rows.iter().map(|row| row.cell.unwrap_or(0)),
+                    rows.iter().map(|row| row.cell),
                 )),
                 false,
             );
@@ -373,7 +402,6 @@ impl Plan {
         limit: usize,
         timings: &mut AggregateTimings,
     ) -> Result<(Vec<Row>, bool)> {
-        let chunks = crate::cells::chunks(cx.segments(), depth, CHUNK_ROWS);
         let cells_at_depth = if depth >= 32 {
             u64::MAX
         } else {
@@ -398,7 +426,6 @@ impl Plan {
             cx,
             source,
             depth,
-            chunks: &chunks,
             methods: &methods,
         };
         let bound: u64 = groups.sizes[position.group.min(groups_count) as usize..]
@@ -417,7 +444,9 @@ impl Plan {
             let (set, reference) = groups.sizes[group as usize];
             let from = match after {
                 None => Some(0),
-                Some(cell) => cell.checked_add(1).filter(|&c| c < cells_at_depth || depth >= 32),
+                Some(cell) => cell
+                    .checked_add(1)
+                    .filter(|&c| c < cells_at_depth || depth >= 32),
             };
             if let (true, Some(from)) = (set > 0 || reference > 0, from) {
                 let (found, complete) =
@@ -435,8 +464,12 @@ impl Plan {
     }
 }
 
-/// About how many rows one chunk of a cell count holds.
+/// The most rows of the view one chunk of a cell count spans.
 const CHUNK_ROWS: u64 = 1 << 20;
+
+/// The fewest rows of the view one chunk spans, so a small page is not cut into slivers whose
+/// scheduling costs more than their rows.
+const MIN_CHUNK_ROWS: u64 = 1 << 14;
 
 /// Range counts are taken for a group when its items number at least this many times the cells
 /// that could hold them: a range count costs about as much as reading this many rows.
@@ -455,7 +488,6 @@ struct Walk<'w> {
     cx: &'w Cx<'w>,
     source: &'w Source<'w>,
     depth: u8,
-    chunks: &'w [std::ops::Range<u64>],
     /// For each group, whether its set and its reference are counted by range.
     methods: &'w [(bool, bool)],
 }
@@ -463,6 +495,10 @@ struct Walk<'w> {
 impl Walk<'_> {
     /// The rows of `groups` whose cell is `from` or after, a batch of chunks at a time until at
     /// least `need` are found, and whether the walk reached the last chunk.
+    ///
+    /// The chunks are cut so that one batch across the pool reads about `need` rows of the view,
+    /// and each later batch takes as many chunks as the rows still wanted need at the yield so far,
+    /// so a page reads little past its own rows however sparse the set is.
     fn window(
         &self,
         groups: std::ops::Range<u32>,
@@ -470,29 +506,38 @@ impl Walk<'_> {
         need: usize,
         timings: &mut AggregateTimings,
     ) -> Result<(Vec<Row>, bool)> {
+        let threads = self.cx.engine.pool.current_num_threads().max(1);
+        let chunk_rows = (need as u64)
+            .div_ceil(threads as u64)
+            .clamp(MIN_CHUNK_ROWS, CHUNK_ROWS);
+        let chunks = crate::cells::chunks(self.cx.segments(), self.depth, chunk_rows);
         let fine = 2 * u32::from(self.depth - self.depth.min(16));
-        let start = self
-            .chunks
-            .partition_point(|chunk| chunk.end <= from >> fine);
-        let batch = self.cx.engine.pool.current_num_threads().max(1);
-        let mut rows: Vec<Row> = Vec::new();
+        let start = chunks.partition_point(|chunk| chunk.end <= from >> fine);
         let mut at = start;
-        while at < self.chunks.len() && rows.len() < need {
+        let mut batch = threads;
+        let mut rows: Vec<Row> = Vec::new();
+        while at < chunks.len() && rows.len() < need {
             self.cx.check_cancelled()?;
-            let end = (at + batch).min(self.chunks.len());
+            let end = (at + batch).min(chunks.len());
             let parts: Vec<Vec<Row>> = self.cx.engine.pool.install(|| {
-                self.chunks[at..end]
+                chunks[at..end]
                     .par_iter()
                     .map(|prefixes| self.chunk(groups.clone(), prefixes.clone()))
                     .collect()
             });
             timings.cells_walked += (end - at) as u64;
+            rows.reserve(parts.iter().map(Vec::len).sum());
             for part in parts {
-                rows.extend(part.into_iter().filter(|row| row.cell >= Some(from)));
+                rows.extend(part.into_iter().filter(|row| row.cell >= from));
             }
             at = end;
+            // Enough chunks for the rows still wanted at the yield so far.
+            let found = (rows.len() as u64).max(1);
+            let wanted = (need - rows.len().min(need)) as u64;
+            let chunks_wanted = wanted.saturating_mul((at - start) as u64).div_ceil(found);
+            batch = (chunks_wanted as usize + 1).clamp(1, threads * 64);
         }
-        Ok((rows, at == self.chunks.len()))
+        Ok((rows, at == chunks.len()))
     }
 
     /// One chunk's rows of `groups`, ascending by cell then group.
@@ -503,8 +548,13 @@ impl Walk<'_> {
         match self.source {
             Source::Grouped(row_groups) => {
                 let set = &self.cx.sets.set;
-                let mut counted: Vec<CellCount> =
-                    count_chunk(set.cells(self.cx), segments, depth, row_groups, prefixes.clone());
+                let mut counted: Vec<CellCount> = count_chunk(
+                    set.cells(self.cx),
+                    segments,
+                    depth,
+                    row_groups,
+                    prefixes.clone(),
+                );
                 counted.retain(wanted);
                 let mut reference: Vec<CellCount> = match &self.cx.sets.reference {
                     None => Vec::new(),
@@ -546,6 +596,17 @@ impl Walk<'_> {
 
 /// Two tables ascending by cell then group, joined into rows.
 fn merge(set: Vec<CellCount>, reference: Vec<CellCount>) -> Vec<Row> {
+    if reference.is_empty() {
+        return set
+            .into_iter()
+            .map(|e| Row {
+                group: e.group,
+                cell: e.cell,
+                count: e.count,
+                reference: 0,
+            })
+            .collect();
+    }
     let mut out: Vec<Row> = Vec::with_capacity(set.len().max(reference.len()));
     let (mut a, mut b) = (set.into_iter().peekable(), reference.into_iter().peekable());
     loop {
@@ -571,7 +632,7 @@ fn merge(set: Vec<CellCount>, reference: Vec<CellCount>) -> Vec<Row> {
         };
         out.push(Row {
             group: row.1,
-            cell: Some(row.0),
+            cell: row.0,
             count: row.2,
             reference: row.3,
         });
@@ -581,9 +642,8 @@ fn merge(set: Vec<CellCount>, reference: Vec<CellCount>) -> Vec<Row> {
 
 /// `(count / total) / (reference / reference_total)`, `None` where `reference` or `total` is 0.
 fn lift(count: u64, total: u64, reference: u64, reference_total: u64) -> Option<f64> {
-    (reference > 0 && total > 0).then(|| {
-        (count as f64 / total as f64) / (reference as f64 / reference_total as f64)
-    })
+    (reference > 0 && total > 0)
+        .then(|| (count as f64 / total as f64) / (reference as f64 / reference_total as f64))
 }
 
 impl Groups {
@@ -614,7 +674,7 @@ fn listed_rows(groups: &Groups, from: u32, limit: usize) -> (Vec<Row>, bool) {
         })
         .map(|(g, &(count, reference))| Row {
             group: g as u32,
-            cell: None,
+            cell: 0,
             count,
             reference,
         })

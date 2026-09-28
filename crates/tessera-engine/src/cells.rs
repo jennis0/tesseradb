@@ -190,7 +190,7 @@ const UNSERVED: u32 = u32::MAX;
 impl LabelTable {
     /// The table over `ordinals` ordinals, `served` the ordinals served and `listed` those listed,
     /// in order. A listed ordinal past `ordinals` stands for no artifact and counts nothing.
-    pub fn new(ordinals: usize, served: impl IntoIterator<Item = u32>, listed: &[u32]) -> Self {
+    pub(crate) fn new(ordinals: usize, served: impl IntoIterator<Item = u32>, listed: &[u32]) -> Self {
         let rest = listed.len() as u32;
         let mut by_ordinal = vec![UNSERVED; ordinals];
         for ordinal in served {
@@ -210,12 +210,12 @@ impl LabelTable {
     }
 
     /// The group of the rows in a served artifact and in no listed one.
-    pub fn rest(&self) -> u32 {
+    pub(crate) fn rest(&self) -> u32 {
         self.listed
     }
 
     /// The group of the rows in no served artifact.
-    pub fn none(&self) -> u32 {
+    pub(crate) fn none(&self) -> u32 {
         self.listed + 1
     }
 }
@@ -277,7 +277,7 @@ impl<'a> RowGroups<'a> {
     }
 
     /// How many groups a row can fall in, numbered from 0.
-    pub fn count(&self) -> usize {
+    pub(crate) fn count(&self) -> usize {
         match self {
             RowGroups::None => 1,
             RowGroups::Drawn { table, .. } | RowGroups::Entity { table, .. } => {
@@ -400,7 +400,7 @@ pub fn pass_in_chunks(
 
 /// Ranges of depth-`min(depth, 16)` cell prefixes, ascending and together covering every cell,
 /// each holding about `chunk_rows` rows of the view. Cut at the largest segment's quantiles.
-pub fn chunks(segments: &[(&SegmentData, u32)], depth: u8, chunk_rows: u64) -> Vec<Range<u64>> {
+pub(crate) fn chunks(segments: &[(&SegmentData, u32)], depth: u8, chunk_rows: u64) -> Vec<Range<u64>> {
     let coarse = depth.min(16);
     let cells = 1u64 << (2 * u32::from(coarse));
     let total: u64 = segments.iter().map(|(s, _)| u64::from(s.row_count)).sum();
@@ -424,7 +424,7 @@ pub fn chunks(segments: &[(&SegmentData, u32)], depth: u8, chunk_rows: u64) -> V
 
 /// The table of one chunk from [`chunks`]: the set's rows whose depth-`min(depth, 16)` prefix is in
 /// `prefixes`, counted by depth-`depth` cell and group, ascending by cell then group.
-pub fn count_chunk(
+pub(crate) fn count_chunk(
     set: CellSet<'_>,
     segments: &[(&SegmentData, u32)],
     depth: u8,
@@ -443,10 +443,10 @@ pub fn count_chunk(
         }
         let rows = row_base + lo..row_base + hi;
         let out = &mut entries;
+        // At most one entry per row, and the set's rows here are a range count.
+        out.reserve(set.count(rows.clone()) as usize);
         match groups {
-            RowGroups::None => {
-                count_segment(set, segment, row_base, rows, depth, width, &Constant(0), out)
-            }
+            RowGroups::None => count_segment_alone(set, segment, row_base, rows, depth, out),
             RowGroups::Drawn { codes, table } => match &codes[s] {
                 Some(ScalarSlice::U8(codes)) => {
                     let g = Drawn { codes, table };
@@ -499,7 +499,7 @@ pub fn count_chunk(
 
 /// [`count_chunk`] by range counts, for a depth of 16 or less and every row in group 0: the
 /// occupied cells of `prefixes` found by binary search and each counted over its row range.
-pub fn count_chunk_by_ranges(
+pub(crate) fn count_chunk_by_ranges(
     set: CellSet<'_>,
     segments: &[(&SegmentData, u32)],
     depth: u8,
@@ -513,6 +513,75 @@ pub fn count_chunk_by_ranges(
         prefixes,
         &|rows| set.count(rows),
     )
+}
+
+/// [`count_segment`] with every row in group 0: a run of rows is read as a slice of cell codes and
+/// a cell's rows are counted as the run of equal prefixes they are.
+fn count_segment_alone(
+    set: CellSet<'_>,
+    segment: &SegmentData,
+    row_base: u32,
+    rows: Range<u32>,
+    depth: u8,
+    out: &mut Vec<CellCount>,
+) {
+    let morton = segment.morton.u32();
+    let push = |cell: u64, count: u64, out: &mut Vec<CellCount>| {
+        out.push(CellCount {
+            cell,
+            group: 0,
+            count,
+        })
+    };
+    if depth <= 16 {
+        let shift = 32 - 2 * u32::from(depth);
+        let mut current: Option<(u64, u64)> = None;
+        set.for_each_run(rows, &mut |run| {
+            let codes = &morton[(run.start - row_base) as usize..(run.end - row_base) as usize];
+            for &code in codes {
+                let at = u64::from(code) >> shift;
+                match &mut current {
+                    Some((cell, n)) if *cell == at => *n += 1,
+                    _ => {
+                        if let Some((cell, n)) = current.replace((at, 1)) {
+                            push(cell, n, out);
+                        }
+                    }
+                }
+            }
+        });
+        if let Some((cell, n)) = current {
+            push(cell, n, out);
+        }
+        return;
+    }
+    // Rows of one depth-16 cell are in `tessera_id` order, so their finer prefixes are sorted
+    // before they are counted.
+    let residual = segment.columns.residual();
+    let shift = 64 - 2 * u32::from(depth);
+    let mut cell16: Option<u32> = None;
+    let mut prefixes: Vec<u64> = Vec::new();
+    let flush = |prefixes: &mut Vec<u64>, out: &mut Vec<CellCount>| {
+        prefixes.sort_unstable();
+        let mut i = 0;
+        while i < prefixes.len() {
+            let j = i + prefixes[i..].partition_point(|&p| p == prefixes[i]);
+            push(prefixes[i], (j - i) as u64, out);
+            i = j;
+        }
+        prefixes.clear();
+    };
+    set.for_each_run(rows, &mut |run| {
+        for row in run {
+            let i = (row - row_base) as usize;
+            if cell16 != Some(morton[i]) {
+                flush(&mut prefixes, out);
+                cell16 = Some(morton[i]);
+            }
+            prefixes.push(((u64::from(morton[i]) << 32) | u64::from(residual[i])) >> shift);
+        }
+    });
+    flush(&mut prefixes, out);
 }
 
 /// Add to `out` the counts of one segment's rows `rows` (view row space), whose depth-16 cells

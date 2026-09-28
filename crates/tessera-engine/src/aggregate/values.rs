@@ -42,13 +42,16 @@ impl Field {
         let manifest = &generation.bundle.manifest;
         let not_countable =
             || EngineError::AggregateRefused(AggregateRefused::NotCountable(column.to_string()));
-        let vocabulary = crate::categories::vocabulary_of(manifest, column).ok_or_else(not_countable)?;
+        let vocabulary =
+            crate::categories::vocabulary_of(manifest, column).ok_or_else(not_countable)?;
         let minter = generation
             .vocabularies
             .get(&vocabulary)
             .ok_or_else(not_countable)?;
         let held = generation.filter_columns.value_layers(column).is_some();
-        let drawn = manifest.render_scalars().any(|scalar| scalar.name == column);
+        let drawn = manifest
+            .render_scalars()
+            .any(|scalar| scalar.name == column);
         if !held && !drawn {
             return Err(not_countable());
         }
@@ -82,15 +85,20 @@ impl Field {
             None => None,
         };
         timings.count_ns += counting.elapsed().as_nanos() as u64;
-        timings.entities_crossed += cx.sets.set.crossed()
-            + cx.sets.reference.as_ref().map_or(0, Set::crossed);
+        timings.entities_crossed +=
+            cx.sets.set.crossed() + cx.sets.reference.as_ref().map_or(0, Set::crossed);
         let vocabulary = cx
             .generation
             .vocabularies
             .get(&self.vocabulary)
-            .ok_or_else(|| EngineError::AggregateRefused(AggregateRefused::NotCountable(self.column.clone())))?;
-        let named = matches!(self.pick, Pick::Named(_));
-        let listable = self.listable(cx)?;
+            .ok_or_else(|| {
+                EngineError::AggregateRefused(AggregateRefused::NotCountable(self.column.clone()))
+            })?;
+        let listable = match self.pick {
+            Pick::Named(_) => Some(self.listable(cx)?),
+            Pick::Top(_) => None,
+        };
+        let listable = |code: u32| listable.as_ref().map_or(Ok(false), |listable| listable(code));
         let codes: Vec<u32> = match chosen {
             Some(chosen) => chosen.iter().map(|&code| code as u32).collect(),
             None => match &self.pick {
@@ -111,7 +119,7 @@ impl Field {
         };
         let mut always = Vec::with_capacity(codes.len());
         for &code in &codes {
-            always.push(named && listable(code)?);
+            always.push(listable(code)?);
         }
         let sizes = sizes(&codes, &set, reference.as_ref());
         let keys = codes
@@ -155,12 +163,14 @@ impl Field {
         let column = self.column.clone();
         Ok(move |code: u32| match &membership {
             None => Ok(true),
-            Some(membership) => membership.carries(code).map_err(|e| {
-                EngineError::VocabularyVisibilityUnavailable {
-                    column: column.clone(),
-                    detail: e.to_string(),
-                }
-            }),
+            Some(membership) => {
+                membership
+                    .carries(code)
+                    .map_err(|e| EngineError::VocabularyVisibilityUnavailable {
+                        column: column.clone(),
+                        detail: e.to_string(),
+                    })
+            }
         })
     }
 
@@ -225,19 +235,28 @@ impl Field {
         if self.drawn {
             return Ok(RowGroups::drawn(cx.segments(), &self.column, table));
         }
-        let tables = cx.open.served.data.row_space.row_entities().ok_or_else(|| {
-            EngineError::Malformed(format!(
-                "view '{}' has no row-to-entity table, so '{}' cannot be counted by cell; \
+        let tables = cx
+            .open
+            .served
+            .data
+            .row_space
+            .row_entities()
+            .ok_or_else(|| {
+                EngineError::Malformed(format!(
+                    "view '{}' has no row-to-entity table, so '{}' cannot be counted by cell; \
                  rebuild the bundle",
-                cx.open.served.name, self.column
-            ))
-        })?;
+                    cx.open.served.name, self.column
+                ))
+            })?;
         let codes = codes.as_ref().expect("a held field's codes are read");
         Ok(RowGroups::entity(tables, codes, table))
     }
 
     /// The per-entity codes [`Self::row_groups`] reads where the field is not drawn.
-    pub(super) fn entity_codes<'g>(&self, generation: &'g Generation) -> Result<Option<EntityCodes<'g>>> {
+    pub(super) fn entity_codes<'g>(
+        &self,
+        generation: &'g Generation,
+    ) -> Result<Option<EntityCodes<'g>>> {
         if self.drawn {
             return Ok(None);
         }
@@ -272,7 +291,7 @@ impl Counts {
 /// The `n` codes carried by the most items, ties by key.
 fn top<'v>(counts: &Counts, n: usize, key_of: &dyn Fn(u32) -> Option<&'v str>) -> Vec<u32> {
     let mut ranked: Vec<(u64, u32)> = counts.by_code.iter().map(|&(code, c)| (c, code)).collect();
-    ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    ranked.sort_unstable_by_key(|&(count, _)| std::cmp::Reverse(count));
     let Some(&(floor, _)) = ranked.get(n.saturating_sub(1)).or(ranked.last()) else {
         return Vec::new();
     };
@@ -301,7 +320,11 @@ fn sizes(codes: &[u32], set: &Counts, reference: Option<&Counts>) -> Vec<(u64, u
 
 /// A drawn column's codes over a set's rows, counted in one parallel pass. Code 0 and a segment
 /// without the column count as no value.
-fn tally_rows(set: CellSet<'_>, segments: &[(&tessera_store::read::SegmentData, u32)], column: &str) -> Counts {
+fn tally_rows(
+    set: CellSet<'_>,
+    segments: &[(&tessera_store::read::SegmentData, u32)],
+    column: &str,
+) -> Counts {
     let pieces: Vec<(usize, std::ops::Range<u32>)> = segments
         .iter()
         .enumerate()
@@ -312,9 +335,9 @@ fn tally_rows(set: CellSet<'_>, segments: &[(&tessera_store::read::SegmentData, 
             })
         })
         .collect();
-    let dense = segments.iter().all(|(segment, _)| {
-        !matches!(segment.columns.scalar(column), Some(ScalarSlice::U32(_)))
-    });
+    let dense = segments
+        .iter()
+        .all(|(segment, _)| !matches!(segment.columns.scalar(column), Some(ScalarSlice::U32(_))));
     let empty = || Tally::new(dense);
     let tally = pieces
         .par_iter()

@@ -39,7 +39,7 @@ use crate::Generation;
 
 pub use artifacts::ArtifactsRequest;
 pub(crate) use cursor::{Binding, CursorKey, Route};
-pub(crate) use walk::Clock;
+pub(crate) use walk::{same_publication, Clock};
 use cursor::{ItemsCursor, Position};
 use columns::{empty_page, read_page};
 use plan::FieldPlan;

@@ -124,7 +124,8 @@ impl Set {
                     return Ok(held);
                 }
                 let crossed = cross(cx, rows)?;
-                self.crossed.fetch_add(rows.cardinality(), Ordering::Relaxed);
+                self.crossed
+                    .fetch_add(rows.cardinality(), Ordering::Relaxed);
                 Ok(self.entities.get_or_init(|| crossed))
             }
         }
@@ -132,11 +133,7 @@ impl Set {
 }
 
 /// The members of `entities` holding a row in the view's rows the page's mask was projected over.
-fn restrict_under(
-    open: &OpenView<'_>,
-    engine: &Engine,
-    entities: &Bitmap,
-) -> Result<Bitmap> {
+fn restrict_under(open: &OpenView<'_>, engine: &Engine, entities: &Bitmap) -> Result<Bitmap> {
     let row_space = &open.served.data.row_space;
     match row_space.restrict_to_view(entities, open.geometry.projection.covers_through()) {
         Some(restricted) => Ok(restricted),
@@ -187,7 +184,8 @@ pub(super) fn compose(
     let resolved = ResolvedLeaves::default();
     let whole = || Set::of(Held::Whole, open.mask.visible_total(), None);
     let total = served.data.row_space.total_rows();
-    let domain = [0..u32::try_from(total).unwrap_or(u32::MAX)];
+    let whole_view = 0..u32::try_from(total).unwrap_or(u32::MAX);
+    let domain = std::slice::from_ref(&whole_view);
     let (set, reference) = engine.route_filters_under(
         served,
         &open.mask,
@@ -206,7 +204,7 @@ pub(super) fn compose(
                     RoutedFilter::Row(tree) => {
                         let region = tree.region_verdict();
                         let matched =
-                            engine.evaluate_row_route(&tree, served, &domain, total, false)?;
+                            engine.evaluate_row_route(&tree, served, domain, total, false)?;
                         let rows = open.mask.visible_rows(matched.rows());
                         let size = rows.cardinality();
                         Set::of(Held::Rows(rows), size, region)
