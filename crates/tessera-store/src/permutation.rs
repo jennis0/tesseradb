@@ -1918,16 +1918,28 @@ impl RowSpace {
         })
     }
 
-    /// The members of `set` holding a row in the base or in one of the first `extents` extents.
+    /// The members of `set` holding a row in the base or in an extent up to and including the one
+    /// whose `seg_id` is `through`; the base alone where `through` is `None`.
     ///
-    /// `extents` is the number of extents a caller's row set covers, so the answer is the entities
-    /// of those rows and not of rows added since. `O(containers of set)` per part.
-    pub fn restrict_to_view(&self, set: &croaring::Bitmap, extents: usize) -> croaring::Bitmap {
+    /// `through` is the last extent a caller's rows were projected over, so the answer is the
+    /// entities of those rows and not of rows a flush has added since. Segment ids are never
+    /// reused. `None` where no extent here has that id: a merge has collapsed it, and which of the
+    /// merged extent's entities the caller's rows cover is not known here. `O(containers of set)`
+    /// per part.
+    pub fn restrict_to_view(
+        &self,
+        set: &croaring::Bitmap,
+        through: Option<&str>,
+    ) -> Option<croaring::Bitmap> {
+        let covered = match through {
+            None => 0,
+            Some(seg_id) => self.extents.iter().position(|e| e.seg_id == seg_id)? + 1,
+        };
         let mut out = set.and(self.base.present_entities());
-        for entities in &self.extent_entities[..extents.min(self.extent_entities.len())] {
+        for entities in &self.extent_entities[..covered] {
             out.or_inplace(&set.and(entities));
         }
-        out
+        Some(out)
     }
 
     /// The entities of `rows`, or `None` where the base published no `row-entity.u32` and so
@@ -2219,8 +2231,9 @@ mod tests {
         }
     }
 
-    /// `restrict_to_view(set, k)` keeps the members of `set` with a row in the base or in the
-    /// first `k` extents, and nothing else.
+    /// `restrict_to_view(set, through)` keeps the members of `set` with a row in the base or in the
+    /// extents up to `through`, and nothing else; after a merge it keeps them up to the merged
+    /// extent, and it has no answer for an extent the merge collapsed.
     #[test]
     fn restricting_to_a_view_keeps_the_entities_with_a_row_in_the_covered_extents() {
         const BOUND: u64 = (2 << PAGE_SHIFT) + 500;
@@ -2232,23 +2245,52 @@ mod tests {
             .filter(|_| rng.gen_bool(0.5))
             .map(|e| e as u32)
             .collect();
-        for covered in 0..=extents.len() + 1 {
-            let want: croaring::Bitmap = set
-                .iter()
+        let want = |covered: &[SegmentExtent]| -> croaring::Bitmap {
+            set.iter()
                 .filter(|&e| {
                     let e = u64::from(e);
                     space.base().row_of(EntityId::new(e)).is_some()
-                        || extents[..covered.min(extents.len())]
+                        || covered
                             .iter()
                             .any(|extent| extent.pairs().any(|(held, _)| held == e))
                 })
-                .collect();
+                .collect()
+        };
+        assert_eq!(space.restrict_to_view(&set, None), Some(want(&[])), "the base");
+        for (i, extent) in extents.iter().enumerate() {
             assert_eq!(
-                space.restrict_to_view(&set, covered),
-                want,
-                "{covered} extents covered"
+                space.restrict_to_view(&set, Some(&extent.seg_id)),
+                Some(want(&extents[..=i])),
+                "through {}",
+                extent.seg_id
             );
         }
+        assert_eq!(space.restrict_to_view(&set, Some("no-such-segment")), None);
+
+        // A merge of both extents into one: rows projected through the first no longer say which
+        // of the merged extent's entities they hold.
+        let mut by_row: Vec<(u32, u64)> = extents
+            .iter()
+            .flat_map(|extent| {
+                extent
+                    .pairs()
+                    .map(move |(entity, row)| (extent.row_base + row, entity))
+            })
+            .collect();
+        by_row.sort_unstable();
+        let merged = SegmentExtent::from_rows(
+            "m",
+            extents[0].row_base,
+            (extents[0].entity_lo, extents[1].entity_hi),
+            by_row.into_iter().map(|(_, entity)| entity),
+        )
+        .expect("the merged extent is well formed");
+        let seg_ids: Vec<String> = extents.iter().map(|e| e.seg_id.clone()).collect();
+        let merged_space = space.collapsing(&seg_ids, merged).expect("the merge applies");
+        assert_eq!(merged_space.restrict_to_view(&set, Some(&extents[0].seg_id)), None);
+        assert_eq!(merged_space.restrict_to_view(&set, Some(&extents[1].seg_id)), None);
+        assert_eq!(merged_space.restrict_to_view(&set, Some("m")), Some(want(&extents)));
+        assert_eq!(merged_space.restrict_to_view(&set, None), Some(want(&[])));
     }
 
     /// `entities_of_rows` is `entity_of` over every row of the set: across the base and the

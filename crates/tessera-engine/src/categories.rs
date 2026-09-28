@@ -409,8 +409,9 @@ pub struct Suggestion {
     pub title: Option<String>,
     pub span: MatchSpan,
     /// The number of items carrying this value that this viewer may see, within the request's view
-    /// where it names one: present iff the request asked for counts. Under a view, a value visible
-    /// to this viewer in another view and carried by no item of this one counts 0.
+    /// where it names one: present iff the request asked for counts. Under a view, items not yet
+    /// flushed do not count, and a value visible to this viewer in another view and carried by no
+    /// item of this one counts 0.
     pub count: Option<u64>,
 }
 
@@ -474,8 +475,9 @@ impl Engine {
     ///
     /// With `counts`, each value carries the number of items carrying it that this viewer may see:
     /// the base, the extents and the buffered rows, from inside the composed candidate. With
-    /// `view`, only items holding a row in that view count, and a value visible in another view
-    /// counts 0 here. An unknown or unreachable view is refused as [`EngineError::UnknownView`].
+    /// `view`, only items holding a row in that view count. An item ingested and not yet flushed
+    /// holds no row in any view, so it counts without `view` and not with it. A value visible in
+    /// another view counts 0 here. An unknown or unreachable view is refused as [`EngineError::UnknownView`].
     #[allow(clippy::too_many_arguments)]
     pub fn suggest(
         &self,
@@ -645,7 +647,10 @@ impl Engine {
                 let set = match row_space {
                     None => candidate,
                     Some(row_space) => {
-                        within = row_space.restrict_to_view(candidate, row_space.extent_count());
+                        let through = row_space.extents().last().map(|e| e.seg_id.as_str());
+                        within = row_space
+                            .restrict_to_view(candidate, through)
+                            .expect("the last extent of a row space is one of its extents");
                         &within
                     }
                 };
@@ -708,7 +713,8 @@ pub(crate) fn buffered_codes(
     let mut emit = |entity: &tessera_types::EntityId, item, place| {
         let code = category_code(buffered_value(item, place));
         debug_assert!(code.is_some(), "a buffered category value is a code");
-        if let (Ok(entity), Some(code)) = (u32::try_from(entity.raw()), code) {
+        let entity = u32::try_from(entity.raw()).expect("entity ids are bounded by the allocator");
+        if let Some(code) = code {
             visit(entity, code);
         }
     };

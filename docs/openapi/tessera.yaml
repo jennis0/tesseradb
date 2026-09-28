@@ -387,7 +387,7 @@ paths:
         - name: counts
           in: query
           required: false
-          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request, including items ingested and not yet flushed. With `view`, only items in that view count, and a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
+          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request. Without `view`, an item ingested and not yet flushed counts. With `view`, only items holding a row in that view count, and an item ingested and not yet flushed holds no row in any view until its flush, so it does not count; a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
           schema:
             type: boolean
         - name: view
@@ -2789,7 +2789,7 @@ components:
               count:
                 type: integer
                 minimum: 0
-                description: Present only with `counts=true`. The items carrying this value that this principal may see, within `view` where the request names one, exact and computed per request. Under a view it is `0` for a value this principal sees only in other views. It does not affect the order.
+                description: Present only with `counts=true`. The items carrying this value that this principal may see, within `view` where the request names one, exact and computed per request. Under a view it leaves out items not yet flushed, which hold no row in the view, and is `0` for a value this principal sees only in other views. It does not affect the order.
         more:
           type: boolean
           description: "`true` where the walk stopped before its range was exhausted: the page filled, or `selection.max_suggestion_walk` values were examined. Answered from the session's set of visible values, it means only that the page filled. There is no cursor; a client asks for more by extending `q`."

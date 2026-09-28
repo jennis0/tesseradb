@@ -391,3 +391,29 @@ fn count_segment(
         emit(&mut cell, out);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GroupTable;
+
+    /// A listed code falls in its first position in the list, code 0 in none, and every other code
+    /// in the rest, whether the table is indexed by code or a map.
+    #[test]
+    fn the_group_table_sends_listed_codes_to_their_place_and_the_rest_to_rest() {
+        for listed in [[7u32, 300, 7, 65_535], [7, 300, 7, 4_000_000_000]] {
+            let table = GroupTable::new(&listed);
+            assert_eq!((table.rest(), table.none()), (4, 5));
+            assert_eq!(
+                table.group(7),
+                0,
+                "a code listed twice keeps its first place"
+            );
+            assert_eq!(table.group(300), 1);
+            assert_eq!(table.group(listed[3]), 3);
+            assert_eq!(table.group(0), table.none());
+            for unlisted in [1, 8, 65_534, 70_000, u32::MAX] {
+                assert_eq!(table.group(unlisted), table.rest(), "code {unlisted}");
+            }
+        }
+    }
+}

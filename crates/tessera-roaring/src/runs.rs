@@ -178,7 +178,7 @@ pub fn for_each_run_in(bitmap: &Bitmap, r: Range<u32>, f: &mut impl FnMut(Range<
     loop {
         let n = cursor.read_many_ranges(&mut buf);
         if n == 0 {
-            // Exhausted — `read_many_ranges` returning 0 is the termination signal.
+            // `read_many_ranges` returns 0 once the cursor is exhausted.
             return;
         }
         for run in &buf[..n] {
@@ -345,8 +345,8 @@ mod run_walk_tests {
         out
     }
 
-    /// Every emitted run flattens back to exactly `bitmap ∩ r`, half-open — the property every
-    /// other test here is a named corner of.
+    /// Every emitted run flattens back to exactly `bitmap ∩ r`, half-open. Every other test here
+    /// checks one corner of this property.
     fn assert_flattens_to_intersection(bitmap: &Bitmap, r: Range<u32>) {
         let flat: Vec<u32> = runs_of(bitmap, r.clone()).into_iter().flatten().collect();
         let expected: Vec<u32> = bitmap.and(&Bitmap::from_range(r.clone())).to_vec();
@@ -367,7 +367,7 @@ mod run_walk_tests {
 
     #[test]
     fn a_run_spanning_the_container_boundary_comes_back_merged() {
-        // croaring merges runs across the 65535/65536 container boundary — one run, not two.
+        // croaring merges runs across the 65535/65536 container boundary into one run.
         let mut b = Bitmap::new();
         b.add_range(65_530..=65_540);
         assert_eq!(runs_of(&b, 0..100_000), vec![65_530..65_541]);

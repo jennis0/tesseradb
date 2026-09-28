@@ -574,13 +574,7 @@ fn execute_flush_stages(
         let mut scalars = Vec::with_capacity(ctx.render_indices.len() + ctx.scoped_render.len());
         // Positionally parallel to `render_indices`, the render subset in declaration order.
         for &index in &ctx.render_indices {
-            let value = item.scalars.get(index).ok_or_else(|| {
-                MaintenanceFailed(format!(
-                    "a buffered row carries {} scalars, but a render column is declared at \
-                     position {index}",
-                    item.scalars.len()
-                ))
-            })?;
+            let value = buffered_value(item, BufferedPlace::Entity(index));
             // Absence is not resolved here: `write_flush_segment` records it in the presence bitmap.
             scalars.push(value.clone());
         }

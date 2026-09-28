@@ -613,13 +613,12 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
 // ---------------------------------------------------------------------------------------------
 
 /// A slow viewport request, engineered exactly as `healthz_stays_prompt_while_a_long_viewport_runs`
-/// does (see its doc for the cost-model argument): `zoom = 0`, `underlay_offset = 12` against a
+/// does (see its doc for the cost-model argument): the whole extent at `zoom = 11` against a
 /// server whose `EngineConfig` has been widened to allow it. Used throughout the gate tests below
 /// to hold the compute permit for long enough to deterministically observe saturation.
 fn slow_viewport_body() -> serde_json::Value {
     serde_json::json!({
-        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
-        "underlay_offset": 12
+        "view": "s0", "zoom": 11, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
     })
 }
 
@@ -632,8 +631,7 @@ fn fast_viewport_body() -> serde_json::Value {
 /// anything.
 fn engine_config_for_slow_viewport() -> EngineConfig {
     let mut config = default_engine_config();
-    config.max_underlay_offset = 12;
-    config.max_underlay_cells = 20_000_000;
+    config.max_tiles_per_request = 1 << 22;
     config
 }
 
@@ -1094,21 +1092,11 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
 // Cooperative cancellation wired to client disconnect (the rapid-pan case).
 // ---------------------------------------------------------------------------------------------
 
-/// A slow viewport request engineered to spread its cost across MANY tiles rather than
-/// [`slow_viewport_body`]'s one giant tile. The per-tile cancellation check sits at the top of
-/// the tile loop — it is deliberately not checked mid-tile (a tile's own underlay sweep is
-/// bounded, in-flight work, same as every other per-tile stage) — so a single-tile fixture like
-/// `slow_viewport_body` (`zoom = 0`) cannot demonstrate early interruption at all: cancellation
-/// would only ever be observed once that one tile's entire sweep has already finished, which is
-/// indistinguishable from no cancellation. `zoom = 2` gives 16 tiles; `underlay_offset = 9` costs
-/// ~262144 sub-cell evaluations per tile (~4.2M total, tens of tiles' worth of real work), so a
-/// disconnect landing after any prefix of tiles releases the gate long before the rest would have
-/// run.
+/// A slow viewport request whose cost is spread across many tiles. The cancellation check sits at
+/// the top of the tile loop, so a disconnect landing after any prefix of the `4^11` tiles of
+/// `zoom = 11` releases the gate long before the rest would have run.
 fn slow_multi_tile_viewport_body() -> serde_json::Value {
-    serde_json::json!({
-        "view": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
-        "underlay_offset": 9
-    })
+    slow_viewport_body()
 }
 
 /// Warm-session scope: a client that drops its connection mid-viewport — the rapid-pan case

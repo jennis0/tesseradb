@@ -707,12 +707,9 @@ async fn ingest_answers_each_rows_tessera_id_as_the_string_the_viewer_serves() {
 /// moves to tokio's separate blocking-thread pool (a real OS thread, regardless of runtime
 /// flavor), freeing the one reactor thread to service `/healthz` while it runs.
 ///
-/// Slowness is engineered deterministically via the §3.3 density underlay's `4^offset` sub-cell
-/// fan-out (`tessera_engine::viewport`'s cost model — each sub-cell costs one small binary search
-/// plus one bitmap range-count, independent of corpus size), not via corpus size — so the fixture
-/// stays at the file's default `N_ITEMS` and builds in the same sub-second time every other test
-/// here does. `offset = 12` at `zoom = 0` (one tile, so the tile-count bound never engages) asks
-/// for `4^12 ≈ 16.8M` sub-cell evaluations.
+/// Slowness is engineered by the tile count rather than by corpus size, so the fixture stays at
+/// the file's default `N_ITEMS` and builds as fast as every other test here: the whole extent at
+/// `zoom = 11` is `4^11 ≈ 4.2M` tiles, each searched for its rows whether it holds any or not.
 ///
 /// **The passing (post-refactor) bound is self-scaling, not a fixed wall-clock bet.** A fixed
 /// `healthz_elapsed < 1s` assumed this debug-profile binary's absolute speed; on a slower or more
@@ -733,10 +730,9 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut config = default_engine_config();
-    // Wide enough to let the request below through `Engine::viewport`'s own bounds checks
-    // (`EngineError::UnderlayRefused`) rather than being rejected before it ever costs anything.
-    config.max_underlay_offset = 12;
-    config.max_underlay_cells = 20_000_000;
+    // Wide enough to let the request below through `Engine::viewport`'s tile bound rather than
+    // being refused before it costs anything.
+    config.max_tiles_per_request = 1 << 22;
     let server = spawn_server_with_config(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -755,8 +751,7 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
             .post(viewer_url)
             .bearer_auth(token)
             .json(&serde_json::json!({
-                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
-                "underlay_offset": 12
+                "view": "s0", "zoom": 11, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
             }))
             .send()
             .await

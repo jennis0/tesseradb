@@ -711,8 +711,10 @@ fn a_count_under_a_view_counts_that_views_items() {
     ));
 }
 
-/// **A count takes in an item ingested and not yet flushed**, as a filter's candidate does, and
-/// under a view it does not, the item holding no row there until its flush.
+/// **A count takes in an item ingested and not yet flushed**, as a filter's candidate does; under
+/// a view it does not until its flush, the item holding no row there before. After the flush it
+/// counts once either way, so the buffer and the new extent are not both counted. A suppressed
+/// buffered item counts nowhere.
 #[test]
 fn a_count_takes_in_an_item_buffered_before_its_flush() {
     let fx = fixture();
@@ -720,41 +722,53 @@ fn a_count_takes_in_an_item_buffered_before_its_flush() {
     engine.start_write_executor(8).expect("the executor starts");
     engine.set_background_refresh_for_test(false);
     let session = engine.authorise(&subset_credential()).unwrap();
-    let count_of = |view: Option<&str>, key: &str| {
+    let count_of = |view: Option<&str>| {
         suggest_with(&engine, &session, "department", view, "", 20, true, 100_000, 0)
             .values
             .iter()
-            .find(|v| v.key == key)
+            .find(|v| v.key == "eng")
             .and_then(|v| v.count)
+            .expect("eng is offered")
     };
-    let (before, before_in_view) = (count_of(None, "eng"), count_of(Some("s0"), "eng"));
+    let (before, before_in_view) = (count_of(None), count_of(Some("s0")));
 
-    engine
-        .ingest_rows(
-            vec![UnallocatedRow {
-                view: "s0".to_string(),
-                join: None,
-                descriptors: vec![b"0".to_vec(), b"1".to_vec()],
-                x: 1.0,
-                y: 1.0,
-                scalars: vec![
-                    WalScalar::Utf8("eng".to_string()),
-                    WalScalar::Utf8("xx".to_string()),
-                ],
-                terms: engine.resolve_terms(&[b"0".to_vec(), b"1".to_vec()]),
-                scoped: Vec::new(),
-            }],
-            "batch-1".to_string(),
-            [0u8; 32],
-        )
+    let row = |key: &str| UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec(), b"1".to_vec()],
+        x: 1.0,
+        y: 1.0,
+        scalars: vec![
+            WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("xx".to_string()),
+            WalScalar::U64(key_id(key)),
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec(), b"1".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let entities = engine
+        .ingest_rows(vec![row("kept"), row("suppressed")], "batch-1".to_string(), [0u8; 32])
         .expect("the ingest is accepted");
+    engine
+        .accept_change(entities[1], tessera_lifecycle::wal::ChangeOp::Suppress)
+        .expect("a suppression is an ordinary change");
 
-    assert_eq!(count_of(None, "eng"), before.map(|n| n + 1), "the buffered item counts");
+    assert_eq!(count_of(None), before + 1, "the buffered item counts, the suppressed one does not");
     assert_eq!(
-        count_of(Some("s0"), "eng"),
+        count_of(Some("s0")),
         before_in_view,
         "the buffered item holds no row in the view before its flush"
     );
+
+    let flushes = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().flushes <= flushes {
+        assert!(std::time::Instant::now() < deadline, "the flush never published");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(count_of(None), before + 1, "after the flush the item counts once");
+    assert_eq!(count_of(Some("s0")), before_in_view + 1, "and under the view it now counts");
 }
 
 // ---------------------------------------------------------------------------------------------

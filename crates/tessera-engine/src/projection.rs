@@ -291,6 +291,12 @@ impl RowProjection {
         Self::over(extended, rows)
     }
 
+    /// The `seg_id` of the last extent this projection covers, `None` where it covers the base
+    /// alone: what [`RowSpace::restrict_to_view`] takes to find the entities of these rows.
+    pub fn covers_through(&self) -> Option<&str> {
+        self.boundary_seg_id.as_deref()
+    }
+
     /// Whether `rows` extends the row space this was built over, rather than permuting it, so
     /// [`Self::extend`] is valid to call.
     pub fn extends_to(&self, rows: &RowSpace) -> bool {
