@@ -248,9 +248,130 @@ pub fn tiles_for_bbox_count(bbox: [f64; 4], depth: u8, e: &Bounds) -> u64 {
     wide * high
 }
 
+/// The cells at `depth`, 0 to 32, that a bbox `[x0, y0, x1, y1]` within an extent spans: inclusive
+/// ranges of `depth`-bit cell coordinates on each axis. A cell at depth `d` is the top `d` bits of
+/// each axis's [`fixed32`] position, so its prefix is the top `2d` bits of the 64-bit position.
+/// At depth 16 or less these are the tiles [`tiles_for_bbox`] lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellRect {
+    pub depth: u8,
+    pub x: (u32, u32),
+    pub y: (u32, u32),
+}
+
+/// The [`CellRect`] of `bbox` at `depth`.
+pub fn cells_for_bbox(bbox: [f64; 4], depth: u8, e: &Bounds) -> CellRect {
+    assert!(depth <= 32, "a position has 32 levels");
+    let [x0, y0, x1, y1] = bbox;
+    let at = |v: f64, min: f64, max: f64| {
+        (u64::from(fixed32(v, min, max)) >> (32 - u32::from(depth))) as u32
+    };
+    let (ax, bx) = (at(x0, e.x_min, e.x_max), at(x1, e.x_min, e.x_max));
+    let (ay, by) = (at(y0, e.y_min, e.y_max), at(y1, e.y_min, e.y_max));
+    CellRect {
+        depth,
+        x: (ax.min(bx), ax.max(bx)),
+        y: (ay.min(by), ay.max(by)),
+    }
+}
+
+impl CellRect {
+    /// How many cells the rectangle holds, `u64::MAX` for every cell at depth 32.
+    pub fn count(&self) -> u64 {
+        (u64::from(self.x.1 - self.x.0) + 1).saturating_mul(u64::from(self.y.1 - self.y.0) + 1)
+    }
+
+    /// Whether it holds every cell at its depth.
+    pub fn is_whole(&self) -> bool {
+        let last = ((1u64 << self.depth) - 1) as u32;
+        self.x == (0, last) && self.y == (0, last)
+    }
+
+    /// Whether it holds the cell whose depth-`self.depth` prefix is `cell`.
+    pub fn contains(&self, cell: u64) -> bool {
+        let (x, y) = (compact64(cell), compact64(cell >> 1));
+        (self.x.0..=self.x.1).contains(&x) && (self.y.0..=self.y.1).contains(&y)
+    }
+
+    /// The prefixes at `depth`, at most 16 and at most the rectangle's, of the cells it covers
+    /// wholly or in part, as ascending ranges with no two adjacent.
+    pub fn prefix_ranges(&self, depth: u8) -> Vec<std::ops::Range<u64>> {
+        assert!(depth <= 16 && depth <= self.depth, "a range of tiles at depth 16 or less");
+        let shift = self.depth - depth;
+        let area = CellRect {
+            depth,
+            x: (self.x.0 >> shift, self.x.1 >> shift),
+            y: (self.y.0 >> shift, self.y.1 >> shift),
+        };
+        let mut out: Vec<std::ops::Range<u64>> = Vec::new();
+        area.cover(0, 0, 0, &mut out);
+        out
+    }
+
+    /// The ranges of the node `(nx, ny)` at `level`, whose descendants at `self.depth` it covers.
+    fn cover(&self, level: u8, nx: u32, ny: u32, out: &mut Vec<std::ops::Range<u64>>) {
+        let below = u32::from(self.depth - level);
+        let (x0, x1) = (nx << below, ((nx + 1) << below) - 1);
+        let (y0, y1) = (ny << below, ((ny + 1) << below) - 1);
+        if x1 < self.x.0 || x0 > self.x.1 || y1 < self.y.0 || y0 > self.y.1 {
+            return;
+        }
+        let inside = x0 >= self.x.0 && x1 <= self.x.1 && y0 >= self.y.0 && y1 <= self.y.1;
+        if inside || level == self.depth {
+            let first = interleave_bits(nx, ny, level) << (2 * below);
+            let range = first..first + (1u64 << (2 * below));
+            match out.last_mut() {
+                Some(last) if last.end == range.start => last.end = range.end,
+                _ => out.push(range),
+            }
+            return;
+        }
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            self.cover(level + 1, 2 * nx + dx, 2 * ny + dy, out);
+        }
+    }
+}
+
+/// The even bits of `v`, packed.
+fn compact64(v: u64) -> u32 {
+    let mut v = v & 0x5555_5555_5555_5555;
+    v = (v | (v >> 1)) & 0x3333_3333_3333_3333;
+    v = (v | (v >> 2)) & 0x0f0f_0f0f_0f0f_0f0f;
+    v = (v | (v >> 4)) & 0x00ff_00ff_00ff_00ff;
+    v = (v | (v >> 8)) & 0x0000_ffff_0000_ffff;
+    v = (v | (v >> 16)) & 0x0000_0000_ffff_ffff;
+    v as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cell_rect_agrees_with_the_tiles_and_its_ranges_cover_exactly_its_cells() {
+        let e = Bounds { x_min: 0.0, x_max: 1000.0, y_min: 0.0, y_max: 1000.0 };
+        for bbox in [[0.0, 0.0, 1000.0, 1000.0], [120.5, 33.0, 610.0, 499.9], [3.0, 3.0, 3.0, 3.0]] {
+            for depth in 0..=6u8 {
+                let rect = cells_for_bbox(bbox, depth, &e);
+                let tiles = tiles_for_bbox(bbox, depth, &e);
+                assert_eq!(rect.count(), tiles.len() as u64);
+                let mut prefixes: Vec<u64> = tiles.iter().map(|t| t.prefix).collect();
+                prefixes.sort_unstable();
+                let covered: Vec<u64> = rect.prefix_ranges(depth).into_iter().flatten().collect();
+                assert_eq!(covered, prefixes, "{bbox:?} at {depth}");
+                assert!(prefixes.iter().all(|&p| rect.contains(p)));
+                let all = 1u64 << (2 * depth);
+                assert_eq!((0..all).filter(|&p| rect.contains(p)).count() as u64, rect.count());
+            }
+        }
+        let whole = cells_for_bbox([0.0, 0.0, 1000.0, 1000.0], 32, &e);
+        assert!(whole.is_whole());
+        assert_eq!(whole.count(), u64::MAX, "4^32 cells saturate");
+        assert_eq!(whole.prefix_ranges(16), vec![0..1 << 32]);
+        let deep = cells_for_bbox([100.0, 100.0, 100.001, 100.001], 20, &e);
+        assert!(deep.count() > 0 && deep.count() < 100);
+        assert!(deep.prefix_ranges(16).iter().map(|r| r.end - r.start).sum::<u64>() <= 4);
+    }
 
     #[test]
     fn unfixed32_is_within_half_a_step_of_every_value_fixed32_maps_there() {
