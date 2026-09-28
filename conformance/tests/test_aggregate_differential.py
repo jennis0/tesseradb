@@ -12,8 +12,10 @@ What this module covers:
   holds a hidden value, a declared value with no item and a key that does not exist; with `rest`
   and `none`; under three principals of very different coverage, with no filter, a category
   filter and a region, and with a reference of the whole visible set.
-- **Cells**, alone and inside a value grouping, at depths 0, 3, 7, 16 and 20, including a table
-  long enough to be read through its cursor.
+- **Cells**, alone and inside a value grouping, at depths 0, 3, 7 and 10 over the whole view and
+  12 and 20 over an area, which lists only its own cells, including tables long enough to be read
+  through the cursor.
+- **The cell limit**: the whole view at depth 11 is refused.
 - **Artifacts**, over the spatial-layer fixture of `test_member_of.py`: two flat spatial layers,
   by `top` and by a named list holding an id that names
   nothing, under that fixture's three principals and a numeric filter.
@@ -76,8 +78,10 @@ GROUPINGS = [
     {"by": {"field": "archive", "values": ["void", "green"]}},
     {"by": {"field": "shelf", "top": 5}, "cells": {"depth": 7}},
     {"cells": {"depth": 0}},
-    {"cells": {"depth": 16}},
-    {"cells": {"depth": 20}},
+    {"cells": {"depth": 10}},
+    {"cells": {"depth": 12, "area": [0.0, 0.0, 16383.0, 16383.0]}},
+    {"by": {"field": "archive", "top": 2}, "cells": {"depth": 12, "area": [8000.0, 3000.0, 20000.0, 9000.0]}},
+    {"cells": {"depth": 20, "area": [30000.0, 30000.0, 30040.0, 30040.0]}},
 ]
 
 
@@ -176,9 +180,11 @@ def expected_tables(oracle, m_auth: set[int], filters, reference, groupings):
     for grouping in groupings:
         by = grouping.get("by")
         depth = grouping.get("cells", {}).get("depth")
+        bbox = grouping.get("cells", {}).get("area")
+        area = agg.area_of(bbox, depth, cat.EXTENT) if bbox is not None else None
         if by is None:
             tables.append(agg.table(items=items, reference=ref, groups=None, pick=None,
-                                    depth=depth, position=position))
+                                    depth=depth, position=position, area=area))
             continue
         planted, codes, derived = values[by["field"]]
         groups: dict[str, set[int]] = {}
@@ -192,7 +198,7 @@ def expected_tables(oracle, m_auth: set[int], filters, reference, groupings):
                 return key in codes
         pick = ("top", by["top"]) if "top" in by else ("named", by["values"])
         tables.append(agg.table(items=items, reference=ref, groups=groups, pick=pick,
-                                listable=listable, depth=depth, position=position))
+                                listable=listable, depth=depth, position=position, area=area))
     return items, tables
 
 
@@ -236,6 +242,15 @@ def test_a_table_without_a_reference_has_no_reference_columns(catalogue_server, 
     for index, (rows, (want_head, want_rows)) in enumerate(zip(tables, expected)):
         assert "reference_total" not in heads[index]
         assert_rows_equal(rows, want_rows, f"grouping {index}")
+
+
+def test_the_cell_limit_refuses_the_whole_view_past_depth_10(catalogue_server):
+    case = next(c for c in cat.catalogue() if c.name == "full_100pct")
+    token = catalogue_server.authorise(list(case.grants))["token"]
+    ok = catalogue_server.aggregate(token, view=cat.VIEW_ID, groupings=[{"cells": {"depth": 10}}])
+    assert ok.status_code == 200, ok.text
+    over = catalogue_server.aggregate(token, view=cat.VIEW_ID, groupings=[{"cells": {"depth": 11}}])
+    assert over.status_code == 422 and over.json()["error"] == "contract", over.text
 
 
 def test_a_field_that_cannot_be_counted_is_refused(catalogue_server):

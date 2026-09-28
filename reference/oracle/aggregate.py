@@ -14,6 +14,8 @@ The rules, as the contract states them:
   in no group. Each appears only where it holds an item of the set or of the reference.
 - **Cells.** A cell at depth `d` is the top `2d` bits of the position. With cells, each group's
   rows are its non-empty cells, ascending, and a row appears where either count is non-zero.
+  With an area, a rectangle of depth-`d` cell coordinates, only its cells have rows, each
+  counting all of its items; the head and the ranking of groups stay the whole set's.
 - **Lift.** `(count / total) / (reference_count / reference_total)`, `None` where
   `reference_count` or `total` is zero.
 
@@ -40,6 +42,30 @@ def cell_of(position: int, depth: int) -> int:
     return position >> (64 - 2 * depth) if depth else 0
 
 
+def deinterleave(cell: int) -> tuple[int, int]:
+    """A cell prefix's two axes: its even bits and its odd bits, read one bit at a time."""
+    x = y = 0
+    for bit in range(32):
+        x |= ((cell >> (2 * bit)) & 1) << bit
+        y |= ((cell >> (2 * bit + 1)) & 1) << bit
+    return x, y
+
+
+def area_of(bbox, depth: int, extent) -> tuple[int, int, int, int]:
+    """The inclusive cell coordinates at `depth` a bbox `[x0, y0, x1, y1]` spans, over an extent
+    `(x_min, x_max, y_min, y_max)`: each corner's 32-bit quantisation, cut to `depth` bits."""
+    from . import morton
+    x_min, x_max, y_min, y_max = extent
+    x0, y0, x1, y1 = bbox
+
+    def cut(q: int) -> int:
+        return q >> (32 - depth) if depth else 0
+
+    xs = sorted((cut(morton.fixed32(x0, x_min, x_max)), cut(morton.fixed32(x1, x_min, x_max))))
+    ys = sorted((cut(morton.fixed32(y0, y_min, y_max)), cut(morton.fixed32(y1, y_min, y_max))))
+    return xs[0], xs[1], ys[0], ys[1]
+
+
 def lift(count: int, total: int, reference_count: int, reference_total: int) -> float | None:
     if reference_count == 0 or total == 0:
         return None
@@ -55,13 +81,20 @@ def table(
     listable=lambda key: True,
     depth: int | None,
     position: dict[int, int],
+    area: tuple[int, int, int, int] | None = None,
 ) -> tuple[dict, list[Row]]:
     """One grouping's table head and rows.
 
     `groups` maps each group's key to its entities; `None` is a grouping with no outer level.
     `pick` is `("top", n)` or `("named", [key, ...])`. `listable(key)` says whether a named key is
     one the principal may be listed, and a key absent from `groups` is listable when it passes.
+    `area` is `(x0, x1, y0, y1)`, inclusive cell coordinates at `depth`.
     """
+    def in_area(entity: int) -> bool:
+        if area is None:
+            return True
+        x, y = deinterleave(cell_of(position[entity], depth))
+        return area[0] <= x <= area[1] and area[2] <= y <= area[3]
     total = len(items)
     reference_total = len(reference) if reference is not None else None
     head: dict = {"total": total}
@@ -69,7 +102,8 @@ def table(
         head["reference_total"] = reference_total
 
     if groups is None:
-        rows = _rows(None, None, items, reference, depth, position, total, reference_total, True)
+        rows = _rows(None, None, items, reference, depth, position, total, reference_total, True,
+                     in_area)
         return head, rows
 
     head["groups"] = sum(1 for members in groups.values() if members & items)
@@ -96,25 +130,29 @@ def table(
         rows += _rows(
             "listed", key, items & members,
             reference & members if reference is not None else None,
-            depth, position, total, reference_total, always,
+            depth, position, total, reference_total, always, in_area,
         )
     for name, members in (("rest", grouped - in_listed), ("none", None)):
         in_set = items & members if members is not None else items - grouped
         in_reference = None
         if reference is not None:
             in_reference = reference & members if members is not None else reference - grouped
-        rows += _rows(name, None, in_set, in_reference, depth, position, total, reference_total, False)
+        rows += _rows(name, None, in_set, in_reference, depth, position, total, reference_total, False,
+                      in_area)
     return head, rows
 
 
-def _rows(group, key, in_set, in_reference, depth, position, total, reference_total, always):
-    """One group's rows: one without cells, or one per non-empty cell."""
+def _rows(group, key, in_set, in_reference, depth, position, total, reference_total, always,
+          in_area=lambda entity: True):
+    """One group's rows: one without cells, or one per non-empty cell in the area."""
     if depth is None:
         count = len(in_set)
         reference_count = len(in_reference) if in_reference is not None else None
         if not always and group is not None and count == 0 and not reference_count:
             return []
         return [_row(group, key, None, count, reference_count, total, reference_total)]
+    in_set = {entity for entity in in_set if in_area(entity)}
+    in_reference = {entity for entity in in_reference if in_area(entity)} if in_reference is not None else None
     counts: dict[int, int] = {}
     for entity in in_set:
         cell = cell_of(position[entity], depth)
