@@ -1,6 +1,8 @@
 import type {Artifact, ArtifactDetail, BrowsePage, PaletteScheme, Projections, RegionProjection, Store} from '@tesseradb/client';
 import {NO_MASKED} from '@tesseradb/client';
 import type {TesseraMap} from '@tesseradb/components';
+import type {Colouring} from '@tesseradb/deck';
+import {setColouring} from '../../components/src/colouring.js';
 import {fakeStore, meta as baseMeta, settle, status, type FakeStore} from '../../components/test/fake-store.js';
 import {AREA, FIELDS, LAYERS, MANY_FIELDS, META, TOPIC, VENUES, browseRow, emptyDraft, filtersOf, legendOf, mapState, paper, ranksOf, suggestion, topicArtifacts, withDraft} from './corpus.js';
 
@@ -40,6 +42,36 @@ function store(over: Partial<Projections> = {}): FakeStore {
 }
 
 const SHOWN_VIEW = mapState().view;
+
+/** Type `q` into a filter's search box, as a viewer would, once the element has drawn it. */
+const typeInto = (q: string) => async (el: HTMLElement) => {
+  await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
+  await until(() => !!shadow(el, 'input[part="entry"]'), 'the search box');
+  const input = shadow(el, 'input[part="entry"]') as HTMLInputElement;
+  input.value = q;
+  input.dispatchEvent(new Event('input'));
+  await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
+};
+
+/** Clauses in both positions and on artifacts, for the panels. */
+const APPLIED = filtersOf(
+  withDraft(
+    {
+      field: {family: 'category', keys: ['cs.CV', 'cs.LG', 'stat.ML']},
+      authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix'},
+      citations: {family: 'numeric', gte: 100, lte: null},
+      published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}
+    },
+    {title: {family: 'text', query: '"classifier-free guidance"', phrase: true}, field: {family: 'category', keys: ['cs.CV']}}
+  ),
+  {
+    members: [
+      {layer: 'topics', artifact: TOPIC(1).tesseraId, outside: false, verb: 'filter'},
+      {layer: 'topics', artifact: TOPIC(5).tesseraId, outside: true, verb: 'filter'},
+      {layer: 'venues', artifact: VENUES.conferences[2]!.tesseraId, outside: false, verb: 'highlight', label: VENUES.conferences[2]!.name}
+    ]
+  }
+);
 
 /** Wait until `test` holds, checking each frame, or give up after `ms` and report it as an error. */
 async function until(test: () => boolean, what: string, ms = 5000): Promise<void> {
@@ -118,7 +150,12 @@ async function search(el: HTMLElement, q: string, done: string): Promise<void> {
   await until(() => !!shadow(el, done), `search results for ${q}`);
 }
 
-const legendStore = (colourBy: string | null, over: Partial<Projections> = {}) => store({legend: legendOf(colourBy), ...over});
+/** A store colouring by `colourBy`, with the colour choices `colouring` names already made. */
+const legendStore = (colourBy: string | null, over: Partial<Projections> = {}, colouring: Partial<Colouring> = {}) => {
+  const s = store({legend: legendOf(colourBy), ...over});
+  if (Object.keys(colouring).length > 0) setColouring(s, colouring);
+  return s;
+};
 
 export const SECTIONS: Section[] = [
   {
@@ -178,6 +215,7 @@ export const SECTIONS: Section[] = [
         state: 'shown, inexact counts',
         build: () => make('tessera-status', {store: store({view: {...SHOWN_VIEW, served: {...SHOWN_VIEW.served, exact: false}, matched: {value: 12_465_020, exact: false}}})})
       },
+      {fit: true, state: 'shown, compact', build: () => make('tessera-status', {store: store({view: SHOWN_VIEW})}, {compact: ''})},
       {fit: true, state: 'shown, expanded card', build: () => make('tessera-status', {store: store({view: {...SHOWN_VIEW, provisional: 1_204}, replica: {bytes: 48_812_000, points: 6_390, bands: 58, views: 1, lastPlan: null}}), expanded: true})},
       {fit: true, state: 'empty', build: () => make('tessera-status', {store: store({status: status({status: 'empty'})})})},
       {fit: true, state: 'refused', build: () => make('tessera-status', {store: store({status: status({status: 'refused', refusal: REFUSAL})})})},
@@ -228,6 +266,21 @@ export const SECTIONS: Section[] = [
       {state: 'loading (no meta yet)', build: () => make('tessera-legend', {store: store({meta: null, status: status({status: 'loading'})})})},
       {state: 'colour by none', build: () => make('tessera-legend', {store: legendStore(null)})},
       {state: 'category', build: () => make('tessera-legend', {store: legendStore('field')})},
+      {state: 'category, filtered to two values', build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}))})})},
+      {
+        state: 'category, filtered to two values with one highlighted',
+        build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, {field: {family: 'category', keys: ['cs.CV']}}))})})
+      },
+      {state: 'category, one value highlighted', build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({}, {field: {family: 'category', keys: ['cs.CV']}}))})})},
+      {
+        state: 'category, with exact counts where a store holds them',
+        build: () =>
+          make('tessera-legend', {
+            store: store({legend: legendOf('field', {counts: {field: Object.fromEntries(FIELDS.map((v, i) => [v.key, {value: Math.round(4_812_300 / (i + 1.2)), exact: true}]))}})})
+          })
+      },
+      {state: 'category, a chosen colour and the Okabe-Ito palette', build: () => make('tessera-legend', {store: legendStore('field', {}, {palette: 'okabe-ito', values: {field: {'cs.CV': '#6b3fa0'}}})})},
+      {state: 'category, limit 4', build: () => make('tessera-legend', {store: legendStore('field')}, {limit: '4'})},
       {state: 'category, names loading', build: () => make('tessera-legend', {store: store({legend: legendOf('field', {categories: {}})})})},
       {
         state: 'category, more values than the palette',
@@ -238,10 +291,12 @@ export const SECTIONS: Section[] = [
         build: () => make('tessera-legend', {store: store({legend: legendOf('field', {categoryErrors: {field: {code: 'vocabulary-withheld', detail: 'arxiv_fields is not listable for this session'}}})})})
       },
       {state: 'numeric ramp', build: () => make('tessera-legend', {store: legendStore('citations')})},
+      {state: 'numeric, a range filter on the ramp', build: () => make('tessera-legend', {store: legendStore('citations', {filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 2000}}))})})},
+      {state: 'numeric, Magma on a log scale', build: () => make('tessera-legend', {store: legendStore('citations', {}, {ramp: 'magma', scale: 'log'})})},
       {state: 'numeric, no values on screen', build: () => make('tessera-legend', {store: store({legend: legendOf('citations', {domains: {}})})})},
       {state: 'a column that is not rendered', build: () => make('tessera-legend', {store: legendStore('published_at')})},
       {state: 'colour by cluster', build: () => make('tessera-legend', {store: legendStore('cluster:topics', {artifacts: mapState().artifacts})})},
-      {state: 'selectable, selects only', build: () => make('tessera-legend', {store: legendStore('field', {artifacts: mapState().artifacts}), selectable: true})},
+      {state: 'selectable, choice only', build: () => make('tessera-legend', {store: legendStore('field', {artifacts: mapState().artifacts}), selectable: true})},
       {state: 'selectable with readout, category', build: () => make('tessera-legend', {store: legendStore('field', {artifacts: mapState().artifacts}), selectable: true, readout: true})},
       {
         state: 'selectable with readout, cluster with a level select',
@@ -253,60 +308,58 @@ export const SECTIONS: Section[] = [
     name: 'filter',
     tag: 'tessera-filter',
     specimens: [
+      {state: 'category, nothing typed', build: () => make('tessera-filter', {store: store({view: SHOWN_VIEW})}, {column: 'field'})},
       {
-        state: 'category checklist',
-        build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})}, {column: 'field'})
-      },
-      {
-        state: 'category checklist, two chosen',
-        build: () =>
-          make(
-            'tessera-filter',
-            {store: store({filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV', 'cs.LG'], verb: 'filter'}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})},
-            {column: 'field'}
-          )
-      },
-      {
-        state: 'category typeahead, first page',
-        build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestions: {field: {q: '', values: FIELDS.slice(0, 6).map((v) => suggestion(v)), more: true}}})})}, {column: 'field'})
-      },
-      {
-        state: 'category typeahead, typed with matches marked, one chosen',
+        state: 'category, typed, with counts and shares, two chosen',
         build: () =>
           make(
             'tessera-filter',
             {
               store: store({
-                filters: filtersOf(withDraft({field: {family: 'category', keys: ['stat.ML'], verb: 'filter'}}), {
+                view: SHOWN_VIEW,
+                legend: legendOf('field'),
+                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'stat.ML']}}), {
                   suggestions: {field: {q: 'learn', values: [FIELDS[0]!, FIELDS[3]!].map((v) => suggestion(v, 'learn')), more: false}}
                 })
               })
             },
             {column: 'field'}
           ),
-        ready: async (el) => {
-          await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
-          await until(() => !!shadow(el, 'input[part="entry"]'), 'the typeahead input');
-          const input = shadow(el, 'input[part="entry"]') as HTMLInputElement;
-          input.value = 'learn';
-          input.dispatchEvent(new Event('input'));
-          await until(() => !!shadow(el, '[part="tick"] mark'), 'marked suggestions');
-        }
+        ready: typeInto('learn')
       },
-      {state: 'category typeahead, loading', build: () => make('tessera-filter', {store: store()}, {column: 'field'})},
       {
-        state: 'category typeahead, refused',
-        build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestErrors: {field: {code: 'vocabulary-withheld', detail: 'not listable'}}})})}, {column: 'field'})
-      },
-      {state: 'text, all words / phrase', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({title: {family: 'text', query: 'score matching', mode: 'phrase', verb: 'filter'}}))})}, {column: 'title'})},
-      {state: 'text, all words / any word', build: () => make('tessera-filter', {store: store()}, {column: 'abstract'})},
-      {state: 'keyword with operator', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix', verb: 'filter'}}))})}, {column: 'authors'})},
-      {state: 'number range', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 25_000, verb: 'filter'}}))})}, {column: 'citations'})},
-      {
-        state: 'date range',
+        state: 'category in the highlight, typed; a value the filter leaves out is greyed',
         build: () =>
-          make('tessera-filter', {store: store({filters: filtersOf(withDraft({published_at: {family: 'numeric', gte: Date.UTC(2020, 0, 1) * 1000, lte: Date.UTC(2024, 11, 31) * 1000, verb: 'filter'}}))})}, {column: 'published_at'})
+          make(
+            'tessera-filter',
+            {
+              store: store({
+                view: SHOWN_VIEW,
+                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
+                  suggestions: {field: {q: 'c', values: [FIELDS[1]!, FIELDS[2]!, FIELDS[7]!].map((v) => suggestion(v, 'c')), more: false}}
+                })
+              })
+            },
+            {column: 'field', verb: 'highlight'}
+          ),
+        ready: typeInto('c')
       },
+      {state: 'category, typed, loading', build: () => make('tessera-filter', {store: store()}, {column: 'field'}), ready: typeInto('neur')},
+      {
+        state: 'category, typed, refused',
+        build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestErrors: {field: {code: 'vocabulary-withheld', detail: 'not listable'}}})})}, {column: 'field'}),
+        ready: typeInto('q')
+      },
+      {state: 'text, a phrase or a word', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({title: {family: 'text', query: '"score matching" OR guidance', phrase: true}}))})}, {column: 'title'})},
+      {state: 'text, a column with no phrase', build: () => make('tessera-filter', {store: store()}, {column: 'abstract'})},
+      {state: 'keyword with operator', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix'}}))})}, {column: 'authors'})},
+      {state: 'number range', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 25_000}}))})}, {column: 'citations'})},
+      {
+        state: 'date range, whole years',
+        build: () =>
+          make('tessera-filter', {store: store({filters: filtersOf(withDraft({published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}}))})}, {column: 'published_at'})
+      },
+      {state: 'date range, open end', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({published_at: {family: 'numeric', gte: Date.UTC(2019, 2, 3) * 1000, lte: null}}))})}, {column: 'published_at'})},
       {state: 'unknown column (renders nothing)', build: () => make('tessera-filter', {store: store()}, {column: 'no_such_column'})}
     ]
   },
@@ -318,33 +371,26 @@ export const SECTIONS: Section[] = [
       {state: 'loading (no meta yet)', build: () => make('tessera-filter-panel', {store: store({meta: null, status: status({status: 'loading'})})})},
       {state: 'refused (no meta)', build: () => make('tessera-filter-panel', {store: store({meta: null, status: status({status: 'refused', refusal: REFUSAL})})})},
       {state: 'nothing filterable', build: () => make('tessera-filter-panel', {store: store({meta: {...META, filterOperands: []}})})},
-      {state: 'every control empty', build: () => make('tessera-filter-panel', {store: store({filters: filtersOf(emptyDraft(), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})})},
+      {state: 'nothing applied, nothing pinned', build: () => make('tessera-filter-panel', {store: store()})},
+      {state: 'nothing applied, two fields pinned', build: () => make('tessera-filter-panel', {store: store()}, {pinned: 'field published_at'})},
+      {
+        state: 'Add filter open',
+        build: () => make('tessera-filter-panel', {store: store()}, {pinned: 'field'}),
+        ready: async (el) => {
+          await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
+          shadow(el, '[part="add"]')!.click();
+          await until(() => !!shadow(el, '[part="add-list"]'), 'the Add filter list');
+        }
+      },
       {
         state: 'clauses applied: filter, highlight and member chips',
-        build: () =>
-          make('tessera-filter-panel', {
-            store: store({
-              artifacts: mapState().artifacts,
-              filters: filtersOf(
-                withDraft({
-                  field: {family: 'category', keys: ['cs.CV', 'cs.LG', 'stat.ML'], verb: 'filter'},
-                  title: {family: 'text', query: 'classifier-free guidance', mode: 'phrase', verb: 'highlight'},
-                  authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix', verb: 'filter'},
-                  citations: {family: 'numeric', gte: 100, lte: null, verb: 'filter'},
-                  published_at: {family: 'numeric', gte: Date.UTC(2020, 0, 1) * 1000, lte: Date.UTC(2024, 11, 31) * 1000, verb: 'filter'}
-                }),
-                {
-                  suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}},
-                  members: [
-                    {layer: 'topics', artifact: TOPIC(1).tesseraId, outside: false, verb: 'filter'},
-                    {layer: 'topics', artifact: TOPIC(5).tesseraId, outside: true, verb: 'filter'},
-                    {layer: 'venues', artifact: VENUES.conferences[2]!.tesseraId, outside: false, verb: 'highlight', label: VENUES.conferences[2]!.name}
-                  ]
-                }
-              )
-            })
-          })
-      }
+        build: () => make('tessera-filter-panel', {store: store({artifacts: mapState().artifacts, filters: APPLIED})})
+      },
+      {
+        state: 'the same, in Highlight mode: the highlighted field open, the rest Any',
+        build: () => make('tessera-filter-panel', {store: store({artifacts: mapState().artifacts, filters: APPLIED})}, {mode: 'highlight'})
+      },
+      {state: 'chips only', build: () => make('tessera-filter-panel', {store: store({artifacts: mapState().artifacts, filters: APPLIED})}, {'chips-only': ''})}
     ]
   },
   {
@@ -483,7 +529,7 @@ export const SECTIONS: Section[] = [
           make('tessera-hierarchy', {
             store: hierarchyStore(
               {
-                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV'], verb: 'filter'}}), {
+                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV']}}), {
                   members: [
                     {layer: 'topics', artifact: AREA(0).tesseraId, outside: false, verb: 'highlight'},
                     {layer: 'topics', artifact: TOPIC(1).tesseraId, outside: false, verb: 'filter'}
@@ -543,7 +589,8 @@ function mapSpecimens(): Specimen[] {
     {state: 'detached', wide: true, build: () => map(null), ready: ready(false)},
     {state: 'loading', wide: true, build: () => map(store({status: status({status: 'loading'})})), ready: ready(false)},
     {state: 'coloured by field (category)', wide: true, build: (ctx) => map(mapStore(ctx, 'field')), ready: ready(true)},
-    {state: 'coloured by citations, density wash on', wide: true, build: (ctx) => map(mapStore(ctx, 'citations'), {wash: ''}), ready: ready(true)},
+    {state: 'coloured by citations, a smooth density under the points', wide: true, build: (ctx) => map(mapStore(ctx, 'citations'), {density: 'smooth'}), ready: ready(true)},
+    {state: 'density in hexagons, points off, with its key', wide: true, build: (ctx) => map(mapStore(ctx, 'field'), {density: 'hex', 'no-points': ''}), ready: ready(false)},
     {
       state: 'coloured by cluster, a topic opened (outline and labels)',
       wide: true,
@@ -552,9 +599,9 @@ function mapSpecimens(): Specimen[] {
     },
     {state: 'highlight active (cs.CV lit)', wide: true, build: (ctx) => map(mapStore(ctx, 'field', {highlight: (m) => m.field === 2})), ready: ready(true)},
     {
-      state: 'a box selected, toolbar top-right',
+      state: 'a box selected, toolbar bottom-left',
       wide: true,
-      build: (ctx) => map(mapStore(ctx, 'field', {}, {region: region()}), {'controls-corner': 'top-right'}),
+      build: (ctx) => map(mapStore(ctx, 'field', {}, {region: region()}), {'controls-corner': 'bottom-left'}),
       ready: ready(true)
     },
     {state: 'refused', wide: true, build: () => map(store({status: status({status: 'refused', refusal: REFUSAL})})), ready: ready(false)},
@@ -564,9 +611,9 @@ function mapSpecimens(): Specimen[] {
 }
 
 function explorerSpecimens(): Specimen[] {
-  const explorer = (s: Store, attrs: Record<string, string> = {}) => {
+  const explorer = (s: Store, attrs: Record<string, string> = {}, height = 640) => {
     const el = make('tessera-explorer', {store: s}, {'title-field': 'title', 'tooltip-fields': 'field year citations', ...attrs});
-    el.style.setProperty('--tessera-explorer-height', '640px');
+    el.style.setProperty('--tessera-explorer-height', `${height}px`);
     return el;
   };
   const readyFor = (marks: boolean) => async (el: HTMLElement) => {
@@ -579,21 +626,152 @@ function explorerSpecimens(): Specimen[] {
   const full = (ctx: Context, over: Partial<Projections> = {}) =>
     mapStore(ctx, 'field', {}, {
       view: {...mapState().view},
-      filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: null, verb: 'filter'}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}}),
+      filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}, citations: {family: 'numeric', gte: 100, lte: null}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}}),
       ...over
     });
+  const item = {selection: {item: paper(), itemRefusal: null, artifact: null, artifactRefusal: null}};
+  // The host declares the dataset's title and which filters start listed; the explorer guesses neither.
+  const named = {'dataset-title': 'arXiv abstracts', 'pinned-filters': 'field published_at abstract'};
+  const panelOf = (el: HTMLElement) => el.shadowRoot?.querySelector('[part="filters-popover"] tessera-filter-panel') ?? null;
+  const openFilters = async (el: HTMLElement) => {
+    await ready(el);
+    shadow(el, '[part="filters-toggle"]')?.click();
+    await until(() => !!panelOf(el)?.shadowRoot?.querySelector('[part="mode"]'), 'the filters panel');
+    await settle(el.parentElement!);
+  };
   return [
+    {state: 'docked, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'docked', ...named}, 900), ready},
+    {state: 'overlay, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 900), ready},
+    {state: 'overlay, no dataset title, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 900), ready},
     {
-      state: 'docked, an item selected',
-      wide: true,
-      build: (ctx) => explorer(full(ctx, {selection: {item: paper(), itemRefusal: null, artifact: null, artifactRefusal: null}}), {layout: 'docked'}),
+      state: 'overlay, the filters open in Filter mode, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) =>
+        explorer(
+          full(ctx, {
+            filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'stat.ML']}, published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}}, {abstract: {family: 'text', query: '"diffusion model"', phrase: false}}))
+          }),
+          {layout: 'overlay', ...named},
+          900
+        ),
+      ready: openFilters
+    },
+    {
+      state: 'overlay, the filters open in Highlight mode, typing a value, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) =>
+        explorer(
+          mapStore(ctx, 'field', {highlight: (m) => m.field === 2}, {
+            filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV', 'stat.ML']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
+              suggestions: {field: {q: 'c', values: [FIELDS[1]!, FIELDS[2]!, FIELDS[7]!].map((v) => suggestion(v, 'c')), more: false}}
+            })
+          }),
+          {layout: 'overlay', ...named},
+          900
+        ),
+      ready: async (el) => {
+        await openFilters(el);
+        (panelOf(el) as HTMLElementTagNameMap['tessera-filter-panel']).show('field', 'highlight');
+        await settle(el.parentElement!);
+        const control = panelOf(el)!.shadowRoot!.querySelector('tessera-filter[column="field"]') as HTMLElement;
+        await typeInto('c')(control);
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'overlay, a box selected, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx, {...item, region: region()}), {layout: 'overlay', ...named}, 900),
+      ready
+    },
+    {state: 'compact container, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 560), ready},
+    {
+      state: 'compact container, a box selected and an item open, 900 × 560',
+      pinned: 900,
+      build: (ctx) => explorer(full(ctx, {...item, region: region()}), {layout: 'overlay', ...named}, 560),
+      ready
+    },
+    {state: 'compact container, the filters open, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 560), ready: openFilters},
+    {state: 'points over a smooth density, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth'}, 900), ready},
+    {state: 'density only, smooth, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth', 'no-points': ''}, 900), ready: readyFor(false)},
+    {state: 'density only, hexagons, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'hex', 'no-points': ''}, 900), ready: readyFor(false)},
+    {state: 'density only, grid, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'grid', 'no-points': ''}, 900), ready: readyFor(false)},
+    {state: 'contours over the points, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'contours'}, 900), ready},
+    {
+      state: 'a highlight (Computer Vision lit), 1440 × 900',
+      pinned: 1440,
+      build: (ctx) =>
+        explorer(mapStore(ctx, 'field', {highlight: (m) => m.field === 2}, {filters: filtersOf(withDraft({}, {field: {family: 'category', keys: ['cs.CV']}}))}), {layout: 'overlay'}, 900),
       ready
     },
     {
-      state: 'overlay, a topic opened',
+      state: 'a number’s range filter on its ramp, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(mapStore(ctx, 'citations', {}, {filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 2000}}))}), {layout: 'overlay'}, 900),
+      ready
+    },
+    {
+      state: 'the colour picker open for Computer Vision, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx), {layout: 'overlay'}, 900),
+      ready: async (el) => {
+        await ready(el);
+        const legend = () => el.shadowRoot?.querySelector('tessera-legend') ?? null;
+        await until(() => !!legend()?.shadowRoot?.querySelector('[data-key="cs.CV"] [part="swatch"]'), 'the legend rows');
+        legend()!.shadowRoot!.querySelector<HTMLElement>('[data-key="cs.CV"] [part="swatch"]')!.click();
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-popover"]'), 'the colour picker');
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'the Colour by menu open with the palettes, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx), {layout: 'overlay'}, 900),
+      ready: async (el) => {
+        await ready(el);
+        const legend = () => el.shadowRoot?.querySelector('tessera-legend') ?? null;
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-by"]'), 'the Colour by button');
+        legend()!.shadowRoot!.querySelector<HTMLElement>('[part="colour-by"]')!.click();
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-menu"]'), 'the Colour by menu');
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'the Colour by menu open with the ramps, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(mapStore(ctx, 'citations'), {layout: 'overlay'}, 900),
+      ready: async (el) => {
+        await ready(el);
+        const legend = () => el.shadowRoot?.querySelector('tessera-legend') ?? null;
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-by"]'), 'the Colour by button');
+        legend()!.shadowRoot!.querySelector<HTMLElement>('[part="colour-by"]')!.click();
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-menu"]'), 'the Colour by menu');
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'the Layers popover open over a smooth density, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth'}, 900),
+      ready: async (el) => {
+        await ready(el);
+        shadow(el, '[part="layers-toggle"]')?.click();
+        await until(() => !!shadow(el, '[part="layers-popover"]'), 'the layers popover');
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'overlay, a topic opened, the filters, the sections and the layers open',
       wide: true,
       build: (ctx) => explorer(full(ctx, {selection: {item: null, itemRefusal: null, artifact: {id: TOPIC(1).tesseraId, detail: detail(TOPIC(1))}, artifactRefusal: null}}), {layout: 'overlay'}),
-      ready
+      ready: async (el) => {
+        await ready(el);
+        shadow(el, '[part="filters-toggle"]')?.click();
+        for (const section of el.shadowRoot?.querySelectorAll('details') ?? []) section.open = true;
+        shadow(el, '[part="layers-toggle"]')?.click();
+        await until(() => !!shadow(el, '[part="layers-popover"]'), 'the layers popover');
+        await settle(el.parentElement!);
+      }
     },
     {
       state: 'narrow container, the filters sheet open',

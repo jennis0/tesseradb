@@ -117,6 +117,22 @@ impl RowToEntity {
         &self.mmap
     }
 
+    /// The entities of the rows in `rows`, in row order. Panics where `rows` runs past the table.
+    #[inline]
+    pub fn slice(&self, rows: std::ops::Range<u32>) -> &[u32] {
+        if self.row_count == 0 {
+            return &[][rows.start as usize..rows.end as usize];
+        }
+        let bytes = self.slots();
+        // SAFETY: the mapping starts page-aligned and `load` checked its length is a whole number
+        // of `u32`s. The file is little-endian and is read in place as native `u32`s, as the
+        // store reads `permutation.bin`'s pages.
+        let all: &[u32] = unsafe {
+            std::slice::from_raw_parts(bytes.as_ptr() as *const u32, self.row_count as usize)
+        };
+        &all[rows.start as usize..rows.end as usize]
+    }
+
     /// The entity occupying `row`, or `None` if `row` is outside this table.
     ///
     /// Out of range is `None` rather than a panic because the caller is a viewport walking a tile's

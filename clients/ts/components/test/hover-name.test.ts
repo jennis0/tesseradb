@@ -118,12 +118,43 @@ describe('a hover over a mark', () => {
     expect(el.hover?.lines).toEqual(['GB-LND', 'London']);
   });
 
-  it('shows a timestamp in full', async () => {
+  it('shows a timestamp in full to the second, in UTC, without its fraction', async () => {
     const at = 1_700_000_000_123_000;
     const {el} = await map([{name: 'published', arrowType: 'timestamp_us'}], 'tooltip-fields="published"');
     el.slab.markAt = carrying({published: {arrowType: 'timestamp_us', value: at}});
 
     el.onHover(markAt(5n));
-    expect(el.hover?.lines).toEqual([new Date(at / 1000).toISOString()]);
+    expect(el.hover?.lines).toEqual(['14 November 2023, 22:13:20 UTC']);
+  });
+});
+
+describe('a hover across a change of viewer', () => {
+  it('is dropped when the store’s meta goes null', async () => {
+    vi.useFakeTimers();
+    const {el, store} = await map([{name: 'name', arrowType: 'text'}], 'title-field="name"');
+    store.describe = async () => ({name: 'Sheena McCurrach Art'});
+    el.onHover(markAt(31728047486770n));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(el.hover?.title).toBe('Sheena McCurrach Art');
+
+    store.set('meta', null);
+    expect(el.hover).toBeNull();
+  });
+});
+
+describe('a hover under a highlight', () => {
+  it('reads a lit mark, and a dulled one, from the pass that drew it', async () => {
+    const {el} = await map([{name: 'name', arrowType: 'utf8'}], 'title-field="name"');
+    let asked: number | null = null;
+    el.slab.markAt = (slot: number) => {
+      asked = slot;
+      return carrying({name: {arrowType: 'utf8', value: 'London'}})();
+    };
+    for (const pass of ['lit', 'dull']) {
+      asked = null;
+      el.onHover({index: 0, x: 10, y: 20, sourceLayer: {id: `marks-p3-${pass}`, props: {tesseraIds: new BigUint64Array([5n])}}});
+      expect(asked).toBe(3);
+      expect(el.hover?.title).toBe('London');
+    }
   });
 });

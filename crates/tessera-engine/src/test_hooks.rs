@@ -31,6 +31,19 @@ impl Engine {
         self.switches.refresh_enabled.store(enabled, Ordering::SeqCst);
     }
 
+    /// Cut an aggregate's cell counts into chunks of at least `min_chunk_rows` rows of the view, and
+    /// send a run of more than `alone_rows` cells as a page of its own, so a small fixture walks
+    /// many chunks and pages.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_aggregate_chunking_for_test(&self, min_chunk_rows: u64, alone_rows: u64) {
+        let switches = &self.switches;
+        switches
+            .aggregate_min_chunk_rows
+            .store(min_chunk_rows, Ordering::Relaxed);
+        switches.aggregate_alone_rows.store(alone_rows, Ordering::Relaxed);
+    }
+
     /// Turn the background occupancy fill off, so a request computes every rung itself, letting a
     /// test assert what the request path computed rather than what a background fill left behind.
     /// Must be set before the viewport that would spawn the fill.

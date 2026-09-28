@@ -3,6 +3,7 @@ import {
   colourLayers,
   createStore,
   emptyDraft,
+  textQueryOf,
   type ColumnDraft,
   type FilterDraft,
   type FilterExpr,
@@ -125,71 +126,79 @@ function tokenSupplier(model: WidgetModel, onMessage: (cb: (msg: KernelMessage) 
   };
 }
 
+/** The one column every leaf under `expr` names, or `null` where they name several or none. */
+function columnOf(expr: FilterExpr): string | null {
+  const keys = Object.keys(expr);
+  if (keys.length !== 1) return null;
+  const key = keys[0]!;
+  if (key === 'none_of') return null;
+  if (key !== 'all_of' && key !== 'any_of') return key;
+  const inner = (expr as Record<string, FilterExpr[]>)[key]!;
+  const columns = new Set(inner.map(columnOf));
+  return columns.size === 1 && !columns.has(null) ? [...columns][0]! : null;
+}
+
 /**
- * The store's draft for the `filters` traitlet's expression, which is in the wire's form. This
- * inverts `composeFilters` for the shapes a draft can hold: one leaf per column, joined by
- * `all_of` at the top. Anything else (`any_of`, `none_of`, a nested `all_of`, two leaves on one
- * column, an unknown column, an operator the column's family cannot hold) throws with a reason,
- * which goes to the kernel as an `error` message. `null` is no filter.
+ * The store's draft for the `filters` traitlet's expression, which is in the wire's form, with every
+ * control in the `filter` position and none in `highlight`. This inverts `composeFilters`: the
+ * expression is an `all_of` over the columns, or one column's expression alone, and each column
+ * holds one leaf, except a text column, which may hold any expression on itself. A text column's
+ * expression becomes the query that writes it where there is one, and is otherwise kept as sent
+ * and sent back as it is. Anything else (`none_of`, an `any_of` across columns, two leaves on
+ * another column, an unknown column, an operator the column's family cannot hold) throws with a
+ * reason, which goes to the kernel as an `error` message. `null` is no filter.
  */
 export function draftOf(expr: FilterExpr | null, operands: FilterOperandSet[]): FilterDraft {
   const draft = emptyDraft(operands);
   if (expr === null) return draft;
-  const leaves: FilterExpr[] = 'all_of' in expr && Array.isArray(expr.all_of) ? (expr.all_of as FilterExpr[]) : [expr];
-  const seen = new Set<string>();
-  for (const leaf of leaves) {
-    const keys = Object.keys(leaf);
-    if (keys.length !== 1) throw new Error(`a filter leaf names exactly one column; got ${JSON.stringify(leaf)}`);
-    const column = keys[0]!;
-    if (column === 'all_of' || column === 'any_of' || column === 'none_of') {
-      throw new Error(`only a conjunction of column leaves can be set from the widget; got ${column}`);
-    }
-    if (seen.has(column)) throw new Error(`two leaves on ${column}; the widget holds one per column`);
-    seen.add(column);
-    const control = draft[column];
+  const top: FilterExpr[] = columnOf(expr) === null && 'all_of' in expr && Array.isArray(expr.all_of) ? (expr.all_of as FilterExpr[]) : [expr];
+  const byColumn = new Map<string, FilterExpr[]>();
+  for (const part of top) {
+    const column = columnOf(part);
+    if (column === null) throw new Error(`each part of a filter set from the widget names one column; got ${JSON.stringify(part)}`);
+    byColumn.set(column, [...(byColumn.get(column) ?? []), part]);
+  }
+  for (const [column, parts] of byColumn) {
+    const control = draft.filter[column];
     if (!control) throw new Error(`${column} is not a filterable column of this view`);
-    draft[column] = controlOf(column, control, (leaf as Record<string, unknown>)[column] as Record<string, unknown>);
+    if (control.family === 'text') {
+      const held = parts.length === 1 ? parts[0]! : {all_of: parts};
+      const query = textQueryOf(column, held, control.phrase);
+      draft.filter[column] = query === null ? {...control, expr: held} : {...control, query};
+      continue;
+    }
+    if (parts.length !== 1) throw new Error(`two leaves on ${column}; the widget holds one per column`);
+    const leaf = parts[0]!;
+    if (Object.keys(leaf)[0] !== column) throw new Error(`${column}: only a text column holds a combination of leaves`);
+    draft.filter[column] = controlOf(column, control, (leaf as Record<string, unknown>)[column] as Record<string, unknown>);
   }
   return draft;
 }
 
-/**
- * One leaf back into a control, keeping the control's `verb`: naming a column in `filters` does
- * not move a clause out of the highlight position.
- */
-function controlOf(column: string, control: ColumnDraft, op: Record<string, unknown>): ColumnDraft {
-  const {verb} = control;
+/** One leaf back into a control of the family `control` has, for a family other than text. */
+function controlOf(column: string, control: Exclude<ColumnDraft, {family: 'text'}>, op: Record<string, unknown>): ColumnDraft {
   const names = Object.keys(op);
   if (names.length !== 1) throw new Error(`${column}: an operator has exactly one key; got ${names.join(', ')}`);
   const name = names[0]!;
   const value = op[name];
   const bad = () => new Error(`${column}: a ${control.family} column cannot hold ${name}`);
   switch (control.family) {
-    case 'text': {
-      if (name === 'phrase' && typeof value === 'string') return {family: 'text', query: value, mode: 'phrase', verb};
-      if (name === 'match' && typeof value === 'string') return {family: 'text', query: value, mode: 'all', verb};
-      if (name === 'match' && value && typeof value === 'object') {
-        const m = value as {query: string; minimum_should_match?: number};
-        return {family: 'text', query: m.query, mode: m.minimum_should_match === 1 ? 'any' : 'all', verb};
-      }
-      throw bad();
-    }
     case 'keyword': {
       if ((name === 'eq' || name === 'prefix' || name === 'contains') && typeof value === 'string') {
-        return {family: control.family, needle: value, op: name, verb};
+        return {family: control.family, needle: value, op: name};
       }
       throw bad();
     }
     case 'category': {
-      if (name === 'in' && Array.isArray(value)) return {family: 'category', keys: value.map(String), verb};
-      if (name === 'eq') return {family: 'category', keys: [String(value)], verb};
+      if (name === 'in' && Array.isArray(value)) return {family: 'category', keys: value.map(String)};
+      if (name === 'eq') return {family: 'category', keys: [String(value)]};
       throw bad();
     }
     case 'numeric': {
       if (name === 'range' && value && typeof value === 'object') {
         const r = value as {gte?: number; lte?: number; gt?: number; lt?: number};
         if (r.gt !== undefined || r.lt !== undefined) throw new Error(`${column}: the widget's range is inclusive (gte, lte)`);
-        return {family: 'numeric', gte: r.gte ?? null, lte: r.lte ?? null, verb};
+        return {family: 'numeric', gte: r.gte ?? null, lte: r.lte ?? null};
       }
       throw bad();
     }
@@ -267,7 +276,8 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     // expression when meta arrives.
     if (!meta) return;
     try {
-      store.setFilters(draftOf(expr, meta.filterOperands));
+      // The traitlet is the `filters` expression, so the highlight is kept.
+      store.setFilters({...draftOf(expr, meta.filterOperands), highlight: store.get('filters').draft.highlight});
     } catch (e) {
       report('filters', e);
     }

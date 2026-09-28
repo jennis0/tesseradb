@@ -1,6 +1,7 @@
 import {TesseraError} from './client.js';
 import type {Clock} from './driver.js';
 import type {Refusal} from './presented.js';
+import type {Store} from './store.js';
 
 /**
  * A function the store calls for a viewer token, and calls again to renew it. It resolves to the
@@ -10,6 +11,9 @@ import type {Refusal} from './presented.js';
  * The store renews 30 seconds before expiry, or halfway through a lifetime shorter than a minute,
  * and calls again before a request where the token has 5 seconds or less left. Concurrent requests
  * share one call. A rejection refuses the request that was waiting for the token.
+ *
+ * A store serves one viewer: to show another, call {@link Store.clear} or create a new store.
+ * {@link Store} says how long a previous viewer's data stays without that.
  *
  * @category Store
  */
@@ -30,6 +34,8 @@ export class TokenSupply {
   private renewing: Promise<string> | null = null;
   private used = false;
   private disposed = false;
+  /** Moved by {@link forget}, so a supplier call made before it installs nothing. */
+  private generation = 0;
 
   constructor(
     private readonly supplier: TokenSupplier | undefined,
@@ -74,21 +80,41 @@ export class TokenSupply {
     return refusal.code === 'bad-credential' && this.used;
   }
 
+  /**
+   * Drop the supplied token, so the next {@link get} calls the supplier. A fixed token is kept. A
+   * supplier call in flight installs nothing, and its callers wait for the next call.
+   */
+  forget(): void {
+    if (!this.supplier) return;
+    this.generation += 1;
+    this.token = null;
+    this.expiresAtMs = Infinity;
+    this.used = false;
+    this.renewing = null;
+    if (this.renewTimer) this.clock.cancel(this.renewTimer);
+    this.renewTimer = null;
+  }
+
   dispose(): void {
     this.disposed = true;
     if (this.renewTimer) this.clock.cancel(this.renewTimer);
   }
 
   private renew(supplier: TokenSupplier): Promise<string> {
-    this.renewing ??= this.renewOnce(supplier).finally(() => {
-      this.renewing = null;
-    });
+    if (!this.renewing) {
+      const renewing: Promise<string> = this.renewOnce(supplier).finally(() => {
+        if (this.renewing === renewing) this.renewing = null;
+      });
+      this.renewing = renewing;
+    }
     return this.renewing;
   }
 
   private async renewOnce(supplier: TokenSupplier): Promise<string> {
+    const generation = this.generation;
     const got = await supplier();
     if (this.disposed) throw disposedError();
+    if (generation !== this.generation) return this.get();
     const changed = this.token !== null && this.token !== got.token;
     this.token = got.token;
     this.expiresAtMs = got.expiresAt * 1000;

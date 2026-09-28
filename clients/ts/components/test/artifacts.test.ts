@@ -1,11 +1,16 @@
 import {afterEach, describe, expect, it} from 'vitest';
 import {type Artifact, type ArtifactsProjection, type Layer, type Meta} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
+import {SessionArtifactTable, servedLineage, attachedTextOf} from '@tesseradb/client/internal';
 import '../src/layer-picker.js';
 import '../src/artifact-card.js';
 import '../src/legend.js';
 import '../src/explorer.js';
+import '../src/artifact-list.js';
+import '../src/item-card.js';
+import '../src/selection.js';
+import '../src/status.js';
 import {deep, deepAll, deepText, fakeStore, mount, settle, status, meta, scalar} from './fake-store.js';
+import {UNNAMED} from '../src/base.js';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -54,6 +59,7 @@ function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']
     layers,
     served,
     colourServed: [],
+    attached: attachedTextOf(served, META.layers),
     lineage: servedLineage(served),
     status: 'shown',
     refusal: null,
@@ -84,6 +90,17 @@ describe('<tessera-layer-picker>', () => {
     box.dispatchEvent(new Event('change'));
     const sent = store.calls.find((c) => c.name === 'setLayers');
     expect(sent!.args[0]).toEqual(['clusters']);
+  });
+
+  it('names a filter layer in a note and gives it no checkbox', async () => {
+    const host = await mount('<tessera-layer-picker></tessera-layer-picker>');
+    const venues = {...layer('venues'), title: 'Venues', computedContent: []};
+    const store = fakeStore({meta: {...META, layers: [...META.layers, venues]}, status: status({})});
+    (host.querySelector('tessera-layer-picker') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    expect(deepAll(host, '[part="entry"]').map((e) => e.getAttribute('data-layer'))).toEqual(['clusters', 'districts']);
+    expect(deep(host, '[part="note"]')?.getAttribute('data-layers')).toBe('venues');
+    expect(deepAll(host, 'input[type="checkbox"]')).toHaveLength(2);
   });
 });
 
@@ -135,7 +152,7 @@ describe('<tessera-artifact-list>', () => {
     (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
     await settle(host);
     const nameless = deep(host, '[part="item"][data-id="2"] [part="name"]');
-    expect(nameless?.textContent?.trim()).toBe('\u2014');
+    expect(nameless?.textContent?.trim()).toBe(UNNAMED);
     expect(nameless?.hasAttribute('data-unnamed')).toBe(true);
     expect(deepText(deep(host, '[part="item"][data-id="2"] [part="count"]')).trim()).toBe('40');
     // Nowhere in the list — not in a title, not in a row — does the key appear.
@@ -184,8 +201,8 @@ describe('<tessera-artifact-card>', () => {
     (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await settle(host);
-    expect(deep(host, '[part="headline"]')?.textContent?.trim()).toBe('\u2014');
-    expect(deepAll(host, '[part="child"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['\u2014']);
+    expect(deep(host, '[part="headline"]')?.textContent?.trim()).toBe(UNNAMED);
+    expect(deepAll(host, '[part="child"] [part="name"]').map((n) => n.textContent?.trim())).toEqual([UNNAMED]);
     // The key is still there — under the field that says it is a key, which is where it belongs.
     const fields = deepAll(host, '[part="value"]').map((v) => v.textContent);
     expect(fields).toContain('c-1');
@@ -193,7 +210,7 @@ describe('<tessera-artifact-card>', () => {
     // rather than falling back to the key it carries in the drill-down.
     store.set('artifacts', artifactsProjection([]));
     await settle(host);
-    expect(deep(host, '[part="headline"]')?.textContent?.trim()).toBe('\u2014');
+    expect(deep(host, '[part="headline"]')?.textContent?.trim()).toBe(UNNAMED);
   });
 
   it('renders a refusal as one', async () => {
@@ -207,31 +224,48 @@ describe('<tessera-artifact-card>', () => {
   });
 });
 
+describe('<tessera-legend limit>', () => {
+  it('names the first entries and shows the rest when "N more" is pressed', async () => {
+    const values = Array.from({length: 7}, (_, i) => ({code: i + 1, key: `k${i}`, title: `Value ${i}`}));
+    const store = fakeStore({
+      meta: META,
+      status: status({}),
+      legend: {ranks: {archive: Object.fromEntries(values.map((v, i) => [v.code, i]))}, domains: {}, categories: {archive: values}, categoryErrors: {}, colourBy: 'archive'}
+    });
+    const host = await mount('<tessera-legend limit="4"></tessera-legend>');
+    (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    // Seven values, all within the palette, so no entry for the rest; cut to four.
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(4);
+    (deep(host, '[part="more"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(7);
+    expect(deep(host, '[part="more"]')).toBeNull();
+  });
+});
+
 describe('<tessera-legend selectable>', () => {
   it('offers the clusters of every layer that can colour, drawn or not, and choosing one draws nothing', async () => {
     const host = await mount('<tessera-legend selectable readout></tessera-legend>');
     const store = fakeStore({meta: META, status: status({})});
     (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
     await settle(host);
-    const colourOptions = () => deepAll(host, '[part="select"] option').map((o) => o.getAttribute('value'));
+    (deep(host, '[part="colour-by"]') as HTMLButtonElement).click();
+    await settle(host);
+    const colourOptions = () => deepAll(host, '[part="option"]').map((o) => o.getAttribute('data-value'));
     // No layer is drawn. A labels layer has no clusters of its own, so it is not offered.
     expect(colourOptions()).toEqual(['', 'cluster:clusters', 'cluster:districts', 'archive']);
-    // Nothing drawn: the select offers the two roots and sits on the entry that says none is on.
-    expect(deepAll(host, '[part="layers-select"] option').map((o) => o.getAttribute('value'))).toEqual(['', 'clusters', 'districts']);
-    expect((deep(host, '[part="layers-select"]') as HTMLSelectElement).value).toBe('');
-    const select = deep(host, '[part="select"]') as HTMLSelectElement;
-    select.value = 'cluster:clusters';
-    select.dispatchEvent(new Event('change'));
+    (deep(host, '[part="option"][data-value="cluster:clusters"]') as HTMLButtonElement).click();
     expect(store.calls.find((c) => c.name === 'setColourBy')?.args[0]).toBe('cluster:clusters');
     expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
     // The store answers with the colour layer's rows and still draws nothing: the swatches are
-    // the colour layer's served artifacts, and the choice shows in the select.
+    // the colour layer's served artifacts, and the choice shows in the menu and on its button.
     store.set('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:clusters'});
     store.set('artifacts', {...artifactsProjection([], []), colourServed: [artifact(1n, 100n)]});
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
-    expect((deep(host, '[part="select"]') as HTMLSelectElement).value).toBe('cluster:clusters');
-    expect((deep(host, '[part="layers-select"]') as HTMLSelectElement).value).toBe('');
+    expect(deep(host, '[part="option"][aria-checked="true"]')?.getAttribute('data-value')).toBe('cluster:clusters');
+    expect(deep(host, '[part="colour-by"]')?.textContent?.trim()).toBe('clusters');
   });
 
   it('is a readout without selectable', async () => {
@@ -239,7 +273,7 @@ describe('<tessera-legend selectable>', () => {
     const store = fakeStore({meta: META, status: status({})});
     (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
     await settle(host);
-    expect(deep(host, 'select')).toBeNull();
+    expect(deep(host, '[part="colour-by"]')).toBeNull();
   });
 });
 
@@ -349,5 +383,107 @@ describe('<tessera-explorer> on an artifact selection', () => {
     fit.click();
     await settle(host);
     expect(fitted).toEqual([1n]);
+  });
+});
+
+describe('<tessera-artifact-list rows>', () => {
+  it('offers the rest under "N more", and starts cut again when the layers change', async () => {
+    const host = await mount('<tessera-artifact-list rows="2"></tessera-artifact-list>');
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 30n), artifact(2n, 20n), artifact(3n, 10n)])});
+    (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    expect(deepAll(host, '[part="item"]')).toHaveLength(2);
+    (deep(host, '[part="more"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(deepAll(host, '[part="item"]')).toHaveLength(3);
+    expect(deep(host, '[part="more"]')).toBeNull();
+    store.set('artifacts', artifactsProjection([artifact(1n, 30n), artifact(2n, 20n), artifact(3n, 10n)], ['districts']));
+    await settle(host);
+    expect(deepAll(host, '[part="item"]')).toHaveLength(2);
+  });
+});
+
+describe('a refusal on screen', () => {
+  const code = async (markup: string, over: Parameters<typeof fakeStore>[0], ready?: (host: HTMLElement) => Promise<void>) => {
+    const host = await mount(markup);
+    (host.firstElementChild as unknown as {store: unknown}).store = fakeStore({meta: META, status: status({}), ...over});
+    await settle(host);
+    await ready?.(host);
+    const found = deep(host, '[part="refusal"]')?.getAttribute('data-code') ?? null;
+    host.remove();
+    return found;
+  };
+
+  it('carries the server’s code on the refusal part, in every element that shows one', async () => {
+    const refusal = {code: 'withheld', detail: 'not for you'};
+    const selection = {item: null, itemRefusal: null, artifact: null, artifactRefusal: null};
+    expect(await code('<tessera-item-card></tessera-item-card>', {selection: {...selection, itemRefusal: refusal}})).toBe('withheld');
+    expect(await code('<tessera-artifact-card></tessera-artifact-card>', {selection: {...selection, artifactRefusal: refusal}})).toBe('withheld');
+    expect(await code('<tessera-artifact-list></tessera-artifact-list>', {artifacts: {...artifactsProjection([]), status: 'refused', refusal}})).toBe('withheld');
+    expect(await code('<tessera-legend></tessera-legend>', {legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {archive: refusal}, colourBy: 'archive'}})).toBe('withheld');
+    const box = {kind: 'box' as const, bbox: [0, 0, 1, 1] as [number, number, number, number]};
+    const held = {ids: new BigUint64Array(0), positions: new Float32Array(0), count: 0};
+    expect(await code('<tessera-selection></tessera-selection>', {region: {shape: box, status: 'refused', refusal, visible: null, matched: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}, verdict: null, held}})).toBe('withheld');
+    expect(await code('<tessera-status></tessera-status>', {status: status({status: 'refused', refusal})})).toBe('withheld');
+  });
+});
+
+describe('a cluster named by the label attached to it', () => {
+  // Clusters 1 and 2 carry no text of their own. The label on 1 is served; the label on 2 is
+  // withheld from this viewer, so the server never sent it.
+  const label: Artifact = {...artifact(9n, 100n, null, ['spin magnetic effect']), layer: 'labels', centroid: null, target: 1n};
+  const clusters = [artifact(1n, 100n), artifact(2n, 40n)];
+
+  async function shown(markup: string) {
+    const host = await mount(markup);
+    const store = fakeStore({
+      meta: META,
+      status: status({}),
+      artifacts: {...artifactsProjection([...clusters, label]), colourServed: clusters},
+      legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:clusters'}
+    });
+    for (const el of host.querySelectorAll('*')) (el as unknown as {store: unknown}).store = store;
+    await settle(host);
+    return {host, store};
+  }
+
+  it('in the legend: the label names its row, and a row whose label is withheld is unnamed', async () => {
+    const {host} = await shown('<tessera-legend readout></tessera-legend>');
+    const names = deepAll(host, '[part="entry"] [part="name"]');
+    expect(names.map((n) => n.textContent)).toEqual(['spin magnetic effect', UNNAMED, 'Not yet coloured']);
+    expect(names.map((n) => n.hasAttribute('data-unnamed'))).toEqual([false, true, false]);
+  });
+
+  it('in the artifact list', async () => {
+    const {host} = await shown('<tessera-artifact-list></tessera-artifact-list>');
+    expect(deep(host, '[part="item"][data-id="1"] [part="name"]')?.textContent).toBe('spin magnetic effect');
+    expect(deep(host, '[part="item"][data-id="2"] [part="name"]')?.textContent).toBe(UNNAMED);
+    expect(deep(host, '[part="item"][data-id="2"] [part="name"]')?.hasAttribute('data-unnamed')).toBe(true);
+    // The label is the cluster's name, not a row of its own.
+    expect(deep(host, '[part="item"][data-id="9"]')).toBeNull();
+  });
+
+  it('lists a drawn dependent layer’s rows where only the colour layer’s labels are served', async () => {
+    const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
+    // The drawn label on 1 carries no text; the text in `attached` is the colour layer's, on 5.
+    const bare: Artifact = {...artifact(9n, 100n), layer: 'labels', target: 1n};
+    const store = fakeStore({meta: META, status: status({}), artifacts: {...artifactsProjection([artifact(1n, 100n), bare]), attached: new Map([[5n, 'a colour label']])}});
+    (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    expect(deep(host, '[part="item"][data-id="9"]')).not.toBeNull();
+  });
+
+  it('in the artifact card, and on the clause the card makes', async () => {
+    const {host, store} = await shown('<tessera-artifact-card></tessera-artifact-card>');
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
+    await settle(host);
+    expect(deep(host, '[part="headline"]')?.textContent).toBe('spin magnetic effect');
+    (deep(host, '[part="filter"]') as HTMLButtonElement).click();
+    const [clause] = store.calls.find((c) => c.name === 'setMembers')!.args[0] as {label?: string}[];
+    expect(clause?.label).toBe('spin magnetic effect');
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 2n, detail: {layer: 'clusters', key: 'c-2', maskedCount: 40n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
+    await settle(host);
+    expect(deep(host, '[part="headline"]')?.textContent).toBe(UNNAMED);
+    expect(deep(host, '[part="headline"]')?.hasAttribute('data-unnamed')).toBe(true);
   });
 });

@@ -17,6 +17,7 @@ function artifacts(): ArtifactsProjection {
     layers: [],
     served: [],
     colourServed: [],
+    attached: new Map(),
     lineage: servedLineage([]),
     status: 'idle',
     refusal: null,

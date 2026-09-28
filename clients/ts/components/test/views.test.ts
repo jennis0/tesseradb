@@ -6,7 +6,7 @@ import '../src/item-card.js';
 import '../src/map.js';
 import '../src/explorer.js';
 import type {TesseraItemCard} from '../src/item-card.js';
-import {deep, deepAll, fakeStore, mount, settle, status, type FakeStore, meta, scalar} from './fake-store.js';
+import {deep, deepAll, deepText, fakeStore, mount, settle, status, type FakeStore, meta, scalar} from './fake-store.js';
 
 /**
  * What the two view pickers, the map and the item card draw and call, against the fake store. The
@@ -210,7 +210,7 @@ describe('<tessera-key-picker>', () => {
     expect(parts('step').map((b) => b.getAttribute('data-direction'))).toEqual(['prev', 'next']);
     const view = await picker('tessera-view-picker', 'quarter:2026-Q3');
     expect(deepAll(view.host, '[part="select"]')).toHaveLength(1);
-    expect(deepAll(view.host, '[part="label"]')).toHaveLength(1);
+    expect(deepAll(view.host, '[part="field"]')).toHaveLength(1);
   });
 
   it('renders nothing for a plain view, which is in no group', async () => {
@@ -290,12 +290,12 @@ describe('<tessera-item-card> and the views it reaches', () => {
     return {host, el, store};
   }
 
-  it('draws a chip per reachable view, the current one marked, and the satisfied labels', async () => {
+  it('draws a chip per reachable view, the current one marked, and none for the viewer’s access labels', async () => {
     const {host} = await card();
     const chips = deepAll(host, '[part="view-chip"]');
     expect(chips.map((c) => c.textContent?.trim())).toEqual(['knn', 'pca64']);
     expect(chips.map((c) => c.getAttribute('aria-current'))).toEqual(['true', 'false']);
-    expect(deepAll(host, '[part="label-chip"]').map((c) => c.textContent?.trim())).toEqual(['quant-ph', '2024']);
+    expect(deepText(host)).not.toContain('quant-ph');
   });
 
   it('follows an item into another view, with the position dequantised under that view’s frame', async () => {
@@ -348,7 +348,7 @@ describe('<tessera-explorer>', () => {
     return {host, el, store, looks, follow};
   }
 
-  it('puts both pickers at the top of the toolbar slot', async () => {
+  it('puts both pickers in the toolbar slot and the legend in the colour slot', async () => {
     const host = await mount('<tessera-explorer></tessera-explorer>');
     const el = host.querySelector('tessera-explorer') as unknown as {store: unknown};
     const store = fakeStore({meta: deployment(), status: status({})});
@@ -357,8 +357,9 @@ describe('<tessera-explorer>', () => {
     await settle(host);
     const toolbar = (host.querySelector('tessera-explorer') as HTMLElement).shadowRoot!.querySelector('slot[name="toolbar"]')!;
     const tags = [...toolbar.children].map((c) => c.tagName.toLowerCase());
-    expect(tags.slice(0, 2)).toEqual(['tessera-view-picker', 'tessera-key-picker']);
-    expect(tags).toContain('tessera-legend');
+    expect(tags).toEqual(['tessera-view-picker', 'tessera-key-picker']);
+    const colour = (host.querySelector('tessera-explorer') as HTMLElement).shadowRoot!.querySelector('slot[name="colour"]')!;
+    expect([...colour.children].map((c) => c.tagName.toLowerCase())).toEqual(['tessera-legend']);
     expect(deep(host, '[part="view-chip"]')).toBeNull();
   });
 

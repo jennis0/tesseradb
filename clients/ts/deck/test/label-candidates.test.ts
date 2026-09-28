@@ -1,7 +1,9 @@
 import {describe, expect, it} from 'vitest';
 import {type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
-import {LABEL_CANDIDATE_CEILING, artifactName, displayName, frontier, labelBudget, labelCandidates} from '../src/layer.js';
+import {SessionArtifactTable, attachedTextOf, servedLineage} from '@tesseradb/client/internal';
+import {LayerManager, OrthographicView, type Layer} from '@deck.gl/core';
+import {LABEL_CANDIDATE_CEILING, TesseraLayer, frontier, labelBudget, labelCandidates, type TesseraLayerInternalProps} from '../src/layer.js';
+import {fakeDevice} from './fake-device.js';
 import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, placeLabels} from '../src/labels.js';
 import medcpt from './fixtures/medcpt-kmeans-labels.json' with {type: 'json'};
 
@@ -53,7 +55,7 @@ function projection(input: Artifact[]): ArtifactsProjection {
   const served = withRungs(input);
   const table = new SessionArtifactTable();
   const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
-  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
+  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], lineage: servedLineage(served), attached: attachedTextOf(served, ['clusters', 'topics'].map((name) => ({name, hierarchy: {kind: 'flat' as const, pruneChildren: false}}))), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
 const META = {layers: [{name: 'clusters', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: []}, {name: 'topics', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: ['clusters']}]} as unknown as Meta;
@@ -100,25 +102,14 @@ describe('frontier', () => {
   });
 });
 
-describe('naming', () => {
-  it('an artifact with no supplied text has no name — never its key', () => {
-    expect(artifactName(artifact(1n, 5n, ['quantum error correction']))).toBe('quantum error correction');
-    expect(artifactName(artifact(1n, 5n))).toBeNull();
-    expect(artifactName(artifact(1n, 5n, ['']))).toBeNull();
-    const topics = new Map([[2n, 'decoders, thresholds']]);
-    expect(displayName(artifact(2n, 5n), topics)).toBe('decoders, thresholds');
-    expect(displayName(artifact(3n, 5n), topics)).toBeNull();
-  });
-});
-
 describe('labelCandidates', () => {
   it('an artifact with no text draws no label — never its key', () => {
     const p = projection([artifact(1n, 100n, ['quantum error correction']), artifact(2n, 900n), artifact(3n, 50n, [''])]);
     const {candidates, byId} = labelCandidates(p, META, undefined, 0, 10);
     expect(candidates.map((c) => String(c.id))).toEqual(['1']);
-    // Wrapped to short lines, and the whole name is still there.
-    expect(byId.get(1n)!.lines).toEqual(['quantum error', 'correction']);
-    expect([...byId.values()].some((t) => t.lines.join(' ').startsWith('c-'))).toBe(false);
+    // One line, and the whole name is there.
+    expect(byId.get(1n)!.line).toBe('quantum error correction');
+    expect([...byId.values()].some((t) => t.line.startsWith('c-'))).toBe(false);
   });
 
   it('only the frontier is labelled — an ancestor of something drawn draws nothing', () => {
@@ -136,7 +127,7 @@ describe('labelCandidates', () => {
     const p = projection([artifact(1n, 100n), artifact(2n, 40n), topic(9n, 1n, 'decoders, thresholds')]);
     const {candidates, byId} = labelCandidates(p, META, undefined, 0, 10);
     expect(candidates.map((c) => String(c.id))).toEqual(['1']);
-    expect(byId.get(1n)!.lines.join(' ')).toBe('decoders, thresholds');
+    expect(byId.get(1n)!.line).toBe('decoders, thresholds');
     expect(byId.get(1n)!.topic).toBeNull();
   });
 
@@ -145,8 +136,8 @@ describe('labelCandidates', () => {
     // matter.
     const p = projection([artifact(1n, 100n), artifact(2n, 100n), topic(8n, 1n, 'left topic'), topic(9n, 2n, 'right topic')]);
     const {byId} = labelCandidates(p, META, undefined, 0, 10);
-    expect(byId.get(1n)!.lines.join(' ')).toBe('left topic');
-    expect(byId.get(2n)!.lines.join(' ')).toBe('right topic');
+    expect(byId.get(1n)!.line).toBe('left topic');
+    expect(byId.get(2n)!.line).toBe('right topic');
     // And a topic naming nothing this response holds attaches to nothing rather than to whichever
     // row happens to share its count.
     const orphan = projection([artifact(1n, 100n), {...topic(7n, 1n, 'unattached'), target: null}]);
@@ -273,13 +264,36 @@ describe('labelBudget', () => {
     const placed = (budget: number) => placeLabels(labelCandidates(p, MEDCPT_META, undefined, 0, budget).candidates).length;
     const screenDerived = placed(28);
     const drawnSet = placed(labelBudget(p.served.length));
-    expect(screenDerived).toBeLessThanOrEqual(4);
-    expect(drawnSet).toBeGreaterThanOrEqual(4 * screenDerived);
+    expect(screenDerived).toBeLessThanOrEqual(8);
+    expect(drawnSet).toBeGreaterThanOrEqual(3 * screenDerived);
   });
 
   it('offers every drawn artifact, so a small cluster in a gap is a candidate at all', () => {
     const p = projection(medcptClusters());
     const {candidates} = labelCandidates(p, MEDCPT_META, undefined, 0, labelBudget(p.served.length));
     expect(candidates).toHaveLength(253);
+  });
+});
+
+describe('labels at rest and under the pointer', () => {
+  /** The rows of each text sublayer, drawn by deck's own LayerManager over an orthographic viewport. */
+  function drawn(hovered: bigint | null) {
+    const manager = new LayerManager(fakeDevice(), {});
+    manager.activateViewport(new OrthographicView({flipY: true}).makeViewport({width: 800, height: 600, viewState: {target: [256, 256, 0], zoom: 0}})!);
+    const p = projection([artifact(1n, 100n), artifact(2n, 90n, ['graph neural networks']), topic(9n, 1n, 'decoders, thresholds')]);
+    manager.setLayers([new TesseraLayer({id: 'tessera', depth: 2, status: 'shown', artifacts: p, meta: META, hoveredArtifact: hovered} as TesseraLayerInternalProps)]);
+    const layer = manager.getLayers().find((l) => l.id === 'tessera') as TesseraLayer;
+    const rows = (id: string) => {
+      const sub = (layer.getSubLayers() as Layer[]).find((l) => l.id === `tessera-${id}`);
+      return ((sub?.props.data as {text: string; id: bigint}[] | undefined) ?? []).map((d) => [String(d.id), d.text]);
+    };
+    return {names: rows('labels'), counts: rows('label-counts')};
+  }
+
+  it('draws every name at rest, and a count only for the artifact under the pointer', () => {
+    const rest = drawn(null);
+    expect(rest.names.map(([id]) => id).sort()).toEqual(['1', '2']);
+    expect(rest.counts).toEqual([]);
+    expect(drawn(2n).counts).toEqual([['2', '90']]);
   });
 });

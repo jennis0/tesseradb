@@ -340,7 +340,7 @@ async fn categories(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let meta = state.engine.meta();
     let visible = session.visible_views();
-    let resolved =
+    let (resolved, _) =
         resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
     // Clamped rather than refused, since the cursor carries the rest; `0` is refused because a
@@ -408,13 +408,14 @@ async fn categories(
 
 /// Resolves the column for `/v1/categories/{column}` and its `suggest` route, so the two cannot
 /// disagree on what a spelling names. A scoped family is addressed by `?view=` or a
-/// `{column}@{key}` pin; a view the session cannot reach is the unknown-view 404.
+/// `{column}@{key}` pin; a view the session cannot reach is the unknown-view 404. Returns the
+/// resolved column and the resolved view's id, where the request named one.
 fn resolve_category_column(
     meta: &tessera_engine::EngineMeta,
     column: &str,
     requested_view: Option<&str>,
     visible: &tessera_engine::gate::VisibleViews,
-) -> Result<String, ApiError> {
+) -> Result<(String, Option<String>), ApiError> {
     // `view` is resolved before the column, so an unknown or unreachable view is a 404 even for
     // an entity-scoped column.
     let view = match requested_view {
@@ -430,7 +431,7 @@ fn resolve_category_column(
             column: resolved,
             family: tessera_engine::filter::Family::Category,
             ..
-        } => Ok(resolved),
+        } => Ok((resolved, requested_view.map(|_| view.to_string()))),
         tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
             "'{column}' is scoped to view group '{group}' and this request names no view of \
              it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
@@ -490,7 +491,8 @@ async fn suggest(
 
     let meta = state.engine.meta();
     let visible = session.visible_views();
-    let resolved = resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
+    let (resolved, view) =
+        resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
     // At most one suggestion walk per session, refused with a 429 before any work runs, so an
     // undebounced client cannot queue keystrokes. It takes no compute-gate permit; a keystroke
@@ -513,6 +515,7 @@ async fn suggest(
                 .suggest(
                     &session,
                     &resolved,
+                    view.as_deref(),
                     &q,
                     limit,
                     counts,
@@ -1459,8 +1462,8 @@ struct BrowseReq {
     /// parents in `parents`. A `tessera_id`, as a number or its decimal string.
     #[serde(default)]
     parent: Option<serde_json::Value>,
-    /// The search form: the layer's artifacts whose key, or whose first supplied text content,
-    /// contains this case-insensitively.
+    /// The search form: the layer's artifacts whose key or served `name` contains this
+    /// case-insensitively.
     #[serde(default)]
     q: Option<String>,
     /// The viewport's filter object. Rows then carry `matched_count` and are ordered by it;

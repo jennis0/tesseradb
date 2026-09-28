@@ -949,7 +949,6 @@ pub struct Found {
     pub field: SuggestionField,
     pub start: u32,
     pub len: u32,
-    pub count: Option<u64>,
 }
 
 /// What bounds one walk.
@@ -963,15 +962,14 @@ pub struct WalkBudget {
     /// the enumeration walks whole and unbudgeted; a budget only ever narrows what one request
     /// examines (§6.2, §8).
     pub walk_budget: u64,
-    pub counts: bool,
 }
 
 /// **One suggestion walk** (`docs/design/value-suggestion.md` §6.2), over the base index merged
 /// with the vocabulary's side map.
 ///
 /// Free of the engine so that the gate and the traversal are separable — `Engine::suggest` supplies
-/// `visible` and `count`, and the bench supplies its own. Everything about *who may be told* is in
-/// those two closures and in nothing here; this function would happily emit every value of the
+/// `visible`, and the bench supplies its own. Everything about *who may be told* is in that
+/// closure and in nothing here; this function would happily emit every value of the
 /// vocabulary if handed a predicate that said yes.
 ///
 /// `q` is the caller's text, folded here rather than by the caller, so the query and the index go
@@ -1002,7 +1000,6 @@ pub fn walk<E>(
     q: &str,
     budget: WalkBudget,
     visible: &dyn Fn(u32) -> Result<bool, E>,
-    count: &dyn Fn(u32) -> Result<u64, E>,
     unreadable: &dyn Fn(io::Error) -> E,
     set: Option<&crate::suggest_set::SuggestSet>,
 ) -> Result<(Vec<Found>, bool), E> {
@@ -1044,7 +1041,7 @@ pub fn walk<E>(
             if state.admits(code, Some(payload.position), visible)? {
                 let (key, title) = base.served(payload.position).map_err(unreadable)?;
                 state.emit(
-                    fold, &folded, code, key, title, payload.field, payload.start, count,
+                    fold, &folded, code, key, title, payload.field, payload.start,
                 )?;
             }
         }
@@ -1069,7 +1066,6 @@ pub fn walk<E>(
                         value.title.as_deref(),
                         value.field,
                         value.start,
-                        count,
                     )?;
                 }
             }
@@ -1102,7 +1098,6 @@ pub fn walk<E>(
                             value.title.as_deref(),
                             value.field,
                             value.start,
-                            count,
                         )?;
                     }
                 }
@@ -1114,7 +1109,7 @@ pub fn walk<E>(
                 // prefix, and the arm above runs otherwise.
                 if state.admits(code, Some(payload.position), visible)? {
                     state.emit(
-                        fold, &folded, code, key, title, payload.field, payload.start, count,
+                        fold, &folded, code, key, title, payload.field, payload.start,
                     )?;
                 }
             }
@@ -1135,7 +1130,6 @@ pub fn walk<E>(
                     value.title.as_deref(),
                     value.field,
                     value.start,
-                    count,
                 )?;
             }
         }
@@ -1216,16 +1210,10 @@ impl WalkState<'_> {
         title: Option<&str>,
         field: SuggestionField,
         start: u32,
-        count: &dyn Fn(u32) -> Result<u64, E>,
     ) -> Result<(), E> {
         let served = match field {
             SuggestionField::Key => key,
             SuggestionField::Title => title.unwrap_or(key),
-        };
-        let count = if self.budget.counts {
-            Some(count(code)?)
-        } else {
-            None
         };
         self.emitted.insert(code);
         self.found.push(Found {
@@ -1235,7 +1223,6 @@ impl WalkState<'_> {
             field,
             start,
             len: match_len(fold, served, start, folded_q),
-            count,
         });
         Ok(())
     }

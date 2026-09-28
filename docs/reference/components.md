@@ -15,7 +15,7 @@ The `tessera-*` custom elements, in the `@tesseradb/components` package, built w
 | [`<tessera-layer-picker>`](components/tessera-layer-picker.md) | Which annotation layers the map draws. |
 | [`<tessera-view-picker>`](components/tessera-view-picker.md) | Chooses the view. |
 | [`<tessera-key-picker>`](components/tessera-key-picker.md) | Chooses the view within the current group. |
-| [`<tessera-filter-panel>`](components/tessera-filter-panel.md) | Every filter control, with the applied clauses as chips. |
+| [`<tessera-filter-panel>`](components/tessera-filter-panel.md) | The applied clauses as chips, and the filter controls. |
 | [`<tessera-filter>`](components/tessera-filter.md) | One filter control, drawn by the column's type. |
 | [`<tessera-selection>`](components/tessera-selection.md) | The selected region's counts, marks and actions. |
 | [`<tessera-item-card>`](components/tessera-item-card.md) | The selected item's fields, with Open and Copy id. |
@@ -27,9 +27,9 @@ The `tessera-*` custom elements, in the `@tesseradb/components` package, built w
 
 ## Loading the elements
 
-`import '@tesseradb/components'` defines every element. Each element also has its own entry, such as `import '@tesseradb/components/map'`, which defines that element and the elements it renders. The map, the explorer, the legend, the artifact list and the artifact card import `@tesseradb/deck`, which depends on deck.gl; the other elements do not.
+`import '@tesseradb/components'` defines every element. Each element also has its own entry, such as `import '@tesseradb/components/map'`, which defines that element and the elements it renders. The map, the explorer, the legend, the artifact list and the artifact card import `@tesseradb/deck`, which depends on deck.gl; the other elements do not. `@deck.gl/aggregation-layers` is a peer dependency as well, which `@tesseradb/deck` imports only when a map first draws density as hexagons or contours. A host's bundler puts it in a chunk of its own, which a page that never draws those does not load.
 
-A page with no build step loads the single-file bundle, `tessera-components.js`, which holds Lit, deck.gl and the decode worker. `npm run bundle -w @tesseradb/components` in `clients/ts` writes it to `components/dist/` with its subresource-integrity hash in `tessera-components.js.sri`:
+A page with no build step loads the single-file bundle, `tessera-components.js`, which holds Lit, deck.gl, its aggregation layers and the decode worker. `npm run bundle -w @tesseradb/components` in `clients/ts` writes it to `components/dist/` with its subresource-integrity hash in `tessera-components.js.sri`:
 
 ```html
 <script type="module" src="./tessera-components.js" integrity="sha384-..."></script>
@@ -45,7 +45,7 @@ Every element but `<tessera-count>` reads a store, and takes the first of these 
 2. the store of the nearest `<tessera-store>` or `<tessera-explorer>` above it;
 3. for `<tessera-map>`, `<tessera-explorer>` and `<tessera-store>` only, a store it builds from its `viewer-url` attribute and its `token` attribute or `authorise` property.
 
-With none, the element renders its detached state. An element that has built its own store keeps it when a provider appears above it later. A store the element built is replaced when `viewer-url` or `token` changes, and disposed by the element's `dispose()`. A store it was given is left for its owner to dispose. Disconnecting an element keeps its store, so moving it in the page does not fetch the view again.
+With none, the element renders its detached state. An element that has built its own store keeps it when a provider appears above it later. A store the element built is replaced when `viewer-url`, `token` or the `authorise` function changes, and disposed by the element's `dispose()`. A store serves one viewer, as `Store` in the [TypeScript reference](typescript.md) sets out: to show another viewer, give the element a new `token`, a new `authorise` function, a new `viewer-url`, or a new element. Without one of these, the previous viewer's data stays on screen for as long as `Store` in the TypeScript reference says. An element also drops the pages, names and hover it fetched itself when it adopts another store and when its store forgets what the server answered. A store it was given is left for its owner to dispose. Disconnecting an element keeps its store, so moving it in the page does not fetch the view again.
 
 ## Events and styling
 

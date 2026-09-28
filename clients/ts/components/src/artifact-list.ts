@@ -1,10 +1,9 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
-import {property} from 'lit/decorators.js';
-import {type Artifact, type ArtifactsProjection, type Masked, type ServedLineage} from '@tesseradb/client';
-import {attachedTopics, displayName} from '@tesseradb/deck/internal';
+import {property, state} from 'lit/decorators.js';
+import {artifactName, type Artifact, type ArtifactsProjection, type Masked, type ServedLineage} from '@tesseradb/client';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
-import {renderState} from './states.js';
+import {refusalText, renderState} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
@@ -23,11 +22,12 @@ import './count.js';
  *   row was pressed.
  * @csspart title - The heading, with how many are listed.
  * @csspart state - The state line, with `data-state`.
- * @csspart refusal - A refusal's code and detail, in the refused state.
+ * @csspart refusal - The words "Layer unavailable", with `data-code` set to the refusal's code.
  * @csspart items - The list.
  * @csspart item - One artifact, with `data-id`, and `data-opened` on the opened one.
  * @csspart name - An artifact's name, with `data-unnamed` where it has none.
  * @csspart count - An artifact's `<tessera-count>`.
+ * @csspart more - The "N more" button, which shows the next `rows` rows until the layers change.
  */
 export class TesseraArtifactList extends TesseraElement {
   static override styles = [
@@ -37,18 +37,15 @@ export class TesseraArtifactList extends TesseraElement {
       :host {
         display: block;
       }
+      [part='more'] {
+        margin-top: 6px;
+      }
       [part='items'] {
         list-style: none;
         margin: 0;
         padding: 0;
         max-height: 240px;
         overflow-y: auto;
-      }
-      [part='item'] {
-        padding-left: calc(6px + var(--depth, 0) * 18px);
-      }
-      [part='name'][data-unnamed] {
-        color: var(--_tessera-ink-2);
       }
       [part='item'] tessera-count::part(count) {
         margin-left: auto;
@@ -61,8 +58,21 @@ export class TesseraArtifactList extends TesseraElement {
 
   /** The served artifacts to list in place of the store's `artifacts` projection. */
   @property({attribute: false}) accessor artifacts: ArtifactsProjection | null = null;
-  /** How many rows the list shows before it says how many more there are. */
+  /** How many rows the list shows before it offers the rest under "N more". */
   @property({type: Number}) accessor rows = 40;
+  /** Rows shown beyond `rows` after "N more" was pressed, for the layers it was pressed under. */
+  @state() private accessor extra = 0;
+  private extraFor = '';
+
+  protected override onStoreChange(): void {
+    // Other layers are another list, which starts at `rows` again.
+    const layers = this.shown?.layers.join(' ') ?? '';
+    if (layers !== this.extraFor) {
+      this.extraFor = layers;
+      this.extra = 0;
+    }
+    super.onStoreChange();
+  }
 
   private get shown(): ArtifactsProjection | null {
     return this.artifacts ?? this.resolvedStore?.get('artifacts') ?? null;
@@ -80,19 +90,22 @@ export class TesseraArtifactList extends TesseraElement {
     if (a.layers.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">No layer on</span></div>`;
     if (a.status === 'idle' || a.status === 'loading') return html`<div class="panel">${heading()}${renderState('loading', this.resolvedStore?.get('status') ?? null)}</div>`;
     if (a.status === 'refused') {
-      return html`<div class="panel">${heading()}<span part="state" data-state="refused"><span part="refusal">${a.refusal?.code}: ${a.refusal?.detail}</span></span></div>`;
+      return html`<div class="panel">${heading()}<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText('Layer unavailable', a.refusal?.code)}</span></div>`;
     }
-    if (a.served.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">Nothing in this view</span></div>`;
+    if (a.served.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">Nothing in view</span></div>`;
     const stale = this.resolvedStore?.get('status').stale ?? false;
     const opened = this.resolvedStore?.get('selection').artifact?.id ?? null;
-    const topics = attachedTopics(a, this.resolvedStore?.get('meta') ?? null);
-    const listed = flatten(a.lineage).filter(({artifact}) => !topics.size || !(this.resolvedStore?.get('meta')?.layers.find((l) => l.name === artifact.layer)?.depsOn.length));
-    const shown = listed.slice(0, this.rows);
+    // A drawn layer's labels name their clusters and are not rows of their own. Where no drawn
+    // label carries text, a dependent layer's rows are listed.
+    const drawnLabels = a.served.some((x) => x.target !== null && x.content.length > 0);
+    const listed = flatten(a.lineage).filter(({artifact}) => !drawnLabels || !(this.resolvedStore?.get('meta')?.layers.find((l) => l.name === artifact.layer)?.depsOn.length));
+    const shown = listed.slice(0, this.rows + this.extra);
     const n = a.lineage.linked ? a.lineage.roots.length : a.served.length;
     return html`<div class="panel">${heading(`${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`)}
       <span part="state" data-state="shown"></span>
       <ul part="items" class="list">
         ${shown.map(({artifact, depth}) => {
+          const name = artifactName(artifact, a.attached);
           const masked: Masked = {value: Number(artifact.maskedCount), exact: true};
           return html`<li
             part="item"
@@ -108,14 +121,14 @@ export class TesseraArtifactList extends TesseraElement {
               if (e.key === 'Enter' || e.key === ' ') this.open(artifact);
             }}
           >
-            <span part="name" class="name" title=${artifact.layer} ?data-unnamed=${displayName(artifact, topics) === null}
-              >${displayName(artifact, topics) ?? UNNAMED}</span
-            >
+            <span part="name" class="name" title=${artifact.layer} ?data-unnamed=${name === null}>${name ?? UNNAMED}</span>
             <tessera-count part="count" .masked=${masked} .stale=${stale}></tessera-count>
           </li>`;
         })}
       </ul>
-      ${listed.length > shown.length ? html`<div class="muted xs">and ${(listed.length - shown.length).toLocaleString('en-GB')} more</div>` : nothing}
+      ${listed.length > shown.length
+        ? html`<button class="more-link" part="more" type="button" @click=${() => (this.extra += this.rows)}>${(listed.length - shown.length).toLocaleString('en-GB')} more</button>`
+        : nothing}
     </div>`;
   }
 }

@@ -1070,9 +1070,10 @@ export type ViewportResponse = {
   /** The server's timings. */
   timings: Timings;
   /**
-   * The key held data is partitioned by (`x-tessera-identity-key`). It covers the identity set,
-   * the credential, the principal's visible set and the view. Data held under one key must not be
-   * shown under another, so a client drops what it holds when this changes.
+   * The key held data is partitioned by (`x-tessera-identity-key`). It hashes the exact credential
+   * bytes presented at authorisation, the identity of the principal's visible-set fragment, which a
+   * compaction or a rebuilt bundle changes, and the view. Data held under one key must not be shown
+   * under another, so a client drops what it holds when this changes.
    */
   identityKey: string;
   /**
@@ -1218,7 +1219,7 @@ export type BrowseRequest = {
    * layer, a suppressed one and one this principal is not served all answer an empty page.
    */
   parent?: bigint;
-  /** The search form's text. */
+  /** The search form: the artifacts whose key or {@link BrowseRow.name} contains this, ignoring case. */
   q?: string;
   /**
    * The viewport's filter. Each row then carries `matchedCount` and the page is ordered by it.
@@ -1242,7 +1243,11 @@ export type BrowseRow = {
   tesseraId: bigint;
   /** The publisher's own key, or `null` where none was supplied. */
   key: string | null;
-  /** The artifact's first supplied text, or `null` where it has none or its first content is a shape. */
+  /**
+   * The artifact's first supplied text; where it has none, the first text of an artifact attached
+   * to it that this principal is served, such as a cluster's topic label, taking label layers in
+   * `meta`'s order. `null` where neither gives text.
+   */
   name: string | null;
   /** How many of the artifact's members this principal can see. A filter does not change it. */
   maskedCount: bigint;

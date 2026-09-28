@@ -33,13 +33,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use croaring::Bitmap;
+use tessera_roaring::for_each_run_in;
 use tessera_store::read::SegmentData;
 use tessera_types::EntityId;
 
 use super::cursor::{Key, Position};
 use super::{RecordsOrder, ResponseEndedBy};
 use crate::cancel::CancelToken;
-use crate::compose::{for_each_run_in, FilterRows, MaskedSet};
+use crate::compose::{FilterRows, MaskedSet};
 use crate::engine::Engine;
 use crate::error::Result;
 use crate::filter::FilterExpr;
@@ -138,14 +139,14 @@ pub(super) struct Collected {
 /// response started from, so every response the walk begins moves the scan on. The scan gathers
 /// the least key it has not reached first, so one chunk moves it; a response runs past its
 /// deadline by at most one stretch's filter evaluation, which is not interrupted, and one chunk.
-pub(super) struct Clock {
+pub(crate) struct Clock {
     started: Instant,
     budget: Duration,
     pub(super) cancel: Option<CancelToken>,
 }
 
 impl Clock {
-    pub(super) fn new(started: Instant, budget: Duration, cancel: Option<CancelToken>) -> Clock {
+    pub(crate) fn new(started: Instant, budget: Duration, cancel: Option<CancelToken>) -> Clock {
         Clock {
             started,
             budget,
@@ -153,11 +154,11 @@ impl Clock {
         }
     }
 
-    pub(super) fn cancelled(&self) -> bool {
+    pub(crate) fn cancelled(&self) -> bool {
         self.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
     }
 
-    pub(super) fn out_of_time(&self) -> bool {
+    pub(crate) fn out_of_time(&self) -> bool {
         self.started.elapsed() >= self.budget
     }
 
@@ -213,7 +214,7 @@ struct Stretch {
 
 /// Whether two generations share the row positions and the deny state a stretch was evaluated
 /// under.
-pub(super) fn same_publication(a: &Generation, b: &Generation) -> bool {
+pub(crate) fn same_publication(a: &Generation, b: &Generation) -> bool {
     a.prefix == b.prefix
         && a.segments_version == b.segments_version
         && Arc::ptr_eq(&a.overlay, &b.overlay)

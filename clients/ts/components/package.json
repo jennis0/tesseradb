@@ -112,12 +112,14 @@
     "@tesseradb/deck": "0.1.0"
   },
   "peerDependencies": {
+    "@deck.gl/aggregation-layers": "^9.3.7",
     "@deck.gl/core": "^9.3.7",
     "@deck.gl/layers": "^9.3.7",
     "@luma.gl/core": "^9.3.6",
     "lit": "^3.3.0"
   },
   "devDependencies": {
+    "@deck.gl/aggregation-layers": "^9.3.7",
     "@deck.gl/core": "^9.3.7",
     "@deck.gl/layers": "^9.3.7",
     "@luma.gl/core": "^9.3.6",

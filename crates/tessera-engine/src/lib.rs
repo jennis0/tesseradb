@@ -6,6 +6,7 @@
 //! `/control/changes` or `/control/ingest` acceptance advances the overlay/buffer, or a
 //! `tessera build` advances the bundle.
 
+mod aggregate;
 pub mod artifact_content;
 pub mod artifacts;
 mod attributes;
@@ -13,6 +14,7 @@ pub mod browse;
 mod bundle_lock;
 mod cache;
 pub mod cancel;
+pub mod cells;
 mod categories;
 mod coalesce;
 mod compact;
@@ -63,6 +65,10 @@ mod write;
 use arc_swap::ArcSwap;
 
 
+pub use aggregate::{
+    AggregateCaps, AggregateHead, AggregateRefused, AggregateRequest, AggregateSink,
+    AggregateTimings, AggregateTrailer, By, Grouping, Pick, Reference, TableHead,
+};
 pub use cancel::CancelToken;
 pub use categories::{
     CategoryColumn, CategoryPage, CategoryQuery, CategoryValue, MatchSpan, SuggestPage, Suggestion,

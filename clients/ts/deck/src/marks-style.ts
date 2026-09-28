@@ -2,9 +2,9 @@
  * How big and how solid a mark is drawn, from how many marks are resident and how far in the
  * camera is.
  *
- * At a million marks a viewport is a density picture, so each mark is small and translucent and
- * the ones under it show through. As the count falls each mark is drawn larger and more solid,
- * down to about 1.5 px at 0.7 alpha for a few hundred. Zoom adds a little to both.
+ * Up to ten thousand marks each is drawn at a 2 px radius and 0.8 alpha. Past that a viewport
+ * turns into a density picture, so each mark shrinks and turns translucent and the ones under it
+ * show through, to 1.1 px at 0.34 alpha at a million. Zoom adds a little to both.
  *
  * The count is every mark the slab holds for the frame plus the stand-ins, render margin
  * included. It is a screen quantity used only for presentation, and is not masked.
@@ -22,9 +22,9 @@ export type MarkStyle = {
   antialiasing: boolean;
 };
 
-/** The density scale: `0` at a hundred marks or fewer, `1` at a million or more. */
+/** The density scale: `0` at ten thousand marks or fewer, `1` at a million or more. */
 function density(marks: number): number {
-  const t = (Math.log10(Math.max(1, marks)) - 2) / 4;
+  const t = (Math.log10(Math.max(1, marks)) - 4) / 2;
   return Math.min(1, Math.max(0, t));
 }
 
@@ -33,15 +33,15 @@ export const ANTIALIAS_ABOVE_PX = 1.4;
 
 /**
  * The style for `marks` resident at `zoom` (deck's zoom: 0 when the world fills 512 px, +1 per
- * doubling). `fixedRadius` pins the radius where a host asked for one; the alpha still follows
- * the count. At about 1,600 marks this gives 1.53 px at 0.65 alpha; at a million, 1.10 px at 0.34
- * before the zoom term.
+ * doubling). `fixedRadius` and `fixedAlpha` pin the radius and the alpha where a host or viewer
+ * chose them; each one not pinned follows the count: 2 px at 0.8 alpha up to ten thousand marks,
+ * 1.55 px at 0.57 at a hundred thousand, 1.10 px at 0.34 at a million, before the zoom term.
  */
-export function markStyle(marks: number, zoom: number, fixedRadius: number | null = null): MarkStyle {
+export function markStyle(marks: number, zoom: number, fixedRadius: number | null = null, fixedAlpha: number | null = null): MarkStyle {
   const t = density(marks);
   const z = Math.min(10, Math.max(0, zoom));
-  const radius = fixedRadius ?? 1.1 + 0.6 * (1 - t) + 0.05 * z;
-  const alpha = Math.min(0.9, 0.34 + 0.44 * (1 - t) + 0.015 * z);
+  const radius = fixedRadius ?? 1.1 + 0.9 * (1 - t) + 0.05 * z;
+  const alpha = fixedAlpha === null ? Math.min(0.9, 0.34 + 0.46 * (1 - t) + 0.015 * z) : Math.min(1, Math.max(0, fixedAlpha));
   return {
     radius: Math.round(radius * 100) / 100,
     alpha: Math.round(alpha * 1000) / 1000,

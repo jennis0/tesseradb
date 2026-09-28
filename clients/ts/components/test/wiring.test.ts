@@ -6,7 +6,7 @@ import {TesseraStatus} from '../src/status.js';
 import {TesseraCount} from '../src/count.js';
 import {defineOnce} from '../src/define.js';
 import {emit} from '../src/base.js';
-import {fakeStore, mount, settle, status} from './fake-store.js';
+import {deep, fakeStore, meta, mount, settle, status} from './fake-store.js';
 
 /**
  * Store precedence (property, context, own, detached), an own store that follows its attributes,
@@ -147,7 +147,7 @@ describe('configuration after connection', () => {
     expect(disposed).toEqual(built);
   });
 
-  it('keeps its store when the authorise function alone is replaced, and asks the latest one', async () => {
+  it('builds a new store when another authorise function is set, through null in one task too', async () => {
     const {host, el} = await bare('<tessera-store viewer-url="http://127.0.0.1:1"></tessera-store>');
     const asked: string[] = [];
     // An expiry in the past, so the store asks its supplier on every request.
@@ -157,15 +157,27 @@ describe('configuration after connection', () => {
     };
     el.authorise = supplier('first');
     await settle(host);
-    const built = el.activeStore!;
-    const disposed = vi.spyOn(built, 'dispose');
+    const first = el.activeStore!;
+    const firstDisposed = vi.spyOn(first, 'dispose');
     el.authorise = supplier('second');
     await settle(host);
-    expect(el.activeStore).toBe(built);
-    expect(disposed).not.toHaveBeenCalled();
+    const second = el.activeStore!;
+    expect(second).not.toBe(first);
+    expect(firstDisposed).toHaveBeenCalled();
     asked.length = 0;
-    await built.browse({layer: 'x'}).catch(() => {});
+    await second.browse({layer: 'x'}).catch(() => {});
     expect(asked).toEqual(['second']);
+
+    // Cleared and set again before the element updates.
+    const secondDisposed = vi.spyOn(second, 'dispose');
+    el.authorise = null;
+    el.authorise = supplier('third');
+    await settle(host);
+    expect(el.activeStore).not.toBe(second);
+    expect(secondDisposed).toHaveBeenCalled();
+    asked.length = 0;
+    await el.activeStore!.browse({layer: 'x'}).catch(() => {});
+    expect(asked).toEqual(['third']);
     el.dispose();
   });
 
@@ -316,14 +328,49 @@ describe('event details', () => {
 });
 
 describe('<tessera-map> defaults', () => {
-  it('draws no density wash unless a host asks for one', async () => {
+  it('draws the points and no density unless a host asks otherwise', async () => {
     await import('../src/map.js');
-    const map = document.createElement('tessera-map') as unknown as {wash: boolean};
-    expect(map.wash).toBe(false);
+    type Display = {density: string; noPoints: boolean};
+    const map = document.createElement('tessera-map') as unknown as Display;
+    expect([map.density, map.noPoints]).toEqual(['none', false]);
     const asked = document.createElement('div');
-    asked.innerHTML = '<tessera-map wash></tessera-map>';
+    asked.innerHTML = '<tessera-map density="hex" no-points></tessera-map>';
     document.body.append(asked);
-    expect((asked.firstElementChild as unknown as {wash: boolean}).wash).toBe(true);
+    const el = asked.firstElementChild as unknown as Display;
+    expect([el.density, el.noPoints]).toEqual(['hex', true]);
     asked.remove();
+  });
+});
+
+describe('<tessera-map> display', () => {
+  it('keys density’s colours while they encode counts, and not for the warm-grey wash under the points', async () => {
+    await import('../src/map.js');
+    const host = await mount('<tessera-map density="smooth"></tessera-map>');
+    const map = host.querySelector('tessera-map') as HTMLElement & {store: unknown; density: string; noPoints: boolean; densityColours: string};
+    map.store = fakeStore({meta: meta(), status: status({})});
+    await settle(host);
+    expect(deep(host, '[part="density-key"]')).toBeNull();
+    map.noPoints = true;
+    await settle(host);
+    expect(deep(host, '[part="density-key"]')).not.toBeNull();
+    map.noPoints = false;
+    map.densityColours = 'magma';
+    await settle(host);
+    expect(deep(host, '[part="density-key"]')).not.toBeNull();
+    map.density = 'contours';
+    await settle(host);
+    expect(deep(host, '[part="density-key"]')).toBeNull();
+  });
+
+  it('shares the palette and ramp a host sets with every element over its store', async () => {
+    await import('../src/map.js');
+    const {colouringOf} = await import('../src/colouring.js');
+    const host = await mount('<tessera-map category-palette="dark2" ramp="cividis" ramp-scale="log" ramp-reverse></tessera-map>');
+    const map = host.querySelector('tessera-map') as HTMLElement & {store: unknown};
+    const store = fakeStore({meta: meta(), status: status({})});
+    map.store = store;
+    await settle(host);
+    const {palette, ramp, scale, reverse} = colouringOf(store);
+    expect({palette, ramp, scale, reverse}).toEqual({palette: 'dark2', ramp: 'cividis', scale: 'log', reverse: true});
   });
 });

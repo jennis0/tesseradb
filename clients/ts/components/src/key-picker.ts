@@ -35,13 +35,19 @@ export class TesseraKeyPicker extends TesseraElement {
         display: flex;
         flex-direction: column;
         gap: 4px;
-        padding: 10px 16px 0;
+      }
+      [part='label'] {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
       }
       [part='entry'] {
         gap: 6px;
       }
       [part='step'] {
         width: 30px;
+        height: 30px;
         padding: 0;
         justify-content: center;
         flex: none;
@@ -102,7 +108,7 @@ export class TesseraKeyPicker extends TesseraElement {
         <span>${icon('chevr', 14)}</span>
       </button>`;
     return html`<div part="field">
-      <span part="label" class="xs muted">${heading}</span>
+      <span part="label" class="muted">${heading}</span>
       <div part="entry" class="row">
         ${step('prev', previous, -1, 'Previous')}
         <select part="select" aria-label=${heading} @change=${(e: Event) => switchView(this, s, meta, (e.target as HTMLSelectElement).value)}>

@@ -5,6 +5,7 @@
  */
 export {SessionArtifactTable} from './artifactTable.js';
 export {servedLineage} from './artifactChannel.js';
+export {attachedTextOf} from './names.js';
 export {artifactBudgetFor, levelForBudget} from './artifactBudget.js';
 export {bandsOfResult} from './bands.js';
 export type {DepthChoice} from './budget.js';

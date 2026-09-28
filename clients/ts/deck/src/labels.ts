@@ -1,6 +1,6 @@
 /**
- * Label placement: names and counts at each artifact's centroid, placed by priority into a
- * spatial hash in O(K) for K labels, with a leader line when a label moved off its centroid.
+ * Label placement: names at each artifact's centroid, placed by priority into a spatial hash in
+ * O(K) for K labels, with a leader line when a label moved off its centroid.
  *
  * A label moves at most `MAX_DISPLACEMENT` pixels. One that fits nowhere within that is dropped
  * until a zoom in makes room, so a leader never crosses the map to a shape the name does not sit on.
@@ -98,8 +98,8 @@ export function placeLabels(candidates: readonly LabelCandidate[], maxDisplaceme
 }
 
 /** The ends of the label size band, in pixels. */
-export const LABEL_SIZE_MIN = 12.5;
-export const LABEL_SIZE_MAX = 24;
+export const LABEL_SIZE_MIN = 13;
+export const LABEL_SIZE_MAX = 16;
 
 /**
  * The pixel size of an artifact's name, from its masked count on a logarithmic band between the
@@ -119,36 +119,19 @@ export function labelSize(count: number, smallest: number, largest: number): num
   return LABEL_SIZE_MIN + (LABEL_SIZE_MAX - LABEL_SIZE_MIN) * (Math.log(c / lo) / span);
 }
 
-/**
- * How many characters a line of a name may hold before it wraps, and how many lines a name may
- * take. Short lines pack better into the spatial hash, which sees the wrapped box.
- */
-export const MAX_LABEL_LINE_CHARS = 14;
-export const MAX_LABEL_LINES = 3;
-/** The line box as a multiple of the font size, for the wrapped block's height. */
+/** How many characters a name may take on the map; a longer one is shortened. */
+export const MAX_LABEL_CHARS = 36;
+/** The line box as a multiple of the font size, for the placed box's height. */
 export const LABEL_LINE_HEIGHT = 1.15;
 
 /**
- * A name as up to {@link MAX_LABEL_LINES} lines of at most `maxChars` each, greedy over words and
- * without hyphenation, so a longer word takes a line of its own. What does not fit is cut from
- * the last line and marked with an ellipsis, so a shortened name does not read as another name.
+ * A name as the one line the map draws: whole where it has at most `maxChars` characters, else cut
+ * at the last word that fits and marked with an ellipsis, so a shortened name does not read as
+ * another name. A first word longer than the line is cut inside the word.
  */
-export function wrapLabel(text: string, maxChars = MAX_LABEL_LINE_CHARS, maxLines = MAX_LABEL_LINES): string[] {
-  const words = text.split(/\s+/).filter((w) => w.length > 0);
-  if (words.length === 0) return [text];
-  const lines: string[] = [];
-  let line = '';
-  for (const word of words) {
-    if (line.length === 0) line = word;
-    else if (line.length + 1 + word.length <= maxChars) line += ` ${word}`;
-    else if (lines.length + 1 < maxLines) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = `${line} ${word}`;
-      if (line.length > maxChars + 2) return [...lines, `${line.slice(0, maxChars + 1).trimEnd()}…`];
-    }
-  }
-  lines.push(line);
-  return lines;
+export function labelLine(text: string, maxChars = MAX_LABEL_CHARS): string {
+  const line = text.split(/\s+/).filter((w) => w.length > 0).join(' ');
+  if (line.length <= maxChars) return line;
+  const cut = line.lastIndexOf(' ', maxChars);
+  return `${(cut > 0 ? line.slice(0, cut) : line.slice(0, maxChars)).replace(/[\s,;:·–-]+$/, '')}…`;
 }

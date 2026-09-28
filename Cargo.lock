@@ -2840,6 +2840,7 @@ dependencies = [
  "tessera-filter-write",
  "tessera-lifecycle",
  "tessera-plugin",
+ "tessera-roaring",
  "tessera-server",
  "tessera-spatial",
  "tessera-store",
@@ -3055,6 +3056,7 @@ name = "tessera-roaring"
 version = "0.1.0"
 dependencies = [
  "croaring",
+ "rand 0.8.7",
 ]
 
 [[package]]

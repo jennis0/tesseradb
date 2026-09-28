@@ -15,7 +15,7 @@ interface Window {
     region: {depth: number; tiles: number; exact: boolean; visible: number; matched: number; held: number; status: string; ms: number | null} | null;
     timings: {
       slabMs: number;
-      washMs: number;
+      densityMs: number;
       lutMs: number;
       outlinesMs: number;
       labelsMs: number;

@@ -17,8 +17,10 @@
 //!
 //! What it reports per cell:
 //!   * `underlay_us` — the §3.3 loop's own time, separated from the rest of the request.
-//!   * `cells_evaluated` vs `cells_emitted` — the gap is work spent discovering emptiness, which
-//!     on a clustered corpus is most of it, and is exactly what a single-pass route would avoid.
+//!   * `cells_evaluated` vs `cells_emitted`: the sub-cell row ranges counted, one per occupied
+//!     sub-cell per segment, against the sub-cells emitted. An empty sub-cell is skipped by a
+//!     binary search and counts in neither; the gap is occupied sub-cells whose rows the viewer
+//!     cannot see, and sub-cells spanning several segments.
 //!   * `us_per_cell_evaluated` — the figure that says whether the cost is per-cell or per-item.
 //!
 //! ```text

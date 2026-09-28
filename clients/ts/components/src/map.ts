@@ -12,7 +12,8 @@ import {
 } from '@tesseradb/client';
 import {assertCompositionMatchesServed, hasValue} from '@tesseradb/client/internal';
 import {TesseraLayer, resolvePick, viewInputOf, type Picked} from '@tesseradb/deck';
-import {MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, type ContourShape} from '@tesseradb/deck/internal';
+import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, encodingOf, encodingSignature, hoverAt, type ContourShape} from '@tesseradb/deck/internal';
+import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -20,7 +21,9 @@ import {renderState, stateOf, type PanelState} from './states.js';
 import {icon} from './icons.js';
 import {sameFrame} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
-import {washChannel} from './wash.js';
+import {densityChannel} from './density.js';
+import './count.js';
+import {colouringOf, setColouring, watchColouring} from './colouring.js';
 
 
 /** How long after disconnection the `Deck` is finalised, unless the element reconnects. */
@@ -47,7 +50,7 @@ export type MapProbe = {
   timings: {
     /** The last paint's work per stage, in milliseconds. */
     slabMs: number;
-    washMs: number;
+    densityMs: number;
     lutMs: number;
     outlinesMs: number;
     labelsMs: number;
@@ -100,7 +103,8 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * selection, drawn with deck.gl in an orthographic view. The refused, expired and empty states are
  * drawn over the canvas, so none of them reads as an empty corpus. The toolbar switches between
  * pan, box select and lasso select, and fits the whole extent; shift-drag in pan mode draws a box.
- * A settled box or lasso becomes the store's selection, a filter every count narrows to.
+ * A settled box or lasso becomes the store's selection, a filter every count narrows to; a tag on
+ * its top-left corner gives the count matched inside it and a button that clears it.
  *
  * The map owns the camera and tells the store where it is looking on every move. Keys, with the
  * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn or
@@ -113,10 +117,10 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * @summary The map canvas.
  * @tagname tessera-map
  * @category Elements
- * @slot top-left - Content in the top-left corner, beside the toolbar when it is there.
- * @slot top-right - Content in the top-right corner, beside the toolbar when it is there.
- * @slot bottom-left - Content in the bottom-left corner.
- * @slot bottom-right - Content in the bottom-right corner.
+ * @slot top-left - Content in the top-left corner, below the toolbar when it is there.
+ * @slot top-right - Content in the top-right corner, below the toolbar when it is there.
+ * @slot bottom-left - Content in the bottom-left corner, above the toolbar when it is there.
+ * @slot bottom-right - Content in the bottom-right corner, above the toolbar when it is there.
  * @slot tooltip - Replaces the hover tooltip's content.
  * @fires {CustomEvent<TesseraEventDetails['tessera-viewchange']>} tessera-viewchange - The camera
  *   moved.
@@ -134,11 +138,19 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * @csspart canvas - The deck.gl canvas's container.
  * @csspart overlay - The state drawn over the canvas when refused, expired or empty.
  * @csspart state - The state line inside the overlay, with `data-state`.
- * @csspart refusal - The refusal's code and detail, inside the overlay.
+ * @csspart retry - The Retry button in the overlay, when the view was refused.
+ * @csspart refusal - The words "View refused" inside the overlay, with `data-code` set to the
+ *   refusal's code.
  * @csspart controls - The toolbar.
+ * @csspart region-tag - The drawn region's tag on its top-left corner: how many items match inside
+ *   it, or outside it for its complement, and a button that clears the selection.
  * @csspart tooltip - The hover tooltip.
+ * @csspart density-key - The key to density's colours, from "Fewer" to "More items", in the
+ *   bottom-left corner while density is drawn in a ramp or without the points.
  * @cssprop --tessera-map-height - The map's height.
  * @cssprop --tessera-map-bg - The canvas's background, behind the points and any basemap.
+ * @cssprop --tessera-map-inset-left - Extra space between the top-left corner's content and the
+ *   map's left edge, for a panel floated over the map's left side. Defaults to 0.
  */
 export class TesseraMap extends TesseraElement {
   static override styles = [
@@ -170,7 +182,7 @@ export class TesseraMap extends TesseraElement {
         z-index: 2;
         display: flex;
         flex-direction: column;
-        gap: var(--_tessera-space);
+        gap: calc(var(--_tessera-space) / 2);
         max-width: 46%;
         pointer-events: none;
       }
@@ -179,7 +191,7 @@ export class TesseraMap extends TesseraElement {
       }
       .top-left {
         top: var(--_tessera-space);
-        left: var(--_tessera-space);
+        left: calc(var(--_tessera-space) + var(--tessera-map-inset-left, 0px));
       }
       .top-right {
         top: var(--_tessera-space);
@@ -195,35 +207,66 @@ export class TesseraMap extends TesseraElement {
         align-items: flex-end;
       }
       [part='controls'] {
+        align-self: flex-start;
         display: flex;
         flex-direction: column;
+        gap: 2px;
+        padding: 3px;
         background: var(--_tessera-surface);
         border: 1px solid var(--_tessera-line);
         border-radius: var(--_tessera-radius);
         box-shadow: var(--_tessera-shadow);
-        overflow: hidden;
         pointer-events: auto;
       }
       [part='controls'] button {
-        width: 36px;
-        height: 36px;
+        width: var(--_tessera-tool-size, 32px);
+        height: var(--_tessera-tool-size, 32px);
         display: grid;
         place-items: center;
-        color: var(--_tessera-ink-2);
-        border-bottom: 1px solid var(--_tessera-line-2);
-        border-radius: 0;
+        color: color-mix(in srgb, var(--_tessera-ink) 82%, var(--_tessera-surface));
+        border-radius: var(--_tessera-radius-control);
       }
-      [part='controls'] button:last-child {
-        border-bottom: 0;
+      [part='controls'] button:hover {
+        background: var(--_tessera-surface-2);
       }
       [part='controls'] button[aria-pressed='true'] {
-        background: var(--_tessera-accent-soft);
-        color: var(--_tessera-accent);
+        background: var(--_tessera-accent);
+        color: var(--_tessera-accent-ink);
       }
-      [part='controls'] .sep {
-        height: 6px;
+      /* The drawn region's count and clear button, on its top edge. */
+      [part='region-tag'] {
+        position: absolute;
+        z-index: 3;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 3px 2px 8px;
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius-control);
+        box-shadow: var(--_tessera-shadow);
+        font-size: 12px;
+        color: var(--_tessera-ink-2);
+        white-space: nowrap;
+        transform: translateY(calc(-100% - 4px));
+      }
+      [part='region-tag'] tessera-count {
+        font-size: inherit;
+        color: var(--_tessera-ink);
+      }
+      [part='region-tag'] tessera-count::part(count) {
+        font-weight: 600;
+      }
+      [part='region-tag'] button {
+        width: 20px;
+        height: 20px;
+        display: grid;
+        place-items: center;
+        border-radius: 4px;
+        color: var(--_tessera-ink-2);
+      }
+      [part='region-tag'] button:hover {
         background: var(--_tessera-surface-2);
-        border-bottom: 1px solid var(--_tessera-line-2);
       }
       [part='tooltip'] {
         position: absolute;
@@ -258,17 +301,42 @@ export class TesseraMap extends TesseraElement {
       }
       [part='overlay'] [part='state'] {
         pointer-events: auto;
-        padding: 10px 14px;
+        min-height: 40px;
+        padding: 6px 8px 6px 14px;
         background: var(--_tessera-surface);
         border: 1px solid var(--_tessera-line);
         border-radius: var(--_tessera-radius);
         box-shadow: var(--_tessera-shadow);
         font-size: 13px;
-        font-weight: 600;
+        font-weight: 500;
+        color: var(--_tessera-ink);
       }
-      [part='overlay'] [part='state'][data-state='refused'],
-      [part='overlay'] [part='state'][data-state='expired'] {
-        background: var(--_tessera-refuse-soft);
+      [part='overlay'] [part='state']:not(:has(button)) {
+        padding-right: 14px;
+      }
+      [part='density-key'] {
+        align-self: flex-start;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        padding: 7px 9px;
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius-control);
+        font-size: 11px;
+        color: var(--_tessera-ink-2);
+        pointer-events: auto;
+      }
+      [part='density-key'] .ramp {
+        display: block;
+        width: 120px;
+        height: 8px;
+        border-radius: 2px;
+      }
+      [part='density-key'] .ends {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
       }
     `
   ];
@@ -315,16 +383,56 @@ export class TesseraMap extends TesseraElement {
   /** A deck.gl layer drawn under the points, such as a basemap, in the map's 512-unit world. */
   @property({attribute: false}) accessor basemap: Layer | null = null;
   /**
-   * The ground the map draws on, `light` or `dark`, where it differs from the page's, such as a light
-   * basemap under a dark page. The labels and the positional palette follow it, and the toolbar and
-   * panels follow the page. Unset, the host's `color-scheme` decides, else the system preference.
+   * The ground the map draws on, `light` or `dark`, where it differs from the page's, such as a
+   * light basemap under a dark page. The labels and the positional palette follow it, and the
+   * toolbar and panels follow the page. Unset, the host's `color-scheme` decides, else the system
+   * preference.
    */
   @property({reflect: true}) accessor ground: 'light' | 'dark' | '' = '';
+  /** Hides the points. Density, outlines, labels and the selection are still drawn. */
+  @property({type: Boolean, attribute: 'no-points', reflect: true}) accessor noPoints = false;
   /**
-   * Draws a density wash under the points, in one hue, from the tiles' exact counts: the highlighted
-   * count under a highlight, the matched count under a filter or selection, else the visible count.
+   * A fixed point alpha from 0.1 to 1. Unset, points are more transparent the more of them are
+   * drawn, so a dense region reads as a density.
    */
-  @property({type: Boolean}) accessor wash = false;
+  @property({type: Number, attribute: 'point-opacity'}) accessor pointOpacity: number | null = null;
+  /**
+   * How density is drawn under the points, from the tiles' exact counts and never from the points,
+   * which are a sample: `none`, `smooth` (a soft wash), `hex` (hexagons), `grid` (square cells one
+   * tile wide) or `contours` (lines of equal density). It counts the highlighted items under a
+   * highlight, the matched items under a filter or selection, else the visible items.
+   */
+  @property({reflect: true}) accessor density: DensityMode = 'none';
+  /**
+   * The colours density is drawn in: `warm-grey`, `viridis`, `cividis`, `magma` or `greys`. Unset,
+   * the smooth wash under the points is warm grey and every other density is Viridis. While density
+   * is drawn in a ramp, or without the points, a key reading "Fewer" to "More items" sits in the
+   * bottom-left corner.
+   */
+  @property({attribute: 'density-colours'}) accessor densityColours: DensityColours | '' = '';
+  /** How strongly density is drawn, from 0.1 to 1. */
+  @property({type: Number, attribute: 'density-strength'}) accessor densityStrength = 1;
+  /**
+   * The palette a category column's values are coloured from: `tableau10`, `okabe-ito`, `set2` or
+   * `dark2`. Unset, the choice made in `<tessera-legend>` stands, Tableau 10 until one is made.
+   */
+  @property({attribute: 'category-palette'}) accessor categoryPalette: CategoryPaletteName | '' = '';
+  /**
+   * The ramp a number column's values are coloured on: `viridis`, `cividis`, `magma`, `greys` or
+   * `red-blue`. Unset, the choice made in `<tessera-legend>` stands, Viridis until one is made.
+   */
+  @property() accessor ramp: RampName | '' = '';
+  /** How numbers are placed on the ramp, `linear` or `log`. Unset, the legend's choice stands. */
+  @property({attribute: 'ramp-scale'}) accessor rampScale: RampScale | '' = '';
+  /** Runs the ramp from its high end to its low end. */
+  @property({type: Boolean, attribute: 'ramp-reverse'}) accessor rampReverse = false;
+  /**
+   * Colours for single category values, per column, per category key, as `#rrggbb`, such as
+   * `{field: {'cs.CV': '#f28e2b'}}`. Setting it replaces every value colour chosen before,
+   * including those chosen in the legend; a host restores a viewer's saved choices this way, having
+   * kept them from `tessera-valuecolour`. Unset, the legend's choices stand.
+   */
+  @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
   /**
    * Whether the map measures itself for the probe: the frame-gap loop behind `probe.timings.frame`,
    * the colour-by-cluster sample behind `probe.cluster`, and the check that each composition
@@ -333,12 +441,15 @@ export class TesseraMap extends TesseraElement {
    * @internal
    */
   @property({type: Boolean}) accessor measure = false;
-  /** A fixed mark radius in pixels. Unset, marks are sized by how many are drawn and by the zoom. */
+  /** A fixed point radius in pixels. Unset, points are sized by how many are drawn and by the zoom. */
   @property({type: Number}) accessor radius: number | null = null;
   /** Hides the toolbar. */
   @property({type: Boolean, attribute: 'no-controls'}) accessor noControls = false;
-  /** Which corner the toolbar sits in: `top-left` or `top-right`. */
-  @property({attribute: 'controls-corner'}) accessor controlsCorner: 'top-left' | 'top-right' = 'top-left';
+  /**
+   * Which corner the toolbar sits in: `top-left`, `top-right`, `bottom-left` or `bottom-right`. In
+   * a top corner the corner's slotted content is below the toolbar; in a bottom corner, above it.
+   */
+  @property({attribute: 'controls-corner'}) accessor controlsCorner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' = 'top-left';
 
   /** @internal */
   @state() accessor hover: {x: number; y: number; title: string; lines: string[]} | null = null;
@@ -363,7 +474,7 @@ export class TesseraMap extends TesseraElement {
     encoding: 'uniform',
     view: {depth: 0, status: 'idle', stale: false, visible: 0, matched: 0, served: 0, provisional: 0},
     region: null,
-    timings: {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, outlinesDrawn: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
+    timings: {slabMs: 0, densityMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, outlinesDrawn: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
     cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: [], coloured: 0}
   };
 
@@ -439,8 +550,22 @@ export class TesseraMap extends TesseraElement {
       if (changed.has('palette')) s.setPalette(this.palette);
       // The ground also sets the positional palette's lightness in the store.
       if (changed.has('ground')) s.setScheme(this.scheme());
+      this.pushColouring(s, changed);
     }
-    if (changed.has('mode') || changed.has('drag') || changed.has('dragPolygon') || changed.has('basemap') || changed.has('ground') || changed.has('wash') || changed.has('radius') || changed.has('clusterLevel') || changed.has('hoveredArtifact')) this.paint();
+    const repaint = ['mode', 'drag', 'dragPolygon', 'basemap', 'ground', 'radius', 'clusterLevel', 'hoveredArtifact', 'noPoints', 'pointOpacity', 'density', 'densityColours', 'densityStrength'] as const;
+    if (repaint.some((k) => changed.has(k))) this.paint();
+  }
+
+  /** The colour properties the host set, written to the choices every element over `store` shares. */
+  private pushColouring(store: Store, changed?: PropertyValues<this>): void {
+    const touched = (k: 'categoryPalette' | 'ramp' | 'rampScale' | 'rampReverse' | 'valueColours') => !changed || changed.has(k);
+    const patch: Partial<Colouring> = {};
+    if (touched('categoryPalette') && this.categoryPalette !== '') patch.palette = this.categoryPalette;
+    if (touched('ramp') && this.ramp !== '') patch.ramp = this.ramp;
+    if (touched('rampScale') && this.rampScale !== '') patch.scale = this.rampScale;
+    if (changed ? changed.has('rampReverse') && changed.get('rampReverse') !== undefined : this.rampReverse) patch.reverse = this.rampReverse;
+    if (touched('valueColours') && this.valueColours !== null) patch.values = this.valueColours;
+    if (Object.keys(patch).length > 0) setColouring(store, patch);
   }
 
   /** The ground: `ground` if set, else the host's `color-scheme`, else the system preference. */
@@ -455,7 +580,18 @@ export class TesseraMap extends TesseraElement {
     return typeof matchMedia !== 'undefined' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
+  protected override resetServerData(): void {
+    // A hover's title is a record the server answered.
+    this.hover = null;
+    this.hoveredArtifact = null;
+  }
+
+  /** Stops following the colour choices of the store adopted last. */
+  private unwatchColouring: (() => void) | null = null;
+
   protected override onStoreAdopted(store: Store | null): void {
+    this.unwatchColouring?.();
+    this.unwatchColouring = store ? watchColouring(store, () => this.paint()) : null;
     this.slab.clear();
     this.metaSeen = false;
     this.selectedWorldXY = null;
@@ -470,6 +606,7 @@ export class TesseraMap extends TesseraElement {
     if (this.layers) store.setLayers(this.layers);
     if (this.budget > 0) store.setBudget(this.budget);
     if (this.palette !== 'positional') store.setPalette(this.palette);
+    this.pushColouring(store);
     this.paint();
   }
 
@@ -505,7 +642,7 @@ export class TesseraMap extends TesseraElement {
     };
     const legend = s.get('legend');
     const clusterLayer = clusterLayerOf(legend.colourBy);
-    p.encoding = clusterLayer ? `cluster|${clusterLayer}` : encodingSignature(encodingOf(s.get('meta'), legend));
+    p.encoding = clusterLayer ? `cluster|${clusterLayer}` : encodingSignature(encodingOf(s.get('meta'), legend, colouringOf(s)));
     if (this.measure) this.measureStore(s);
 
     // Events for what arrived: the picked record, the opened artifact, the region's counts.
@@ -573,11 +710,11 @@ export class TesseraMap extends TesseraElement {
       this.paintedOpened = opened;
       this.paint();
     }
-    // Likewise for `highlighting` and `washChannel`.
-    const wash = washChannel(s.get('filters'), view, region);
-    if (view.highlighting !== this.paintedHighlighting || wash !== this.paintedWashChannel) {
+    // Likewise for `highlighting` and `densityChannel`.
+    const channel = densityChannel(s.get('filters'), view, region);
+    if (view.highlighting !== this.paintedHighlighting || channel !== this.paintedChannel) {
       this.paintedHighlighting = view.highlighting;
-      this.paintedWashChannel = wash;
+      this.paintedChannel = channel;
       this.paint();
     }
     super.onStoreChange();
@@ -589,7 +726,7 @@ export class TesseraMap extends TesseraElement {
   private paintedOpened: bigint | null = null;
   /** What the last paint told the layer about the highlight. */
   private paintedHighlighting = false;
-  private paintedWashChannel: ReturnType<typeof washChannel> | null = null;
+  private paintedChannel: ReturnType<typeof densityChannel> | null = null;
   private regionShape: SelectionShape | null = null;
 
   /** What `measure` adds on a store change: the composition check and the cluster sample. */
@@ -655,6 +792,8 @@ export class TesseraMap extends TesseraElement {
         this.viewState = {...this.viewState, target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
         this.deck?.setProps({viewState: this.viewState});
         this.pushView();
+        // The region's tag follows the camera.
+        if (this.regionWorld || this.regionPolygon) this.requestUpdate();
         return viewState;
       },
       onClick: (info) => this.onClick(info),
@@ -699,10 +838,15 @@ export class TesseraMap extends TesseraElement {
           regionPolygon: this.regionPolygon,
           drag: this.drag,
           dragPolygon: this.dragPolygon,
-          wash: this.wash,
           highlighting: s.get('view').highlighting,
-          washChannel: washChannel(s.get('filters'), s.get('view'), s.get('region')),
+          points: !this.noPoints,
           radius: this.radius,
+          pointOpacity: this.pointOpacity,
+          density: this.density,
+          densityChannel: densityChannel(s.get('filters'), s.get('view'), s.get('region')),
+          densityColours: this.densityColours || null,
+          densityStrength: this.densityStrength,
+          colouring: colouringOf(s),
           scheme: this.scheme(),
           onDrawn: (drawn, provisional) => {
             const p = this.probe;
@@ -713,7 +857,7 @@ export class TesseraMap extends TesseraElement {
           onTimings: (t) => {
             Object.assign(this.probe.timings, {
               slabMs: t.slabMs,
-              washMs: t.washMs,
+              densityMs: t.densityMs,
               lutMs: t.lutMs,
               outlinesMs: t.outlinesMs,
               labelsMs: t.labelsMs,
@@ -773,7 +917,7 @@ export class TesseraMap extends TesseraElement {
   private onHover(info: PickingInfo): void {
     const picked = resolvePick(info as never);
     const layerId = (info.sourceLayer ?? info.layer)?.id ?? '';
-    const slot = picked.kind === 'mark' ? /marks-p(\d+)$/.exec(layerId) : null;
+    const slot = picked.kind === 'mark' ? /marks-p(\d+)(?:-(?:dull|lit))?$/.exec(layerId) : null;
     const at = slot ? this.slab.markAt(Number(slot[1]), info.index) : null;
     const artifacts = this.resolvedStore?.get('artifacts') ?? null;
     // The mark's own artifact, preferred where shapes interleave.
@@ -943,8 +1087,8 @@ export class TesseraMap extends TesseraElement {
   };
 
   /**
-   * Select a shape in data coordinates, as drawing a box or lasso does; `null` clears the selection.
-   * Fires `tessera-selectchange`.
+   * Select a shape in data coordinates, as drawing a box or lasso does; `null` clears the
+   * selection. Fires `tessera-selectchange`.
    */
   select(shape: SelectionShape | null): void {
     this.regionAskedAt = performance.now();
@@ -957,6 +1101,39 @@ export class TesseraMap extends TesseraElement {
     this.viewState = {...this.viewState, ...next};
     this.deck?.setProps({viewState: this.viewState});
     this.pushView();
+    if (this.regionWorld || this.regionPolygon) this.requestUpdate();
+  }
+
+  /**
+   * The drawn region's tag at its top-left corner: how many items match inside it (or outside, for
+   * its complement) and a button that clears it. A region drawn as an artifact's outline has none.
+   */
+  private regionTag(): TemplateResult | typeof nothing {
+    const region = this.resolvedStore?.get('region');
+    if (!region) return nothing;
+    let corner: [number, number] | null = null;
+    if (this.regionWorld) corner = [this.regionWorld[0], this.regionWorld[1]];
+    else if (this.regionPolygon && this.regionPolygon.length > 0) {
+      corner = [Math.min(...this.regionPolygon.map((p) => p[0])), Math.min(...this.regionPolygon.map((p) => p[1]))];
+    }
+    if (!corner) return nothing;
+    // The orthographic camera, y down: world units scale by 2^zoom about the target at the centre.
+    const {width, height} = this.size;
+    const scale = 2 ** this.viewState.zoom;
+    const [tx, ty] = this.viewState.target;
+    // Kept inside the map where the corner is off its top edge, and no further left than the
+    // top-left corner's content starts, right of whatever the host keeps over the map's left side.
+    const left = (corner[0] - tx!) * scale + width / 2;
+    const top = Math.max(30, (corner[1] - ty!) * scale + height / 2);
+    return html`<div part="region-tag" style=${`left:max(calc(var(--_tessera-space) + var(--tessera-map-inset-left, 0px)), ${left}px);top:${top}px`}>
+      <tessera-count .masked=${region.matched}></tessera-count><span>${region.shape.outside ? 'outside' : 'inside'}</span>
+      <button type="button" aria-label="Clear selection" title="Clear selection" @click=${() => this.select(null)}>${icon('close', 12, 1.4)}</button>
+    </div>`;
+  }
+
+  /** The ground the map draws on now: `ground` where it is set, else the page's colour scheme. */
+  get drawnGround(): 'light' | 'dark' {
+    return this.scheme();
   }
 
   /** The camera's zoom: 0 when the 512-unit world fills 512 px, +1 per doubling. */
@@ -1073,20 +1250,36 @@ export class TesseraMap extends TesseraElement {
     this.frameLoop = null;
   }
 
+  /**
+   * What density's colours mean, from "Fewer" to "More items", while density is drawn in a ramp or
+   * without the points. The warm-grey wash under the points is context and has no key. There are no
+   * figures on it: the colours follow the rank of each count among those on screen.
+   */
+  private densityKey(): TemplateResult | typeof nothing {
+    if (this.density !== 'smooth' && this.density !== 'hex' && this.density !== 'grid') return nothing;
+    const colours = drawnDensityColours(this.density, this.densityColours, !this.noPoints);
+    if (!this.noPoints && colours === 'warm-grey') return nothing;
+    const stops = densityStops(colours, this.scheme()).map(([r, g, b]) => `rgb(${r}, ${g}, ${b})`);
+    return html`<div part="density-key" role="img" aria-label=${`Density in ${DENSITY_COLOUR_TITLES[colours]}, from fewer items to more`}>
+      <span class="ramp" style=${`background:linear-gradient(to right, ${stops.join(', ')})`}></span>
+      <span class="ends"><span>Fewer</span><span>More items</span></span>
+    </div>`;
+  }
+
   override render(): TemplateResult | typeof nothing {
     const status = this.resolvedStore?.get('status') ?? null;
     const state: PanelState = stateOf(status);
     // Loading and retrying are the status strip's; the map draws the states that could otherwise
     // read as an empty corpus.
-    const overlay = state === 'refused' || state === 'expired' || state === 'empty' ? html`<div part="overlay">${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh()})}</div>` : nothing;
+    const refresh = () => this.resolvedStore?.refresh();
+    const overlay = state === 'refused' || state === 'expired' || state === 'empty' ? html`<div part="overlay">${renderState(state, status, {onRefresh: refresh, onRetry: refresh})}</div>` : nothing;
     const controls = this.noControls
       ? nothing
       : html`<div part="controls" role="toolbar" aria-label="Map tools">
-          <button type="button" aria-label="Pan" aria-pressed=${this.mode === 'pan'} title="Pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>${icon('pan')}</button>
-          <button type="button" aria-label="Box select" aria-pressed=${this.mode === 'box'} title="Box select" @click=${() => (this.mode = 'box')}>${icon('box')}</button>
-          <button type="button" aria-label="Lasso select" aria-pressed=${this.mode === 'lasso'} title="Lasso select" @click=${() => (this.mode = 'lasso')}>${icon('lasso')}</button>
-          <div class="sep"></div>
-          <button type="button" aria-label="Fit to extent" title="Fit to extent" @click=${() => this.fit()}>${icon('fit')}</button>
+          <button type="button" aria-label="Pan" aria-pressed=${this.mode === 'pan'} title="Pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>${icon('pan', 16, 1.2)}</button>
+          <button type="button" aria-label="Box select" aria-pressed=${this.mode === 'box'} title="Box select" @click=${() => (this.mode = 'box')}>${icon('box', 16, 1.2)}</button>
+          <button type="button" aria-label="Lasso select" aria-pressed=${this.mode === 'lasso'} title="Lasso select" @click=${() => (this.mode = 'lasso')}>${icon('lasso', 16, 1.2)}</button>
+          <button type="button" aria-label="Fit to extent" title="Fit to extent" @click=${() => this.fit()}>${icon('fit', 16, 1.2)}</button>
         </div>`;
     return html`<div
         part="canvas"
@@ -1101,6 +1294,7 @@ export class TesseraMap extends TesseraElement {
         @lostpointercapture=${{handleEvent: this.onPointerUp, capture: true}}
       ></div>
       ${overlay}
+      ${this.regionTag()}
       <div class="corner top-left">
         ${this.controlsCorner === 'top-left' ? controls : nothing}
         <slot name="top-left"></slot>
@@ -1109,8 +1303,15 @@ export class TesseraMap extends TesseraElement {
         ${this.controlsCorner === 'top-right' ? controls : nothing}
         <slot name="top-right"></slot>
       </div>
-      <div class="corner bottom-left"><slot name="bottom-left"></slot></div>
-      <div class="corner bottom-right"><slot name="bottom-right"></slot></div>
+      <div class="corner bottom-left">
+        ${this.densityKey()}
+        <slot name="bottom-left"></slot>
+        ${this.controlsCorner === 'bottom-left' ? controls : nothing}
+      </div>
+      <div class="corner bottom-right">
+        <slot name="bottom-right"></slot>
+        ${this.controlsCorner === 'bottom-right' ? controls : nothing}
+      </div>
       ${this.hover
         ? html`<div part="tooltip" style=${`left:${this.hover.x}px;top:${this.hover.y}px`}>
             <slot name="tooltip"><div class="t">${this.hover.title}</div>${this.hover.lines.length > 0 ? html`<div class="s">${this.hover.lines.join(' · ')}</div>` : nothing}</slot>
@@ -1119,7 +1320,12 @@ export class TesseraMap extends TesseraElement {
   }
 }
 
-/** A value as the hover shows it; a timestamp in full, as an ISO date-time. */
+/** The density colours drawn: those chosen, else warm grey for a wash under the points, else Viridis. */
+export function drawnDensityColours(density: DensityMode, colours: DensityColours | '', points: boolean): DensityColours {
+  return colours || (density === 'smooth' && points ? 'warm-grey' : 'viridis');
+}
+
+/** A value as the hover shows it; a timestamp as a date. */
 function hoverText(value: unknown, arrowType: string | null): string {
   if (arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return timestampText(value);
   return String(value);

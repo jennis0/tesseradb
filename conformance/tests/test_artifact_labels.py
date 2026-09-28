@@ -11,7 +11,9 @@ is read back from a packed extent.
 What is compared, per principal: the artifacts frame (keys, masked counts, parent links, targets),
 the points frame's membership columns, the identifier route (status and body, a withheld artifact
 answering exactly as an identifier nothing was issued under), `member_of` counts, and browse's
-roots, children and search, walked page by page through `next`. A served artifact's drill-down
+roots, children and search, walked page by page through `next`. A browse row's `name` is the text
+of the label attached to it that the principal is served, and a search finds a row by that name
+and by no label the principal is not served. A served artifact's drill-down
 carries its layer, key and masked count.
 """
 
@@ -152,6 +154,27 @@ def check(server) -> None:
                 assert children == never_children, (terms, key)
             assert set(browsed(browse_all(server, token, q=key[1]))) <= set(teams), (terms, key)
             assert (key[1] in browsed(browse_all(server, token, q=key[1]))) == (key[1] in teams)
+        check_names(server, token, terms)
+
+
+def check_names(server, token, terms) -> None:
+    """Each team's browse `name`, and a search by every label text written, against the oracle."""
+    names = fx.browse_names(terms)
+    every = browse_all(server, token, q="")
+    assert {row["key"]: row.get("name") for row in every} == names, terms
+    nothing = browse_all(server, token, q="text nobody wrote")
+    assert nothing == []
+    texts = [text for _, _, text in fx.NAME_ROWS] + [text for _, _, text, _ in fx.TITLE_ROWS]
+    for text in texts:
+        found = browse_all(server, token, q=text.upper())
+        assert {row["key"] for row in found} == {
+            key
+            for key, name in names.items()
+            if text.lower() in key.lower() or (name is not None and text.lower() in name.lower())
+        }, (terms, text)
+        if not found:
+            # A label this principal is not served answers as text nobody wrote.
+            assert found == nothing, (terms, text)
 
 
 def test_the_fixture_separates_two_principals_by_one_label():
@@ -168,6 +191,11 @@ def test_the_fixture_separates_two_principals_by_one_label():
         if key not in {("teams", "t-open"), ("names", "n-open")}:
             assert any(key not in fx.served(p) for p in fx.PRINCIPALS), key
     assert ("teams", "t-empty") not in narrow and ("teams", "t-empty") in wide
+    # `t-one` is served to both, and named only for the principal served its title.
+    assert fx.browse_names(["3", "1"])["t-one"] is None
+    assert fx.browse_names(["3", "1", "2"])["t-one"] == "Firstly"
+    assert fx.browse_names(["3", "1", "2"])["t-open"] == "Open", "`names` is listed first"
+    assert fx.browse_names(["3", "2"])["t-late"] == "Late, by a", "by key, not publication"
 
 
 @pytest.fixture(scope="module")

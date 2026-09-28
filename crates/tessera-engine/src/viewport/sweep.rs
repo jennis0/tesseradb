@@ -362,42 +362,28 @@ pub(super) fn tile_sweep<'a>(
             .sum(),
     };
 
-    // The tile's sub-cells, each an exact masked count over a contiguous Morton range. Only
-    // non-empty cells are emitted, exactly as empty tiles are skipped above.
+    // The tile's sub-cells, each an exact masked count over a contiguous Morton range, summed
+    // across the tile's segments. Only non-empty cells are emitted, as empty tiles are skipped
+    // above.
     let mut sub_cells = Vec::new();
     if let Some(offset) = underlay_offset {
-        let sub_depth = zoom + offset;
         let first = tile.prefix << (2 * offset as u32);
-        for i in 0..(1u64 << (2 * offset as u32)) {
-            let cell = first + i;
-            let sub_tile = Tile {
-                prefix: cell,
-                depth: sub_depth,
-            };
-            // Searches only the parent's range, over bytes already touched by the parent's own
-            // `count_range`. Summed across segments so a sub-cell count is exact for the cell.
-            let sub_count: u64 = parts
+        let counted = crate::cells::count_by_ranges(
+            parts
                 .as_slice()
                 .iter()
-                .map(|part| {
-                    let local = tile_ranges_within(part.segment, &sub_tile, part.range.clone());
-                    mask.count_range(part.row_base + local.start..part.row_base + local.end)
-                })
-                .sum();
-            if sub_count > 0 {
-                sub_cells.push(SubCellCount {
-                    cell,
-                    count: sub_count,
-                });
-            }
-        }
-        stats.lap(|t| &mut t.underlay_ns);
-        // Evaluated, not emitted: the gap between this and `sub_cells.len()` is the work spent
-        // discovering that a sub-cell was empty, which on a clustered corpus is most of it.
-        stats.count(
-            |t| &mut t.underlay_cells_evaluated,
-            1u64 << (2 * offset as u32),
+                .map(|part| (part.segment, part.row_base, part.range.clone())),
+            zoom + offset,
+            first..first + (1u64 << (2 * offset as u32)),
+            &|rows| mask.count_range(rows),
         );
+        sub_cells = counted
+            .cells
+            .into_iter()
+            .map(|(cell, count)| SubCellCount { cell, count })
+            .collect();
+        stats.lap(|t| &mut t.underlay_ns);
+        stats.count(|t| &mut t.underlay_cells_evaluated, counted.visited);
     }
 
     Ok(Some(TileSweepOut {

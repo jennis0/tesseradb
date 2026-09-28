@@ -249,6 +249,7 @@ impl ArtifactRows {
                 parents: vec![Vec::new(); sets.len()],
                 declared: vec![Vec::new(); sets.len()],
                 access: Vec::new(),
+                attached_by: Default::default(),
             }),
             membership,
             index: Arc::new(index),

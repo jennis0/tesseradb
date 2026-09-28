@@ -3,20 +3,24 @@ import {property} from 'lit/decorators.js';
 import {NO_COUNT, NO_MASKED, type StatusProjection, type ViewProjection} from '@tesseradb/client';
 import {TesseraElement, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
-import {icon} from './icons.js';
-import {renderState, showsContent, stateOf, stateWord, type PanelState} from './states.js';
+import {renderState, showsContent, stateOf, type PanelState} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * The view's state and counts on one line: a dot and a word, then
- * `4,812 shown · 12,465 matched · 181,900 visible`, with `the highlight matched N` added while a
- * highlight is set. Skeleton bars fill the cells while loading or retrying. The stale state offers
- * Refresh, and the expired state offers Sign in again where `reauthorise` is set. `expanded`
- * renders the detail behind the numbers as a card; otherwise it is the strip's tooltip.
+ * The view's state and counts on one line: `● | 16,822,190 of 21,406,522 match | 5,390 shown`.
+ * While a highlight is set, a cell reads `N highlighted of M`, M being the matched count, and the
+ * match cell is left out unless a filter or selection narrows what matches. While the view is up to
+ * date the first cell is a dot alone, titled "Up to date"; otherwise it names the state in two or
+ * three words (Updating, Reconnecting, Data updated, View refused, Session expired) with the action
+ * the state offers: Refresh when the data changed, Retry when the view was refused, and Sign in on
+ * expiry where `reauthorise` is set. The counts grey out while they are not current. The strip
+ * sizes to its content and does not wrap. `compact` shortens the figures (`16.8M of 21.4M match`)
+ * and drops the shown count. `expanded` renders the figures again as a card below the strip.
  *
- * The strip is an `aria-live` region, so a refusal, an expiry or a stale view is announced. The
- * state is one of the eight panel states (see `PanelState`).
+ * The strip is an `aria-live` region, so a refusal, an expiry or a change of data is announced. The
+ * state is one of the eight panel states (see `PanelState`); what was refused and why stays in the
+ * store's `status.refusal`, and the refusal's code is on the refusal part's `data-code`.
  *
  * @summary The state and the counts of the view, on one line.
  * @tagname tessera-status
@@ -26,15 +30,18 @@ import './count.js';
  * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - Once each time the
  *   session expires.
  * @csspart strip - The one-line strip.
- * @csspart state - The state's dot and word, with `data-state` set to the panel state.
- * @csspart refusal - The refusal's code and detail, in the refused state.
- * @csspart refresh - The Refresh button, in the stale state.
- * @csspart reauthorise - The Sign in again button, in the expired state where `reauthorise` is set.
+ * @csspart state - The state's dot and words, with `data-state` set to the panel state.
+ * @csspart refusal - The words "View refused", with `data-code` set to the refusal's code.
+ * @csspart refresh - The Refresh button, when the data changed under the view.
+ * @csspart retry - The Retry button, when the view was refused.
+ * @csspart reauthorise - The Sign in button, on expiry where `reauthorise` is set.
  * @csspart count-shown - The `<tessera-count>` of marks shown.
  * @csspart count-matched - The `<tessera-count>` matched by the filters.
  * @csspart count-highlighted - The `<tessera-count>` the highlight matched, while a highlight is set.
- * @csspart count-visible - The `<tessera-count>` visible to the viewer.
- * @csspart card - The detail card, under `expanded`.
+ * @csspart count-of - The matched count the highlighted count is out of, while a highlight is set.
+ * @csspart count-visible - The `<tessera-count>` of items the viewer may see here, which the matched
+ *   count is out of.
+ * @csspart card - The card of figures, under `expanded`.
  */
 export class TesseraStatus extends TesseraElement {
   static override styles = [
@@ -43,91 +50,89 @@ export class TesseraStatus extends TesseraElement {
     css`
       :host {
         display: inline-block;
+        max-width: 100%;
+        vertical-align: top;
       }
       [part='strip'] {
         display: inline-flex;
         align-items: stretch;
+        max-width: 100%;
+        min-height: 32px;
+        overflow: hidden;
         background: var(--_tessera-surface);
         border: 1px solid var(--_tessera-line);
         border-radius: var(--_tessera-radius);
         box-shadow: var(--_tessera-shadow);
-        height: 36px;
         font-size: 12px;
+        color: var(--_tessera-ink-2);
+        font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }
-      [part='strip'] > * {
+      [part='strip'][data-state='detached'] {
+        display: none;
+      }
+      .cell {
         display: flex;
         align-items: center;
-        gap: 6px;
-        padding: 0 12px;
+        gap: 4px;
+        padding: 7px 12px;
+        flex: none;
       }
-      [part='strip'] > * + * {
+      .cell tessera-count {
+        font-size: inherit;
+      }
+      .cell + .cell {
         border-left: 1px solid var(--_tessera-line-2);
       }
+      .cell.dim {
+        opacity: 0.4;
+      }
+      .cell.state {
+        padding: 0 5px 0 12px;
+      }
+      .cell.state.bare {
+        padding: 0 12px;
+      }
       [part='state'] {
-        font-weight: 600;
-        color: var(--_tessera-ink);
-        font-size: 12px;
-      }
-      [part='state'][data-state='loading'],
-      [part='state'][data-state='retrying'] {
-        color: var(--_tessera-ink-2);
-      }
-      [part='state'][data-state='loading'] .dot,
-      [part='state'][data-state='retrying'] .dot {
-        background: var(--_tessera-ink-3);
-      }
-      [part='state'][data-state='retrying'] .dot {
-        background: var(--_tessera-warn);
-      }
-      [part='state'][data-state='refused'],
-      [part='state'][data-state='expired'] {
-        background: var(--_tessera-refuse-soft);
-        color: var(--_tessera-refuse);
-      }
-      [part='state'][data-state='stale'] {
-        background: var(--_tessera-warn-soft);
-        color: var(--_tessera-warn);
+        gap: 7px;
+        color: inherit;
       }
       [part='state'] .skel {
         display: none;
       }
       [part='state'] .btn {
-        height: 26px;
-        padding: 0 10px;
-        margin-left: 4px;
-        font-size: 12px;
-        font-weight: 600;
-        border-radius: 3px;
+        margin-left: 1px;
       }
-      [part='state'][data-state='expired'] .btn,
-      [part='state'][data-state='stale'] .btn {
-        margin: 0 -6px 0 6px;
-      }
-      [part='refusal'] {
-        font-weight: 400;
-        color: var(--_tessera-ink-2);
-        padding-left: 12px;
-        margin-left: 12px;
-        border-left: 1px solid var(--_tessera-line-2);
-        height: 100%;
-        display: flex;
-        align-items: center;
-      }
-      .cell {
-        gap: 5px;
-      }
-      .cell .l {
-        color: var(--_tessera-ink-2);
-      }
-      .cell.dim {
-        opacity: 0.45;
+      [part='state']:not(:has(.btn)) {
+        padding-right: 7px;
       }
       .cell tessera-count::part(count) {
-        font-size: 12.5px;
+        font-weight: 600;
+      }
+      .cell tessera-count[part~='count-visible']::part(count) {
+        color: inherit;
+        font-weight: 400;
+      }
+      .cell tessera-count[part~='count-shown']::part(count) {
+        color: inherit;
+        font-weight: 400;
+      }
+      .cell tessera-count[part~='count-of']::part(count) {
+        color: inherit;
+        font-weight: 400;
+      }
+      .cell tessera-count.lit::part(count) {
+        color: var(--_tessera-highlight);
       }
       .cell tessera-count::part(label) {
-        font-weight: 400;
+        margin-left: 0.3em;
+      }
+      :host([compact]) .cell + .cell {
+        border-left: 0;
+        padding-left: 0;
+      }
+      :host([compact]) .cell.state {
+        padding-right: 7px;
       }
       [part='card'] {
         margin-top: 8px;
@@ -141,9 +146,11 @@ export class TesseraStatus extends TesseraElement {
     `
   ];
 
-  /** Renders the detail behind the numbers as a card below the strip, in place of the tooltip. */
+  /** Renders the figures again as a card below the strip. */
   @property({type: Boolean}) accessor expanded = false;
-  /** Called by the Sign in again button that the expired state shows; without it, no button. */
+  /** Shortens the figures to one decimal (`16.8M`) and drops the shown count, where room is short. */
+  @property({type: Boolean, reflect: true}) accessor compact = false;
+  /** Called by the Sign in button that the expired state shows; without it, no button. */
   @property({attribute: false}) accessor reauthorise: (() => void) | null = null;
 
   private lastState: PanelState | null = null;
@@ -172,62 +179,57 @@ export class TesseraStatus extends TesseraElement {
     }
   }
 
-  private hover(): string {
-    const v = this.view;
-    const r = this.resolvedStore?.get('replica');
-    if (!v || !r) return '';
-    const parts = [`depth ${v.depth}`];
-    if (v.provisional > 0) parts.push(`${v.provisional.toLocaleString('en-GB')} provisional`);
-    const a = this.resolvedStore?.get('artifacts');
-    if (a && a.layers.length > 0 && a.status === 'shown') {
-      parts.push(a.coverage.stale === 0 ? 'colours exact' : `refreshing ${a.coverage.stale.toLocaleString('en-GB')} tiles`);
-    }
-    parts.push(`replica ${(r.bytes / 1e6).toFixed(1)} MB · ${r.bands.toLocaleString('en-GB')} bands`);
-    return parts.join(' · ');
-  }
-
   override render(): TemplateResult | typeof nothing {
     const status = this.status;
     const state = stateOf(status);
     const stale = status?.stale ?? false;
     const v = this.view;
-    // Stale shows dimmed skeleton cells and no numbers, since they predate the corpus change.
-    const content = state === 'shown' && v;
-    const skeleton = (state === 'loading' && status?.sessionWarm !== false) || state === 'retrying' || state === 'stale';
-    const cell = (label: string, inner: unknown, dim = false) => html`<div class=${`cell${dim ? ' dim' : ''}`}>${inner}<span class="l">${label}</span></div>`;
-    const cells = content
-      ? html`<div class="cell"><tessera-count part="count-shown" .count=${v.served} .stale=${stale} figure="shown" label="shown"></tessera-count></div>
-          <div class="cell"><tessera-count part="count-matched" .masked=${v.matched} .stale=${stale} label="matched"></tessera-count></div>
-          ${v.highlighting
-            ? html`<div class="cell"><tessera-count part="count-highlighted" .masked=${v.highlighted} .stale=${stale} label="the highlight matched"></tessera-count></div>`
-            : nothing}
-          <div class="cell"><tessera-count part="count-visible" .masked=${v.visible} .stale=${stale} label="visible"></tessera-count></div>`
-      : skeleton
-        ? html`${cell('shown', html`<span class="skel" aria-hidden="true"></span>`, stale)}${cell('matched', html`<span class="skel" aria-hidden="true"></span>`, stale)}${cell('visible', html`<span class="skel" aria-hidden="true"></span>`, stale)}`
-        : nothing;
-    const empty = state === 'empty' ? html`<div class="cell"><span class="l">nothing in this region</span></div>` : nothing;
-    const strip =
-      state === 'stale'
-        ? html`<span part="state" data-state="stale">${icon('clock', 14)}${stateWord(state, status)}</span>${cells}
-            <div><button part="refresh" class="btn primary" type="button" @click=${() => this.resolvedStore?.refresh()}>${icon('refresh', 13)}Refresh</button></div>`
-        : state === 'shown' || state === 'empty'
-          ? html`<span part="state" data-state=${state}><span class="dot"></span>${stateWord(state, status)}</span>${cells}${empty}`
-          : html`${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh(), onReauthorise: this.reauthorise})}${cells}`;
-    return html`<div part="strip" role="status" aria-live="polite" title=${this.hover()}>${strip}</div>
+    const refresh = () => this.resolvedStore?.refresh();
+    const first =
+      state === 'shown'
+        ? html`<div class="cell state bare"><span part="state" data-state="shown"><span class="dot" role="img" aria-label="Up to date" title="Up to date"></span></span></div>`
+        : html`<div class="cell state">${renderState(state, status, {onRefresh: refresh, onRetry: refresh, onReauthorise: this.reauthorise})}</div>`;
+    return html`<div part="strip" role="status" aria-live="polite" data-state=${state}>${first}${this.counts(state, v, stale)}</div>
       ${this.expanded && showsContent(state) && v ? this.card(v, stale) : nothing}`;
   }
 
+  /**
+   * The count cells: current in the shown state, greyed out while a new answer is awaited or the
+   * last one was refused, and skeletons where there is no answer yet. Nothing where there is no
+   * view to count, or where the view is empty.
+   */
+  private counts(state: PanelState, v: ViewProjection | null, stale: boolean): TemplateResult | typeof nothing {
+    if (state === 'detached' || state === 'empty' || !v) return nothing;
+    if (state === 'loading' && this.status?.sessionWarm === false) return nothing;
+    const dim = state !== 'shown';
+    const answered = v.matched.exact || v.matched.value > 0 || v.visible.value > 0;
+    const cls = `cell${dim ? ' dim' : ''}`;
+    if (!answered || stale) {
+      const skel = html`<span class="skel" aria-hidden="true"></span>`;
+      return html`<div class=${cls}>${skel}<span>match</span></div>${this.compact ? nothing : html`<div class=${cls}>${skel}<span>shown</span></div>`}`;
+    }
+    // Under a highlight with nothing narrowing, the match cell would read "M of M match" beside
+    // the highlight's, so the highlight's cell stands alone and names M.
+    const narrowed = this.resolvedStore?.requestFilters() != null;
+    const match = html`<div class=${cls}>
+      <tessera-count part="count-matched" .masked=${v.matched} .compact=${this.compact}></tessera-count><span>of</span><tessera-count
+        part="count-visible" .masked=${v.visible} .compact=${this.compact}></tessera-count><span>match</span>
+    </div>`;
+    return html`${v.highlighting && !narrowed ? nothing : match}
+      ${v.highlighting
+        ? html`<div class=${cls}><tessera-count part="count-highlighted" class="lit" .masked=${v.highlighted} .compact=${this.compact}></tessera-count><span>highlighted of</span><tessera-count
+              part="count-of" .masked=${v.matched} .compact=${this.compact}></tessera-count></div>`
+        : nothing}
+      ${this.compact || !v.served.exact ? nothing : html`<div class=${cls}><tessera-count part="count-shown" .count=${v.served} figure="shown" label="shown"></tessera-count></div>`}`;
+  }
+
   private card(v: ViewProjection, stale: boolean) {
-    const r = this.resolvedStore?.get('replica');
     const row = (label: string, value: unknown) => html`<div class="k">${label}</div><div class="v">${value}</div>`;
     return html`<div part="card"><div class="kv">
       ${row('Shown', html`<tessera-count .count=${v.served ?? NO_COUNT} .stale=${stale}></tessera-count>`)}
-      ${row('Matched by filters', html`<tessera-count .masked=${v.matched ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
-      ${v.highlighting ? row('The highlight matched', html`<tessera-count .masked=${v.highlighted ?? NO_MASKED} .stale=${stale}></tessera-count>`) : nothing}
-      ${row('Visible to you here', html`<tessera-count .masked=${v.visible ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
-      ${row('Region', `depth ${v.depth}`)}
-      ${row('Provisional marks', v.provisional.toLocaleString('en-GB'))}
-      ${r ? row('Replica', `${(r.bytes / 1e6).toFixed(1)} MB · ${r.points.toLocaleString('en-GB')} points · ${r.bands.toLocaleString('en-GB')} bands`) : nothing}
+      ${row('Match the filters', html`<tessera-count .masked=${v.matched ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
+      ${v.highlighting ? row('Highlighted', html`<tessera-count .masked=${v.highlighted ?? NO_MASKED} .stale=${stale}></tessera-count>`) : nothing}
+      ${row('In this view', html`<tessera-count .masked=${v.visible ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
     </div></div>`;
   }
 }

@@ -1,6 +1,6 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
+import {artifactName, browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
 import {refusalOf} from '@tesseradb/client/internal';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -35,7 +35,9 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * The panel sends the map's filters and, while any is set, shows each row's matched count beside
  * its masked count. A row's presence and its masked count do not change with the filters. A row's
  * buttons put a `member_of` clause on its artifact as a highlight or a filter, and Fit fits the map
- * to it on a layer that draws. Pressing the name highlights it.
+ * to it on a layer that draws. Pressing the name highlights it. A row holding a clause is filled,
+ * grey for a filter and in the highlight colour for a highlight, and carries a × per clause that
+ * takes it off.
  *
  * The panel asks for nothing while it is hidden. The element keeps which rows are expanded and
  * paged.
@@ -49,14 +51,15 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  *   button was pressed.
  * @csspart title - The heading.
  * @csspart state - The state line, with `data-state`.
- * @csspart refusal - A refusal's code and detail.
+ * @csspart refusal - The words "Layer unavailable", with `data-code` set to the refusal's code.
  * @csspart layer - The layer select, shown where there are several layers.
  * @csspart search - The search box.
  * @csspart tree - The tree of rows.
- * @csspart row - One row, with `data-id`, and `data-clause` (`filter` or `highlight`) while a
- *   clause is on its artifact.
+ * @csspart row - One row, with `data-id`, and `data-clause` while a clause is on its artifact:
+ *   `filter`, `highlight`, or both separated by a space.
  * @csspart expander - A row's expand button.
- * @csspart name - A row's name, which highlights the artifact when pressed.
+ * @csspart name - A row's name, with `data-unnamed` where it has none, which highlights the artifact
+ *   when pressed.
  * @csspart counts - A row's counts.
  * @csspart count-matched - A row's matched `<tessera-count>`, while a filter is set.
  * @csspart count-masked - A row's masked `<tessera-count>`.
@@ -64,7 +67,10 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * @csspart highlight - A row's highlight button, with `aria-pressed`.
  * @csspart filter - A row's filter button, with `aria-pressed`.
  * @csspart fit - A row's Fit button, on a layer that draws.
- * @csspart also - The other parents a row is served under, or a refusal of its children.
+ * @csspart dismiss - A × on a row holding a clause, one per clause, with `data-verb`; it takes that
+ *   clause off.
+ * @csspart also - The other parents a row is served under, or "Children unavailable" with
+ *   `data-code` where its children were refused.
  * @csspart children - An expanded row's children.
  * @csspart more - The More button that fetches the next page.
  */
@@ -91,23 +97,24 @@ export class TesseraHierarchy extends TesseraElement {
         overflow-y: auto;
       }
       [part='row'] {
+        position: relative;
         display: flex;
         align-items: center;
         gap: 6px;
         min-height: 28px;
         padding: 0 4px 0 calc(2px + var(--depth, 0) * 14px);
-        border-radius: 3px;
+        border-radius: var(--_tessera-radius-control);
       }
       [part='row']:hover {
         background: var(--_tessera-surface-2);
       }
-      [part='row'][data-clause='highlight'] {
+      [part='row'][data-clause~='filter'] {
+        background: var(--_tessera-surface-2);
+        font-weight: 500;
+      }
+      [part='row'][data-clause~='highlight'] {
         background: var(--_tessera-highlight-soft);
         color: var(--_tessera-highlight);
-      }
-      [part='row'][data-clause='filter'] {
-        background: var(--_tessera-accent-soft);
-        color: var(--_tessera-accent);
       }
       [part='expander'] {
         display: inline-flex;
@@ -124,9 +131,6 @@ export class TesseraHierarchy extends TesseraElement {
         white-space: nowrap;
         text-align: left;
       }
-      [part='name'][data-unnamed] {
-        color: var(--_tessera-ink-2);
-      }
       [part='counts'] {
         display: inline-flex;
         gap: 6px;
@@ -134,23 +138,48 @@ export class TesseraHierarchy extends TesseraElement {
         font-size: 12px;
         color: var(--_tessera-ink-2);
       }
+      /* Over the counts, so hidden buttons take no width from the name; still reachable by Tab. */
       [part='actions'] {
+        position: absolute;
+        right: 2px;
+        top: 50%;
+        transform: translateY(-50%);
         display: inline-flex;
         gap: 2px;
+        padding-left: 6px;
+        background: var(--_tessera-surface-2);
+        border-radius: var(--_tessera-radius-control);
         opacity: 0;
+        pointer-events: none;
       }
       [part='row']:hover [part='actions'],
       [part='row']:focus-within [part='actions'] {
         opacity: 1;
+        pointer-events: auto;
       }
       [part='actions'] button {
         display: inline-flex;
-        padding: 2px;
-        color: var(--_tessera-ink-3);
-        border-radius: 2px;
+        padding: 3px;
+        color: var(--_tessera-ink-2);
+        border-radius: 4px;
       }
       [part='actions'] button:hover {
         color: var(--_tessera-ink);
+        background: var(--_tessera-surface-3);
+      }
+      [part='dismiss'] {
+        display: inline-grid;
+        place-items: center;
+        width: 20px;
+        height: 20px;
+        flex: none;
+        border-radius: 4px;
+        color: var(--_tessera-ink-2);
+      }
+      [part='dismiss'][data-verb='highlight'] {
+        color: var(--_tessera-highlight);
+      }
+      [part='dismiss']:hover {
         background: var(--_tessera-surface-3);
       }
       [part='also'] {
@@ -159,13 +188,13 @@ export class TesseraHierarchy extends TesseraElement {
         color: var(--_tessera-ink-3);
       }
       [part='more'] {
-        padding-left: calc(18px + var(--depth, 0) * 14px);
-        font-size: 12px;
-        color: var(--_tessera-accent);
+        margin: 4px 0 4px calc(18px + var(--depth, 0) * 14px);
       }
-      [part='lineage'] {
-        font-size: 11px;
-        color: var(--_tessera-ink-3);
+      [part='refusal'] {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
       }
     `
   ];
@@ -194,6 +223,23 @@ export class TesseraHierarchy extends TesseraElement {
    */
   private names = new Map<bigint, string>();
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Moved by {@link resetServerData}, so a page asked for before it is dropped. */
+  private epoch = 0;
+
+  protected override resetServerData(): void {
+    this.epoch += 1;
+    this.roots = null;
+    this.rootsNext = null;
+    this.searching = null;
+    this.loading = false;
+    this.refusal = null;
+    this.open = new Set();
+    this.names.clear();
+    this.fetchedUnder = '';
+    if (this.searchTimer) clearTimeout(this.searchTimer);
+    this.searchTimer = null;
+    this.query = '';
+  }
 
   private layers(): Layer[] {
     return browsableLayers(this.resolvedStore?.get('meta')?.layers ?? []);
@@ -285,23 +331,27 @@ export class TesseraHierarchy extends TesseraElement {
   private async loadRoots(cursor?: string): Promise<void> {
     const request = this.page(cursor === undefined ? {} : {cursor});
     if (!request) return;
+    const epoch = this.epoch;
     this.loading = true;
     this.refusal = null;
     try {
       const page = await request;
+      if (epoch !== this.epoch) return;
       const nodes = page.artifacts.map((row) => this.node(row, ''));
       this.roots = cursor === undefined ? nodes : [...(this.roots ?? []), ...nodes];
       this.rootsNext = page.next;
     } catch (error) {
+      if (epoch !== this.epoch) return;
       this.refusal = refusalOf(error);
       this.roots = this.roots ?? [];
     } finally {
-      this.loading = false;
+      if (epoch === this.epoch) this.loading = false;
     }
   }
 
   private node(row: BrowseRow, parentPath: string): Node {
-    if (row.name !== null) this.names.set(row.tesseraId, row.name);
+    const name = artifactName(row);
+    if (name !== null) this.names.set(row.tesseraId, name);
     return {row, path: `${parentPath}/${row.tesseraId}`, children: null, next: null, loading: false, refusal: null};
   }
 
@@ -317,11 +367,13 @@ export class TesseraHierarchy extends TesseraElement {
   private async expand(node: Node, more = false): Promise<void> {
     const request = this.page({parent: node.row.tesseraId, ...(more && node.next ? {cursor: node.next} : {})});
     if (!request) return;
+    const epoch = this.epoch;
     node.loading = true;
     node.refusal = null;
     this.revision++;
     try {
       const page = await request;
+      if (epoch !== this.epoch) return;
       const nodes = page.artifacts.map((row) => this.node(row, node.path));
       node.children = more ? [...(node.children ?? []), ...nodes] : nodes;
       node.next = page.next;
@@ -357,22 +409,24 @@ export class TesseraHierarchy extends TesseraElement {
       }
       const request = this.page({q});
       if (!request) return;
+      const epoch = this.epoch;
       void request
         .then((page) => {
-          this.searching = page.artifacts.map((row) => this.node(row, 'q'));
+          if (epoch === this.epoch) this.searching = page.artifacts.map((row) => this.node(row, 'q'));
         })
         .catch((error: unknown) => {
+          if (epoch !== this.epoch) return;
           this.refusal = refusalOf(error);
           this.searching = [];
         });
     }, 250);
   }
 
-  /** The clause on this row's artifact, if any, which colours the row and sets the buttons. */
-  private clauseOn(id: bigint): ClauseVerb | null {
+  /** The positions of the clauses on this row's artifact, which colour the row and set the buttons. */
+  private clausesOn(id: bigint): ClauseVerb[] {
     const layer = this.current()?.name;
     const held = this.resolvedStore?.get('filters').members ?? [];
-    return held.find((c) => c.layer === layer && c.artifact === id && !c.outside)?.verb ?? null;
+    return held.filter((c) => c.layer === layer && c.artifact === id && !c.outside).map((c) => c.verb);
   }
 
   private apply(id: bigint, verb: ClauseVerb): void {
@@ -380,11 +434,11 @@ export class TesseraHierarchy extends TesseraElement {
     const layer = this.current();
     if (!s || !layer) return;
     const held = s.get('filters').members;
-    const on = this.clauseOn(id) === verb;
+    const on = this.clausesOn(id).includes(verb);
     const label = this.names.get(id);
     s.setMembers(
       on
-        ? withoutMember(held, layer.name, id)
+        ? withoutMember(held, layer.name, id, verb)
         : withMember(held, {layer: layer.name, artifact: id, outside: false, verb, ...(label === undefined ? {} : {label})})
     );
     emit(this, 'tessera-clausechange', {id: idString(id), layer: layer.name, outside: false, verb, on: !on});
@@ -409,71 +463,75 @@ export class TesseraHierarchy extends TesseraElement {
             this.searching = null;
             this.open = new Set();
           }}>
-            ${offered.map((l) => html`<option value=${l.name} ?selected=${l.name === layer.name}>${l.title || l.name}${isFilterLayer(l) ? ' (filter layer)' : ''}</option>`)}
+            ${offered.map((l) => html`<option value=${l.name} ?selected=${l.name === layer.name}>${l.title || l.name}</option>`)}
           </select>`
         : nothing}
       <div part="search" class="input">${icon('search', 14)}<input
         type="search"
-        aria-label=${`Search ${layer.name}`}
+        aria-label=${`Search ${layer.title || layer.name}`}
         .value=${this.query}
         placeholder="Search names"
         autocomplete="off"
         @input=${(e: Event) => this.search((e.target as HTMLInputElement).value)}
       /></div>
-      ${this.refusal ? html`<span part="refusal">${this.refusal.code}: ${this.refusal.detail}</span>` : nothing}
-      ${rows === null
+      ${this.refusal ? html`<span part="refusal" data-code=${this.refusal.code}><span class="dot refuse"></span>Layer unavailable</span>` : nothing}
+      ${rows === null || (this.refusal && rows.length === 0)
         ? nothing
         : rows.length === 0
           ? html`<span part="state" data-state="empty">${this.searching ? 'No match' : 'Nothing here'}</span>`
           : html`<ul part="tree">${rows.map((n) => this.renderNode(n, 0, layer, filtered))}</ul>`}
       ${this.searching === null && this.rootsNext
-        ? html`<button part="more" type="button" @click=${() => void this.loadRoots(this.rootsNext ?? undefined)}>More…</button>`
+        ? html`<button part="more" class="more-link" type="button" @click=${() => void this.loadRoots(this.rootsNext ?? undefined)}>More</button>`
         : nothing}
     </div>`;
   }
 
   private renderNode(node: Node, depth: number, layer: Layer, filtered: boolean): unknown {
     const open = this.open.has(node.path);
-    const clause = this.clauseOn(node.row.tesseraId);
-    const name = node.row.name;
+    const clauses = this.clausesOn(node.row.tesseraId);
+    const name = artifactName(node.row);
     // A `dag` node is drawn under each served parent; the row names the others.
     const also = node.row.parentIds.filter((p) => String(p) !== node.path.split('/').at(-2));
     const drawn = !isFilterLayer(layer);
     return html`<li>
-      <div part="row" style=${`--depth:${depth}`} data-id=${idString(node.row.tesseraId)} data-clause=${clause ?? nothing}>
+      <div part="row" style=${`--depth:${depth}`} data-id=${idString(node.row.tesseraId)} data-clause=${clauses.length > 0 ? clauses.sort().join(' ') : nothing}>
         <button part="expander" type="button" data-leaf=${layer.hierarchy.kind === 'flat' ? '' : nothing}
           aria-expanded=${open ? 'true' : 'false'}
           aria-label=${open ? `Collapse ${name ?? 'row'}` : `Expand ${name ?? 'row'}`}
           @click=${() => this.toggle(node)}>${icon(open ? 'chev' : 'chevr', 12)}</button>
         <button part="name" type="button" data-unnamed=${name === null ? '' : nothing}
-          title="Highlight this: the map stays and its members are lit"
+          title="Highlight"
           @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${name ?? UNNAMED}</button>
         <span part="counts">
           ${filtered && node.row.matchedCount !== null
             ? html`<tessera-count part="count-matched" .masked=${masked(node.row.matchedCount)}></tessera-count>/`
             : nothing}<tessera-count part="count-masked" .masked=${masked(node.row.maskedCount)}></tessera-count>
         </span>
+        ${clauses.map(
+          (verb) => html`<button part="dismiss" type="button" data-verb=${verb} aria-label=${verb === 'highlight' ? `Stop highlighting ${name ?? UNNAMED}` : `Stop filtering to ${name ?? UNNAMED}`}
+            title=${verb === 'highlight' ? 'Stop highlighting' : 'Stop filtering'} @click=${() => this.apply(node.row.tesseraId, verb)}>${icon('close', 12)}</button>`
+        )}
         <span part="actions">
-          <button part="highlight" type="button" data-verb="highlight" aria-pressed=${clause === 'highlight' ? 'true' : 'false'}
+          <button part="highlight" type="button" data-verb="highlight" aria-pressed=${clauses.includes('highlight') ? 'true' : 'false'}
             title="Highlight this" @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${icon('highlight', 13)}</button>
-          <button part="filter" type="button" data-verb="filter" aria-pressed=${clause === 'filter' ? 'true' : 'false'}
+          <button part="filter" type="button" data-verb="filter" aria-pressed=${clauses.includes('filter') ? 'true' : 'false'}
             title="Filter to this" @click=${() => this.apply(node.row.tesseraId, 'filter')}>${icon('filter', 13)}</button>
           ${
             // A filter layer draws nothing, so there is nothing to fit to.
             drawn
-              ? html`<button part="fit" type="button" title="Fit the map to this"
+              ? html`<button part="fit" type="button" title="Fit the map to it"
                   @click=${() => emit(this, 'tessera-artifactfit', {id: idString(node.row.tesseraId)})}>${icon('fit', 13)}</button>`
               : nothing
           }
         </span>
       </div>
       ${also.length > 0 ? html`<div part="also" style=${`--depth:${depth}`}>also under ${also.map((p) => this.nameOf(p)).join(', ')}</div>` : nothing}
-      ${node.refusal ? html`<div part="also" style=${`--depth:${depth}`}>${node.refusal.code}: ${node.refusal.detail}</div>` : nothing}
+      ${node.refusal ? html`<div part="also" style=${`--depth:${depth}`} data-code=${node.refusal.code}>Children unavailable</div>` : nothing}
       ${open && node.children
         ? html`<ul part="children" class="list" style="list-style:none;margin:0;padding:0">
             ${node.children.map((c) => this.renderNode(c, depth + 1, layer, filtered))}
             ${node.next
-              ? html`<li><button part="more" style=${`--depth:${depth + 1}`} type="button" @click=${() => void this.expand(node, true)}>More…</button></li>`
+              ? html`<li><button part="more" class="more-link" style=${`--depth:${depth + 1}`} type="button" @click=${() => void this.expand(node, true)}>More</button></li>`
               : nothing}
           </ul>`
         : nothing}

@@ -3,10 +3,10 @@
 //! XChaCha20-Poly1305 under a key derived from the bundle's identity key, with a random
 //! 24-byte nonce drawn for each cursor. The route, the format, the view, the view's incarnation,
 //! the session's authorisation-data hash and, on the artifacts route, the layer, its entity and
-//! the level named are the associated data, so a cursor presented under any other binding does not
-//! open, and every such failure is the one refusal
-//! [`EngineError::CursorRefused`]. A cursor issued by another bundle is sealed under another key
-//! and refused the same way. The order is sealed inside, and a request that names no order takes
+//! the level named, and on the aggregate route a digest of the request, are the associated data,
+//! so a cursor presented under any other binding does not open, and every such failure is the one
+//! refusal [`EngineError::CursorRefused`]. A cursor issued by another bundle is sealed under
+//! another key and refused the same way. The order is sealed inside, and a request that names no order takes
 //! the cursor's. A client can read nothing from a cursor and can build none, so no position in one
 //! is used before it has opened.
 
@@ -22,32 +22,35 @@ use crate::error::{EngineError, Result};
 const KEY_DOMAIN: &[u8] = b"tessera-records-cursor-key-v1";
 const AAD_DOMAIN: &[u8] = b"tessera-records-cursor-v1";
 /// The sealed payload's layout. A cursor of another format does not open.
-const FORMAT: u8 = 4;
+const FORMAT: u8 = 5;
 const NONCE_LEN: usize = 24;
 
 /// The route a cursor was issued on, bound into its associated data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Route {
+pub(crate) enum Route {
     Items = 1,
     Artifacts = 2,
+    Aggregate = 3,
 }
 
 /// What a cursor is bound to besides its payload.
-pub(super) struct Binding<'a> {
-    pub(super) route: Route,
-    pub(super) view: &'a str,
-    pub(super) incarnation: u64,
-    pub(super) auth_data_hash: [u8; 32],
-    /// The layer an artifacts read is of; `None` on the items route.
-    pub(super) layer: Option<LayerBinding<'a>>,
+pub(crate) struct Binding<'a> {
+    pub(crate) route: Route,
+    pub(crate) view: &'a str,
+    pub(crate) incarnation: u64,
+    pub(crate) auth_data_hash: [u8; 32],
+    /// The layer an artifacts read is of; `None` on the other routes.
+    pub(crate) layer: Option<LayerBinding<'a>>,
+    /// A digest of the request an aggregate cursor continues; `None` on the other routes.
+    pub(crate) request: Option<[u8; 32]>,
 }
 
 /// The layer an artifacts cursor is bound to: its name, its own entity, which a drop and a later
 /// registration never share, and the level the request named, if any.
-pub(super) struct LayerBinding<'a> {
-    pub(super) name: &'a str,
-    pub(super) entity: u64,
-    pub(super) level: Option<u32>,
+pub(crate) struct LayerBinding<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) entity: u64,
+    pub(crate) level: Option<u32>,
 }
 
 impl Binding<'_> {
@@ -76,6 +79,13 @@ impl Binding<'_> {
                 }
             }
         }
+        match &self.request {
+            None => aad.push(0),
+            Some(digest) => {
+                aad.push(1);
+                aad.extend_from_slice(digest);
+            }
+        }
         aad
     }
 }
@@ -101,7 +111,7 @@ impl CursorKey {
     }
 
     /// `payload` sealed under `binding`, as base64url without padding.
-    pub(super) fn seal(&self, binding: &Binding<'_>, payload: &[u8]) -> String {
+    pub(crate) fn seal(&self, binding: &Binding<'_>, payload: &[u8]) -> String {
         let mut nonce = [0u8; NONCE_LEN];
         rand::thread_rng().fill_bytes(&mut nonce);
         let aad = binding.associated_data();
@@ -123,7 +133,7 @@ impl CursorKey {
 
     /// The payload `token` seals under `binding`, or [`EngineError::CursorRefused`] for every
     /// reason it does not open.
-    pub(super) fn open(&self, binding: &Binding<'_>, token: &str) -> Result<Vec<u8>> {
+    pub(crate) fn open(&self, binding: &Binding<'_>, token: &str) -> Result<Vec<u8>> {
         let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(token)
             .map_err(|_| EngineError::CursorRefused)?;
@@ -261,6 +271,7 @@ mod tests {
             incarnation,
             auth_data_hash: [hash; 32],
             layer: None,
+            request: None,
         }
     }
 
@@ -306,6 +317,7 @@ mod tests {
                 entity,
                 level,
             }),
+            request: None,
         };
         let cursor = ArtifactsCursor {
             scan: Some((1, 40)),

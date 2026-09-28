@@ -1,8 +1,10 @@
 import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import {createStore, type Store} from '../src/store.js';
-import {withVerb, type FilterDraft} from '../src/filters.js';
-import type {Artifact, Layer, MembershipColumn, Meta, ViewportResponse} from '../src/types.js';
+import type {FilterDraft} from '../src/filters.js';
+import {withMember} from '../src/members.js';
+import {artifactName} from '../src/names.js';
+import type {Artifact, Layer, MembershipColumn, Meta, ViewportPart, ViewportResponse} from '../src/types.js';
 import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
@@ -19,7 +21,7 @@ const META = meta({
 });
 
 /** What the fake sees of a request. */
-type FakeRequest = {zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[] | 'all'};
+type FakeRequest = {view?: string; zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[] | 'all'};
 
 /**
  * A response that answers every tile the request spans, 1,000 items each with the served points on
@@ -178,7 +180,7 @@ describe('the drops', () => {
 
     // A filter changes what is served but not the identity key, so the store drops its bands itself
     // and asks again.
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('filters').expr).toEqual({archive: {in: ['cs']}});
@@ -200,7 +202,7 @@ describe('the drops', () => {
     await clock.advance(600);
     scheduler.flush();
 
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'highlight'}});
+    store.setFilters({filter: {}, highlight: {archive: {family: 'category', keys: ['cs']}}});
     await clock.advance(600);
     scheduler.flush();
     const body = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
@@ -211,7 +213,7 @@ describe('the drops', () => {
     expect(store.get('filters').expr).toBeNull();
   });
 
-  it('moves a clause between the two positions without it being re-entered', async () => {
+  it('sends a filter and a highlight on one column as both expressions', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
@@ -219,20 +221,30 @@ describe('the drops', () => {
     await clock.advance(600);
     scheduler.flush();
 
-    const filtered: FilterDraft = {archive: {family: 'category', keys: ['cs'], verb: 'filter'}};
-    store.setFilters(filtered);
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, highlight: {archive: {family: 'category', keys: ['cs.CV']}}});
     await clock.advance(600);
     scheduler.flush();
-    expect((viewport.mock.calls.at(-1)![1] as {filters?: unknown}).filters).toEqual({archive: {in: ['cs']}});
+    const body = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
+    expect(body.filters).toEqual({archive: {in: ['cs.LG', 'cs.CV']}});
+    expect(body.highlight).toEqual({archive: {in: ['cs.CV']}});
+    expect(store.get('view').highlighting).toBe(true);
+  });
 
-    // The predicate is unchanged; only the verb moves.
-    store.setFilters(withVerb(filtered, 'archive', 'highlight'));
+  it('sends a member_of filter and highlight on one artifact as both expressions', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await clock.advance(600);
     scheduler.flush();
-    const moved = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
-    expect(moved.filters ?? null).toBeNull();
-    expect(moved.highlight).toEqual({archive: {in: ['cs']}});
-    expect(store.get('filters').draft['archive']).toEqual({family: 'category', keys: ['cs'], verb: 'highlight'});
+
+    const filtered = withMember([], {layer: 'l', artifact: 7n, outside: false, verb: 'filter'});
+    store.setMembers(withMember(filtered, {layer: 'l', artifact: 7n, outside: false, verb: 'highlight'}));
+    await clock.advance(600);
+    scheduler.flush();
+    const body = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
+    expect(body.filters).toEqual({member_of: {layer: 'l', artifact: '7'}});
+    expect(body.highlight).toEqual({member_of: {layer: 'l', artifact: '7'}});
   });
 
   it('sends a member_of clause in whichever position it carries, the artifact as a decimal string', async () => {
@@ -272,7 +284,7 @@ describe('the drops', () => {
     expect(store.get('view').highlighted.value).toBe(store.get('view').matched.value);
     expect(store.get('view').highlighting).toBe(false);
 
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'highlight'}});
+    store.setFilters({filter: {}, highlight: {archive: {family: 'category', keys: ['cs']}}});
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('view').highlighting).toBe(true);
@@ -386,7 +398,7 @@ describe('suggest in the store', () => {
 
     store.suggest('archive', '');
     await clock.advance(200);
-    expect(suggest).toHaveBeenCalledWith('tok', 'archive', '', {view: 's0'});
+    expect(suggest).toHaveBeenCalledWith('tok', 'archive', '', {view: 's0', counts: true});
     expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
 
     store.clear();
@@ -608,7 +620,7 @@ describe('select: the selection is the region leaf on every request', () => {
     scheduler.flush();
     expect(store.get('region')?.status).toBe('shown');
     const asked = viewport.mock.calls.length;
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
     expect(store.get('region')?.status).toBe('loading');
     await clock.advance(600);
     scheduler.flush();
@@ -838,7 +850,7 @@ describe('the subscriber fan-out', () => {
     });
     store.subscribe('filters', () => seen.push('named-after'));
     store.subscribe(() => seen.push('all'));
-    store.setFilters({});
+    store.setFilters({filter: {}, highlight: {}});
     expect(seen).toEqual(['named-after', 'all']);
     expect(traced).toContain('subscriber-fault');
     expect(quiet).toHaveBeenCalledTimes(1);
@@ -868,7 +880,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
       content: target === null ? [] : ['a name'],
       target
     });
-  const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)]};
+  const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)], subtopics: [row('subtopics', 41n)]};
 
   /**
    * Answers as the server does: the artifacts of every layer named, and on a point request a
@@ -887,10 +899,10 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     return {...r, result: {...r.result, membership, artifacts: named.flatMap((n) => ROWS[n] ?? []), artifactsIdentity: null}};
   }
 
-  async function open(traces: {kind: string; fields: Record<string, number | string>}[] = []) {
+  async function open(traces: {kind: string; fields: Record<string, number | string>}[] = [], declared: Meta = LAYERED) {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    const {client, viewport} = fakeClient(answer, LAYERED);
+    const {client, viewport} = fakeClient(answer, declared);
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, instruments: {onTrace: (kind, fields) => traces.push({kind, fields})}});
     await clock.advance(1);
     const settle = async () => {
@@ -905,7 +917,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
 
   const layersOf = (artifacts: readonly Artifact[]) => [...new Set(artifacts.map((a) => a.layer))];
 
-  it('colours by a layer with nothing drawn: the request names the layer alone, points carry it, and nothing of it is drawn', async () => {
+  it('colours by a layer with nothing drawn: points carry its column and not its labels’, the channel asks for both, and nothing of it is drawn', async () => {
     const {store, settle, asked} = await open();
     store.setColourBy('cluster:topics');
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
@@ -914,17 +926,19 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     const points = asked().filter((r) => r.k !== 0);
     expect(points.length).toBeGreaterThan(0);
     for (const r of points) {
-      // The colour layer alone: its labels layer would be drawn, and nothing of it is.
+      // The colour layer alone: a label's membership column is read by nothing.
       expect(r.layers).toEqual(['topics']);
       expect(r.levels).toEqual([0, 1, 2, 3]);
       expect(r.artifactBudget).toBeGreaterThan(0);
     }
-    expect(asked().some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('topics'))).toBe(true);
+    // The channel asks for the labels too, which name the legend's rows.
+    expect(asked().some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('topics') && r.layers.includes('topic_names'))).toBe(true);
 
     const bands = store.get('marks').bands;
     expect(bands.length).toBeGreaterThan(0);
     const a = store.get('artifacts');
     for (const band of bands) {
+      expect(Object.keys(band.membership)).toEqual(['topics']);
       const m = band.membership['topics']!;
       expect(m).toBeDefined();
       for (const ordinal of m.distinct) expect(a.table.resolve(ordinal, a.colours)).not.toBe(0);
@@ -934,6 +948,19 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     expect(a.served).toEqual([]);
     expect(a.lineage.roots).toEqual([]);
     expect(layersOf(a.colourServed)).toEqual(['topics']);
+    // The coloured cluster is named by the label attached to it.
+    expect(a.colourServed.map((x) => artifactName(x, a.attached))).toEqual(['a name']);
+  });
+
+  it('keeps a drawn dependent layer that declares geometry on the point path, and drops only its labels', async () => {
+    // `subtopics` depends on `topics` and draws clusters of its own, so it is not a label layer.
+    const declared: Meta = {...LAYERED, layers: [...LAYERED.layers.slice(0, 2), drawn('subtopics', {depsOn: ['topics']}), ...LAYERED.layers.slice(2)]};
+    const {store, settle, asked} = await open([], declared);
+    store.setLayers(['topics']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'subtopics']);
+    expect(Object.keys(store.get('marks').bands[0]!.membership).sort()).toEqual(['subtopics', 'topics']);
   });
 
   it('draws a layer with its labels and colours by another, and each surface sees its own', async () => {
@@ -943,7 +970,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await settle();
 
-    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'topic_names', 'kmeans']);
+    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'kmeans']);
     const a = store.get('artifacts');
     expect(a.layers).toEqual(['topics', 'topic_names']);
     expect(layersOf(a.served)).toEqual(['topics', 'topic_names']);
@@ -1026,46 +1053,6 @@ describe('the token', () => {
     await clock.advance(600_000);
     expect(authorise).toHaveBeenCalledTimes(2);
     expect(clock.pending).toBe(0);
-  });
-
-  it('forgets derived shapes and hovered records when the token changes, and keeps predicate shapes', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
-    const served = [artifact(1n, {layer: 'hulls'}), artifact(2n, {layer: 'regions'})];
-    const {client} = fakeClient((req) => {
-      const r = response('ck');
-      return (req.layers ?? []).length === 0 ? r : {...r, result: {...r.result, artifacts: served}};
-    }, meta({
-      ...META,
-      layers: [
-        layer('hulls', {computedContent: ['centroid', 'box', 'hull'], shape: 'derived'}),
-        layer('regions', {membership: 'spatial', computedContent: ['centroid', 'box'], shape: 'predicate'})
-      ]
-    }));
-    const shapeOf = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}));
-    const item = vi.fn(async (token: string) => ({fields: {asked: token}, views: [], scoped: {}, labels: []}));
-    Object.assign(client, {artifact: shapeOf, item});
-    let issued = 0;
-    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    store.setLayers(['hulls', 'regions']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
-    await clock.advance(600);
-    scheduler.flush();
-    await clock.advance(600);
-    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([1n, 2n]);
-    store.needShape(1n);
-    store.needShape(2n);
-    await clock.advance(1);
-    expect([...store.get('artifacts').shapes.keys()]).toEqual([1n, 2n]);
-    expect(await store.describe(7n)).toEqual({asked: 't1'});
-
-    // The renewal hands over another token, so another principal as far as the store knows.
-    await clock.advance(30_000);
-    expect(authorise).toHaveBeenCalledTimes(2);
-    expect([...store.get('artifacts').shapes.keys()]).toEqual([2n]);
-    expect(await store.describe(7n)).toEqual({asked: 't2'});
   });
 
   it('answers every verb called before the first token lands, from one supplier call', async () => {
@@ -1260,6 +1247,693 @@ describe('the token', () => {
     scheduler.flush();
     expect(viewport.mock.calls.length).toBeGreaterThan(asked);
     expect(store.get('status')).toMatchObject({status: 'refused', expired: true, refusal: {code: 'expired-token'}});
+  });
+});
+
+describe('a store serves one viewer', () => {
+  /** Two viewers' answers, told apart by identity key, by the visible count of a tile and by artifact. */
+  const VIEWERS = {
+    a: {identityKey: 'ik-a', visible: 1_000n, artifact: 1n},
+    b: {identityKey: 'ik-b', visible: 7n, artifact: 2n}
+  } as const;
+  type Who = keyof typeof VIEWERS;
+
+  const SHAPED = meta({...META, layers: [layer('l', {computedContent: ['centroid', 'box', 'hull'], shape: 'derived'})]});
+
+  /** One viewer's answer: three points spread over the corner of world space, and its artifact where a layer is asked for. */
+  function answerOf(who: Who, req: FakeRequest): ViewportResponse {
+    const v = VIEWERS[who];
+    const scalars = {archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: 3}, () => 5)}};
+    const world = Float32Array.from([0.1, 0.1, 4.5, 4.5, 9, 1]);
+    const artifacts = (req.layers ?? []).length === 0 ? [] : [artifact(v.artifact)];
+    return responseOf(servedResult(3, [tile(0n, v.visible)], {scalars, world, artifacts}), {contentKey: `ck-${who}`, identityKey: v.identityKey});
+  }
+
+  /** Whose answers a store is showing: the identity key of every band drawn, every tile counted and every artifact served. */
+  function showing(store: Store): Set<string> {
+    const who = new Set<string>();
+    const marks = store.get('marks');
+    for (const band of [...marks.bands, ...marks.standIn.map((piece) => piece.band)]) who.add(band.identityKey);
+    for (const t of store.get('tiles').tiles) {
+      if (t.counts) who.add(t.counts.visible === VIEWERS.a.visible ? 'ik-a' : 'ik-b');
+    }
+    for (const a of store.get('artifacts').served) who.add(a.tesseraId === VIEWERS.a.artifact ? 'ik-a' : 'ik-b');
+    return who;
+  }
+
+  /**
+   * A store behind a supplier that hands out `t1` and then `t2`, each for a minute, so the renewal
+   * falls 30 s in. `t1` is viewer A's; `t2` is viewer B's unless `renewal` says it is A's again.
+   * `gate` holds a `t2` request that fetches points open after its first part has been handed over.
+   * `metaOf` answers `/v1/meta` per token.
+   */
+  function twoTokens(opts: {renewal: Who; gate?: Promise<void>; metaOf?: (token: string) => Meta}) {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const whose = (token: string): Who => (token === 't1' ? 'a' : opts.renewal);
+    const viewport = vi.fn(
+      async (token: string, req: FakeRequest, _signal?: AbortSignal, _background?: boolean, onPart?: (part: ViewportPart) => void | Promise<void>) => {
+        const answer = answerOf(whose(token), req);
+        if (opts.gate && token === 't2' && (req.k ?? 1) > 0 && onPart) {
+          await onPart({result: answer.result, identityKey: answer.identityKey, contentKey: answer.contentKey});
+          await opts.gate;
+          return {...answer, result: {...answer.result, ids: new BigUint64Array(0), codes: new BigUint64Array(0), positions: new Float64Array(0), world: new Float32Array(0), tiles: []}};
+        }
+        return answer;
+      }
+    );
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const metaRead = vi.fn(async (token: string) => opts.metaOf?.(token) ?? SHAPED);
+    const client = {
+      meta: metaRead,
+      viewport,
+      item: async (token: string) => ({fields: {asked: token}, views: [], scoped: {}, labels: []}),
+      artifact: async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}),
+      categories: async () => [],
+      suggest: async () => ({status: 'ok' as const, column: 'archive', q: '', values: [], more: false}),
+      close: () => {}
+    } as unknown as TesseraClient;
+    let issued = 0;
+    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    return {store, viewport, authorise, metaRead, clock, scheduler};
+  }
+
+  async function settled(clock: ReturnType<typeof fakeClock>, scheduler: ReturnType<typeof fakeScheduler>): Promise<void> {
+    for (let i = 0; i < 4; i++) {
+      await clock.advance(600);
+      scheduler.flush();
+    }
+  }
+
+  it('keeps what is drawn through a renewal for the same viewer, and asks with the new token', async () => {
+    const {store, viewport, authorise, clock, scheduler} = twoTokens({renewal: 'a'});
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.needShape(VIEWERS.a.artifact);
+    await clock.advance(1);
+    expect(showing(store)).toEqual(new Set(['ik-a']));
+    expect(store.get('artifacts').shapes.has(VIEWERS.a.artifact)).toBe(true);
+    const drawn = store.get('marks').bands.length;
+    expect(drawn).toBeGreaterThan(0);
+
+    const blanks: string[] = [];
+    store.subscribe(() => {
+      if (store.get('marks').bands.length === 0) blanks.push('marks');
+      if (store.get('artifacts').served.length === 0) blanks.push('artifacts');
+      if (store.get('view').composition === null) blanks.push('counts');
+    });
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(viewport.mock.calls.at(-1)![0]).toBe('t2');
+    expect(blanks).toEqual([]);
+    expect(showing(store)).toEqual(new Set(['ik-a']));
+    expect(store.get('marks').bands.length).toBe(drawn);
+    expect(store.get('artifacts').shapes.has(VIEWERS.a.artifact)).toBe(true);
+  });
+
+  it('drops everything held for viewer A before viewer B’s first answer is drawn', async () => {
+    const {store, authorise, clock, scheduler} = twoTokens({renewal: 'b'});
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.needShape(VIEWERS.a.artifact);
+    await clock.advance(1);
+    expect(showing(store)).toEqual(new Set(['ik-a']));
+
+    const mixed: Set<string>[] = [];
+    const late: Set<string>[] = [];
+    let sawB = false;
+    store.subscribe(() => {
+      const who = showing(store);
+      if (who.size > 1) mixed.push(who);
+      if (who.has('ik-b')) sawB = true;
+      if (sawB && who.has('ik-a')) late.push(who);
+    });
+    // The renewal hands over viewer B's token; nothing moves the camera.
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(mixed).toEqual([]);
+    expect(late).toEqual([]);
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+    expect(showing(store)).toEqual(new Set(['ik-b']));
+    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([VIEWERS.b.artifact]);
+    expect(store.get('artifacts').shapes.has(VIEWERS.a.artifact)).toBe(false);
+    expect(await store.describe(7n)).toEqual({asked: 't2'});
+  });
+
+  it('publishes none of viewer A’s meta once viewer B’s first answer arrives, and reads B’s', async () => {
+    // Viewer A is told of a layer and a view viewer B may not reach.
+    const metaA = meta({
+      ...SHAPED,
+      views: [...SHAPED.views, view('hidden', {quantisation: SHAPED.views[0]!.quantisation})],
+      layers: [...SHAPED.layers, layer('secret', {computedContent: ['centroid', 'box']})]
+    });
+    const metaB = SHAPED;
+    const {store, metaRead, clock, scheduler} = twoTokens({renewal: 'b', metaOf: (token) => (token === 't1' ? metaA : metaB)});
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(store.get('meta')).toBe(metaA);
+
+    const late: (Meta | null)[] = [];
+    let sawB = false;
+    store.subscribe(() => {
+      if (showing(store).has('ik-b')) sawB = true;
+      if (sawB && store.get('meta') === metaA) late.push(store.get('meta'));
+    });
+    const published: (Meta | null)[] = [];
+    store.subscribe('meta', (m) => published.push(m));
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(sawB).toBe(true);
+    expect(late).toEqual([]);
+    // Dropped when B's first answer came, then read again under B's token.
+    expect(published).toEqual([null, metaB]);
+    expect(metaRead.mock.calls.at(-1)![0]).toBe('t2');
+    expect(store.get('meta')?.layers.map((l) => l.name)).toEqual(['l']);
+    expect(store.get('meta')?.views.map((v) => v.id)).toEqual(['s0']);
+    expect(showing(store)).toEqual(new Set(['ik-b']));
+  });
+
+  it('draws no stand-in from viewer A beside the first points streamed to viewer B', async () => {
+    let now = Date.now();
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      let open: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (open = resolve));
+      const {store, authorise, clock, scheduler} = twoTokens({renewal: 'b', gate});
+      store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+      await settled(clock, scheduler);
+      expect(showing(store)).toEqual(new Set(['ik-a']));
+
+      const mixed: Set<string>[] = [];
+      store.subscribe(() => {
+        const who = showing(store);
+        if (who.size > 1) mixed.push(who);
+      });
+      // Viewer A's token has four seconds left, so the next request renews it first, and the
+      // points for the zoomed view are asked for under viewer B's token. Until they come, viewer
+      // A's coarser points stand in.
+      now += 56_000;
+      store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+      for (let i = 0; i < 4; i++) {
+        await clock.advance(1);
+        scheduler.flush();
+      }
+      expect(authorise).toHaveBeenCalledTimes(2);
+      expect(mixed).toEqual([]);
+      expect(showing(store).has('ik-a')).toBe(false);
+
+      open();
+      await settled(clock, scheduler);
+      expect(mixed).toEqual([]);
+      expect(store.get('marks').bands.length).toBeGreaterThan(0);
+      expect(showing(store)).toEqual(new Set(['ik-b']));
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it('keeps the region and the filters through an identity change under the same meta, and counts them again', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    // A compaction: the same token and meta, and answers under a new identity key from a point on.
+    let compacted = false;
+    const viewport = vi.fn(async (_token: string, req: FakeRequest) => answerOf(compacted ? 'b' : 'a', req));
+    const metaRead = vi.fn(async () => SHAPED);
+    const {client} = fakeClient(() => response('ck'), SHAPED);
+    Object.assign(client, {viewport, meta: metaRead});
+    // Held tiles are revalidated after a second, so the same camera asks again.
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: 1_000}});
+    await clock.advance(1);
+    store.setColourBy('archive');
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    const filters: FilterDraft = {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}};
+    store.setFilters(filters);
+    const shape = {kind: 'box' as const, bbox: [0, 0, 50, 50] as [number, number, number, number]};
+    store.select(shape);
+    await settled(clock, scheduler);
+    expect(store.get('region')).toMatchObject({status: 'shown', matched: {value: Number(VIEWERS.a.visible)}});
+
+    compacted = true;
+    let changed = false;
+    const stale: string[] = [];
+    store.subscribe(() => {
+      if (store.get('meta') === null || showing(store).has('ik-b')) changed = true;
+      if (!changed) return;
+      if (showing(store).has('ik-a')) stale.push('mark');
+      const r = store.get('region');
+      if (r?.status === 'shown' && r.matched.value === Number(VIEWERS.a.visible)) stale.push('region count');
+      if (store.get('view').matched.value === Number(VIEWERS.a.visible)) stale.push('view count');
+    });
+    await clock.advance(2_000);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+
+    expect(changed).toBe(true);
+    expect(stale).toEqual([]);
+    expect(metaRead).toHaveBeenCalledTimes(2);
+    expect(store.get('region')?.shape).toBe(shape);
+    expect(store.get('region')).toMatchObject({status: 'shown', matched: {value: Number(VIEWERS.b.visible)}});
+    expect(store.get('filters').draft.filter.archive).toEqual(filters.filter.archive);
+    expect(store.get('legend').colourBy).toBe('archive');
+    const asked = viewport.mock.calls.at(-1)![1];
+    expect(JSON.stringify(asked.filters)).toContain('region');
+    expect(JSON.stringify(asked.filters)).toContain('archive');
+    expect(showing(store)).toEqual(new Set(['ik-b']));
+  });
+
+  /**
+   * Viewer A behind `t1` and viewer B behind `t2`, each with its own meta, whose identity keys name
+   * the viewer and the view. `hold` leaves a request unanswered; `refuse` refuses it as the server
+   * refuses a filter on a column the viewer cannot reach.
+   */
+  function perViewer(opts: {
+    metaOf: (token: string) => Meta;
+    hold?: (token: string, req: FakeRequest) => boolean;
+    refuse?: (token: string, req: FakeRequest) => boolean;
+    authorise?: () => Promise<{token: string; expiresAt: number}>;
+  }) {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const whose = (token: string): Who => (token === 't1' || token === 't-a' ? 'a' : 'b');
+    const viewport = vi.fn(async (token: string, req: FakeRequest) => {
+      if (opts.refuse?.(token, req)) throw new TesseraError(422, 'bad-filter', 'this principal cannot filter on that column');
+      if (opts.hold?.(token, req)) return new Promise<never>(() => {});
+      const who = whose(token);
+      return {...answerOf(who, req), identityKey: `${who}:${req.view}`};
+    });
+    const {client} = fakeClient(() => response('ck'));
+    Object.assign(client, {viewport, meta: async (token: string) => opts.metaOf(token)});
+    let issued = 0;
+    const authorise = vi.fn(opts.authorise ?? (async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000})));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    return {store, client, viewport, authorise, clock, scheduler};
+  }
+
+  /** Whose answers a store shows, by the viewer each band, tile count, artifact and meta came from. */
+  function whoShows(store: Store, metas: {a: Meta; b: Meta}): Set<Who> {
+    const who = new Set<Who>();
+    const marks = store.get('marks');
+    for (const band of [...marks.bands, ...marks.standIn.map((piece) => piece.band)]) who.add(band.identityKey.split(':')[0] as Who);
+    for (const t of store.get('tiles').tiles) if (t.counts) who.add(t.counts.visible === VIEWERS.a.visible ? 'a' : 'b');
+    for (const a of store.get('artifacts').served) who.add(a.tesseraId === VIEWERS.a.artifact ? 'a' : 'b');
+    if (store.get('meta') === metas.a) who.add('a');
+    if (store.get('meta') === metas.b) who.add('b');
+    return who;
+  }
+
+  const TWO_VIEWS = meta({...SHAPED, views: [...SHAPED.views, view('s1', {quantisation: SHAPED.views[0]!.quantisation})]});
+
+  it('forgets when the renewed token is refused the view the previous token reached', async () => {
+    // Viewer B is not served s0, which viewer A was drawing.
+    const metas = {a: SHAPED, b: meta({...SHAPED, views: [view('s1', {quantisation: SHAPED.views[0]!.quantisation})]})};
+    const refused: string[] = [];
+    const {store, clock, scheduler} = perViewer({
+      metaOf: (token) => (token === 't1' ? metas.a : metas.b),
+      refuse: (token, req) => {
+        const no = token === 't2' && req.view === 's0';
+        if (no) refused.push(req.view!);
+        return no;
+      }
+    });
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(refused.length).toBeGreaterThan(0);
+    expect(store.get('meta')).toBe(metas.b);
+    expect(store.get('view').id).toBe('s1');
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+  });
+
+  it('forgets on a streamed part under a new key for a view it has left, and holds none of it for the return', async () => {
+    const metas = {a: meta({...TWO_VIEWS}), b: meta({...TWO_VIEWS})};
+    // Whose answers the server gives, and whose meta, from here on.
+    let who: Who = 'a';
+    let gate: Promise<void> | null = null;
+    const {store, viewport, clock, scheduler} = perViewer({metaOf: () => (who === 'a' ? metas.a : metas.b)});
+    const answer = (req: FakeRequest) => ({...answerOf(who, req), identityKey: `${who}:${req.view}`});
+    type Fetch = (token: string, req: FakeRequest, signal?: AbortSignal, background?: boolean, onPart?: (part: ViewportPart) => void | Promise<void>) => Promise<ViewportResponse>;
+    (viewport as unknown as {mockImplementation(f: Fetch): void}).mockImplementation(async (_token, req, _signal, _background, onPart) => {
+      // One request for s0 hands over a part only once the gate opens, and never answers.
+      if (gate && req.view === 's0' && (req.k ?? 1) > 0 && onPart) {
+        const held = gate;
+        gate = null;
+        await held;
+        const a = answer(req);
+        await onPart({result: a.result, identityKey: a.identityKey, contentKey: a.contentKey});
+        return new Promise<never>(() => {});
+      }
+      return answer(req);
+    });
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    // A zoom on s0 whose points are still on the way when the host moves to s1.
+    let open: () => void = () => {};
+    gate = new Promise<void>((resolve) => (open = resolve));
+    store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+    await clock.advance(1);
+    scheduler.flush();
+    store.setCurrentView('s1');
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    const mixed: Set<Who>[] = [];
+    store.subscribe(() => {
+      const shown = whoShows(store, metas);
+      if (shown.size > 1) mixed.push(shown);
+    });
+    // The part for s0 arrives under viewer B's key after s0 was left.
+    who = 'b';
+    open();
+    await settled(clock, scheduler);
+    // The key changed, so the store forgot at once and read meta again, with nothing asked for s1.
+    expect(store.get('meta')).toBe(metas.b);
+
+    // Back on s0, nothing from the part is held to draw from before s0 asks.
+    store.setCurrentView('s0');
+    scheduler.flush();
+    expect(store.get('replica').bands).toBe(0);
+    expect(store.get('marks').bands).toEqual([]);
+    await settled(clock, scheduler);
+
+    expect(mixed).toEqual([]);
+    expect(store.get('meta')).toBe(metas.b);
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+  });
+
+  it('reads meta again at a renewal when it holds meta and no answer yet', async () => {
+    const metas = {a: SHAPED, b: meta({...SHAPED})};
+    const {store, authorise, clock} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
+    // A store with no camera, as behind a panel or a map not yet sized.
+    await clock.advance(1);
+    expect(store.get('meta')).toBe(metas.a);
+
+    await clock.advance(30_000);
+    await clock.advance(1);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(store.get('meta')).toBe(metas.b);
+  });
+
+  it('empties the colours of every held view’s artifacts when it forgets', async () => {
+    const both = {...TWO_VIEWS, layers: [layer('l', {views: ['s0', 's1'], computedContent: ['centroid', 'box', 'hull'], shape: 'derived'})]};
+    const metas = {a: meta(both), b: meta(both)};
+    const {store, viewport, clock, scheduler} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
+    // Each view serves its own artifact, and its points are members of it, so each view's rows
+    // hold an ordinal in the table.
+    const answered = viewport.getMockImplementation()!;
+    viewport.mockImplementation(async (token: string, req: FakeRequest) => {
+      const r = await answered(token, req);
+      const id = VIEWERS.a.artifact + (req.view === 's1' ? 100n : 0n);
+      const membership = {l: {index: Uint16Array.from({length: r.result.ids.length}, () => 1), ids: BigUint64Array.of(id)}};
+      return {...r, result: {...r.result, membership, artifacts: r.result.artifacts.map((a) => ({...a, tesseraId: id}))}};
+    });
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.setCurrentView('s1');
+    await settled(clock, scheduler);
+    const table = store.get('artifacts').table;
+    expect(table.ordinalOf('l', VIEWERS.a.artifact)).not.toBe(0);
+    expect(table.ordinalOf('l', VIEWERS.a.artifact + 100n)).not.toBe(0);
+    expect(store.get('artifacts').colours.size).toBeGreaterThanOrEqual(2);
+
+    const atForget: number[] = [];
+    store.subscribe('meta', (m) => {
+      if (m === null) atForget.push(store.get('artifacts').colours.size);
+    });
+    store.clear();
+    expect(atForget).toEqual([0]);
+  });
+
+  it('names nothing in the artifact table from an absorb a clear interrupts between slices', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const N = 200;
+    /** `N` one-point tiles, each point a member of its own artifact: ids from `base`. */
+    const many = (req: FakeRequest, base: bigint, identityKey: string): ViewportResponse => {
+      const scalars = {archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: N}, () => 5)}};
+      return responseOf(
+        servedResult(N, Array.from({length: N}, (_, i) => tile(BigInt(i), 1n, {served: 1n})), {
+          scalars,
+          membership: {l: {index: Uint16Array.from({length: N}, (_, i) => i + 1), ids: BigUint64Array.from({length: N}, (_, i) => base + BigInt(i))}}
+        }),
+        {identityKey, contentKey: `ck-${identityKey}`}
+      );
+    };
+    // Each servedResult puts all served points on its first tile; spread them one per tile.
+    const spread = (r: ViewportResponse): ViewportResponse => ({...r, result: {...r.result, tiles: r.result.tiles.map((t) => ({...t, served: 1n}))}});
+    let signedIn: Who = 'a';
+    const viewport = vi.fn(async (token: string, req: FakeRequest) => spread(many(req, token === 't-a' ? 1_000n : 5_000n, `ik-${token}`)));
+    const {client} = fakeClient(() => response('ck'), SHAPED);
+    Object.assign(client, {viewport});
+    const authorise = vi.fn(async () => ({token: `t-${signedIn}`, expiresAt: (Date.now() + 3_600_000) / 1000}));
+    // Every read of the clock is far past the last, so each slice ends after its first 64 tiles.
+    let now = 0;
+    const clockRead = vi.spyOn(performance, 'now').mockImplementation(() => (now += 1_000));
+    try {
+      let interrupted = false;
+      const store: Store = createStore({
+        viewerUrl: 'http://viewer',
+        authorise,
+        client,
+        clock,
+        scheduler,
+        prefetch: false,
+        replica: {
+          revalidateAfterMs: Infinity,
+          // The first slice of viewer A's answer is stored; the next waits for a frame, and the
+          // store is cleared for viewer B in between.
+          onPhase: (kind) => {
+            if (kind !== 'piece' || interrupted) return;
+            interrupted = true;
+            signedIn = 'b';
+            store.clear();
+          }
+        }
+      });
+      store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+      for (let i = 0; i < 20; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await clock.advance(50);
+        scheduler.flush();
+      }
+      expect(interrupted).toBe(true);
+      const table = store.get('artifacts').table;
+      const ids = table.liveEntries().map(({entry}) => entry.tesseraId);
+      expect(ids.length).toBe(N);
+      expect(ids.every((id) => id >= 5_000n)).toBe(true);
+    } finally {
+      clockRead.mockRestore();
+    }
+  });
+
+  it('resolves a hover’s record asked for before a forget to nothing', async () => {
+    const metas = {a: SHAPED, b: meta({...SHAPED})};
+    const {store, client, clock} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
+    let answer: () => void = () => {};
+    Object.assign(client, {
+      item: async () => {
+        await new Promise<void>((resolve) => (answer = resolve));
+        return {fields: {title: 'viewer A’s record'}, views: [], scoped: {}, labels: []};
+      }
+    });
+    await clock.advance(1);
+    const described = store.describe(7n);
+    await clock.advance(1);
+    store.clear();
+    answer();
+    expect(await described).toBeNull();
+  });
+
+  it('does not trust the first answer on an unvisited view after a renewal, before a held key is matched', async () => {
+    const metas = {a: meta({...TWO_VIEWS}), b: meta({...TWO_VIEWS})};
+    // The ask the renewal sends at once goes unanswered, so the first answer under B's token is on s1.
+    const {store, authorise, clock, scheduler} = perViewer({
+      metaOf: (token) => (token === 't1' ? metas.a : metas.b),
+      hold: (token, req) => token === 't2' && req.view === 's0'
+    });
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    const mixed: Set<Who>[] = [];
+    store.subscribe(() => {
+      const who = whoShows(store, metas);
+      if (who.size > 1) mixed.push(who);
+    });
+    await clock.advance(30_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    store.setCurrentView('s1');
+    await settled(clock, scheduler);
+
+    expect(mixed).toEqual([]);
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+    expect(store.get('view').id).toBe('s1');
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+  });
+
+  it('sees a new key after a renewal although the previous viewer’s filter is refused under the new token', async () => {
+    const metaA = meta({...SHAPED, filterOperands: [...SHAPED.filterOperands, {column: 'secret', family: 'category', operands: ['in']}]});
+    const metas = {a: metaA, b: SHAPED};
+    const {store, viewport, clock, scheduler} = perViewer({
+      metaOf: (token) => (token === 't1' ? metas.a : metas.b),
+      refuse: (token, req) => token === 't2' && JSON.stringify(req.filters ?? null).includes('secret')
+    });
+    await clock.advance(1);
+    store.setFilters({filter: {secret: {family: 'category', keys: ['x']}, archive: {family: 'category', keys: ['cs']}}, highlight: {secret: {family: 'category', keys: ['y']}}});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+    expect(Object.keys(store.get('filters').draft.filter)).toEqual(['archive']);
+    expect(Object.keys(store.get('filters').draft.highlight)).toEqual([]);
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+    expect(JSON.stringify(viewport.mock.calls.at(-1)![1].filters)).not.toContain('secret');
+  });
+
+  it('drops the member_of clauses, a region selected from an artifact and the old colours when the key changes', async () => {
+    const metas = {a: SHAPED, b: meta({...SHAPED})};
+    const {store, clock, scheduler} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.setMembers([{layer: 'l', artifact: VIEWERS.a.artifact, outside: false, verb: 'filter', label: 'a1'}]);
+    store.select({kind: 'artifact', id: VIEWERS.a.artifact});
+    await settled(clock, scheduler);
+    expect(store.get('artifacts').colours.size).toBeGreaterThan(0);
+
+    const atForget: {colours: number; members: number; region: unknown}[] = [];
+    store.subscribe('meta', (m) => {
+      if (m === null) atForget.push({colours: store.get('artifacts').colours.size, members: store.get('filters').members.length, region: store.get('region')});
+    });
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(atForget).toEqual([{colours: 0, members: 0, region: null}]);
+    expect(store.get('filters').members).toEqual([]);
+    expect(store.get('region')).toBeNull();
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+  });
+
+  it('drops a filter, a layer and a colouring the next viewer’s meta does not list, and a view it does not list', async () => {
+    const hidden = view('hidden', {quantisation: SHAPED.views[0]!.quantisation});
+    const metaA = meta({
+      ...SHAPED,
+      views: [...SHAPED.views, hidden],
+      layers: [...SHAPED.layers, layer('secret-layer', {views: ['s0', 'hidden'], computedContent: ['centroid', 'box']})],
+      declaredScalars: [...SHAPED.declaredScalars, scalar('secretcol', 'u16', {category: {vocabulary: 'b', kind: 'declared', visibility: 'public'}, render: true, homes: ['rendered']})],
+      filterOperands: [...SHAPED.filterOperands, {column: 'secret', family: 'category', operands: ['in']}]
+    });
+    const metas = {a: metaA, b: SHAPED};
+    let signedIn: Who = 'a';
+    const {store, viewport, clock, scheduler} = perViewer({
+      metaOf: (token) => (token === 't-a' ? metas.a : metas.b),
+      authorise: async () => ({token: `t-${signedIn}`, expiresAt: (Date.now() + 3_600_000) / 1000})
+    });
+    await clock.advance(1);
+    store.setCurrentView('hidden');
+    store.setLayers(['l', 'secret-layer']);
+    store.setColourBy('secretcol');
+    store.setFilters({filter: {secret: {family: 'category', keys: ['x']}, archive: {family: 'category', keys: ['cs']}}, highlight: {secret: {family: 'category', keys: ['y']}}});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.select({kind: 'box', bbox: [0, 0, 50, 50]});
+    await settled(clock, scheduler);
+    expect(store.get('view').id).toBe('hidden');
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+
+    signedIn = 'b';
+    store.clear();
+    const asked = viewport.mock.calls.length;
+    await settled(clock, scheduler);
+
+    expect(store.get('meta')).toBe(metas.b);
+    expect(Object.keys(store.get('filters').draft.filter)).toEqual(['archive']);
+    expect(Object.keys(store.get('filters').draft.highlight)).toEqual([]);
+    expect(store.get('artifacts').layers).toEqual(['l']);
+    expect(store.get('legend').colourBy).toBeNull();
+    // The view is not offered, so the store opens on the first and drops the camera with it.
+    expect(store.get('view').id).toBe('s0');
+    expect(store.get('region')).toBeNull();
+    expect(viewport.mock.calls.slice(asked).filter((c) => (c[1].k ?? 1) > 0)).toEqual([]);
+  });
+
+  it('clear() forgets viewer A and serves viewer B from B’s own token and meta', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    // Viewer A may filter on a column viewer B is not told of.
+    const metaOf = (token: string) =>
+      token === 't-a' ? meta({...SHAPED, filterOperands: [...SHAPED.filterOperands, {column: 'secret', family: 'category', operands: ['in']}]}) : SHAPED;
+    const whose = (token: string): Who => (token === 't-a' ? 'a' : 'b');
+    const viewport = vi.fn(async (token: string, req: FakeRequest) => answerOf(whose(token), req));
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const client = {
+      meta: async (token: string) => metaOf(token),
+      viewport,
+      item: async (token: string) => ({fields: {asked: token}, views: [], scoped: {}, labels: []}),
+      artifact: async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}),
+      categories: async () => [{code: 5, key: 'cs', title: 'CS'}],
+      suggest: async () => ({status: 'ok' as const, column: 'archive', q: '', values: [], more: false}),
+      close: () => {}
+    } as unknown as TesseraClient;
+    // The host's supplier answers for whoever is signed in.
+    let signedIn: Who = 'a';
+    const authorise = vi.fn(async () => ({token: `t-${signedIn}`, expiresAt: (Date.now() + 3_600_000) / 1000}));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    store.setLayers(['l']);
+    store.setColourBy('archive');
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.needShape(VIEWERS.a.artifact);
+    await store.pick(7n);
+    store.select({kind: 'box', bbox: [0, 0, 50, 50]});
+    await settled(clock, scheduler);
+    expect(showing(store)).toEqual(new Set(['ik-a']));
+    expect(Object.keys(store.get('filters').draft.filter)).toContain('secret');
+
+    signedIn = 'b';
+    store.clear();
+    const late: Set<string>[] = [];
+    store.subscribe(() => {
+      if (showing(store).has('ik-a')) late.push(showing(store));
+    });
+
+    // Nothing of viewer A's is published or drawn once the call returns.
+    expect(store.get('meta')).toBeNull();
+    expect(showing(store)).toEqual(new Set());
+    expect(store.get('marks')).toMatchObject({bands: [], standIn: []});
+    expect(store.get('view').composition).toBeNull();
+    expect(store.get('artifacts').shapes.size).toBe(0);
+    expect(store.get('selection').item).toBeNull();
+    expect(store.get('region')).toBeNull();
+    expect(store.get('legend').categories).toEqual({});
+
+    await settled(clock, scheduler);
+    expect(late).toEqual([]);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(store.get('meta')?.filterOperands.map((f) => f.column)).toEqual(['archive']);
+    expect(Object.keys(store.get('filters').draft.filter)).not.toContain('secret');
+    expect(viewport.mock.calls.at(-1)![0]).toBe('t-b');
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+    expect(showing(store)).toEqual(new Set(['ik-b']));
   });
 });
 

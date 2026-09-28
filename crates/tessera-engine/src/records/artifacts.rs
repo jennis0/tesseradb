@@ -411,6 +411,7 @@ impl Engine {
                 entity: layer.entity.raw(),
                 level: req.level,
             }),
+            request: None,
         };
         let resumed = match req.cursor {
             None => None,
