@@ -250,8 +250,8 @@ function generateMarks(): Mark[] {
 
 const MARKS = generateMarks();
 
-/** The depth the frame is composed at: 8 × 8 tiles of 64 world units. */
-const DEPTH = 3;
+/** The depth the frame is composed at: 32 × 32 tiles of 16 world units. */
+const DEPTH = 5;
 
 export type MapOptions = {
   /** Points that satisfy the highlight, which sets each band's highlight bits. */

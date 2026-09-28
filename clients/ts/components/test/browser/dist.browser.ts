@@ -93,6 +93,6 @@ describe('the built packages', () => {
   });
 
   it('define and render the elements from dist/, their decorated properties read from attributes', async () => {
-    expect(await result('/elements.html')).toEqual({instance: true, layout: 'overlay', wash: true, controls: true});
+    expect(await result('/elements.html')).toEqual({instance: true, layout: 'overlay', density: 'hex', noPoints: true, controls: true});
   });
 });

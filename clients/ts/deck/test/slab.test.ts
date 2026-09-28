@@ -187,7 +187,7 @@ describe('MarkSlab', () => {
 
   it('colours a band as it is written, from its own values', () => {
     const slab = new MarkSlab();
-    const encoding: Encoding = {kind: 'category', column: 'c', rankOfCode: {1: 0, 2: 1}};
+    const encoding: Encoding = {kind: 'category', column: 'c', rankOfCode: {1: 0, 2: 1}, palette: 'tableau10', chosen: new Map()};
     const draw = slab.sync([band(1, 2), band(2, 1)], 2, encoding, 'c');
 
     expect([...draw.colours.subarray(0, 4)]).toEqual([...colourOfRank(0)]);
@@ -209,8 +209,8 @@ describe('MarkSlab', () => {
   it('does not recolour when a sticky domain has merely been re-supplied', () => {
     const slab = new MarkSlab();
     const a = band(1, 1);
-    const first = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}}, 'c');
-    const second = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}}, 'c');
+    const first = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}, ramp: 'viridis', scale: 'linear', reverse: false}, 'c');
+    const second = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}, ramp: 'viridis', scale: 'linear', reverse: false}, 'c');
     // The same colouring in a new object; a reference comparison would re-upload the colour
     // buffer on every response.
     expect(second).toBe(first);
@@ -218,7 +218,7 @@ describe('MarkSlab', () => {
 
   it('gives every mark a colour even where the band lacks the column', () => {
     const slab = new MarkSlab();
-    const draw = slab.sync([band(1, 2)], 2, {kind: 'category', column: 'absent', rankOfCode: {}}, 'absent');
+    const draw = slab.sync([band(1, 2)], 2, {kind: 'category', column: 'absent', rankOfCode: {}, palette: 'tableau10', chosen: new Map()}, 'absent');
     expect([...draw.colours.subarray(0, 8)]).toEqual([...UNMAPPED, ...UNMAPPED]);
   });
 

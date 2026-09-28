@@ -27,9 +27,9 @@ The `tessera-*` custom elements, in the `@tesseradb/components` package, built w
 
 ## Loading the elements
 
-`import '@tesseradb/components'` defines every element. Each element also has its own entry, such as `import '@tesseradb/components/map'`, which defines that element and the elements it renders. The map, the explorer, the legend, the artifact list and the artifact card import `@tesseradb/deck`, which depends on deck.gl; the other elements do not.
+`import '@tesseradb/components'` defines every element. Each element also has its own entry, such as `import '@tesseradb/components/map'`, which defines that element and the elements it renders. The map, the explorer, the legend, the artifact list and the artifact card import `@tesseradb/deck`, which depends on deck.gl; the other elements do not. `@deck.gl/aggregation-layers` is a peer dependency as well, which `@tesseradb/deck` imports only when a map first draws density as hexagons or contours. A host's bundler puts it in a chunk of its own, which a page that never draws those does not load.
 
-A page with no build step loads the single-file bundle, `tessera-components.js`, which holds Lit, deck.gl and the decode worker. `npm run bundle -w @tesseradb/components` in `clients/ts` writes it to `components/dist/` with its subresource-integrity hash in `tessera-components.js.sri`:
+A page with no build step loads the single-file bundle, `tessera-components.js`, which holds Lit, deck.gl, its aggregation layers and the decode worker. `npm run bundle -w @tesseradb/components` in `clients/ts` writes it to `components/dist/` with its subresource-integrity hash in `tessera-components.js.sri`:
 
 ```html
 <script type="module" src="./tessera-components.js" integrity="sha384-..."></script>

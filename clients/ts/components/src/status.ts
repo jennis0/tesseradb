@@ -8,14 +8,15 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * The view's state and counts on one line: `● | 16,822,190 of 21,406,522 match | 5,390 shown`, with
- * `N highlighted` added while a highlight is set. While the view is up to date the first cell is a
- * dot alone, titled "Up to date"; otherwise it names the state in two or three words (Updating,
- * Reconnecting, Data updated, View refused, Session expired) with the action the state offers:
- * Refresh when the data changed, Retry when the view was refused, and Sign in on expiry where
- * `reauthorise` is set. The counts grey out while they are not current. The strip sizes to its
- * content and does not wrap. `compact` shortens the figures (`16.8M of 21.4M match`) and drops the
- * shown count. `expanded` renders the figures again as a card below the strip.
+ * The view's state and counts on one line: `● | 16,822,190 of 21,406,522 match | 5,390 shown`.
+ * While a highlight is set, a cell reads `N highlighted of M`, M being the matched count, and the
+ * match cell is left out unless a filter or selection narrows what matches. While the view is up to
+ * date the first cell is a dot alone, titled "Up to date"; otherwise it names the state in two or
+ * three words (Updating, Reconnecting, Data updated, View refused, Session expired) with the action
+ * the state offers: Refresh when the data changed, Retry when the view was refused, and Sign in on
+ * expiry where `reauthorise` is set. The counts grey out while they are not current. The strip
+ * sizes to its content and does not wrap. `compact` shortens the figures (`16.8M of 21.4M match`)
+ * and drops the shown count. `expanded` renders the figures again as a card below the strip.
  *
  * The strip is an `aria-live` region, so a refusal, an expiry or a change of data is announced. The
  * state is one of the eight panel states (see `PanelState`); what was refused and why stays in the
@@ -37,6 +38,7 @@ import './count.js';
  * @csspart count-shown - The `<tessera-count>` of marks shown.
  * @csspart count-matched - The `<tessera-count>` matched by the filters.
  * @csspart count-highlighted - The `<tessera-count>` the highlight matched, while a highlight is set.
+ * @csspart count-of - The matched count the highlighted count is out of, while a highlight is set.
  * @csspart count-visible - The `<tessera-count>` of items the viewer may see here, which the matched
  *   count is out of.
  * @csspart card - The card of figures, under `expanded`.
@@ -111,6 +113,13 @@ export class TesseraStatus extends TesseraElement {
       .cell tessera-count[part~='count-shown']::part(count) {
         color: inherit;
         font-weight: 400;
+      }
+      .cell tessera-count[part~='count-of']::part(count) {
+        color: inherit;
+        font-weight: 400;
+      }
+      .cell tessera-count.lit::part(count) {
+        color: var(--_tessera-highlight);
       }
       .cell tessera-count::part(label) {
         margin-left: 0.3em;
@@ -196,12 +205,17 @@ export class TesseraStatus extends TesseraElement {
       const skel = html`<span class="skel" aria-hidden="true"></span>`;
       return html`<div class=${cls}>${skel}<span>match</span></div>${this.compact ? nothing : html`<div class=${cls}>${skel}<span>shown</span></div>`}`;
     }
-    return html`<div class=${cls}>
-        <tessera-count part="count-matched" .masked=${v.matched} .compact=${this.compact}></tessera-count><span>of</span><tessera-count
-          part="count-visible" .masked=${v.visible} .compact=${this.compact}></tessera-count><span>match</span>
-      </div>
+    // Under a highlight with nothing narrowing, the match cell would read "M of M match" beside
+    // the highlight's, so the highlight's cell stands alone and names M.
+    const narrowed = this.resolvedStore?.requestFilters() != null;
+    const match = html`<div class=${cls}>
+      <tessera-count part="count-matched" .masked=${v.matched} .compact=${this.compact}></tessera-count><span>of</span><tessera-count
+        part="count-visible" .masked=${v.visible} .compact=${this.compact}></tessera-count><span>match</span>
+    </div>`;
+    return html`${v.highlighting && !narrowed ? nothing : match}
       ${v.highlighting
-        ? html`<div class=${cls}><tessera-count part="count-highlighted" .masked=${v.highlighted} .compact=${this.compact} label="highlighted"></tessera-count></div>`
+        ? html`<div class=${cls}><tessera-count part="count-highlighted" class="lit" .masked=${v.highlighted} .compact=${this.compact}></tessera-count><span>highlighted of</span><tessera-count
+              part="count-of" .masked=${v.matched} .compact=${this.compact}></tessera-count></div>`
         : nothing}
       ${this.compact || !v.served.exact ? nothing : html`<div class=${cls}><tessera-count part="count-shown" .count=${v.served} figure="shown" label="shown"></tessera-count></div>`}`;
   }

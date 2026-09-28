@@ -89,6 +89,17 @@ describe('<tessera-layer-picker>', () => {
     const sent = store.calls.find((c) => c.name === 'setLayers');
     expect(sent!.args[0]).toEqual(['clusters']);
   });
+
+  it('names a filter layer in a note and gives it no checkbox', async () => {
+    const host = await mount('<tessera-layer-picker></tessera-layer-picker>');
+    const venues = {...layer('venues'), title: 'Venues', computedContent: []};
+    const store = fakeStore({meta: {...META, layers: [...META.layers, venues]}, status: status({})});
+    (host.querySelector('tessera-layer-picker') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    expect(deepAll(host, '[part="entry"]').map((e) => e.getAttribute('data-layer'))).toEqual(['clusters', 'districts']);
+    expect(deep(host, '[part="note"]')?.getAttribute('data-layers')).toBe('venues');
+    expect(deepAll(host, 'input[type="checkbox"]')).toHaveLength(2);
+  });
 });
 
 describe('<tessera-artifact-list>', () => {
@@ -222,11 +233,11 @@ describe('<tessera-legend limit>', () => {
     const host = await mount('<tessera-legend limit="4"></tessera-legend>');
     (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
     await settle(host);
-    // Seven values and the entry for the rest, cut to four.
+    // Seven values, all within the palette, so no entry for the rest; cut to four.
     expect(deepAll(host, '[part="swatch"]')).toHaveLength(4);
     (deep(host, '[part="more"]') as HTMLButtonElement).click();
     await settle(host);
-    expect(deepAll(host, '[part="swatch"]')).toHaveLength(8);
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(7);
     expect(deep(host, '[part="more"]')).toBeNull();
   });
 });
@@ -237,21 +248,22 @@ describe('<tessera-legend selectable>', () => {
     const store = fakeStore({meta: META, status: status({})});
     (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
     await settle(host);
-    const colourOptions = () => deepAll(host, '[part="select"] option').map((o) => o.getAttribute('value'));
+    (deep(host, '[part="colour-by"]') as HTMLButtonElement).click();
+    await settle(host);
+    const colourOptions = () => deepAll(host, '[part="option"]').map((o) => o.getAttribute('data-value'));
     // No layer is drawn. A labels layer has no clusters of its own, so it is not offered.
     expect(colourOptions()).toEqual(['', 'cluster:clusters', 'cluster:districts', 'archive']);
-    const select = deep(host, '[part="select"]') as HTMLSelectElement;
-    select.value = 'cluster:clusters';
-    select.dispatchEvent(new Event('change'));
+    (deep(host, '[part="option"][data-value="cluster:clusters"]') as HTMLButtonElement).click();
     expect(store.calls.find((c) => c.name === 'setColourBy')?.args[0]).toBe('cluster:clusters');
     expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
     // The store answers with the colour layer's rows and still draws nothing: the swatches are
-    // the colour layer's served artifacts, and the choice shows in the select.
+    // the colour layer's served artifacts, and the choice shows in the menu and on its button.
     store.set('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:clusters'});
     store.set('artifacts', {...artifactsProjection([], []), colourServed: [artifact(1n, 100n)]});
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
-    expect((deep(host, '[part="select"]') as HTMLSelectElement).value).toBe('cluster:clusters');
+    expect(deep(host, '[part="option"][aria-checked="true"]')?.getAttribute('data-value')).toBe('cluster:clusters');
+    expect(deep(host, '[part="colour-by"]')?.textContent?.trim()).toBe('clusters');
   });
 
   it('is a readout without selectable', async () => {
@@ -259,7 +271,7 @@ describe('<tessera-legend selectable>', () => {
     const store = fakeStore({meta: META, status: status({})});
     (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
     await settle(host);
-    expect(deep(host, 'select')).toBeNull();
+    expect(deep(host, '[part="colour-by"]')).toBeNull();
   });
 });
 

@@ -33,8 +33,7 @@ import {css} from 'lit';
  * @cssprop --tessera-accent-soft - The background of a filtered row and a matched span in a
  *   suggestion.
  * @cssprop --tessera-highlight - The colour of a highlight chip and a pressed highlight button.
- * @cssprop --tessera-highlight-ink - For text on a highlight background. Not built yet: no element
- *   reads it, so setting it changes nothing.
+ * @cssprop --tessera-highlight-ink - The icon colour on a pressed highlight button in the legend.
  * @cssprop --tessera-highlight-soft - The background of a highlight chip and a highlighted row.
  * @cssprop --tessera-warn - The colour of the dot in the data updated and reconnecting states.
  * @cssprop --tessera-refuse - The colour of the refused and expired states and their dot.
@@ -315,6 +314,28 @@ export const chrome = css`
     background: var(--_tessera-surface-2);
     color: var(--_tessera-ink);
     font-weight: 600;
+  }
+  /* An on-off switch: a button with role="switch" and a knob inside it. */
+  .switch {
+    width: 34px;
+    height: 20px;
+    padding: 2px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--_tessera-ink-3) 35%, var(--_tessera-surface));
+    display: flex;
+    justify-content: flex-start;
+    flex: none;
+  }
+  .switch[aria-checked='true'] {
+    background: var(--_tessera-accent);
+    justify-content: flex-end;
+  }
+  .switch .knob {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--_tessera-surface);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
   }
   /* A checkbox row. */
   .check {

@@ -416,10 +416,12 @@ const countsAfter = await listCounts();
 
 // ---- 9: a coloured point's ordinal resolves to a served artifact ---------------------------------
 
-const legendSelect = page.locator('tessera-legend select').first();
-const clusterOption = await legendSelect.locator('option[part="cluster-option"]').first().getAttribute('value').catch(() => null);
+await page.locator('tessera-legend [part="colour-by"]').first().click().catch(() => null);
+const clusterEntry = page.locator('tessera-legend [part="option"][data-kind="layer"]').first();
+const clusterOption = await clusterEntry.getAttribute('data-value', {timeout: 5_000}).catch(() => null);
 const refillStarted = Date.now();
-if (clusterOption) await legendSelect.selectOption(clusterOption);
+if (clusterOption) await clusterEntry.click();
+await page.keyboard.press('Escape');
 await settled();
 await page.waitForTimeout(800);
 {
@@ -514,7 +516,7 @@ if (probe) {
   } else {
     console.log('  per response — the decode, absorb and region lanes are the demo\'s instruments; this page keeps none (the store\'s `instruments` option), so they are not measured here');
   }
-  console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, wash bin ${probe.timings.washMs.toFixed(2)} ms, lookup texture ${probe.timings.lutMs.toFixed(2)} ms, outlines ${probe.timings.outlinesMs.toFixed(2)} ms (${probe.timings.outlines}), labels ${probe.timings.labelsMs.toFixed(2)} ms (${probe.timings.labels} placed), layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle); coverage check ${lanes?.coverage ? `${lanes.coverage.ms.toFixed(2)} ms over ${lanes.coverage.bands} bands, ${lanes.coverage.stale} stale` : 'not recorded'}`);
+  console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, density ${probe.timings.densityMs.toFixed(2)} ms, lookup texture ${probe.timings.lutMs.toFixed(2)} ms, outlines ${probe.timings.outlinesMs.toFixed(2)} ms (${probe.timings.outlines}), labels ${probe.timings.labelsMs.toFixed(2)} ms (${probe.timings.labels} placed), layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle); coverage check ${lanes?.coverage ? `${lanes.coverage.ms.toFixed(2)} ms over ${lanes.coverage.bands} bands, ${lanes.coverage.stale} stale` : 'not recorded'}`);
   console.log(`  per frame — mean ${probe.timings.frame.mean.toFixed(1)} ms, p95 ${probe.timings.frame.p95.toFixed(1)} ms over the last ${probe.timings.frame.n} frames (${headed ? 'headed chromium on the display' : 'software GL under headless chromium'}), colouring by ${probe.cluster.layer ? 'cluster' : 'column'} through the lookup texture, ${probe.timings.lutWrites} writes to the lookup texture since the layer made it`);
   const region = await page.evaluate(() => window.__tesseraProbeOf()?.region ?? null);
   console.log(`  box selection — ${region?.ms?.toFixed(0) ?? '?'} ms select-to-counted (200 ms settle, the request, the sum); ${regionMs} ms mouse-up to panel under ${headed ? 'headed' : 'headless'} input; lanes: ${lanes?.region ? `settle ${lanes.region.settleMs.toFixed(0)} ms, wire ${lanes.region.wireMs.toFixed(0)} ms (server ${lanes.region.serverMs.toFixed(1)} ms, ${lanes.region.tiles} tiles), projection ${lanes.region.projectMs.toFixed(1)} ms` : 'not recorded'}`);

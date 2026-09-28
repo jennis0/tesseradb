@@ -1,12 +1,12 @@
 import type {FiltersProjection, RegionProjection, ViewProjection} from '@tesseradb/client';
 
 /**
- * Which count the density wash reads, and so its label: `highlighted` under a highlight, `matched`
- * when the request's `filters` carries anything (the filter clauses, `member_of` clauses and the
- * drawn region), `visible` otherwise. The choice follows what was asked, since the counts are
- * equal when nothing narrows them.
+ * Which count density reads: `highlighted` under a highlight, `matched` when the request's
+ * `filters` carries anything (the filter clauses, `member_of` clauses and the drawn region),
+ * `visible` otherwise. The choice follows what was asked, since the counts are equal when nothing
+ * narrows them.
  */
-export function washChannel(
+export function densityChannel(
   filters: FiltersProjection,
   view: ViewProjection,
   region: RegionProjection | null

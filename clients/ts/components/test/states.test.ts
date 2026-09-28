@@ -120,7 +120,8 @@ describe('<tessera-status> renders every state through part="state"', () => {
 
   /**
    * The highlight's count shows only under a highlight: without one `highlighted` equals `matched`
-   * and the cell would repeat it. `highlighting` says whether one was asked.
+   * and the cell would repeat it. `highlighting` says whether one was asked. It reads "N highlighted
+   * of M", M being the matched count.
    */
   it('adds the highlight’s own count only where a highlight was asked', async () => {
     const host = await mount('<tessera-status></tessera-status>');
@@ -129,10 +130,18 @@ describe('<tessera-status> renders every state through part="state"', () => {
     await settle(host);
     expect(deep(host, '[part="count-highlighted"]')).toBeNull();
 
-    el.store = fakeStore({status: status({}), view: {...view, highlighted: {value: 812, exact: true}, highlighting: true}});
+    // Nothing narrows what matches: the strip reads "812 highlighted of 3,210".
+    const lit = {...view, highlighted: {value: 812, exact: true}, highlighting: true};
+    el.store = fakeStore({status: status({}), view: lit});
     await settle(host);
-    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['3,210', '12,040', '812', '500']);
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['812', '3,210', '500']);
     expect(deep(host, '[part="count-highlighted"]')).not.toBeNull();
+
+    // A filter narrows it too, so the match cell stays beside the highlight's.
+    const filters = {draft: {}, expr: {archive: {in: ['cs']}}, highlight: {archive: {in: ['cs.CV']}}, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0};
+    el.store = fakeStore({status: status({}), view: lit, filters});
+    await settle(host);
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['3,210', '12,040', '812', '3,210', '500']);
   });
 
   it('retries a refused view and signs in again on expiry through the host’s renewal', async () => {
