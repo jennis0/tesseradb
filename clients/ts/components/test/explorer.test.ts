@@ -183,9 +183,10 @@ describe('<tessera-explorer> layouts', () => {
 
   it('opens the filter controls beside the card from its Filters button, which counts the clauses applied', async () => {
     const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
-    const popover = () => shadow.querySelector('[part="filters-popover"]');
+    const popover = () => shadow.querySelector<HTMLElement>('[part="filters-popover"]')!;
+    const open = () => !popover().hidden;
     const card = () => shadow.querySelector('[part="panel"]')!;
-    expect(popover()).toBeNull();
+    expect(open()).toBe(false);
     store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}}});
     await settle(host);
     const toggle = shadow.querySelector<HTMLButtonElement>('[part="filters-toggle"]')!;
@@ -204,22 +205,28 @@ describe('<tessera-explorer> layouts', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(shadow.getElementById(toggle.getAttribute('aria-controls')!)).toBe(popover());
     expect(deepAll(card(), 'tessera-filter')).toHaveLength(0);
-    const controls = deepAll(popover()!, 'tessera-filter') as (HTMLElement & {column: string; verb: string})[];
+    const controls = deepAll(popover(), 'tessera-filter') as (HTMLElement & {column: string; verb: string})[];
     expect(controls.map((c) => [c.column, c.verb])).toEqual([['archive', 'highlight']]);
-    // The Filters button closes it and opens it again; so do its close button and Escape.
+    // The Filters button closes it and opens it again, with focus in it and its position kept;
+    // its close button and Escape close it too, and focus goes back to the button.
     toggle.click();
     await settle(host);
-    expect(popover()).toBeNull();
+    expect(open()).toBe(false);
     toggle.click();
     await settle(host);
-    (popover()!.querySelector('[part="filters-close"]') as HTMLButtonElement).click();
     await settle(host);
-    expect(popover()).toBeNull();
+    const panel = popover().querySelector('tessera-filter-panel')!;
+    expect(panel.getAttribute('mode')).toBe('highlight');
+    expect(panel.shadowRoot!.activeElement?.getAttribute('data-verb')).toBe('highlight');
+    (popover().querySelector('[part="filters-close"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(open()).toBe(false);
+    expect(shadow.activeElement).toBe(toggle);
     toggle.click();
     await settle(host);
-    popover()!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
+    popover().dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
     await settle(host);
-    expect(popover()).toBeNull();
+    expect(open()).toBe(false);
     expect(shadow.activeElement).toBe(toggle);
   });
 

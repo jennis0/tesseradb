@@ -254,6 +254,13 @@ export class TesseraFilterPanel extends TesseraElement {
     this.requestUpdate();
   }
 
+  /** Moves focus to the Filter / Highlight switch, where the controls are drawn. */
+  override focus(options?: FocusOptions): void {
+    const target = this.renderRoot.querySelector<HTMLElement>('[part="mode"] [aria-checked="true"]');
+    if (target) target.focus(options);
+    else super.focus(options);
+  }
+
   private edit(column: string, verb: ClauseVerb): void {
     if (this.chipsOnly) emit(this, 'tessera-chipopen', {column, verb});
     else this.show(column, verb);

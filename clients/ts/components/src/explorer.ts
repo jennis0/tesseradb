@@ -229,8 +229,15 @@ export class TesseraExplorer extends TesseraElement {
         height: 100%;
         min-height: 320px;
       }
-      .floating:not(.compact) tessera-map {
-        --tessera-map-inset-left: calc(var(--_panel-width) + var(--_tessera-space));
+      /* The map's tools sit right of the card, and of the filter panel while it is open; in the
+         narrow layout there is no card beside them. */
+      @container explorer (width > 720px) {
+        .floating:not(.compact) tessera-map {
+          --tessera-map-inset-left: calc(var(--_panel-width) + var(--_tessera-space));
+        }
+        .floating.filters-open:not(.compact) tessera-map {
+          --tessera-map-inset-left: calc(var(--_panel-width) + 8px + 360px + var(--_tessera-space));
+        }
       }
       [part='sidebar'] {
         display: flex;
@@ -384,8 +391,12 @@ export class TesseraExplorer extends TesseraElement {
       [part='filters-close']:hover {
         background: var(--_tessera-surface-2);
       }
-      .floating.filters-open:not(.compact) tessera-map {
-        --tessera-map-inset-left: calc(var(--_panel-width) + 8px + 360px + var(--_tessera-space));
+      [part='filters-popover'][hidden] {
+        display: none;
+      }
+      /* In the compact form the filter panel lies over the map's right-hand cards, so they give way. */
+      .compact.filters-open .right {
+        display: none;
       }
       .badge {
         min-width: 16px;
@@ -463,10 +474,15 @@ export class TesseraExplorer extends TesseraElement {
       [part='detail'] {
         flex: 0 1 auto;
       }
-      /* The selection keeps to its own share of the column, so the detail card under it stays on screen. */
+      /* The selection keeps its heading, counts and actions; only its list of marks scrolls, so the
+         detail card under it stays on screen. */
       [part='selection-card'] {
         flex: none;
-        max-height: min(320px, 45cqh);
+        overflow: visible;
+      }
+      [part='selection-card'] tessera-selection::part(items) {
+        max-height: min(144px, 18cqh);
+        overflow-y: auto;
       }
       .compact [part='selection-card'] {
         width: 272px;
@@ -569,6 +585,7 @@ export class TesseraExplorer extends TesseraElement {
         }
         [part='sidebar'],
         [part='panel'],
+        [part='filters-popover'],
         .layers,
         .right,
         .in-map-strip {
@@ -717,12 +734,22 @@ export class TesseraExplorer extends TesseraElement {
   @state() accessor level: number | null = null;
   /** Whether the card's Filters button has opened the panel of controls. @internal */
   @state() accessor filtersOpen = false;
-  /** The control a chip asked to show, once the panel of controls is drawn. */
-  private showing: {column: string; verb: ClauseVerb} | null = null;
+  /**
+   * Where focus goes once the panel of controls shows: the control a chip asked for, or the panel
+   * itself where the Filters button opened it.
+   */
+  private showing: {column: string; verb: ClauseVerb} | 'panel' | null = null;
   /** Whether the Layers popover is open. @internal */
   @state() accessor layersOpen = false;
   /** Whether the container is narrower than 1000 px and wider than the narrow layout. @internal */
   @state() accessor compact = false;
+  /** Whether the host put anything in the filters slot, in place of the filter panel and its chips. */
+  @state() private accessor filtersFilled = false;
+
+  private onFiltersSlot = (e: Event): void => {
+    this.filtersFilled = (e.target as HTMLSlotElement).assignedElements().length > 0;
+  };
+
   /** Whether the host put anything in the toolbar slot. */
   @state() private accessor toolbarFilled = false;
 
@@ -759,6 +786,8 @@ export class TesseraExplorer extends TesseraElement {
     this.resize ??= new ResizeObserver((entries) => {
       const width = entries.at(-1)?.contentRect.width ?? 0;
       this.compact = width > COMPACT_BETWEEN[0] && width < COMPACT_BETWEEN[1];
+      // The narrow layout shows the filters as a sheet, so a panel left open beside the card closes.
+      if (width <= COMPACT_BETWEEN[0]) this.filtersOpen = false;
     });
     this.resize.observe(this);
   }
@@ -842,10 +871,9 @@ export class TesseraExplorer extends TesseraElement {
     const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout ?hide-palettes=${this.hidePalettes} .limit=${compact ? 4 : 0} .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
     // Only the card's copy carries the id its Filters button controls, so no id repeats.
-    const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>`;
+    const filters = html`<slot name="filters" @slotchange=${this.onFiltersSlot}><tessera-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>`;
     // The card's chips; a chip pressed opens the panel of controls at the chip's control.
-    const hostFilters = this.querySelector(':scope > [slot="filters"]') !== null;
-    const chips = hostFilters
+    const chips = this.filtersFilled
       ? nothing
       : html`<tessera-filter-panel exportparts=${FORWARD['filter-panel']} chips-only @tessera-chipopen=${(e: CustomEvent<{column: string; verb: ClauseVerb}>) => this.openFilters(e.detail)}></tessera-filter-panel>`;
     const hierarchy = html`<slot name="hierarchy"><tessera-hierarchy exportparts=${FORWARD.hierarchy}></tessera-hierarchy></slot>`;
@@ -875,11 +903,11 @@ export class TesseraExplorer extends TesseraElement {
       ${this.has('toolbar') ? colour : nothing}
       ${sections}
     </div>`;
-    const filtersPopover =
-      this.has('filters') && this.filtersOpen
-        ? html`<div part="filters-popover" id="filters" class="card" role="dialog" aria-label="Filters" @keydown=${this.onFiltersKey}>
+    // Drawn while closed too, so its switch and the fields opened in it last while the explorer does.
+    const filtersPopover = this.has('filters')
+      ? html`<div part="filters-popover" id="filters" class="card" role="dialog" aria-label="Filters" ?hidden=${!this.filtersOpen} @keydown=${this.onFiltersKey}>
             <button part="filters-close" type="button" aria-label="Close filters" @click=${() => this.closeFilters()}>${icon('close', 14, 1.4)}</button>
-            <slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} controls-only pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>
+            <slot name="filters" @slotchange=${this.onFiltersSlot}><tessera-filter-panel exportparts=${FORWARD['filter-panel']} controls-only pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>
           </div>`
         : nothing;
 
@@ -1065,7 +1093,7 @@ export class TesseraExplorer extends TesseraElement {
   /** Open the panel of controls, at `at`'s control where a chip asked for one. */
   private openFilters(at: {column: string; verb: ClauseVerb} | null): void {
     this.filtersOpen = true;
-    this.showing = at;
+    this.showing = at ?? 'panel';
   }
 
   private closeFilters(): void {
@@ -1113,9 +1141,11 @@ export class TesseraExplorer extends TesseraElement {
   protected override updated(changed: PropertyValues<this>): void {
     this.toggleAttribute('data-compact', this.compact);
     if (this.showing) {
-      const {column, verb} = this.showing;
+      const showing = this.showing;
       this.showing = null;
-      this.renderRoot.querySelector<TesseraFilterPanel>('[part="filters-popover"] tessera-filter-panel')?.show(column, verb);
+      const panel = this.renderRoot.querySelector<TesseraFilterPanel>('[part="filters-popover"] tessera-filter-panel');
+      if (showing === 'panel') void panel?.updateComplete.then(() => panel.focus());
+      else panel?.show(showing.column, showing.verb);
     }
     if (!changed.has('sheet')) return;
     const before = changed.get('sheet');
