@@ -31,10 +31,7 @@ import {css} from 'lit';
  * @cssprop --tessera-accent - The colour of the active map tool, primary buttons, badges, checked
  *   boxes and focus rings.
  * @cssprop --tessera-accent-ink - The text colour on an accent background.
- * @cssprop --tessera-accent-soft - The background of a filtered row and a matched span in a
- *   suggestion.
- * @cssprop --tessera-highlight - The colour of a highlight chip and a pressed highlight button.
- * @cssprop --tessera-highlight-ink - The icon colour on a pressed highlight button in the legend.
+ * @cssprop --tessera-highlight - The colour of a highlight chip, a highlighted row's text and its ×.
  * @cssprop --tessera-highlight-soft - The background of a highlight chip and a highlighted row.
  * @cssprop --tessera-warn - The colour of the dot in the data updated and reconnecting states.
  * @cssprop --tessera-refuse - The colour of the refused and expired states and their dot.
@@ -68,9 +65,7 @@ export const tokens = css`
     --_tessera-line-control: var(--tessera-line-control, light-dark(#deded9, #33373e));
     --_tessera-accent: var(--tessera-accent, light-dark(#1b1d21, #eceef1));
     --_tessera-accent-ink: var(--tessera-accent-ink, light-dark(#ffffff, #111317));
-    --_tessera-accent-soft: var(--tessera-accent-soft, light-dark(#ebebe6, #2c3037));
     --_tessera-highlight: var(--tessera-highlight, light-dark(#6b3fa0, #c3a6ee));
-    --_tessera-highlight-ink: var(--tessera-highlight-ink, light-dark(#ffffff, #1b1430));
     --_tessera-highlight-soft: var(--tessera-highlight-soft, light-dark(#efe6fa, #2c2340));
     --_tessera-warn: var(--tessera-warn, light-dark(#c98a0a, #e0a940));
     --_tessera-refuse: var(--tessera-refuse, light-dark(#b42318, #f0857a));

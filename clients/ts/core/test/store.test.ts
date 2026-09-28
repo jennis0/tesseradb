@@ -398,7 +398,7 @@ describe('suggest in the store', () => {
 
     store.suggest('archive', '');
     await clock.advance(200);
-    expect(suggest).toHaveBeenCalledWith('tok', 'archive', '', {view: 's0'});
+    expect(suggest).toHaveBeenCalledWith('tok', 'archive', '', {view: 's0', counts: true});
     expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
 
     store.clear();

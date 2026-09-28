@@ -1,7 +1,7 @@
 import {ContextProvider} from '@lit/context';
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import type {Store} from '@tesseradb/client';
+import type {ClauseVerb, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale} from '@tesseradb/deck';
 import {activeCount, browsableLayers, emptyDraft} from '@tesseradb/client';
 import {artifactBudgetFor, hasOneLayout, levelForBudget} from '@tesseradb/client/internal';
@@ -15,6 +15,7 @@ import {icon, type IconName} from './icons.js';
 import {exportparts, forwarded} from './parts.js';
 import {sameFrame} from './view-switch.js';
 import {drawnDensityColours, type TesseraMap} from './map.js';
+import type {TesseraFilterPanel} from './filter-panel.js';
 import {chrome, tokens} from './tokens.js';
 import './map.js';
 import './status.js';
@@ -71,24 +72,31 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * and `token` or an `authorise` property, or takes a `store` property, and provides it by context
  * to everything inside it, including elements a host puts in its slots.
  *
- * `layout="docked"` puts a sidebar left of the map: the view choice, then Colour (the legend), then
- * Filters (the applied clauses as chips, with Clear all, and every filter control), the selection
- * while a region is selected, and Hierarchy and In view as sections that start collapsed.
- * `layout="overlay"` folds the same content into one card over the map's top-left: the view choice
- * and a Filters button with the number of clauses applied, the chips, then Colour; the Filters
- * button opens the controls inside the card. In both, the map's tools sit at the top-left of the
- * map (beside the card in the overlay layout) with a Layers button beneath them, the detail card
- * sits in the map's top-right corner and the status strip in its bottom-right. The Layers button
+ * The heading names what is shown: `dataset-title` where the host sets one, with the view's name
+ * under it, else the view's name alone. With several views the view's name is the view choice.
+ *
+ * `layout="docked"` puts a sidebar left of the map: the heading, then Colour (the legend), then
+ * Filters (the applied clauses as chips, with Clear all, the Filter / Highlight switch and the
+ * filter controls), and Hierarchy and In view as sections that start collapsed.
+ * `layout="overlay"` folds the same content into one card over the map's top-left: the heading and
+ * a Filters button with the number of clauses applied, the chips, then Colour. The Filters button
+ * opens the switch and the controls in a panel beside the card, and the map's tools move to its
+ * right while it is open; its close button, the Filters button and Escape close it. In both, the
+ * map's tools sit at the top-left of the map (beside the card in the overlay layout) with a Layers
+ * button beneath them. The map's top-right corner holds the selection while a region is selected
+ * and, under it, the detail card; the status strip sits in its bottom-right. The Layers button
  * opens a popover with a Display section (whether the points are drawn, their size and opacity,
  * and how density is drawn, in which colours and how strongly) over the layer picker. The display
- * settings are the explorer's properties of the same names, passed to its map.
+ * settings are the explorer's properties of the same names, passed to its map. `pinned-filters`
+ * names the columns whose controls are listed before they hold a clause.
  *
  * In a container narrower than 1000 px, either layout folds into the card, 300 px wide, whose
- * legend names four values and offers the rest under "N more"; the tools move to the bottom-left
- * and the strip shortens its figures. In a container 720 px wide or narrower, the status strip runs
- * full width above a tab bar (Filters, Layers, In view, Item), and each tab opens its panel as a
- * sheet. The Hierarchy section appears only where the bundle has a hierarchical layer, and the
- * detail card only once something is selected.
+ * legend names four values and offers the rest under "N more"; the tools move to the bottom-left,
+ * the strip shortens its figures, and the filter panel opens beside the card over the map. In a
+ * container 720 px wide or narrower, the status strip runs full width above a tab bar (Filters,
+ * Layers, In view, Item), and each tab opens its panel as a sheet. The Hierarchy section appears
+ * only where the bundle has a hierarchical layer, and the detail card only once something is
+ * selected.
  *
  * Every event its elements fire bubbles out of it, since each is composed.
  *
@@ -98,7 +106,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @slot toolbar - Replaces the view picker and the key picker.
  * @slot colour - Replaces the legend.
  * @slot layers - Replaces the layer picker, in the Layers popover.
- * @slot filters - Replaces the filter panel.
+ * @slot filters - Replaces the filter panel: the chips and the controls in the sidebar, the
+ *   controls in the overlay's panel, whose card then shows no chips of its own.
  * @slot hierarchy - Replaces the hierarchy panel.
  * @slot artifacts - Replaces the In view list.
  * @slot selection - Replaces the selection panel, shown while a region is selected.
@@ -132,8 +141,15 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart sidebar - The sidebar, in the docked layout.
  * @csspart panel - The card over the map, in the overlay layout and in a container narrower than
  *   1000 px.
+ * @csspart dataset-title - The heading's dataset title, where `dataset-title` is set.
+ * @csspart view-name - The view's name in the heading, where there is one view to show.
  * @csspart filters-toggle - The card's Filters button, with `aria-expanded` while the controls show
  *   and `data-count` set to the number of clauses applied.
+ * @csspart filters-popover - The panel beside the card holding the filter controls, while it is
+ *   open.
+ * @csspart filters-close - The close button of that panel.
+ * @csspart selection-card - The card in the map's top-right corner holding the selection, while a
+ *   region is selected.
  * @csspart layers-toggle - The Layers button under the map's tools, with `data-on` while any layer
  *   is drawn.
  * @csspart layers-popover - The popover holding the Display section and the layer picker, while it
@@ -283,14 +299,44 @@ export class TesseraExplorer extends TesseraElement {
       .compact [part='panel'] .head {
         padding: 4px 4px 4px 12px;
       }
-      .head .pickers {
+      .names {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .names .pickers {
         display: flex;
         flex-direction: column;
         gap: 8px;
         min-width: 0;
       }
-      .head .pickers:empty {
-        display: none;
+      .title {
+        font-size: 15px;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .compact .title {
+        font-size: 13px;
+      }
+      .sub {
+        font-size: 12px;
+        color: var(--_tessera-ink-2);
+      }
+      .sub .pickers {
+        gap: 2px;
+      }
+      .sub tessera-view-picker::part(field) {
+        font-size: 12px;
+        font-weight: 400;
+        line-height: 1.45;
+      }
+      .compact tessera-view-picker::part(field) {
+        font-size: 13px;
+      }
+      .compact .sub tessera-view-picker::part(field) {
+        font-size: 12px;
       }
       [part='filters-toggle'] {
         margin-left: auto;
@@ -302,6 +348,45 @@ export class TesseraExplorer extends TesseraElement {
         padding: 0 8px;
         border: 0;
       }
+      [part='filters-toggle'][aria-expanded='true'] {
+        background: var(--_tessera-accent);
+        border-color: var(--_tessera-accent);
+        color: var(--_tessera-accent-ink);
+      }
+      [part='filters-toggle'][aria-expanded='true'] .badge {
+        background: var(--_tessera-accent-ink);
+        color: var(--_tessera-accent);
+      }
+      /* The filter controls in a panel beside the card, with the map's tools moved to its right. */
+      [part='filters-popover'] {
+        --_tessera-panel-inline: 14px;
+        position: absolute;
+        z-index: 2;
+        top: var(--_tessera-space);
+        left: calc(var(--_tessera-space) + var(--_panel-width) + 8px);
+        width: min(360px, calc(100% - var(--_panel-width) - 2 * var(--_tessera-space) - 8px));
+        max-height: calc(100% - 2 * var(--_tessera-space));
+        overflow-y: auto;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
+      }
+      [part='filters-close'] {
+        position: absolute;
+        z-index: 1;
+        top: 10px;
+        right: 10px;
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        border-radius: 5px;
+        color: var(--_tessera-ink-2);
+      }
+      [part='filters-close']:hover {
+        background: var(--_tessera-surface-2);
+      }
+      .floating.filters-open:not(.compact) tessera-map {
+        --tessera-map-inset-left: calc(var(--_panel-width) + 8px + 360px + var(--_tessera-space));
+      }
       .badge {
         min-width: 16px;
         padding: 0 4px;
@@ -312,7 +397,7 @@ export class TesseraExplorer extends TesseraElement {
         line-height: 16px;
         text-align: center;
       }
-      [part='panel'] tessera-filter-panel[chips-only]::part(filter-panel-title) {
+      [part='panel'] tessera-filter-panel::part(title) {
         margin-bottom: 8px;
       }
       /* The Layers button under the tools, and its popover. */
@@ -367,12 +452,24 @@ export class TesseraExplorer extends TesseraElement {
         top: auto;
         bottom: 0;
       }
-      [part='detail'] {
+      [part='detail'],
+      [part='selection-card'] {
         --_tessera-panel-padding: 14px 14px 12px;
         width: 320px;
         max-width: 100%;
-        max-height: calc(100cqh - 2 * var(--_tessera-space) - 48px);
+        min-height: 0;
         overflow-y: auto;
+      }
+      [part='detail'] {
+        flex: 0 1 auto;
+      }
+      /* The selection keeps to its own share of the column, so the detail card under it stays on screen. */
+      [part='selection-card'] {
+        flex: none;
+        max-height: min(320px, 45cqh);
+      }
+      .compact [part='selection-card'] {
+        width: 272px;
       }
       .compact [part='detail'] {
         width: 272px;
@@ -387,6 +484,7 @@ export class TesseraExplorer extends TesseraElement {
         flex-direction: column;
         align-items: flex-end;
         gap: calc(var(--_tessera-space) / 2);
+        max-height: calc(100cqh - 2 * var(--_tessera-space) - 48px);
         pointer-events: none;
       }
       .right > * {
@@ -600,6 +698,10 @@ export class TesseraExplorer extends TesseraElement {
   @property({type: Boolean, attribute: 'ramp-reverse'}) accessor rampReverse = false;
   /** Passed to the map's `valueColours`. */
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
+  /** The dataset's title, which heads the explorer above the view's name. Unset, the view's name is the heading. */
+  @property({attribute: 'dataset-title'}) accessor datasetTitle = '';
+  /** Passed to the filter panel's `pinned`: the columns whose controls are listed before they hold a clause. */
+  @property({attribute: 'pinned-filters'}) accessor pinnedFilters = '';
   /** Passed to the legend's `hide-palettes`: the palette and ramp choices are left out of Colour by. */
   @property({type: Boolean, attribute: 'hide-palettes'}) accessor hidePalettes = false;
   /** Whether the list of density colours in the Layers popover is open. @internal */
@@ -610,8 +712,10 @@ export class TesseraExplorer extends TesseraElement {
   @state() private accessor tabFocus: Sheet | null = null;
   /** The level chosen through the legend's select; the map colours and labels at it. @internal */
   @state() accessor level: number | null = null;
-  /** Whether the card's Filters button has opened the controls. @internal */
+  /** Whether the card's Filters button has opened the panel of controls. @internal */
   @state() accessor filtersOpen = false;
+  /** The control a chip asked to show, once the panel of controls is drawn. */
+  private showing: {column: string; verb: ClauseVerb} | null = null;
   /** Whether the Layers popover is open. @internal */
   @state() accessor layersOpen = false;
   /** Whether the container is narrower than 1000 px and wider than the narrow layout. @internal */
@@ -723,39 +827,58 @@ export class TesseraExplorer extends TesseraElement {
     // filled the slot. The slot is always rendered, so its slotchange keeps `toolbarFilled` current.
     const pickersShown = this.toolbarFilled || (meta !== null && !hasOneLayout(meta));
     const pickers = html`<div class="pickers" ?hidden=${!pickersShown}><slot name="toolbar" @slotchange=${this.onToolbarSlot}><tessera-view-picker exportparts=${FORWARD['view-picker']}></tessera-view-picker><tessera-key-picker exportparts=${FORWARD['key-picker']}></tessera-key-picker></slot></div>`;
+    // The heading names what is shown: the dataset's title over the view's name, or the view's
+    // name alone. With one view the name is text; with several it is the view choice.
+    const shown = meta?.views.find((v) => v.id === s?.get('view').id) ?? (meta?.views.length === 1 ? meta.views[0] : undefined);
+    const viewName = shown?.displayName ?? '';
+    const viewText = (cls: string) => (pickersShown || !viewName ? nothing : html`<span part="view-name" class=${cls}>${viewName}</span>`);
+    const names = this.datasetTitle
+      ? html`<div class="names"><span part="dataset-title" class="title">${this.datasetTitle}</span><div class="sub">${pickers}${viewText('')}</div></div>`
+      : html`<div class="names">${pickers}${viewText('title')}</div>`;
+    const named = pickersShown || viewName !== '' || this.datasetTitle !== '';
     const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout ?hide-palettes=${this.hidePalettes} .limit=${compact ? 4 : 0} .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
     // Only the card's copy carries the id its Filters button controls, so no id repeats.
-    // A chip pressed while the controls are closed opens them; the panel then opens the chip's control.
-    const filters = (chipsOnly: boolean, id: string | typeof nothing = nothing) => html`<div id=${id} class="filters" @tessera-chipopen=${() => (this.filtersOpen = true)}><slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} ?chips-only=${chipsOnly}></tessera-filter-panel></slot></div>`;
+    const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>`;
+    // The card's chips; a chip pressed opens the panel of controls at the chip's control.
+    const hostFilters = this.querySelector(':scope > [slot="filters"]') !== null;
+    const chips = hostFilters
+      ? nothing
+      : html`<tessera-filter-panel exportparts=${FORWARD['filter-panel']} chips-only @tessera-chipopen=${(e: CustomEvent<{column: string; verb: ClauseVerb}>) => this.openFilters(e.detail)}></tessera-filter-panel>`;
     const hierarchy = html`<slot name="hierarchy"><tessera-hierarchy exportparts=${FORWARD.hierarchy}></tessera-hierarchy></slot>`;
     // Drawn only where there is a hierarchy to walk; an empty section would look broken.
     const hasHierarchy = browsableLayers(meta?.layers ?? []).length > 0;
     const list = html`<slot name="artifacts"><tessera-artifact-list exportparts=${FORWARD['artifact-list']}></tessera-artifact-list></slot>`;
     const selectionPanel = this.has('selection') && region ? html`<slot name="selection"><tessera-selection exportparts=${FORWARD.selection}></tessera-selection></slot>` : nothing;
+    const selectionCard = selectionPanel === nothing ? nothing : html`<div part="selection-card" class="card">${selectionPanel}</div>`;
     const section = (name: string, title: string, summary: string, body: unknown) =>
       html`<details><summary><span class="t"><span class="closed-chev">${icon('chevr', 14)}</span><span class="open-chev">${icon('chev', 14)}</span>${title}</span><span class="summary">${summary}</span></summary><div class="body" data-section=${name}>${body}</div></details>`;
     const sections = html`${this.has('hierarchy') && hasHierarchy ? section('hierarchy', 'Hierarchy', '', hierarchy) : nothing}
       ${this.has('artifacts') ? section('artifacts', 'In view', inView > 0 ? inView.toLocaleString('en-GB') : '', list) : nothing}`;
 
     const docked = html`<aside part="sidebar" aria-label="Explorer panels">
-      ${this.has('toolbar') ? html`<div class="head" ?hidden=${!pickersShown}>${pickers}</div>` : nothing}
+      ${this.has('toolbar') ? html`<div class="head" ?hidden=${!named}>${names}</div>` : nothing}
       ${this.has('toolbar') ? colour : nothing}
-      ${this.has('filters') ? filters(false) : nothing}
-      ${selectionPanel}
+      ${this.has('filters') ? filters : nothing}
       ${sections}
     </aside>`;
 
     const filtersToggle = this.has('filters')
-      ? html`<button part="filters-toggle" class="btn" type="button" aria-controls="filters" aria-expanded=${this.filtersOpen ? 'true' : 'false'} data-count=${applied} @click=${() => (this.filtersOpen = !this.filtersOpen)}>${icon('filter', 14, 1.3)}Filters${applied > 0 ? html`<span class="badge">${applied}</span>` : nothing}</button>`
+      ? html`<button part="filters-toggle" class="btn" type="button" aria-controls=${this.filtersOpen ? 'filters' : nothing} aria-expanded=${this.filtersOpen ? 'true' : 'false'} data-count=${applied} @click=${() => (this.filtersOpen ? this.closeFilters() : this.openFilters(null))}>${icon('filter', 14, 1.3)}Filters${applied > 0 ? html`<span class="badge">${applied}</span>` : nothing}</button>`
       : nothing;
     const panel = html`<div part="panel" class="card" role="region" aria-label="Explorer panels">
-      ${this.has('toolbar') || this.has('filters') ? html`<div class="head" ?hidden=${!(this.has('toolbar') && pickersShown) && !this.has('filters')}>${this.has('toolbar') ? pickers : nothing}${filtersToggle}</div>` : nothing}
-      ${this.has('filters') ? filters(!this.filtersOpen, 'filters') : nothing}
+      ${this.has('toolbar') || this.has('filters') ? html`<div class="head" ?hidden=${!(this.has('toolbar') && named) && !this.has('filters')}>${this.has('toolbar') ? names : nothing}${filtersToggle}</div>` : nothing}
+      ${this.has('filters') ? chips : nothing}
       ${this.has('toolbar') ? colour : nothing}
-      ${selectionPanel}
       ${sections}
     </div>`;
+    const filtersPopover =
+      this.has('filters') && this.filtersOpen
+        ? html`<div part="filters-popover" id="filters" class="card" role="dialog" aria-label="Filters" @keydown=${this.onFiltersKey}>
+            <button part="filters-close" type="button" aria-label="Close filters" @click=${() => this.closeFilters()}>${icon('close', 14, 1.4)}</button>
+            <slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} controls-only pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>
+          </div>`
+        : nothing;
 
     const layersButton = this.has('legend')
       ? html`<div class="layers" slot=${compact ? 'bottom-left' : 'top-left'} @keydown=${this.onLayersKey}>
@@ -789,9 +912,9 @@ export class TesseraExplorer extends TesseraElement {
     </div>`;
     const sheetBody =
       this.sheet === 'filters'
-        ? html`${filters(false)}${this.has('hierarchy') && hasHierarchy ? hierarchy : nothing}${sheetFooter}`
+        ? html`${filters}${this.has('hierarchy') && hasHierarchy ? hierarchy : nothing}${sheetFooter}`
         : this.sheet === 'layers'
-          ? html`<div class="head" ?hidden=${!pickersShown}>${pickers}</div>${colour}<div class="panel">${layersPanel}</div>`
+          ? html`<div class="head" ?hidden=${!named}>${names}</div>${colour}<div class="panel">${layersPanel}</div>`
           : this.sheet === 'artifacts'
             ? html`${selectionPanel}${list}`
             : this.sheet === 'detail'
@@ -800,7 +923,7 @@ export class TesseraExplorer extends TesseraElement {
 
     // The tooltip slot is forwarded only when the host supplied one: a slot assigned another slot
     // counts as filled even when that slot is empty, which would hide the map's own tooltip.
-    return html`<div part="frame" class=${`${floating ? 'floating' : 'docked'}${compact ? ' compact' : ''}`}
+    return html`<div part="frame" class=${`${floating ? 'floating' : 'docked'}${compact ? ' compact' : ''}${floating && this.filtersOpen ? ' filters-open' : ''}`}
       @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))}
       @tessera-viewfollow=${(e: CustomEvent<{view: string; x: number; y: number}>) => this.followItem(e.detail)}
       @tessera-close=${() => this.closeDetail()}>
@@ -831,11 +954,12 @@ export class TesseraExplorer extends TesseraElement {
           @click=${() => this.requestUpdate()}
         >
           ${layersButton}
-          <div slot="top-right" class="right"><slot name="top-right"></slot>${this.has('detail') && hasDetail ? html`<div part="detail" class="card">${detail}</div>` : nothing}</div>
+          <div slot="top-right" class="right"><slot name="top-right"></slot>${selectionCard}${this.has('detail') && hasDetail ? html`<div part="detail" class="card">${detail}</div>` : nothing}</div>
           <div slot="bottom-right" class="in-map-strip"><slot name="status"><tessera-status exportparts=${FORWARD.status} ?compact=${compact}></tessera-status></slot></div>
           ${this.querySelector('[slot="tooltip"]') ? html`<slot name="tooltip" slot="tooltip"></slot>` : nothing}
         </tessera-map>
         ${floating ? panel : nothing}
+        ${floating ? filtersPopover : nothing}
       </div>
       ${this.sheet && sheetBody !== nothing
         ? html`<div part="sheet" id="sheet" role="dialog" aria-labelledby=${`tab-${this.sheet}`} tabindex="-1" @keydown=${this.onSheetKey}>${sheetBody}</div>`
@@ -935,6 +1059,24 @@ export class TesseraExplorer extends TesseraElement {
     emit(this, 'tessera-displaychange', this.display);
   }
 
+  /** Open the panel of controls, at `at`'s control where a chip asked for one. */
+  private openFilters(at: {column: string; verb: ClauseVerb} | null): void {
+    this.filtersOpen = true;
+    this.showing = at;
+  }
+
+  private closeFilters(): void {
+    this.filtersOpen = false;
+    this.renderRoot.querySelector<HTMLElement>('[part="filters-toggle"]')?.focus();
+  }
+
+  /** Escape closes the panel of controls and returns focus to the Filters button. */
+  private onFiltersKey = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    this.closeFilters();
+  };
+
   /** Escape closes the Layers popover and returns focus to its button. */
   private onLayersKey = (e: KeyboardEvent): void => {
     if (e.key !== 'Escape' || !this.layersOpen) return;
@@ -967,6 +1109,11 @@ export class TesseraExplorer extends TesseraElement {
   /** Focus goes into a sheet as it opens, and back to its tab as it closes. */
   protected override updated(changed: PropertyValues<this>): void {
     this.toggleAttribute('data-compact', this.compact);
+    if (this.showing) {
+      const {column, verb} = this.showing;
+      this.showing = null;
+      this.renderRoot.querySelector<TesseraFilterPanel>('[part="filters-popover"] tessera-filter-panel')?.show(column, verb);
+    }
     if (!changed.has('sheet')) return;
     const before = changed.get('sheet');
     if (this.sheet) this.renderRoot.querySelector<HTMLElement>('[part="sheet"]')?.focus();

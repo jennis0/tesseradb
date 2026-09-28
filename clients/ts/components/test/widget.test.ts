@@ -320,7 +320,6 @@ describe('draftOf inverts composeFilters', () => {
   ];
   const cases: FilterExpr[] = [
     {title: {match: 'sea'}},
-    {title: {match: {query: 'sea sky', minimum_should_match: 1}}},
     {title: {phrase: 'the sea'}},
     {archive: {in: ['a', 'b']}},
     {author: {prefix: 'Ke'}},
@@ -332,6 +331,10 @@ describe('draftOf inverts composeFilters', () => {
       expect(composeFilters(draftOf(expr, operands))).toEqual(expr);
     });
   }
+  it('reads a match of any one word as alternatives, which ask the same', () => {
+    expect(composeFilters(draftOf({title: {match: {query: 'sea sky', minimum_should_match: 1}}}, operands))).toEqual({any_of: [{title: {match: 'sea'}}, {title: {match: 'sky'}}]});
+    expect(() => draftOf({title: {match: {query: 'sea sky wave', minimum_should_match: 2}}}, operands)).toThrow();
+  });
   it('null is the unfiltered request', () => {
     expect(composeFilters(draftOf(null, operands))).toBeNull();
   });

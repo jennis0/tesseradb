@@ -81,7 +81,9 @@ describe('<tessera-explorer> parts', () => {
   });
 
   it('forwards the filter controls’ parts through the filter panel', async () => {
-    const {shadow} = await explorer();
+    const {host, shadow, store} = await explorer();
+    store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}, author: {family: 'keyword', needle: 'Ada', op: 'eq'}}, highlight: {}}});
+    await settle(host);
     const panel = shadow.querySelector('tessera-filter-panel')!;
     const outer = forwardedBy(panel);
     const filters = [...panel.shadowRoot!.querySelectorAll('tessera-filter')];
@@ -179,33 +181,71 @@ describe('<tessera-explorer> layouts', () => {
     expect(overlay.shadow.querySelector('[part="panel"] tessera-legend')).not.toBeNull();
   });
 
-  it('opens the filter controls from the card’s Filters button, which counts the clauses applied', async () => {
+  it('opens the filter controls beside the card from its Filters button, which counts the clauses applied', async () => {
     const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
-    const controls = () => deepAll(shadow.querySelector('[part="panel"]')!, 'tessera-filter');
-    expect(controls()).toHaveLength(0);
+    const popover = () => shadow.querySelector('[part="filters-popover"]');
+    const card = () => shadow.querySelector('[part="panel"]')!;
+    expect(popover()).toBeNull();
     store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}}});
     await settle(host);
     const toggle = shadow.querySelector<HTMLButtonElement>('[part="filters-toggle"]')!;
     expect(toggle.getAttribute('data-count')).toBe('1');
-    expect(shadow.getElementById(toggle.getAttribute('aria-controls')!)).not.toBeNull();
-    // The chips show with the controls closed.
-    expect(deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"]')).toHaveLength(1);
+    // The chips show in the card with the controls closed; the card holds no control.
+    expect(deepAll(card(), '[part="chip"]')).toHaveLength(1);
     // A highlight on the same column is a second clause and a second chip.
     store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {archive: {family: 'category', keys: ['cs']}}}});
     await settle(host);
     expect(toggle.getAttribute('data-count')).toBe('2');
-    expect(deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"]')).toHaveLength(2);
-    // Pressing a chip while the controls are closed opens them.
-    (deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"][data-verb="highlight"] [part="edit"]')[0] as HTMLButtonElement).click();
+    expect(deepAll(card(), '[part="chip"]')).toHaveLength(2);
+    // Pressing a chip opens the panel at the chip's control, in the chip's position.
+    (deepAll(card(), '[part="chip"][data-verb="highlight"] [part="edit"]')[0] as HTMLButtonElement).click();
+    await settle(host);
     await settle(host);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(controls()).toHaveLength(2);
+    expect(shadow.getElementById(toggle.getAttribute('aria-controls')!)).toBe(popover());
+    expect(deepAll(card(), 'tessera-filter')).toHaveLength(0);
+    const controls = deepAll(popover()!, 'tessera-filter') as (HTMLElement & {column: string; verb: string})[];
+    expect(controls.map((c) => [c.column, c.verb])).toEqual([['archive', 'highlight']]);
+    // The Filters button closes it and opens it again; so do its close button and Escape.
     toggle.click();
     await settle(host);
+    expect(popover()).toBeNull();
     toggle.click();
     await settle(host);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(controls()).toHaveLength(2);
+    (popover()!.querySelector('[part="filters-close"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(popover()).toBeNull();
+    toggle.click();
+    await settle(host);
+    popover()!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
+    await settle(host);
+    expect(popover()).toBeNull();
+    expect(shadow.activeElement).toBe(toggle);
+  });
+
+  it('heads the card with the dataset title over the view’s name, or the view’s name alone', async () => {
+    const titled = await explorer('<tessera-explorer layout="overlay" dataset-title="arXiv abstracts"></tessera-explorer>');
+    expect(titled.shadow.querySelector('[part="dataset-title"]')?.textContent).toBe('arXiv abstracts');
+    expect(titled.shadow.querySelector('[part="view-name"]')?.textContent).toBe('default');
+    document.body.innerHTML = '';
+    const plain = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    expect(plain.shadow.querySelector('[part="dataset-title"]')).toBeNull();
+    expect(plain.shadow.querySelector('[part="view-name"]')?.textContent).toBe('default');
+    // With several views the name is the view choice.
+    plain.store.set('meta', {...META, views: [...META.views, {...META.views[0]!, id: 's1', displayName: 'other'}]});
+    await settle(plain.host);
+    expect(plain.shadow.querySelector('[part="view-name"]')).toBeNull();
+    expect(plain.shadow.querySelector('tessera-view-picker')?.shadowRoot?.querySelector('select')).not.toBeNull();
+  });
+
+  it('shows a selected region in the map’s top-right corner, above the detail card', async () => {
+    const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    store.set('selection', {item: {id: 5n, detail: {fields: {}, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
+    store.set('region', {shape: {kind: 'box', bbox: [0, 0, 1, 1]}, status: 'shown', refusal: null, visible: {value: 3, exact: true}, matched: {value: 3, exact: true}, served: {shown: 1, total: 3, exact: true}, verdict: {exact: true, depth: null}, held: {ids: BigUint64Array.of(5n), positions: new Float32Array(2), count: 1}});
+    await settle(host);
+    const corner = shadow.querySelector('.right')!;
+    expect([...corner.children].map((c) => c.getAttribute('part')).filter(Boolean)).toEqual(['selection-card', 'detail']);
+    expect(shadow.querySelector('[part="panel"] tessera-selection')).toBeNull();
   });
 
   it('opens the layer picker from the Layers button, passes its change on, and closes on Escape', async () => {

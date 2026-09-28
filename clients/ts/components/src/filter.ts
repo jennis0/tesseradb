@@ -1,19 +1,8 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {
-  composeFilters,
-  emptyDraft,
-  isPopulated,
-  type ClauseVerb,
-  type ColumnDraft,
-  type FilterOperandSet,
-  type MatchSpan,
-  type Refusal,
-  type SuggestValue,
-  type TextMode
-} from '@tesseradb/client';
-import {TesseraElement, columnCaption, emit} from './base.js';
+import {composeFilters, emptyDraft, isPopulated, type ClauseVerb, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestValue} from '@tesseradb/client';
+import {TesseraElement, columnCaption, emit, keyTitle, parseDateText, shortDateText} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
@@ -27,22 +16,36 @@ const OPERATOR_WORDS: Record<KeywordOperator, string> = {contains: 'contains', p
 /** How long a typed control must be quiet before its change is sent. */
 const TYPING_DEBOUNCE_MS = 350;
 
+/** The narrowest bar a suggested value with any items draws, as a percentage, so it still shows. */
+const BAR_FLOOR = 2;
+
 /**
- * One filter control for the column `column`, drawn by the family `/v1/meta` gives the column. A
- * text column is a search box and two buttons: all words, and phrase (any word where the column
- * takes no phrase). A category is a checklist when every value the viewer can see fits on the first page of suggestions, else a
- * typeahead over `/v1/categories/{column}/suggest`. A number is two inputs, and a date two date
- * inputs. A keyword column is a text box with its operator (`contains`, `prefix` or `eq`).
+ * One filter control for the column `column`, drawn by the family `/v1/meta` gives the column, under
+ * the column's name. `verb` is the position it edits: the column's filter clause or its highlight
+ * clause. The two are separate clauses; the control shows the one in its position and leaves the
+ * other alone.
  *
- * A Filter / Highlight switch beside the caption sets `verb`, the position the control edits: the
- * column's filter clause or its highlight clause. The two are separate clauses; the control shows
- * the one in its position and leaves the other alone.
+ * A text column is one search box. Its words must all appear; words in double quotes are a phrase;
+ * `OR` between terms asks for either. A line under the box says so, leaving out the phrase where
+ * the column takes none.
+ *
+ * A category is a search box over `/v1/categories/{column}/suggest`, which lists nothing until
+ * something is typed. Each value suggested shows its count in the current view and a bar, its
+ * share of the items the map matches now. In the highlight position a value the column's filter
+ * leaves out is greyed, counted 0 and cannot be chosen. The values chosen sit under the box as
+ * chips, each with a ×. A value typed and entered is added whether or not it was suggested; a key
+ * the viewer cannot see matches nothing, as a key that does not exist does. Where the legend holds
+ * the column's values, the heading says how many there are.
+ *
+ * A number is two inputs, and a date two text inputs that read and write dates as day, month and
+ * year (`1 Jan 2019`); a date typed as a month or a year means its first day in the lower input
+ * and its last in the upper. A keyword column is a text box with its operator (`contains`,
+ * `prefix` or `eq`).
  *
  * Typing is sent 350 ms after the last keystroke; a choice is sent at once, and so is typing still
- * waiting when the position is switched. Each change replaces the column's control in the
- * control's position of the store's draft (`Store.setFilters`). A category value typed and entered
- * is added whether or not it was suggested; a key the viewer cannot see matches nothing, as a key
- * that does not exist does. The host carries `data-on` while the control holds a value.
+ * waiting when the position changes. Each change replaces the column's control in the control's
+ * position of the store's draft (`Store.setFilters`). The host carries `data-on` while the control
+ * holds a value.
  *
  * @summary One filter control, drawn by the column's type.
  * @tagname tessera-filter
@@ -50,11 +53,17 @@ const TYPING_DEBOUNCE_MS = 350;
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - The
  *   control changed, with the column, its position and the expression that position composes.
  * @csspart label - The column's name, as a caption.
- * @csspart verb - The Filter / Highlight switch: two buttons with `data-verb` and `aria-pressed`.
- * @csspart entry - A text, number or date input.
- * @csspart mode - The text column's word toggle, or the keyword column's operator select.
- * @csspart values - The checklist, or the typeahead's suggestions.
- * @csspart tick - One value in the checklist or the suggestions.
+ * @csspart aside - The heading's right-hand text: how many values a category has, or a number or
+ *   date control's Clear button.
+ * @csspart entry - A text, number or date input, with `aria-invalid` on a date that does not read.
+ * @csspart hint - The line under a text column's box saying how to write a query.
+ * @csspart mode - The keyword column's operator select.
+ * @csspart values - The typeahead's suggestions.
+ * @csspart tick - One suggested value, with `aria-selected`, and `aria-disabled` where the filter
+ *   leaves it out.
+ * @csspart bar - A suggested value's share of the items matched.
+ * @csspart value-count - A suggested value's count.
+ * @csspart chosen - A chosen category value's chip.
  * @csspart more - The hint that more values match than one page holds.
  * @csspart refusal - The words "Values unavailable" where the values could not be listed, with
  *   `data-code` set to the refusal's code.
@@ -69,7 +78,7 @@ export class TesseraFilter extends TesseraElement {
       }
       .head {
         display: flex;
-        align-items: center;
+        align-items: baseline;
         justify-content: space-between;
         gap: 8px;
         margin-bottom: 8px;
@@ -79,18 +88,18 @@ export class TesseraFilter extends TesseraElement {
         font-weight: 600;
         color: var(--_tessera-ink);
       }
-      .seg[part='verb'] {
-        margin-top: 0;
-        height: 22px;
-        flex: none;
+      [part='aside'] {
+        font-size: 12px;
+        color: var(--_tessera-ink-3);
       }
-      .seg[part='verb'] button {
-        padding: 0 7px;
-        font-size: 11px;
+      button[part='aside'] {
+        font-weight: 500;
+        color: var(--_tessera-ink-2);
       }
-      .seg[part='verb'] button[data-verb='highlight'][aria-pressed='true'] {
-        background: var(--_tessera-highlight-soft);
-        color: var(--_tessera-highlight);
+      :host([verb='highlight']) .input:focus-within {
+        outline: 0;
+        border: 1.5px solid var(--_tessera-highlight);
+        padding: 0 9.5px;
       }
       .ctl-row {
         display: flex;
@@ -101,46 +110,129 @@ export class TesseraFilter extends TesseraElement {
         flex: 1 1 0;
         min-width: 0;
       }
-      .seg {
+      .range {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        gap: 8px;
+        align-items: center;
+      }
+      .range input {
+        width: 100%;
+        height: 28px;
+        padding: 0 8px;
+        font-variant-numeric: tabular-nums;
+      }
+      .range input[aria-invalid='true'] {
+        border-color: var(--_tessera-refuse);
+      }
+      [part='hint'] {
+        display: block;
         margin-top: 6px;
+        font-size: 12px;
+        color: var(--_tessera-ink-3);
       }
       [part='values'] {
-        margin-top: 4px;
         display: flex;
         flex-direction: column;
-        gap: 2px;
+        margin-top: 6px;
+        padding: 4px;
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius-control);
+        background: var(--_tessera-surface);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
       }
-      /* A row is a button stretched to the list's width; the shared button reset leaves text-align. */
-      [part='tick'] {
+      [part~='tick'] {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        column-gap: 10px;
+        padding: 5px 8px;
+        border-radius: 4px;
         text-align: left;
       }
-      [part='tick'] .t {
+      [part~='tick']:hover,
+      [part~='tick']:focus-visible {
+        background: var(--_tessera-surface-2);
+      }
+      [part~='tick'][aria-selected='true'] {
+        background: var(--_tessera-surface-2);
+        font-weight: 600;
+      }
+      :host([verb='highlight']) [part~='tick'][aria-selected='true'] {
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
+      }
+      [part~='tick'][aria-disabled='true'] {
+        cursor: default;
+        background: none;
+        color: var(--_tessera-ink-3);
+      }
+      .opt {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+      }
+      .opt .t {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        min-width: 0;
+      }
+      .opt .name {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .opt .out {
+        flex: none;
+        font-size: 11px;
+        font-weight: 400;
+        color: var(--_tessera-ink-3);
+      }
       /* The matched span the server gave. */
-      [part='tick'] mark {
+      [part~='tick'] mark {
         background: none;
         color: inherit;
         font-weight: 600;
       }
-      [part='tick'] input {
-        width: 14px;
-        height: 14px;
-        margin: 0;
-        flex: none;
-      }
-      [part='values'][role='group'] > [part='tick'] {
-        min-height: 28px;
-        padding-left: 2px;
-      }
       /* The key follows the title, muted, since a key may be an opaque identifier such as a uuid. */
-      [part='tick'] .k {
+      [part~='tick'] .k {
         margin-left: 0.45em;
         opacity: 0.55;
         font-size: 0.85em;
         font-variant-numeric: tabular-nums;
+      }
+      .track {
+        height: 3px;
+        border-radius: 2px;
+        background: var(--_tessera-surface-3);
+      }
+      [part='bar'] {
+        height: 3px;
+        border-radius: 2px;
+        background: color-mix(in srgb, var(--_tessera-ink-2) 75%, var(--_tessera-surface));
+      }
+      [aria-selected='true'] [part='bar'] {
+        background: var(--_tessera-ink);
+      }
+      :host([verb='highlight']) [aria-selected='true'] [part='bar'] {
+        background: var(--_tessera-highlight);
+      }
+      [part='value-count'] {
+        font-size: 12px;
+        font-weight: 400;
+        font-variant-numeric: tabular-nums;
+        color: var(--_tessera-ink-2);
+      }
+      [aria-disabled='true'] [part='value-count'] {
+        color: var(--_tessera-ink-3);
+      }
+      .chosen {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 8px;
       }
       [part='more'] {
         display: block;
@@ -155,11 +247,11 @@ export class TesseraFilter extends TesseraElement {
         margin-top: 6px;
         font-size: 12px;
       }
+      .skel {
+        margin-top: 8px;
+      }
       .to {
         color: var(--_tessera-ink-3);
-      }
-      input.num {
-        font-variant-numeric: tabular-nums;
       }
     `
   ];
@@ -175,18 +267,11 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor draft: ColumnDraft | null = null;
   /** @internal */
   @state() accessor search = '';
-  /**
-   * Which category shape this control draws: `null` until the empty-`q` page answers, then
-   * `'checklist'` if it said `more: false` (every visible value fits) or `'lookahead'` if not.
-   * Decided once from that page, so later pages do not flip it, and reset when the store's
-   * `suggestEpoch` moves.
-   *
-   * @internal
-   */
-  @state() accessor shape: 'checklist' | 'lookahead' | null = null;
+  /** The date inputs whose text did not read as a date, which keep the text typed. @internal */
+  @state() accessor invalid: {gte?: string; lte?: string} = {};
   private sent: ColumnDraft | null = null;
   private typing: ReturnType<typeof setTimeout> | null = null;
-  /** The change `typing` is waiting to send, so a switch of position can send it first. */
+  /** The change `typing` is waiting to send, so a change of position can send it first. */
   private pending: (() => void) | null = null;
   /**
    * The last `q` this element asked the store's typeahead for. Store changes arrive for every
@@ -196,13 +281,12 @@ export class TesseraFilter extends TesseraElement {
   private lastAsked: string | null = null;
   /**
    * The store's `filters.suggestEpoch` as last seen, `-1` before the first update. A change means
-   * every held page was invalidated (a view switch or re-authorisation). A column still loading or
-   * refused looks the same before and after a reset, so only the epoch shows one happened.
+   * every held page was invalidated (a view switch or re-authorisation), so a typed `q` is asked
+   * again.
    */
   private lastEpoch = -1;
 
   protected override resetServerData(): void {
-    this.shape = null;
     this.search = '';
     this.lastAsked = null;
     this.lastEpoch = -1;
@@ -226,10 +310,10 @@ export class TesseraFilter extends TesseraElement {
     return this.resolvedStore?.get('filters').suggestErrors[this.column] ?? null;
   }
 
-  /** Ask the store's typeahead for `q`, but only once per distinct `q` this element has asked. */
+  /** Ask the store's typeahead for `q`, once per distinct `q`; nothing is asked before anything is typed. */
   private ask(q: string): void {
     const s = this.resolvedStore;
-    if (!s || this.lastAsked === q) return;
+    if (!s || q === '' || this.lastAsked === q) return;
     this.lastAsked = q;
     s.suggest(this.column, q);
   }
@@ -243,21 +327,11 @@ export class TesseraFilter extends TesseraElement {
       this.sent = stored;
     }
     if (this.resolvedOperand?.family === 'category') {
-      const filters = this.resolvedStore?.get('filters');
-      const epoch = filters?.suggestEpoch ?? -1;
-      // Invalidated: forget the shape, the typed `q` and `lastAsked`, so the `ask('')` below
-      // reaches the store and the control starts over as on first mount.
+      const epoch = this.resolvedStore?.get('filters').suggestEpoch ?? -1;
       if (epoch !== this.lastEpoch) {
         this.lastEpoch = epoch;
-        this.shape = null;
         this.lastAsked = null;
-        this.search = '';
       }
-      // Not an `else`: the first update after mount takes the branch above, and a page may
-      // already be on the store then.
-      const page = filters?.suggestions[this.column];
-      if (page && page.q === '' && this.shape === null) this.shape = page.more ? 'lookahead' : 'checklist';
-      // An empty `q` lists values before anything is typed. `ask` reaches the store once per `q`.
       this.ask(this.search);
     }
     super.onStoreChange();
@@ -271,12 +345,13 @@ export class TesseraFilter extends TesseraElement {
       this.pending?.();
       this.draft = null;
       this.sent = null;
+      this.invalid = {};
     }
   }
 
-  /** Moves focus to the control's first input, or its first value in a checklist. */
+  /** Moves focus to the control's first input. */
   override focus(options?: FocusOptions): void {
-    const target = this.renderRoot.querySelector<HTMLElement>('#ctl, [part="values"] input, [part="values"] button');
+    const target = this.renderRoot.querySelector<HTMLElement>('#ctl');
     if (target) target.focus(options);
     else super.focus(options);
   }
@@ -321,20 +396,22 @@ export class TesseraFilter extends TesseraElement {
     if (!o) return nothing;
     const draft = this.currentDraft(o);
     if (!draft) return nothing;
-    // The checklist is a `role="group"`, which `for` cannot label, so it uses `aria-labelledby`;
-    // every other shape has an `input` with `id="ctl"`.
-    const checklist = draft.family === 'category' && this.shape === 'checklist';
-    const label = checklist
-      ? html`<span part="label" class="muted" id="ctl-label">${columnCaption(this.column)}</span>`
-      : html`<label part="label" class="muted" for="ctl">${columnCaption(this.column)}</label>`;
-    const verbs: [ClauseVerb, string][] = [
-      ['filter', 'Filter'],
-      ['highlight', 'Highlight']
-    ];
-    const toggle = html`<div class="seg" part="verb" role="group" aria-label=${`${columnCaption(this.column)}: edit the filter or the highlight`}>
-      ${verbs.map(([v, t]) => html`<button type="button" data-verb=${v} aria-pressed=${this.verb === v ? 'true' : 'false'} @click=${() => (this.verb = v)}>${t}</button>`)}
-    </div>`;
-    return html`<div class="head">${label}${toggle}</div>${this.body(o, draft)}`;
+    return html`<div class="head"><label part="label" for="ctl">${columnCaption(this.column)}</label>${this.aside(draft)}</div>${this.body(o, draft)}`;
+  }
+
+  /** The heading's right-hand side: a category's number of values, or Clear on a range. */
+  private aside(draft: ColumnDraft): TemplateResult | typeof nothing {
+    if (draft.family === 'category') {
+      const values = this.resolvedStore?.get('legend').categories[this.column];
+      return values ? html`<span part="aside">${values.length.toLocaleString('en-GB')} ${values.length === 1 ? 'value' : 'values'}</span>` : nothing;
+    }
+    if (draft.family === 'numeric' && isPopulated(draft)) {
+      return html`<button part="aside" type="button" @click=${() => {
+        this.invalid = {};
+        this.change({family: 'numeric', gte: null, lte: null}, true);
+      }}>Clear</button>`;
+    }
+    return nothing;
   }
 
   private body(o: FilterOperandSet, draft: ColumnDraft) {
@@ -351,15 +428,11 @@ export class TesseraFilter extends TesseraElement {
   }
 
   private text(o: FilterOperandSet, draft: ColumnDraft & {family: 'text'}) {
-    const modes: [TextMode, string][] = [['all', 'all words']];
-    if (o.operands.includes('phrase')) modes.push(['phrase', 'phrase']);
-    else modes.push(['any', 'any word']);
-    return html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.query} placeholder="" autocomplete="off"
-        aria-label=${`${o.column} words`}
-        @input=${(e: Event) => this.change({...draft, query: (e.target as HTMLInputElement).value}, false)} /></div>
-      <div class="seg" part="mode" role="group" aria-label=${`${o.column} mode`}>
-        ${modes.map(([v, t]) => html`<button type="button" data-mode=${v} aria-pressed=${draft.mode === v ? 'true' : 'false'} @click=${() => this.change({...draft, mode: v}, true)}>${t}</button>`)}
-      </div>`;
+    const hint = o.operands.includes('phrase') ? 'Words match together. Use “quotes” for a phrase, OR for either.' : 'Words match together. Use OR for either.';
+    return html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.query} placeholder="Search the text" autocomplete="off"
+        aria-describedby="hint"
+        @input=${(e: Event) => this.change({family: 'text', query: (e.target as HTMLInputElement).value}, false)} /></div>
+      <span part="hint" id="hint">${hint}</span>`;
   }
 
   /** A keyword control, offering the operators the column publishes. */
@@ -367,9 +440,8 @@ export class TesseraFilter extends TesseraElement {
     const ops = o.operands.filter((op): op is KeywordOperator => (KEYWORD_OPERATORS as readonly string[]).includes(op));
     return html`<div class="ctl-row">
       <div class="input grow">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.needle} autocomplete="off"
-        aria-label=${`${this.column} value`}
         @input=${(e: Event) => this.change({...draft, needle: (e.target as HTMLInputElement).value}, false)} /></div>
-      <select part="mode" style="width:auto" aria-label=${`${this.column} operator`} .value=${draft.op}
+      <select part="mode" style="width:auto" aria-label=${`${columnCaption(this.column)} operator`} .value=${draft.op}
         @change=${(e: Event) => this.change({...draft, op: (e.target as HTMLSelectElement).value as KeywordOperator}, true)}>
         ${ops.map((op) => html`<option value=${op} ?selected=${draft.op === op}>${OPERATOR_WORDS[op]}</option>`)}
       </select>
@@ -395,95 +467,111 @@ export class TesseraFilter extends TesseraElement {
       : html`${this.markedField(v, 'key', v.key)}`;
   }
 
-  /** A checklist row's text: the title where there is one, else the key. The key is its tooltip. */
-  private checklistText(v: SuggestValue): string {
-    return v.title ?? v.key;
-  }
-
   private category(draft: ColumnDraft & {family: 'category'}) {
+    const s = this.resolvedStore;
     const suggestion = this.resolvedSuggestion;
     const refusal = this.resolvedSuggestRefusal;
     const chosen = new Set(draft.keys);
-
-    const pick = (v: SuggestValue) => {
-      this.change(chosen.has(v.key) ? {...draft, keys: draft.keys.filter((k) => k !== v.key)} : {...draft, keys: [...draft.keys, v.key]}, true);
-    };
-    // The checklist: every visible value is on the page, so a checkbox per value and no search
-    // box. It uses the same `pick` as the lookahead, so the draft sent is the same. The chosen
-    // values show as ticks here and as the filter panel's chip.
-    if (this.shape === 'checklist') {
-      const rows = suggestion?.values ?? [];
-      // A checklist does not re-ask, so a refusal here is unexpected; it is shown if it happens.
-      const refusalNote = refusal ? html`<span part="refusal" data-code=${refusal.code}><span class="dot refuse"></span>Values unavailable</span>` : nothing;
-      return html`<div part="values" class="list" role="group" aria-labelledby="ctl-label">
-        ${repeat(
-          rows,
-          (v) => v.code,
-          (v) => html`<label part="tick" class="item" title=${v.key}>
-              <input type="checkbox" .checked=${chosen.has(v.key)} @change=${() => pick(v)} aria-label=${v.title ?? v.key} />
-              <span class="t">${this.checklistText(v)}</span>
-            </label>`
-        )}
-      </div>${refusalNote}`;
-    }
+    // In the highlight position, the values the column's own filter leaves out cannot be lit.
+    const filtered = this.verb === 'highlight' ? s?.get('filters').draft.filter[this.column] : undefined;
+    const kept = filtered?.family === 'category' && filtered.keys.length > 0 ? new Set(filtered.keys) : null;
+    const matched = s?.get('view').matched;
+    const total = matched && matched.value > 0 ? matched.value : null;
+    const toggle = (key: string) => this.change({...draft, keys: chosen.has(key) ? draft.keys.filter((k) => k !== key) : [...draft.keys, key]}, true);
 
     // Enter submits what is typed, suggested or not; see the element's doc.
     const submit = () => {
       const key = this.search.trim();
       if (!key || chosen.has(key)) return;
-      this.search = '';
-      this.ask('');
       this.change({...draft, keys: [...draft.keys, key]}, true);
     };
-    const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off"
-        aria-label=${`${this.column} value`} .value=${this.search}
+    const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder="Type a value"
+        .value=${this.search}
         @input=${(e: Event) => {
           this.search = (e.target as HTMLInputElement).value;
           this.ask(this.search);
         }}
         @keydown=${(e: KeyboardEvent) => {
           if (e.key === 'Enter') submit();
+          if (e.key === 'Escape' && this.search) {
+            e.stopPropagation();
+            this.search = '';
+          }
         }} /></div>`;
 
+    const option = (v: SuggestValue) => {
+      const out = kept !== null && !kept.has(v.key);
+      const count = out ? 0 : v.count;
+      const share = count === undefined || total === null ? null : count === 0 ? 0 : Math.min(100, Math.max(BAR_FLOOR, (100 * count) / total));
+      return html`<button type="button" part="tick" role="option" aria-selected=${chosen.has(v.key) ? 'true' : 'false'} aria-disabled=${out ? 'true' : 'false'}
+        @click=${() => !out && toggle(v.key)}>
+        <span class="opt">
+          <span class="t"><span class="name">${this.suggestionText(v)}</span>${out ? html`<span class="out">filtered out</span>` : nothing}</span>
+          ${share === null ? nothing : html`<span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span>`}
+        </span>
+        ${count === undefined ? nothing : html`<span part="value-count">${count.toLocaleString('en-GB')}</span>`}
+      </button>`;
+    };
+    const typed = this.search !== '';
     const rows = suggestion?.values ?? [];
     const list =
-      rows.length > 0
-        ? html`<div part="values" class="list" role="listbox" aria-label=${`${this.column} suggestions`}>
-            ${repeat(
-              rows,
-              (v) => v.code,
-              (v) => html`<button type="button" part="tick" class="item" role="option" aria-selected=${chosen.has(v.key) ? 'true' : 'false'} @click=${() => pick(v)}>
-                  <span class="t">${this.suggestionText(v)}</span>
-                </button>`
-            )}
+      typed && rows.length > 0
+        ? html`<div part="values" role="listbox" aria-label=${`${columnCaption(this.column)} values`}>${repeat(rows, (v) => v.code, option)}</div>`
+        : nothing;
+    const note = !typed
+      ? nothing
+      : refusal
+        ? html`<span part="refusal" data-code=${refusal.code}><span class="dot refuse"></span>Values unavailable</span>`
+        : suggestion === null
+          ? html`<span class="skel" aria-hidden="true"></span>`
+          : rows.length === 0
+            ? html`<span part="more">No value starts with that</span>`
+            : suggestion.more
+              ? html`<span part="more">Type more to narrow the list</span>`
+              : nothing;
+    const chips =
+      draft.keys.length > 0
+        ? html`<div class="chosen">
+            ${draft.keys.map((key) => {
+              const title = keyTitle(s, this.column, key);
+              return html`<span part="chosen" class="chip" data-verb=${this.verb}>${title}<button type="button" aria-label=${`Remove ${title}`} @click=${() => toggle(key)}>${icon('close', 12)}</button></span>`;
+            })}
           </div>`
         : nothing;
-
-    const note = refusal
-      ? html`<span part="refusal" data-code=${refusal.code}><span class="dot refuse"></span>Values unavailable</span>`
-      : suggestion === null
-        ? html`<span class="skel" aria-hidden="true"></span>`
-        : suggestion.more
-          ? html`<span part="more">Type to narrow the list</span>`
-          : nothing;
-
-    return html`${field}${list}${note}`;
+    return html`${field}${list}${note}${chips}`;
   }
 
   private numeric(draft: {family: 'numeric'; gte: number | null; lte: number | null}) {
     const column = this.resolvedStore?.get('meta')?.declaredScalars.find((c) => c.name === this.column);
     const date = column?.arrowType === 'timestamp_us';
-    const toValue = (raw: string): number | null => {
-      if (raw === '') return null;
-      const n = date ? Date.parse(raw) * 1000 : Number(raw);
-      return Number.isFinite(n) ? n : null;
+    const caption = columnCaption(this.column);
+    const bound = (which: 'gte' | 'lte') => {
+      const held = draft[which];
+      const invalid = this.invalid[which];
+      const shown = invalid ?? (held === null ? '' : date ? shortDateText(held) : String(held));
+      const read = (raw: string): number | null | undefined => {
+        if (raw.trim() === '') return null;
+        const n = date ? parseDateText(raw, which === 'lte') : Number(raw);
+        return n !== null && Number.isFinite(n) ? n : undefined;
+      };
+      const commit = (e: Event) => {
+        const raw = (e.target as HTMLInputElement).value;
+        const value = read(raw);
+        if (value === undefined) {
+          this.invalid = {...this.invalid, [which]: raw};
+          return;
+        }
+        const {[which]: _dropped, ...rest} = this.invalid;
+        this.invalid = rest;
+        if (value !== held) this.change({...draft, [which]: value} as ColumnDraft, true);
+        else this.requestUpdate();
+      };
+      return html`<input id=${which === 'gte' ? 'ctl' : nothing} part="entry" type=${date ? 'text' : 'number'} inputmode=${date ? nothing : 'decimal'}
+        placeholder=${date ? (which === 'gte' ? 'Earliest' : 'Latest') : which === 'gte' ? 'Lowest' : 'Highest'} .value=${shown}
+        aria-label=${`${caption} ${which === 'gte' ? 'from' : 'to'}`} aria-invalid=${invalid !== undefined ? 'true' : 'false'}
+        @change=${commit} @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && commit(e)} />`;
     };
-    const fromValue = (v: number | null): string => (v === null ? '' : date ? new Date(v / 1000).toISOString().slice(0, 10) : String(v));
-    const bound = (which: 'gte' | 'lte') =>
-      html`<input id=${which === 'gte' ? 'ctl' : nothing} part="entry" class="grow num" type=${date ? 'date' : 'number'}
-        .value=${fromValue(draft[which])} aria-label=${`${this.column} ${which === 'gte' ? 'from' : 'to'}`}
-        @change=${(e: Event) => this.change({...draft, [which]: toValue((e.target as HTMLInputElement).value)} as ColumnDraft, true)} />`;
-    return html`<div class="ctl-row">${bound('gte')}<span class="to">to</span>${bound('lte')}</div>`;
+    return html`<div class="range">${bound('gte')}<span class="to">to</span>${bound('lte')}</div>`;
   }
 }
 

@@ -163,11 +163,13 @@ function controlOf(column: string, control: ColumnDraft, op: Record<string, unkn
   const bad = () => new Error(`${column}: a ${control.family} column cannot hold ${name}`);
   switch (control.family) {
     case 'text': {
-      if (name === 'phrase' && typeof value === 'string') return {family: 'text', query: value, mode: 'phrase'};
-      if (name === 'match' && typeof value === 'string') return {family: 'text', query: value, mode: 'all'};
+      if (name === 'phrase' && typeof value === 'string') return {family: 'text', query: `"${value}"`};
+      if (name === 'match' && typeof value === 'string') return {family: 'text', query: value};
       if (name === 'match' && value && typeof value === 'object') {
         const m = value as {query: string; minimum_should_match?: number};
-        return {family: 'text', query: m.query, mode: m.minimum_should_match === 1 ? 'any' : 'all'};
+        if (m.minimum_should_match === undefined) return {family: 'text', query: m.query};
+        if (m.minimum_should_match === 1) return {family: 'text', query: m.query.trim().split(/\s+/).join(' OR ')};
+        throw new Error(`${column}: the widget's text box asks for every word or for any one; minimum_should_match ${m.minimum_should_match} is neither`);
       }
       throw bad();
     }

@@ -43,6 +43,36 @@ function store(over: Partial<Projections> = {}): FakeStore {
 
 const SHOWN_VIEW = mapState().view;
 
+/** Type `q` into a filter's search box, as a viewer would, once the element has drawn it. */
+const typeInto = (q: string) => async (el: HTMLElement) => {
+  await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
+  await until(() => !!shadow(el, 'input[part="entry"]'), 'the search box');
+  const input = shadow(el, 'input[part="entry"]') as HTMLInputElement;
+  input.value = q;
+  input.dispatchEvent(new Event('input'));
+  await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
+};
+
+/** Clauses in both positions and on artifacts, for the panels. */
+const APPLIED = filtersOf(
+  withDraft(
+    {
+      field: {family: 'category', keys: ['cs.CV', 'cs.LG', 'stat.ML']},
+      authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix'},
+      citations: {family: 'numeric', gte: 100, lte: null},
+      published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}
+    },
+    {title: {family: 'text', query: '"classifier-free guidance"'}, field: {family: 'category', keys: ['cs.CV']}}
+  ),
+  {
+    members: [
+      {layer: 'topics', artifact: TOPIC(1).tesseraId, outside: false, verb: 'filter'},
+      {layer: 'topics', artifact: TOPIC(5).tesseraId, outside: true, verb: 'filter'},
+      {layer: 'venues', artifact: VENUES.conferences[2]!.tesseraId, outside: false, verb: 'highlight', label: VENUES.conferences[2]!.name}
+    ]
+  }
+);
+
 /** Wait until `test` holds, checking each frame, or give up after `ms` and report it as an error. */
 async function until(test: () => boolean, what: string, ms = 5000): Promise<void> {
   const start = performance.now();
@@ -278,75 +308,58 @@ export const SECTIONS: Section[] = [
     name: 'filter',
     tag: 'tessera-filter',
     specimens: [
+      {state: 'category, nothing typed', build: () => make('tessera-filter', {store: store({view: SHOWN_VIEW})}, {column: 'field'})},
       {
-        state: 'category checklist',
-        build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})}, {column: 'field'})
-      },
-      {
-        state: 'category checklist, two chosen',
-        build: () =>
-          make(
-            'tessera-filter',
-            {store: store({filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV', 'cs.LG']}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})},
-            {column: 'field'}
-          )
-      },
-      {
-        state: 'category typeahead, first page',
-        build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestions: {field: {q: '', values: FIELDS.slice(0, 6).map((v) => suggestion(v)), more: true}}})})}, {column: 'field'})
-      },
-      {
-        state: 'category typeahead, typed with matches marked, one chosen',
+        state: 'category, typed, with counts and shares, two chosen',
         build: () =>
           make(
             'tessera-filter',
             {
               store: store({
-                filters: filtersOf(withDraft({field: {family: 'category', keys: ['stat.ML']}}), {
+                view: SHOWN_VIEW,
+                legend: legendOf('field'),
+                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'stat.ML']}}), {
                   suggestions: {field: {q: 'learn', values: [FIELDS[0]!, FIELDS[3]!].map((v) => suggestion(v, 'learn')), more: false}}
                 })
               })
             },
             {column: 'field'}
           ),
-        ready: async (el) => {
-          await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
-          await until(() => !!shadow(el, 'input[part="entry"]'), 'the typeahead input');
-          const input = shadow(el, 'input[part="entry"]') as HTMLInputElement;
-          input.value = 'learn';
-          input.dispatchEvent(new Event('input'));
-          await until(() => !!shadow(el, '[part="tick"] mark'), 'marked suggestions');
-        }
+        ready: typeInto('learn')
       },
       {
-        state: 'category checklist, switched to the highlight, the filter kept',
+        state: 'category in the highlight, typed; a value the filter leaves out is greyed',
         build: () =>
           make(
             'tessera-filter',
             {
               store: store({
-                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV', 'cs.LG']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
-                  suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}
+                view: SHOWN_VIEW,
+                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
+                  suggestions: {field: {q: 'c', values: [FIELDS[1]!, FIELDS[2]!, FIELDS[7]!].map((v) => suggestion(v, 'c')), more: false}}
                 })
               })
             },
             {column: 'field', verb: 'highlight'}
-          )
+          ),
+        ready: typeInto('c')
       },
-      {state: 'category typeahead, loading', build: () => make('tessera-filter', {store: store()}, {column: 'field'})},
+      {state: 'category, typed, loading', build: () => make('tessera-filter', {store: store()}, {column: 'field'}), ready: typeInto('neur')},
       {
-        state: 'category typeahead, refused',
-        build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestErrors: {field: {code: 'vocabulary-withheld', detail: 'not listable'}}})})}, {column: 'field'})
+        state: 'category, typed, refused',
+        build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestErrors: {field: {code: 'vocabulary-withheld', detail: 'not listable'}}})})}, {column: 'field'}),
+        ready: typeInto('q')
       },
-      {state: 'text, all words / phrase', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({title: {family: 'text', query: 'score matching', mode: 'phrase'}}))})}, {column: 'title'})},
-      {state: 'text, all words / any word', build: () => make('tessera-filter', {store: store()}, {column: 'abstract'})},
+      {state: 'text, a phrase or a word', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({title: {family: 'text', query: '"score matching" OR guidance'}}))})}, {column: 'title'})},
+      {state: 'text, a column with no phrase', build: () => make('tessera-filter', {store: store()}, {column: 'abstract'})},
       {state: 'keyword with operator', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix'}}))})}, {column: 'authors'})},
       {state: 'number range', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 25_000}}))})}, {column: 'citations'})},
       {
-        state: 'date range',
+        state: 'date range, whole years',
         build: () =>
-          make('tessera-filter', {store: store({filters: filtersOf(withDraft({published_at: {family: 'numeric', gte: Date.UTC(2020, 0, 1) * 1000, lte: Date.UTC(2024, 11, 31) * 1000}}))})}, {column: 'published_at'})
+          make('tessera-filter', {store: store({filters: filtersOf(withDraft({published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}}))})}, {column: 'published_at'})
       },
+      {state: 'date range, open end', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({published_at: {family: 'numeric', gte: Date.UTC(2019, 2, 3) * 1000, lte: null}}))})}, {column: 'published_at'})},
       {state: 'unknown column (renders nothing)', build: () => make('tessera-filter', {store: store()}, {column: 'no_such_column'})}
     ]
   },
@@ -358,52 +371,26 @@ export const SECTIONS: Section[] = [
       {state: 'loading (no meta yet)', build: () => make('tessera-filter-panel', {store: store({meta: null, status: status({status: 'loading'})})})},
       {state: 'refused (no meta)', build: () => make('tessera-filter-panel', {store: store({meta: null, status: status({status: 'refused', refusal: REFUSAL})})})},
       {state: 'nothing filterable', build: () => make('tessera-filter-panel', {store: store({meta: {...META, filterOperands: []}})})},
-      {state: 'every control empty', build: () => make('tessera-filter-panel', {store: store({filters: filtersOf(emptyDraft(), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})})},
+      {state: 'nothing applied, nothing pinned', build: () => make('tessera-filter-panel', {store: store()})},
+      {state: 'nothing applied, two fields pinned', build: () => make('tessera-filter-panel', {store: store()}, {pinned: 'field published_at'})},
       {
-        state: 'a field filtered to two values with one highlighted, the highlight chip pressed',
-        build: () =>
-          make('tessera-filter-panel', {
-            store: store({
-              filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
-                suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}
-              })
-            })
-          }),
-        // Pressing the highlight chip switches the field's control to the highlight.
+        state: 'Add filter open',
+        build: () => make('tessera-filter-panel', {store: store()}, {pinned: 'field'}),
         ready: async (el) => {
           await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
-          (shadow(el, '[part="chip"][data-verb="highlight"] [part="edit"]') as HTMLButtonElement).click();
-          await until(() => shadow(el, 'tessera-filter[column="field"]')?.getAttribute('verb') === 'highlight', 'the field control on the highlight');
+          shadow(el, '[part="add"]')!.click();
+          await until(() => !!shadow(el, '[part="add-list"]'), 'the Add filter list');
         }
       },
       {
         state: 'clauses applied: filter, highlight and member chips',
-        build: () =>
-          make('tessera-filter-panel', {
-            store: store({
-              artifacts: mapState().artifacts,
-              filters: filtersOf(
-                withDraft(
-                  {
-                    field: {family: 'category', keys: ['cs.CV', 'cs.LG', 'stat.ML']},
-                    authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix'},
-                    citations: {family: 'numeric', gte: 100, lte: null},
-                    published_at: {family: 'numeric', gte: Date.UTC(2020, 0, 1) * 1000, lte: Date.UTC(2024, 11, 31) * 1000}
-                  },
-                  {title: {family: 'text', query: 'classifier-free guidance', mode: 'phrase'}}
-                ),
-                {
-                  suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}},
-                  members: [
-                    {layer: 'topics', artifact: TOPIC(1).tesseraId, outside: false, verb: 'filter'},
-                    {layer: 'topics', artifact: TOPIC(5).tesseraId, outside: true, verb: 'filter'},
-                    {layer: 'venues', artifact: VENUES.conferences[2]!.tesseraId, outside: false, verb: 'highlight', label: VENUES.conferences[2]!.name}
-                  ]
-                }
-              )
-            })
-          })
-      }
+        build: () => make('tessera-filter-panel', {store: store({artifacts: mapState().artifacts, filters: APPLIED})})
+      },
+      {
+        state: 'the same, in Highlight mode: the highlighted field open, the rest Any',
+        build: () => make('tessera-filter-panel', {store: store({artifacts: mapState().artifacts, filters: APPLIED})}, {mode: 'highlight'})
+      },
+      {state: 'chips only', build: () => make('tessera-filter-panel', {store: store({artifacts: mapState().artifacts, filters: APPLIED})}, {'chips-only': ''})}
     ]
   },
   {
@@ -643,10 +630,62 @@ function explorerSpecimens(): Specimen[] {
       ...over
     });
   const item = {selection: {item: paper(), itemRefusal: null, artifact: null, artifactRefusal: null}};
+  // The host declares the dataset's title and which filters start listed; the explorer guesses neither.
+  const named = {'dataset-title': 'arXiv abstracts', 'pinned-filters': 'field published_at abstract'};
+  const panelOf = (el: HTMLElement) => el.shadowRoot?.querySelector('[part="filters-popover"] tessera-filter-panel') ?? null;
+  const openFilters = async (el: HTMLElement) => {
+    await ready(el);
+    shadow(el, '[part="filters-toggle"]')?.click();
+    await until(() => !!panelOf(el)?.shadowRoot?.querySelector('[part="mode"]'), 'the filters panel');
+    await settle(el.parentElement!);
+  };
   return [
-    {state: 'docked, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'docked'}, 900), ready},
-    {state: 'overlay, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 900), ready},
-    {state: 'compact container, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 560), ready},
+    {state: 'docked, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'docked', ...named}, 900), ready},
+    {state: 'overlay, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 900), ready},
+    {state: 'overlay, no dataset title, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 900), ready},
+    {
+      state: 'overlay, the filters open in Filter mode, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) =>
+        explorer(
+          full(ctx, {
+            filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'stat.ML']}, published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}}, {abstract: {family: 'text', query: '"diffusion model"'}}))
+          }),
+          {layout: 'overlay', ...named},
+          900
+        ),
+      ready: openFilters
+    },
+    {
+      state: 'overlay, the filters open in Highlight mode, typing a value, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) =>
+        explorer(
+          mapStore(ctx, 'field', {highlight: (m) => m.field === 2}, {
+            filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV', 'stat.ML']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
+              suggestions: {field: {q: 'c', values: [FIELDS[1]!, FIELDS[2]!, FIELDS[7]!].map((v) => suggestion(v, 'c')), more: false}}
+            })
+          }),
+          {layout: 'overlay', ...named},
+          900
+        ),
+      ready: async (el) => {
+        await openFilters(el);
+        (panelOf(el) as HTMLElementTagNameMap['tessera-filter-panel']).show('field', 'highlight');
+        await settle(el.parentElement!);
+        const control = panelOf(el)!.shadowRoot!.querySelector('tessera-filter[column="field"]') as HTMLElement;
+        await typeInto('c')(control);
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'overlay, a box selected, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx, {...item, region: region()}), {layout: 'overlay', ...named}, 900),
+      ready
+    },
+    {state: 'compact container, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 560), ready},
+    {state: 'compact container, the filters open, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 560), ready: openFilters},
     {state: 'points over a smooth density, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth'}, 900), ready},
     {state: 'density only, smooth, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth', 'no-points': ''}, 900), ready: readyFor(false)},
     {state: 'density only, hexagons, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'hex', 'no-points': ''}, 900), ready: readyFor(false)},
