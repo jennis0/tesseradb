@@ -42,9 +42,9 @@ export {
   emptyDraft,
   isPopulated,
   withVerb,
+  withoutClause,
   type ClauseVerb,
   type ColumnDraft,
-  type ColumnPredicate,
   type FilterDraft,
   type TextMode
 } from './filters.js';

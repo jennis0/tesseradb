@@ -273,10 +273,13 @@ describe('the down-sync', () => {
     const operands: FilterOperandSet[] = [{column: 'year', family: 'numeric', operands: ['range']}];
     store.set('meta', {...META, layers: [clusters('clusters/a')], filterOperands: operands} as never);
     expect(model.sent).toEqual([]);
+    // The traitlet is the filter expression; a highlight the page holds is kept beside it.
+    const lit = {year: {family: 'numeric' as const, gte: 1990, lte: 1999}};
+    store.set('filters', {...store.get('filters'), draft: {filter: {}, highlight: lit}});
     model.set('filters', {year: {range: {gte: 2000}}});
     const applied = store.calls.filter((c) => c.name === 'setFilters');
     expect(applied).toHaveLength(1);
-    expect(applied[0]!.args[0]).toEqual({year: {family: 'numeric', gte: 2000, lte: null, verb: 'filter'}});
+    expect(applied[0]!.args[0]).toEqual({filter: {year: {family: 'numeric', gte: 2000, lte: null}}, highlight: lit});
     // An expression the draft cannot hold is refused to the kernel, and applies nothing.
     model.set('filters', {any_of: [{year: {range: {gte: 1}}}]});
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);

@@ -236,8 +236,12 @@ export const SECTIONS: Section[] = [
       {state: 'loading (no meta yet)', build: () => make('tessera-legend', {store: store({meta: null, status: status({status: 'loading'})})})},
       {state: 'colour by none', build: () => make('tessera-legend', {store: legendStore(null)})},
       {state: 'category', build: () => make('tessera-legend', {store: legendStore('field')})},
-      {state: 'category, filtered to two values', build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV'], verb: 'filter'}}))})})},
-      {state: 'category, one value highlighted', build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV'], verb: 'highlight'}}))})})},
+      {state: 'category, filtered to two values', build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}))})})},
+      {
+        state: 'category, filtered to two values with one highlighted',
+        build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, {field: {family: 'category', keys: ['cs.CV']}}))})})
+      },
+      {state: 'category, one value highlighted', build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({}, {field: {family: 'category', keys: ['cs.CV']}}))})})},
       {
         state: 'category, with exact counts where a store holds them',
         build: () =>
@@ -257,7 +261,7 @@ export const SECTIONS: Section[] = [
         build: () => make('tessera-legend', {store: store({legend: legendOf('field', {categoryErrors: {field: {code: 'vocabulary-withheld', detail: 'arxiv_fields is not listable for this session'}}})})})
       },
       {state: 'numeric ramp', build: () => make('tessera-legend', {store: legendStore('citations')})},
-      {state: 'numeric, a range filter on the ramp', build: () => make('tessera-legend', {store: legendStore('citations', {filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 2000, verb: 'filter'}}))})})},
+      {state: 'numeric, a range filter on the ramp', build: () => make('tessera-legend', {store: legendStore('citations', {filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 2000}}))})})},
       {state: 'numeric, Magma on a log scale', build: () => make('tessera-legend', {store: legendStore('citations', {}, {ramp: 'magma', scale: 'log'})})},
       {state: 'numeric, no values on screen', build: () => make('tessera-legend', {store: store({legend: legendOf('citations', {domains: {}})})})},
       {state: 'a column that is not rendered', build: () => make('tessera-legend', {store: legendStore('published_at')})},
@@ -283,7 +287,7 @@ export const SECTIONS: Section[] = [
         build: () =>
           make(
             'tessera-filter',
-            {store: store({filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV', 'cs.LG'], verb: 'filter'}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})},
+            {store: store({filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV', 'cs.LG']}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})},
             {column: 'field'}
           )
       },
@@ -298,7 +302,7 @@ export const SECTIONS: Section[] = [
             'tessera-filter',
             {
               store: store({
-                filters: filtersOf(withDraft({field: {family: 'category', keys: ['stat.ML'], verb: 'filter'}}), {
+                filters: filtersOf(withDraft({field: {family: 'category', keys: ['stat.ML']}}), {
                   suggestions: {field: {q: 'learn', values: [FIELDS[0]!, FIELDS[3]!].map((v) => suggestion(v, 'learn')), more: false}}
                 })
               })
@@ -319,14 +323,14 @@ export const SECTIONS: Section[] = [
         state: 'category typeahead, refused',
         build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestErrors: {field: {code: 'vocabulary-withheld', detail: 'not listable'}}})})}, {column: 'field'})
       },
-      {state: 'text, all words / phrase', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({title: {family: 'text', query: 'score matching', mode: 'phrase', verb: 'filter'}}))})}, {column: 'title'})},
+      {state: 'text, all words / phrase', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({title: {family: 'text', query: 'score matching', mode: 'phrase'}}))})}, {column: 'title'})},
       {state: 'text, all words / any word', build: () => make('tessera-filter', {store: store()}, {column: 'abstract'})},
-      {state: 'keyword with operator', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix', verb: 'filter'}}))})}, {column: 'authors'})},
-      {state: 'number range', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 25_000, verb: 'filter'}}))})}, {column: 'citations'})},
+      {state: 'keyword with operator', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix'}}))})}, {column: 'authors'})},
+      {state: 'number range', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 25_000}}))})}, {column: 'citations'})},
       {
         state: 'date range',
         build: () =>
-          make('tessera-filter', {store: store({filters: filtersOf(withDraft({published_at: {family: 'numeric', gte: Date.UTC(2020, 0, 1) * 1000, lte: Date.UTC(2024, 11, 31) * 1000, verb: 'filter'}}))})}, {column: 'published_at'})
+          make('tessera-filter', {store: store({filters: filtersOf(withDraft({published_at: {family: 'numeric', gte: Date.UTC(2020, 0, 1) * 1000, lte: Date.UTC(2024, 11, 31) * 1000}}))})}, {column: 'published_at'})
       },
       {state: 'unknown column (renders nothing)', build: () => make('tessera-filter', {store: store()}, {column: 'no_such_column'})}
     ]
@@ -341,19 +345,32 @@ export const SECTIONS: Section[] = [
       {state: 'nothing filterable', build: () => make('tessera-filter-panel', {store: store({meta: {...META, filterOperands: []}})})},
       {state: 'every control empty', build: () => make('tessera-filter-panel', {store: store({filters: filtersOf(emptyDraft(), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})})},
       {
+        state: 'a field filtered to two values with one highlighted',
+        build: () =>
+          make('tessera-filter-panel', {
+            store: store({
+              filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
+                suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}
+              })
+            })
+          })
+      },
+      {
         state: 'clauses applied: filter, highlight and member chips',
         build: () =>
           make('tessera-filter-panel', {
             store: store({
               artifacts: mapState().artifacts,
               filters: filtersOf(
-                withDraft({
-                  field: {family: 'category', keys: ['cs.CV', 'cs.LG', 'stat.ML'], verb: 'filter'},
-                  title: {family: 'text', query: 'classifier-free guidance', mode: 'phrase', verb: 'highlight'},
-                  authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix', verb: 'filter'},
-                  citations: {family: 'numeric', gte: 100, lte: null, verb: 'filter'},
-                  published_at: {family: 'numeric', gte: Date.UTC(2020, 0, 1) * 1000, lte: Date.UTC(2024, 11, 31) * 1000, verb: 'filter'}
-                }),
+                withDraft(
+                  {
+                    field: {family: 'category', keys: ['cs.CV', 'cs.LG', 'stat.ML']},
+                    authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix'},
+                    citations: {family: 'numeric', gte: 100, lte: null},
+                    published_at: {family: 'numeric', gte: Date.UTC(2020, 0, 1) * 1000, lte: Date.UTC(2024, 11, 31) * 1000}
+                  },
+                  {title: {family: 'text', query: 'classifier-free guidance', mode: 'phrase'}}
+                ),
                 {
                   suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}},
                   members: [
@@ -504,7 +521,7 @@ export const SECTIONS: Section[] = [
           make('tessera-hierarchy', {
             store: hierarchyStore(
               {
-                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV'], verb: 'filter'}}), {
+                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV']}}), {
                   members: [
                     {layer: 'topics', artifact: AREA(0).tesseraId, outside: false, verb: 'highlight'},
                     {layer: 'topics', artifact: TOPIC(1).tesseraId, outside: false, verb: 'filter'}
@@ -601,7 +618,7 @@ function explorerSpecimens(): Specimen[] {
   const full = (ctx: Context, over: Partial<Projections> = {}) =>
     mapStore(ctx, 'field', {}, {
       view: {...mapState().view},
-      filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV'], verb: 'filter'}, citations: {family: 'numeric', gte: 100, lte: null, verb: 'filter'}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}}),
+      filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}, citations: {family: 'numeric', gte: 100, lte: null}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}}),
       ...over
     });
   const item = {selection: {item: paper(), itemRefusal: null, artifact: null, artifactRefusal: null}};
@@ -618,13 +635,13 @@ function explorerSpecimens(): Specimen[] {
       state: 'a highlight (Computer Vision lit), 1440 × 900',
       pinned: 1440,
       build: (ctx) =>
-        explorer(mapStore(ctx, 'field', {highlight: (m) => m.field === 2}, {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV'], verb: 'highlight'}}))}), {layout: 'overlay'}, 900),
+        explorer(mapStore(ctx, 'field', {highlight: (m) => m.field === 2}, {filters: filtersOf(withDraft({}, {field: {family: 'category', keys: ['cs.CV']}}))}), {layout: 'overlay'}, 900),
       ready
     },
     {
       state: 'a number’s range filter on its ramp, 1440 × 900',
       pinned: 1440,
-      build: (ctx) => explorer(mapStore(ctx, 'citations', {}, {filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 2000, verb: 'filter'}}))}), {layout: 'overlay'}, 900),
+      build: (ctx) => explorer(mapStore(ctx, 'citations', {}, {filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 2000}}))}), {layout: 'overlay'}, 900),
       ready
     },
     {

@@ -1,6 +1,6 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, colourLayers, composeFilters, type CategoryValue, type FilterDraft, type Masked, type Meta, type Rgba, type Store} from '@tesseradb/client';
+import {CLUSTER_PREFIX, colourLayers, composeFilters, type CategoryValue, type ClauseVerb, type FilterDraft, type Masked, type Meta, type Rgba, type Store} from '@tesseradb/client';
 import {NEUTRAL} from '@tesseradb/client/internal';
 import {CATEGORY_PALETTES, RAMPS, type CategoryPaletteName, type Colouring, type RampName, type RampScale} from '@tesseradb/deck';
 import {
@@ -51,9 +51,9 @@ type Picking = {column: string; key: string; title: string};
  * store holds exact counts for the column (not built yet: no route serves them, so no count shows).
  * The buttons show while the row is hovered or focused, and stay shown while pressed. Filter adds
  * the value to the column's filter, which may hold several; the rows left out empty their swatch.
- * Highlight picks the value out without changing any count; the other rows grey. A column holds one
- * clause, so pressing the other verb moves the column's clause to it with that value alone. Both go
- * through the store's filters, so the chips are the ones `<tessera-filter-panel>` shows. The
+ * Highlight picks the value out without changing any count; the other rows grey. The two are
+ * separate clauses and a row can have both pressed: filtered to two values with one highlighted,
+ * the map shows the two and picks out the one. Both go through the store's filters, so the chips are the ones `<tessera-filter-panel>` shows. The
  * buttons appear only where the column can be filtered by value.
  *
  * The swatch opens a colour picker: the palette's colours and a lighter row, a custom area with a
@@ -98,8 +98,9 @@ type Picking = {column: string; key: string; title: string};
  * @csspart reverse - The Reverse switch in the Colour by menu.
  * @csspart level-select - The Level select.
  * @csspart swatches - The list of rows.
- * @csspart entry - One row, with `data-key` for a category value and `data-state`: `filtered` or
- *   `out` while the column is filtered, `lit` or `dim` while it is highlighted, else empty.
+ * @csspart entry - One row, with `data-key` for a category value and `data-state`: `out` for a
+ *   value the column's filter leaves out; for one it keeps, `lit` or `dim` while the column is
+ *   highlighted, else `filtered` while it is filtered; else empty.
  * @csspart swatch - A row's colour: for a category value, the button that opens the colour picker.
  * @csspart name - A row's name.
  * @csspart highlight - A row's Highlight button, with `aria-pressed`.
@@ -620,17 +621,18 @@ export class TesseraLegend extends TesseraElement {
   }
 
   /**
-   * Put `key` in or out of `column`'s clause in the position `verb`. A column holds one clause, so
-   * a clause in the other position is replaced by one holding `key` alone.
+   * Put `key` in or out of `column`'s clause in the position `verb`. The clause in the other
+   * position is kept.
    */
-  private applyVerb(column: string, key: string, verb: 'filter' | 'highlight'): void {
+  private applyVerb(column: string, key: string, verb: ClauseVerb): void {
     const s = this.resolvedStore;
     if (!s) return;
     const draft = s.get('filters').draft;
-    const held = draft[column];
-    if (!held || held.family !== 'category') return;
-    const keys = held.verb === verb ? (held.keys.includes(key) ? held.keys.filter((k) => k !== key) : [...held.keys, key]) : [key];
-    const next: FilterDraft = {...draft, [column]: {family: 'category', keys, verb}};
+    if (draft.filter[column]?.family !== 'category') return;
+    const held = draft[verb][column];
+    const was = held?.family === 'category' ? held.keys : [];
+    const keys = was.includes(key) ? was.filter((k) => k !== key) : [...was, key];
+    const next: FilterDraft = {...draft, [verb]: {...draft[verb], [column]: {family: 'category', keys}}};
     s.setFilters(next);
     emit(this, 'tessera-filterchange', {column, expr: composeFilters(next)});
   }
@@ -644,12 +646,11 @@ export class TesseraLegend extends TesseraElement {
     const s = this.resolvedStore;
     if (!s) return;
     const draft = s.get('filters').draft;
-    const held = draft[column.name];
-    if (!held || held.family !== 'numeric') return;
+    if (draft.filter[column.name]?.family !== 'numeric') return;
     const whole = column.arrowType !== 'f32' && column.arrowType !== 'f64';
     const round = (v: number | null) => (v === null ? null : whole ? Math.round(v) : Number(v.toPrecision(6)));
     const [lo, hi] = gte !== null && lte !== null && gte > lte ? [lte, gte] : [gte, lte];
-    const next: FilterDraft = {...draft, [column.name]: {family: 'numeric', gte: round(lo), lte: round(hi), verb: 'filter'}};
+    const next: FilterDraft = {...draft, filter: {...draft.filter, [column.name]: {family: 'numeric', gte: round(lo), lte: round(hi)}}};
     s.setFilters(next);
     emit(this, 'tessera-filterchange', {column: column.name, expr: composeFilters(next)});
   }
@@ -742,13 +743,17 @@ export class TesseraLegend extends TesseraElement {
   /** The rows of a category column: swatch, name, the two verbs and the count. */
   private categoryRows(s: Store, column: string, values: CategoryValue[], ranks: Record<number, number>, colouring: Colouring, counts: Record<string, Masked> | undefined): TemplateResult {
     const meta = s.get('meta');
-    const held = s.get('filters').draft[column];
-    const filterable = held?.family === 'category' && (meta?.filterOperands.some((o) => o.column === column && o.operands.includes('in')) ?? false);
-    const keys = held?.family === 'category' ? held.keys : [];
-    const filtered = held?.verb === 'filter' ? keys : [];
-    const lit = held?.verb === 'highlight' ? keys : [];
+    const {draft} = s.get('filters');
+    const filterable = draft.filter[column]?.family === 'category' && (meta?.filterOperands.some((o) => o.column === column && o.operands.includes('in')) ?? false);
+    const keysIn = (verb: ClauseVerb) => {
+      const held = draft[verb][column];
+      return held?.family === 'category' ? held.keys : [];
+    };
+    const filtered = keysIn('filter');
+    const lit = keysIn('highlight');
+    const has = (keys: string[], key: string | null) => key !== null && keys.includes(key);
     const stateOfKey = (key: string | null) =>
-      filtered.length > 0 ? (key !== null && filtered.includes(key) ? 'filtered' : 'out') : lit.length > 0 ? (key !== null && lit.includes(key) ? 'lit' : 'dim') : '';
+      filtered.length > 0 && !has(filtered, key) ? 'out' : lit.length > 0 ? (has(lit, key) ? 'lit' : 'dim') : filtered.length > 0 ? 'filtered' : '';
     const chosen = colouring.values[column] ?? {};
     const shown = paletteValues(values, ranks, colouring.palette);
     const counted = counts !== undefined;
@@ -808,13 +813,13 @@ export class TesseraLegend extends TesseraElement {
       if (Math.abs(n) >= 1e6 || (n !== 0 && Math.abs(n) < 1e-3)) return n.toExponential(2);
       return n.toLocaleString('en-GB', {maximumFractionDigits: 2});
     };
-    const held = s.get('filters').draft[column.name];
+    const held = s.get('filters').draft.filter[column.name];
     const filterable = held?.family === 'numeric' && (s.get('meta')?.filterOperands.some((o) => o.column === column.name && o.operands.includes('range')) ?? false);
     const at = (v: number) => Math.min(1, Math.max(0, fractionOf(v, domain, colouring.scale, ramp.diverging)));
     const valueAt = (t: number) => valueAtFraction(t, domain, colouring.scale, ramp.diverging);
     // The filter's own bounds, `null` where an end is open. A bound outside the values drawn keeps
     // its value and pins its handle to the ramp's end.
-    const bounds = held?.family === 'numeric' && held.verb === 'filter' ? {gte: held.gte, lte: held.lte} : {gte: null, lte: null};
+    const bounds = held?.family === 'numeric' ? {gte: held.gte, lte: held.lte} : {gte: null, lte: null};
     const toBound = (t: number) => (t <= 0 || t >= 1 ? null : valueAt(t));
     const drag = this.dragging;
     const shown = drag ? {gte: toBound(drag.low), lte: toBound(drag.high)} : bounds;

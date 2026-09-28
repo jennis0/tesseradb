@@ -53,8 +53,8 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * @csspart layer - The layer select, shown where there are several layers.
  * @csspart search - The search box.
  * @csspart tree - The tree of rows.
- * @csspart row - One row, with `data-id`, and `data-clause` (`filter` or `highlight`) while a
- *   clause is on its artifact.
+ * @csspart row - One row, with `data-id`, and `data-clause` while a clause is on its artifact:
+ *   `filter`, `highlight`, or both separated by a space.
  * @csspart expander - A row's expand button.
  * @csspart name - A row's name, which highlights the artifact when pressed.
  * @csspart counts - A row's counts.
@@ -103,13 +103,13 @@ export class TesseraHierarchy extends TesseraElement {
       [part='row']:hover {
         background: var(--_tessera-surface-2);
       }
-      [part='row'][data-clause='highlight'] {
-        background: var(--_tessera-highlight-soft);
-        color: var(--_tessera-highlight);
-      }
-      [part='row'][data-clause='filter'] {
+      [part='row'][data-clause~='filter'] {
         background: var(--_tessera-accent-soft);
         font-weight: 500;
+      }
+      [part='row'][data-clause~='highlight'] {
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
       }
       [part='expander'] {
         display: inline-flex;
@@ -404,11 +404,11 @@ export class TesseraHierarchy extends TesseraElement {
     }, 250);
   }
 
-  /** The clause on this row's artifact, if any, which colours the row and sets the buttons. */
-  private clauseOn(id: bigint): ClauseVerb | null {
+  /** The positions of the clauses on this row's artifact, which colour the row and set the buttons. */
+  private clausesOn(id: bigint): ClauseVerb[] {
     const layer = this.current()?.name;
     const held = this.resolvedStore?.get('filters').members ?? [];
-    return held.find((c) => c.layer === layer && c.artifact === id && !c.outside)?.verb ?? null;
+    return held.filter((c) => c.layer === layer && c.artifact === id && !c.outside).map((c) => c.verb);
   }
 
   private apply(id: bigint, verb: ClauseVerb): void {
@@ -416,11 +416,11 @@ export class TesseraHierarchy extends TesseraElement {
     const layer = this.current();
     if (!s || !layer) return;
     const held = s.get('filters').members;
-    const on = this.clauseOn(id) === verb;
+    const on = this.clausesOn(id).includes(verb);
     const label = this.names.get(id);
     s.setMembers(
       on
-        ? withoutMember(held, layer.name, id)
+        ? withoutMember(held, layer.name, id, verb)
         : withMember(held, {layer: layer.name, artifact: id, outside: false, verb, ...(label === undefined ? {} : {label})})
     );
     emit(this, 'tessera-clausechange', {id: idString(id), layer: layer.name, outside: false, verb, on: !on});
@@ -470,13 +470,13 @@ export class TesseraHierarchy extends TesseraElement {
 
   private renderNode(node: Node, depth: number, layer: Layer, filtered: boolean): unknown {
     const open = this.open.has(node.path);
-    const clause = this.clauseOn(node.row.tesseraId);
+    const clauses = this.clausesOn(node.row.tesseraId);
     const name = node.row.name;
     // A `dag` node is drawn under each served parent; the row names the others.
     const also = node.row.parentIds.filter((p) => String(p) !== node.path.split('/').at(-2));
     const drawn = !isFilterLayer(layer);
     return html`<li>
-      <div part="row" style=${`--depth:${depth}`} data-id=${idString(node.row.tesseraId)} data-clause=${clause ?? nothing}>
+      <div part="row" style=${`--depth:${depth}`} data-id=${idString(node.row.tesseraId)} data-clause=${clauses.length > 0 ? clauses.sort().join(' ') : nothing}>
         <button part="expander" type="button" data-leaf=${layer.hierarchy.kind === 'flat' ? '' : nothing}
           aria-expanded=${open ? 'true' : 'false'}
           aria-label=${open ? `Collapse ${name ?? 'row'}` : `Expand ${name ?? 'row'}`}
@@ -490,9 +490,9 @@ export class TesseraHierarchy extends TesseraElement {
             : nothing}<tessera-count part="count-masked" .masked=${masked(node.row.maskedCount)}></tessera-count>
         </span>
         <span part="actions">
-          <button part="highlight" type="button" data-verb="highlight" aria-pressed=${clause === 'highlight' ? 'true' : 'false'}
+          <button part="highlight" type="button" data-verb="highlight" aria-pressed=${clauses.includes('highlight') ? 'true' : 'false'}
             title="Highlight this" @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${icon('highlight', 13)}</button>
-          <button part="filter" type="button" data-verb="filter" aria-pressed=${clause === 'filter' ? 'true' : 'false'}
+          <button part="filter" type="button" data-verb="filter" aria-pressed=${clauses.includes('filter') ? 'true' : 'false'}
             title="Filter to this" @click=${() => this.apply(node.row.tesseraId, 'filter')}>${icon('filter', 13)}</button>
           ${
             // A filter layer draws nothing, so there is nothing to fit to.

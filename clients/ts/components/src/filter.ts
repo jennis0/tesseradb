@@ -34,7 +34,8 @@ const TYPING_DEBOUNCE_MS = 350;
  * inputs. A keyword column is a text box with its operator (`contains`, `prefix` or `eq`).
  *
  * Typing is sent 350 ms after the last keystroke; a choice is sent at once. Each change replaces
- * the column's control in the store's filter draft (`Store.setFilters`). A category value typed
+ * the column's control in the `filter` position of the store's draft (`Store.setFilters`). A
+ * highlight on the column is not shown here and is kept. A category value typed
  * and entered is added whether or not it was suggested; a key the viewer cannot see matches
  * nothing, as a key that does not exist does. The host carries `data-on` while the control holds a
  * value.
@@ -208,7 +209,7 @@ export class TesseraFilter extends TesseraElement {
   protected override onStoreChange(): void {
     // Re-seed from the store only when its draft changed underneath (a clear all, or the first
     // meta), not while the user's own edit is in flight.
-    const stored = this.resolvedStore?.get('filters').draft[this.column] ?? null;
+    const stored = this.resolvedStore?.get('filters').draft.filter[this.column] ?? null;
     if (stored && stored !== this.sent && JSON.stringify(stored) !== JSON.stringify(this.draft)) {
       this.draft = structuredClone(stored);
       this.sent = stored;
@@ -244,7 +245,7 @@ export class TesseraFilter extends TesseraElement {
    * this operand, which also sets a keyword control's starting operator.
    */
   private currentDraft(o: FilterOperandSet): ColumnDraft | null {
-    return this.draft ?? this.resolvedStore?.get('filters').draft[this.column] ?? emptyDraft([o])[o.column] ?? null;
+    return this.draft ?? this.resolvedStore?.get('filters').draft.filter[this.column] ?? emptyDraft([o]).filter[o.column] ?? null;
   }
 
   private change(next: ColumnDraft, immediate: boolean): void {
@@ -254,7 +255,8 @@ export class TesseraFilter extends TesseraElement {
       this.typing = null;
       const s = this.resolvedStore;
       if (!s) return;
-      const draft = {...s.get('filters').draft, [this.column]: next};
+      const held = s.get('filters').draft;
+      const draft = {...held, filter: {...held.filter, [this.column]: next}};
       this.sent = next;
       s.setFilters(draft);
       emit(this, 'tessera-filterchange', {column: this.column, expr: composeFilters(draft)});

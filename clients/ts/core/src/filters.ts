@@ -25,8 +25,7 @@ export type TextMode =
   | 'phrase';
 
 /**
- * Which of a request's two expressions a clause joins. Moving a clause between them changes only
- * this field.
+ * Which of a request's two expressions a clause joins.
  *
  * - `filter`: the clause joins `filters`, and the map and its counts narrow to the matches.
  * - `highlight`: the clause joins `highlight`, and the matches are lit and the rest dulled.
@@ -36,12 +35,12 @@ export type TextMode =
 export type ClauseVerb = 'filter' | 'highlight';
 
 /**
- * What one filter control asks, without its position: one variant per column family. A control
- * whose predicate is empty asks nothing (see {@link isPopulated}).
+ * One filter control: what it asks, one variant per column family. A control whose predicate is
+ * empty asks nothing (see {@link isPopulated}).
  *
  * @category Filters
  */
-export type ColumnPredicate =
+export type ColumnDraft =
   /** A search of `query` by analysed words, matched as `mode` says. The query is trimmed. */
   | {family: 'text'; query: string; mode: TextMode}
   /** `needle` compared with the whole value (`eq`), its start (`prefix`) or any part (`contains`). */
@@ -55,23 +54,20 @@ export type ColumnPredicate =
   | {family: 'numeric'; gte: number | null; lte: number | null};
 
 /**
- * One filter control: its predicate, and which of the request's two expressions it joins.
+ * A filter panel's controls in each of the request's two expressions, keyed by the column name the
+ * leaf is sent under. A column may have a control in both, so one field can narrow the map to some
+ * values and light a few of them. Either record may hold empty controls, which constrain nothing.
+ * {@link emptyDraft} seeds one; {@link composeFilters} turns it into the expressions a request
+ * carries.
  *
  * @category Filters
  */
-export type ColumnDraft = ColumnPredicate & {
-  /** The expression the control joins. */
-  verb: ClauseVerb;
+export type FilterDraft = {
+  /** The controls whose clauses join `filters`: once seeded, one per filterable column. */
+  filter: Record<string, ColumnDraft>;
+  /** The controls whose clauses join `highlight`. */
+  highlight: Record<string, ColumnDraft>;
 };
-
-/**
- * A filter panel's controls, keyed by the column name the leaf is sent under. It may hold empty
- * controls, which constrain nothing. {@link emptyDraft} seeds one; {@link composeFilters} turns it
- * into the expressions a request carries.
- *
- * @category Filters
- */
-export type FilterDraft = Record<string, ColumnDraft>;
 
 /**
  * Whether a control carries a predicate: a text query that is not blank, a keyword needle that is
@@ -79,7 +75,7 @@ export type FilterDraft = Record<string, ColumnDraft>;
  *
  * @category Filters
  */
-export function isPopulated(draft: ColumnPredicate): boolean {
+export function isPopulated(draft: ColumnDraft): boolean {
   switch (draft.family) {
     case 'text':
       return draft.query.trim().length > 0;
@@ -96,7 +92,7 @@ export function isPopulated(draft: ColumnPredicate): boolean {
  * The operator one populated control becomes. A category control with one key still sends `in`,
  * which asks the same as `eq`.
  */
-function operatorOf(draft: ColumnPredicate): FilterOperator {
+function operatorOf(draft: ColumnDraft): FilterOperator {
   switch (draft.family) {
     case 'text': {
       const query = draft.query.trim();
@@ -123,7 +119,7 @@ function operatorOf(draft: ColumnPredicate): FilterOperator {
 
 /**
  * Composes the populated controls in one position into a filter expression: `null` for none, the
- * bare leaf for one, and `all_of` over the leaves for several, in the draft's key order. A draft
+ * bare leaf for one, and `all_of` over the leaves for several, in the position's key order. A draft
  * that constrains nothing therefore sends the same request as no filter.
  *
  * @param verb - The position to compose. Defaults to `filter`.
@@ -134,8 +130,7 @@ export function composeFilters(draft: FilterDraft, verb: ClauseVerb = 'filter'):
   const leaves: FilterExpr[] = [];
   // The draft is seeded in `/v1/meta`'s declaration order, so leaves follow the schema and two
   // sessions filtering alike send the same body.
-  for (const [column, control] of Object.entries(draft)) {
-    if (control.verb !== verb) continue;
+  for (const [column, control] of Object.entries(draft[verb])) {
     if (!isPopulated(control)) continue;
     leaves.push({[column]: operatorOf(control)} as FilterExpr);
   }
@@ -145,30 +140,67 @@ export function composeFilters(draft: FilterDraft, verb: ClauseVerb = 'filter'):
 }
 
 /**
- * How many controls carry a predicate, for a panel heading. With `verb`, only those in that
- * position are counted.
+ * How many controls carry a predicate, for a panel heading. A column with a clause in both
+ * positions counts twice. With `verb`, only those in that position are counted.
  *
  * @category Filters
  */
 export function activeCount(draft: FilterDraft, verb?: ClauseVerb): number {
-  return Object.values(draft).filter((d) => isPopulated(d) && (verb === undefined || d.verb === verb)).length;
+  const verbs: ClauseVerb[] = verb === undefined ? ['filter', 'highlight'] : [verb];
+  return verbs.reduce((n, v) => n + Object.values(draft[v]).filter(isPopulated).length, 0);
 }
 
 /**
- * Returns a draft with `column`'s control moved to `verb`, its predicate kept. Returns `draft`
- * itself where the column has no control or the control is already in that position.
+ * Returns a draft with `column`'s control in position `verb` emptied, keeping its family, text
+ * mode and keyword operator. The control in the other position is kept. Returns `draft` itself
+ * where the column has no control there.
+ *
+ * @category Filters
+ */
+export function withoutClause(draft: FilterDraft, column: string, verb: ClauseVerb): FilterDraft {
+  const control = draft[verb][column];
+  if (!control) return draft;
+  const empty: ColumnDraft =
+    control.family === 'text'
+      ? {...control, query: ''}
+      : control.family === 'keyword'
+        ? {...control, needle: ''}
+        : control.family === 'category'
+          ? {family: 'category', keys: []}
+          : {family: 'numeric', gte: null, lte: null};
+  return {...draft, [verb]: {...draft[verb], [column]: empty}};
+}
+
+/**
+ * Returns a draft with `column`'s clause moved from the other position to `verb`, and emptied
+ * where it was. Where `verb` already holds a clause on the column, the two are merged: category
+ * keys are joined, a numeric range widens to span both (an open side stays open), and a text or
+ * keyword clause replaces the one there. Returns `draft` itself where the other position holds no
+ * clause on the column.
  *
  * @category Filters
  */
 export function withVerb(draft: FilterDraft, column: string, verb: ClauseVerb): FilterDraft {
-  const control = draft[column];
-  if (!control || control.verb === verb) return draft;
-  return {...draft, [column]: {...control, verb}};
+  const from: ClauseVerb = verb === 'filter' ? 'highlight' : 'filter';
+  const moved = draft[from][column];
+  if (!moved || !isPopulated(moved)) return draft;
+  const held = draft[verb][column];
+  let merged: ColumnDraft = moved;
+  if (held && isPopulated(held)) {
+    if (held.family === 'category' && moved.family === 'category') {
+      merged = {family: 'category', keys: [...held.keys, ...moved.keys.filter((k) => !held.keys.includes(k))]};
+    } else if (held.family === 'numeric' && moved.family === 'numeric') {
+      const wider = (a: number | null, b: number | null, pick: (...n: number[]) => number) => (a === null || b === null ? null : pick(a, b));
+      merged = {family: 'numeric', gte: wider(held.gte, moved.gte, Math.min), lte: wider(held.lte, moved.lte, Math.max)};
+    }
+  }
+  const emptied = withoutClause(draft, column, from);
+  return {...emptied, [verb]: {...emptied[verb], [column]: merged}};
 }
 
 /**
  * A draft with one empty control per filterable column in `operands` (`Meta.filterOperands`), each
- * in the `filter` position. A column gets a control only where it publishes the operator the
+ * in the `filter` position, and none in the `highlight` position. A column gets a control only where it publishes the operator the
  * control sends: `match` for text (the control starts in mode `all`), `in` for category and `range`
  * for numeric. A keyword control starts on whichever of `eq`, `prefix` and `contains` the column
  * publishes first.
@@ -180,24 +212,24 @@ export function withVerb(draft: FilterDraft, column: string, verb: ClauseVerb): 
  * @category Filters
  */
 export function emptyDraft(operands: FilterOperandSet[]): FilterDraft {
-  const draft: FilterDraft = {};
+  const draft: Record<string, ColumnDraft> = {};
   for (const {column, family, operands: ops} of operands) {
     switch (family) {
       case 'text':
-        if (ops.includes('match')) draft[column] = {family: 'text', query: '', mode: 'all', verb: 'filter'};
+        if (ops.includes('match')) draft[column] = {family: 'text', query: '', mode: 'all'};
         break;
       case 'keyword': {
         const op = ops.find((o): o is 'eq' | 'prefix' | 'contains' => o === 'eq' || o === 'prefix' || o === 'contains');
-        if (op) draft[column] = {family, needle: '', op, verb: 'filter'};
+        if (op) draft[column] = {family, needle: '', op};
         break;
       }
       case 'category':
-        if (ops.includes('in')) draft[column] = {family: 'category', keys: [], verb: 'filter'};
+        if (ops.includes('in')) draft[column] = {family: 'category', keys: []};
         break;
       case 'numeric':
-        if (ops.includes('range')) draft[column] = {family: 'numeric', gte: null, lte: null, verb: 'filter'};
+        if (ops.includes('range')) draft[column] = {family: 'numeric', gte: null, lte: null};
         break;
     }
   }
-  return draft;
+  return {filter: draft, highlight: {}};
 }

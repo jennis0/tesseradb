@@ -403,16 +403,20 @@ export function filtersOf(draft: FilterDraft, over: Partial<FiltersProjection> =
 /** Every control empty, in declaration order, as a fresh session holds them. */
 export function emptyDraft(): FilterDraft {
   return {
-    field: {family: 'category', keys: [], verb: 'filter'},
-    title: {family: 'text', query: '', mode: 'all', verb: 'filter'},
-    abstract: {family: 'text', query: '', mode: 'all', verb: 'filter'},
-    authors: {family: 'keyword', needle: '', op: 'contains', verb: 'filter'},
-    citations: {family: 'numeric', gte: null, lte: null, verb: 'filter'},
-    published_at: {family: 'numeric', gte: null, lte: null, verb: 'filter'}
+    filter: {
+      field: {family: 'category', keys: []},
+      title: {family: 'text', query: '', mode: 'all'},
+      abstract: {family: 'text', query: '', mode: 'all'},
+      authors: {family: 'keyword', needle: '', op: 'contains'},
+      citations: {family: 'numeric', gte: null, lte: null},
+      published_at: {family: 'numeric', gte: null, lte: null}
+    },
+    highlight: {}
   };
 }
 
-export const withDraft = (over: Record<string, ColumnDraft>): FilterDraft => ({...emptyDraft(), ...over});
+/** The empty draft with `filter` over its filter controls and `highlight` as its highlight controls. */
+export const withDraft = (filter: Record<string, ColumnDraft>, highlight: Record<string, ColumnDraft> = {}): FilterDraft => ({filter: {...emptyDraft().filter, ...filter}, highlight});
 
 const at = (y: number, m: number, d: number) => Date.UTC(y, m - 1, d, 12) * 1000;
 

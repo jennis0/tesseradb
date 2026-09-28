@@ -76,8 +76,9 @@ export type TesseraEventDetails = {
   /**
    * A filter changed. `column` is the column whose control changed, or null for Clear all. After an
    * edit in a control, `expr` is the expression the controls now compose, null for none. Where a
-   * chip was removed or Clear all pressed, `expr` is null. Where a clause moved between `filter`
-   * and `highlight`, `verb` is its new position and `expr` is absent.
+   * chip was removed, `verb` is the position it was in and `expr` is null; after Clear all, `expr`
+   * is null. Where a clause moved between `filter` and `highlight`, `verb` is its new position and
+   * `expr` is absent.
    */
   'tessera-filterchange': {column: string | null; expr?: FilterExpr | null; verb?: ClauseVerb};
   /** Open was pressed on the item `id`: `fields` is its record's fields. */

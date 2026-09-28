@@ -1,7 +1,7 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {activeCount, emptyDraft, isPopulated, memberKey, withVerb, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
+import {activeCount, emptyDraft, isPopulated, withMember, withVerb, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
 import {TesseraElement, UNNAMED, columnCaption, dateText, emit, keyTitle} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -16,21 +16,25 @@ const FILTER_PARTS = exportparts('filter');
 /**
  * A `<tessera-filter>` for every column `meta.filterOperands` lists, under the clauses applied, as
  * chips, and a Clear all button. A clause is in one of two positions: a filter narrows the map and
- * every count to the matches, and a highlight keeps the map and lights the matches. A highlight
- * chip says "highlight"; a filter chip carries no mark. Each chip's toggle moves the clause to the
- * other position. A `member_of` clause (an artifact chosen on the artifact card or in the
- * hierarchy) is a chip too.
+ * every count to the matches, and a highlight keeps the map and lights the matches. A column or an
+ * artifact can hold a clause in each, and then has two chips. A highlight chip says "highlight"; a
+ * filter chip carries no mark. The controls edit the filter clauses; a highlight shows only as its
+ * chip. A `member_of` clause (an artifact chosen on the artifact card or in the hierarchy) is a
+ * chip too.
  *
- * Removing a chip empties its control and keeps its position. Clear all empties every control and
- * drops every `member_of` clause. `chips-only` leaves the controls out, and renders nothing while no
+ * Each chip's toggle moves its clause to the other position. Where that position already holds a
+ * clause on the same column, the two merge as `withVerb` says; on the same artifact, the moved
+ * clause replaces the one there. Removing a chip empties its clause and leaves the other position's
+ * alone. Clear all empties every control in both positions and drops every `member_of` clause. `chips-only` leaves the controls out, and renders nothing while no
  * clause is applied.
  *
  * @summary Every filter control, with the applied clauses as chips.
  * @tagname tessera-filter-panel
  * @category Elements
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A
- *   column's chip moved between filter and highlight (with `verb`), a column's chip was removed
- *   (with `expr` null), or Clear all was pressed (with `column` and `expr` null). Moving or removing
+ *   column's chip moved between filter and highlight (with `verb`, its new position), a column's
+ *   chip was removed (with `verb`, the position it was in, and `expr` null), or Clear all was
+ *   pressed (with `column` and `expr` null). Moving or removing
  *   a `member_of` chip fires nothing. Each inner control fires its own as well.
  * @csspart title - The heading, holding Clear all at its right.
  * @csspart clear - The Clear all button, shown while any clause is applied.
@@ -131,14 +135,13 @@ export class TesseraFilterPanel extends TesseraElement {
   private moveMember(clause: MemberClause, to: ClauseVerb): void {
     const s = this.resolvedStore;
     if (!s) return;
-    const key = memberKey(clause.layer, clause.artifact);
-    s.setMembers(s.get('filters').members.map((c) => (memberKey(c.layer, c.artifact) === key ? {...c, verb: to} : c)));
+    s.setMembers(withMember(withoutMember(s.get('filters').members, clause.layer, clause.artifact, clause.verb), {...clause, verb: to}));
   }
 
   private clearMember(clause: MemberClause): void {
     const s = this.resolvedStore;
     if (!s) return;
-    s.setMembers(withoutMember(s.get('filters').members, clause.layer, clause.artifact));
+    s.setMembers(withoutMember(s.get('filters').members, clause.layer, clause.artifact, clause.verb));
   }
 
   /**
@@ -151,19 +154,20 @@ export class TesseraFilterPanel extends TesseraElement {
     return clause.outside ? `Outside ${name}` : name;
   }
 
-  private clear(column: string | null): void {
+  private clearColumn(column: string, verb: ClauseVerb): void {
+    const s = this.resolvedStore;
+    if (!s) return;
+    s.setFilters(withoutClause(s.get('filters').draft, column, verb));
+    emit(this, 'tessera-filterchange', {column, verb, expr: null});
+  }
+
+  private clearAll(): void {
     const s = this.resolvedStore;
     const meta = s?.get('meta');
     if (!s || !meta) return;
-    const empty = emptyDraft(meta.filterOperands);
-    const held = s.get('filters').draft;
-    // Clearing a control empties its predicate and keeps its position: a viewer who moved a clause
-    // to the highlight and then retyped it means the highlight.
-    const keep = (c: string) => ({...empty[c]!, verb: held[c]?.verb ?? 'filter'}) as ColumnDraft;
-    const next = column === null ? empty : {...held, [column]: keep(column)};
-    s.setFilters(next);
-    if (column === null) s.setMembers([]);
-    emit(this, 'tessera-filterchange', {column, expr: null});
+    s.setFilters(emptyDraft(meta.filterOperands));
+    s.setMembers([]);
+    emit(this, 'tessera-filterchange', {column: null, expr: null});
   }
 
   override render(): TemplateResult | typeof nothing {
@@ -174,18 +178,25 @@ export class TesseraFilterPanel extends TesseraElement {
     if (operands.length === 0) return html`<div class="panel"><h2 part="title">Filters</h2><span part="state" data-state="empty">Nothing filterable</span></div>`;
     const {draft, members} = s.get('filters');
     const active = activeCount(draft);
-    const chips = Object.entries(draft).filter(([, d]) => isPopulated(d));
+    // A column's filter chip and then its highlight chip, the columns in the draft's order.
+    const columns = [...new Set([...Object.keys(draft.filter), ...Object.keys(draft.highlight)])];
+    const chips = columns.flatMap((c) =>
+      (['filter', 'highlight'] as const).flatMap((verb) => {
+        const d = draft[verb][c];
+        return d && isPopulated(d) ? [{c, verb, d}] : [];
+      })
+    );
     if (this.chipsOnly && chips.length === 0 && members.length === 0) return nothing;
-    return html`<div class="panel"><h2 part="title">Filters${active > 0 || members.length > 0 ? html`<button part="clear" class="quiet" type="button" @click=${() => this.clear(null)}>Clear all</button>` : nothing}</h2>
+    return html`<div class="panel"><h2 part="title">Filters${active > 0 || members.length > 0 ? html`<button part="clear" class="quiet" type="button" @click=${() => this.clearAll()}>Clear all</button>` : nothing}</h2>
       <span part="state" data-state="shown"></span>
       ${chips.length > 0 || members.length > 0
         ? html`<div part="chips">
             ${chips.map(
-              ([c, d]) => html`<span part="chip" class="chip" data-verb=${d.verb} data-column=${c}
-                >${d.verb === 'highlight' ? this.verbToggle(d.verb, c, () => this.moveColumn(c, 'filter')) : nothing}${this.chipText(c, d)}${d.verb === 'filter' ? this.verbToggle(d.verb, c, () => this.moveColumn(c, 'highlight')) : nothing}<button
+              ({c, verb, d}) => html`<span part="chip" class="chip" data-verb=${verb} data-column=${c}
+                >${verb === 'highlight' ? this.verbToggle(verb, c, () => this.moveColumn(c, 'filter')) : nothing}${this.chipText(c, d)}${verb === 'filter' ? this.verbToggle(verb, c, () => this.moveColumn(c, 'highlight')) : nothing}<button
                   type="button"
-                  aria-label=${`Remove ${c} filter`}
-                  @click=${() => this.clear(c)}
+                  aria-label=${`Remove ${c} ${verb}`}
+                  @click=${() => this.clearColumn(c, verb)}
                 >
                   ${icon('close', 12)}
                 </button></span
