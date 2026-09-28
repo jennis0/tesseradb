@@ -767,6 +767,7 @@ async fn every_refusal_has_its_status() {
         (by(json!({ "field": "archive", "top": 6 })), Some("max_aggregate_top")),
         (by(json!({ "field": "archive", "values": [] })), None),
         (by(json!({ "field": "archive", "values": ["a", "b", "c", "d"] })), Some("max_aggregate_named")),
+        (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 300 } }] }), None),
         (by(json!({ "field": "archive", "artifacts": [1] })), None),
         (by(json!({ "field": "archive", "top": 1, "level": 0 })), None),
         (by(json!({ "field": "archive", "top": 1, "unknown": 1 })), None),
@@ -794,10 +795,14 @@ async fn every_refusal_has_its_status() {
             assert!(text.contains(limit), "{body}: {text}");
         }
     }
-    // The three a field cannot be counted for read alike.
-    let nope = uncountable(&f.server, &token, "nope").await;
-    assert_eq!(nope, uncountable(&f.server, &token, "id").await);
-    assert_eq!(nope, uncountable(&f.server, &token, "tag").await);
+    // An unknown field, a field that is not a category and a category that cannot be counted
+    // are three refusals, each with its own detail.
+    let details = [
+        refusal_detail(&f.server, &token, "nope").await,
+        refusal_detail(&f.server, &token, "id").await,
+        refusal_detail(&f.server, &token, "tag").await,
+    ];
+    assert_eq!(details.iter().collect::<HashSet<_>>().len(), 3, "{details:?}");
 
     let resp = post(&f.server, "/v1/aggregate", &token, &json!({ "view": "nowhere", "groupings": [{}] })).await;
     assert_eq!(refused(resp, 404).await, "unknown");
@@ -813,7 +818,7 @@ async fn every_refusal_has_its_status() {
 }
 
 /// The detail of the refusal to count `field`, with the field's name taken out.
-async fn uncountable(server: &TestServer, token: &str, field: &str) -> String {
+async fn refusal_detail(server: &TestServer, token: &str, field: &str) -> String {
     let body = json!({ "view": "s0", "groupings": [{ "by": { "field": field, "top": 1 } }] });
     let resp = post(server, "/v1/aggregate", token, &body).await;
     assert_eq!(resp.status().as_u16(), 422);

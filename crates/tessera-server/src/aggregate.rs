@@ -23,7 +23,7 @@ use tessera_wire::table_head_frame;
 use crate::error::ApiError;
 use crate::records::{bulk_read, limits, view_and_filter, CompressionReq, FrameSink, Lane, Opening, Read};
 use crate::state::{ApiJson, AppState, ViewerSession};
-use crate::viewer::{category_column, FilterParser};
+use crate::viewer::{category_column, CategoryColumn, FilterParser};
 
 /// The request body. Every field but `view` and `groupings` may be left out; an unknown one is a
 /// `422`.
@@ -79,7 +79,7 @@ struct ByReq {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CellsReq {
-    depth: u8,
+    depth: u64,
 }
 
 /// The table heads and pages of an aggregate response. It has no head frame of its own: the
@@ -210,10 +210,19 @@ fn grouping_of(
         None => None,
         Some(by) => Some(by_of(meta, view, session, by)?),
     };
-    Ok(Grouping {
-        by,
-        cells: grouping.cells.as_ref().map(|cells| cells.depth),
-    })
+    let cells = match &grouping.cells {
+        None => None,
+        Some(CellsReq { depth }) => match u8::try_from(*depth) {
+            Ok(cells) if cells <= 32 => Some(cells),
+            _ => {
+                return Err(ApiError::Contract(format!(
+                    "cells depth {depth} is past the stored resolution; ask for a depth from 0 \
+                     to 32"
+                )))
+            }
+        },
+    };
+    Ok(Grouping { by, cells })
 }
 
 fn by_of(
@@ -234,11 +243,15 @@ fn by_of(
                 (Some(_), Some(_)) => return bad("`by` carries both `top` and `values`; send one"),
                 (None, None) => return bad("`by` carries neither `top` nor `values`; send one"),
             };
-            // An unknown field and one that is not a category are refused as the engine refuses
-            // a category it cannot count, so the three read alike.
-            let column = category_column(meta, field, view, session.visible_views())?
-                .ok_or_else(|| not_countable(field))?;
-            Ok(By::Field { column, pick })
+            match category_column(meta, field, view, session.visible_views())? {
+                CategoryColumn::Resolved(column) => Ok(By::Field { column, pick }),
+                CategoryColumn::NotCategory => Err(ApiError::Contract(format!(
+                    "field '{field}' is not a category; name a category field"
+                ))),
+                CategoryColumn::Unknown => Err(ApiError::Contract(format!(
+                    "field '{field}' is unknown; name a field /v1/meta publishes"
+                ))),
+            }
         }
         (None, Some(layer)) => {
             if by.values.is_some() {
@@ -265,13 +278,6 @@ fn by_of(
         (Some(_), Some(_)) => bad("`by` names both `field` and `layer`; name one"),
         (None, None) => bad("`by` names neither `field` nor `layer`; name one"),
     }
-}
-
-fn not_countable(field: &str) -> ApiError {
-    ApiError::Contract(
-        EngineError::AggregateRefused(AggregateRefused::NotCountable(field.to_string()))
-            .to_string(),
-    )
 }
 
 /// A refusal naming a field the engine was given resolved, named as the caller spelled it.

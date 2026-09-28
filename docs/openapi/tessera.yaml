@@ -1155,9 +1155,9 @@ paths:
             - an unknown key, a missing `view` or `groupings`, no grouping, or more than `selection.max_aggregate_groupings`;
             - `by` naming neither or both of `field` and `layer`, or carrying neither or both of `top` and `values` or `artifacts`, or `values` on a layer, or `artifacts` or `level` on a field;
             - `top` of 0 or above `selection.max_aggregate_top`; `values` or `artifacts` empty or longer than `selection.max_aggregate_named`; an `artifacts` entry that is not a `tessera_id`;
-            - an unknown field, a field that is not a category, or a category declared with none of `index`, `render` or a `derived` vocabulary: one detail, saying to declare it with `index` or `render`;
+            - an unknown field, and a field that is not a category, each with its own detail; a category declared with none of `index`, `render` or a `derived` vocabulary, with a detail saying to declare it with `index` or `render`;
             - a layer outside the list `/v1/meta` publishes to this principal; no `level` on a layer with several, a `level` the layer does not hold, or one given on a layer with a single level;
-            - `depth` above 32;
+            - `depth` above 32, whatever its size;
             - `page_rows` or `pages` of 0;
             - a cursor that does not open for this request.
 

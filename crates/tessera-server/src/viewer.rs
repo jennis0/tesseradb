@@ -432,27 +432,40 @@ fn resolve_category_column(
         },
     };
     match category_column(meta, column, view, visible)? {
-        Some(resolved) => Ok((resolved, requested_view.map(|_| view.to_string()))),
+        CategoryColumn::Resolved(resolved) => {
+            Ok((resolved, requested_view.map(|_| view.to_string())))
+        }
         // A non-category column gets the same 404 as no column at all.
-        None => Err(ApiError::Unknown("unknown category column".to_string())),
+        CategoryColumn::NotCategory | CategoryColumn::Unknown => {
+            Err(ApiError::Unknown("unknown category column".to_string()))
+        }
     }
 }
 
+/// What a spelling names as a category column.
+pub(crate) enum CategoryColumn {
+    Resolved(String),
+    /// A column this principal can reach that is not a category.
+    NotCategory,
+    /// No column this principal can reach.
+    Unknown,
+}
+
 /// The category column `column` names under the resolved `view` (`""` for none), as a filter leaf
-/// resolves it, or `None` where it names no category column this principal can reach. A scoped
-/// family's spelling that needs a view or names a pin wrongly is refused.
+/// resolves it. A scoped family's spelling that needs a view or names a pin wrongly is refused.
 pub(crate) fn category_column(
     meta: &tessera_engine::EngineMeta,
     column: &str,
     view: &str,
     visible: &tessera_engine::gate::VisibleViews,
-) -> Result<Option<String>, ApiError> {
+) -> Result<CategoryColumn, ApiError> {
     match meta.resolve_category_column(column, view, visible) {
         tessera_engine::LeafColumn::Resolved {
             column: resolved,
             family: tessera_engine::filter::Family::Category,
             ..
-        } => Ok(Some(resolved)),
+        } => Ok(CategoryColumn::Resolved(resolved)),
+        tessera_engine::LeafColumn::Resolved { .. } => Ok(CategoryColumn::NotCategory),
         tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
             "'{column}' is scoped to view group '{group}' and this request names no view of \
              it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
@@ -463,7 +476,7 @@ pub(crate) fn category_column(
         tessera_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
             "'{column}' is not scoped to a view group; leave out the pin"
         ))),
-        _ => Ok(None),
+        _ => Ok(CategoryColumn::Unknown),
     }
 }
 

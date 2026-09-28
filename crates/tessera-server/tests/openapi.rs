@@ -1420,6 +1420,7 @@ async fn the_aggregate_read_matches_the_description_with_its_refusals() {
         json!({ "view": "s0", "groupings": [{ "by": { "field": "score", "top": 1 } }] }),
         json!({ "view": "s0", "groupings": [{ "by": { "layer": LAYER, "top": 1, "level": 0 } }] }),
         json!({ "view": "s0", "groupings": [{ "cells": { "depth": 33 } }] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 300 } }] }),
         json!({ "view": "s0", "groupings": [{}], "cursor": "not-a-cursor" }),
     ] {
         let resp = post(body, token).await.unwrap();
