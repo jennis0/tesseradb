@@ -458,21 +458,26 @@ set. A value or an artifact is listed on the same terms as everywhere else: a va
 vocabulary only where the viewer can see an item carrying it, an artifact only where the viewport
 would serve it, tested against the viewer's whole visible set whatever the filter.
 
-A cell at depth `d` is the first `2d` bits of an item's 64-bit Morton position. At depths up to
-16 a cell is a tile of the map at that zoom, and its count is the tile's matched count; deeper
-cells divide a tile down to the stored position. Each request counts cells by whichever of two
-methods costs less: by bitmap arithmetic over the row range of each cell where the cells are far
-fewer than the set's items, or by one pass over the set's rows reading each row's position.
+A cell at depth `d` is the first `2d` bits of an item's 64-bit Morton position. At depths up to 16
+a cell is a tile of the map at that zoom, and its count is the tile's matched count; deeper cells
+divide a tile down to the stored position. A cell level can name an area, a bbox as the viewport
+takes one, and then lists only the cells at its depth that the area intersects, each with all of
+its items, while the table's totals and the counts that rank its groups stay the whole set's. The
+cells at a depth in an area are counted from the geometry before anything is read, and a request
+for more than `selection.max_aggregate_cells` of them is refused with the deepest depth that fits;
+the whole view fits down to depth 10. Each request counts cells by whichever of two methods costs
+less: by bitmap arithmetic over the row range of each cell where the cells are far fewer than the
+set's items, or by one pass over the set's rows reading each row's position.
 
 The response is framed as a bulk read is, with a table head before each table's first page, and a
 table larger than a page continues through a cursor. Every page composes the visible set again,
 so a deletion or suppression accepted during a read applies from the next page. The groups a
 table lists under `top` are fixed at its first page and carried in the cursor, so a table read
 across a changing corpus keeps its groups, and a response's trailer says when a page counted a
-different state of the corpus from the page before it. A request with no cells runs under the
-viewport's admission, since its tables hold only the listed groups and `rest` and `none`. A
-request with cells can hold a row per item, so it runs under the bulk reads' admission and memory
-budget. Either stops its work when the client disconnects.
+different state of the corpus from the page before it. Every request runs under the viewport's
+admission, and each response is held to a byte budget of its own, 16 MiB by default in pages of
+4 MiB, so what one request holds is bounded however large its table; a larger table continues
+through the cursor. A request stops its work when the client disconnects.
 
 **Not built yet:** histograms, minimum, maximum and mean of number and timestamp fields;
 breakdowns of keyword and integer fields; a grouping of one kind inside another of the same kind,

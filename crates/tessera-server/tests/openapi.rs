@@ -1350,10 +1350,11 @@ async fn the_aggregate_read_matches_the_description_with_its_refusals() {
         "groupings": [
             {},
             { "by": { "field": "archive", "top": 2 } },
-            { "by": { "field": "archive", "values": ["hep", "astro"] }, "cells": { "depth": 12 } },
+            { "by": { "field": "archive", "values": ["hep", "astro"] }, "cells": { "depth": 8 } },
             { "by": { "layer": LAYER, "top": 5 } },
             { "by": { "layer": LAYER, "artifacts": [f.artifacts[1].clone(), 7] } },
-            { "cells": { "depth": 32 } },
+            { "cells": { "depth": 10 } },
+            { "cells": { "depth": 20, "area": [100.0, 100.0, 100.4, 100.4] } },
         ],
         "page_rows": 50,
         "pages": 4,
@@ -1421,6 +1422,8 @@ async fn the_aggregate_read_matches_the_description_with_its_refusals() {
         json!({ "view": "s0", "groupings": [{ "by": { "layer": LAYER, "top": 1, "level": 0 } }] }),
         json!({ "view": "s0", "groupings": [{ "cells": { "depth": 33 } }] }),
         json!({ "view": "s0", "groupings": [{ "cells": { "depth": 300 } }] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 11 } }] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 3, "area": [9.0, 0.0, 1.0, 1.0] } }] }),
         json!({ "view": "s0", "groupings": [{}], "cursor": "not-a-cursor" }),
     ] {
         let resp = post(body, token).await.unwrap();
@@ -1442,6 +1445,7 @@ async fn the_aggregate_read_matches_the_description_with_its_refusals() {
         json!({ "groupings": [{}] }),
         json!({ "view": "s0", "groupings": [] }),
         json!({ "view": "s0", "groupings": [{ "cells": { "depth": 33 } }] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 3, "area": [0.0, 0.0, 1.0] } }] }),
         json!({ "view": "s0", "groupings": [{ "by": { "field": "archive" } }] }),
         json!({ "view": "s0", "groupings": [{ "by": { "field": "archive", "top": 0 } }] }),
         json!({ "view": "s0", "groupings": [{ "by": { "field": "archive", "values": [] } }] }),

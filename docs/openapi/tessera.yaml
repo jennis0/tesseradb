@@ -1053,7 +1053,13 @@ paths:
         category `field` or the artifacts of a `layer`, and lists `top` groups by count or the
         groups named in `values` or `artifacts`. `cells` divides the set, or each group, into the
         cells of `view` at `depth`: depths 0 to 16 are the cells of the map's tiles at that zoom,
-        and 17 to 32 divide them down to the stored position.
+        and 17 to 32 divide them down to the stored position. `cells.area` is a bbox in the form
+        and units the viewport's `bbox` takes, absent for the view's whole extent; only the cells
+        at `depth` that intersect it are listed, as a viewport lists tiles for its `bbox`, each
+        with all of its items. The table head's `total`, `reference_total` and `groups`, and the
+        counts that rank `top`, stay the whole set's. The cells at `depth` in the area, a matter of
+        geometry alone, may number at most `selection.max_aggregate_cells`, however many groups
+        the grouping has.
 
         **Rows.** A field with `top`: the `top` values with the most items, ties by key; then
         `rest`, the items with any other value; then `none`, the items with no value. Each item
@@ -1082,10 +1088,11 @@ paths:
         `(count / total) / (reference_count / reference_total)`, null where `reference_count` or
         `total` is 0.
 
-        **Reading a whole result.** A response carries at most `pages` pages and runs within the
-        byte and time budgets of the bulk reads. A page holds at most `page_rows` rows and
-        `selection.max_page_bytes` bytes; one can hold fewer rows than `page_rows` before the
-        table ends. Pass the trailer's `next` back as `cursor`, unchanged, until it is null. Every
+        **Reading a whole result.** A response carries at most `pages` pages and runs within its
+        own byte budget, `serve.aggregate_response_bytes` (16 MiB by default), and the bulk
+        reads' time budget. A page holds at most `page_rows` rows and `serve.aggregate_page_bytes`
+        Arrow bytes (4 MiB by default); one can hold fewer rows than `page_rows` before the table
+        ends. Pass the trailer's `next` back as `cursor`, unchanged, until it is null. Every
         page composes the visible set again, so a deletion or suppression accepted during a read
         applies from the next page, and the pages of one table can count different states of a
         changing corpus. Which groups a table lists under `top` is fixed at its first page and
@@ -1094,12 +1101,10 @@ paths:
         **Cursor.** As `POST /v1/items`' cursor, bound also to this route and to the request's
         `filters`, `reference` and `groupings`: a cursor sent with any of them changed is `422`.
 
-        **Admission.** A request whose groupings have no `cells` runs under the viewport's
-        admission, since a client sends it beside viewport requests and its tables hold at most
-        the listed groups and `rest` and `none`. A request with `cells` in any grouping can hold a
-        row per item, so it runs under the bulk reads' admission limit, `serve.bulk_admission`,
-        and within their memory budget: one past that limit is refused at once with `429`. Either
-        holds its place until the response ends, and a client that disconnects stops the work.
+        **Admission.** Every request runs under the viewport's admission, since a client sends it
+        beside viewport requests, and holds its place until the response ends; the response's
+        byte budget bounds what it holds, and a larger table continues through the cursor. A
+        client that disconnects stops the work.
 
         **The trailer** carries `recomposed: true` where a page of this response counted a
         different state of the corpus from the page before it, in this response or in the one
@@ -1165,7 +1170,8 @@ paths:
             - `top` of 0 or above `selection.max_aggregate_top`; `values` or `artifacts` empty or longer than `selection.max_aggregate_named`; an `artifacts` entry that is not a `tessera_id`;
             - an unknown field, and a field that is not a category, each with its own detail; a category declared with none of `index`, `render` or a `derived` vocabulary, with a detail saying to declare it with `index` or `render`;
             - a layer outside the list `/v1/meta` publishes to this principal; no `level` on a layer with several, a `level` the layer does not hold, or one given on a layer with a single level;
-            - `depth` above 32, whatever its size;
+            - `depth` above 32, whatever its size; an `area` that is not `[x0, y0, x1, y1]` with `x0 ≤ x1`, `y0 ≤ y1`, all finite;
+            - more cells at `depth` in the area than `selection.max_aggregate_cells`: one detail naming the count, the limit and the deepest depth at which the area fits;
             - `page_rows` or `pages` of 0;
             - a cursor that does not open for this request.
 
@@ -2739,7 +2745,7 @@ components:
       type: object
       additionalProperties: false
       description: The sampling parameters and request ceilings. They are the same for every principal, and a client needs them to read a count of drawn points as a density.
-      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows, max_page_rows, max_page_bytes, max_aggregate_groupings, max_aggregate_top, max_aggregate_named]
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows, max_page_rows, max_page_bytes, max_aggregate_groupings, max_aggregate_top, max_aggregate_named, max_aggregate_cells]
       properties:
         k_min:
           type: integer
@@ -2785,7 +2791,7 @@ components:
         max_page_bytes:
           type: integer
           minimum: 1
-          description: The most Arrow bytes a page holds before compression. A single row larger than this is sent alone.
+          description: The most Arrow bytes a `POST /v1/items` or `POST /v1/artifacts` page holds before compression. A single row larger than this is sent alone. An aggregate page is held to the server's own `serve.aggregate_page_bytes`.
         max_aggregate_groupings:
           type: integer
           minimum: 0
@@ -2798,6 +2804,10 @@ components:
           type: integer
           minimum: 0
           description: The most `values` or `artifacts` an aggregate grouping may name; `serve.max_aggregate_named`, default 1,000. More is `422`.
+        max_aggregate_cells:
+          type: integer
+          minimum: 0
+          description: The most cells an aggregate grouping's cell level may list, the cells at its `depth` in its `area`, whatever its groups; `serve.max_aggregate_cells`, default 1,048,576, every cell at depth 10. More is `422`.
         max_region_cells:
           type: integer
           minimum: 0
@@ -3636,6 +3646,12 @@ components:
               type: integer
               minimum: 0
               maximum: 32
+            area:
+              type: array
+              minItems: 4
+              maxItems: 4
+              items: { type: number }
+              description: "As the viewport's `bbox`: `[x0, y0, x1, y1]` in the coordinates of the view's quantisation extent, with `x0 ≤ x1`, `y0 ≤ y1`, all finite. Only the cells at `depth` that intersect it are listed, each with all of its items. Absent is the view's whole extent."
 
     AggregateBy:
       description: |
