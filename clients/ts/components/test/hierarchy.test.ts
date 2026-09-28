@@ -137,6 +137,28 @@ describe('<tessera-hierarchy>', () => {
     expect(deep(host, '[part="filter"]')).not.toBeNull();
   });
 
+  it('holds a filter and a highlight on one row at once, and withdraws each on its own', async () => {
+    const both = [
+      {layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'filter' as const},
+      {layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'highlight' as const}
+    ];
+    const {host, store} = await panel();
+    store.set('filters', {...store.get('filters'), members: both.slice(0, 1)});
+    await settle(host);
+    (deep(host, '[part="row"] [part="highlight"]') as HTMLButtonElement).click();
+    const added = store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0] as {verb: string}[];
+    expect(added.map((c) => c.verb)).toEqual(['filter', 'highlight']);
+
+    store.set('filters', {...store.get('filters'), members: both});
+    await settle(host);
+    const first = deep(host, '[part="row"]')!;
+    expect([first.querySelector('[part="filter"]')!.getAttribute('aria-pressed'), first.querySelector('[part="highlight"]')!.getAttribute('aria-pressed')]).toEqual(['true', 'true']);
+    expect(first.getAttribute('data-clause')!.split(' ').sort()).toEqual(['filter', 'highlight']);
+    (first.querySelector('[part="filter"]') as HTMLButtonElement).click();
+    const left = store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0] as {verb: string}[];
+    expect(left.map((c) => c.verb)).toEqual(['highlight']);
+  });
+
   /**
    * The panel's counts answer the question the request carried, so the walk has to be dropped when
    * that question moves — and the question is `requestFilters()`, which carries the **drawn
@@ -171,7 +193,7 @@ describe('<tessera-hierarchy>', () => {
 
   it('shows the matched count beside the masked one where the map carries a filter', async () => {
     const {host} = await panel({
-      filters: {draft: {}, expr: {archive: {in: ['cs']}}, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0}
+      filters: {draft: {filter: {}, highlight: {}}, expr: {archive: {in: ['cs']}}, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0}
     });
     // Existence and the masked count never move with the filter; the second figure is what does.
     expect(deep(host, '[part="count-masked"]')).not.toBeNull();

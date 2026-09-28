@@ -146,6 +146,15 @@ describe('<tessera-explorer> narrow layout', () => {
     expect(shadow.querySelector('[part="sheet"]')).toBeNull();
     expect(shadow.activeElement).toBe(tabs(shadow)[0]);
   });
+
+  it('clears the controls and the member_of clauses from the filters sheet', async () => {
+    const {host, shadow, store} = await explorer();
+    tabs(shadow)[0]!.click();
+    await settle(host);
+    (shadow.querySelector('.sheet-footer .btn:not(.primary)') as HTMLButtonElement).click();
+    expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);
+    expect(store.calls.filter((c) => c.name === 'setMembers').map((c) => c.args[0])).toEqual([[]]);
+  });
 });
 
 describe('<tessera-explorer> detail', () => {
@@ -174,13 +183,25 @@ describe('<tessera-explorer> layouts', () => {
     const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
     const controls = () => deepAll(shadow.querySelector('[part="panel"]')!, 'tessera-filter');
     expect(controls()).toHaveLength(0);
-    store.set('filters', {...store.get('filters'), draft: {archive: {family: 'category', keys: ['cs'], verb: 'filter'}}});
+    store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}}});
     await settle(host);
     const toggle = shadow.querySelector<HTMLButtonElement>('[part="filters-toggle"]')!;
     expect(toggle.getAttribute('data-count')).toBe('1');
     expect(shadow.getElementById(toggle.getAttribute('aria-controls')!)).not.toBeNull();
     // The chips show with the controls closed.
     expect(deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"]')).toHaveLength(1);
+    // A highlight on the same column is a second clause and a second chip.
+    store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {archive: {family: 'category', keys: ['cs']}}}});
+    await settle(host);
+    expect(toggle.getAttribute('data-count')).toBe('2');
+    expect(deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"]')).toHaveLength(2);
+    // Pressing a chip while the controls are closed opens them.
+    (deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"][data-verb="highlight"] [part="edit"]')[0] as HTMLButtonElement).click();
+    await settle(host);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(controls()).toHaveLength(2);
+    toggle.click();
+    await settle(host);
     toggle.click();
     await settle(host);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');

@@ -76,10 +76,10 @@ describe('<tessera-legend> rows as a filter and a highlight', () => {
     host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
 
     press(host, 'cs.LG', 'filter');
-    expect(sent(store)!['field']).toEqual({family: 'category', keys: ['cs.LG'], verb: 'filter'});
+    expect(sent(store)!.filter['field']).toEqual({family: 'category', keys: ['cs.LG']});
     await answer(host, store);
     press(host, 'cs.CV', 'filter');
-    expect(sent(store)!['field']).toEqual({family: 'category', keys: ['cs.LG', 'cs.CV'], verb: 'filter'});
+    expect(sent(store)!.filter['field']).toEqual({family: 'category', keys: ['cs.LG', 'cs.CV']});
     await answer(host, store);
 
     // The rows in the filter are pressed; the rest are out of it.
@@ -87,31 +87,56 @@ describe('<tessera-legend> rows as a filter and a highlight', () => {
     expect(entry(host, 'cs.LG').querySelector('[part="filter"]')!.getAttribute('aria-pressed')).toBe('true');
 
     press(host, 'cs.LG', 'filter');
-    expect(sent(store)!['field']).toEqual({family: 'category', keys: ['cs.CV'], verb: 'filter'});
+    expect(sent(store)!.filter['field']).toEqual({family: 'category', keys: ['cs.CV']});
     expect(changes).toEqual([
-      {column: 'field', expr: {field: {in: ['cs.LG']}}},
-      {column: 'field', expr: {field: {in: ['cs.LG', 'cs.CV']}}},
-      {column: 'field', expr: {field: {in: ['cs.CV']}}}
+      {column: 'field', verb: 'filter', expr: {field: {in: ['cs.LG']}}},
+      {column: 'field', verb: 'filter', expr: {field: {in: ['cs.LG', 'cs.CV']}}},
+      {column: 'field', verb: 'filter', expr: {field: {in: ['cs.CV']}}}
     ]);
   });
 
   it('highlights a value without filtering, and greys the other rows', async () => {
     const {host, store} = await mountLegend('field');
+    const changes: unknown[] = [];
+    host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
     press(host, 'cs.CV', 'highlight');
-    expect(sent(store)!['field']).toEqual({family: 'category', keys: ['cs.CV'], verb: 'highlight'});
+    expect(changes).toEqual([{column: 'field', verb: 'highlight', expr: {field: {in: ['cs.CV']}}}]);
+    expect(sent(store)!.highlight['field']).toEqual({family: 'category', keys: ['cs.CV']});
     await answer(host, store);
     expect(['cs.LG', 'cs.CV', 'hep-th'].map((k) => entry(host, k).getAttribute('data-state'))).toEqual(['dim', 'lit', 'dim']);
     expect(entry(host, 'cs.CV').querySelector('[part="highlight"]')!.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('moves the column’s clause to the other verb with the value pressed alone', async () => {
+  it('holds a filter and a highlight on the column at once, each pressed on its own', async () => {
     const {host, store} = await mountLegend('field');
     press(host, 'cs.LG', 'filter');
     await answer(host, store);
     press(host, 'cs.CV', 'filter');
     await answer(host, store);
-    press(host, 'hep-th', 'highlight');
-    expect(sent(store)!['field']).toEqual({family: 'category', keys: ['hep-th'], verb: 'highlight'});
+    press(host, 'cs.CV', 'highlight');
+    expect(sent(store)!.filter['field']).toEqual({family: 'category', keys: ['cs.LG', 'cs.CV']});
+    expect(sent(store)!.highlight['field']).toEqual({family: 'category', keys: ['cs.CV']});
+    await answer(host, store);
+
+    // Of the two filtered, the one highlighted is lit and the other dim; the rest are out.
+    expect(['cs.LG', 'cs.CV', 'hep-th'].map((k) => entry(host, k).getAttribute('data-state'))).toEqual(['dim', 'lit', 'out']);
+    const pressed = (key: string, verb: 'filter' | 'highlight') => entry(host, key).querySelector(`[part="${verb}"]`)!.getAttribute('aria-pressed');
+    expect([pressed('cs.CV', 'filter'), pressed('cs.CV', 'highlight'), pressed('cs.LG', 'filter'), pressed('cs.LG', 'highlight')]).toEqual(['true', 'true', 'true', 'false']);
+
+    // Taking the value out of the filter leaves the highlight.
+    press(host, 'cs.CV', 'filter');
+    expect(sent(store)!.filter['field']).toEqual({family: 'category', keys: ['cs.LG']});
+    expect(sent(store)!.highlight['field']).toEqual({family: 'category', keys: ['cs.CV']});
+  });
+
+  it('offers the verbs from the published operands, with no filter control seeded', async () => {
+    const {host, store} = await mountLegend('field');
+    store.set('filters', filtersOf({filter: {}, highlight: {field: {family: 'category', keys: ['cs.CV']}}}));
+    await settle(host);
+    expect(entry(host, 'cs.CV').querySelector('[part="highlight"]')!.getAttribute('aria-pressed')).toBe('true');
+    press(host, 'cs.LG', 'filter');
+    expect(sent(store)!.filter['field']).toEqual({family: 'category', keys: ['cs.LG']});
+    expect(sent(store)!.highlight['field']).toEqual({family: 'category', keys: ['cs.CV']});
   });
 
   it('offers no verbs on a column that cannot be filtered by value, and none on Other', async () => {
@@ -295,18 +320,18 @@ describe('<tessera-legend> colours', () => {
 describe('<tessera-legend> a number’s range', () => {
   /** The draft the store holds for citations, as the filter panel's chip reads it. */
   const withRange = (store: FakeStore, gte: number | null, lte: number | null) =>
-    store.set('filters', filtersOf({...emptyDraft(META.filterOperands), citations: {family: 'numeric', gte, lte, verb: 'filter'}}));
+    store.set('filters', filtersOf({filter: {...emptyDraft(META.filterOperands).filter, citations: {family: 'numeric', gte, lte}}, highlight: {}}));
 
   it('leaves an end open that is not moved off the ramp’s edge, since the ramp spans only the values drawn', async () => {
     const {host, store} = await mountLegend('citations');
     expect(deep(host, '[part="range"]')).toBeNull();
     const low = deep(host, '[part="range-low"]') as HTMLElement;
     low.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', shiftKey: true, bubbles: true}));
-    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: 100, lte: null, verb: 'filter'});
+    expect(sent(store)!.filter['citations']).toEqual({family: 'numeric', gte: 100, lte: null});
     await answer(host, store);
     // Home takes the low end back to the edge, which opens it.
     (deep(host, '[part="range-low"]') as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', {key: 'Home', bubbles: true}));
-    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: null, lte: null, verb: 'filter'});
+    expect(sent(store)!.filter['citations']).toEqual({family: 'numeric', gte: null, lte: null});
   });
 
   it('follows the filter it is given, and shows a bound beyond the values drawn as its own value', async () => {
@@ -327,7 +352,7 @@ describe('<tessera-legend> a number’s range', () => {
     expect(deepAll(host, '[part="range-value"]').map((v) => v.textContent)).toEqual(['-50', '5,000']);
     // Moving one end keeps the other end's own bound.
     high.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowLeft', shiftKey: true, bubbles: true}));
-    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: -50, lte: 900, verb: 'filter'});
+    expect(sent(store)!.filter['citations']).toEqual({family: 'numeric', gte: -50, lte: 900});
   });
 
   it('sets a range from a drag across the ramp, open where the drag reaches its end', async () => {
@@ -338,10 +363,10 @@ describe('<tessera-legend> a number’s range', () => {
     pointer('pointerdown', 50);
     pointer('pointermove', 150);
     pointer('pointerup', 150);
-    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: 250, lte: 750, verb: 'filter'});
+    expect(sent(store)!.filter['citations']).toEqual({family: 'numeric', gte: 250, lte: 750});
     pointer('pointerdown', 100);
     pointer('pointerup', 260);
-    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: 500, lte: null, verb: 'filter'});
+    expect(sent(store)!.filter['citations']).toEqual({family: 'numeric', gte: 500, lte: null});
     // A press without a drag changes nothing.
     const before = store.calls.length;
     pointer('pointerdown', 120);

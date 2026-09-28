@@ -20,7 +20,7 @@ const view = (highlighting = false): ViewProjection => ({
 });
 
 const filters = (over: Partial<FiltersProjection> = {}): FiltersProjection => ({
-  draft: {},
+  draft: {filter: {}, highlight: {}},
   expr: null,
   highlight: null,
   members: [],

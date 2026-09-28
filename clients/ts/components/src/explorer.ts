@@ -121,6 +121,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - The session expired.
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A filter control or chip changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A `member_of` clause was put on or taken off.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-chipopen']>} tessera-chipopen - A filter chip was pressed while the controls were closed, which opens them.
  * @fires {CustomEvent<TesseraEventDetails['tessera-artifactselect']>} tessera-artifactselect - A row of the In view list was pressed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit was pressed on the artifact card or in the hierarchy; the explorer fits its map to the artifact.
  * @fires {CustomEvent<TesseraEventDetails['tessera-open']>} tessera-open - Open was pressed on the item card.
@@ -700,7 +701,8 @@ export class TesseraExplorer extends TesseraElement {
     const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout ?hide-palettes=${this.hidePalettes} .limit=${compact ? 4 : 0} .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
     // Only the card's copy carries the id its Filters button controls, so no id repeats.
-    const filters = (chipsOnly: boolean, id: string | typeof nothing = nothing) => html`<div id=${id} class="filters"><slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} ?chips-only=${chipsOnly}></tessera-filter-panel></slot></div>`;
+    // A chip pressed while the controls are closed opens them; the panel then opens the chip's control.
+    const filters = (chipsOnly: boolean, id: string | typeof nothing = nothing) => html`<div id=${id} class="filters" @tessera-chipopen=${() => (this.filtersOpen = true)}><slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} ?chips-only=${chipsOnly}></tessera-filter-panel></slot></div>`;
     const hierarchy = html`<slot name="hierarchy"><tessera-hierarchy exportparts=${FORWARD.hierarchy}></tessera-hierarchy></slot>`;
     // Drawn only where there is a hierarchy to walk; an empty section would look broken.
     const hasHierarchy = browsableLayers(meta?.layers ?? []).length > 0;
@@ -754,7 +756,9 @@ export class TesseraExplorer extends TesseraElement {
     const sheetFooter = html`<div class="sheet-footer">
       <button class="btn" type="button" @click=${() => {
         const meta = s?.get('meta');
-        if (s && meta) s.setFilters(emptyDraft(meta.filterOperands));
+        if (!s || !meta) return;
+        s.setFilters(emptyDraft(meta.filterOperands));
+        s.setMembers([]);
       }}>Clear</button>
       <button class="btn primary" type="button" @click=${() => (this.sheet = null)}>${matchedText}</button>
     </div>`;

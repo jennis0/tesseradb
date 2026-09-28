@@ -174,7 +174,8 @@ export class TesseraArtifactCard extends TesseraElement {
   /**
    * One of the card's clause buttons: a `member_of` clause on this artifact, as a filter or a
    * highlight, inside or outside. The button shows whether the clause is on; clicking a pressed
-   * button withdraws it, and pressing the other verb moves the clause.
+   * button withdraws it. The artifact holds one clause in each position, so Filter to this and
+   * Outside this replace each other, and a highlight is kept beside either.
    */
   private verb(layer: string, artifact: bigint, outside: boolean, verb: ClauseVerb, label: string, name: string | null) {
     const s = this.resolvedStore;
@@ -196,7 +197,7 @@ export class TesseraArtifactCard extends TesseraElement {
       @click=${() => {
         if (!s) return;
         const members = on
-          ? withoutMember(s.get('filters').members, layer, artifact)
+          ? withoutMember(s.get('filters').members, layer, artifact, verb)
           : withMember(s.get('filters').members, {layer, artifact, outside, verb, ...(name === null ? {} : {label: name})});
         s.setMembers(members);
         emit(this, 'tessera-clausechange', {id: idString(artifact), layer, outside, verb, on: !on});

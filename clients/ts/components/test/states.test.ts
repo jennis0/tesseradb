@@ -1,4 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
+import {composeFilters, type FilterDraft} from '@tesseradb/client';
 import '../src/status.js';
 import '../src/selection.js';
 import '../src/count.js';
@@ -137,8 +138,9 @@ describe('<tessera-status> renders every state through part="state"', () => {
     expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['812', '3,210', '500']);
     expect(deep(host, '[part="count-highlighted"]')).not.toBeNull();
 
-    // A filter narrows it too, so the match cell stays beside the highlight's.
-    const filters = {draft: {}, expr: {archive: {in: ['cs']}}, highlight: {archive: {in: ['cs.CV']}}, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0};
+    // A filter on the same column narrows it too, so the match cell stays beside the highlight's.
+    const draft: FilterDraft = {filter: {archive: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, highlight: {archive: {family: 'category', keys: ['cs.CV']}}};
+    const filters = {draft, expr: composeFilters(draft, 'filter'), highlight: composeFilters(draft, 'highlight'), members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0};
     el.store = fakeStore({status: status({}), view: lit, filters});
     await settle(host);
     expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['3,210', '12,040', '812', '3,210', '500']);

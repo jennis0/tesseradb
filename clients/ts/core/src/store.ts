@@ -807,7 +807,7 @@ export function createStore(options: StoreOptions): Store {
     artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: colours.palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
-    filters: {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
+    filters: {draft: emptyDraft([]), expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
   };
@@ -1083,7 +1083,8 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('meta', meta);
     replaceProjection('view', {...projections.view, id: views.id});
     // One empty control per operand set the bundle publishes.
-    if (Object.keys(projections.filters.draft).length === 0) {
+    const held = projections.filters.draft;
+    if (Object.keys(held.filter).length === 0 && Object.keys(held.highlight).length === 0) {
       const draft = emptyDraft(meta.filterOperands);
       replaceProjection('filters', {...projections.filters, draft, expr: composeFilters(draft, 'filter'), highlight: composeFilters(draft, 'highlight')});
     }
@@ -1111,8 +1112,10 @@ export function createStore(options: StoreOptions): Store {
     const columns = new Set(m.filterOperands.map((f) => f.column));
     const layerNames = new Set(m.layers.map((l) => l.name));
     const {draft} = projections.filters;
-    const keptDraft = Object.fromEntries(Object.entries(draft).filter(([column]) => columns.has(column)));
-    if (Object.keys(keptDraft).length !== Object.keys(draft).length) {
+    const kept = (controls: FilterDraft['filter']) => Object.fromEntries(Object.entries(controls).filter(([column]) => columns.has(column)));
+    const keptDraft: FilterDraft = {filter: kept(draft.filter), highlight: kept(draft.highlight)};
+    const count = (d: FilterDraft) => Object.keys(d.filter).length + Object.keys(d.highlight).length;
+    if (count(keptDraft) !== count(draft)) {
       replaceProjection('filters', {
         ...projections.filters,
         draft: keptDraft,
@@ -1702,7 +1705,7 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('filters', {
       ...projections.filters,
       members: [],
-      ...(filtersSet ? {} : {draft: {}, expr: null, highlight: null})
+      ...(filtersSet ? {} : {draft: emptyDraft([]), expr: null, highlight: null})
     });
     legend.clear();
     meta = null;

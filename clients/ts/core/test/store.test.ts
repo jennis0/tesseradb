@@ -1,7 +1,8 @@
 import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import {createStore, type Store} from '../src/store.js';
-import {withVerb, type FilterDraft} from '../src/filters.js';
+import type {FilterDraft} from '../src/filters.js';
+import {withMember} from '../src/members.js';
 import type {Artifact, Layer, MembershipColumn, Meta, ViewportPart, ViewportResponse} from '../src/types.js';
 import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
@@ -178,7 +179,7 @@ describe('the drops', () => {
 
     // A filter changes what is served but not the identity key, so the store drops its bands itself
     // and asks again.
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('filters').expr).toEqual({archive: {in: ['cs']}});
@@ -200,7 +201,7 @@ describe('the drops', () => {
     await clock.advance(600);
     scheduler.flush();
 
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'highlight'}});
+    store.setFilters({filter: {}, highlight: {archive: {family: 'category', keys: ['cs']}}});
     await clock.advance(600);
     scheduler.flush();
     const body = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
@@ -211,7 +212,7 @@ describe('the drops', () => {
     expect(store.get('filters').expr).toBeNull();
   });
 
-  it('moves a clause between the two positions without it being re-entered', async () => {
+  it('sends a filter and a highlight on one column as both expressions', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
@@ -219,20 +220,30 @@ describe('the drops', () => {
     await clock.advance(600);
     scheduler.flush();
 
-    const filtered: FilterDraft = {archive: {family: 'category', keys: ['cs'], verb: 'filter'}};
-    store.setFilters(filtered);
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, highlight: {archive: {family: 'category', keys: ['cs.CV']}}});
     await clock.advance(600);
     scheduler.flush();
-    expect((viewport.mock.calls.at(-1)![1] as {filters?: unknown}).filters).toEqual({archive: {in: ['cs']}});
+    const body = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
+    expect(body.filters).toEqual({archive: {in: ['cs.LG', 'cs.CV']}});
+    expect(body.highlight).toEqual({archive: {in: ['cs.CV']}});
+    expect(store.get('view').highlighting).toBe(true);
+  });
 
-    // The predicate is unchanged; only the verb moves.
-    store.setFilters(withVerb(filtered, 'archive', 'highlight'));
+  it('sends a member_of filter and highlight on one artifact as both expressions', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await clock.advance(600);
     scheduler.flush();
-    const moved = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
-    expect(moved.filters ?? null).toBeNull();
-    expect(moved.highlight).toEqual({archive: {in: ['cs']}});
-    expect(store.get('filters').draft['archive']).toEqual({family: 'category', keys: ['cs'], verb: 'highlight'});
+
+    const filtered = withMember([], {layer: 'l', artifact: 7n, outside: false, verb: 'filter'});
+    store.setMembers(withMember(filtered, {layer: 'l', artifact: 7n, outside: false, verb: 'highlight'}));
+    await clock.advance(600);
+    scheduler.flush();
+    const body = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
+    expect(body.filters).toEqual({member_of: {layer: 'l', artifact: '7'}});
+    expect(body.highlight).toEqual({member_of: {layer: 'l', artifact: '7'}});
   });
 
   it('sends a member_of clause in whichever position it carries, the artifact as a decimal string', async () => {
@@ -272,7 +283,7 @@ describe('the drops', () => {
     expect(store.get('view').highlighted.value).toBe(store.get('view').matched.value);
     expect(store.get('view').highlighting).toBe(false);
 
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'highlight'}});
+    store.setFilters({filter: {}, highlight: {archive: {family: 'category', keys: ['cs']}}});
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('view').highlighting).toBe(true);
@@ -608,7 +619,7 @@ describe('select: the selection is the region leaf on every request', () => {
     scheduler.flush();
     expect(store.get('region')?.status).toBe('shown');
     const asked = viewport.mock.calls.length;
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
     expect(store.get('region')?.status).toBe('loading');
     await clock.advance(600);
     scheduler.flush();
@@ -838,7 +849,7 @@ describe('the subscriber fan-out', () => {
     });
     store.subscribe('filters', () => seen.push('named-after'));
     store.subscribe(() => seen.push('all'));
-    store.setFilters({});
+    store.setFilters({filter: {}, highlight: {}});
     expect(seen).toEqual(['named-after', 'all']);
     expect(traced).toContain('subscriber-fault');
     expect(quiet).toHaveBeenCalledTimes(1);
@@ -1448,7 +1459,7 @@ describe('a store serves one viewer', () => {
     await clock.advance(1);
     store.setColourBy('archive');
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
-    const filters: FilterDraft = {archive: {family: 'category', keys: ['cs'], verb: 'filter'}};
+    const filters: FilterDraft = {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}};
     store.setFilters(filters);
     const shape = {kind: 'box' as const, bbox: [0, 0, 50, 50] as [number, number, number, number]};
     store.select(shape);
@@ -1475,7 +1486,7 @@ describe('a store serves one viewer', () => {
     expect(metaRead).toHaveBeenCalledTimes(2);
     expect(store.get('region')?.shape).toBe(shape);
     expect(store.get('region')).toMatchObject({status: 'shown', matched: {value: Number(VIEWERS.b.visible)}});
-    expect(store.get('filters').draft.archive).toEqual(filters.archive);
+    expect(store.get('filters').draft.filter.archive).toEqual(filters.filter.archive);
     expect(store.get('legend').colourBy).toBe('archive');
     const asked = viewport.mock.calls.at(-1)![1];
     expect(JSON.stringify(asked.filters)).toContain('region');
@@ -1768,7 +1779,7 @@ describe('a store serves one viewer', () => {
       refuse: (token, req) => token === 't2' && JSON.stringify(req.filters ?? null).includes('secret')
     });
     await clock.advance(1);
-    store.setFilters({secret: {family: 'category', keys: ['x'], verb: 'filter'}, archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setFilters({filter: {secret: {family: 'category', keys: ['x']}, archive: {family: 'category', keys: ['cs']}}, highlight: {secret: {family: 'category', keys: ['y']}}});
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await settled(clock, scheduler);
     expect(whoShows(store, metas)).toEqual(new Set(['a']));
@@ -1777,7 +1788,8 @@ describe('a store serves one viewer', () => {
     await settled(clock, scheduler);
 
     expect(whoShows(store, metas)).toEqual(new Set(['b']));
-    expect(Object.keys(store.get('filters').draft)).toEqual(['archive']);
+    expect(Object.keys(store.get('filters').draft.filter)).toEqual(['archive']);
+    expect(Object.keys(store.get('filters').draft.highlight)).toEqual([]);
     expect(store.get('marks').bands.length).toBeGreaterThan(0);
     expect(JSON.stringify(viewport.mock.calls.at(-1)![1].filters)).not.toContain('secret');
   });
@@ -1825,7 +1837,7 @@ describe('a store serves one viewer', () => {
     store.setCurrentView('hidden');
     store.setLayers(['l', 'secret-layer']);
     store.setColourBy('secretcol');
-    store.setFilters({secret: {family: 'category', keys: ['x'], verb: 'filter'}, archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setFilters({filter: {secret: {family: 'category', keys: ['x']}, archive: {family: 'category', keys: ['cs']}}, highlight: {secret: {family: 'category', keys: ['y']}}});
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     store.select({kind: 'box', bbox: [0, 0, 50, 50]});
     await settled(clock, scheduler);
@@ -1838,7 +1850,8 @@ describe('a store serves one viewer', () => {
     await settled(clock, scheduler);
 
     expect(store.get('meta')).toBe(metas.b);
-    expect(Object.keys(store.get('filters').draft)).toEqual(['archive']);
+    expect(Object.keys(store.get('filters').draft.filter)).toEqual(['archive']);
+    expect(Object.keys(store.get('filters').draft.highlight)).toEqual([]);
     expect(store.get('artifacts').layers).toEqual(['l']);
     expect(store.get('legend').colourBy).toBeNull();
     // The view is not offered, so the store opens on the first and drops the camera with it.
@@ -1878,7 +1891,7 @@ describe('a store serves one viewer', () => {
     store.select({kind: 'box', bbox: [0, 0, 50, 50]});
     await settled(clock, scheduler);
     expect(showing(store)).toEqual(new Set(['ik-a']));
-    expect(Object.keys(store.get('filters').draft)).toContain('secret');
+    expect(Object.keys(store.get('filters').draft.filter)).toContain('secret');
 
     signedIn = 'b';
     store.clear();
@@ -1901,7 +1914,7 @@ describe('a store serves one viewer', () => {
     expect(late).toEqual([]);
     expect(authorise).toHaveBeenCalledTimes(2);
     expect(store.get('meta')?.filterOperands.map((f) => f.column)).toEqual(['archive']);
-    expect(Object.keys(store.get('filters').draft)).not.toContain('secret');
+    expect(Object.keys(store.get('filters').draft.filter)).not.toContain('secret');
     expect(viewport.mock.calls.at(-1)![0]).toBe('t-b');
     expect(store.get('marks').bands.length).toBeGreaterThan(0);
     expect(showing(store)).toEqual(new Set(['ik-b']));
