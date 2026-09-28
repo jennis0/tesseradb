@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::{Array, DictionaryArray, Float64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Int8Type, Schema as ArrowSchema};
+use arrow::datatypes::{DataType, Field, Int32Type, Int8Type, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
@@ -217,6 +217,8 @@ struct Fx {
     root: PathBuf,
     engine: Engine,
     items: Vec<Item>,
+    /// The items ingested since the build, by entity, as positions in `items`.
+    ingested: HashMap<u64, usize>,
 }
 
 fn fixture() -> Fx {
@@ -229,6 +231,7 @@ fn fixture() -> Fx {
         root,
         engine,
         items: (0..N).map(built).collect(),
+        ingested: HashMap::new(),
     }
 }
 
@@ -388,14 +391,45 @@ fn rows_of(batch: &RecordBatch) -> Vec<Row> {
     let u64s = |name: &str| {
         column(name).map(|c| c.as_any().downcast_ref::<UInt64Array>().unwrap().clone())
     };
-    let group = column("group").map(|c| {
-        c.as_any()
-            .downcast_ref::<DictionaryArray<Int8Type>>()
-            .expect("group is a dictionary")
-            .clone()
-    });
-    let key = column("key");
-    let title = column("title").map(|c| c.as_any().downcast_ref::<StringArray>().unwrap().clone());
+    // A dictionary-encoded text column's value at row `i`, `None` where it is null.
+    let text = |c: &dyn Array, i: usize| -> Option<String> {
+        if c.is_null(i) {
+            return None;
+        }
+        match c.data_type() {
+            DataType::Dictionary(key, _) if **key == DataType::Int8 => {
+                let d = c
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<Int8Type>>()
+                    .unwrap();
+                let values = d.values().as_any().downcast_ref::<StringArray>().unwrap();
+                Some(values.value(d.keys().value(i) as usize).to_string())
+            }
+            DataType::Dictionary(key, _) if **key == DataType::Int32 => {
+                let d = c
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<Int32Type>>()
+                    .unwrap();
+                let values = d.values().as_any().downcast_ref::<StringArray>().unwrap();
+                Some(values.value(d.keys().value(i) as usize).to_string())
+            }
+            DataType::Utf8 => Some(
+                c.as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(i)
+                    .to_string(),
+            ),
+            DataType::UInt64 => Some(
+                c.as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .value(i)
+                    .to_string(),
+            ),
+            other => panic!("a text column of type {other:?}"),
+        }
+    };
     let (cell, count, reference) = (
         u64s("cell"),
         u64s("count").unwrap(),
@@ -404,32 +438,9 @@ fn rows_of(batch: &RecordBatch) -> Vec<Row> {
     let lift = column("lift").map(|c| c.as_any().downcast_ref::<Float64Array>().unwrap().clone());
     (0..batch.num_rows())
         .map(|i| Row {
-            group: group.as_ref().map(|g| {
-                let values = g.values().as_any().downcast_ref::<StringArray>().unwrap();
-                values.value(g.keys().value(i) as usize).to_string()
-            }),
-            key: key.and_then(|k| {
-                if k.is_null(i) {
-                    return None;
-                }
-                Some(match k.data_type() {
-                    DataType::UInt64 => k
-                        .as_any()
-                        .downcast_ref::<UInt64Array>()
-                        .unwrap()
-                        .value(i)
-                        .to_string(),
-                    _ => k
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .unwrap()
-                        .value(i)
-                        .to_string(),
-                })
-            }),
-            title: title
-                .as_ref()
-                .and_then(|t| (!t.is_null(i)).then(|| t.value(i).to_string())),
+            group: column("group").map(|g| text(g.as_ref(), i).expect("every row has a group")),
+            key: column("key").and_then(|k| text(k.as_ref(), i)),
+            title: column("title").and_then(|t| text(t.as_ref(), i)),
             cell: cell.as_ref().map(|c| c.value(i)),
             count: count.value(i),
             reference: reference.as_ref().map(|r| r.value(i)),
@@ -1100,43 +1111,7 @@ fn a_live_corpus_is_counted_as_the_map_shows_it() {
     let mut fx = fixture();
     fx.engine.set_background_refresh_for_test(true);
     let session = fx.session(true);
-    let rows: Vec<UnallocatedRow> = (0..40u64)
-        .map(|i| {
-            let item = Item {
-                source: 1_000_000 + i,
-                kind: Some(["a", "g"][(i % 2) as usize].to_string()),
-                shade: Some(["x", "w"][(i % 3 % 2) as usize].to_string()),
-                mark: (i % 5 != 0).then(|| "p".to_string()),
-                subset: false,
-                position: ((i * 23 % 1000) as f64, (i * 41 % 1000) as f64),
-                flushed: false,
-            };
-            let text = |v: &Option<String>| match v {
-                Some(v) => WalScalar::Utf8(v.clone()),
-                None => WalScalar::Null,
-            };
-            let row = UnallocatedRow {
-                view: "s0".to_string(),
-                join: None,
-                descriptors: vec![b"0".to_vec()],
-                x: item.position.0,
-                y: item.position.1,
-                scalars: vec![
-                    text(&item.kind),
-                    text(&item.shade),
-                    text(&item.mark),
-                    WalScalar::U64(key_id(&format!("live-{i}"))),
-                ],
-                terms: fx.engine.resolve_terms(&[b"0".to_vec()]),
-                scoped: Vec::new(),
-            };
-            fx.items.push(item);
-            row
-        })
-        .collect();
-    fx.engine
-        .ingest_rows(rows, "live".to_string(), [9u8; 32])
-        .expect("the ingest is accepted");
+    ingest_items(&mut fx, 40, "live");
 
     let check = |fx: &Fx, when: &str| {
         let engine = &fx.engine;
@@ -1161,18 +1136,8 @@ fn a_live_corpus_is_counted_as_the_map_shows_it() {
     };
     check(&fx, "before the flush");
 
-    let flushes = fx.engine.write_executor_stats().flushes;
-    fx.engine.request_flush();
-    wait_for("the flush", || {
-        fx.engine.write_executor_stats().flushes > flushes
-    });
-    for item in fx.items.iter_mut() {
-        item.flushed = true;
-    }
+    flush_and_show(&mut fx, &session);
     let all = fx.visible(true, &|_| true).count() as u64;
-    wait_for("the map to show the flushed items", || {
-        viewport_matched(&fx.engine, &session, None) == all
-    });
     check(&fx, "after the flush");
 
     let before = fx.engine.write_executor_stats();
@@ -1184,6 +1149,70 @@ fn a_live_corpus_is_counted_as_the_map_shows_it() {
         viewport_matched(&fx.engine, &session, None) == all
     });
     check(&fx, "after the fold");
+}
+
+/// Ingest `n` items the broad viewer alone may see, unflushed, recording each in the oracle: half
+/// carry a kind the build never saw, a third a shade it never saw.
+fn ingest_items(fx: &mut Fx, n: u64, batch: &str) {
+    let text = |v: &Option<String>| match v {
+        Some(v) => WalScalar::Utf8(v.clone()),
+        None => WalScalar::Null,
+    };
+    let mut added = Vec::new();
+    let rows: Vec<UnallocatedRow> = (0..n)
+        .map(|i| {
+            let item = Item {
+                source: 1_000_000 + i,
+                kind: Some(["a", "g"][(i % 2) as usize].to_string()),
+                shade: Some(["x", "w"][(i % 3 % 2) as usize].to_string()),
+                mark: (i % 5 != 0).then(|| "p".to_string()),
+                subset: false,
+                position: ((i * 23 % 1000) as f64, (i * 41 % 1000) as f64),
+                flushed: false,
+            };
+            let row = UnallocatedRow {
+                view: "s0".to_string(),
+                join: None,
+                descriptors: vec![b"0".to_vec()],
+                x: item.position.0,
+                y: item.position.1,
+                scalars: vec![
+                    text(&item.kind),
+                    text(&item.shade),
+                    text(&item.mark),
+                    WalScalar::U64(key_id(&format!("{batch}-{i}"))),
+                ],
+                terms: fx.engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
+            };
+            added.push(item);
+            row
+        })
+        .collect();
+    let entities = fx
+        .engine
+        .ingest_rows(rows, batch.to_string(), [9u8; 32])
+        .expect("the ingest is accepted");
+    for (entity, item) in entities.into_iter().zip(added) {
+        fx.ingested.insert(entity.raw(), fx.items.len());
+        fx.items.push(item);
+    }
+}
+
+/// Flush what is buffered and wait until the map shows every item.
+fn flush_and_show(fx: &mut Fx, session: &Session) {
+    let flushes = fx.engine.write_executor_stats().flushes;
+    fx.engine.request_flush();
+    wait_for("the flush", || {
+        fx.engine.write_executor_stats().flushes > flushes
+    });
+    for item in fx.items.iter_mut() {
+        item.flushed = true;
+    }
+    let all = fx.visible(true, &|_| true).count() as u64;
+    wait_for("the map to show the flushed items", || {
+        viewport_matched(&fx.engine, session, None) == all
+    });
 }
 
 fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
@@ -1294,7 +1323,13 @@ fn stored_rows<'a>(fx: &'a Fx, session: &Session) -> Vec<(u64, &'a Item)> {
         .expect("a row-to-entity table");
     let item_of: HashMap<u64, &Item> = source_to_new_map(&fx.root, "v00000")
         .into_iter()
+        .filter(|&(source, _)| source < N)
         .map(|(source, entity)| (entity, &fx.items[source as usize]))
+        .chain(
+            fx.ingested
+                .iter()
+                .map(|(&entity, &at)| (entity, &fx.items[at])),
+        )
         .collect();
     let mut out = Vec::new();
     for &(segment, row_base) in &segments {
@@ -1482,54 +1517,67 @@ fn planted() -> Vec<(&'static str, Vec<u64>, Option<&'static str>)> {
     ]
 }
 
+/// A flat enumerated layer over `s0` whose artifacts carry their labels in `visibility`.
+fn declaration(
+    name: &str,
+    layout: tessera_types::layer::ServingLayout,
+) -> tessera_types::layer::LayerDeclaration {
+    use tessera_types::layer::{
+        ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
+        MembershipSource,
+    };
+    LayerDeclaration {
+        scope: Default::default(),
+        name: name.into(),
+        title: None,
+        views: vec!["s0".into()],
+        membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
+        visibility: None,
+        artifact_visibility: ArtifactVisibility::carried("visibility"),
+        require_member_visibility: None,
+        hierarchy: Hierarchy {
+            kind: HierarchyKind::Flat,
+            prune_children: false,
+        },
+        content: ContentDeclaration::default(),
+        depends_on: Vec::new(),
+        levels: Vec::new(),
+        layout: Some(layout),
+        shape: None,
+    }
+}
+
+/// An artifact of `key` over the built items `members`, carrying `label`.
+fn artifact(
+    fx: &Fx,
+    key: &str,
+    members: &[u64],
+    label: Option<&str>,
+) -> tessera_lifecycle::IncomingArtifact {
+    let map = source_to_new_map(&fx.root, "v00000");
+    let mut artifact = tessera_lifecycle::IncomingArtifact::from_entities(
+        Some(key.into()),
+        members
+            .iter()
+            .map(|s| tessera_types::EntityId::new(map[s]))
+            .collect::<Vec<_>>(),
+    );
+    artifact.access = Some(label.map_or_else(Vec::new, |l| vec![l.as_bytes().to_vec()]));
+    artifact
+}
+
 /// Register `name` over the planted artifacts in `layout`, and answer each artifact's id.
 fn plant(
     fx: &Fx,
     name: &str,
     layout: tessera_types::layer::ServingLayout,
 ) -> BTreeMap<&'static str, tessera_types::TesseraId> {
-    use tessera_lifecycle::IncomingArtifact;
-    use tessera_types::layer::{
-        ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
-        MembershipSource,
-    };
     let engine = &fx.engine;
-    engine
-        .register_layer(LayerDeclaration {
-            scope: Default::default(),
-            name: name.into(),
-            title: None,
-            views: vec!["s0".into()],
-            membership: MembershipSource::Enumerated,
-            value_set: Default::default(),
-            visibility: None,
-            artifact_visibility: ArtifactVisibility::carried("visibility"),
-            require_member_visibility: None,
-            hierarchy: Hierarchy {
-                kind: HierarchyKind::Flat,
-                prune_children: false,
-            },
-            content: ContentDeclaration::default(),
-            depends_on: Vec::new(),
-            levels: Vec::new(),
-            layout: Some(layout),
-            shape: None,
-        })
-        .unwrap();
-    let map = source_to_new_map(&fx.root, "v00000");
+    engine.register_layer(declaration(name, layout)).unwrap();
     let artifacts = planted()
-        .into_iter()
-        .map(|(key, members, label)| {
-            let mut artifact = IncomingArtifact::from_entities(
-                Some(key.into()),
-                members
-                    .iter()
-                    .map(|s| tessera_types::EntityId::new(map[s]))
-                    .collect::<Vec<_>>(),
-            );
-            artifact.access = Some(label.map_or_else(Vec::new, |l| vec![l.as_bytes().to_vec()]));
-            artifact
-        })
+        .iter()
+        .map(|(key, members, label)| artifact(fx, key, members, *label))
         .collect();
     let ids = engine.publish_artifacts(name.into(), 0, artifacts).unwrap();
     tick(engine);
@@ -1735,4 +1783,456 @@ fn a_member_of_set_is_what_the_viewport_and_items_count() {
             ))
         ));
     }
+}
+
+// ---- cells, artifacts and bindings, further ---------------------------------------------------
+
+/// **Cells over a view of two segments**, the build's and a flush's, are the oracle's: a cell's
+/// rows from both segments are added, at depths either side of 16, with no group and by a field.
+#[test]
+fn cells_over_the_segments_a_flush_adds_are_the_oracles() {
+    let mut fx = fixture();
+    fx.engine.set_background_refresh_for_test(true);
+    let session = fx.session(true);
+    ingest_items(&mut fx, 600, "cells");
+    flush_and_show(&mut fx, &session);
+    let (generation, _) = fx.engine.composed_mask(&session, "s0").unwrap();
+    let segments = tessera_engine::viewport::segments_with_row_bases(
+        "s0",
+        &generation.bundle.partitions["default"].views["s0"],
+    )
+    .unwrap()
+    .len();
+    assert!(segments >= 2, "the flush wrote a segment of its own");
+    let rows = stored_rows(&fx, &session);
+    assert_eq!(rows.len(), fx.visible(true, &|_| true).count());
+    let items: Vec<&Item> = rows.iter().map(|(_, i)| *i).collect();
+    for depth in [3u8, 16, 20, 32] {
+        let groupings = [
+            with_cells(size(), depth),
+            with_cells(field("kind", Pick::Top(3)), depth),
+        ];
+        let tables = read_all(&fx.engine, &session, request(&groupings));
+        let mut density: BTreeMap<u64, u64> = BTreeMap::new();
+        for (position, _) in &rows {
+            *density.entry(cell_at(*position, depth)).or_default() += 1;
+        }
+        let served: Vec<(u64, u64)> = tables[&0]
+            .1
+            .iter()
+            .map(|r| (r.cell.unwrap(), r.count))
+            .collect();
+        assert_eq!(
+            served,
+            density.into_iter().collect::<Vec<_>>(),
+            "depth {depth}"
+        );
+        let listed = top_keys(&items, "kind", 3);
+        let mut expected: BTreeMap<(usize, u64), (Option<String>, u64)> = BTreeMap::new();
+        for (position, item) in &rows {
+            let (g, key) = match item.kind.as_deref() {
+                Some(v) if listed.iter().any(|k| k == v) => (
+                    listed.iter().position(|k| k == v).unwrap(),
+                    Some(v.to_string()),
+                ),
+                Some(_) => (3, None),
+                None => (4, None),
+            };
+            expected
+                .entry((g, cell_at(*position, depth)))
+                .or_insert((key, 0))
+                .1 += 1;
+        }
+        let expected: Vec<(Option<String>, u64, u64)> = expected
+            .into_iter()
+            .map(|((_, cell), (key, n))| (key, cell, n))
+            .collect();
+        let served: Vec<(Option<String>, u64, u64)> = tables[&1]
+            .1
+            .iter()
+            .map(|r| (r.key.clone(), r.cell.unwrap(), r.count))
+            .collect();
+        assert_eq!(served, expected, "depth {depth}, by kind");
+    }
+}
+
+/// Suppresses one item after the first page it is handed.
+struct SuppressAfterFirstPage<'a> {
+    inner: Collect,
+    engine: &'a Engine,
+    entity: Option<tessera_types::EntityId>,
+}
+
+impl AggregateSink for SuppressAfterFirstPage<'_> {
+    fn head(&mut self, head: &AggregateHead) -> SinkResult {
+        self.inner.head(head)
+    }
+
+    fn table(&mut self, head: &TableHead) -> SinkResult {
+        self.inner.table(head)
+    }
+
+    fn page(&mut self, grouping: u32, batch: &RecordBatch, end: &PageEnd) -> SinkResult {
+        self.inner.page(grouping, batch, end)?;
+        if let Some(entity) = self.entity.take() {
+            self.engine
+                .accept_change(entity, ChangeOp::Suppress)
+                .unwrap();
+        }
+        Ok(())
+    }
+}
+
+/// **A suppression landing between two pages of one response of a cell table applies from the
+/// next page**: rows the first page counted past its end are not served after it.
+#[test]
+fn a_suppression_between_pages_of_a_cell_table_drops_the_rows_held_past_the_page() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    let groupings = [with_cells(size(), 16)];
+    let (_, before) = table(engine, &session, request(&groupings));
+    assert!(before.len() > 200);
+    let target = before[120].cell.unwrap();
+    let (_, item) = stored_rows(&fx, &session)
+        .into_iter()
+        .find(|(position, _)| cell_at(*position, 16) == target)
+        .expect("an item in the cell");
+    let entity = item_of_id(engine, item.source).unwrap().unwrap();
+    let mut req = request(&groupings);
+    req.page_rows = Some(100);
+    let mut sink = SuppressAfterFirstPage {
+        inner: Collect::default(),
+        engine,
+        entity: Some(entity),
+    };
+    let trailer = engine.aggregate_stream(&session, req, &mut sink).unwrap();
+    assert!(trailer.next.is_none() && sink.inner.pages.len() > 2);
+    assert!(trailer.recomposed);
+    let served: Vec<Row> = sink
+        .inner
+        .pages
+        .iter()
+        .flat_map(|(_, b, _)| rows_of(b))
+        .collect();
+    let (_, after) = table(engine, &session, request(&groupings));
+    assert_ne!(after, before, "the suppression changed the table");
+    assert_eq!(served[..100], before[..100]);
+    assert_eq!(served, after);
+}
+
+/// **An artifact by cell table is the oracle's**: each item counted in every listed artifact
+/// holding it, else the rest where a served artifact holds it, else none, on both layouts.
+#[test]
+fn artifact_cells_are_the_oracles() {
+    use tessera_types::layer::ServingLayout;
+    let fx = fixture();
+    let engine = &fx.engine;
+    let ids = plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
+    let row_ids = plant(&fx, "topics/rows", ServingLayout::RowMajorList);
+    for broad in [true, false] {
+        let session = fx.session(broad);
+        let rows = stored_rows(&fx, &session);
+        let held = |label: Option<&str>| match label {
+            None => true,
+            Some("1") => !broad,
+            Some(_) => false,
+        };
+        let served: Vec<(&str, Vec<u64>)> = planted()
+            .into_iter()
+            .filter(|(_, m, label)| held(*label) && rows.iter().any(|(_, i)| m.contains(&i.source)))
+            .map(|(key, m, _)| (key, m))
+            .collect();
+        for (name, ids) in [("topics/major", &ids), ("topics/rows", &row_ids)] {
+            let count = |members: &[u64]| {
+                rows.iter()
+                    .filter(|(_, i)| members.contains(&i.source))
+                    .count() as u64
+            };
+            let mut ranked: Vec<&(&str, Vec<u64>)> = served.iter().collect();
+            ranked.sort_by(|a, b| count(&b.1).cmp(&count(&a.1)).then(ids[a.0].cmp(&ids[b.0])));
+            let listed: Vec<&(&str, Vec<u64>)> = ranked.into_iter().take(2).collect();
+            for depth in [5u8, 20] {
+                let mut expected: BTreeMap<(usize, u64), (Option<String>, u64)> = BTreeMap::new();
+                for (position, item) in &rows {
+                    let cell = cell_at(*position, depth);
+                    let mut add = |g: usize, key: Option<String>| {
+                        expected.entry((g, cell)).or_insert((key, 0)).1 += 1;
+                    };
+                    let mut in_listed = false;
+                    for (g, (key, members)) in listed.iter().enumerate() {
+                        if members.contains(&item.source) {
+                            in_listed = true;
+                            add(g, Some(ids[key].raw().to_string()));
+                        }
+                    }
+                    if !in_listed {
+                        if served.iter().any(|(_, m)| m.contains(&item.source)) {
+                            add(listed.len(), None);
+                        } else {
+                            add(listed.len() + 1, None);
+                        }
+                    }
+                }
+                let expected: Vec<(Option<String>, u64, u64)> = expected
+                    .into_iter()
+                    .map(|((_, cell), (key, n))| (key, cell, n))
+                    .collect();
+                let groupings = [Grouping {
+                    by: Some(By::Layer {
+                        layer: name.to_string(),
+                        level: None,
+                        pick: Pick::Top(2),
+                    }),
+                    cells: Some(depth),
+                }];
+                let served_rows: Vec<(Option<String>, u64, u64)> =
+                    table(engine, &session, request(&groupings))
+                        .1
+                        .into_iter()
+                        .map(|r| (r.key, r.cell.unwrap(), r.count))
+                        .collect();
+                assert_eq!(
+                    served_rows, expected,
+                    "{name}, broad {broad}, depth {depth}"
+                );
+            }
+        }
+    }
+}
+
+/// Collects an artifacts read's `tessera_id` and `matched_count` columns.
+#[derive(Default)]
+struct Matched(BTreeMap<u64, u64>);
+
+impl RecordsSink for Matched {
+    fn head(&mut self, _: &RecordsHead) -> SinkResult {
+        Ok(())
+    }
+
+    fn page(&mut self, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
+        let column = |name: &str| {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .clone()
+        };
+        let (ids, matched) = (column("tessera_id"), column("matched_count"));
+        for i in 0..batch.num_rows() {
+            self.0.insert(ids.value(i), matched.value(i));
+        }
+        Ok(())
+    }
+}
+
+/// **An attached layer counts as `/v1/artifacts` counts it**: an attached artifact's items are its
+/// target's, whatever members it holds of its own.
+#[test]
+fn an_attached_layer_counts_as_the_artifacts_route_does() {
+    use tessera_lifecycle::membership::IncomingAttachment;
+    use tessera_types::layer::ServingLayout;
+    let fx = fixture();
+    let engine = &fx.engine;
+    plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
+    let mut labels = declaration("labels/major", ServingLayout::ArtifactMajor);
+    labels.depends_on = vec!["topics/major".into()];
+    engine.register_layer(labels).unwrap();
+    let planted = planted();
+    let attached = (0..3)
+        .map(|i| {
+            // Its own members are the next artifact's.
+            let mut label = artifact(&fx, &format!("label-{i}"), &planted[(i + 1) % 3].1, None);
+            label.attached_to = Some(IncomingAttachment {
+                layer: "topics/major".into(),
+                level: 0,
+                key: planted[i].0.to_string(),
+            });
+            label
+        })
+        .collect();
+    let label_ids = engine
+        .publish_artifacts("labels/major".into(), 0, attached)
+        .unwrap();
+    tick(engine);
+    for broad in [true, false] {
+        let session = fx.session(broad);
+        for filter in [FilterExpr::AllOf(Vec::new()), fx.is_in("kind", &["a", "b"])] {
+            let mut route = Matched::default();
+            engine
+                .artifacts_stream(
+                    &session,
+                    tessera_engine::ArtifactsRequest {
+                        view: "s0",
+                        layer: "labels/major",
+                        level: None,
+                        parent: None,
+                        q: None,
+                        filter: Some(filter.clone()),
+                        keep_unmatched: true,
+                        count: false,
+                        fields: &[],
+                        page_rows: None,
+                        pages: None,
+                        cursor: None,
+                        limits: limits(),
+                        cancel: None,
+                    },
+                    &mut route,
+                )
+                .unwrap();
+            assert_eq!(route.0.len(), 3, "every label is served");
+            let groupings = [layer("labels/major", Pick::Named(label_ids.clone()))];
+            let mut req = request(&groupings);
+            req.filter = Some(filter.clone());
+            let (_, rows) = table(engine, &session, req);
+            let counted: BTreeMap<u64, u64> = rows
+                .iter()
+                .filter(|r| r.group.as_deref() == Some("listed"))
+                .map(|r| (r.key.as_ref().unwrap().parse().unwrap(), r.count))
+                .collect();
+            assert_eq!(counted, route.0, "broad {broad}, {filter:?}");
+            assert!(route.0.values().any(|&n| n > 0));
+        }
+    }
+}
+
+/// **A stacked layer is counted one named level at a time**, and one named without a level is
+/// refused.
+#[test]
+fn a_level_is_required_on_a_layer_with_several() {
+    use tessera_types::layer::{HierarchyKind, LevelDeclaration, ServingLayout};
+    let fx = fixture();
+    let engine = &fx.engine;
+    let mut tiers = declaration("clusters/tiers", ServingLayout::ArtifactMajor);
+    tiers.hierarchy.kind = HierarchyKind::Stacked;
+    tiers.levels = (0..2)
+        .map(|level| LevelDeclaration {
+            level,
+            title: None,
+            zoom: None,
+        })
+        .collect();
+    engine.register_layer(tiers).unwrap();
+    for level in [0u32, 1] {
+        let artifacts = (0..3u64)
+            .map(|t| {
+                let members: Vec<u64> = (t * 300..t * 300 + 300 + u64::from(level) * 50).collect();
+                artifact(&fx, &format!("l{level}-{t}"), &members, None)
+            })
+            .collect();
+        engine
+            .publish_artifacts("clusters/tiers".into(), level, artifacts)
+            .unwrap();
+    }
+    tick(engine);
+    let session = fx.session(true);
+    let at = |level| Grouping {
+        by: Some(By::Layer {
+            layer: "clusters/tiers".into(),
+            level,
+            pick: Pick::Top(5),
+        }),
+        cells: None,
+    };
+    assert!(matches!(
+        respond(engine, &session, request(&[at(None)])),
+        Err(EngineError::AggregateRefused(
+            tessera_engine::AggregateRefused::LevelRequired(_)
+        ))
+    ));
+    for (level, per) in [(0u32, 300u64), (1, 350)] {
+        let (_, rows) = table(engine, &session, request(&[at(Some(level))]));
+        let listed: Vec<u64> = rows
+            .iter()
+            .filter(|r| r.group.as_deref() == Some("listed"))
+            .map(|r| r.count)
+            .collect();
+        assert_eq!(listed, vec![per; 3], "level {level}");
+    }
+}
+
+/// **A cursor opens only for its view**, and a layer dropped since is refused as unknown: its name
+/// cannot be registered again, and the cursor is bound to the layer's own entity besides.
+#[test]
+fn a_cursor_is_refused_under_another_view_or_over_a_dropped_layer() {
+    use homes::{build_homes, open};
+    use tessera_types::layer::ServingLayout;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = build_homes(tmp.path());
+    let engine = open(tmp.path(), &root);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let groupings = [with_cells(size(), 16)];
+    let mut req = request(&groupings);
+    req.view = "quarter:q1";
+    req.page_rows = Some(1);
+    req.pages = Some(1);
+    let (_, trailer) = respond(&engine, &session, req.clone()).unwrap();
+    let token = trailer.next.expect("more than one row");
+    let mut elsewhere = req.clone();
+    elsewhere.view = "quarter:q2";
+    elsewhere.cursor = Some(&token);
+    assert!(matches!(
+        respond(&engine, &session, elsewhere),
+        Err(EngineError::CursorRefused)
+    ));
+
+    let fx = fixture();
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
+    let groupings = [layer("topics/major", Pick::Top(3))];
+    let mut req = request(&groupings);
+    req.page_rows = Some(1);
+    req.pages = Some(1);
+    let (_, trailer) = respond(engine, &session, req.clone()).unwrap();
+    let token = trailer.next.expect("more than one row");
+    engine.drop_layer("topics/major".into()).unwrap();
+    req.cursor = Some(&token);
+    assert!(matches!(
+        respond(engine, &session, req),
+        Err(EngineError::RecordsRefused(
+            tessera_engine::RecordsRefused::UnknownLayer(_)
+        ))
+    ));
+}
+
+/// **A region in the reference sets the response's verdict**, the coarsest of the set's and the
+/// reference's.
+#[test]
+fn a_region_in_the_reference_gives_the_coarsest_verdict() {
+    use tessera_engine::RegionVerdict;
+    let fx = fixture();
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    let region = bbox(120.0, 80.0, 610.0, 745.0);
+    let exact = bbox(0.0, 0.0, 1000.0, 1000.0);
+    let head = |filter: Option<FilterExpr>, reference: Option<Reference>| {
+        let groupings = [size()];
+        let mut req = request(&groupings);
+        req.filter = filter;
+        req.reference = reference;
+        respond(engine, &session, req)
+            .unwrap()
+            .0
+            .head
+            .unwrap()
+            .region
+    };
+    assert_eq!(head(None, None), None);
+    assert_eq!(
+        head(Some(exact.clone()), Some(Reference::Filter(region.clone()))),
+        Some(RegionVerdict::Exact)
+    );
+    engine.set_max_region_cells(16);
+    assert!(matches!(
+        head(Some(exact.clone()), Some(Reference::Filter(region.clone()))),
+        Some(RegionVerdict::Cover { .. })
+    ));
+    assert!(matches!(
+        head(None, Some(Reference::Filter(region))),
+        Some(RegionVerdict::Cover { .. })
+    ));
 }

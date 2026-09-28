@@ -249,7 +249,7 @@ struct Planned<'r> {
 
 impl Engine {
     /// Serve one `POST /v1/aggregate` response into `sink` and return its trailer. Every refusal is
-    /// decided before the head: the request's shape, the view, the cursor, each grouping, then the
+    /// decided before the head: the request's shape, the view, each grouping, the cursor, then the
     /// filters. An `Err` after the head leaves the response without a trailer, which a client
     /// reads as incomplete and resumes from the last page end.
     pub fn aggregate_stream(
@@ -276,13 +276,22 @@ impl Engine {
         if !session.visible_views().contains_view(req.view) {
             return Err(unknown_view());
         }
+        let plans = req
+            .groupings
+            .iter()
+            .enumerate()
+            .map(|(index, grouping)| {
+                Plan::of(self, session, &generation, req.view, index, grouping)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let layers: Vec<Option<u64>> = plans.iter().map(Plan::layer_entity).collect();
         let binding = Binding {
             route: Route::Aggregate,
             view: req.view,
             incarnation: manifest.incarnation_of(req.view).ok_or_else(unknown_view)?,
             auth_data_hash: session.auth_data_hash(),
             layer: None,
-            request: Some(cursor::digest(&req)),
+            request: Some(cursor::digest(&req, &layers)),
         };
         let position = match req.cursor {
             None => Position::start(),
@@ -294,14 +303,6 @@ impl Engine {
                 position
             }
         };
-        let plans = req
-            .groupings
-            .iter()
-            .enumerate()
-            .map(|(index, grouping)| {
-                Plan::of(self, session, &generation, req.view, index, grouping)
-            })
-            .collect::<Result<Vec<_>>>()?;
         let reaches = |layer: &str| self.reaches_layer(session, layer);
         for expr in req.filter.iter().chain(match &req.reference {
             Some(Reference::Filter(expr)) => Some(expr),
@@ -347,7 +348,7 @@ impl Engine {
         let mut recomposed = false;
         // The table whose head this response has sent.
         let mut table_sent: Option<u32> = None;
-        let mut spill = None;
+        let mut held = None;
         let tables = req.groupings.len() as u32;
         let ended_by = loop {
             if position.table >= tables {
@@ -395,7 +396,11 @@ impl Engine {
                 sink.head(&head)
                     .map_err(|SinkClosed| EngineError::Cancelled)?;
             }
-            let stamp = (generation.segments_version, generation.overlay_version);
+            let stamp = (
+                generation.segments_version,
+                generation.overlay_version,
+                open.geometry.fragment.watermark,
+            );
             if position.stamp.is_some_and(|held| held != stamp) {
                 recomposed = true;
             }
@@ -410,7 +415,7 @@ impl Engine {
                 planned.page_rows,
                 limits,
                 &mut timings,
-                &mut spill,
+                &mut held,
             ) {
                 Err(EngineError::Cancelled) => break ResponseEndedBy::Deadline,
                 page => page?,

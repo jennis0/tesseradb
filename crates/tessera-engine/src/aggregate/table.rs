@@ -16,7 +16,7 @@ use arrow::record_batch::RecordBatch;
 
 use rayon::prelude::*;
 
-use super::artifacts::Layer;
+use super::artifacts::{Layer, Served};
 use super::cursor::Position;
 use super::set::Cx;
 use super::values::Field;
@@ -77,24 +77,26 @@ pub(super) enum Key {
     Id(u64),
 }
 
-/// The rows a page of a cell table counted past its end, held for the next page of the same
-/// response while the publication and the mask they were counted under hold.
-pub(super) struct Spill {
-    at: Position,
+/// What one page of a table counted that the next page of the same response can take while the
+/// publication and the mask it was counted under hold: the table's groups, a layer's served
+/// artifacts, and the rows counted past the page's end with where they start and whether they run
+/// to the table's end.
+pub(super) struct Held {
+    table: u32,
     under: Arc<Generation>,
     mask: crate::histogram::MaskIdentity,
-    rows: Vec<Row>,
-    /// Whether the rows run to the table's end.
-    complete: bool,
+    groups: Groups,
+    served: Option<Served>,
+    spill: Option<(Position, Vec<Row>, bool)>,
 }
 
-impl Spill {
-    /// Whether these rows are the next page's from `position` under `cx`, and enough for it.
-    fn holds(&self, cx: &Cx<'_>, position: &Position, limit: usize) -> bool {
-        self.at == *position
+impl Held {
+    /// Whether this was counted for the table `position` continues, under `cx`.
+    fn holds(&self, cx: &Cx<'_>, position: &Position) -> bool {
+        self.table == position.table
+            && position.chosen.as_deref() == Some(&self.groups.chosen[..])
             && same_publication(&self.under, cx.generation)
             && self.mask == cx.open.served.mask_identity
-            && (self.complete || self.rows.len() > limit)
     }
 }
 
@@ -143,7 +145,17 @@ impl Plan {
             }
     }
 
-    /// The page of this table starting at `position`.
+    /// The layer's entity, on a layer grouping.
+    pub(super) fn layer_entity(&self) -> Option<u64> {
+        match &self.outer {
+            Outer::Layer(layer) => Some(layer.entity()),
+            _ => None,
+        }
+    }
+
+    /// The page of this table starting at `position`. What the previous page of the same
+    /// response counted, its groups and any rows past its end, is taken from `held` while the
+    /// publication and the mask are the ones it was counted under, and left there for the next.
     pub(super) fn page(
         &self,
         cx: &Cx<'_>,
@@ -151,17 +163,24 @@ impl Plan {
         page_rows: u32,
         limits: &RecordsLimits,
         timings: &mut AggregateTimings,
-        spill: &mut Option<Spill>,
+        held: &mut Option<Held>,
     ) -> Result<Page> {
         cx.check_cancelled()?;
-        let mut served = None;
-        let groups = match &self.outer {
-            Outer::None => Groups::whole(cx),
-            Outer::Field(field) => field.groups(cx, position.chosen.as_deref(), timings)?,
-            Outer::Layer(layer) => {
-                let (groups, held) = layer.groups(cx, position.chosen.as_deref(), timings)?;
-                served = Some(held);
-                groups
+        let (groups, served, spill) = match held.take().filter(|h| h.holds(cx, position)) {
+            Some(h) => (h.groups, h.served, h.spill),
+            None => {
+                let (groups, served) = match &self.outer {
+                    Outer::None => (Groups::whole(cx), None),
+                    Outer::Field(field) => {
+                        (field.groups(cx, position.chosen.as_deref(), timings)?, None)
+                    }
+                    Outer::Layer(layer) => {
+                        let (groups, served) =
+                            layer.groups(cx, position.chosen.as_deref(), timings)?;
+                        (groups, Some(served))
+                    }
+                };
+                (groups, served, None)
             }
         };
         let head = TableHead {
@@ -172,64 +191,51 @@ impl Plan {
             resumed: position.chosen.is_some(),
         };
         let limit = page_rows as usize;
-        let (mut rows, complete) = match self.cells {
-            None => listed_rows(&groups, position.group, limit),
-            Some(depth) => match spill.take().filter(|held| held.holds(cx, position, limit)) {
-                Some(held) => (held.rows, held.complete),
-                None => {
-                    let started = std::time::Instant::now();
-                    let table;
-                    let codes;
-                    let labels;
-                    let parts;
-                    let source = match &self.outer {
-                        Outer::None => Source::Split(vec![(
-                            cx.sets.set.cells(cx),
-                            cx.sets.reference.as_ref().map(|r| r.cells(cx)),
-                        )]),
-                        Outer::Field(field) => {
-                            let listed: Vec<u32> =
-                                groups.chosen.iter().map(|&c| c as u32).collect();
-                            table = GroupTable::new(&listed);
-                            codes = field.entity_codes(cx.generation)?;
-                            Source::Grouped(field.row_groups(cx, &table, &codes)?)
+        let spilled = spill
+            .filter(|(at, rows, complete)| at == position && (*complete || rows.len() > limit));
+        let (mut rows, complete) = match (self.cells, spilled) {
+            (None, _) => listed_rows(&groups, position.group, limit),
+            (Some(_), Some((_, rows, complete))) => (rows, complete),
+            (Some(depth), None) => {
+                let started = std::time::Instant::now();
+                let table;
+                let codes;
+                let labels;
+                let source = match &self.outer {
+                    Outer::None => Source::Split(vec![(
+                        cx.sets.set.cells(cx),
+                        cx.sets.reference.as_ref().map(|r| r.cells(cx)),
+                    )]),
+                    Outer::Field(field) => {
+                        let listed: Vec<u32> = groups.chosen.iter().map(|&c| c as u32).collect();
+                        table = GroupTable::new(&listed);
+                        codes = field.entity_codes(cx.generation)?;
+                        Source::Grouped(field.row_groups(cx, &table, &codes)?)
+                    }
+                    Outer::Layer(_) => {
+                        let served = served.as_ref().expect("a layer's groups were read");
+                        labels = served.label_table();
+                        match (&labels, served.parts()) {
+                            (Some(labels), _) => Source::Grouped(served.row_groups(labels)),
+                            (None, Some((set, reference))) => Source::Split(
+                                set.iter()
+                                    .enumerate()
+                                    .map(|(g, rows)| {
+                                        (
+                                            CellSet::Rows(rows),
+                                            reference.as_ref().map(|r| CellSet::Rows(&r[g])),
+                                        )
+                                    })
+                                    .collect(),
+                            ),
+                            (None, None) => Source::Split(Vec::new()),
                         }
-                        Outer::Layer(_) => {
-                            let served = served.as_ref().expect("a layer's groups were read");
-                            labels = served.label_table();
-                            match &labels {
-                                Some(labels) => Source::Grouped(served.row_groups(labels)),
-                                None => {
-                                    let set = served.group_rows(cx, cx.sets.set.rows(cx));
-                                    let reference = cx
-                                        .sets
-                                        .reference
-                                        .as_ref()
-                                        .map(|r| served.group_rows(cx, r.rows(cx)));
-                                    parts = (set, reference);
-                                    Source::Split(
-                                        parts
-                                            .0
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(g, rows)| {
-                                                (
-                                                    CellSet::Rows(rows),
-                                                    parts.1.as_ref().map(|r| CellSet::Rows(&r[g])),
-                                                )
-                                            })
-                                            .collect(),
-                                    )
-                                }
-                            }
-                        }
-                    };
-                    let counted =
-                        self.cell_rows(cx, &groups, &source, position, depth, limit, timings);
-                    timings.cells_ns += started.elapsed().as_nanos() as u64;
-                    counted?
-                }
-            },
+                    }
+                };
+                let counted = self.cell_rows(cx, &groups, &source, position, depth, limit, timings);
+                timings.cells_ns += started.elapsed().as_nanos() as u64;
+                counted?
+            }
         };
         let mut bytes = 0usize;
         let mut kept = 0usize;
@@ -260,13 +266,16 @@ impl Plan {
             }
         };
         let batch = self.batch(&groups, &head, &rows[..kept])?;
-        if self.cells.is_some() && kept < rows.len() {
-            *spill = Some(Spill {
-                at: next.clone(),
+        if next.table == position.table {
+            let spill = (self.cells.is_some() && kept < rows.len())
+                .then(|| (next.clone(), rows.split_off(kept), complete));
+            *held = Some(Held {
+                table: position.table,
                 under: Arc::clone(cx.generation),
                 mask: cx.open.served.mask_identity,
-                rows: rows.split_off(kept),
-                complete,
+                groups,
+                served,
+                spill,
             });
         }
         Ok(Page {
@@ -321,8 +330,8 @@ impl Plan {
             let group = DictionaryArray::<Int8Type>::try_new(kinds, values)
                 .map_err(|e| EngineError::Malformed(format!("a group column: {e}")))?;
             push("group", Arc::new(group), false);
-            match groups.keys.first() {
-                Some(Key::Id(_)) => {
+            match &self.outer {
+                Outer::Layer(_) => {
                     let mut b = UInt64Builder::with_capacity(rows.len());
                     for row in rows {
                         match groups.keys.get(row.group as usize) {
@@ -547,18 +556,27 @@ impl Walk<'_> {
         let wanted = |entry: &CellCount| groups.contains(&entry.group);
         match self.source {
             Source::Grouped(row_groups) => {
+                let only = (groups.len() == 1).then_some(groups.start);
                 let set = &self.cx.sets.set;
                 let mut counted: Vec<CellCount> = count_chunk(
                     set.cells(self.cx),
                     segments,
                     depth,
                     row_groups,
+                    only,
                     prefixes.clone(),
                 );
                 counted.retain(wanted);
                 let mut reference: Vec<CellCount> = match &self.cx.sets.reference {
                     None => Vec::new(),
-                    Some(r) => count_chunk(r.cells(self.cx), segments, depth, row_groups, prefixes),
+                    Some(r) => count_chunk(
+                        r.cells(self.cx),
+                        segments,
+                        depth,
+                        row_groups,
+                        only,
+                        prefixes,
+                    ),
                 };
                 reference.retain(wanted);
                 merge(counted, reference)
@@ -572,10 +590,17 @@ impl Walk<'_> {
                             .map(|(cell, count)| CellCount { cell, group, count })
                             .collect()
                     } else {
-                        count_chunk(set, segments, depth, &RowGroups::None, prefixes.clone())
-                            .into_iter()
-                            .map(|entry| CellCount { group, ..entry })
-                            .collect()
+                        count_chunk(
+                            set,
+                            segments,
+                            depth,
+                            &RowGroups::None,
+                            None,
+                            prefixes.clone(),
+                        )
+                        .into_iter()
+                        .map(|entry| CellCount { group, ..entry })
+                        .collect()
                     }
                 };
                 let mut rows: Vec<Row> = Vec::new();

@@ -313,7 +313,9 @@ fn main() -> Result<(), BoxError> {
             .find_map(|partition| partition.views.get(&args.view))
             .ok_or("no view data")?;
         let segments = tessera_engine::viewport::segments_with_row_bases(&args.view, view_data)?;
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(args.threads).build()?;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build()?;
         for depth in [16u8, 32] {
             let (n, median, _, _) = timed(args.repeat, || {
                 pool.install(|| {
@@ -326,7 +328,10 @@ fn main() -> Result<(), BoxError> {
                     .len()
                 })
             });
-            println!("{}", json!({"case": format!("the pass alone, d{depth}"), "segments": segments.len(), "cells": n, "ms": ms(median)}));
+            println!(
+                "{}",
+                json!({"case": format!("the pass alone, d{depth}"), "segments": segments.len(), "cells": n, "ms": ms(median)})
+            );
         }
     }
     for filter in [None, Some(region.clone())] {

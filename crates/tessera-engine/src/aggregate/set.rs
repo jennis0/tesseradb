@@ -138,10 +138,17 @@ fn restrict_under(open: &OpenView<'_>, engine: &Engine, entities: &Bitmap) -> Re
     match row_space.restrict_to_view(entities, open.geometry.projection.covers_through()) {
         Some(restricted) => Ok(restricted),
         // A merge has collapsed the extent the projection was taken through, so which of the
-        // merged extent's entities its rows cover is read from the mask's rows.
+        // extents' entities its rows cover is read from the mask's rows above the base.
         None => {
-            let mut held = crossing(engine, open, open.mask.visible_all())?;
-            held.and_inplace(entities);
+            let mut held = row_space
+                .restrict_to_view(entities, None)
+                .expect("the base alone is always covered");
+            let above_base = open.mask.visible_all().and(&Bitmap::from_range(
+                row_space.base_rows()..u32::try_from(row_space.total_rows()).unwrap_or(u32::MAX),
+            ));
+            let mut extents = crossing(engine, open, &above_base)?;
+            extents.and_inplace(entities);
+            held.or_inplace(&extents);
             Ok(held)
         }
     }

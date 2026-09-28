@@ -7,9 +7,10 @@
 //! narrow — a key is a string per *value*, and inlining it would make it a string per *point*.
 //!
 //! **The unit of address is the column, not the vocabulary.** Two columns may draw from one value
-//! set (one `[[vocabulary]]` named by both), and they still have distinct member sets: a principal who may see
-//! `finance` under `reviewing_department` may see nothing under `owner_department`. §3.2 makes
-//! that normative, so the gate is applied per column even where the values behind it are shared.
+//! set (one `[[vocabulary]]` named by both), and they still have distinct member sets: a principal
+//! who may see `finance` under `reviewing_department` may see nothing under `owner_department`.
+//! §3.2 makes that normative, so the gate is applied per column even where the values behind it
+//! are shared.
 //!
 //! **View is not part of the address for an entity-scoped column**, and deliberately. Membership
 //! is an *entity-space* question and entity ids are bundle-global, so a column rendered in several
@@ -131,7 +132,10 @@ pub struct CategoryPage {
 /// A scoped family that is on no filter surface is not a value list either: the one
 /// `index`-or-`render` licence (`scoped_is_filterable`) decides both, so a name that resolves to
 /// nothing here is the `None` an undeclared column gets.
-pub(crate) fn vocabulary_of(manifest: &tessera_store::manifest::Manifest, column: &str) -> Option<String> {
+pub(crate) fn vocabulary_of(
+    manifest: &tessera_store::manifest::Manifest,
+    column: &str,
+) -> Option<String> {
     if let Some(scalar) = manifest.declared_scalars.iter().find(|s| s.name == column) {
         return scalar.vocabulary.clone();
     }

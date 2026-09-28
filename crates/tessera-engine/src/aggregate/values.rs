@@ -98,7 +98,11 @@ impl Field {
             Pick::Named(_) => Some(self.listable(cx)?),
             Pick::Top(_) => None,
         };
-        let listable = |code: u32| listable.as_ref().map_or(Ok(false), |listable| listable(code));
+        let listable = |code: u32| {
+            listable
+                .as_ref()
+                .map_or(Ok(false), |listable| listable(code))
+        };
         let codes: Vec<u32> = match chosen {
             Some(chosen) => chosen.iter().map(|&code| code as u32).collect(),
             None => match &self.pick {
@@ -335,10 +339,18 @@ fn tally_rows(
             })
         })
         .collect();
-    let dense = segments
+    // Indexed by code up to the widest code any segment stores, a map where one stores 32 bits.
+    let width = segments
         .iter()
-        .all(|(segment, _)| !matches!(segment.columns.scalar(column), Some(ScalarSlice::U32(_))));
-    let empty = || Tally::new(dense);
+        .map(|(segment, _)| match segment.columns.scalar(column) {
+            Some(ScalarSlice::U8(_)) => Some(1 << 8),
+            Some(ScalarSlice::U16(_)) => Some(1 << 16),
+            Some(ScalarSlice::U32(_)) => None,
+            _ => Some(1),
+        })
+        .try_fold(1usize, |most, width| width.map(|w| most.max(w)))
+        .unwrap_or(0);
+    let empty = || Tally::new(width);
     let tally = pieces
         .par_iter()
         .fold(empty, |mut tally, (s, rows)| {
@@ -368,7 +380,7 @@ fn tally_rows(
     tally.into_counts()
 }
 
-/// A running count per code: indexed by code for codes below 2^16, a map otherwise.
+/// A running count per code: indexed by code for a `u8` or `u16` column, a map for a `u32` one.
 struct Tally {
     dense: Vec<u64>,
     sparse: FxHashMap<u32, u64>,
@@ -377,9 +389,10 @@ struct Tally {
 }
 
 impl Tally {
-    fn new(dense: bool) -> Tally {
+    /// A tally indexed by code below `width`, and a map above it.
+    fn new(width: usize) -> Tally {
         Tally {
-            dense: if dense { vec![0; 1 << 16] } else { Vec::new() },
+            dense: vec![0; width],
             sparse: FxHashMap::default(),
             absent: 0,
         }

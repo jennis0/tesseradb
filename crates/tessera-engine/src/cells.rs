@@ -190,7 +190,11 @@ const UNSERVED: u32 = u32::MAX;
 impl LabelTable {
     /// The table over `ordinals` ordinals, `served` the ordinals served and `listed` those listed,
     /// in order. A listed ordinal past `ordinals` stands for no artifact and counts nothing.
-    pub(crate) fn new(ordinals: usize, served: impl IntoIterator<Item = u32>, listed: &[u32]) -> Self {
+    pub(crate) fn new(
+        ordinals: usize,
+        served: impl IntoIterator<Item = u32>,
+        listed: &[u32],
+    ) -> Self {
         let rest = listed.len() as u32;
         let mut by_ordinal = vec![UNSERVED; ordinals];
         for ordinal in served {
@@ -305,6 +309,24 @@ impl Grouper for Constant {
     }
 }
 
+/// One group of another grouper, its other groups passed over.
+struct Only<'g, G> {
+    inner: &'g G,
+    group: u32,
+}
+
+impl<G: Grouper> Grouper for Only<'_, G> {
+    #[inline(always)]
+    fn each(&self, local: usize, row: u32, mut f: impl FnMut(u32)) {
+        let group = self.group;
+        self.inner.each(local, row, |g| {
+            if g == group {
+                f(g)
+            }
+        })
+    }
+}
+
 /// A drawn code of one width, through a table.
 struct Drawn<'a, T> {
     codes: &'a [T],
@@ -328,7 +350,8 @@ struct ByEntity<'a> {
 impl Grouper for ByEntity<'_> {
     #[inline(always)]
     fn each(&self, _: usize, row: u32, mut f: impl FnMut(u32)) {
-        f(self.table
+        f(self
+            .table
             .group(self.codes.code_of(self.tables.entity_of(row))))
     }
 }
@@ -393,14 +416,18 @@ pub fn pass_in_chunks(
     assert!(depth <= 32, "a position has 32 levels");
     let parts: Vec<Vec<CellCount>> = chunks(segments, depth, chunk_rows)
         .par_iter()
-        .map(|prefixes| count_chunk(set, segments, depth, groups, prefixes.clone()))
+        .map(|prefixes| count_chunk(set, segments, depth, groups, None, prefixes.clone()))
         .collect();
     parts.concat()
 }
 
 /// Ranges of depth-`min(depth, 16)` cell prefixes, ascending and together covering every cell,
 /// each holding about `chunk_rows` rows of the view. Cut at the largest segment's quantiles.
-pub(crate) fn chunks(segments: &[(&SegmentData, u32)], depth: u8, chunk_rows: u64) -> Vec<Range<u64>> {
+pub(crate) fn chunks(
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+    chunk_rows: u64,
+) -> Vec<Range<u64>> {
     let coarse = depth.min(16);
     let cells = 1u64 << (2 * u32::from(coarse));
     let total: u64 = segments.iter().map(|(s, _)| u64::from(s.row_count)).sum();
@@ -423,12 +450,14 @@ pub(crate) fn chunks(segments: &[(&SegmentData, u32)], depth: u8, chunk_rows: u6
 }
 
 /// The table of one chunk from [`chunks`]: the set's rows whose depth-`min(depth, 16)` prefix is in
-/// `prefixes`, counted by depth-`depth` cell and group, ascending by cell then group.
+/// `prefixes`, counted by depth-`depth` cell and group, ascending by cell then group. With
+/// `only`, the rows of that group alone are counted; the others are read and passed over.
 pub(crate) fn count_chunk(
     set: CellSet<'_>,
     segments: &[(&SegmentData, u32)],
     depth: u8,
     groups: &RowGroups<'_>,
+    only: Option<u32>,
     prefixes: Range<u64>,
 ) -> Vec<CellCount> {
     let shift = 32 - 2 * u32::from(depth.min(16));
@@ -443,26 +472,28 @@ pub(crate) fn count_chunk(
         }
         let rows = row_base + lo..row_base + hi;
         let out = &mut entries;
-        // At most one entry per row, and the set's rows here are a range count.
-        out.reserve(set.count(rows.clone()) as usize);
+        if only.is_none() {
+            // At most one entry per row, and the set's rows here are a range count.
+            out.reserve(set.count(rows.clone()) as usize);
+        }
         match groups {
             RowGroups::None => count_segment_alone(set, segment, row_base, rows, depth, out),
             RowGroups::Drawn { codes, table } => match &codes[s] {
                 Some(ScalarSlice::U8(codes)) => {
                     let g = Drawn { codes, table };
-                    count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                    count_as(set, segment, row_base, rows, depth, width, &g, only, out)
                 }
                 Some(ScalarSlice::U16(codes)) => {
                     let g = Drawn { codes, table };
-                    count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                    count_as(set, segment, row_base, rows, depth, width, &g, only, out)
                 }
                 Some(ScalarSlice::U32(codes)) => {
                     let g = Drawn { codes, table };
-                    count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                    count_as(set, segment, row_base, rows, depth, width, &g, only, out)
                 }
                 _ => {
                     let g = Constant(table.none());
-                    count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                    count_as(set, segment, row_base, rows, depth, width, &g, only, out)
                 }
             },
             RowGroups::Entity {
@@ -475,11 +506,11 @@ pub(crate) fn count_chunk(
                     codes,
                     table,
                 };
-                count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                count_as(set, segment, row_base, rows, depth, width, &g, only, out)
             }
             RowGroups::Labels { column, table } => {
                 let g = ByLabel { column, table };
-                count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                count_as(set, segment, row_base, rows, depth, width, &g, only, out)
             }
         }
     }
@@ -513,6 +544,31 @@ pub(crate) fn count_chunk_by_ranges(
         prefixes,
         &|rows| set.count(rows),
     )
+}
+
+/// [`count_segment`] over `groups`, or over its group `only` where one is named.
+#[allow(clippy::too_many_arguments)]
+fn count_as<G: Grouper>(
+    set: CellSet<'_>,
+    segment: &SegmentData,
+    row_base: u32,
+    rows: Range<u32>,
+    depth: u8,
+    width: usize,
+    groups: &G,
+    only: Option<u32>,
+    out: &mut Vec<CellCount>,
+) {
+    match only {
+        None => count_segment(set, segment, row_base, rows, depth, width, groups, out),
+        Some(group) => {
+            let only = Only {
+                inner: groups,
+                group,
+            };
+            count_segment(set, segment, row_base, rows, depth, width, &only, out)
+        }
+    }
 }
 
 /// [`count_segment`] with every row in group 0: a run of rows is read as a slice of cell codes and
