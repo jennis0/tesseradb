@@ -13,6 +13,7 @@ pub mod browse;
 mod bundle_lock;
 mod cache;
 pub mod cancel;
+pub mod cells;
 mod categories;
 mod coalesce;
 mod compact;

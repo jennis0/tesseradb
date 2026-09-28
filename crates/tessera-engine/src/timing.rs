@@ -207,10 +207,10 @@ pub struct StageTimings {
     pub select_rows_visited: u64,
     /// Points actually returned.
     pub points_gathered: u64,
-    /// Sub-cells *evaluated* for the underlay — `tiles_nonempty × 4^offset`, not the number
-    /// emitted. The two differ by however many sub-cells were empty, and that gap is the useful
-    /// number: it is the work spent discovering emptiness, which on a clustered corpus is most of
-    /// it. Compare against `ViewportOut::sub_cells.len()` for the emitted count.
+    /// Sub-cell row ranges counted for the underlay: one per occupied sub-cell per segment of its
+    /// tile. An empty sub-cell is skipped by the search and costs nothing here. Above
+    /// `ViewportOut::sub_cells.len()` where a sub-cell's rows are all hidden from the viewer, or
+    /// lie in more than one segment.
     pub underlay_cells_evaluated: u64,
     /// Number of clock reads taken. Multiply by the per-lap cost from `tessera-bench calibrate`
     /// to get the perturbation this instrumentation itself introduced, and subtract it honestly
