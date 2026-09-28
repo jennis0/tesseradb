@@ -37,6 +37,7 @@ use crate::viewport::{filter_refusal, SinkClosed, SinkResult};
 
 use cursor::{AggregateCursor, Position};
 use table::Plan;
+pub(crate) use table::{ALONE_ROWS, MIN_CHUNK_ROWS};
 
 /// One `POST /v1/aggregate` response, as the engine sees it.
 #[derive(Debug, Clone)]
@@ -414,6 +415,7 @@ impl Engine {
             let plan = &planned.plans[grouping as usize];
             let cx = set::Cx::new(self, &open, &generation, &sets, &req.cancel);
             let budget = table::Budget {
+                deadline: (pages > 0).then(|| started + limits.response_time),
                 page_rows: planned.page_rows,
                 max_page_bytes: limits.max_page_bytes,
                 pages_left: req.pages.map_or(u64::MAX, |limit| u64::from(limit) - pages),
@@ -421,7 +423,9 @@ impl Engine {
             };
             let page = match plan.page(&cx, &position, &budget, &mut timings, &mut held) {
                 Err(EngineError::Cancelled) => break ResponseEndedBy::Deadline,
-                page => page?,
+                Ok(None) => break ResponseEndedBy::BudgetTime,
+                Ok(Some(page)) => page,
+                Err(e) => return Err(e),
             };
             position = page.next.clone();
             if table_sent != Some(grouping) {

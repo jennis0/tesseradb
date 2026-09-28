@@ -5,6 +5,7 @@
 //! and a named value this viewer may be told of appears with no item. A page takes the rows after
 //! its position up to the page's rows and bytes, and the position moves to its last row.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -23,7 +24,8 @@ use super::set::Cx;
 use super::values::Field;
 use super::{AggregateTimings, By, Grouping, TableHead};
 use crate::cells::{
-    count_chunk_by_ranges, count_chunk_into, CellSet, CellSink, GroupTable, RowGroups,
+    count_chunk_by_ranges, count_chunk_into, rows_in_chunk, CellSet, CellSink, GroupTable,
+    RowGroups,
 };
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
@@ -47,6 +49,9 @@ enum Outer {
 /// What the page about to be built may hold, and what the response can still send after it.
 #[derive(Clone, Copy)]
 pub(super) struct Budget {
+    /// When the response's time runs out, where a page may stop for it: every page but the
+    /// response's first.
+    pub(super) deadline: Option<std::time::Instant>,
     pub(super) page_rows: u32,
     pub(super) max_page_bytes: usize,
     pub(super) pages_left: u64,
@@ -183,14 +188,12 @@ struct ByGroup {
 }
 
 impl ByGroup {
-    /// Columns for `wanted`, a single group's reserved for `rows` entries, at most one a row, so
-    /// they do not move as they grow.
-    fn new(wanted: &std::ops::Range<u32>, rows: u64) -> ByGroup {
-        let reserve = if wanted.len() == 1 { rows as usize } else { 0 };
+    /// Columns for `wanted`, each reserved for `room` entries.
+    fn new(wanted: &std::ops::Range<u32>, room: usize) -> ByGroup {
         ByGroup {
             first: wanted.start,
             groups: (wanted.start..wanted.end)
-                .map(|_| (Vec::with_capacity(reserve), Vec::with_capacity(reserve)))
+                .map(|_| (Vec::with_capacity(room), Vec::with_capacity(room)))
                 .collect(),
         }
     }
@@ -274,8 +277,9 @@ impl Plan {
         budget: &Budget,
         timings: &mut AggregateTimings,
         held: &mut Option<Held>,
-    ) -> Result<Page> {
+    ) -> Result<Option<Page>> {
         let Budget {
+            deadline,
             page_rows,
             max_page_bytes,
             pages_left,
@@ -307,6 +311,8 @@ impl Plan {
             resumed: position.chosen.is_some(),
         };
         let limit = page_rows as usize;
+        let switches = &cx.engine.switches;
+        let alone = switches.aggregate_alone_rows.load(Ordering::Relaxed) as usize;
         let row_bytes = self.row_bytes(&groups, head.reference_total.is_some());
         let dictionary = self.dictionary_bytes(&groups);
         let spilled = spill.filter(|(at, runs, complete)| {
@@ -353,32 +359,46 @@ impl Plan {
                 };
                 let rows_left =
                     response_bytes_left.saturating_sub(dictionary as u64) / row_bytes as u64;
-                let counted = self.cell_rows(
+                let walk = Walk {
                     cx,
-                    &groups,
-                    &source,
-                    position,
+                    source: &source,
                     depth,
+                    methods: &[],
+                    reference: cx.sets.reference.is_some(),
+                    min_chunk_rows: switches.aggregate_min_chunk_rows.load(Ordering::Relaxed),
+                    deadline,
+                };
+                let counted = self.cell_rows(
+                    walk,
+                    &groups,
+                    position,
                     limit,
                     rows_left.min(pages_left.saturating_mul(limit as u64)),
                     timings,
                 );
                 timings.cells_ns += started.elapsed().as_nanos() as u64;
-                counted?
+                match counted? {
+                    Some(counted) => counted,
+                    None => return Ok(None),
+                }
             }
         };
         let total: usize = runs.iter().map(Run::len).sum();
         let fits = max_page_bytes.saturating_sub(dictionary) / row_bytes;
         let most = total.min(limit).min(fits.max(1));
         // A long run goes out as its own page, sent as the columns it was counted into.
-        let alone = if self.cells.is_some() {
-            ALONE_ROWS
-        } else {
-            usize::MAX
-        };
-        let (page, rest) = split_runs(runs, most, alone);
+        let (page, rest) = split_runs(
+            runs,
+            most,
+            if self.cells.is_some() {
+                alone
+            } else {
+                usize::MAX
+            },
+        );
         let kept: usize = page.iter().map(Run::len).sum();
-        let cut_by_bytes = kept == fits && fits < total.min(limit);
+        // The page's bytes bound it, one row over them included.
+        let cut_by_bytes = kept == most && most == fits.max(1) && most < total.min(limit);
         let next = if complete && rest.is_empty() {
             position.next_table()
         } else {
@@ -399,12 +419,12 @@ impl Plan {
         };
         let building = std::time::Instant::now();
         // A long page's columns are joined on the engine's threads; a short one's on this one.
-        let batch = if kept > ALONE_ROWS {
+        let batch = if kept > alone {
             cx.engine
                 .pool
-                .install(|| self.batch(&groups, &head, &page))?
+                .install(|| self.batch(&groups, &head, &page, alone))?
         } else {
-            self.batch(&groups, &head, &page)?
+            self.batch(&groups, &head, &page, alone)?
         };
         timings.batch_ns += building.elapsed().as_nanos() as u64;
         if next.table == position.table {
@@ -419,13 +439,13 @@ impl Plan {
                 spill,
             });
         }
-        Ok(Page {
+        Ok(Some(Page {
             head,
             batch,
             bytes: kept * row_bytes + dictionary,
             cut_by_bytes,
             next,
-        })
+        }))
     }
 
     /// The Arrow bytes a row adds to a page, besides the dictionaries.
@@ -473,7 +493,13 @@ impl Plan {
     }
 
     /// The runs as one batch, in the contract's column order.
-    fn batch(&self, groups: &Groups, head: &TableHead, runs: &[Run]) -> Result<RecordBatch> {
+    fn batch(
+        &self,
+        groups: &Groups,
+        head: &TableHead,
+        runs: &[Run],
+        alone: usize,
+    ) -> Result<RecordBatch> {
         let malformed = |e: arrow::error::ArrowError| {
             EngineError::Malformed(format!("an aggregate page did not assemble: {e}"))
         };
@@ -535,12 +561,12 @@ impl Plan {
             }
         }
         if self.cells.is_some() {
-            push("cell", joined(runs, |r| &r.cells), false);
+            push("cell", joined(runs, alone, |r| &r.cells), false);
         }
-        let counts = joined(runs, |r| &r.counts);
+        let counts = joined(runs, alone, |r| &r.counts);
         push("count", Arc::clone(&counts), false);
         if let Some(reference_total) = head.reference_total {
-            let references = joined(runs, |r| {
+            let references = joined(runs, alone, |r| {
                 r.references.as_ref().expect("a reference was counted")
             });
             let (c, r) = (
@@ -587,12 +613,12 @@ fn valid(runs: &[Run], holds: impl Fn(u32) -> bool) -> Option<NullBuffer> {
 
 /// One column of the runs as one array: a single run's own, or the runs' copied side by side, a
 /// long page's on the current pool into a buffer whose pages the copy is the first to touch.
-fn joined(runs: &[Run], of: impl Fn(&Run) -> &UInt64Array + Sync) -> ArrayRef {
+fn joined(runs: &[Run], alone: usize, of: impl Fn(&Run) -> &UInt64Array + Sync) -> ArrayRef {
     if let [one] = runs {
         return Arc::new(of(one).clone());
     }
     let rows: usize = runs.iter().map(Run::len).sum();
-    if rows <= ALONE_ROWS {
+    if rows <= alone {
         let mut out = Vec::with_capacity(rows);
         for run in runs {
             out.extend_from_slice(of(run).values());
@@ -621,18 +647,16 @@ impl Plan {
     /// this response can still send, `budget` rows, one walk counts every remaining group and the
     /// pages after this one take theirs from it. Otherwise each group is counted alone, from the
     /// cell after the last one sent, a batch of chunks at a time until the page is full.
-    #[allow(clippy::too_many_arguments)]
     fn cell_rows(
         &self,
-        cx: &Cx<'_>,
+        walk: Walk<'_>,
         groups: &Groups,
-        source: &Source<'_>,
         position: &Position,
-        depth: u8,
         limit: usize,
         budget: u64,
         timings: &mut AggregateTimings,
-    ) -> Result<(Vec<Run>, bool)> {
+    ) -> Result<Option<(Vec<Run>, bool)>> {
+        let (cx, depth) = (walk.cx, walk.depth);
         let cells_at_depth = if depth >= 32 {
             u64::MAX
         } else {
@@ -645,33 +669,34 @@ impl Plan {
             .iter()
             .map(|&(set, reference)| (ranges(set), ranges(reference)))
             .collect();
-        let method = match source {
+        let method = match walk.source {
             Source::Split(_) if methods.iter().all(|&(s, _)| s) => "ranges",
             _ => "pass",
         };
         if !timings.methods.contains(&(self.grouping, method)) {
             timings.methods.push((self.grouping, method));
         }
-        let groups_count = groups.sizes.len() as u32;
         let walk = Walk {
-            cx,
-            source,
-            depth,
             methods: &methods,
-            reference: cx.sets.reference.is_some(),
+            ..walk
         };
+        let groups_count = groups.sizes.len() as u32;
         let bound: u64 = groups.sizes[position.group.min(groups_count) as usize..]
             .iter()
             .map(|&(set, reference)| (set + reference).min(most_cells))
             .sum();
         if position.after_cell.is_none() && bound <= budget.max(limit as u64) {
-            let (pieces, _) = walk.window(position.group..groups_count, 0, usize::MAX, timings)?;
+            let Some((pieces, _)) =
+                walk.window(position.group..groups_count, 0, usize::MAX, timings)?
+            else {
+                return Ok(None);
+            };
             let runs = pieces
                 .into_iter()
                 .zip(position.group..)
                 .flat_map(|(pieces, group)| pieces.into_iter().map(move |p| Run::of(group, p)))
                 .collect();
-            return Ok((runs, true));
+            return Ok(Some((runs, true)));
         }
         let mut runs: Vec<Run> = Vec::new();
         let mut rows = 0usize;
@@ -685,21 +710,25 @@ impl Plan {
                     .filter(|&c| c < cells_at_depth || depth >= 32),
             };
             if let (true, Some(from)) = (set > 0 || reference > 0, from) {
-                let (mut found, complete) =
-                    walk.window(group..group + 1, from, limit + 1 - rows, timings)?;
+                let found = walk.window(group..group + 1, from, limit + 1 - rows, timings)?;
+                let (mut found, complete) = found.expect("a group's window stops with its rows");
                 for piece in found.pop().expect("one group was counted") {
                     rows += piece.len();
                     runs.push(Run::of(group, piece));
                 }
                 if !complete {
-                    return Ok((runs, false));
+                    // Stopped for the response's time before a row was found.
+                    if runs.is_empty() {
+                        return Ok(None);
+                    }
+                    return Ok(Some((runs, false)));
                 }
             }
             group += 1;
             after = None;
         }
         let complete = group >= groups_count && rows <= limit;
-        Ok((runs, complete))
+        Ok(Some((runs, complete)))
     }
 }
 
@@ -708,7 +737,7 @@ const CHUNK_ROWS: u64 = 1 << 20;
 
 /// The fewest rows of the view one chunk spans, so a small page is not cut into slivers whose
 /// scheduling costs more than their rows.
-const MIN_CHUNK_ROWS: u64 = 1 << 14;
+pub(crate) const MIN_CHUNK_ROWS: u64 = 1 << 14;
 
 /// How many chunks a walk cuts per thread, so threads that finish early take more.
 const CHUNKS_PER_THREAD: u64 = 4;
@@ -733,6 +762,10 @@ struct Walk<'w> {
     /// For each group, whether its set and its reference are counted by range.
     methods: &'w [(bool, bool)],
     reference: bool,
+    /// The fewest rows of the view a chunk spans.
+    min_chunk_rows: u64,
+    /// When the walk stops between batches for the response's time.
+    deadline: Option<std::time::Instant>,
 }
 
 impl Walk<'_> {
@@ -742,18 +775,30 @@ impl Walk<'_> {
     /// The chunks are cut so that one batch across the pool reads about `need` rows of the view,
     /// and each later batch takes as many chunks as the rows still wanted need at the yield so far,
     /// so a page reads little past its own rows however sparse the set is.
+    ///
+    /// Past the deadline it stops between batches: a walk of several groups, which sends nothing
+    /// until it has read to the end, answers `None`; a group's window answers the rows found so
+    /// far as incomplete.
     fn window(
         &self,
         groups: std::ops::Range<u32>,
         from: u64,
         need: usize,
         timings: &mut AggregateTimings,
-    ) -> Result<(Vec<Vec<Columns>>, bool)> {
+    ) -> Result<Option<(Vec<Vec<Columns>>, bool)>> {
         let threads = self.cx.engine.pool.current_num_threads().max(1) as u64;
         let span = (need as u64).min(self.cx.view_rows()).max(1);
         let chunk_rows = span
             .div_ceil(threads * CHUNKS_PER_THREAD)
-            .clamp(MIN_CHUNK_ROWS, CHUNK_ROWS);
+            .clamp(self.min_chunk_rows.min(CHUNK_ROWS), CHUNK_ROWS);
+        // A batch reads at most four times the rows still wanted, so a dense stretch after a
+        // sparse one is not read whole.
+        let most_chunks = match need {
+            usize::MAX => threads * 64,
+            _ => (4 * need as u64)
+                .div_ceil(chunk_rows)
+                .clamp(threads, threads * 64),
+        };
         let chunks = crate::cells::chunks(self.cx.segments(), self.depth, chunk_rows);
         let fine = 2 * u32::from(self.depth - self.depth.min(16));
         let start = chunks.partition_point(|chunk| chunk.end <= from >> fine);
@@ -763,12 +808,22 @@ impl Walk<'_> {
         let mut rows = 0usize;
         while at < chunks.len() && rows < need {
             self.cx.check_cancelled()?;
+            if at > start
+                && self
+                    .deadline
+                    .is_some_and(|d| std::time::Instant::now() >= d)
+            {
+                if groups.len() > 1 {
+                    return Ok(None);
+                }
+                break;
+            }
             let end = (at + batch).min(chunks.len());
             let walking = std::time::Instant::now();
             let parts: Vec<Vec<Columns>> = self.cx.engine.pool.install(|| {
                 chunks[at..end]
                     .par_iter()
-                    .map(|prefixes| self.chunk(groups.clone(), prefixes.clone(), chunk_rows))
+                    .map(|prefixes| self.chunk(groups.clone(), prefixes.clone()))
                     .collect()
             });
             timings.pass_ns += walking.elapsed().as_nanos() as u64;
@@ -787,22 +842,28 @@ impl Walk<'_> {
             let found = (rows as u64).max(1);
             let wanted = (need - rows.min(need)) as u64;
             let chunks_wanted = wanted.saturating_mul((at - start) as u64).div_ceil(found);
-            batch = (chunks_wanted.saturating_add(1)).min(threads * 64).max(1) as usize;
+            batch = chunks_wanted.saturating_add(1).clamp(1, most_chunks) as usize;
         }
-        Ok((out, at == chunks.len()))
+        Ok(Some((out, at == chunks.len())))
     }
 
-    /// One chunk's rows of each of `groups`, the chunk spanning about `rows` rows of the view.
-    fn chunk(
-        &self,
-        groups: std::ops::Range<u32>,
-        prefixes: std::ops::Range<u64>,
-        rows: u64,
-    ) -> Vec<Columns> {
+    /// One chunk's rows of each of `groups`.
+    fn chunk(&self, groups: std::ops::Range<u32>, prefixes: std::ops::Range<u64>) -> Vec<Columns> {
         let segments = self.cx.segments();
         let depth = self.depth;
-        let mut set = ByGroup::new(&groups, rows);
-        let mut reference = ByGroup::new(&groups, rows);
+        // A single group's count of a chunk holds at most an entry for each of its rows there.
+        let room = |cells: CellSet<'_>| match groups.len() {
+            1 => rows_in_chunk(cells, segments, depth, prefixes.clone()) as usize,
+            _ => 0,
+        };
+        let sets = &self.cx.sets;
+        let mut set = ByGroup::new(&groups, room(sets.set.cells(self.cx)));
+        let mut reference = ByGroup::new(
+            &groups,
+            sets.reference
+                .as_ref()
+                .map_or(0, |r| room(r.cells(self.cx))),
+        );
         match self.source {
             Source::Grouped(row_groups) => {
                 let only = (groups.len() == 1).then_some(groups.start);
@@ -913,7 +974,7 @@ fn merge(set: (Vec<u64>, Vec<u64>), reference: Option<(Vec<u64>, Vec<u64>)>) -> 
 }
 
 /// Runs longer than this are not joined to another in one page.
-const ALONE_ROWS: usize = 1 << 16;
+pub(crate) const ALONE_ROWS: u64 = 1 << 16;
 
 /// The first `n` rows of `runs`, or fewer where a run longer than `alone` would share the page with
 /// another, and the rest.

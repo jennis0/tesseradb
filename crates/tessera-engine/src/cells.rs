@@ -481,6 +481,26 @@ pub(crate) fn count_chunk(
     out
 }
 
+/// How many of the set's rows lie in the chunk `prefixes` from [`chunks`]: the most entries one
+/// group's count of it can hold.
+pub(crate) fn rows_in_chunk(
+    set: CellSet<'_>,
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+    prefixes: Range<u64>,
+) -> u64 {
+    let shift = 32 - 2 * u32::from(depth.min(16));
+    segments
+        .iter()
+        .map(|&(segment, row_base)| {
+            let n = segment.row_count;
+            let lo = first_code_at_or_past(segment, prefixes.start << shift, 0..n);
+            let hi = first_code_at_or_past(segment, prefixes.end << shift, lo..n);
+            set.count(row_base + lo..row_base + hi)
+        })
+        .sum()
+}
+
 /// [`count_chunk`] into `out`. Where the chunk's rows lie in one segment its entries go straight
 /// to `out`; a cell's rows from several segments are added first.
 pub(crate) fn count_chunk_into(

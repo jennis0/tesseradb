@@ -2476,3 +2476,100 @@ fn a_resumed_table_lists_only_the_artifacts_it_chose() {
         .collect();
     assert_eq!(keys, vec![Some(ids["t1"].raw().to_string())]);
 }
+
+/// **Cell tables cut into many chunks and pages are the oracle's**, over a view of two segments.
+/// Chunks of a few dozen rows make a group's window run over several batches and stop short of
+/// its group's end, a page leave rows counted past it for the next, a run of more than a few cells
+/// go out as a page of its own, and a long page join its runs on the engine's threads.
+#[test]
+fn cell_tables_over_many_chunks_and_pages_are_the_oracles() {
+    let mut fx = fixture();
+    fx.engine.set_background_refresh_for_test(true);
+    let session = fx.session(true);
+    ingest_items(&mut fx, 600, "chunks");
+    flush_and_show(&mut fx, &session);
+    fx.engine.set_aggregate_chunking_for_test(32, 16);
+    let engine = &fx.engine;
+    let rows = stored_rows(&fx, &session);
+    let items: Vec<&Item> = rows.iter().map(|(_, i)| *i).collect();
+    for depth in [16u8, 32] {
+        let listed = top_keys(&items, "kind", 3);
+        let groupings = [
+            with_cells(size(), depth),
+            with_cells(field("kind", Pick::Top(3)), depth),
+        ];
+        let mut density: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut by_kind: BTreeMap<(usize, u64), (Option<String>, u64)> = BTreeMap::new();
+        for (position, item) in &rows {
+            let cell = cell_at(*position, depth);
+            *density.entry(cell).or_default() += 1;
+            let (g, key) = match item.kind.as_deref() {
+                Some(v) if listed.iter().any(|k| k == v) => (
+                    listed.iter().position(|k| k == v).unwrap(),
+                    Some(v.to_string()),
+                ),
+                Some(_) => (3, None),
+                None => (4, None),
+            };
+            by_kind.entry((g, cell)).or_insert((key, 0)).1 += 1;
+        }
+        let density: Vec<(Option<String>, u64, u64)> = density
+            .into_iter()
+            .map(|(cell, n)| (None, cell, n))
+            .collect();
+        let by_kind: Vec<(Option<String>, u64, u64)> = by_kind
+            .into_iter()
+            .map(|((_, cell), (key, n))| (key, cell, n))
+            .collect();
+        // Small pages two a response, a group at a time; long pages from one walk of the table;
+        // responses bounded by their bytes.
+        for (page_rows, pages, response_bytes) in [
+            (50u32, Some(2u32), 256usize << 20),
+            (400, None, 256 << 20),
+            (1_000, None, 4_000),
+        ] {
+            let mut req = request(&groupings);
+            req.page_rows = Some(page_rows);
+            req.pages = pages;
+            req.limits.response_bytes = response_bytes;
+            req.limits.max_page_bytes = response_bytes.min(64 << 20) / 2;
+            let tables = read_all(engine, &session, req.clone());
+            let served = |g: u32| -> Vec<(Option<String>, u64, u64)> {
+                tables[&g]
+                    .1
+                    .iter()
+                    .map(|r| (r.key.clone(), r.cell.unwrap(), r.count))
+                    .collect()
+            };
+            let what =
+                format!("depth {depth}, {page_rows} rows a page, {pages:?}, {response_bytes}");
+            assert_eq!(served(0), density, "{what}: density");
+            assert_eq!(served(1), by_kind, "{what}: by kind");
+        }
+        // A page of a sparse group, a response at a time: some window reads past its first
+        // batch of chunks, one a thread four times over.
+        let first_batch = 4 * tessera_engine::default_compute_threads() as u64;
+        let groupings = [with_cells(field("kind", Pick::Top(3)), depth)];
+        let mut req = request(&groupings);
+        req.page_rows = Some(200);
+        req.pages = Some(1);
+        let mut cursor: Option<String> = None;
+        let mut widest = 0;
+        loop {
+            let this = AggregateRequest {
+                cursor: cursor.as_deref(),
+                ..req.clone()
+            };
+            let (_, trailer) = respond(engine, &session, this).unwrap();
+            widest = widest.max(trailer.timings.cells_walked);
+            match trailer.next {
+                None => break,
+                Some(next) => cursor = Some(next),
+            }
+        }
+        assert!(
+            widest > first_batch,
+            "depth {depth}: at most {widest} chunks a response"
+        );
+    }
+}
