@@ -316,14 +316,16 @@ describe('event details', () => {
 });
 
 describe('<tessera-map> defaults', () => {
-  it('draws no density wash unless a host asks for one', async () => {
+  it('draws the points and no density unless a host asks otherwise', async () => {
     await import('../src/map.js');
-    const map = document.createElement('tessera-map') as unknown as {wash: boolean};
-    expect(map.wash).toBe(false);
+    type Display = {density: string; noPoints: boolean};
+    const map = document.createElement('tessera-map') as unknown as Display;
+    expect([map.density, map.noPoints]).toEqual(['none', false]);
     const asked = document.createElement('div');
-    asked.innerHTML = '<tessera-map wash></tessera-map>';
+    asked.innerHTML = '<tessera-map density="hex" no-points></tessera-map>';
     document.body.append(asked);
-    expect((asked.firstElementChild as unknown as {wash: boolean}).wash).toBe(true);
+    const el = asked.firstElementChild as unknown as Display;
+    expect([el.density, el.noPoints]).toEqual(['hex', true]);
     asked.remove();
   });
 });

@@ -29,7 +29,7 @@
 import {Buffer as GpuBuffer} from '@luma.gl/core';
 import type {Device} from '@luma.gl/core';
 import type {Band, ScalarColumn} from '@tesseradb/client';
-import {writeColours, type Encoding} from './colour.js';
+import {encodingSignature, writeColours, type Encoding} from './colour.js';
 
 /** Enough for a first view at the default budget without a growth step on the way. */
 const MIN_CAPACITY = 1 << 16;
@@ -475,7 +475,7 @@ export class MarkSlab {
     this.activeSlot = slot;
     const partition = this.parts[slot]!;
     partition.lastUsed = ++this.clock;
-    const draw = partition.sync(bands, encoding, encodingIdentity(encoding), colourBy, membershipLayer);
+    const draw = partition.sync(bands, encoding, encodingSignature(encoding), colourBy, membershipLayer);
     this.enforceBudget();
     return draw;
   }
@@ -542,21 +542,4 @@ export class MarkSlab {
 
 function columnOf(band: Band, colourBy: string | null): ScalarColumn | undefined {
   return colourBy ? band.scalars[colourBy] : undefined;
-}
-
-/**
- * A key equal for two encodings that colour alike. The rank map and the numeric domain only grow
- * as marks arrive, so their size identifies them; a reference comparison would recolour on every
- * response.
- */
-function encodingIdentity(encoding: Encoding): string {
-  switch (encoding.kind) {
-    case 'uniform':
-    case 'unmapped':
-      return encoding.kind;
-    case 'category':
-      return `category|${encoding.column}|${Object.keys(encoding.rankOfCode).length}`;
-    case 'numeric':
-      return `numeric|${encoding.column}|${encoding.domain.min}|${encoding.domain.max}`;
-  }
 }

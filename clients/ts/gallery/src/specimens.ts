@@ -545,7 +545,8 @@ function mapSpecimens(): Specimen[] {
     {state: 'detached', wide: true, build: () => map(null), ready: ready(false)},
     {state: 'loading', wide: true, build: () => map(store({status: status({status: 'loading'})})), ready: ready(false)},
     {state: 'coloured by field (category)', wide: true, build: (ctx) => map(mapStore(ctx, 'field')), ready: ready(true)},
-    {state: 'coloured by citations, density wash on', wide: true, build: (ctx) => map(mapStore(ctx, 'citations'), {wash: ''}), ready: ready(true)},
+    {state: 'coloured by citations, a smooth density under the points', wide: true, build: (ctx) => map(mapStore(ctx, 'citations'), {density: 'smooth'}), ready: ready(true)},
+    {state: 'density in hexagons, points off, with its key', wide: true, build: (ctx) => map(mapStore(ctx, 'field'), {density: 'hex', 'no-points': ''}), ready: ready(false)},
     {
       state: 'coloured by cluster, a topic opened (outline and labels)',
       wide: true,
@@ -589,6 +590,22 @@ function explorerSpecimens(): Specimen[] {
     {state: 'docked, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'docked'}, 900), ready},
     {state: 'overlay, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 900), ready},
     {state: 'compact container, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 560), ready},
+    {state: 'points over a smooth density, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth'}, 900), ready},
+    {state: 'density only, smooth, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth', 'no-points': ''}, 900), ready: readyFor(false)},
+    {state: 'density only, hexagons, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'hex', 'no-points': ''}, 900), ready: readyFor(false)},
+    {state: 'density only, grid, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'grid', 'no-points': ''}, 900), ready: readyFor(false)},
+    {state: 'contours over the points, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'contours'}, 900), ready},
+    {
+      state: 'the Layers popover open over a smooth density, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth'}, 900),
+      ready: async (el) => {
+        await ready(el);
+        shadow(el, '[part="layers-toggle"]')?.click();
+        await until(() => !!shadow(el, '[part="layers-popover"]'), 'the layers popover');
+        await settle(el.parentElement!);
+      }
+    },
     {
       state: 'overlay, a topic opened, the filters, the sections and the layers open',
       wide: true,

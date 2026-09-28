@@ -12,9 +12,8 @@ import {LUT_SHIFT, LUT_WIDTH} from './lut.js';
  * attribute, exact to 2²⁴, which covers any range the texture can hold.
  */
 
-const lutUniforms = {
-  name: 'tesseraLut',
-  vs: /* glsl */ `\
+/** The uniform block the vertex and fragment stages share. */
+const LUT_BLOCK = /* glsl */ `\
 layout(std140) uniform tesseraLutUniforms {
   float useLut;
   highp int lutMask;
@@ -24,10 +23,15 @@ layout(std140) uniform tesseraLutUniforms {
   float dullRadius;
   float litRadius;
   float pass;
+  vec3 dullColour;
 } tesseraLut;
-uniform sampler2D lutTexture;
+`;
+
+const lutUniforms = {
+  name: 'tesseraLut',
+  vs: `${LUT_BLOCK}uniform sampler2D lutTexture;
 `,
-  fs: '',
+  fs: LUT_BLOCK,
   source: '',
   uniformTypes: {
     useLut: 'f32',
@@ -37,46 +41,64 @@ uniform sampler2D lutTexture;
     dullGrey: 'f32',
     dullRadius: 'f32',
     litRadius: 'f32',
-    pass: 'f32'
+    pass: 'f32',
+    dullColour: 'vec3<f32>'
   } as const
 };
 
 /**
  * What an unmatched mark's alpha is multiplied by while a highlight is set.
  *
- * Under a highlight every served mark is still drawn. The unmatched ones are set back four ways,
- * because on a dense region overdraw composites a lower alpha alone back to nearly full: this
- * alpha, a smaller radius ({@link DULL_RADIUS_SCALE} against {@link LIT_RADIUS_SCALE}), a colour
- * pulled {@link DULL_GREY} of the way to grey, and a separate draw pass under the matched marks
- * ({@link HighlightPass}). Matched marks keep their colour exactly.
+ * Under a highlight every served mark is still drawn. The unmatched ones are set back three ways:
+ * this alpha, a light grey in place of their colour ({@link DULL_COLOUR}), and a separate draw pass
+ * under the matched marks ({@link HighlightPass}). The matched marks keep their colour exactly,
+ * draw larger ({@link LIT_RADIUS_SCALE}) and carry a glow of their own colour, so a sparse
+ * highlight can be found at a glance.
  */
-export const DULL_ALPHA = 0.12;
+export const DULL_ALPHA = 0.5;
 
-/** How far a dulled mark's colour is pulled to neutral grey, 0 = its own colour, 1 = grey. */
-export const DULL_GREY = 0.8;
+/** How far a dulled mark's colour is taken to {@link DULL_COLOUR}, 0 = its own colour, 1 = the grey. */
+export const DULL_GREY = 1;
 
-/** The grey a dulled mark is pulled towards, mid grey so it reads on a light or dark ground. */
-export const DULL_NEUTRAL = 0.5;
+/**
+ * The colour of a dulled mark per ground, as RGB from 0 to 1: a light grey on a light ground and
+ * a dark grey on a dark one, each a little off the ground so the unmatched marks still show where
+ * they are.
+ */
+export const DULL_COLOUR: Record<'light' | 'dark', [number, number, number]> = {
+  light: [201 / 255, 201 / 255, 195 / 255],
+  dark: [74 / 255, 78 / 255, 85 / 255]
+};
 
 /** A dulled mark's radius, as a fraction of the frame's mark radius. */
-export const DULL_RADIUS_SCALE = 0.8;
+export const DULL_RADIUS_SCALE = 1;
 
 /** A lit mark's radius, as a multiple of the frame's mark radius. */
-export const LIT_RADIUS_SCALE = 1.7;
+export const LIT_RADIUS_SCALE = 1.4;
+
+/** The glow's radius, as a multiple of a lit mark's radius. */
+export const GLOW_RADIUS_SCALE = 3.5;
+
+/**
+ * The glow's alpha at its centre, as a fraction of the lit mark's. It falls to nothing at its edge
+ * with the square of the distance, and follows the frame's alpha, so a dense highlight's glows
+ * overlap into a tint and do not cover the map.
+ */
+export const GLOW_ALPHA = 0.35;
 
 /**
  * Which marks a pass draws. With no highlight there is one pass, `'all'`.
  *
- * Under a highlight the marks are drawn twice, `'dull'` then `'lit'`, each over the whole set.
- * Instances are rasterised in buffer order, so in one pass a lit mark is buried under every
- * unlit mark later in the slab. Each pass collapses the marks it does not draw to zero size in
- * the vertex shader.
+ * Under a highlight the marks are drawn three times, `'dull'`, `'glow'` then `'lit'`, each over the
+ * whole set. Instances are rasterised in buffer order, so in one pass a lit mark is buried under
+ * every unlit mark later in the slab. Each pass collapses the marks it does not draw to zero size
+ * in the vertex shader. `'glow'` draws the lit marks as wide soft discs under the lit pass.
  */
-export type HighlightPass = 'all' | 'dull' | 'lit';
+export type HighlightPass = 'all' | 'dull' | 'glow' | 'lit';
 
-/** {@link HighlightPass} as the shader's uniform: 0 all, 1 dull only, 2 lit only. */
+/** {@link HighlightPass} as the shader's uniform: 0 all, 1 dull only, 2 lit only, 3 the glow. */
 function passCode(pass: HighlightPass): number {
-  return pass === 'dull' ? 1 : pass === 'lit' ? 2 : 0;
+  return pass === 'dull' ? 1 : pass === 'lit' ? 2 : pass === 'glow' ? 3 : 0;
 }
 
 export type MarksLayerProps = ScatterplotLayerProps & {
@@ -89,8 +111,10 @@ export type MarksLayerProps = ScatterplotLayerProps & {
   highlighting?: boolean;
   /** The highlight bit per mark, bound as a buffer the same way the ordinal is. */
   getHighlight?: number | ((d: unknown) => number);
-  /** Which half of the highlight this pass draws; see {@link HighlightPass}. */
+  /** Which part of the highlight this pass draws; see {@link HighlightPass}. */
   highlightPass?: HighlightPass;
+  /** The colour a dulled mark takes, RGB from 0 to 1; see {@link DULL_COLOUR}. */
+  dullColour?: [number, number, number];
 };
 
 export class MarksLayer extends ScatterplotLayer<unknown, MarksLayerProps> {
@@ -102,7 +126,8 @@ export class MarksLayer extends ScatterplotLayer<unknown, MarksLayerProps> {
     getOrdinal: {type: 'accessor', value: 0},
     highlighting: false,
     getHighlight: {type: 'accessor', value: 1},
-    highlightPass: 'all'
+    highlightPass: 'all',
+    dullColour: DULL_COLOUR.dark
   };
 
   override getShaders() {
@@ -113,15 +138,18 @@ export class MarksLayer extends ScatterplotLayer<unknown, MarksLayerProps> {
       inject: {
         'vs:#decl': /* glsl */ `in float instanceOrdinals;
 in float instanceHighlights;
-// 1.0 where this mark is drawn by the pass in force, 0.0 where the other pass draws it.
+// 1.0 where this mark is drawn by the pass in force, 0.0 where another pass draws it. The dull pass
+// draws the unlit marks; the lit and glow passes draw the lit ones.
 float tesseraInPass(float lit) {
-  return tesseraLut.pass < 0.5 ? 1.0 : step(abs(tesseraLut.pass - 1.0 - lit), 0.5);
+  if (tesseraLut.pass < 0.5) return 1.0;
+  return tesseraLut.pass < 1.5 ? 1.0 - lit : lit;
 }`,
-        // A lit mark is drawn larger than a dulled one; the pass not drawing this mark collapses
-        // it to zero size before rasterisation.
+        // A lit mark is drawn larger than a dulled one, and its glow larger still; the passes not
+        // drawing this mark collapse it to zero size before rasterisation.
         'vs:DECKGL_FILTER_SIZE': /* glsl */ `\
 float tesseraLit = step(0.5, instanceHighlights);
-size *= mix(tesseraLut.dullRadius, tesseraLut.litRadius, tesseraLit) * tesseraInPass(tesseraLit);
+float tesseraGlow = step(2.5, tesseraLut.pass);
+size *= mix(tesseraLut.dullRadius, tesseraLut.litRadius, tesseraLit) * mix(1.0, ${GLOW_RADIUS_SCALE.toFixed(3)}, tesseraGlow) * tesseraInPass(tesseraLit);
 `,
         // The colour from whichever source is on, then the highlight over it. With no highlight
         // `dull` is 1.0 and `dullGrey` 0.0, so the colour passes through.
@@ -133,8 +161,15 @@ if (tesseraLut.useLut > 0.5) {
   color = vec4(lutColour.rgb, lutColour.a * layer.opacity);
 }
 float lit = step(0.5, instanceHighlights);
-color.rgb = mix(mix(color.rgb, vec3(${DULL_NEUTRAL.toFixed(3)}), tesseraLut.dullGrey), color.rgb, lit);
-color.a *= mix(tesseraLut.dull, 1.0, lit) * tesseraInPass(lit);
+color.rgb = mix(mix(color.rgb, tesseraLut.dullColour, tesseraLut.dullGrey), color.rgb, lit);
+color.a *= mix(tesseraLut.dull, 1.0, lit) * tesseraInPass(lit) * mix(1.0, ${GLOW_ALPHA.toFixed(3)}, step(2.5, tesseraLut.pass));
+`,
+        // The glow fades from its centre to nothing at its edge.
+        'fs:DECKGL_FILTER_COLOR': /* glsl */ `\
+if (tesseraLut.pass > 2.5) {
+  float tesseraFade = 1.0 - min(1.0, length(geometry.uv));
+  color.a *= tesseraFade * tesseraFade;
+}
 `
       }
     };
@@ -162,7 +197,8 @@ color.a *= mix(tesseraLut.dull, 1.0, lit) * tesseraInPass(lit);
           dullGrey: this.props.highlighting ? DULL_GREY : 0,
           dullRadius: this.props.highlighting ? DULL_RADIUS_SCALE : 1,
           litRadius: this.props.highlighting ? LIT_RADIUS_SCALE : 1,
-          pass: this.props.highlighting ? passCode(this.props.highlightPass ?? 'all') : 0
+          pass: this.props.highlighting ? passCode(this.props.highlightPass ?? 'all') : 0,
+          dullColour: this.props.dullColour ?? DULL_COLOUR.dark
         }
       });
       if (texture) model.setBindings({lutTexture: texture});

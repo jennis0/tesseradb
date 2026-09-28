@@ -5,13 +5,15 @@ import {TesseraExplorer} from '@tesseradb/components';
 const explorer = document.createElement('tessera-explorer');
 explorer.setAttribute('layout', 'overlay');
 const map = document.createElement('tessera-map');
-map.setAttribute('wash', '');
+map.setAttribute('density', 'hex');
+map.setAttribute('no-points', '');
 document.body.append(explorer, map);
 await explorer.updateComplete;
 await map.updateComplete;
 (window as unknown as {result: unknown}).result = {
   instance: explorer instanceof TesseraExplorer,
   layout: explorer.layout,
-  wash: map.wash,
+  density: map.density,
+  noPoints: map.noPoints,
   controls: explorer.shadowRoot?.querySelector('tessera-map')?.shadowRoot?.querySelector('[part="controls"]') !== null
 };

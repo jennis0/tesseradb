@@ -1,4 +1,5 @@
 import type {ArtifactDetail, ClauseVerb, Count, FilterExpr, ItemDetail, Masked, RegionProjection, Refusal, SelectionShape} from '@tesseradb/client';
+import type {CategoryPaletteName, DensityColours, DensityMode, RampName, RampScale} from '@tesseradb/deck';
 import type {PanelState} from './states.js';
 
 /** A selection shape as an event carries it: an artifact's `tessera_id` as a decimal string. */
@@ -57,6 +58,21 @@ export type TesseraEventDetails = {
   'tessera-colourchange': {colourBy: string | null};
   /** The level to colour and label at is now `level`; null is the level drawn by default. */
   'tessera-levelchange': {level: number | null};
+  /**
+   * A colour was chosen for the value `value` (a category key) of the column `column`, as
+   * `#rrggbb`, or the value's chosen colour was reset (`colour` null) so it takes its palette colour
+   * again. The map already draws it; a host that keeps the choice sets it back through the map's or
+   * the explorer's `valueColours`.
+   */
+  'tessera-valuecolour': {column: string; value: string; colour: string | null};
+  /** The palette, the ramp, the ramp's scale or its direction was chosen in the legend; the detail is all four as they now stand. */
+  'tessera-palettechange': {palette: CategoryPaletteName; ramp: RampName; scale: RampScale; reverse: boolean};
+  /**
+   * A display setting was changed in the explorer's Layers popover; the detail is every setting as
+   * it now stands. `radius` and `pointOpacity` are null where the map sizes and fades the points by
+   * how many are drawn, and `densityColours` is null where the map chooses.
+   */
+  'tessera-displaychange': {points: boolean; radius: number | null; pointOpacity: number | null; density: DensityMode; densityColours: DensityColours | null; densityStrength: number};
   /**
    * A filter changed. `column` is the column whose control changed, or null for Clear all. After an
    * edit in a control, `expr` is the expression the controls now compose, null for none. Where a

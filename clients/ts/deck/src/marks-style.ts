@@ -33,15 +33,15 @@ export const ANTIALIAS_ABOVE_PX = 1.4;
 
 /**
  * The style for `marks` resident at `zoom` (deck's zoom: 0 when the world fills 512 px, +1 per
- * doubling). `fixedRadius` pins the radius where a host asked for one; the alpha still follows
- * the count. At about 1,600 marks this gives 1.53 px at 0.65 alpha; at a million, 1.10 px at 0.34
- * before the zoom term.
+ * doubling). `fixedRadius` and `fixedAlpha` pin the radius and the alpha where a host or viewer
+ * chose them; each one not pinned follows the count. At about 1,600 marks this gives 1.53 px at
+ * 0.65 alpha; at a million, 1.10 px at 0.34 before the zoom term.
  */
-export function markStyle(marks: number, zoom: number, fixedRadius: number | null = null): MarkStyle {
+export function markStyle(marks: number, zoom: number, fixedRadius: number | null = null, fixedAlpha: number | null = null): MarkStyle {
   const t = density(marks);
   const z = Math.min(10, Math.max(0, zoom));
   const radius = fixedRadius ?? 1.1 + 0.6 * (1 - t) + 0.05 * z;
-  const alpha = Math.min(0.9, 0.34 + 0.44 * (1 - t) + 0.015 * z);
+  const alpha = fixedAlpha === null ? Math.min(0.9, 0.34 + 0.44 * (1 - t) + 0.015 * z) : Math.min(1, Math.max(0, fixedAlpha));
   return {
     radius: Math.round(radius * 100) / 100,
     alpha: Math.round(alpha * 1000) / 1000,

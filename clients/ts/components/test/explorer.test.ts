@@ -223,6 +223,54 @@ describe('<tessera-explorer> layouts', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
   });
 
+  it('changes its map’s display from the Display section and reports every setting', async () => {
+    const {host, shadow} = await explorer('<tessera-explorer density="smooth"></tessera-explorer>');
+    const seen: {density: string; points: boolean; densityColours: string | null}[] = [];
+    host.addEventListener('tessera-displaychange', (e) => seen.push((e as CustomEvent).detail));
+    shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
+    await settle(host);
+    const map = shadow.querySelector('tessera-map') as unknown as {density: string; noPoints: boolean; densityColours: string; densityStrength: number};
+    const mode = (m: string) => shadow.querySelector<HTMLButtonElement>(`[part="density-mode"] [data-mode="${m}"]`)!;
+    // The host's setting is the one shown checked.
+    expect(mode('smooth').getAttribute('aria-checked')).toBe('true');
+
+    mode('hex').click();
+    await settle(host);
+    expect(map.density).toBe('hex');
+    expect(mode('hex').getAttribute('aria-checked')).toBe('true');
+
+    // The arrow keys move the choice, as in any radio group.
+    mode('hex').dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
+    await settle(host);
+    expect(map.density).toBe('grid');
+
+    const points = shadow.querySelector<HTMLButtonElement>('[part="points-toggle"]')!;
+    points.click();
+    await settle(host);
+    expect(map.noPoints).toBe(true);
+    expect(points.getAttribute('aria-checked')).toBe('false');
+
+    shadow.querySelector<HTMLButtonElement>('[part="density-colours"]')!.click();
+    await settle(host);
+    shadow.querySelector<HTMLButtonElement>('#density-colour-list [data-colours="magma"]')!.click();
+    await settle(host);
+    expect(map.densityColours).toBe('magma');
+
+    const strength = shadow.querySelector<HTMLInputElement>('[part="density-strength"]')!;
+    strength.value = '0.5';
+    strength.dispatchEvent(new Event('input'));
+    await settle(host);
+    expect(map.densityStrength).toBe(0.5);
+
+    expect(seen.map((d) => [d.density, d.points, d.densityColours])).toEqual([
+      ['hex', true, null],
+      ['grid', true, null],
+      ['grid', false, null],
+      ['grid', false, 'magma'],
+      ['grid', false, 'magma']
+    ]);
+  });
+
   it('marks the Layers button while any layer is drawn', async () => {
     const {host, shadow, store} = await explorer();
     const toggle = () => shadow.querySelector('[part="layers-toggle"]')!;

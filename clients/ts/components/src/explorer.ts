@@ -2,17 +2,19 @@ import {ContextProvider} from '@lit/context';
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import type {Store} from '@tesseradb/client';
+import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale} from '@tesseradb/deck';
 import {activeCount, browsableLayers, emptyDraft} from '@tesseradb/client';
 import {artifactBudgetFor, hasOneLayout, levelForBudget} from '@tesseradb/client/internal';
-import {clusterLayerOf} from '@tesseradb/deck/internal';
+import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import './hierarchy.js';
-import {TesseraElement} from './base.js';
+import {TesseraElement, emit} from './base.js';
+import {densityGradient, displayStyles, radioKeys, type DisplaySettings} from './display.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon, type IconName} from './icons.js';
 import {exportparts, forwarded} from './parts.js';
 import {sameFrame} from './view-switch.js';
-import type {TesseraMap} from './map.js';
+import {drawnDensityColours, type TesseraMap} from './map.js';
 import {chrome, tokens} from './tokens.js';
 import './map.js';
 import './status.js';
@@ -47,6 +49,14 @@ const ALL_PANELS = ['toolbar', 'legend', 'filters', 'hierarchy', 'artifacts', 's
 const COMPACT_BETWEEN = [720, 1000] as const;
 type Panel = (typeof ALL_PANELS)[number];
 type Sheet = 'filters' | 'layers' | 'artifacts' | 'detail';
+/** The Density choices in the Layers popover, in order. */
+const DENSITY_MODES: readonly {mode: DensityMode; label: string; icon: IconName}[] = [
+  {mode: 'none', label: 'None', icon: 'density-none'},
+  {mode: 'smooth', label: 'Smooth', icon: 'density-smooth'},
+  {mode: 'hex', label: 'Hex', icon: 'density-hex'},
+  {mode: 'grid', label: 'Grid', icon: 'density-grid'},
+  {mode: 'contours', label: 'Lines', icon: 'density-lines'}
+];
 /** The narrow layout's tabs, each opening a sheet, drawn where its panel is. */
 const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}[] = [
   {sheet: 'filters', icon: 'filter', label: 'Filters', panel: 'filters'},
@@ -67,9 +77,11 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * `layout="overlay"` folds the same content into one card over the map's top-left: the view choice
  * and a Filters button with the number of clauses applied, the chips, then Colour; the Filters
  * button opens the controls inside the card. In both, the map's tools sit at the top-left of the
- * map (beside the card in the overlay layout) with a Layers button beneath them that opens the
- * layer picker, the detail card sits in the map's top-right corner and the status strip in its
- * bottom-right.
+ * map (beside the card in the overlay layout) with a Layers button beneath them, the detail card
+ * sits in the map's top-right corner and the status strip in its bottom-right. The Layers button
+ * opens a popover with a Display section (whether the points are drawn, their size and opacity,
+ * and how density is drawn, in which colours and how strongly) over the layer picker. The display
+ * settings are the explorer's properties of the same names, passed to its map.
  *
  * In a container narrower than 1000 px, either layout folds into the card, 300 px wide, whose
  * legend names four values and offers the rest under "N more"; the tools move to the bottom-left
@@ -102,6 +114,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The layers chosen changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - The Colour by choice changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level choice changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-displaychange']>} tessera-displaychange - A setting in the Display section changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - The session expired.
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A filter control or chip changed.
@@ -120,7 +133,17 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  *   and `data-count` set to the number of clauses applied.
  * @csspart layers-toggle - The Layers button under the map's tools, with `data-on` while any layer
  *   is drawn.
- * @csspart layers-popover - The popover holding the layer picker, while it is open.
+ * @csspart layers-popover - The popover holding the Display section and the layer picker, while it
+ *   is open.
+ * @csspart display - The Display section at the top of the Layers popover.
+ * @csspart points-toggle - The Points switch, with `aria-checked`.
+ * @csspart point-size - The Size slider: the points' radius in pixels.
+ * @csspart point-opacity - The Opacity slider.
+ * @csspart density-mode - The Density choice: None, Smooth, Hex, Grid and Lines, each with
+ *   `data-mode` and `aria-checked`.
+ * @csspart density-colours - The button that opens the list of density colours, while density is
+ *   drawn in colours.
+ * @csspart density-strength - The Strength slider, while density is drawn.
  * @csspart detail - The detail card in the map's top-right corner.
  * @csspart sheet - The open sheet, in the narrow layout.
  * @csspart strip-row - The full-width status strip, in the narrow layout.
@@ -145,6 +168,7 @@ export class TesseraExplorer extends TesseraElement {
   static override styles = [
     tokens,
     chrome,
+    displayStyles,
     css`
       :host {
         display: block;
@@ -308,9 +332,14 @@ export class TesseraExplorer extends TesseraElement {
         position: absolute;
         top: 0;
         left: calc(100% + 8px);
-        width: 260px;
-        max-height: 360px;
+        width: 316px;
+        max-height: min(560px, calc(100cqh - 2 * var(--_tessera-space)));
         overflow-y: auto;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
+      }
+      [part='layers-popover'] tessera-layer-picker {
+        display: block;
+        border-top: 1px solid var(--_tessera-line-2);
       }
       .compact [part='layers-popover'] {
         top: auto;
@@ -521,6 +550,32 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'title-field'}) accessor titleField = '';
   /** Passed to the map's `budget`. */
   @property({type: Number}) accessor budget = 0;
+  /** Passed to the map's `no-points`; the Points switch in the Layers popover changes it. */
+  @property({type: Boolean, attribute: 'no-points'}) accessor noPoints = false;
+  /** Passed to the map's `radius`; the Size slider in the Layers popover changes it. */
+  @property({type: Number}) accessor radius: number | null = null;
+  /** Passed to the map's `point-opacity`; the Opacity slider in the Layers popover changes it. */
+  @property({type: Number, attribute: 'point-opacity'}) accessor pointOpacity: number | null = null;
+  /** Passed to the map's `density`; the Density choice in the Layers popover changes it. */
+  @property() accessor density: DensityMode = 'none';
+  /** Passed to the map's `density-colours`; the Colours choice in the Layers popover changes it. */
+  @property({attribute: 'density-colours'}) accessor densityColours: DensityColours | '' = '';
+  /** Passed to the map's `density-strength`; the Strength slider in the Layers popover changes it. */
+  @property({type: Number, attribute: 'density-strength'}) accessor densityStrength = 1;
+  /** Passed to the map's `category-palette`. */
+  @property({attribute: 'category-palette'}) accessor categoryPalette: CategoryPaletteName | '' = '';
+  /** Passed to the map's `ramp`. */
+  @property() accessor ramp: RampName | '' = '';
+  /** Passed to the map's `ramp-scale`. */
+  @property({attribute: 'ramp-scale'}) accessor rampScale: RampScale | '' = '';
+  /** Passed to the map's `ramp-reverse`. */
+  @property({type: Boolean, attribute: 'ramp-reverse'}) accessor rampReverse = false;
+  /** Passed to the map's `valueColours`. */
+  @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
+  /** Passed to the legend's `hide-palettes`: the palette and ramp choices are left out of Colour by. */
+  @property({type: Boolean, attribute: 'hide-palettes'}) accessor hidePalettes = false;
+  /** Whether the list of density colours in the Layers popover is open. @internal */
+  @state() accessor densityColoursOpen = false;
   /** @internal */
   @state() accessor sheet: Sheet | null = null;
   /** The narrow layout's tab focused last, which keeps the tab list's one place in the tab order. */
@@ -640,7 +695,7 @@ export class TesseraExplorer extends TesseraElement {
     // filled the slot. The slot is always rendered, so its slotchange keeps `toolbarFilled` current.
     const pickersShown = this.toolbarFilled || (meta !== null && !hasOneLayout(meta));
     const pickers = html`<div class="pickers" ?hidden=${!pickersShown}><slot name="toolbar" @slotchange=${this.onToolbarSlot}><tessera-view-picker exportparts=${FORWARD['view-picker']}></tessera-view-picker><tessera-key-picker exportparts=${FORWARD['key-picker']}></tessera-key-picker></slot></div>`;
-    const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout .limit=${compact ? 4 : 0} .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
+    const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout ?hide-palettes=${this.hidePalettes} .limit=${compact ? 4 : 0} .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
     // Only the card's copy carries the id its Filters button controls, so no id repeats.
     const filters = (chipsOnly: boolean, id: string | typeof nothing = nothing) => html`<div id=${id} class="filters"><slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} ?chips-only=${chipsOnly}></tessera-filter-panel></slot></div>`;
@@ -675,9 +730,9 @@ export class TesseraExplorer extends TesseraElement {
 
     const layersButton = this.has('legend')
       ? html`<div class="layers" slot=${compact ? 'bottom-left' : 'top-left'} @keydown=${this.onLayersKey}>
-          <div class="group"><button part="layers-toggle" type="button" aria-label=${`Layers, ${layersOn} on`} aria-expanded=${this.layersOpen ? 'true' : 'false'}
+          <div class="group"><button part="layers-toggle" type="button" aria-label=${`Layers and display, ${layersOn} layers on`} aria-expanded=${this.layersOpen ? 'true' : 'false'}
             aria-controls="layers-popover" ?data-on=${layersOn > 0} @click=${() => (this.layersOpen ? this.closeLayers() : this.openLayers())}>${icon('layers', 16, 1.2)}${layersOn > 0 ? html`<span class="on"></span>` : nothing}</button></div>
-          ${this.layersOpen ? html`<div part="layers-popover" id="layers-popover" class="card" role="dialog" aria-label="Layers">${layersPanel}</div>` : nothing}
+          ${this.layersOpen ? html`<div part="layers-popover" id="layers-popover" class="card" role="dialog" aria-label="Layers and display">${this.displaySection()}${layersPanel}</div>` : nothing}
         </div>`
       : nothing;
 
@@ -729,6 +784,17 @@ export class TesseraExplorer extends TesseraElement {
           budget=${this.budget || nothing}
           controls-corner=${compact ? 'bottom-left' : 'top-left'}
           .clusterLevel=${level}
+          .noPoints=${this.noPoints}
+          .radius=${this.radius}
+          .pointOpacity=${this.pointOpacity}
+          .density=${this.density}
+          .densityColours=${this.densityColours}
+          .densityStrength=${this.densityStrength}
+          .categoryPalette=${this.categoryPalette}
+          .ramp=${this.ramp}
+          .rampScale=${this.rampScale}
+          .rampReverse=${this.rampReverse}
+          .valueColours=${this.valueColours}
           @tessera-viewchange=${() => this.requestUpdate()}
           @tessera-pick=${() => this.requestUpdate()}
           @click=${() => this.requestUpdate()}
@@ -746,6 +812,96 @@ export class TesseraExplorer extends TesseraElement {
       <div part="strip-row"><tessera-status exportparts=${FORWARD.status}></tessera-status></div>
       <div part="tabs" role="tablist" aria-label="Explorer panels" @keydown=${this.onTabKey}>${tabs.map(tab)}</div>
     </div>`;
+  }
+
+  /** The display settings as they stand. */
+  private get display(): DisplaySettings {
+    return {
+      points: !this.noPoints,
+      radius: this.radius,
+      pointOpacity: this.pointOpacity,
+      density: this.density,
+      densityColours: this.densityColours || null,
+      densityStrength: this.densityStrength
+    };
+  }
+
+  /**
+   * The Display section of the Layers popover, over the layer picker. The Size and Opacity sliders
+   * show what the map drew last while the setting is unset, and moving one fixes it.
+   */
+  private displaySection(): TemplateResult {
+    const s = this.display;
+    const probe = this.map?.probe.timings;
+    const radius = s.radius ?? (probe && probe.markRadius > 0 ? probe.markRadius : 1.5);
+    const opacity = s.pointOpacity ?? (probe && probe.markAlpha > 0 ? probe.markAlpha : 0.7);
+    const scheme = this.map?.drawnGround ?? 'light';
+    const colours = drawnDensityColours(s.density, this.densityColours, s.points);
+    const modeAt = DENSITY_MODES.findIndex((m) => m.mode === s.density);
+    const ramped = s.density === 'smooth' || s.density === 'hex' || s.density === 'grid';
+    const change = (patch: Partial<DisplaySettings>) => this.changeDisplay(patch);
+    const number = (e: Event) => Number((e.target as HTMLInputElement).value);
+    const choices = Object.keys(DENSITY_COLOUR_TITLES) as DensityColours[];
+    const colourList = this.densityColoursOpen
+      ? html`<div id="density-colour-list" class="ramp-list" role="radiogroup" aria-labelledby="colours-label">
+          ${choices.map(
+            (c, i) => html`<button type="button" role="radio" data-colours=${c} aria-checked=${c === colours ? 'true' : 'false'} tabindex=${c === colours ? '0' : '-1'}
+              @click=${() => change({densityColours: c})}
+              @keydown=${(e: KeyboardEvent) => radioKeys(e, choices.length, i, (j) => change({densityColours: choices[j]!}))}><span class="bar" style=${`background:${densityGradient(c, scheme)}`}></span>${DENSITY_COLOUR_TITLES[c]}</button>`
+          )}
+        </div>`
+      : nothing;
+    const densityControls =
+      s.density === 'none'
+        ? html`<div class="gap"></div>`
+        : html`<div class="sliders">
+            ${ramped
+              ? html`<span id="colours-label">Colours</span>
+                  <button part="density-colours" class="ramp-choice" type="button" aria-labelledby="colours-label" aria-expanded=${this.densityColoursOpen ? 'true' : 'false'} aria-controls="density-colour-list"
+                    @click=${() => (this.densityColoursOpen = !this.densityColoursOpen)}><span class="bar" style=${`background:${densityGradient(colours, scheme)}`}></span>${DENSITY_COLOUR_TITLES[colours]}${icon('chev', 12, 1.4)}</button>
+                  ${colourList}`
+              : nothing}
+            <label for="density-strength">Strength</label><input id="density-strength" part="density-strength" type="range" min="0.1" max="1" step="0.05" .value=${String(s.densityStrength)}
+              @input=${(e: Event) => change({densityStrength: number(e)})} />
+          </div>`;
+    return html`<div part="display" class="display">
+      <div class="hd">Display</div>
+      <div class="line">
+        <span class="lead" id="points-label">Points</span>
+        <button part="points-toggle" class="switch" type="button" role="switch" aria-checked=${s.points ? 'true' : 'false'} aria-labelledby="points-label"
+          @click=${() => change({points: !s.points})}><span class="knob"></span></button>
+      </div>
+      <div class="sliders">
+        <label for="point-size">Size</label><input id="point-size" part="point-size" type="range" min="0.5" max="8" step="0.5" .value=${String(radius)} ?disabled=${!s.points}
+          @input=${(e: Event) => change({radius: number(e)})} />
+        <label for="point-opacity">Opacity</label><input id="point-opacity" part="point-opacity" type="range" min="0.1" max="1" step="0.05" .value=${String(opacity)} ?disabled=${!s.points}
+          @input=${(e: Event) => change({pointOpacity: number(e)})} />
+      </div>
+      <div class="rule"></div>
+      <div class="lead" id="density-label">Density</div>
+      <div part="density-mode" class="modes" role="radiogroup" aria-labelledby="density-label">
+        ${DENSITY_MODES.map(
+          (m, i) => html`<button type="button" role="radio" data-mode=${m.mode} aria-checked=${m.mode === s.density ? 'true' : 'false'} tabindex=${i === modeAt ? '0' : '-1'}
+            @click=${() => change({density: m.mode})}
+            @keydown=${(e: KeyboardEvent) => radioKeys(e, DENSITY_MODES.length, i, (j) => change({density: DENSITY_MODES[j]!.mode}))}>${icon(m.icon, 16, 1.3)}<span>${m.label}</span></button>`
+        )}
+      </div>
+      ${densityControls}
+    </div>`;
+  }
+
+  /** Apply a change made in the Display section, and report every setting as it now stands. */
+  private changeDisplay(patch: Partial<DisplaySettings>): void {
+    if (patch.points !== undefined) this.noPoints = !patch.points;
+    if (patch.radius !== undefined) this.radius = patch.radius;
+    if (patch.pointOpacity !== undefined) this.pointOpacity = patch.pointOpacity;
+    if (patch.density !== undefined) this.density = patch.density;
+    if (patch.densityColours !== undefined) {
+      this.densityColours = patch.densityColours ?? '';
+      this.densityColoursOpen = false;
+    }
+    if (patch.densityStrength !== undefined) this.densityStrength = patch.densityStrength;
+    emit(this, 'tessera-displaychange', this.display);
   }
 
   /** Escape closes the Layers popover and returns focus to its button. */

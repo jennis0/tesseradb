@@ -89,6 +89,17 @@ describe('<tessera-layer-picker>', () => {
     const sent = store.calls.find((c) => c.name === 'setLayers');
     expect(sent!.args[0]).toEqual(['clusters']);
   });
+
+  it('names a filter layer in a note and gives it no checkbox', async () => {
+    const host = await mount('<tessera-layer-picker></tessera-layer-picker>');
+    const venues = {...layer('venues'), title: 'Venues', computedContent: []};
+    const store = fakeStore({meta: {...META, layers: [...META.layers, venues]}, status: status({})});
+    (host.querySelector('tessera-layer-picker') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    expect(deepAll(host, '[part="entry"]').map((e) => e.getAttribute('data-layer'))).toEqual(['clusters', 'districts']);
+    expect(deep(host, '[part="note"]')?.getAttribute('data-layers')).toBe('venues');
+    expect(deepAll(host, 'input[type="checkbox"]')).toHaveLength(2);
+  });
 });
 
 describe('<tessera-artifact-list>', () => {
