@@ -49,7 +49,7 @@ fn write_drawings(path: &Path) {
 
     let mut keys = StringBuilder::new();
     keys.append_value("uk");
-    let members = id_member_lists([0..PLACES.len() as u64]);
+    let members = id_member_lists([(0..PLACES.len() as u64).collect::<Vec<_>>()]);
     let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
     contents.values().values().append_value(UK);
     contents.values().append(true);
