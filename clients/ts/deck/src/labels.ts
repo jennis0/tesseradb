@@ -1,6 +1,6 @@
 /**
- * Label placement: names and counts at each artifact's centroid, placed by priority into a
- * spatial hash in O(K) for K labels, with a leader line when a label moved off its centroid.
+ * Label placement: names at each artifact's centroid, placed by priority into a spatial hash in
+ * O(K) for K labels, with a leader line when a label moved off its centroid.
  *
  * A label moves at most `MAX_DISPLACEMENT` pixels. One that fits nowhere within that is dropped
  * until a zoom in makes room, so a leader never crosses the map to a shape the name does not sit on.
