@@ -546,7 +546,8 @@ export interface Store {
   requestFilters(): FilterExpr | null;
   /**
    * Ask a category column's typeahead for `q`, 120 ms after the last call for that column. The page
-   * lands in `filters.suggestions[column]` and a refusal in `filters.suggestErrors[column]`. A call
+   * lands in `filters.suggestions[column]`, each value with its count in the current view, and a
+   * refusal in `filters.suggestErrors[column]`. A call
    * repeating the `q` last asked for does nothing, and an answer to an earlier `q` is dropped. An ask
    * the server sheds as `superseded` is retried after the wait it gives, at least 0.25 s, up to five
    * times. Waits for `/v1/meta`.
@@ -775,7 +776,7 @@ export function createStore(options: StoreOptions): Store {
     clock,
     async (column, q) => {
       const asked = await viewed();
-      return client.suggest(asked.token, column, q, {view: asked.view});
+      return client.suggest(asked.token, column, q, {view: asked.view, counts: true});
     },
     (state) => replaceProjection('filters', {...projections.filters, ...state})
   );

@@ -385,7 +385,8 @@ export function legendOf(colourBy: string | null, over: Partial<LegendProjection
 export function suggestion(v: CategoryValue, q = ''): SuggestValue {
   const title = v.title ?? v.key;
   const at = q ? title.toLowerCase().indexOf(q.toLowerCase()) : -1;
-  return {code: v.code, key: v.key, title: v.title, match: at >= 0 ? {field: 'title', start: at, len: q.length} : {field: 'key', start: 0, len: 0}};
+  // Counts falling with the code, as a corpus's commonest values come first.
+  return {code: v.code, key: v.key, title: v.title, match: at >= 0 ? {field: 'title', start: at, len: q.length} : {field: 'key', start: 0, len: 0}, count: Math.round(4_812_300 / v.code)};
 }
 
 /** A filters projection over `draft`, with its expressions composed as the store would. */
@@ -407,8 +408,8 @@ export function emptyDraft(): FilterDraft {
   return {
     filter: {
       field: {family: 'category', keys: []},
-      title: {family: 'text', query: '', mode: 'all'},
-      abstract: {family: 'text', query: '', mode: 'all'},
+      title: {family: 'text', query: '', phrase: true},
+      abstract: {family: 'text', query: '', phrase: false},
       authors: {family: 'keyword', needle: '', op: 'contains'},
       citations: {family: 'numeric', gte: null, lte: null},
       published_at: {family: 'numeric', gte: null, lte: null}

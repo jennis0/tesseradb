@@ -44,7 +44,7 @@ const projections = {
               artifact: {id: 111n, detail: {layer: 'mesh/descriptors', key: 'D001943', maskedCount: 288_412n, centroid: null, box: null, shape: null}},
               artifactRefusal: null},
   region: null,
-  filters: {draft: {filter: {title: {family: 'text', query: 'quantum entanglement', mode: 'all'}},
+  filters: {draft: {filter: {title: {family: 'text', query: 'quantum entanglement', phrase: true}},
                     highlight: {archive: {family: 'category', keys: ['quant-ph']}}},
             expr: {title: {match: 'quantum entanglement'}},
             highlight: {archive: {in: ['quant-ph']}},

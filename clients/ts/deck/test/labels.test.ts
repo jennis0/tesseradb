@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, MAX_DISPLACEMENT, MAX_LABEL_LINE_CHARS, labelSize, placeLabels, wrapLabel, type LabelCandidate} from '../src/labels.js';
+import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, MAX_DISPLACEMENT, MAX_LABEL_CHARS, labelSize, placeLabels, labelLine, type LabelCandidate} from '../src/labels.js';
 
 const at = (id: number, x: number, y: number, priority: number, width = 60, height = 24): LabelCandidate => ({id: BigInt(id), x, y, width, height, priority});
 
@@ -103,26 +103,23 @@ describe('label placement (§5.10)', () => {
   });
 });
 
-describe('wrapping a name (§5.10)', () => {
-  it('breaks on words, keeps every line short, and never hyphenates', () => {
-    expect(wrapLabel('quantum error correction')).toEqual(['quantum error', 'correction']);
-    expect(wrapLabel('graph')).toEqual(['graph']);
-    // A word longer than the line takes a line of its own rather than being cut.
-    expect(wrapLabel('electroencephalography signals')).toEqual(['electroencephalography', 'signals']);
-    for (const line of wrapLabel('dark matter haloes in cosmological simulations')) {
-      expect(line.length).toBeLessThanOrEqual(MAX_LABEL_LINE_CHARS + 2);
-    }
+describe('a name on one line', () => {
+  it('keeps a name that fits whole, on one line', () => {
+    expect(labelLine('quantum error correction')).toBe('quantum error correction');
+    expect(labelLine('graph  neural\nnetworks')).toBe('graph neural networks');
   });
 
-  it('elides rather than silently truncating what will not fit in three lines', () => {
-    const lines = wrapLabel('one two three four five six seven eight nine ten eleven twelve');
-    expect(lines.length).toBe(3);
-    expect(lines[2]!.endsWith('…')).toBe(true);
+  it('cuts a longer name at a word and marks the cut', () => {
+    const line = labelLine('Large language models: alignment, evaluation and the long tail of instruction following');
+    expect(line.length).toBeLessThanOrEqual(MAX_LABEL_CHARS + 1);
+    expect(line).toBe('Large language models: alignment…');
+    // A first word longer than the line is cut inside the word.
+    expect(labelLine('x'.repeat(MAX_LABEL_CHARS + 10))).toBe(`${'x'.repeat(MAX_LABEL_CHARS)}…`);
   });
 
-  it('places a wrapped label by the box it actually draws', () => {
-    // Two labels a line apart on the same anchor: the taller wrapped box refuses the overlap the
-    // one-line box would have allowed.
+  it('places a label by the box it actually draws', () => {
+    // Two labels a line apart on the same anchor: a taller box, such as one with a topic beneath,
+    // refuses the overlap a one-line box allows.
     const box = (id: bigint, y: number, height: number): LabelCandidate => ({id, x: 0, y, width: 100, height, priority: Number(id)});
     const tall = placeLabels([box(2n, 0, 40), box(1n, 30, 40)]);
     expect(tall.length).toBe(1);

@@ -128,7 +128,6 @@ html[data-theme='editorial'] main.stage {
   --tessera-line-2: #e7dac3;
   --tessera-accent: #b0502c;
   --tessera-accent-ink: #fffaf2;
-  --tessera-accent-soft: #f4ddd0;
   --tessera-highlight: #6e4a8e;
   --tessera-highlight-soft: #ece0f1;
   --tessera-warn: #8a5a00;
@@ -181,7 +180,6 @@ html[data-theme='console'] main.stage {
   --tessera-line-2: #18211b;
   --tessera-accent: #3ddc84;
   --tessera-accent-ink: #03140a;
-  --tessera-accent-soft: #0f2a1a;
   --tessera-highlight: #f5c542;
   --tessera-highlight-soft: #2e2610;
   --tessera-warn: #f5a524;
