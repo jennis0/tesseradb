@@ -24,6 +24,7 @@ import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rampAt as ra
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
 import {binDensity, contourThresholds, densityCells, densityPaint, densityStops, filterDensity, type DensityCell, type DensityColours, type DensityMode} from './density.js';
 import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
+import {importAggregation} from './aggregation-loader.js';
 import {LookupTexture} from './lut.js';
 import {DULL_COLOUR, MarksLayer, type HighlightPass} from './marks-layer.js';
 import {deckOpacity, markStyle} from './marks-style.js';
@@ -358,8 +359,8 @@ const DENSITY_STEPS = 8;
 /** The share of a hexagon or grid cell drawn, so neighbouring cells show a hairline gap. */
 const DENSITY_COVERAGE = 0.94;
 
-/** `@deck.gl/aggregation-layers`, which the hexagons and contours need, once it has loaded. */
-type Aggregation = typeof import('@deck.gl/aggregation-layers');
+/** The aggregation layers the hexagons and contours need, once they have loaded. */
+type Aggregation = Awaited<ReturnType<typeof importAggregation>>;
 let aggregation: Aggregation | null = null;
 let aggregationLoading: Promise<Aggregation> | null = null;
 
@@ -370,7 +371,7 @@ let aggregationLoading: Promise<Aggregation> | null = null;
  * @internal
  */
 export function loadAggregationLayers(): Promise<Aggregation> {
-  aggregationLoading ??= import('@deck.gl/aggregation-layers').then((m) => (aggregation = m));
+  aggregationLoading ??= importAggregation().then((m) => (aggregation = m));
   return aggregationLoading;
 }
 /** How long `tiles` must stay unchanged before the wash is rebuilt. */

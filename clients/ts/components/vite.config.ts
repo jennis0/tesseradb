@@ -1,3 +1,4 @@
+import {fileURLToPath} from 'node:url';
 import {defaultClientConditions, defineConfig} from 'vite';
 import {tesseraDecorators} from './vite-plugin-decorators.js';
 
@@ -9,7 +10,13 @@ import {tesseraDecorators} from './vite-plugin-decorators.js';
 export default defineConfig({
   plugins: [tesseraDecorators()],
   // The workspace packages resolve to their sources, so the bundle needs no prior library build.
-  resolve: {conditions: ['tessera-source', ...defaultClientConditions]},
+  // The deck package's lazy loader of the aggregation layers becomes a static one here: one file
+  // holds them either way, and an inlined dynamic import makes the bundler wrap every module in a
+  // lazy initialiser, about 40 KB more.
+  resolve: {
+    conditions: ['tessera-source', ...defaultClientConditions],
+    alias: [{find: /^\.\/aggregation-loader\.js$/, replacement: fileURLToPath(new URL('../deck/src/aggregation-static.ts', import.meta.url))}]
+  },
   // deck.gl reads `process.env.NODE_ENV` unguarded, and library mode does not substitute it. A
   // host's bundler substitutes it, but this bundle is also loaded as-is from a
   // `<script type="module">` and, as the widget's `_esm`, from a Blob URL in JupyterLab, where
