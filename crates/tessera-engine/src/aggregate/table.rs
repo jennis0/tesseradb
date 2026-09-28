@@ -14,10 +14,13 @@ use arrow::array::{
 use arrow::datatypes::{Field as ArrowField, Int8Type, Schema};
 use arrow::record_batch::RecordBatch;
 
+use rayon::prelude::*;
+
 use super::cursor::Position;
 use super::set::Cx;
 use super::values::Field;
 use super::{AggregateTimings, By, Grouping, TableHead};
+use crate::cells::{count_chunk, count_chunk_by_ranges, CellCount, CellSet, GroupTable, RowGroups};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::records::RecordsLimits;
@@ -101,11 +104,6 @@ impl Plan {
                 ))
             }
         };
-        if grouping.cells.is_some() {
-            return Err(EngineError::Malformed(
-                "a cell level is not counted yet".to_string(),
-            ));
-        }
         Ok(Plan {
             grouping: index as u32,
             outer,
@@ -144,7 +142,30 @@ impl Plan {
             resumed: position.chosen.is_some(),
         };
         let limit = page_rows as usize;
-        let (rows, complete) = listed_rows(&groups, position.group, limit);
+        let (rows, complete) = match self.cells {
+            None => listed_rows(&groups, position.group, limit),
+            Some(depth) => {
+                let started = std::time::Instant::now();
+                let table;
+                let codes;
+                let source = match &self.outer {
+                    Outer::None => Source::Split(vec![(
+                        cx.sets.set.cells(cx),
+                        cx.sets.reference.as_ref().map(|r| r.cells(cx)),
+                    )]),
+                    Outer::Field(field) => {
+                        let listed: Vec<u32> = groups.chosen.iter().map(|&c| c as u32).collect();
+                        table = GroupTable::new(&listed);
+                        codes = field.entity_codes(cx.generation)?;
+                        Source::Grouped(field.row_groups(cx, &table, &codes)?)
+                    }
+                };
+                let counted =
+                    self.cell_rows(cx, &groups, &source, position, depth, limit, timings);
+                timings.cells_ns += started.elapsed().as_nanos() as u64;
+                counted?
+            }
+        };
         let mut bytes = 0usize;
         let mut kept = 0usize;
         let mut cut_by_bytes = false;
@@ -294,6 +315,230 @@ impl Plan {
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
             .map_err(|e| EngineError::Malformed(format!("an aggregate page did not assemble: {e}")))
     }
+}
+
+impl Plan {
+    /// A table with cells: the rows from `position`, at least `limit` of them unless the table
+    /// ends first, and whether they run to its end.
+    ///
+    /// Where no cell of the group in progress has been sent and every remaining row can fit the
+    /// page, one walk counts every remaining group. Otherwise each group is counted alone, from
+    /// the cell after the last one sent, a batch of chunks at a time until the page is full.
+    #[allow(clippy::too_many_arguments)]
+    fn cell_rows(
+        &self,
+        cx: &Cx<'_>,
+        groups: &Groups,
+        source: &Source<'_>,
+        position: &Position,
+        depth: u8,
+        limit: usize,
+        timings: &mut AggregateTimings,
+    ) -> Result<(Vec<Row>, bool)> {
+        let chunks = crate::cells::chunks(cx.segments(), depth, CHUNK_ROWS);
+        let cells_at_depth = if depth >= 32 {
+            u64::MAX
+        } else {
+            1u64 << (2 * u32::from(depth))
+        };
+        let most_cells = cells_at_depth.min(cx.view_rows());
+        let ranges = |size: u64| depth <= 16 && most_cells.saturating_mul(RANGE_FACTOR) <= size;
+        let methods: Vec<(bool, bool)> = groups
+            .sizes
+            .iter()
+            .map(|&(set, reference)| (ranges(set), ranges(reference)))
+            .collect();
+        let method = match source {
+            Source::Split(_) if methods.iter().all(|&(s, _)| s) => "ranges",
+            _ => "pass",
+        };
+        if !timings.methods.contains(&(self.grouping, method)) {
+            timings.methods.push((self.grouping, method));
+        }
+        let groups_count = groups.sizes.len() as u32;
+        let walk = Walk {
+            cx,
+            source,
+            depth,
+            chunks: &chunks,
+            methods: &methods,
+        };
+        let bound: u64 = groups.sizes[position.group.min(groups_count) as usize..]
+            .iter()
+            .map(|&(set, reference)| (set + reference).min(most_cells))
+            .sum();
+        if position.after_cell.is_none() && bound <= limit as u64 {
+            let (mut rows, _) =
+                walk.window(position.group..groups_count, 0, usize::MAX, timings)?;
+            rows.sort_unstable_by_key(|row| (row.group, row.cell));
+            return Ok((rows, true));
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        let (mut group, mut after) = (position.group, position.after_cell);
+        while group < groups_count && rows.len() <= limit {
+            let (set, reference) = groups.sizes[group as usize];
+            let from = match after {
+                None => Some(0),
+                Some(cell) => cell.checked_add(1).filter(|&c| c < cells_at_depth || depth >= 32),
+            };
+            if let (true, Some(from)) = (set > 0 || reference > 0, from) {
+                let (found, complete) =
+                    walk.window(group..group + 1, from, limit + 1 - rows.len(), timings)?;
+                rows.extend(found);
+                if !complete {
+                    return Ok((rows, false));
+                }
+            }
+            group += 1;
+            after = None;
+        }
+        let complete = group >= groups_count && rows.len() <= limit;
+        Ok((rows, complete))
+    }
+}
+
+/// About how many rows one chunk of a cell count holds.
+const CHUNK_ROWS: u64 = 1 << 20;
+
+/// Range counts are taken for a group when its items number at least this many times the cells
+/// that could hold them: a range count costs about as much as reading this many rows.
+const RANGE_FACTOR: u64 = 64;
+
+/// Where each group's rows are read for a cell count.
+enum Source<'s> {
+    /// One pass over the set reads each row's groups.
+    Grouped(RowGroups<'s>),
+    /// Each group's rows as a set of its own, in the set and in the reference.
+    Split(Vec<(CellSet<'s>, Option<CellSet<'s>>)>),
+}
+
+/// One page's walk over the view's chunks.
+struct Walk<'w> {
+    cx: &'w Cx<'w>,
+    source: &'w Source<'w>,
+    depth: u8,
+    chunks: &'w [std::ops::Range<u64>],
+    /// For each group, whether its set and its reference are counted by range.
+    methods: &'w [(bool, bool)],
+}
+
+impl Walk<'_> {
+    /// The rows of `groups` whose cell is `from` or after, a batch of chunks at a time until at
+    /// least `need` are found, and whether the walk reached the last chunk.
+    fn window(
+        &self,
+        groups: std::ops::Range<u32>,
+        from: u64,
+        need: usize,
+        timings: &mut AggregateTimings,
+    ) -> Result<(Vec<Row>, bool)> {
+        let fine = 2 * u32::from(self.depth - self.depth.min(16));
+        let start = self
+            .chunks
+            .partition_point(|chunk| chunk.end <= from >> fine);
+        let batch = self.cx.engine.pool.current_num_threads().max(1);
+        let mut rows: Vec<Row> = Vec::new();
+        let mut at = start;
+        while at < self.chunks.len() && rows.len() < need {
+            self.cx.check_cancelled()?;
+            let end = (at + batch).min(self.chunks.len());
+            let parts: Vec<Vec<Row>> = self.cx.engine.pool.install(|| {
+                self.chunks[at..end]
+                    .par_iter()
+                    .map(|prefixes| self.chunk(groups.clone(), prefixes.clone()))
+                    .collect()
+            });
+            timings.cells_walked += (end - at) as u64;
+            for part in parts {
+                rows.extend(part.into_iter().filter(|row| row.cell >= Some(from)));
+            }
+            at = end;
+        }
+        Ok((rows, at == self.chunks.len()))
+    }
+
+    /// One chunk's rows of `groups`, ascending by cell then group.
+    fn chunk(&self, groups: std::ops::Range<u32>, prefixes: std::ops::Range<u64>) -> Vec<Row> {
+        let segments = self.cx.segments();
+        let depth = self.depth;
+        let wanted = |entry: &CellCount| groups.contains(&entry.group);
+        match self.source {
+            Source::Grouped(row_groups) => {
+                let set = &self.cx.sets.set;
+                let mut counted: Vec<CellCount> =
+                    count_chunk(set.cells(self.cx), segments, depth, row_groups, prefixes.clone());
+                counted.retain(wanted);
+                let mut reference: Vec<CellCount> = match &self.cx.sets.reference {
+                    None => Vec::new(),
+                    Some(r) => count_chunk(r.cells(self.cx), segments, depth, row_groups, prefixes),
+                };
+                reference.retain(wanted);
+                merge(counted, reference)
+            }
+            Source::Split(sets) => {
+                let one = |set: CellSet<'_>, ranges: bool, group: u32| -> Vec<CellCount> {
+                    if ranges {
+                        count_chunk_by_ranges(set, segments, depth, prefixes.clone())
+                            .cells
+                            .into_iter()
+                            .map(|(cell, count)| CellCount { cell, group, count })
+                            .collect()
+                    } else {
+                        count_chunk(set, segments, depth, &RowGroups::None, prefixes.clone())
+                            .into_iter()
+                            .map(|entry| CellCount { group, ..entry })
+                            .collect()
+                    }
+                };
+                let mut rows: Vec<Row> = Vec::new();
+                for group in groups.clone() {
+                    let (set, reference) = sets[group as usize];
+                    let (set_ranges, reference_ranges) = self.methods[group as usize];
+                    let counted = one(set, set_ranges, group);
+                    let referenced =
+                        reference.map_or_else(Vec::new, |r| one(r, reference_ranges, group));
+                    rows.extend(merge(counted, referenced));
+                }
+                rows.sort_unstable_by_key(|row| (row.cell, row.group));
+                rows
+            }
+        }
+    }
+}
+
+/// Two tables ascending by cell then group, joined into rows.
+fn merge(set: Vec<CellCount>, reference: Vec<CellCount>) -> Vec<Row> {
+    let mut out: Vec<Row> = Vec::with_capacity(set.len().max(reference.len()));
+    let (mut a, mut b) = (set.into_iter().peekable(), reference.into_iter().peekable());
+    loop {
+        let key = |e: &CellCount| (e.cell, e.group);
+        let row = match (a.peek(), b.peek()) {
+            (None, None) => break,
+            (Some(x), Some(y)) if key(x) == key(y) => {
+                let (x, y) = (a.next().unwrap(), b.next().unwrap());
+                (x.cell, x.group, x.count, y.count)
+            }
+            (Some(x), Some(y)) if key(x) < key(y) => {
+                let x = a.next().unwrap();
+                (x.cell, x.group, x.count, 0)
+            }
+            (Some(_), None) => {
+                let x = a.next().unwrap();
+                (x.cell, x.group, x.count, 0)
+            }
+            _ => {
+                let y = b.next().unwrap();
+                (y.cell, y.group, 0, y.count)
+            }
+        };
+        out.push(Row {
+            group: row.1,
+            cell: Some(row.0),
+            count: row.2,
+            reference: row.3,
+        });
+    }
+    out
 }
 
 /// `(count / total) / (reference / reference_total)`, `None` where `reference` or `total` is 0.

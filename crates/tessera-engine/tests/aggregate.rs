@@ -207,6 +207,7 @@ fn build_bundle(dir: &Path) -> PathBuf {
 
 struct Fx {
     _tmp: tempfile::TempDir,
+    root: PathBuf,
     engine: Engine,
     items: Vec<Item>,
 }
@@ -218,6 +219,7 @@ fn fixture() -> Fx {
     engine.set_background_refresh_for_test(false);
     Fx {
         _tmp: tmp,
+        root,
         engine,
         items: (0..N).map(built).collect(),
     }
@@ -1195,6 +1197,178 @@ fn a_view_counts_only_the_items_with_a_row_in_it() {
                 })
                 .collect();
             assert_eq!(counted, expected, "{view}, {what}");
+        }
+    }
+}
+
+fn with_cells(mut grouping: Grouping, depth: u8) -> Grouping {
+    grouping.cells = Some(depth);
+    grouping
+}
+
+/// Every row this viewer may see in the view, as the stored geometry holds it: its 64-bit
+/// position and the item it belongs to.
+fn stored_rows<'a>(fx: &'a Fx, session: &Session) -> Vec<(u64, &'a Item)> {
+    use tessera_engine::compose::MaskedSet;
+    let (generation, mask) = fx.engine.composed_mask(session, "s0").unwrap();
+    let view_data = &generation.bundle.partitions["default"].views["s0"];
+    let segments =
+        tessera_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
+    let tables = view_data.row_space.row_entities().expect("a row-to-entity table");
+    let item_of: HashMap<u64, &Item> = source_to_new_map(&fx.root, "v00000")
+        .into_iter()
+        .map(|(source, entity)| (entity, &fx.items[source as usize]))
+        .collect();
+    let mut out = Vec::new();
+    for &(segment, row_base) in &segments {
+        let morton = segment.morton.u32();
+        let residual = segment.columns.residual();
+        for local in 0..segment.row_count as usize {
+            let row = row_base + local as u32;
+            if mask.count_range(row..row + 1) == 0 {
+                continue;
+            }
+            let position = (u64::from(morton[local]) << 32) | u64::from(residual[local]);
+            let entity = u64::from(tables.entity_of(row));
+            out.push((position, item_of[&entity]));
+        }
+    }
+    out
+}
+
+fn cell_at(position: u64, depth: u8) -> u64 {
+    if depth == 0 {
+        0
+    } else {
+        position >> (64 - 2 * u32::from(depth))
+    }
+}
+
+/// **Every cell table is the one counted row by row** from the stored positions, at depths from
+/// 0 to 32, with no group and grouped by a drawn field and an indexed one, with and without a
+/// filter; **in every cell the groups add to the cell's count**; and the counts by range, which
+/// the coarsest depths take, agree with the pass.
+#[test]
+fn every_cell_table_is_the_one_counted_row_by_row() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let session = fx.session(false);
+    let rows = stored_rows(&fx, &session);
+    let kinds = ["a", "c"];
+    for (what, filter, keep) in [
+        ("no filter", None, &(|_: &Item| true) as &dyn Fn(&Item) -> bool),
+        (
+            "a filter",
+            Some(fx.is_in("kind", &kinds)),
+            &|i: &Item| kinds.contains(&i.kind.as_deref().unwrap_or("")),
+        ),
+    ] {
+        let kept: Vec<(u64, &Item)> = rows.iter().filter(|(_, i)| keep(i)).cloned().collect();
+        let items: Vec<&Item> = kept.iter().map(|(_, i)| *i).collect();
+        for depth in [0u8, 1, 2, 3, 6, 16, 20, 32] {
+            let groupings = [
+                with_cells(size(), depth),
+                with_cells(field("kind", Pick::Top(2)), depth),
+                with_cells(field("shade", Pick::Top(2)), depth),
+            ];
+            let mut req = request(&groupings);
+            req.filter = filter.clone();
+            let mut sink = Collect::default();
+            let trailer = engine.aggregate_stream(&session, req.clone(), &mut sink).unwrap();
+            let cells = (1u64 << (2 * u32::from(depth.min(16)))).min(N);
+            let ranges = depth <= 16 && cells * 64 <= kept.len() as u64;
+            let method = if ranges { "ranges" } else { "pass" };
+            assert!(
+                trailer.timings.methods.contains(&(0, method)),
+                "{what}, depth {depth}: {:?}",
+                trailer.timings.methods
+            );
+            let tables = read_all(engine, &session, req);
+            let mut density: BTreeMap<u64, u64> = BTreeMap::new();
+            for (position, _) in &kept {
+                *density.entry(cell_at(*position, depth)).or_default() += 1;
+            }
+            let served: Vec<(u64, u64)> = tables[&0]
+                .1
+                .iter()
+                .map(|r| (r.cell.unwrap(), r.count))
+                .collect();
+            assert_eq!(
+                served,
+                density.clone().into_iter().collect::<Vec<_>>(),
+                "{what}, depth {depth}: density"
+            );
+            for (grouping, column) in [(1u32, "kind"), (2, "shade")] {
+                let listed = top_keys(&items, column, 2);
+                let group_of = |item: &Item| match item.value(column) {
+                    Some(v) if listed.iter().any(|k| k == v) => {
+                        (listed.iter().position(|k| k == v).unwrap(), Some(v.to_string()))
+                    }
+                    Some(_) => (2, None),
+                    None => (3, None),
+                };
+                let mut expected: BTreeMap<(usize, u64), (Option<String>, u64)> = BTreeMap::new();
+                for (position, item) in &kept {
+                    let (g, key) = group_of(item);
+                    expected
+                        .entry((g, cell_at(*position, depth)))
+                        .or_insert((key, 0))
+                        .1 += 1;
+                }
+                let expected: Vec<(String, Option<String>, u64, u64)> = expected
+                    .into_iter()
+                    .map(|((g, cell), (key, n))| {
+                        let group = ["listed", "listed", "rest", "none"][g].to_string();
+                        (group, key, cell, n)
+                    })
+                    .collect();
+                let served: Vec<(String, Option<String>, u64, u64)> = tables[&grouping]
+                    .1
+                    .iter()
+                    .map(|r| (r.group.clone().unwrap(), r.key.clone(), r.cell.unwrap(), r.count))
+                    .collect();
+                assert_eq!(served, expected, "{what}, depth {depth}, {column}");
+                let mut added: BTreeMap<u64, u64> = BTreeMap::new();
+                for (_, _, cell, n) in &served {
+                    *added.entry(*cell).or_default() += n;
+                }
+                assert_eq!(added, density, "{what}, depth {depth}, {column}: groups add up");
+            }
+        }
+    }
+}
+
+/// **A cell table's pages joined are the table read whole**, cut anywhere inside a group, with a
+/// reference beside the set.
+#[test]
+fn a_cell_table_pages_from_any_cell() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    let groupings = [
+        with_cells(field("kind", Pick::Top(2)), 6),
+        with_cells(size(), 20),
+        with_cells(field("shade", named(&["y", "x"])), 32),
+    ];
+    let mut req = request(&groupings);
+    req.filter = Some(bbox(0.0, 0.0, 600.0, 600.0));
+    req.reference = Some(Reference::Visible);
+    let whole = read_all(engine, &session, req.clone());
+    for (_, rows) in whole.values() {
+        assert!(rows.len() > 20, "each table spans many pages");
+        assert!(rows.iter().any(|r| r.count == 0 && r.reference.unwrap() > 0));
+    }
+    for page_rows in [17u32, 64, 500] {
+        for pages in [Some(1u32), Some(3)] {
+            let mut paged = req.clone();
+            paged.page_rows = Some(page_rows);
+            paged.pages = pages;
+            let joined = read_all(engine, &session, paged);
+            assert_eq!(
+                joined.values().map(|(_, r)| r.clone()).collect::<Vec<_>>(),
+                whole.values().map(|(_, r)| r.clone()).collect::<Vec<_>>(),
+                "{page_rows} rows a page, {pages:?} pages a response"
+            );
         }
     }
 }
