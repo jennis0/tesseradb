@@ -479,3 +479,65 @@ def split_items_frames(data: bytes) -> ItemsBody:
         raise ValueError(f"the items trailer's keys are {sorted(trailer)}")
     json_payloads = [frames[0][1], *(end for (_, end) in middle[1::2]), frames[-1][1]]
     return ItemsBody(json.loads(frames[0][1]), pages, trailer, json_payloads)
+
+
+# `POST /v1/aggregate` is framed as an items body is, with a table head where the items head was,
+# one per table and no response head:
+#
+#     kind 9  table head JSON {grouping, total, reference_total?, groups?, resumed}
+#                                                  before a table's first page in this response
+#     kind 7  records    one Arrow stream of one batch of the table's rows
+#     kind 8  page end   JSON {next, ended_by}     one after each records frame
+#     kind 4  trailer    JSON, as an items trailer  exactly one, last
+FRAME_TABLE_HEAD = 9
+
+_AGGREGATE_KINDS = {FRAME_TABLE_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER}
+
+
+class AggregateBody(NamedTuple):
+    """One `POST /v1/aggregate` body, split and checked but not decoded past its JSON."""
+
+    #: Each table head, parsed, with the `(records payload, page end)` pairs that follow it.
+    tables: list[tuple[dict, list[tuple[bytes, dict]]]]
+    trailer: dict
+
+
+def split_aggregate_frames(data: bytes) -> AggregateBody:
+    """An aggregate body split strictly: truncation, a kind outside the four, a trailer not last,
+    a page before any table head, or a records frame without its page end all raise."""
+    frames: list[tuple[int, bytes]] = []
+    at = 0
+    while at < len(data):
+        if len(data) - at < 5:
+            raise ValueError(f"truncated frame header at byte {at}")
+        kind = data[at]
+        if kind not in _AGGREGATE_KINDS:
+            raise ValueError(f"unknown frame kind {kind} at byte {at} in an aggregate body")
+        (length,) = struct.unpack_from("<I", data, at + 1)
+        start = at + 5
+        end = start + length
+        if end > len(data):
+            raise ValueError(f"frame at byte {at} claims a payload past the end of the body")
+        frames.append((kind, data[start:end]))
+        at = end
+    if not frames or frames[-1][0] != FRAME_TRAILER:
+        raise ValueError("an aggregate body ends with its trailer")
+    tables: list[tuple[dict, list[tuple[bytes, dict]]]] = []
+    middle = frames[:-1]
+    index = 0
+    while index < len(middle):
+        kind, payload = middle[index]
+        if kind == FRAME_TABLE_HEAD:
+            tables.append((json.loads(payload), []))
+            index += 1
+            continue
+        if kind != FRAME_RECORDS or index + 1 >= len(middle) or middle[index + 1][0] != FRAME_PAGE_END:
+            raise ValueError("an aggregate body pairs each records frame with the page end after it")
+        if not tables:
+            raise ValueError("a page before any table head")
+        tables[-1][1].append((payload, json.loads(middle[index + 1][1])))
+        index += 2
+    trailer = json.loads(frames[-1][1])
+    if set(trailer) != ITEMS_TRAILER_KEYS:
+        raise ValueError(f"the aggregate trailer's keys are {sorted(trailer)}")
+    return AggregateBody(tables, trailer)

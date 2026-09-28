@@ -35,7 +35,7 @@ if str(_REFERENCE) not in sys.path:
     sys.path.insert(0, str(_REFERENCE))
 
 from .battery import (  # noqa: E402
-    Absent,
+    Aggregate,
     ArtifactCard,
     Battery,
     Browse,
@@ -44,14 +44,13 @@ from .battery import (  # noqa: E402
     Meta,
     Query,
     Recorded,
-    Region,
     Suggest,
     Viewport,
     build_battery,
     record,
     record_one,
 )
-from .canonical import Batches, Canonical, Json, Streamed, canonicalise_viewport  # noqa: E402
+from .canonical import Canonical, Json, Streamed, canonicalise_viewport  # noqa: E402
 from .entitlement import (  # noqa: E402
     CappedDelta,
     Delta,
@@ -64,9 +63,8 @@ from .entitlement import (  # noqa: E402
 )
 
 __all__ = [
-    "Absent",
+    "Aggregate",
     "ArtifactCard",
-    "Batches",
     "Battery",
     "Browse",
     "Canonical",
@@ -80,7 +78,6 @@ __all__ = [
     "Nothing",
     "Query",
     "Recorded",
-    "Region",
     "Rows",
     "Streamed",
     "Suggest",
