@@ -27,7 +27,7 @@ use crate::compose::EffectiveMask;
 use crate::filter::EntityCodes;
 use crate::row_column::RowColumn;
 
-/// About how many rows one chunk of the pass holds.
+/// The most rows one chunk of the pass holds.
 const CHUNK_ROWS: u64 = 1 << 20;
 
 /// The rows being counted, in view row space.
@@ -392,6 +392,19 @@ pub struct CellCount {
     pub count: u64,
 }
 
+/// Where a count's entries go, one call per non-empty `(cell, group)`, ascending by cell then
+/// group within a chunk.
+pub(crate) trait CellSink {
+    fn push(&mut self, cell: u64, group: u32, count: u64);
+}
+
+impl CellSink for Vec<CellCount> {
+    #[inline]
+    fn push(&mut self, cell: u64, group: u32, count: u64) {
+        Vec::push(self, CellCount { cell, group, count });
+    }
+}
+
 /// Count the set's rows by depth-`depth` cell (0 to 32) and group, in one pass over its rows on the
 /// current rayon pool. Entries ascend by cell then group, and only non-empty ones appear.
 /// `segments` are the view's, each with its first row in view row space.
@@ -401,7 +414,10 @@ pub fn pass(
     depth: u8,
     groups: &RowGroups<'_>,
 ) -> Vec<CellCount> {
-    pass_in_chunks(set, segments, depth, groups, CHUNK_ROWS)
+    let rows: u64 = segments.iter().map(|(s, _)| u64::from(s.row_count)).sum();
+    let pieces = rayon::current_num_threads() as u64 * 4;
+    let chunk_rows = rows.div_ceil(pieces.max(1)).clamp(1 << 14, CHUNK_ROWS);
+    pass_in_chunks(set, segments, depth, groups, chunk_rows)
 }
 
 /// [`pass`] with chunks of about `chunk_rows` rows, so a test can cut a small view into many.
@@ -460,72 +476,105 @@ pub(crate) fn count_chunk(
     only: Option<u32>,
     prefixes: Range<u64>,
 ) -> Vec<CellCount> {
+    let mut out = Vec::new();
+    count_chunk_into(set, segments, depth, groups, only, prefixes, &mut out);
+    out
+}
+
+/// [`count_chunk`] into `out`. Where the chunk's rows lie in one segment its entries go straight
+/// to `out`; a cell's rows from several segments are added first.
+pub(crate) fn count_chunk_into(
+    set: CellSet<'_>,
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+    groups: &RowGroups<'_>,
+    only: Option<u32>,
+    prefixes: Range<u64>,
+    out: &mut impl CellSink,
+) {
     let shift = 32 - 2 * u32::from(depth.min(16));
-    let width = groups.count();
+    let parts: Vec<(usize, Range<u32>)> = segments
+        .iter()
+        .enumerate()
+        .filter_map(|(s, &(segment, row_base))| {
+            let n = segment.row_count;
+            let lo = first_code_at_or_past(segment, prefixes.start << shift, 0..n);
+            let hi = first_code_at_or_past(segment, prefixes.end << shift, lo..n);
+            (lo < hi).then(|| (s, row_base + lo..row_base + hi))
+        })
+        .collect();
+    if let [(s, rows)] = &parts[..] {
+        count_part(set, segments, *s, rows.clone(), depth, groups, only, out);
+        return;
+    }
     let mut entries: Vec<CellCount> = Vec::new();
-    for (s, &(segment, row_base)) in segments.iter().enumerate() {
-        let n = segment.row_count;
-        let lo = first_code_at_or_past(segment, prefixes.start << shift, 0..n);
-        let hi = first_code_at_or_past(segment, prefixes.end << shift, lo..n);
-        if lo >= hi {
-            continue;
+    for (s, rows) in parts {
+        count_part(set, segments, s, rows, depth, groups, only, &mut entries);
+    }
+    entries.sort_unstable_by_key(|e| (e.cell, e.group));
+    let mut i = 0;
+    while i < entries.len() {
+        let (cell, group) = (entries[i].cell, entries[i].group);
+        let mut count = 0;
+        while i < entries.len() && entries[i].cell == cell && entries[i].group == group {
+            count += entries[i].count;
+            i += 1;
         }
-        let rows = row_base + lo..row_base + hi;
-        let out = &mut entries;
-        if only.is_none() {
-            // At most one entry per row, and the set's rows here are a range count.
-            out.reserve(set.count(rows.clone()) as usize);
-        }
-        match groups {
-            RowGroups::None => count_segment_alone(set, segment, row_base, rows, depth, out),
-            RowGroups::Drawn { codes, table } => match &codes[s] {
-                Some(ScalarSlice::U8(codes)) => {
-                    let g = Drawn { codes, table };
-                    count_as(set, segment, row_base, rows, depth, width, &g, only, out)
-                }
-                Some(ScalarSlice::U16(codes)) => {
-                    let g = Drawn { codes, table };
-                    count_as(set, segment, row_base, rows, depth, width, &g, only, out)
-                }
-                Some(ScalarSlice::U32(codes)) => {
-                    let g = Drawn { codes, table };
-                    count_as(set, segment, row_base, rows, depth, width, &g, only, out)
-                }
-                _ => {
-                    let g = Constant(table.none());
-                    count_as(set, segment, row_base, rows, depth, width, &g, only, out)
-                }
-            },
-            RowGroups::Entity {
-                tables,
+        out.push(cell, group, count);
+    }
+}
+
+/// One segment's rows `rows` of a chunk, into `out`, the grouper resolved for the segment.
+#[allow(clippy::too_many_arguments)]
+fn count_part(
+    set: CellSet<'_>,
+    segments: &[(&SegmentData, u32)],
+    s: usize,
+    rows: Range<u32>,
+    depth: u8,
+    groups: &RowGroups<'_>,
+    only: Option<u32>,
+    out: &mut impl CellSink,
+) {
+    let (segment, row_base) = segments[s];
+    let width = groups.count();
+    match groups {
+        RowGroups::None => count_segment_alone(set, segment, row_base, rows, depth, out),
+        RowGroups::Drawn { codes, table } => match &codes[s] {
+            Some(ScalarSlice::U8(codes)) => {
+                let g = Drawn { codes, table };
+                count_as(set, segment, row_base, rows, depth, width, &g, only, out)
+            }
+            Some(ScalarSlice::U16(codes)) => {
+                let g = Drawn { codes, table };
+                count_as(set, segment, row_base, rows, depth, width, &g, only, out)
+            }
+            Some(ScalarSlice::U32(codes)) => {
+                let g = Drawn { codes, table };
+                count_as(set, segment, row_base, rows, depth, width, &g, only, out)
+            }
+            _ => {
+                let g = Constant(table.none());
+                count_as(set, segment, row_base, rows, depth, width, &g, only, out)
+            }
+        },
+        RowGroups::Entity {
+            tables,
+            codes,
+            table,
+        } => {
+            let g = ByEntity {
+                tables: *tables,
                 codes,
                 table,
-            } => {
-                let g = ByEntity {
-                    tables: *tables,
-                    codes,
-                    table,
-                };
-                count_as(set, segment, row_base, rows, depth, width, &g, only, out)
-            }
-            RowGroups::Labels { column, table } => {
-                let g = ByLabel { column, table };
-                count_as(set, segment, row_base, rows, depth, width, &g, only, out)
-            }
+            };
+            count_as(set, segment, row_base, rows, depth, width, &g, only, out)
+        }
+        RowGroups::Labels { column, table } => {
+            let g = ByLabel { column, table };
+            count_as(set, segment, row_base, rows, depth, width, &g, only, out)
         }
     }
-    if segments.len() > 1 {
-        entries = add_equal_keys(
-            entries
-                .into_iter()
-                .map(|e| ((e.cell, e.group), e.count))
-                .collect(),
-        )
-        .into_iter()
-        .map(|((cell, group), count)| CellCount { cell, group, count })
-        .collect();
-    }
-    entries
 }
 
 /// [`count_chunk`] by range counts, for a depth of 16 or less and every row in group 0: the
@@ -557,7 +606,7 @@ fn count_as<G: Grouper>(
     width: usize,
     groups: &G,
     only: Option<u32>,
-    out: &mut Vec<CellCount>,
+    out: &mut impl CellSink,
 ) {
     match only {
         None => count_segment(set, segment, row_base, rows, depth, width, groups, out),
@@ -579,35 +628,29 @@ fn count_segment_alone(
     row_base: u32,
     rows: Range<u32>,
     depth: u8,
-    out: &mut Vec<CellCount>,
+    out: &mut impl CellSink,
 ) {
     let morton = segment.morton.u32();
-    let push = |cell: u64, count: u64, out: &mut Vec<CellCount>| {
-        out.push(CellCount {
-            cell,
-            group: 0,
-            count,
-        })
-    };
     if depth <= 16 {
         let shift = 32 - 2 * u32::from(depth);
-        let mut current: Option<(u64, u64)> = None;
+        let mut cell = u64::MAX;
+        let mut n = 0u64;
         set.for_each_run(rows, &mut |run| {
             let codes = &morton[(run.start - row_base) as usize..(run.end - row_base) as usize];
             for &code in codes {
                 let at = u64::from(code) >> shift;
-                match &mut current {
-                    Some((cell, n)) if *cell == at => *n += 1,
-                    _ => {
-                        if let Some((cell, n)) = current.replace((at, 1)) {
-                            push(cell, n, out);
-                        }
+                if at != cell {
+                    if n > 0 {
+                        out.push(cell, 0, n);
                     }
+                    cell = at;
+                    n = 0;
                 }
+                n += 1;
             }
         });
-        if let Some((cell, n)) = current {
-            push(cell, n, out);
+        if n > 0 {
+            out.push(cell, 0, n);
         }
         return;
     }
@@ -617,19 +660,13 @@ fn count_segment_alone(
     let shift = 64 - 2 * u32::from(depth);
     let mut cell16: Option<u32> = None;
     let mut prefixes: Vec<u64> = Vec::new();
-    let flush = |prefixes: &mut Vec<u64>, out: &mut Vec<CellCount>| {
-        prefixes.sort_unstable();
-        let mut i = 0;
-        while i < prefixes.len() {
-            let j = i + prefixes[i..].partition_point(|&p| p == prefixes[i]);
-            push(prefixes[i], (j - i) as u64, out);
-            i = j;
-        }
-        prefixes.clear();
+    let flush = |prefixes: &mut Vec<u64>, out: &mut _| {
+        emit_sorted(prefixes, |&p| (p, 0), out);
     };
     set.for_each_run(rows, &mut |run| {
-        for row in run {
-            let i = (row - row_base) as usize;
+        let lo = (run.start - row_base) as usize;
+        let hi = (run.end - row_base) as usize;
+        for i in lo..hi {
             if cell16 != Some(morton[i]) {
                 flush(&mut prefixes, out);
                 cell16 = Some(morton[i]);
@@ -638,6 +675,25 @@ fn count_segment_alone(
         }
     });
     flush(&mut prefixes, out);
+}
+
+/// Sort `entries`, push each run of equal `(cell, group)` keys to `out` with its length, and empty
+/// `entries` for reuse.
+fn emit_sorted<T: Ord + Copy>(
+    entries: &mut Vec<T>,
+    key: impl Fn(&T) -> (u64, u32),
+    out: &mut impl CellSink,
+) {
+    entries.sort_unstable();
+    let mut i = 0;
+    while i < entries.len() {
+        let at = entries[i];
+        let j = i + entries[i..].partition_point(|e| *e == at);
+        let (cell, group) = key(&at);
+        out.push(cell, group, (j - i) as u64);
+        i = j;
+    }
+    entries.clear();
 }
 
 /// Add to `out` the counts of one segment's rows `rows` (view row space), whose depth-16 cells
@@ -651,7 +707,7 @@ fn count_segment<G: Grouper>(
     depth: u8,
     width: usize,
     groups: &G,
-    out: &mut Vec<CellCount>,
+    out: &mut impl CellSink,
 ) {
     let morton = segment.morton.u32();
     if depth <= 16 {
@@ -659,28 +715,21 @@ fn count_segment<G: Grouper>(
         // One counter per group, and the groups the current cell has touched.
         let mut counts = vec![0u64; width];
         let mut touched: Vec<u32> = Vec::new();
-        let mut current: Option<u64> = None;
-        let emit =
-            |at: u64, counts: &mut [u64], touched: &mut Vec<u32>, out: &mut Vec<CellCount>| {
-                touched.sort_unstable();
-                for &group in touched.iter() {
-                    out.push(CellCount {
-                        cell: at,
-                        group,
-                        count: std::mem::take(&mut counts[group as usize]),
-                    });
-                }
-                touched.clear();
-            };
+        let mut current = u64::MAX;
+        let emit = |at: u64, counts: &mut [u64], touched: &mut Vec<u32>, out: &mut _| {
+            touched.sort_unstable();
+            for &group in touched.iter() {
+                CellSink::push(out, at, group, std::mem::take(&mut counts[group as usize]));
+            }
+            touched.clear();
+        };
         set.for_each_run(rows, &mut |run| {
             for row in run {
                 let i = (row - row_base) as usize;
                 let at = u64::from(morton[i]) >> shift;
-                if current != Some(at) {
-                    if let Some(done) = current {
-                        emit(done, &mut counts, &mut touched, out);
-                    }
-                    current = Some(at);
+                if at != current {
+                    emit(current, &mut counts, &mut touched, out);
+                    current = at;
                 }
                 groups.each(i, row, |group| {
                     let slot = &mut counts[group as usize];
@@ -691,34 +740,24 @@ fn count_segment<G: Grouper>(
                 });
             }
         });
-        if let Some(done) = current {
-            emit(done, &mut counts, &mut touched, out);
-        }
+        emit(current, &mut counts, &mut touched, out);
     } else {
         let residual = segment.columns.residual();
         let shift = 64 - 2 * u32::from(depth);
-        let mut cell: Vec<((u64, u32), u64)> = Vec::new();
+        let mut cell: Vec<(u64, u32)> = Vec::new();
         let mut current: Option<u32> = None;
-        let emit = |cell: &mut Vec<((u64, u32), u64)>, out: &mut Vec<CellCount>| {
-            let tallied = add_equal_keys(std::mem::take(cell));
-            out.extend(tallied.into_iter().map(|((at, group), count)| CellCount {
-                cell: at,
-                group,
-                count,
-            }));
-        };
         set.for_each_run(rows, &mut |run| {
             for row in run {
                 let i = (row - row_base) as usize;
                 if current != Some(morton[i]) {
-                    emit(&mut cell, out);
+                    emit_sorted(&mut cell, |&e| e, out);
                     current = Some(morton[i]);
                 }
                 let position = (u64::from(morton[i]) << 32) | u64::from(residual[i]);
-                groups.each(i, row, |group| cell.push(((position >> shift, group), 1)));
+                groups.each(i, row, |group| cell.push((position >> shift, group)));
             }
         });
-        emit(&mut cell, out);
+        emit_sorted(&mut cell, |&e| e, out);
     }
 }
 

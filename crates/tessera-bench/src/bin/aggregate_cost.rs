@@ -7,8 +7,9 @@
 //! `--threads` wide.
 //!
 //! Every figure is the median of `--repeat` runs, with the fastest and slowest beside it, after one
-//! run that is not counted. The pass alone, `cells::pass` over the whole mask with no groups, is
-//! timed first, beside the aggregate that pages the same table.
+//! run that is not counted. Each case also reports its last run's time by stage: composing the
+//! sets, counting groups, counting cells (of which walking the rows is `pass`), and building the
+//! pages' batches.
 //!
 //! ```text
 //! cargo build --release -p tessera-bench --bin aggregate_cost
@@ -62,6 +63,9 @@ struct Args {
     threads: usize,
     #[arg(long, default_value_t = 5)]
     repeat: usize,
+    /// Only the cases whose name contains one of these; every case where none is given.
+    #[arg(long)]
+    case: Vec<String>,
 }
 
 /// Counts what a response carries and keeps none of it.
@@ -73,6 +77,8 @@ struct Tally {
     compose_ns: u64,
     count_ns: u64,
     cells_ns: u64,
+    pass_ns: u64,
+    batch_ns: u64,
     methods: Vec<(u32, &'static str)>,
 }
 
@@ -174,6 +180,8 @@ fn read(
         tally.compose_ns += trailer.timings.compose_ns;
         tally.count_ns += trailer.timings.count_ns;
         tally.cells_ns += trailer.timings.cells_ns;
+        tally.pass_ns += trailer.timings.pass_ns;
+        tally.batch_ns += trailer.timings.batch_ns;
         for method in trailer.timings.methods {
             if !tally.methods.contains(&method) {
                 tally.methods.push(method);
@@ -304,36 +312,6 @@ fn main() -> Result<(), BoxError> {
         "{}",
         json!({"threads": args.threads, "repeat": args.repeat, "view": args.view})
     );
-    {
-        let (generation, mask) = engine.composed_mask(&session, &args.view)?;
-        let view_data = generation
-            .bundle
-            .partitions
-            .values()
-            .find_map(|partition| partition.views.get(&args.view))
-            .ok_or("no view data")?;
-        let segments = tessera_engine::viewport::segments_with_row_bases(&args.view, view_data)?;
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(args.threads)
-            .build()?;
-        for depth in [16u8, 32] {
-            let (n, median, _, _) = timed(args.repeat, || {
-                pool.install(|| {
-                    tessera_engine::cells::pass(
-                        tessera_engine::cells::CellSet::Mask(&mask),
-                        &segments,
-                        depth,
-                        &tessera_engine::cells::RowGroups::None,
-                    )
-                    .len()
-                })
-            });
-            println!(
-                "{}",
-                json!({"case": format!("the pass alone, d{depth}"), "segments": segments.len(), "cells": n, "ms": ms(median)})
-            );
-        }
-    }
     for filter in [None, Some(region.clone())] {
         let (_, median, lo, hi) = timed(args.repeat, || viewport(&filter));
         println!(
@@ -346,6 +324,9 @@ fn main() -> Result<(), BoxError> {
         );
         for (name, grouping, with_region) in &cases {
             if filter.is_some() && !with_region {
+                continue;
+            }
+            if !args.case.is_empty() && !args.case.iter().any(|c| name.contains(c.as_str())) {
                 continue;
             }
             let groupings = std::slice::from_ref(grouping);
@@ -365,6 +346,8 @@ fn main() -> Result<(), BoxError> {
                         "compose": tally.compose_ns as f64 / 1e6,
                         "count": tally.count_ns as f64 / 1e6,
                         "cells": tally.cells_ns as f64 / 1e6,
+                        "pass": tally.pass_ns as f64 / 1e6,
+                        "batch": tally.batch_ns as f64 / 1e6,
                     },
                     "method": tally.methods.first().map(|(_, m)| *m),
                 })

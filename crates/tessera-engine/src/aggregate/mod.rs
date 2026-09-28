@@ -168,7 +168,11 @@ pub struct AggregateTrailer {
 pub struct AggregateTimings {
     pub compose_ns: u64,
     pub count_ns: u64,
+    /// Counting cells, of which `pass_ns` walked the rows and the rest gathered their counts.
     pub cells_ns: u64,
+    pub pass_ns: u64,
+    /// Building the pages' Arrow batches.
+    pub batch_ns: u64,
     /// Entities read through the rows of a set routed in row space.
     pub entities_crossed: u64,
     /// Cells counted by range, or chunks of rows walked by the pass.
@@ -409,14 +413,13 @@ impl Engine {
             let grouping = position.table;
             let plan = &planned.plans[grouping as usize];
             let cx = set::Cx::new(self, &open, &generation, &sets, &req.cancel);
-            let page = match plan.page(
-                &cx,
-                &position,
-                planned.page_rows,
-                limits,
-                &mut timings,
-                &mut held,
-            ) {
+            let budget = table::Budget {
+                page_rows: planned.page_rows,
+                max_page_bytes: limits.max_page_bytes,
+                pages_left: req.pages.map_or(u64::MAX, |limit| u64::from(limit) - pages),
+                response_bytes_left: (limits.response_bytes as u64).saturating_sub(bytes as u64),
+            };
+            let page = match plan.page(&cx, &position, &budget, &mut timings, &mut held) {
                 Err(EngineError::Cancelled) => break ResponseEndedBy::Deadline,
                 page => page?,
             };
