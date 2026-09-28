@@ -87,7 +87,7 @@ pub use expr::{
     RoutedFilter, RowExpr, RowLeafResolvers, UniqueResolver, MAX_FILTER_DEPTH, MEMBER_OF_COLUMN,
     REGION_COLUMN, UNRESOLVABLE_VALUE,
 };
-pub use membership::CategoryMembership;
+pub use membership::{CategoryCounts, CategoryMembership, CountCodes, VisitBuffered, VisitCodes};
 
 /// The operand value types, re-exported so a caller building a [`FilterOperand`] needs no
 /// dependency on the filter crate: `check-layers.sh` denies `tessera-server` that edge, and an

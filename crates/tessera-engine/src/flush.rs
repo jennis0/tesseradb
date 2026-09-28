@@ -1302,15 +1302,7 @@ fn extent_values<'a>(
     if spec.category {
         let mut held: Vec<u32> = Vec::with_capacity(entities.len());
         for (entity, value) in entities {
-            let code = match value {
-                WalScalar::U8(c) => u32::from(*c),
-                WalScalar::U16(c) => u32::from(*c),
-                WalScalar::U32(c) => *c,
-                // The ingest plane already resolves a null key to the reserved code; this arm
-                // reaches the same answer if that ever changes.
-                WalScalar::Null => tessera_store::vocabulary::ABSENT_CODE,
-                other => return Err(wrong(other)),
-            };
+            let code = category_code(value).ok_or_else(|| wrong(value))?;
             if code == tessera_store::vocabulary::ABSENT_CODE {
                 continue;
             }
@@ -1380,8 +1372,40 @@ fn extent_values<'a>(
     Ok(ExtentColumn::flat(codes, presence))
 }
 
-/// The `(entity, value)` pairs one entity-scoped column's extent covers: the plan's own rows, joins excluded, since
-/// a join row's entity-space value was already written by an earlier flush.
+/// Where a column's value sits in a buffered row.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BufferedPlace {
+    /// An entity-scoped column, at this position of the row's `scalars`.
+    Entity(usize),
+    /// A group-scoped family, at this position of the row's `scoped` list.
+    Scoped(usize),
+}
+
+/// A buffered row's value for one column. A row buffered before the column was declared holds
+/// nothing there and answers `Null`.
+pub(crate) fn buffered_value(item: &BufferedItem, place: BufferedPlace) -> &WalScalar {
+    let (values, index) = match place {
+        BufferedPlace::Entity(index) => (&item.scalars, index),
+        BufferedPlace::Scoped(index) => (&item.scoped, index),
+    };
+    values.get(index).unwrap_or(&WalScalar::Null)
+}
+
+/// A category value's code, [`tessera_store::vocabulary::ABSENT_CODE`] for `Null`, or `None` for
+/// a value that is not a code. The ingest plane resolves a key and a null to a code before a row
+/// is buffered.
+pub(crate) fn category_code(value: &WalScalar) -> Option<u32> {
+    match value {
+        WalScalar::U8(c) => Some(u32::from(*c)),
+        WalScalar::U16(c) => Some(u32::from(*c)),
+        WalScalar::U32(c) => Some(*c),
+        WalScalar::Null => Some(tessera_store::vocabulary::ABSENT_CODE),
+        _ => None,
+    }
+}
+
+/// The `(entity, value)` pairs one entity-scoped column's extent covers: the plan's own rows, joins
+/// excluded, since a join row's entity-space value was already written by an earlier flush.
 fn entity_scoped_rows<'a>(
     spec: &FilterColumnSpec,
     plan: &'a FlushPlan,
@@ -1389,15 +1413,7 @@ fn entity_scoped_rows<'a>(
     let mut out = Vec::with_capacity(plan.items.len());
     for (entity, item) in plan.value_rows() {
         let entity = narrow_entity(*entity)?;
-        let value = item.scalars.get(spec.index).ok_or_else(|| {
-            MaintenanceFailed(format!(
-                "a buffered row carries {} scalars, but column '{}' is declared at position {}",
-                item.scalars.len(),
-                spec.name,
-                spec.index
-            ))
-        })?;
-        out.push((entity, value));
+        out.push((entity, buffered_value(item, BufferedPlace::Entity(spec.index))));
     }
     Ok(out)
 }
@@ -1411,9 +1427,7 @@ fn scoped_rows<'a>(
     let mut out = Vec::with_capacity(plan.items.len());
     for (entity, item) in plan.scoped_value_rows() {
         let entity = narrow_entity(*entity)?;
-        // A row buffered before the family was declared has nothing here — ordinary absence.
-        let value = item.scoped.get(spec.index).unwrap_or(&WalScalar::Null);
-        out.push((entity, value));
+        out.push((entity, buffered_value(item, BufferedPlace::Scoped(spec.index))));
     }
     Ok(out)
 }
@@ -1961,14 +1975,7 @@ fn write_record_extent(
             open = Some(entity);
         }
         for spec in &ctx.record_schema {
-            let value = item.scalars.get(spec.index).ok_or_else(|| {
-                MaintenanceFailed(format!(
-                    "a buffered row carries {} scalars, but column '{}' is declared at position {}",
-                    item.scalars.len(),
-                    spec.name,
-                    spec.index
-                ))
-            })?;
+            let value = buffered_value(item, BufferedPlace::Entity(spec.index));
             let Some(value) = record_value_of(value, spec)? else {
                 continue;
             };

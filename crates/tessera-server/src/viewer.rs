@@ -491,6 +491,12 @@ async fn suggest(
     let meta = state.engine.meta();
     let visible = session.visible_views();
     let resolved = resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
+    // Resolved above, so an unknown or unreachable view has already been refused.
+    let view = query
+        .view
+        .as_deref()
+        .and_then(|requested| meta.resolve_visible_view(requested, visible))
+        .map(|view| view.id.clone());
 
     // At most one suggestion walk per session, refused with a 429 before any work runs, so an
     // undebounced client cannot queue keystrokes. It takes no compute-gate permit; a keystroke
@@ -513,6 +519,7 @@ async fn suggest(
                 .suggest(
                     &session,
                     &resolved,
+                    view.as_deref(),
                     &q,
                     limit,
                     counts,

@@ -193,6 +193,36 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
+/// The items of the second view, `s1`: every item but those carrying `legal`, so a value visible
+/// in `s0` is carried by no item of `s1`.
+fn in_second_view(e: u64) -> bool {
+    department_of(e) != Some("legal")
+}
+
+/// `s1`'s geometry: `entity_id`, `x` and `y` for the items [`in_second_view`] keeps.
+fn write_second_view(path: &Path) {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let ids: Vec<u64> = (0..N).filter(|&e| in_second_view(e)).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 41) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 43) % 1000) as f64).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
 /// `points.parquet` with `entity_id`, `x`, `y` and one utf8 column that is null for every row.
 fn write_points_with_absent_column(path: &Path, column: &str) {
     let schema = Arc::new(ArrowSchema::new(vec![
@@ -228,17 +258,23 @@ struct Fixture {
 
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
     let schema = with_id(schema);
+    let view = |view_id: &str, points: &Path| tessera_build::ViewArgs {
+        visibility: None,
+        view_id: view_id.to_string(),
+        projection: tessera_spatial::Projection::None,
+        extent: extent(),
+        points: points.to_path_buf(),
+        point_fields: Default::default(),
+        select: None,
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+    };
+    let second = points.with_file_name("second-view.parquet");
+    let mut views = vec![view("s0", points)];
+    if second.exists() {
+        views.push(view("s1", &second));
+    }
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.to_path_buf(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-        }],
+        views,
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
@@ -274,6 +310,7 @@ fn fixture() -> Fixture {
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
     write_points(&points);
+    write_second_view(&dir.path().join("second-view.parquet"));
     write_pairs_n(&pairs, N);
     write_vocabulary(&dir.path().join("departments.parquet"), DEPARTMENTS);
     write_vocabulary(&dir.path().join("archives.parquet"), ARCHIVES);
@@ -324,7 +361,7 @@ fn page_with(
     budget: u64,
 ) -> SuggestPage {
     let session = engine.authorise(credential).expect("the credential resolves");
-    suggest_with(engine, &session, column, q, limit, counts, budget, 0)
+    suggest_with(engine, &session, column, None, q, limit, counts, budget, 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -332,6 +369,7 @@ fn suggest_with(
     engine: &Engine,
     session: &tessera_engine::Session,
     column: &str,
+    view: Option<&str>,
     q: &str,
     limit: usize,
     counts: bool,
@@ -342,6 +380,7 @@ fn suggest_with(
         .suggest(
             session,
             column,
+            view,
             q,
             limit,
             counts,
@@ -459,7 +498,7 @@ fn a_name_that_is_not_a_category_is_no_answer_rather_than_a_refusal() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     for column in ["nonesuch", "x", "entity_id"] {
         assert!(engine
-            .suggest(&session, column, "", 20, false, 100_000, 0)
+            .suggest(&session, column, None, "", 20, false, 100_000, 0)
             .unwrap()
             .is_none());
     }
@@ -603,22 +642,119 @@ fn more_is_true_on_a_filled_page_and_on_a_spent_budget() {
 fn a_count_is_the_number_of_items_this_viewer_may_see() {
     let fx = fixture();
     let engine = engine_for(&fx, "counts");
+    let carrying = |column: &str, e: u64| match column {
+        "department" => department_of(e),
+        _ => archive_of(e),
+    };
     for credential in [full_coverage_credential(), subset_credential()] {
         let visible = visible_to(&credential);
-        let got = page_with(&engine, &credential, "department", "", 20, true, 100_000);
-        assert!(!got.values.is_empty());
-        for value in &got.values {
-            let expected = visible
-                .iter()
-                .filter(|&&e| department_of(e) == Some(value.key.as_str()))
-                .count() as u64;
-            assert_eq!(value.count, Some(expected), "{}", value.key);
-            assert!(expected > 0, "a value with no visible member was offered");
+        for column in ["department", "archive"] {
+            let got = page_with(&engine, &credential, column, "", 20, true, 100_000);
+            assert!(!got.values.is_empty());
+            for value in &got.values {
+                let expected = visible
+                    .iter()
+                    .filter(|&&e| carrying(column, e) == Some(value.key.as_str()))
+                    .count() as u64;
+                assert_eq!(value.count, Some(expected), "{column}: {}", value.key);
+            }
+            // Without the flag there is no number at all — never a `0` standing in for one.
+            let got = page_with(&engine, &credential, column, "", 20, false, 100_000);
+            assert!(got.values.iter().all(|v| v.count.is_none()));
         }
-        // Without the flag there is no number at all — never a `0` standing in for one.
-        let got = page_with(&engine, &credential, "department", "", 20, false, 100_000);
-        assert!(got.values.iter().all(|v| v.count.is_none()));
     }
+}
+
+/// **Under a view, a count is the viewer's items of that view**: the values offered are the ones
+/// offered without it, and a value this viewer sees in another view, carried by no item of this
+/// one, counts 0. A view the viewer cannot reach is refused.
+#[test]
+fn a_count_under_a_view_counts_that_views_items() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "view-counts");
+    let carrying = |column: &str, e: u64| match column {
+        "department" => department_of(e),
+        _ => archive_of(e),
+    };
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let session = engine.authorise(&credential).expect("the credential resolves");
+        let visible = visible_to(&credential);
+        for column in ["department", "archive"] {
+            let everywhere = suggest_with(&engine, &session, column, None, "", 20, true, 100_000, 0);
+            let within =
+                suggest_with(&engine, &session, column, Some("s1"), "", 20, true, 100_000, 0);
+            assert_eq!(keys(&within), keys(&everywhere), "{column}: a view changes no value offered");
+            for value in &within.values {
+                let expected = visible
+                    .iter()
+                    .filter(|&&e| {
+                        in_second_view(e) && carrying(column, e) == Some(value.key.as_str())
+                    })
+                    .count() as u64;
+                assert_eq!(value.count, Some(expected), "{column}: {}", value.key);
+            }
+            // Every item carrying these is outside `s1`. The full principal sees one in `s0`.
+            let absent = if column == "department" { "legal" } else { "zz" };
+            let served = within.values.iter().find(|v| v.key == absent);
+            if credential == full_coverage_credential() {
+                assert!(served.is_some(), "{column}: {absent} is offered");
+            }
+            if let Some(served) = served {
+                assert_eq!(served.count, Some(0), "{column}: {absent} counts 0 in the view");
+            }
+        }
+    }
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    assert!(matches!(
+        engine.suggest(&session, "department", Some("nowhere"), "", 20, true, 100_000, 0),
+        Err(EngineError::UnknownView(_))
+    ));
+}
+
+/// **A count takes in an item ingested and not yet flushed**, as a filter's candidate does, and
+/// under a view it does not, the item holding no row there until its flush.
+#[test]
+fn a_count_takes_in_an_item_buffered_before_its_flush() {
+    let fx = fixture();
+    let mut engine = engine_for(&fx, "buffered-counts");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    let session = engine.authorise(&subset_credential()).unwrap();
+    let count_of = |view: Option<&str>, key: &str| {
+        suggest_with(&engine, &session, "department", view, "", 20, true, 100_000, 0)
+            .values
+            .iter()
+            .find(|v| v.key == key)
+            .and_then(|v| v.count)
+    };
+    let (before, before_in_view) = (count_of(None, "eng"), count_of(Some("s0"), "eng"));
+
+    engine
+        .ingest_rows(
+            vec![UnallocatedRow {
+                view: "s0".to_string(),
+                join: None,
+                descriptors: vec![b"0".to_vec(), b"1".to_vec()],
+                x: 1.0,
+                y: 1.0,
+                scalars: vec![
+                    WalScalar::Utf8("eng".to_string()),
+                    WalScalar::Utf8("xx".to_string()),
+                ],
+                terms: engine.resolve_terms(&[b"0".to_vec(), b"1".to_vec()]),
+                scoped: Vec::new(),
+            }],
+            "batch-1".to_string(),
+            [0u8; 32],
+        )
+        .expect("the ingest is accepted");
+
+    assert_eq!(count_of(None, "eng"), before.map(|n| n + 1), "the buffered item counts");
+    assert_eq!(
+        count_of(Some("s0"), "eng"),
+        before_in_view,
+        "the buffered item holds no row in the view before its flush"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -725,12 +861,12 @@ fn a_superseded_index_keeps_answering_after_its_files_are_unlinked() {
         .get("department")
         .expect("the fixture builds one");
     let before = engine
-        .suggest(&session, "department", "eng", 20, false, 100_000, 0)
+        .suggest(&session, "department", None, "eng", 20, false, 100_000, 0)
         .unwrap()
         .unwrap();
     std::fs::remove_dir_all(index.base().dir()).expect("the directory is the engine's own");
     let after = engine
-        .suggest(&session, "department", "eng", 20, false, 100_000, 0)
+        .suggest(&session, "department", None, "eng", 20, false, 100_000, 0)
         .expect("a mapped index outlives its directory entry")
         .unwrap();
     assert_eq!(keys(&before), keys(&after));
@@ -758,7 +894,7 @@ fn a_column_with_no_index_refuses_rather_than_answering_empty() {
         "the hook must have published, or the refusal below is asserting nothing"
     );
 
-    let refused = engine.suggest(&session, "department", "eng", 20, false, 100_000, 0);
+    let refused = engine.suggest(&session, "department", None, "eng", 20, false, 100_000, 0);
     match refused {
         Err(EngineError::SuggestionUnavailable { column, detail }) => {
             assert_eq!(column, "department");
@@ -973,7 +1109,7 @@ fn wait_for_set(engine: &Engine, session: &tessera_engine::Session, column: &str
         // not at all. Each request re-dispatches if nothing is in flight and nothing is held, so an
         // abandoned sweep is retried rather than waited on for ever.
         let before = engine.suggest_set_stats().hits;
-        suggest_with(engine, session, column, "", 20, false, 100_000, WIDE_CEILING);
+        suggest_with(engine, session, column, None, "", 20, false, 100_000, WIDE_CEILING);
         let stats = engine.suggest_set_stats();
         if stats.hits > before {
             return stats.hits;
@@ -1007,7 +1143,7 @@ fn the_two_routes_answer_the_same_page() {
         let mut before = Vec::new();
         for q in ["", "e", "s", "l", "legal", "counsel", "zzz"] {
             before.push(suggest_with(
-                &engine, &session, "department", q, 20, true, 100_000, 0,
+                &engine, &session, "department", None, q, 20, true, 100_000, 0,
             ));
         }
         wait_for_set(&engine, &session, "department");
@@ -1019,6 +1155,7 @@ fn the_two_routes_answer_the_same_page() {
                 &engine,
                 &session,
                 "department",
+                None,
                 q,
                 20,
                 true,
@@ -1050,12 +1187,12 @@ fn more_goes_from_a_spent_budget_to_exact_once_the_set_lands() {
 
     // A principal who sees nothing, at a budget of one: the probe route examines one value and
     // stops.
-    let probed = suggest_with(&engine, &session, "department", "", 20, false, 1, 0);
+    let probed = suggest_with(&engine, &session, "department", None, "", 20, false, 1, 0);
     assert!(probed.values.is_empty());
     assert!(probed.more, "the budget was spent");
 
     wait_for_set(&engine, &session, "department");
-    let from_set = suggest_with(&engine, &session, "department", "", 20, false, 1, WIDE_CEILING);
+    let from_set = suggest_with(&engine, &session, "department", None, "", 20, false, 1, WIDE_CEILING);
     assert!(from_set.values.is_empty());
     assert!(
         !from_set.more,
@@ -1073,7 +1210,7 @@ fn a_burst_of_keystrokes_starts_one_sweep() {
         .authorise(&full_coverage_credential())
         .expect("it resolves");
     for q in ["e", "en", "eng", "s", "sa", "sal", "l", "le"] {
-        suggest_with(&engine, &session, "department", q, 20, false, 100_000, WIDE_CEILING);
+        suggest_with(&engine, &session, "department", None, q, 20, false, 100_000, WIDE_CEILING);
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while engine.suggest_set_stats().in_flight > 0 {
@@ -1114,6 +1251,7 @@ fn a_suppression_between_the_sweep_and_the_read_retires_the_value() {
             &engine,
             &session,
             "department",
+            None,
             "eng",
             20,
             false,
@@ -1139,6 +1277,7 @@ fn a_suppression_between_the_sweep_and_the_read_retires_the_value() {
         &engine,
         &session,
         "department",
+        None,
         "eng",
         20,
         false,
@@ -1163,7 +1302,7 @@ fn a_viewer_wider_than_the_ceiling_never_gets_a_set() {
         .authorise(&full_coverage_credential())
         .expect("it resolves");
     for _ in 0..8 {
-        suggest_with(&engine, &session, "department", "", 20, false, 100_000, 0);
+        suggest_with(&engine, &session, "department", None, "", 20, false, 100_000, 0);
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
     let stats = engine.suggest_set_stats();
@@ -1183,7 +1322,7 @@ fn a_public_column_never_gets_a_set() {
         .authorise(&full_coverage_credential())
         .expect("it resolves");
     for _ in 0..4 {
-        suggest_with(&engine, &session, "archive", "", 20, false, 100_000, WIDE_CEILING);
+        suggest_with(&engine, &session, "archive", None, "", 20, false, 100_000, WIDE_CEILING);
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
     let stats = engine.suggest_set_stats();
@@ -1282,7 +1421,7 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
     // `aaa-first` is buffered, so it has no visible member yet and is not offered — the page is
     // unchanged, which is what makes a page read through the *stale* set (whose positions now name
     // other values) a visible failure rather than a coincidence.
-    let got = suggest_with(&engine, &session, "team", "", 20, false, 100_000, WIDE_CEILING);
+    let got = suggest_with(&engine, &session, "team", None, "", 20, false, 100_000, WIDE_CEILING);
     let mut served = keys(&got);
     served.sort_unstable();
     assert_eq!(served, ["alpha", "zulu"]);
@@ -1303,6 +1442,7 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
         &engine,
         &session,
         "team",
+        None,
         "",
         20,
         false,
@@ -1346,6 +1486,7 @@ fn a_prune_drops_the_tokens_visible_value_set() {
         &engine,
         &survivor,
         "department",
+        None,
         "",
         20,
         false,

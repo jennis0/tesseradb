@@ -1904,13 +1904,9 @@ fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
     let _ = session;
 }
 
-/// **`count` is the viewer's own `and_cardinality`**, and it agrees with the filter that resolves
-/// the same value under the same candidate — which is the only cross-check available, the two being
-/// different code over the same postings and the same extents.
-///
-/// The property that makes the arithmetic sound is disjointness: the extents sweep counts entities
-/// ingested since the build and the postings cover the build, so the halves add. A test that only
-/// exercised a bundle with no extents would pass with the halves multiplied.
+/// **A value's count is what a filter on that value returns** under the same candidate, the two
+/// being different code over the same postings and the same extents. The fixture has extents, so
+/// a count that multiplied or dropped a half would disagree.
 ///
 /// **Mutations this kills:** counting extent codes as a set rather than per entity; counting the
 /// posting whole instead of against the candidate; adding a half twice.
@@ -1923,6 +1919,16 @@ fn a_values_count_is_what_a_filter_on_that_value_returns() {
         .filter_columns
         .category_membership("department", &cand)
         .expect("a `derived` category carries membership postings");
+    let codes: Vec<u32> = fx.codes.values().copied().collect();
+    let counts = generation
+        .filter_columns
+        .category_counts(
+            "department",
+            &cand,
+            tessera_engine::filter::CountCodes::All(&|visit| codes.iter().for_each(|&c| visit(c))),
+            &|_| {},
+        )
+        .expect("a declared category counts");
 
     for (key, code) in &fx.codes {
         let resolved = generation
@@ -1933,11 +1939,7 @@ fn a_values_count_is_what_a_filter_on_that_value_returns() {
                 &cand,
             )
             .expect("a declared category resolves");
-        assert_eq!(
-            membership.count(*code).unwrap(),
-            resolved.cardinality(),
-            "{key} (code {code})"
-        );
+        assert_eq!(counts.get(*code), resolved.cardinality(), "{key} (code {code})");
         // And the boolean is the count's own emptiness, so the two gates cannot disagree.
         assert_eq!(
             membership.carries(*code).unwrap(),
@@ -3184,7 +3186,7 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
     };
     let suggested = || {
         let page = engine
-            .suggest(&session, "department", "", 20, false, 100_000, 0)
+            .suggest(&session, "department", None, "", 20, false, 100_000, 0)
             .expect("the column suggests")
             .expect("the column is a category");
         page.values

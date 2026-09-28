@@ -408,9 +408,9 @@ pub struct Suggestion {
     pub key: String,
     pub title: Option<String>,
     pub span: MatchSpan,
-    /// The number of items carrying this value that this viewer may see — present iff the request
-    /// asked for counts. **Never `0` as a stand-in for absent**: a served `0` is a real answer that
-    /// this surface cannot produce, since a value with no visible member is not suggested at all.
+    /// The number of items carrying this value that this viewer may see, within the request's view
+    /// where it names one: present iff the request asked for counts. Under a view, a value visible
+    /// to this viewer in another view and carried by no item of this one counts 0.
     pub count: Option<u64>,
 }
 
@@ -469,11 +469,19 @@ impl Engine {
     /// serving the values found so far: refusing at the value the read failed at would make the
     /// refusal a function of the prefix the caller typed, which is an oracle over value names in a
     /// fault state.
+    ///
+    /// # Counts
+    ///
+    /// With `counts`, each value carries the number of items carrying it that this viewer may see:
+    /// the base, the extents and the buffered rows, from inside the composed candidate. With
+    /// `view`, only items holding a row in that view count, and a value visible in another view
+    /// counts 0 here. An unknown or unreachable view is refused as [`EngineError::UnknownView`].
     #[allow(clippy::too_many_arguments)]
     pub fn suggest(
         &self,
         session: &Session,
         column: &str,
+        view: Option<&str>,
         q: &str,
         limit: usize,
         counts: bool,
@@ -493,16 +501,31 @@ impl Engine {
                 detail: format!("vocabulary '{vocabulary_name}' has no suggestion index"),
             });
         };
+        let row_space = match view {
+            None => None,
+            Some(view) => {
+                let unknown = || EngineError::UnknownView(view.to_string());
+                if !session.visible_views().contains_view(view) {
+                    return Err(unknown());
+                }
+                let data = generation
+                    .bundle
+                    .partitions
+                    .values()
+                    .find_map(|partition| partition.views.get(view))
+                    .ok_or_else(unknown)?;
+                Some(&data.row_space)
+            }
+        };
 
         // **The gate, before a single entry is read**, and it is `Engine::categories`' gate
         // verbatim. A `public` set has no predicate at all; a `derived` one is derived from inside
         // `M_auth` per request, against the composed candidate rather than against the request's
         // filters (I3, I12).
         //
-        // A count is the viewer's own `and_cardinality` and needs the mask whatever the visibility
-        // says, so `counts` composes the candidate for a `public` column too. That only ever
-        // narrows a number; it never widens the set of values served, which the visibility alone
-        // still decides.
+        // A count is taken inside the candidate whatever the visibility says, so `counts` composes
+        // it for a `public` column too. That only ever narrows a number; it never widens the set of
+        // values served, which the visibility alone still decides.
         let derived = vocabulary.visibility() == Visibility::Derived;
         let candidate = if derived || counts {
             let fragment = self.fragment_for(session, &generation)?;
@@ -515,29 +538,17 @@ impl Engine {
         } else {
             None
         };
-        let membership = match &candidate {
-            None => None,
-            Some(candidate) => Some(
+        let membership = match (&candidate, derived) {
+            (Some(candidate), true) => Some(
                 generation
                     .filter_columns
                     .category_membership(column, candidate)
-                    .map_err(|e| {
-                        // A `public` column reaches this only because a count was asked for, and a
-                        // count it cannot compute is refused rather than omitted: a page whose
-                        // `count` fields were silently absent would read as "asked and answered".
-                        if derived {
-                            EngineError::VocabularyVisibilityUnavailable {
-                                column: column.to_string(),
-                                detail: e.to_string(),
-                            }
-                        } else {
-                            EngineError::SuggestionUnavailable {
-                                column: column.to_string(),
-                                detail: format!("counts were asked for and {e}"),
-                            }
-                        }
+                    .map_err(|e| EngineError::VocabularyVisibilityUnavailable {
+                        column: column.to_string(),
+                        detail: e.to_string(),
                     })?,
             ),
+            _ => None,
         };
         // **The route** (§6.3, decision 0124). A `public` column has no predicate to answer, so it
         // never wants a set; a `derived` one takes the set where this viewer's own composed
@@ -623,26 +634,40 @@ impl Engine {
             live,
             &fold,
             q,
-            crate::suggest::WalkBudget {
-                limit,
-                walk_budget,
-                counts,
-            },
+            crate::suggest::WalkBudget { limit, walk_budget },
             &|code| visible(code),
-            &|code| match &membership {
-                Some(membership) => membership.count(code).map_err(|e| {
-                    EngineError::SuggestionUnavailable {
-                        column: column.to_string(),
-                        detail: e.to_string(),
-                    }
-                }),
-                // Unreachable: `counts` composes a candidate for both visibilities, so a count is
-                // only ever asked for where a membership exists.
-                None => Ok(0),
-            },
             &unreadable,
             set.as_deref(),
         )?;
+        let counted = match (&candidate, counts) {
+            (Some(candidate), true) => {
+                let within;
+                let set = match row_space {
+                    None => candidate,
+                    Some(row_space) => {
+                        within = row_space.restrict_to_view(candidate, row_space.extent_count());
+                        &within
+                    }
+                };
+                let codes: Vec<u32> = found.iter().map(|found| found.code).collect();
+                let buffered = |visit: &mut dyn FnMut(u32, u32)| {
+                    buffered_codes(&generation.bundle.manifest, &generation.buffer, column, visit)
+                };
+                let counted = self.pool.install(|| {
+                    generation.filter_columns.category_counts(
+                        column,
+                        set,
+                        crate::filter::CountCodes::Only(&codes),
+                        &buffered,
+                    )
+                });
+                Some(counted.map_err(|e| EngineError::SuggestionUnavailable {
+                    column: column.to_string(),
+                    detail: format!("counts were asked for and {e}"),
+                })?)
+            }
+            _ => None,
+        };
         let values: Vec<Suggestion> = found
             .into_iter()
             .map(|found| Suggestion {
@@ -654,7 +679,7 @@ impl Engine {
                     start: found.start,
                     len: found.len,
                 },
-                count: found.count,
+                count: counted.as_ref().map(|counted| counted.get(found.code)),
             })
             .collect();
 
@@ -670,3 +695,49 @@ impl Engine {
     }
 }
 
+/// Visit `(entity, code)` for each buffered row holding a value in `column`: an entity-scoped
+/// column's on the entity's own row, a group-scoped family's (`name@view`) on every row whose
+/// values that view's column holds. The rows a flush writes into the column's next extent.
+pub(crate) fn buffered_codes(
+    manifest: &tessera_store::manifest::Manifest,
+    buffer: &tessera_lifecycle::IngestBuffer,
+    column: &str,
+    visit: &mut dyn FnMut(u32, u32),
+) {
+    use crate::flush::{buffered_value, category_code, BufferedPlace};
+    let mut emit = |entity: &tessera_types::EntityId, item, place| {
+        let code = category_code(buffered_value(item, place));
+        debug_assert!(code.is_some(), "a buffered category value is a code");
+        if let (Ok(entity), Some(code)) = (u32::try_from(entity.raw()), code) {
+            visit(entity, code);
+        }
+    };
+    if let Some(index) = manifest
+        .declared_scalars
+        .iter()
+        .position(|scalar| scalar.name == column)
+    {
+        for (entity, item) in buffer.iter() {
+            emit(entity, item, BufferedPlace::Entity(index));
+        }
+        return;
+    }
+    let Some((name, view)) = column.split_once(crate::filter::PIN) else {
+        return;
+    };
+    let mut places: rustc_hash::FxHashMap<&str, Option<usize>> = Default::default();
+    for (entity, item) in buffer.rows() {
+        let place = *places.entry(item.view.as_str()).or_insert_with(|| {
+            (crate::write::scoped_owner_view_of(manifest, &item.view) == view)
+                .then(|| {
+                    crate::write::scoped_families_of_view(manifest, &item.view)
+                        .iter()
+                        .position(|family| family.name == name)
+                })
+                .flatten()
+        });
+        if let Some(index) = place {
+            emit(entity, item, BufferedPlace::Scoped(index));
+        }
+    }
+}
