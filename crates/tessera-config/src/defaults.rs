@@ -33,6 +33,15 @@ pub const DEFAULT_MAX_SUGGEST_SET_ENTITIES: u64 = 10_000_000;
 
 pub const DEFAULT_MAX_BROWSE_ROWS: usize = 200;
 
+/// Tables one `POST /v1/aggregate` may ask for.
+pub const DEFAULT_MAX_AGGREGATE_GROUPINGS: u32 = 16;
+
+/// The largest `top` of one aggregate grouping.
+pub const DEFAULT_MAX_AGGREGATE_TOP: u32 = 1_000;
+
+/// The most values or artifacts one aggregate grouping may name.
+pub const DEFAULT_MAX_AGGREGATE_NAMED: u32 = 1_000;
+
 pub const DEFAULT_MAX_REGION_VERTICES: u64 = 10_000;
 
 pub const DEFAULT_REGION_CACHE_BYTES: u64 = 256 * 1024 * 1024;

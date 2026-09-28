@@ -92,6 +92,9 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `bulk_admission` | integer | `2` | Bulk reads running at once. One more is refused with 429 at once, and `0` refuses every bulk read. Bulk reads may hold seven times `max_page_bytes` of memory each. A value above 2305843009213693951 is refused. |
 | `bulk_response_bytes` | integer | `268435456` (256 MiB) | The most bytes one bulk-read response carries before it ends with a cursor to resume from. A value below `max_page_bytes` is refused. |
 | `bulk_response_ms` | integer | `30000` | Milliseconds one bulk-read response may run before it ends with a cursor to resume from. `stream_deadline_ms` ends one too, whichever comes first. |
+| `max_aggregate_groupings` | integer | `16` | The most groupings one `POST /v1/aggregate` may ask for, each a table of the response. A request with more is refused with 422. |
+| `max_aggregate_top` | integer | `1000` | The largest `top` one aggregate grouping may ask for. A larger one is refused with 422. |
+| `max_aggregate_named` | integer | `1000` | The most values or artifacts one aggregate grouping may name. A longer list is refused with 422. |
 | `visible_wait_max_secs` | integer | `30` | The most seconds a write asking to wait until it is visible, and `/control/flush`, wait before answering `visible: false`. |
 | `row_projection_cache_bytes` | integer | `2147483648` (2 GiB) | Bytes of each viewer's projection of the rows they may see, kept between requests. |
 | `fragment_cache_bytes` | integer | `1073741824` (1 GiB) | Bytes of cached visibility masks kept in memory. Masks also persist in the `[bundle]` cache directory, which this does not bound. |

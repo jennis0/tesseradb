@@ -313,6 +313,20 @@ struct RawServe {
     ///
     /// Default: `30000`.
     bulk_response_ms: Option<u64>,
+    /// The most groupings one `POST /v1/aggregate` may ask for, each a table of the response. A
+    /// request with more is refused with 422.
+    ///
+    /// Default: `16`.
+    max_aggregate_groupings: Option<u32>,
+    /// The largest `top` one aggregate grouping may ask for. A larger one is refused with 422.
+    ///
+    /// Default: `1000`.
+    max_aggregate_top: Option<u32>,
+    /// The most values or artifacts one aggregate grouping may name. A longer list is refused
+    /// with 422.
+    ///
+    /// Default: `1000`.
+    max_aggregate_named: Option<u32>,
     /// The most seconds a write asking to wait until it is visible, and `/control/flush`, wait
     /// before answering `visible: false`.
     ///
@@ -526,6 +540,12 @@ pub struct Config {
     /// Time one bulk-read response may run. `stream_deadline_ms` also ends one, whichever comes
     /// first, and either way the response ends with a cursor to resume from.
     pub bulk_response_ms: u64,
+    /// Groupings per `POST /v1/aggregate`.
+    pub max_aggregate_groupings: u32,
+    /// The largest `top` of an aggregate grouping.
+    pub max_aggregate_top: u32,
+    /// The longest named list of an aggregate grouping.
+    pub max_aggregate_named: u32,
     pub region_cache_bytes: u64,
     /// Add `stage_ns` to a viewport response's trailer; does nothing in a binary built without
     /// `bench-timing`.
@@ -874,6 +894,13 @@ fn parse(text: &str) -> Result<Config> {
         bulk_admission,
         bulk_response_bytes,
         bulk_response_ms,
+        max_aggregate_groupings: serve
+            .max_aggregate_groupings
+            .unwrap_or(DEFAULT_MAX_AGGREGATE_GROUPINGS),
+        max_aggregate_top: serve.max_aggregate_top.unwrap_or(DEFAULT_MAX_AGGREGATE_TOP),
+        max_aggregate_named: serve
+            .max_aggregate_named
+            .unwrap_or(DEFAULT_MAX_AGGREGATE_NAMED),
         region_cache_bytes: serve
             .region_cache_bytes
             .unwrap_or(DEFAULT_REGION_CACHE_BYTES),

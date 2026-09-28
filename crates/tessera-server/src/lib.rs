@@ -5,6 +5,7 @@
 //! planes, announces their addresses on stdout and serves. A refusal to start is therefore
 //! testable without a socket.
 
+mod aggregate;
 pub mod control;
 pub mod cors;
 mod decode;

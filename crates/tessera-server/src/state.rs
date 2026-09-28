@@ -467,6 +467,11 @@ pub struct ServeLimits {
     pub bulk_response_bytes: usize,
     /// Time one bulk-read response may run. See `Config::bulk_response_ms`.
     pub bulk_response_ms: u64,
+    /// `POST /v1/aggregate`'s ceilings on groupings, `top` and a named list, published in
+    /// `/v1/meta`. See `Config::max_aggregate_groupings`.
+    pub max_aggregate_groupings: u32,
+    pub max_aggregate_top: u32,
+    pub max_aggregate_named: u32,
     /// `serve.dev_cors_origins`; empty means no CORS layer. See [`crate::cors`].
     pub dev_cors_origins: Vec<String>,
     /// `serve.cors_origins`, read by the viewer router only.
@@ -505,6 +510,9 @@ impl ServeLimits {
             max_page_bytes: config.max_page_bytes,
             bulk_response_bytes: config.bulk_response_bytes,
             bulk_response_ms: config.bulk_response_ms,
+            max_aggregate_groupings: config.max_aggregate_groupings,
+            max_aggregate_top: config.max_aggregate_top,
+            max_aggregate_named: config.max_aggregate_named,
             dev_cors_origins: config.dev_cors_origins.clone(),
             cors_origins: config.cors_origins.clone(),
             cors_loopback: config.cors_loopback,
@@ -541,6 +549,9 @@ impl Default for ServeLimits {
             max_page_bytes: c::DEFAULT_MAX_PAGE_BYTES,
             bulk_response_bytes: c::DEFAULT_BULK_RESPONSE_BYTES,
             bulk_response_ms: c::DEFAULT_BULK_RESPONSE_MS,
+            max_aggregate_groupings: c::DEFAULT_MAX_AGGREGATE_GROUPINGS,
+            max_aggregate_top: c::DEFAULT_MAX_AGGREGATE_TOP,
+            max_aggregate_named: c::DEFAULT_MAX_AGGREGATE_NAMED,
             dev_cors_origins: Vec::new(),
             cors_origins: Vec::new(),
             cors_loopback: false,

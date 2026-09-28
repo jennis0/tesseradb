@@ -1,5 +1,5 @@
 //! The viewer plane: `/v1/meta`, `/v1/categories`, `/v1/viewport`, `/v1/items`,
-//! `/v1/items/{tessera_id}` and `/v1/artifacts`, plus `/healthz` and `/readyz`. Bearer auth is a session token minted by the
+//! `/v1/items/{tessera_id}`, `/v1/artifacts` and `/v1/aggregate`, plus `/healthz` and `/readyz`. Bearer auth is a session token minted by the
 //! session plane's `/session/authorise`.
 
 use std::sync::Arc;
@@ -42,6 +42,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/artifacts", post(crate::records::artifacts))
         .route("/v1/artifacts/{tessera_id}", post(artifact))
         .route("/v1/artifacts/browse", post(browse))
+        .route("/v1/aggregate", post(crate::aggregate::aggregate))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         // Trims the allocator after responses; mounted on every plane, so a node that never
@@ -271,6 +272,11 @@ async fn meta(
             // `POST /v1/items`' page ceilings: rows, and Arrow bytes before compression.
             "max_page_rows": state.limits.max_page_rows,
             "max_page_bytes": state.limits.max_page_bytes,
+            // `POST /v1/aggregate`'s ceilings: groupings per request, and a grouping's `top` and
+            // named list. Its pages are held to the two page ceilings above.
+            "max_aggregate_groupings": state.limits.max_aggregate_groupings,
+            "max_aggregate_top": state.limits.max_aggregate_top,
+            "max_aggregate_named": state.limits.max_aggregate_named,
         },
         // The layers this principal may know exist, with what each declared. Never a layer's
         // artifact count, which counts objects the principal may not see, and never its gate
@@ -425,13 +431,28 @@ fn resolve_category_column(
             None => return Err(ApiError::Unknown(format!("unknown view '{requested}'"))),
         },
     };
-    match meta.resolve_category_column(column, view, visible) {
+    match category_column(meta, column, view, visible)? {
+        Some(resolved) => Ok((resolved, requested_view.map(|_| view.to_string()))),
         // A non-category column gets the same 404 as no column at all.
+        None => Err(ApiError::Unknown("unknown category column".to_string())),
+    }
+}
+
+/// The category column `column` names under the resolved `view` (`""` for none), as a filter leaf
+/// resolves it, or `None` where it names no category column this principal can reach. A scoped
+/// family's spelling that needs a view or names a pin wrongly is refused.
+pub(crate) fn category_column(
+    meta: &tessera_engine::EngineMeta,
+    column: &str,
+    view: &str,
+    visible: &tessera_engine::gate::VisibleViews,
+) -> Result<Option<String>, ApiError> {
+    match meta.resolve_category_column(column, view, visible) {
         tessera_engine::LeafColumn::Resolved {
             column: resolved,
             family: tessera_engine::filter::Family::Category,
             ..
-        } => Ok((resolved, requested_view.map(|_| view.to_string()))),
+        } => Ok(Some(resolved)),
         tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
             "'{column}' is scoped to view group '{group}' and this request names no view of \
              it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
@@ -442,7 +463,7 @@ fn resolve_category_column(
         tessera_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
             "'{column}' is not scoped to a view group; leave out the pin"
         ))),
-        _ => Err(ApiError::Unknown("unknown category column".to_string())),
+        _ => Ok(None),
     }
 }
 
