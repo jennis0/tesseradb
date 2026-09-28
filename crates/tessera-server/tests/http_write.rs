@@ -709,7 +709,8 @@ async fn ingest_answers_each_rows_tessera_id_as_the_string_the_viewer_serves() {
 ///
 /// Slowness is engineered by the tile count rather than by corpus size, so the fixture stays at
 /// the file's default `N_ITEMS` and builds as fast as every other test here: the whole extent at
-/// `zoom = 11` is `4^11 ≈ 4.2M` tiles, each searched for its rows whether it holds any or not.
+/// `zoom = 10` is `4^10 ≈ 1M` tiles, each searched for its rows whether it holds any or not. The
+/// request's memory grows with its tiles, about 300 MB of process RSS here.
 ///
 /// **The passing (post-refactor) bound is self-scaling, not a fixed wall-clock bet.** A fixed
 /// `healthz_elapsed < 1s` assumed this debug-profile binary's absolute speed; on a slower or more
@@ -732,7 +733,7 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     let mut config = default_engine_config();
     // Wide enough to let the request below through `Engine::viewport`'s tile bound rather than
     // being refused before it costs anything.
-    config.max_tiles_per_request = 1 << 22;
+    config.max_tiles_per_request = 1 << 20;
     let server = spawn_server_with_config(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -751,7 +752,7 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
             .post(viewer_url)
             .bearer_auth(token)
             .json(&serde_json::json!({
-                "view": "s0", "zoom": 11, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
+                "view": "s0", "zoom": 10, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
             }))
             .send()
             .await
@@ -799,7 +800,7 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     assert!(
         viewport_elapsed > std::time::Duration::from_millis(200),
         "the viewport request finished in {viewport_elapsed:?}, too fast to exercise this test's \
-         starvation scenario -- widen the underlay offset"
+         starvation scenario -- raise the zoom of the slow request"
     );
     assert!(
         healthz_elapsed < viewport_elapsed / 4,

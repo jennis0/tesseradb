@@ -613,12 +613,14 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
 // ---------------------------------------------------------------------------------------------
 
 /// A slow viewport request, engineered exactly as `healthz_stays_prompt_while_a_long_viewport_runs`
-/// does (see its doc for the cost-model argument): the whole extent at `zoom = 11` against a
+/// does (see its doc for the cost-model argument): the whole extent at `zoom = 10` against a
 /// server whose `EngineConfig` has been widened to allow it. Used throughout the gate tests below
-/// to hold the compute permit for long enough to deterministically observe saturation.
+/// to hold the compute permit for long enough to deterministically observe saturation, and by the
+/// cancellation tests, whose check sits at the top of the tile loop, so a disconnect landing after
+/// any prefix of the `4^10` tiles releases the gate long before the rest would have run.
 fn slow_viewport_body() -> serde_json::Value {
     serde_json::json!({
-        "view": "s0", "zoom": 11, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
+        "view": "s0", "zoom": 10, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
     })
 }
 
@@ -626,12 +628,11 @@ fn fast_viewport_body() -> serde_json::Value {
     serde_json::json!({ "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1 })
 }
 
-/// A server config wide enough for [`slow_viewport_body`] to pass `Engine::viewport`'s own
-/// bounds checks rather than being refused as `EngineError::UnderlayRefused` before it costs
-/// anything.
+/// A server config wide enough for [`slow_viewport_body`] to pass `Engine::viewport`'s tile bound
+/// rather than being refused as `EngineError::TooManyTiles` before it costs anything.
 fn engine_config_for_slow_viewport() -> EngineConfig {
     let mut config = default_engine_config();
-    config.max_tiles_per_request = 1 << 22;
+    config.max_tiles_per_request = 1 << 20;
     config
 }
 
@@ -1092,13 +1093,6 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
 // Cooperative cancellation wired to client disconnect (the rapid-pan case).
 // ---------------------------------------------------------------------------------------------
 
-/// A slow viewport request whose cost is spread across many tiles. The cancellation check sits at
-/// the top of the tile loop, so a disconnect landing after any prefix of the `4^11` tiles of
-/// `zoom = 11` releases the gate long before the rest would have run.
-fn slow_multi_tile_viewport_body() -> serde_json::Value {
-    slow_viewport_body()
-}
-
 /// Warm-session scope: a client that drops its connection mid-viewport — the rapid-pan case
 /// — releases the compute-admission gate's permit well before the full service time an
 /// uncancelled request of the same shape takes. Observed two ways: directly, via `/control/
@@ -1111,7 +1105,7 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 /// COLD first viewport's build cost would dominate this test's timing regardless of cancellation
 /// and would prove nothing about the per-tile checks. A fast warm-up request first, on the SAME token, gets this token/view's row projection
 /// to `Ready` before either slow request below, so the slow request's cost is entirely its
-/// (cancellation-interruptible, per-tile) [`slow_multi_tile_viewport_body`] sweep.
+/// (cancellation-interruptible, per-tile) [`slow_viewport_body`] sweep.
 ///
 /// **Self-scaling, not a fixed wall-clock bet** — same pattern as this file's other slow-viewport
 /// tests (see e.g. `healthz_stays_prompt_while_a_long_viewport_runs`'s doc): `baseline_elapsed` is
@@ -1184,7 +1178,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
         .client
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(&token)
-        .json(&slow_multi_tile_viewport_body())
+        .json(&slow_viewport_body())
         .send()
         .await
         .unwrap();
@@ -1197,7 +1191,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
     assert!(
         baseline_elapsed > std::time::Duration::from_millis(50),
         "the uncancelled baseline finished in {baseline_elapsed:?}, too fast to exercise this \
-         test's early-release scenario -- widen the underlay offset"
+         test's early-release scenario -- raise the zoom of the slow request"
     );
 
     // The actual scenario: a second slow request, admitted and genuinely running
@@ -1210,7 +1204,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
         client
             .post(viewer_url)
             .bearer_auth(slow_token)
-            .json(&slow_multi_tile_viewport_body())
+            .json(&slow_viewport_body())
             .send()
             .await
     });

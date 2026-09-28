@@ -660,9 +660,8 @@ pub struct ValueColumn {
     /// Present entities. `None` means every entity in `0..codes.len()` carries a value, and the
     /// entity id is the slot — the case that costs nothing to address.
     presence: Option<Bitmap>,
-    /// For a partial column, how many present entities lie below each block of 2^16, filled on
-    /// the first lookup that needs it.
-    block_ranks: std::sync::OnceLock<Vec<u64>>,
+    /// For a partial column, [`Self::block_ranks`], filled on the first lookup that needs it.
+    block_ranks: std::sync::OnceLock<(u32, Vec<u64>)>,
 }
 
 impl ValueColumn {
@@ -985,25 +984,32 @@ impl ValueColumn {
             // whole-bitmap rank sums every container below the entity.
             Some(presence) => presence.contains(entity).then(|| {
                 let first = entity & !0xFFFF;
-                let below = self.block_ranks(presence)[(entity >> 16) as usize];
+                let (first_block, ranks) = self.block_ranks(presence);
+                let below = ranks[((entity >> 16) - first_block) as usize];
                 (below + presence.range_cardinality(first..entity)) as usize
             }),
         }
     }
 
-    /// How many present entities lie below each block of 2^16, and below the block past the last.
-    fn block_ranks(&self, presence: &Bitmap) -> &[u64] {
-        self.block_ranks.get_or_init(|| {
-            let blocks = presence.maximum().map_or(0, |m| (m >> 16) as usize + 1);
-            let mut ranks = Vec::with_capacity(blocks + 1);
+    /// The first block holding a present entity, and how many present entities lie below each
+    /// block from it to the block past the last: memory proportional to the column's own span of
+    /// entity space.
+    fn block_ranks(&self, presence: &Bitmap) -> (u32, &[u64]) {
+        let (first, ranks) = self.block_ranks.get_or_init(|| {
+            let (Some(lo), Some(hi)) = (presence.minimum(), presence.maximum()) else {
+                return (0, vec![0]);
+            };
+            let (lo, hi) = (lo >> 16, hi >> 16);
+            let mut ranks = Vec::with_capacity((hi - lo) as usize + 2);
             let mut below = 0u64;
-            for block in 0..blocks as u32 {
+            for block in lo..=hi {
                 ranks.push(below);
                 below += presence.range_cardinality(block << 16..=(block << 16) | 0xFFFF);
             }
             ranks.push(below);
-            ranks
-        })
+            (lo, ranks)
+        });
+        (*first, ranks)
     }
 
     /// Entities carrying `value`, **restricted to `candidate`**.
@@ -1197,58 +1203,6 @@ impl ValueColumn {
     /// This is the direction an inverted index cannot answer, and having it is why the conformance
     /// oracle reads the artefact under test rather than a parallel relation the fold could forget
     /// (`filter-index.md` §9), and why substring matching needs no trigram index to verify against.
-    /// The entities `key << 16 ..= key << 16 | 0xFFFF`, addressed by their low 16 bits: which
-    /// carry a value here and what it is. `O(1024 + runs of the block)` to build, `O(1)` per
-    /// lookup, where [`Self::value_of`] on a partial column pays a rank over the whole presence.
-    pub fn block(&self, key: u16) -> Block<'_> {
-        let first = u32::from(key) << 16;
-        let slots = match &self.presence {
-            None => {
-                let len = self.codes.len();
-                if first as usize >= len {
-                    BlockSlots::Empty
-                } else {
-                    BlockSlots::Dense {
-                        first: first as usize,
-                        end: len,
-                    }
-                }
-            }
-            Some(presence) => {
-                let ranks = self.block_ranks(presence);
-                let key = usize::from(key);
-                if key + 1 >= ranks.len() || ranks[key + 1] == ranks[key] {
-                    BlockSlots::Empty
-                } else {
-                    let mut words = Box::new([0u64; 1024]);
-                    tessera_roaring::for_each_run_in(
-                        presence,
-                        first..first.saturating_add(0xFFFF),
-                        &mut |run| set_bits(&mut words, run.start - first, run.end - first),
-                    );
-                    if presence.contains(first | 0xFFFF) {
-                        words[1023] |= 1 << 63;
-                    }
-                    let mut before = Box::new([0u32; 1024]);
-                    let mut total = 0u32;
-                    for (word, rank) in words.iter().zip(before.iter_mut()) {
-                        *rank = total;
-                        total += word.count_ones();
-                    }
-                    BlockSlots::Sparse {
-                        first_slot: ranks[key] as usize,
-                        words,
-                        before,
-                    }
-                }
-            }
-        };
-        Block {
-            codes: &self.codes,
-            slots,
-        }
-    }
-
     pub fn value_of(&self, entity: u32) -> Option<AttrLocalId> {
         let slot = self.slot_of(entity)?;
         Some(AttrLocalId::new(self.codes.at(slot)))
@@ -1350,143 +1304,6 @@ impl ValueColumn {
                 ValueColumn::partial(codes, presence)
             }
         }
-    }
-}
-
-/// One 2^16-entity block of a [`ValueColumn`], from [`ValueColumn::block`].
-pub struct Block<'a> {
-    codes: &'a Codes,
-    slots: BlockSlots,
-}
-
-enum BlockSlots {
-    /// No entity of the block carries a value.
-    Empty,
-    /// Every entity below `end` carries one, at the slot its id names.
-    Dense { first: usize, end: usize },
-    /// The block's present entities as bits, with each word's count of present entities before it.
-    Sparse {
-        first_slot: usize,
-        words: Box<[u64; 1024]>,
-        before: Box<[u32; 1024]>,
-    },
-}
-
-impl Block<'_> {
-    /// The value the block's entity `low` carries here, `None` where it carries none.
-    #[inline]
-    pub fn code(&self, low: u16) -> Option<u32> {
-        let slot = match &self.slots {
-            BlockSlots::Empty => return None,
-            BlockSlots::Dense { first, end } => {
-                let slot = first + usize::from(low);
-                if slot >= *end {
-                    return None;
-                }
-                slot
-            }
-            BlockSlots::Sparse {
-                first_slot,
-                words,
-                before,
-            } => {
-                let (word, bit) = (usize::from(low >> 6), low & 63);
-                if words[word] >> bit & 1 == 0 {
-                    return None;
-                }
-                let below = (words[word] & ((1u64 << bit) - 1)).count_ones();
-                first_slot + (before[word] + below) as usize
-            }
-        };
-        Some(self.codes.at(slot))
-    }
-
-    /// Whether no entity of the block carries a value here.
-    pub fn is_empty(&self) -> bool {
-        matches!(self.slots, BlockSlots::Empty)
-    }
-
-    /// Call `f` with the code of every entity whose bit is set in `bits`, a word per 64 of the
-    /// block's entities, in ascending order, for those the block holds a value for, and clear
-    /// their bits: what is left set is the entities the block holds nothing for. The width and
-    /// the addressing are decided once, and the values are read in slot order.
-    pub fn take(&self, bits: &mut [u64; 1024], mut f: impl FnMut(u32)) {
-        macro_rules! walk {
-            ($values:expr, $widen:expr) => {{
-                let values = $values;
-                match &self.slots {
-                    BlockSlots::Empty => {}
-                    BlockSlots::Dense { first, end } => {
-                        let held = (end - first).min(1 << 16);
-                        for (w, word) in bits.iter_mut().enumerate().take(held.div_ceil(64)) {
-                            let top = held - w * 64;
-                            let mask = if top >= 64 { u64::MAX } else { (1u64 << top) - 1 };
-                            let mut hit = *word & mask;
-                            *word &= !mask;
-                            while hit != 0 {
-                                let slot = first + w * 64 + hit.trailing_zeros() as usize;
-                                f($widen(values[slot]));
-                                hit &= hit - 1;
-                            }
-                        }
-                    }
-                    BlockSlots::Sparse {
-                        first_slot,
-                        words,
-                        before,
-                    } => {
-                        for (w, word) in bits.iter_mut().enumerate() {
-                            let mut hit = *word & words[w];
-                            if hit == 0 {
-                                continue;
-                            }
-                            *word &= !words[w];
-                            let base = first_slot + before[w] as usize;
-                            while hit != 0 {
-                                let bit = hit.trailing_zeros();
-                                let below = (words[w] & ((1u64 << bit) - 1)).count_ones();
-                                f($widen(values[base + below as usize]));
-                                hit &= hit - 1;
-                            }
-                        }
-                    }
-                }
-            }};
-        }
-        match self.codes {
-            Codes::U8(v) => walk!(v.as_ref(), u32::from),
-            Codes::U16(v) => walk!(v.as_ref(), u32::from),
-            Codes::U32(v) => walk!(v.as_ref(), std::convert::identity),
-            _ => {
-                for (w, word) in bits.iter_mut().enumerate() {
-                    let mut hit = *word;
-                    while hit != 0 {
-                        let low = (w * 64) as u16 + hit.trailing_zeros() as u16;
-                        if let Some(code) = self.code(low) {
-                            *word &= !(1 << (low & 63));
-                            f(code);
-                        }
-                        hit &= hit - 1;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Set bits `lo..hi` of a block's words, a word at a time.
-fn set_bits(words: &mut [u64; 1024], lo: u32, hi: u32) {
-    let mut bit = lo;
-    while bit < hi {
-        let offset = bit & 63;
-        let take = (64 - offset).min(hi - bit);
-        let mask = if take == 64 {
-            u64::MAX
-        } else {
-            ((1u64 << take) - 1) << offset
-        };
-        words[(bit >> 6) as usize] |= mask;
-        bit += take;
     }
 }
 
@@ -1630,58 +1447,30 @@ mod tests {
     use super::*;
     use crate::values_writer::write_value_column;
 
-    /// A block answers for each of its entities what `value_of` answers, over a universal column,
-    /// a partial one with scattered and dense blocks and a block's last entity, and past the end.
+    /// A partial column high in entity space answers each entity as a whole-bitmap rank would,
+    /// in its first block, across a block boundary and in its last.
     #[test]
-    fn a_block_answers_what_value_of_answers() {
-        let n: u32 = 5 * 65_536 + 123;
-        let codes: Vec<u16> = (0..n).map(|e| (e % 977) as u16).collect();
-        let universal = ValueColumn::universal(Codes::U16(codes.into()));
-        let mut present: Vec<u32> = (0..n)
-            .filter(|e| match e >> 16 {
-                0 => e % 7 == 0,
-                1 => true,
-                2 => false,
-                3 => e % 2 == 1,
-                _ => e % 65_536 < 30,
-            })
+    fn a_partial_column_high_in_entity_space_finds_each_slot() {
+        let first = 40u32 << 16;
+        let present: Vec<u32> = (first..first + 3 * 65_536)
+            .filter(|e| e % 3 == 0 || e % 65_536 == 65_535)
             .collect();
-        present.push((3 << 16) | 0xFFFF);
-        present.sort_unstable();
-        present.dedup();
-        let partial_codes: Vec<u16> = present.iter().map(|e| (e % 991) as u16 + 1).collect();
-        let partial =
-            ValueColumn::partial(Codes::U16(partial_codes.into()), Bitmap::of(&present)).unwrap();
-        for column in [&universal, &partial] {
-            for key in 0..8u16 {
-                let block = column.block(key);
-                for low in 0..=u16::MAX {
-                    let entity = (u32::from(key) << 16) | u32::from(low);
-                    assert_eq!(
-                        block.code(low),
-                        column.value_of(entity).map(|v| v.raw()),
-                        "entity {entity}"
-                    );
-                }
-let mut bits = [0u64; 1024];
-                for low in (0..=u16::MAX).step_by(3) {
-                    bits[usize::from(low >> 6)] |= 1 << (low & 63);
-                }
-                let asked = bits;
-                let mut taken = Vec::new();
-                block.take(&mut bits, |code| taken.push(code));
-                let (mut want, mut left) = (Vec::new(), [0u64; 1024]);
-                for low in (0..=u16::MAX).step_by(3) {
-                    match block.code(low) {
-                        Some(code) => want.push(code),
-                        None => left[usize::from(low >> 6)] |= 1 << (low & 63),
-                    }
-                }
-                assert_eq!(taken, want, "take reads what code does, in order");
-                assert_eq!(bits, left, "and leaves set the entities the block holds nothing for");
-                assert_ne!(asked, [0u64; 1024]);
-            }
+        let codes: Vec<u16> = (0..present.len()).map(|i| (i % 1_000) as u16 + 1).collect();
+        let column =
+            ValueColumn::partial(Codes::U16(codes.clone().into()), Bitmap::of(&present)).unwrap();
+        for (slot, &entity) in present.iter().enumerate() {
+            assert_eq!(
+                column.value_of(entity).map(|v| v.raw()),
+                Some(u32::from(codes[slot]))
+            );
         }
+        assert_eq!(column.value_of(first + 1), None);
+        assert_eq!(column.value_of(3), None);
+        assert_eq!(column.value_of(first + 5 * 65_536), None);
+        assert_eq!(
+            column.block_ranks.get().map(|(lo, r)| (*lo, r.len())),
+            Some((40, 4))
+        );
     }
 
     fn candidate(all: impl IntoIterator<Item = u32>) -> Bitmap {

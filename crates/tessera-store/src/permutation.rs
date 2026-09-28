@@ -2150,6 +2150,11 @@ impl RowSpace {
                                 words[usize::from(low >> 6)] |= 1 << (low & 63);
                             }
                         });
+                        debug_assert_eq!(
+                            words.iter().map(|w| w.count_ones()).sum::<u32>(),
+                            card,
+                            "the entities of a view's rows are distinct"
+                        );
                         sink.push_block(key, card, &words);
                     } else {
                         members.clear();
@@ -2157,6 +2162,10 @@ impl RowSpace {
                             members.extend(lows.iter().map(|&low| u32::from(low)));
                         });
                         members.sort_unstable();
+                        debug_assert!(
+                            members.windows(2).all(|pair| pair[0] < pair[1]),
+                            "the entities of a view's rows are distinct"
+                        );
                         sink.push_members(key, &members);
                     }
                 }
@@ -2487,7 +2496,9 @@ mod tests {
     }
 
     /// `entities_of_rows` is `entity_of` over every row of the set: across the base and the
-    /// extents, across a chunk boundary, and ignoring rows past row space.
+    /// extents, over sets dense, scattered and in runs, and ignoring rows past row space. One
+    /// key holding exactly 4,096 entities is an array container and one holding 4,097 a bitset,
+    /// and both come back whole.
     #[test]
     fn the_entities_of_rows_are_each_rows_entity() {
         const BOUND: u64 = (1 << 20) + (3 << PAGE_SHIFT);
@@ -2500,8 +2511,17 @@ mod tests {
             croaring::Bitmap::new(),
             croaring::Bitmap::from_range(0..total),
             croaring::Bitmap::from_range(base - 10..total + 10),
-            croaring::Bitmap::from_range((1 << 20) - 5..(1 << 20) + 5),
         ];
+        let rows_of_key_zero: Vec<u32> = (0..total)
+            .filter(|&row| {
+                space
+                    .entity_of(RowId::new(row))
+                    .is_some_and(|e| e.raw() < 1 << 16)
+            })
+            .collect();
+        for members in [4_096usize, 4_097] {
+            sets.push(croaring::Bitmap::of(&rows_of_key_zero[..members]));
+        }
         sets.push((0..total + 5).filter(|_| rng.gen_bool(0.01)).collect());
         let mut runs = croaring::Bitmap::new();
         for _ in 0..40 {

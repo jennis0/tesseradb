@@ -1,13 +1,10 @@
-//! **What does it cost to cross a region's rows to their entities, and to count them by value?**
+//! **What does it cost to cross a region's rows to their entities?**
 //!
 //! `RowSpace::entities_of_rows` buckets the rows' entities by container key and builds each
 //! container from its buckets. This times it over the rows of a principal's visible set under a
 //! polygon, on pools of 1, 2, 4 and the engine's width, beside the row-at-a-time walk
-//! (`RowSpace::entity_of` per row, then a sort), and checks both give the same entities. With
-//! `--column`, it also times `FilterColumns::category_counts_of_rows`, which counts the rows by
-//! their entity's value without building the entity set, beside crossing then
-//! `category_counts`, and checks both give the same counts. Last, it times the copy, sort and
-//! `Bitmap::of` steps of the route the bucketed crossing replaced.
+//! (`RowSpace::entity_of` per row, then a sort), and checks both give the same entities. Last, it
+//! times the copy, sort and `Bitmap::of` steps of the route the bucketed crossing replaced.
 //!
 //! Every figure is the median of `--repeat` runs, with the fastest, the slowest and the median
 //! CPU time of the process beside it.
@@ -16,7 +13,7 @@
 //! cargo build --release -p tessera-bench --bin row_entity_crossing
 //! systemd-run --user --scope --collect -p MemoryMax=16G -p MemorySwapMax=2G -- \
 //!     target/release/row_entity_crossing \
-//!     --bundle data/ladder/geonames/bundle-final --view world --column admin1 \
+//!     --bundle data/ladder/geonames/bundle-final --view world \
 //!     --polygon '0.4722,0.3927;0.5833,0.3927;0.6111,0.2904;0.4722,0.2904'
 //! ```
 //!
@@ -32,7 +29,6 @@ use croaring::Bitmap;
 use serde_json::{json, Value};
 
 use tessera_engine::compose::MaskedSet;
-use tessera_engine::filter::CountCodes;
 use tessera_engine::region::RegionDecomposition;
 use tessera_engine::shapes::{Bounds, ShapeF64, Space};
 use tessera_engine::viewport::{segments_with_row_bases, ViewportRequest};
@@ -54,9 +50,6 @@ struct Args {
     polygon: String,
     #[arg(long, default_value_t = 5)]
     repeat: usize,
-    /// An indexed category column to count the region's items by, each row through its entity.
-    #[arg(long)]
-    column: Option<String>,
 }
 
 /// The process's CPU time so far, over every thread.
@@ -222,8 +215,6 @@ fn main() -> Result<(), BoxError> {
         "entities": want.cardinality(),
         "row_at_a_time_ms": {"median": ms(walk), "fastest": ms(walk_lo), "slowest": ms(walk_hi)},
     })];
-    let columns = &generation.filter_columns;
-    let no_buffer = |_: &mut dyn FnMut(u32, u32)| {};
     for width in [1, 2, 4, threads] {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(width).build()?;
         let (got, median, lo, hi) = timed(args.repeat, || {
@@ -234,44 +225,6 @@ fn main() -> Result<(), BoxError> {
             "threads": width,
             "entities_of_rows_ms": {"median": ms(median), "fastest": ms(lo), "slowest": ms(hi), "cpu": cpu_ms()},
             "agrees": got == want,
-        }));
-        let Some(column) = &args.column else {
-            continue;
-        };
-        let (direct, all_median, all_lo, all_hi) = timed(args.repeat, || {
-            pool.install(|| {
-                columns.category_counts_of_rows(
-                    column,
-                    &rows,
-                    row_space,
-                    CountCodes::All(&|_| {}),
-                    &no_buffer,
-                )
-            })
-        });
-        let direct_cpu = cpu_ms();
-        let direct = direct?.ok_or("no row-entity.u32")?;
-        let seen: Vec<u32> = direct.nonzero().into_iter().map(|(code, _)| code).collect();
-        let (crossed, cross_median, cross_lo, cross_hi) = timed(args.repeat, || {
-            pool.install(|| {
-                let entities = row_space.entities_of_rows(&rows).expect("the rows cross");
-                columns.category_counts(
-                    column,
-                    &entities,
-                    CountCodes::All(&|visit| seen.iter().for_each(|&c| visit(c))),
-                    &no_buffer,
-                )
-            })
-        });
-        let cross_cpu = cpu_ms();
-        let crossed = crossed?;
-        report.push(json!({
-            "threads": width,
-            "column": column,
-            "values_carried": seen.len(),
-            "counts_of_rows_every_code_ms": {"median": ms(all_median), "fastest": ms(all_lo), "slowest": ms(all_hi), "cpu": direct_cpu},
-            "cross_then_count_ms": {"median": ms(cross_median), "fastest": ms(cross_lo), "slowest": ms(cross_hi), "cpu": cross_cpu},
-            "agrees": direct.nonzero() == crossed.nonzero() && direct.none() == crossed.none(),
         }));
     }
     // The copy-sort-build route this crossing replaced, a step at a time on this thread.

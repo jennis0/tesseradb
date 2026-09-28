@@ -112,156 +112,39 @@ impl FilterColumns {
 }
 
 impl FilterColumns {
-    /// Each entity's code in `column`, read layer by layer and then from the rows `buffered`
-    /// visits: what [`Self::category_counts`] counts, addressed one entity at a time.
-    pub fn entity_codes(
-        &self,
-        column: &str,
-        buffered: &VisitBuffered<'_>,
-    ) -> Result<EntityCodes<'_>, FilterError> {
+    /// Each entity's code in `column`, read layer by layer: what [`Self::category_counts`] counts
+    /// for a row's entity. No buffered row is consulted, since a buffered entity holds no row in
+    /// any view until its flush.
+    pub fn entity_codes(&self, column: &str) -> Result<EntityCodes<'_>, FilterError> {
         let held = self
             .columns
             .get(column)
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
-        let layers = held.value_layers();
-        let mut from_buffer = FxHashMap::default();
-        buffered(&mut |entity, code| {
-            from_buffer.insert(entity, code);
-        });
         Ok(EntityCodes {
-            layers: layers.iter().map(|layer| layer.values.as_ref()).collect(),
-            buffered: from_buffer,
+            layers: held
+                .value_layers()
+                .iter()
+                .map(|layer| layer.values.as_ref())
+                .collect(),
         })
-    }
-
-    /// [`Self::category_counts`] over the entities of `rows`, without building their set, or
-    /// `None` where `row_space` cannot cross rows to entities. Rows past the row space have no
-    /// entity and are not counted.
-    ///
-    /// The rows' entities are bucketed by their 2^16-entity block
-    /// ([`tessera_store::RowSpace::entity_buckets`]) and stamped into a bitset per block. Each
-    /// layer's block ([`tessera_filter::ValueColumn::block`]) then takes the entities it holds a
-    /// value for, reading its values in slot order, and the buffered rows answer for the rest; in
-    /// parallel over blocks on the current rayon pool with a tally per task. A partial layer is
-    /// addressed without a rank over its whole presence. A view's rows hold
-    /// distinct entities, so the counts are those of the rows' entity set.
-    pub fn category_counts_of_rows(
-        &self,
-        column: &str,
-        rows: &Bitmap,
-        row_space: &tessera_store::RowSpace,
-        codes: CountCodes<'_>,
-        buffered: &VisitBuffered<'_>,
-    ) -> Result<Option<CategoryCounts>, FilterError> {
-        let held = self
-            .columns
-            .get(column)
-            .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
-        let layers: Vec<&ValueColumn> = held
-            .value_layers()
-            .iter()
-            .map(|l| l.values.as_ref())
-            .collect();
-        let mut from_buffer: FxHashMap<u32, u32> = FxHashMap::default();
-        buffered(&mut |entity, code| {
-            from_buffer.insert(entity, code);
-        });
-        let empty = match codes {
-            CountCodes::Only(listed) => Tally::only(listed),
-            CountCodes::All(_) => Tally::for_width(layers.first().map(|l| l.codes())),
-        };
-        let Some(buckets) = row_space.entity_buckets(rows) else {
-            return Ok(None);
-        };
-
-        let keys = buckets.keys();
-        let tasks = (rayon::current_num_threads() * 4).clamp(1, keys.len().max(1));
-        let tally = keys
-            .par_chunks(keys.len().div_ceil(tasks).max(1))
-            .map(|keys| {
-                let mut tally = empty.clone();
-                // The key's entities, one bit each: stamped from the buckets, then taken by each
-                // layer in turn, so every layer's values are read in slot order.
-                let mut bits = Box::new([0u64; 1024]);
-                for &key in keys {
-                    let blocks: Vec<tessera_filter::Block<'_>> = layers
-                        .iter()
-                        .map(|layer| layer.block(key))
-                        .filter(|block| !block.is_empty())
-                        .collect();
-
-                    bits.fill(0);
-                    buckets.for_each_bucket(key, |lows| {
-                        for &low in lows {
-                            bits[usize::from(low >> 6)] |= 1 << (low & 63);
-                        }
-                    });
-                    // Neighbouring entities often carry one value, so equal codes are added as
-                    // one run.
-                    let mut run = (ABSENT_CODE, 0u64);
-                    for block in &blocks {
-                        block.take(&mut bits, |code| {
-                            if code == run.0 {
-                                run.1 += 1;
-                            } else {
-                                tally.add(run.0, run.1);
-                                run = (code, 1);
-                            }
-                        });
-                    }
-                    tally.add(run.0, run.1);
-                    if !from_buffer.is_empty() {
-                        let first = u32::from(key) << 16;
-                        for (w, word) in bits.iter().enumerate() {
-                            let mut left = *word;
-                            while left != 0 {
-                                let entity = first | (w as u32 * 64 + left.trailing_zeros());
-                                if let Some(&code) = from_buffer.get(&entity) {
-                                    tally.add(code, 1);
-                                }
-                                left &= left - 1;
-                            }
-                        }
-                    }
-                }
-                tally
-            })
-            .reduce(
-                || empty.clone(),
-                |mut a, b| {
-                    a.merge(b);
-                    a
-                },
-            );
-        let none = match codes {
-            CountCodes::All(_) => {
-                let entities: u64 = keys.iter().map(|&key| u64::from(buckets.count(key))).sum();
-                Some(entities.saturating_sub(tally.total()))
-            }
-            CountCodes::Only(_) => None,
-        };
-        Ok(Some(CategoryCounts { tally, none }))
     }
 }
 
-/// One category column's code for any entity: its layers, base first, then its buffered rows.
-/// Built by [`FilterColumns::entity_codes`].
+/// One category column's code for any entity with a row, from its layers, base first. Built by
+/// [`FilterColumns::entity_codes`].
 pub struct EntityCodes<'a> {
     layers: Vec<&'a ValueColumn>,
-    buffered: FxHashMap<u32, u32>,
 }
 
 impl EntityCodes<'_> {
-    /// The code `entity` carries, [`ABSENT_CODE`] where it carries none. The layers and the
-    /// buffer are disjoint in entity space, so the first that holds the entity answers.
+    /// The code `entity` carries, [`ABSENT_CODE`] where it carries none. The layers are disjoint
+    /// in entity space, so the first that holds the entity answers.
     #[inline]
     pub fn code_of(&self, entity: u32) -> u32 {
-        for layer in &self.layers {
-            if let Some(code) = layer.value_of(entity) {
-                return code.raw();
-            }
-        }
-        self.buffered.get(&entity).copied().unwrap_or(ABSENT_CODE)
+        self.layers
+            .iter()
+            .find_map(|layer| layer.value_of(entity))
+            .map_or(ABSENT_CODE, |code| code.raw())
     }
 }
 

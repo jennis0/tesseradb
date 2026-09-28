@@ -89,6 +89,11 @@ impl Sink {
     // filter scan or the projection.
     #[inline]
     pub fn push_block(&mut self, key: u16, card: u32, words: &[u64; WORDS]) {
+        debug_assert_eq!(
+            words.iter().map(|w| w.count_ones()).sum::<u32>(),
+            card,
+            "card is the words' popcount"
+        );
         if card == 0 {
             return;
         }
