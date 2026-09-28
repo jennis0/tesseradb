@@ -426,6 +426,57 @@ An artifacts response evaluates its filter over the whole view, because an artif
 lie anywhere in it. It does so once per response, and again after a publication or a change to
 the visible set during the response.
 
+## Counts by group
+
+`POST /v1/aggregate` answers how the items a viewer may see in one view are distributed. A request
+names a set, in the filter grammar the viewport takes, and one or more groupings, and receives one
+table of exact counts for each grouping. With no filter the set is every item the viewer may see
+in the view. A second set, the reference, can be named for comparison: each row then also carries
+the reference's count and the lift, the row's share of the set divided by its share of the
+reference. The reference is drawn from the same visible set, and `{}` names the whole of it, so
+the usual comparison is the viewer's selection against everything they can see.
+
+A grouping has an outer level, an inner level, both or neither:
+
+| grouping | its table |
+|---|---|
+| neither | one row: the size of the set, which equals the viewport's matched count over the view |
+| the values of a category field | one row per value, with `rest` and `none` |
+| the artifacts of one level of a layer | one row per artifact, with `rest` and `none` |
+| cells of the view at a depth from 0 to 32 | one row per non-empty cell, a density surface |
+| values or artifacts, then cells | a density surface for each group |
+
+The groups are the `top` values or artifacts by count, or the ones the request names. For a field,
+`rest` counts the items carrying any other value and `none` the items carrying no value, so a
+table's counts sum to the size of the set. A category field can be counted where it is declared
+with `index`, so that the engine keeps a record of which items carry each value, or with
+`render`, so that its codes lie beside each item's position in map order. Any other field is
+refused, with a detail saying to declare it one of those ways. For a layer, `rest` counts the
+items in an artifact that is not listed and in no listed one, and `none` the items in no artifact
+of the level. An item can belong to several artifacts, so a layer's rows can sum to more than the
+set. A value or an artifact is listed on the same terms as everywhere else: a value of a gated
+vocabulary only where the viewer can see an item carrying it, an artifact only where the viewport
+would serve it, tested against the viewer's whole visible set whatever the filter.
+
+A cell at depth `d` is the first `2d` bits of an item's 64-bit Morton position. At depths up to
+16 a cell is a tile of the map at that zoom, and its count is the tile's matched count; deeper
+cells divide a tile down to the stored position. Each request counts cells by whichever of two
+methods costs less: by bitmap arithmetic over the row range of each cell where the cells are far
+fewer than the set's items, or by one pass over the set's rows reading each row's position.
+
+The response is framed as a bulk read is, with a table head before each table's first page, and a
+table larger than a page continues through a cursor. Every page composes the visible set again,
+so a deletion or suppression accepted during a read applies from the next page. The groups a
+table lists under `top` are fixed at its first page and carried in the cursor, so a table read
+across a changing corpus keeps its groups. The route runs under the viewport's admission and
+stops its work when the client disconnects.
+
+**Not built yet:** histograms, minimum, maximum and mean of number and timestamp fields;
+breakdowns of keyword and integer fields; a grouping of one kind inside another of the same kind,
+such as cells within cells; and counts across views. A caller asks for each such figure through
+`/v1/items` and computes it. **Not built yet:** the TypeScript, Python and command-line clients do
+not call this route; a caller of those uses HTTP directly.
+
 ## What is not built
 
 **Not built yet:** typing into one box to search every category at once does not exist; a caller

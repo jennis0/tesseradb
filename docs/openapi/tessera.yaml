@@ -11,12 +11,12 @@
 # `x-tessera-route-prefix`, which `clients/ts/core/test/contract.test.ts` reads to send each
 # operation to its listener.
 #
-# What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`, `POST /v1/items` and
-# `POST /v1/artifacts`, and the Arrow IPC forms of `POST /control/ingest` and
+# What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`, `POST /v1/items`,
+# `POST /v1/artifacts` and `POST /v1/aggregate`, and the Arrow IPC forms of `POST /control/ingest` and
 # `PATCH /control/layers/{name}/artifacts`. They are not JSON, so each is declared as a binary
 # media type and described in prose on its route. `docs/openapi/README.md` carries worked decodes
-# of the framed bodies in Python and in JavaScript. The JSON frames of the two bulk reads have
-# schemas below (`ItemsHead`, `ArtifactsHead`, `PageEnd`, `RecordsTrailer`).
+# of the framed bodies in Python and in JavaScript. The JSON frames of the paged reads have
+# schemas below (`ItemsHead`, `ArtifactsHead`, `AggregateTableHead`, `PageEnd`, `RecordsTrailer`).
 openapi: 3.1.0
 info:
   title: Tessera HTTP API
@@ -1018,6 +1018,154 @@ paths:
                 $ref: "#/components/schemas/Error"
         "422":
           $ref: "#/components/responses/Contract"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/aggregate:
+    post:
+      tags: [viewer]
+      operationId: aggregate
+      summary: How the items this principal may see in one view are distributed, as one table of exact counts per grouping.
+      description: |
+        **The body is not JSON.** It is framed as `POST /v1/items` frames its body, with these
+        kinds:
+
+        - `9` table head: JSON `AggregateTableHead`, before a table's first page in this
+          response, including a table continued from a cursor.
+        - `7` records: one Arrow IPC stream holding one batch of a table's rows.
+        - `8` page end: JSON `PageEnd`.
+        - `4` trailer: JSON `RecordsTrailer`, exactly one, last.
+
+        Tables arrive in the order of `groupings`, one per grouping. A table may span pages, and a
+        response may end part-way through one. There is no response head: a response cancelled
+        before its first page is a trailer alone, ending by `deadline`. An unknown kind is a
+        decoding error. [Wire framing](../openapi/README.md) walks a decode.
+
+        **The sets.** `filters` is the set every count is taken over, in the viewport's grammar
+        and evaluated in `view`; absent is every item this principal may see there. `reference` is
+        a second set in the same grammar, drawn from the same visible set; `{}` is the whole
+        visible set. An item with no position in `view` is counted in neither.
+
+        **Groupings.** Each grouping has an optional outer level, `by`, and an optional inner
+        level, `cells`. With neither, its table is one row: the size of the set. `by` names a
+        category `field` or the artifacts of a `layer`, and lists `top` groups by count or the
+        groups named in `values` or `artifacts`. `cells` divides the set, or each group, into the
+        cells of `view` at `depth`: depths 0 to 16 are the cells of the map's tiles at that zoom,
+        and 17 to 32 divide them down to the stored position.
+
+        **Rows.** A field with `top`: the `top` values with the most items, ties by key; then
+        `rest`, the items with any other value; then `none`, the items with no value. Each item
+        holds one value, so a table's counts sum to the set, and within a cell to that cell's
+        count. A field with `values`: the named values in the order named, a repeat once, then
+        `rest` and `none`; a named value appears, even with a count of 0, when
+        `/v1/categories` would list it to this principal in this view, and otherwise gets no row
+        and is not counted in `rest`. A layer: the listed artifacts as for a field; `rest`, the
+        items in at least one artifact of the level this principal is served and in none of the
+        listed ones; `none`, the items in no such artifact. Artifacts can overlap, so a layer's
+        rows can sum to more than the set. An artifact is listed on the viewport's test against
+        the principal's visible set, never the filtered set, and an id that names nothing or
+        nothing this principal is served gets no row. Cells: one row per non-empty cell, by
+        ascending `cell`, within each group in group order. With `reference`, a row appears where
+        either count is non-zero. `rest` and `none` appear only where non-zero.
+
+        **Columns**, in this order, each only where stated: `group` (`dictionary<int8, utf8>`,
+        with `by`): `listed`, `rest` or `none`. `key` (with `by`): a field's vocabulary key as
+        `dictionary<int32, utf8>`, or an artifact's `tessera_id` as `uint64`; null on `rest` and
+        `none`. `title` (`dictionary<int32, utf8>`, with `by` on a field): the value's title as
+        `/v1/categories` gives it, null where it has none. `cell` (`uint64`, with `cells`): the
+        first `2·depth` bits of the item's 64-bit Morton position, right-aligned; at a depth of
+        16 or less it is the tile code the viewport uses at that zoom. `count` (`uint64`): the
+        items of the set in the row's group and cell. `reference_count` (`uint64`, with
+        `reference`): the same over the reference set. `lift` (`float64`, with `reference`):
+        `(count / total) / (reference_count / reference_total)`, null where `reference_count` or
+        `total` is 0.
+
+        **Reading a whole result.** A response carries at most `pages` pages and runs within the
+        byte and time budgets of the bulk reads. A page holds at most `page_rows` rows and
+        `selection.max_page_bytes` bytes; one can hold fewer rows than `page_rows` before the
+        table ends. Pass the trailer's `next` back as `cursor`, unchanged, until it is null. Every
+        page composes the visible set again, so a deletion or suppression accepted during a read
+        applies from the next page, and the pages of one table can count different states of a
+        changing corpus. Which groups a table lists under `top` is fixed at its first page and
+        carried in the cursor.
+
+        **Cursor.** As `POST /v1/items`' cursor, bound also to this route and to the request's
+        `filters`, `reference` and `groupings`: a cursor sent with any of them changed is `422`.
+
+        Runs under the viewport's admission, since a client sends it beside viewport requests,
+        and holds its place until the response ends. A client that disconnects stops the work.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AggregateRequest"
+      responses:
+        "200":
+          description: The framed body, with the headers `POST /v1/items` sends.
+          headers:
+            x-tessera-identity-key:
+              description: The viewport's identity key for this principal and view. Absent only from a response cancelled before its first page.
+              required: false
+              schema:
+                type: string
+            x-tessera-region:
+              description: "Present exactly when `filters` or `reference` carries a `region` leaf, with the viewport's values: the coarsest answer either reached on the first page."
+              required: false
+              schema:
+                type: string
+                pattern: "^(exact|cover; depth=[0-9]+)$"
+            x-tessera-server-us:
+              description: Server time from admission to the start of the body, in microseconds.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+            x-tessera-admission-us:
+              description: Time spent being admitted, in microseconds.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: For each table, a table head and one or more records frames each followed by a page end; then a trailer.
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: Unknown `view`, or a pin naming no view of its field's group that this principal can reach.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: |
+            The request needs to change. One detail, naming the limit where one is exceeded:
+
+            - the viewport's filter refusals, in `filters` or `reference`;
+            - an unknown key, a missing `view` or `groupings`, no grouping, or more than `selection.max_aggregate_groupings`;
+            - `by` naming neither or both of `field` and `layer`, or carrying neither or both of `top` and `values` or `artifacts`, or `values` on a layer, or `artifacts` or `level` on a field;
+            - `top` of 0 or above `selection.max_aggregate_top`; `values` or `artifacts` empty or longer than `selection.max_aggregate_named`; an `artifacts` entry that is not a `tessera_id`;
+            - an unknown field, a field that is not a category, or a category declared with none of `index`, `render` or a `derived` vocabulary: one detail, saying to declare it with `index` or `render`;
+            - a layer outside the list `/v1/meta` publishes to this principal; no `level` on a layer with several, a `level` the layer does not hold, or one given on a layer with a single level;
+            - `depth` above 32;
+            - `page_rows` or `pages` of 0;
+            - a cursor that does not open for this request.
+
+            An unknown value in `values`, and an `artifacts` id that names nothing this principal is served, are not refused: they get no row.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429":
           $ref: "#/components/responses/Backpressure"
         "500":
@@ -2583,7 +2731,7 @@ components:
       type: object
       additionalProperties: false
       description: The sampling parameters and request ceilings. They are the same for every principal, and a client needs them to read a count of drawn points as a density.
-      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows, max_page_rows, max_page_bytes]
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows, max_page_rows, max_page_bytes, max_aggregate_groupings, max_aggregate_top, max_aggregate_named]
       properties:
         k_min:
           type: integer
@@ -2625,11 +2773,23 @@ components:
         max_page_rows:
           type: integer
           minimum: 1
-          description: The most rows a `POST /v1/items` or `POST /v1/artifacts` page holds. A request's `page_rows` is capped to it.
+          description: The most rows a `POST /v1/items`, `POST /v1/artifacts` or `POST /v1/aggregate` page holds. A request's `page_rows` is capped to it.
         max_page_bytes:
           type: integer
           minimum: 1
           description: The most Arrow bytes a page holds before compression. A single row larger than this is sent alone.
+        max_aggregate_groupings:
+          type: integer
+          minimum: 0
+          description: The most groupings one `POST /v1/aggregate` may carry; `serve.max_aggregate_groupings`, default 16. More is `422`.
+        max_aggregate_top:
+          type: integer
+          minimum: 0
+          description: The largest `top` of an aggregate grouping; `serve.max_aggregate_top`, default 1,000. Larger is `422`.
+        max_aggregate_named:
+          type: integer
+          minimum: 0
+          description: The most `values` or `artifacts` an aggregate grouping may name; `serve.max_aggregate_named`, default 1,000. More is `422`.
         max_region_cells:
           type: integer
           minimum: 0
@@ -3389,7 +3549,7 @@ components:
       type: object
       additionalProperties: false
       required: [pages, rows, next, ended_by, stream_us]
-      description: The kind-4 frame of a `POST /v1/items` or `POST /v1/artifacts` body.
+      description: The kind-4 frame of a `POST /v1/items`, `POST /v1/artifacts` or `POST /v1/aggregate` body.
       properties:
         pages:
           type: integer
@@ -3408,6 +3568,143 @@ components:
           type: integer
           minimum: 0
           description: The whole response's wall time in microseconds, including waits on the client.
+
+    AggregateRequest:
+      type: object
+      additionalProperties: false
+      required: [view, groupings]
+      properties:
+        view:
+          type: string
+          description: The view the counts are taken in, from `/v1/meta`. An item with no position in it is not counted.
+        filters:
+          $ref: "#/components/schemas/FilterExpr"
+        reference:
+          description: The set each count is compared with, in the same grammar and view, drawn from the same visible set. `{}` is the whole visible set. Absent adds no comparison columns.
+          oneOf:
+            - type: object
+              additionalProperties: false
+              maxProperties: 0
+            - $ref: "#/components/schemas/FilterExpr"
+        groupings:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Grouping"
+          description: One table each, in this order. At most `selection.max_aggregate_groupings`.
+        page_rows:
+          type: integer
+          minimum: 1
+          description: Rows per page, capped by `selection.max_page_rows`. Absent is the cap.
+        pages:
+          type: integer
+          minimum: 1
+          description: The most pages this response may carry. Absent is as many as the response's budgets allow.
+        cursor:
+          type: string
+          description: A previous response's `next`, unchanged, under the same request.
+        compression:
+          type: string
+          enum: [zstd]
+          description: Compress every records frame's Arrow buffers with zstd. Absent is uncompressed.
+
+    Grouping:
+      type: object
+      additionalProperties: false
+      description: One table. `{}` is the size of the set.
+      properties:
+        by:
+          $ref: "#/components/schemas/AggregateBy"
+        cells:
+          type: object
+          additionalProperties: false
+          required: [depth]
+          description: Divide the set, or each group, into cells of the view.
+          properties:
+            depth:
+              type: integer
+              minimum: 0
+              maximum: 32
+
+    AggregateBy:
+      description: |
+        A grouping's outer level. `field` is a category field declared with `index` or `render`,
+        or one with a `derived` vocabulary; a group-scoped field resolves under `view` as a filter
+        leaf on it does, or is pinned as `<field>@<key>`. `layer` is one `/v1/meta` publishes to
+        this principal, and `level` follows `BrowseRequest.level`: required on a layer with
+        several levels and refused on one with a single level.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [field, top]
+          properties:
+            field: { type: string }
+            top:
+              type: integer
+              minimum: 1
+              description: At most `selection.max_aggregate_top`.
+        - type: object
+          additionalProperties: false
+          required: [field, values]
+          properties:
+            field: { type: string }
+            values:
+              type: array
+              minItems: 1
+              items: { type: string }
+              description: Vocabulary keys, at most `selection.max_aggregate_named`.
+        - type: object
+          additionalProperties: false
+          required: [layer, top]
+          properties:
+            layer: { type: string }
+            level: { type: integer, minimum: 0 }
+            top:
+              type: integer
+              minimum: 1
+              description: At most `selection.max_aggregate_top`.
+        - type: object
+          additionalProperties: false
+          required: [layer, artifacts]
+          properties:
+            layer: { type: string }
+            level: { type: integer, minimum: 0 }
+            artifacts:
+              type: array
+              minItems: 1
+              description: "`tessera_id`s, at most `selection.max_aggregate_named`."
+              items:
+                oneOf:
+                  - type: integer
+                    minimum: 0
+                  - type: string
+                    pattern: "^[0-9]+$"
+
+    AggregateTableHead:
+      type: object
+      additionalProperties: false
+      required: [grouping, total, resumed]
+      description: The kind-9 frame of a `POST /v1/aggregate` body, before a table's first page in a response. Its figures are those of the page that follows it.
+      properties:
+        grouping:
+          type: integer
+          minimum: 0
+          description: The table's index in `groupings`.
+        total:
+          type: integer
+          minimum: 0
+          description: Items in the set.
+        reference_total:
+          type: integer
+          minimum: 0
+          description: Items in the reference set. Present exactly when the request carries `reference`.
+        groups:
+          type: integer
+          minimum: 0
+          description: "Present exactly when the grouping has `by`: the groups with an item in the set before the cut to `top` or the named list, which are the visible distinct values, or the artifacts this principal is served with a member in the set."
+        resumed:
+          type: boolean
+          description: Whether the table continues from the request's cursor.
 
     ItemRequest:
       type: object
