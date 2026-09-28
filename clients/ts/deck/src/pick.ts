@@ -38,8 +38,8 @@ export function resolvePick(info: PickInfo): Picked {
   if (info.index < 0) return {kind: 'miss'};
   const layer = info.sourceLayer ?? info.layer;
   const props = (layer?.props ?? {}) as {tesseraIds?: BigUint64Array; tesseraPositions?: Float32Array; artifactIds?: bigint[]};
-  // A label hit. `artifactIds` maps each text row to its artifact: a wrapped name is several rows
-  // of one label. Contours are not pickable; `hoverAt` resolves them in JS.
+  // A label hit. `artifactIds` maps each text row to its artifact. Contours are not pickable;
+  // `hoverAt` resolves them in JS.
   if (props.artifactIds) {
     const id = props.artifactIds[info.index];
     if (id === undefined) {

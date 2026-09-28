@@ -57,7 +57,7 @@ export class TesseraStatus extends TesseraElement {
         display: inline-flex;
         align-items: stretch;
         max-width: 100%;
-        height: 32px;
+        min-height: 32px;
         overflow: hidden;
         background: var(--_tessera-surface);
         border: 1px solid var(--_tessera-line);
@@ -75,8 +75,11 @@ export class TesseraStatus extends TesseraElement {
         display: flex;
         align-items: center;
         gap: 4px;
-        padding: 0 12px;
+        padding: 7px 12px;
         flex: none;
+      }
+      .cell tessera-count {
+        font-size: inherit;
       }
       .cell + .cell {
         border-left: 1px solid var(--_tessera-line-2);

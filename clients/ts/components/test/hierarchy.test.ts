@@ -172,6 +172,25 @@ describe('<tessera-hierarchy>', () => {
     expect(left.map((c) => c.verb)).toEqual(['highlight']);
   });
 
+  it('carries a × per clause on its row, which takes that clause off', async () => {
+    const {host, store} = await panel();
+    expect(deep(host, '[part="dismiss"]')).toBeNull();
+    store.set('filters', {
+      ...store.get('filters'),
+      members: [
+        {layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'filter'},
+        {layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'highlight'}
+      ]
+    });
+    await settle(host);
+    const row = deep(host, '[part="row"]')!;
+    const dismiss = [...row.querySelectorAll<HTMLButtonElement>('[part="dismiss"]')];
+    expect(dismiss.map((b) => b.getAttribute('data-verb'))).toEqual(['filter', 'highlight']);
+    dismiss[1]!.click();
+    const left = store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0] as {verb: string}[];
+    expect(left.map((c) => c.verb)).toEqual(['filter']);
+  });
+
   /**
    * The panel's counts answer the question the request carried, so the walk has to be dropped when
    * that question moves — and the question is `requestFilters()`, which carries the **drawn

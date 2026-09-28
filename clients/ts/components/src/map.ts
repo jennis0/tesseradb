@@ -22,6 +22,7 @@ import {icon} from './icons.js';
 import {sameFrame} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 import {densityChannel} from './density.js';
+import './count.js';
 import {colouringOf, setColouring, watchColouring} from './colouring.js';
 
 
@@ -102,7 +103,8 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * selection, drawn with deck.gl in an orthographic view. The refused, expired and empty states are
  * drawn over the canvas, so none of them reads as an empty corpus. The toolbar switches between
  * pan, box select and lasso select, and fits the whole extent; shift-drag in pan mode draws a box.
- * A settled box or lasso becomes the store's selection, a filter every count narrows to.
+ * A settled box or lasso becomes the store's selection, a filter every count narrows to; a tag on
+ * its top-left corner gives the count matched inside it and a button that clears it.
  *
  * The map owns the camera and tells the store where it is looking on every move. Keys, with the
  * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn or
@@ -140,6 +142,8 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * @csspart refusal - The words "View refused" inside the overlay, with `data-code` set to the
  *   refusal's code.
  * @csspart controls - The toolbar.
+ * @csspart region-tag - The drawn region's tag on its top-left corner: how many items match inside
+ *   it, or outside it for its complement, and a button that clears the selection.
  * @csspart tooltip - The hover tooltip.
  * @csspart density-key - The key to density's colours, from "Fewer" to "More items", in the
  *   bottom-left corner while density is drawn in a ramp or without the points.
@@ -215,8 +219,8 @@ export class TesseraMap extends TesseraElement {
         pointer-events: auto;
       }
       [part='controls'] button {
-        width: 32px;
-        height: 32px;
+        width: var(--_tessera-tool-size, 32px);
+        height: var(--_tessera-tool-size, 32px);
         display: grid;
         place-items: center;
         color: color-mix(in srgb, var(--_tessera-ink) 82%, var(--_tessera-surface));
@@ -228,6 +232,41 @@ export class TesseraMap extends TesseraElement {
       [part='controls'] button[aria-pressed='true'] {
         background: var(--_tessera-accent);
         color: var(--_tessera-accent-ink);
+      }
+      /* The drawn region's count and clear button, on its top edge. */
+      [part='region-tag'] {
+        position: absolute;
+        z-index: 3;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 3px 2px 8px;
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius-control);
+        box-shadow: var(--_tessera-shadow);
+        font-size: 12px;
+        color: var(--_tessera-ink-2);
+        white-space: nowrap;
+        transform: translateY(calc(-100% - 4px));
+      }
+      [part='region-tag'] tessera-count {
+        font-size: inherit;
+        color: var(--_tessera-ink);
+      }
+      [part='region-tag'] tessera-count::part(count) {
+        font-weight: 600;
+      }
+      [part='region-tag'] button {
+        width: 20px;
+        height: 20px;
+        display: grid;
+        place-items: center;
+        border-radius: 4px;
+        color: var(--_tessera-ink-2);
+      }
+      [part='region-tag'] button:hover {
+        background: var(--_tessera-surface-2);
       }
       [part='tooltip'] {
         position: absolute;
@@ -753,6 +792,8 @@ export class TesseraMap extends TesseraElement {
         this.viewState = {...this.viewState, target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
         this.deck?.setProps({viewState: this.viewState});
         this.pushView();
+        // The region's tag follows the camera.
+        if (this.regionWorld || this.regionPolygon) this.requestUpdate();
         return viewState;
       },
       onClick: (info) => this.onClick(info),
@@ -1060,6 +1101,34 @@ export class TesseraMap extends TesseraElement {
     this.viewState = {...this.viewState, ...next};
     this.deck?.setProps({viewState: this.viewState});
     this.pushView();
+    if (this.regionWorld || this.regionPolygon) this.requestUpdate();
+  }
+
+  /**
+   * The drawn region's tag at its top-left corner: how many items match inside it (or outside, for
+   * its complement) and a button that clears it. A region drawn as an artifact's outline has none.
+   */
+  private regionTag(): TemplateResult | typeof nothing {
+    const region = this.resolvedStore?.get('region');
+    if (!region) return nothing;
+    let corner: [number, number] | null = null;
+    if (this.regionWorld) corner = [this.regionWorld[0], this.regionWorld[1]];
+    else if (this.regionPolygon && this.regionPolygon.length > 0) {
+      corner = [Math.min(...this.regionPolygon.map((p) => p[0])), Math.min(...this.regionPolygon.map((p) => p[1]))];
+    }
+    if (!corner) return nothing;
+    // The orthographic camera, y down: world units scale by 2^zoom about the target at the centre.
+    const {width, height} = this.size;
+    const scale = 2 ** this.viewState.zoom;
+    const [tx, ty] = this.viewState.target;
+    // Kept inside the map where the corner is off its top edge, and no further left than the
+    // top-left corner's content starts, right of whatever the host keeps over the map's left side.
+    const left = (corner[0] - tx!) * scale + width / 2;
+    const top = Math.max(30, (corner[1] - ty!) * scale + height / 2);
+    return html`<div part="region-tag" style=${`left:max(calc(var(--_tessera-space) + var(--tessera-map-inset-left, 0px)), ${left}px);top:${top}px`}>
+      <tessera-count .masked=${region.matched}></tessera-count><span>${region.shape.outside ? 'outside' : 'inside'}</span>
+      <button type="button" aria-label="Clear selection" title="Clear selection" @click=${() => this.select(null)}>${icon('close', 12, 1.4)}</button>
+    </div>`;
   }
 
   /** The ground the map draws on now: `ground` where it is set, else the page's colour scheme. */
@@ -1225,6 +1294,7 @@ export class TesseraMap extends TesseraElement {
         @lostpointercapture=${{handleEvent: this.onPointerUp, capture: true}}
       ></div>
       ${overlay}
+      ${this.regionTag()}
       <div class="corner top-left">
         ${this.controlsCorner === 'top-left' ? controls : nothing}
         <slot name="top-left"></slot>

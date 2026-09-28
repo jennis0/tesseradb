@@ -320,7 +320,6 @@ describe('draftOf inverts composeFilters', () => {
   ];
   const cases: FilterExpr[] = [
     {title: {match: 'sea'}},
-    {title: {match: {query: 'sea sky', minimum_should_match: 1}}},
     {title: {phrase: 'the sea'}},
     {archive: {in: ['a', 'b']}},
     {author: {prefix: 'Ke'}},
@@ -332,6 +331,28 @@ describe('draftOf inverts composeFilters', () => {
       expect(composeFilters(draftOf(expr, operands))).toEqual(expr);
     });
   }
+  it('reads back every text expression the box writes, alone and beside other columns', () => {
+    for (const query of ['graph neural', '"graph neural"', 'networks "graph neural"', 'graph OR lattice', '"neural net" OR gnn OR graph lattice']) {
+      const alone = composeFilters({filter: {title: {family: 'text', query, phrase: true}}, highlight: {}})!;
+      const draft = draftOf(alone, operands);
+      expect(draft.filter['title']).toEqual({family: 'text', query, phrase: true});
+      expect(composeFilters(draft)).toEqual(alone);
+      const beside = composeFilters({filter: {title: {family: 'text', query, phrase: true}, archive: {family: 'category', keys: ['a']}}, highlight: {}})!;
+      expect(composeFilters(draftOf(beside, operands))).toEqual(beside);
+    }
+  });
+  it('keeps a text expression the box cannot write as it was sent', () => {
+    for (const expr of [
+      {title: {match: 'salt OR pepper'}},
+      {title: {match: {query: 'sea sky', minimum_should_match: 1}}},
+      {title: {match: 'say "hello"'}},
+      {any_of: [{title: {phrase: 'the sea'}}, {title: {match: {query: 'a b c', minimum_should_match: 2}}}]}
+    ] as FilterExpr[]) {
+      const draft = draftOf(expr, operands);
+      expect(draft.filter['title']).toMatchObject({family: 'text', expr});
+      expect(composeFilters(draft)).toEqual(expr);
+    }
+  });
   it('null is the unfiltered request', () => {
     expect(composeFilters(draftOf(null, operands))).toBeNull();
   });
@@ -341,5 +362,6 @@ describe('draftOf inverts composeFilters', () => {
     expect(() => draftOf({year: {eq: 3}}, operands)).toThrow();
     expect(() => draftOf({all_of: [{year: {range: {gte: 1}}}, {year: {range: {lte: 2}}}]}, operands)).toThrow();
     expect(() => draftOf({year: {range: {gt: 1}}}, operands)).toThrow();
+    expect(() => draftOf({any_of: [{title: {match: 'x'}}, {archive: {in: ['a']}}]}, operands)).toThrow();
   });
 });

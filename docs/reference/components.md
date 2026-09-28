@@ -15,7 +15,7 @@ The `tessera-*` custom elements, in the `@tesseradb/components` package, built w
 | [`<tessera-layer-picker>`](components/tessera-layer-picker.md) | Which annotation layers the map draws. |
 | [`<tessera-view-picker>`](components/tessera-view-picker.md) | Chooses the view. |
 | [`<tessera-key-picker>`](components/tessera-key-picker.md) | Chooses the view within the current group. |
-| [`<tessera-filter-panel>`](components/tessera-filter-panel.md) | Every filter control, with the applied clauses as chips. |
+| [`<tessera-filter-panel>`](components/tessera-filter-panel.md) | The applied clauses as chips, and the filter controls. |
 | [`<tessera-filter>`](components/tessera-filter.md) | One filter control, drawn by the column's type. |
 | [`<tessera-selection>`](components/tessera-selection.md) | The selected region's counts, marks and actions. |
 | [`<tessera-item-card>`](components/tessera-item-card.md) | The selected item's fields, with Open and Copy id. |

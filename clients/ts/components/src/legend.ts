@@ -28,6 +28,15 @@ import {chrome, tokens} from './tokens.js';
 /** The entries shown where `limit` is 0, as many as a card can hold. */
 const ENTRIES_SHOWN = 40;
 
+/** The longest name, in characters, that a row in two columns shows whole at 12 px in a 300 px card. */
+const SHORT_NAME = 20;
+/** The characters a row gives up for each pressed × at its end. */
+const PER_DISMISS = 4;
+
+const graphemes = new Intl.Segmenter('en', {granularity: 'grapheme'});
+/** A name's length as a reader counts it: characters, not UTF-16 units. */
+const lengthOf = (text: string): number => [...graphemes.segment(text)].length;
+
 /** How far each lighter colour in the colour picker is taken towards white. */
 const LIGHTER = 0.45;
 
@@ -46,10 +55,13 @@ type Picking = {column: string; key: string; title: string};
  * their colours. The first `limit` rows show, 40 where `limit` is 0, with an "N more" button that
  * shows the rest until the colouring changes.
  *
- * A category row is a swatch, the value's name, Highlight and Filter buttons, and a count where the
- * store holds exact counts for the column (not built yet: no route serves them, so no count shows).
- * The buttons show while the row is hovered or focused, and stay shown while pressed. Filter adds
- * the value to the column's filter, which may hold several; the rows left out empty their swatch.
+ * The rows sit in two columns while every name shown is short, and in one otherwise. A category
+ * row is a swatch, the value's name, Highlight and Filter buttons, and a count where the store
+ * holds exact counts for the column (not built yet: no route serves them, so no count shows). The
+ * buttons show over the row's end while it is hovered or focused. A pressed button stays shown as
+ * a ×, which takes the value out of that clause, and its row is filled: grey for the filter, the
+ * highlight colour for the highlight. Filter adds the value to the column's filter, which may hold
+ * several; the rows left out empty their swatch.
  * Highlight picks the value out without changing any count; the other rows grey. The two are
  * separate clauses and a row can have both pressed: filtered to two values with one highlighted,
  * the map shows the two and picks out the one. Both go through the store's filters, so the chips
@@ -67,8 +79,9 @@ type Picking = {column: string; key: string; title: string};
  * columns and every layer that can colour, drawn or not; colouring by a layer does not draw it. For
  * a category column the menu offers the palettes, and for a number column the ramps, a linear or
  * log scale and reversal, unless `hide-palettes` is set. The colour choices are shared with every
- * map reading the same store. A *Level* choice appears under colour by a levelled layer with
- * several levels served. Which layers are drawn is `<tessera-layer-picker>`'s.
+ * map reading the same store. A *Level* choice appears in the heading, before Colour by, under colour
+ * by a levelled layer with several levels served. Which layers are drawn is
+ * `<tessera-layer-picker>`'s.
  *
  * @summary What the map's colours mean, and the colour controls.
  * @tagname tessera-legend
@@ -97,14 +110,15 @@ type Picking = {column: string; key: string; title: string};
  * @csspart scale - The Linear and Log choice in the Colour by menu.
  * @csspart reverse - The Reverse switch in the Colour by menu.
  * @csspart level-select - The Level select.
- * @csspart swatches - The list of rows.
+ * @csspart swatches - The list of rows, with `data-columns` set to `1` or `2`.
  * @csspart entry - One row, with `data-key` for a category value and `data-state`: `out` for a
  *   value the column's filter leaves out; for one it keeps, `lit` or `dim` while the column is
- *   highlighted, else `filtered` while it is filtered; else empty.
+ *   highlighted, else `filtered` while it is filtered; else empty. `data-clause` names the clauses
+ *   the value itself is in: `filter`, `highlight`, or both separated by a space.
  * @csspart swatch - A row's colour: for a category value, the button that opens the colour picker.
  * @csspart name - A row's name, with `data-unnamed` on a cluster that has none.
- * @csspart highlight - A row's Highlight button, with `aria-pressed`.
- * @csspart filter - A row's Filter button, with `aria-pressed`.
+ * @csspart highlight - A row's Highlight button, with `aria-pressed`; drawn as a × while pressed.
+ * @csspart filter - A row's Filter button, with `aria-pressed`; drawn as a × while pressed.
  * @csspart count - A row's exact count, where the store holds one.
  * @csspart more - The "N more" button, where there are more entries than show.
  * @csspart ramp - A number column's ramp.
@@ -147,48 +161,78 @@ export class TesseraLegend extends TesseraElement {
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .level {
+      /* The heading's choices: Level, then Colour by, each quiet text with a chevron. */
+      .choices {
         display: flex;
         align-items: center;
-        gap: 8px;
-        margin: -2px 0 10px;
-        font-size: 12px;
+        gap: 12px;
+        min-width: 0;
       }
-      .level .choice {
+      [part='title'] .choice {
+        font-size: 12px;
         font-weight: 500;
+        letter-spacing: 0;
+        text-transform: none;
+        color: var(--_tessera-ink);
       }
       [part='swatches'] {
-        display: flex;
-        flex-direction: column;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        row-gap: 1px;
         max-height: 340px;
         overflow-y: auto;
-        margin: 0 -6px;
+        margin: 0 -4px;
+        font-size: 12px;
+      }
+      [part='swatches'][data-columns='2'] {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        column-gap: 4px;
+        row-gap: 2px;
       }
       [part~='entry'] {
+        position: relative;
         display: grid;
-        grid-template-columns: 12px minmax(0, 1fr) auto;
+        grid-template-columns: 10px minmax(0, 1fr);
         align-items: center;
         column-gap: 8px;
-        min-height: 26px;
-        padding: 1px 6px;
-        border-radius: var(--_tessera-radius-control);
+        min-height: 24px;
+        padding: 0 4px;
+        border-radius: 5px;
+      }
+      [data-columns='2'] [part~='entry'] {
+        column-gap: 7px;
+        min-height: 20px;
       }
       [part='swatches'].counted [part~='entry'] {
-        grid-template-columns: 12px minmax(0, 1fr) auto 72px;
+        grid-template-columns: 10px minmax(0, 1fr) 72px;
       }
       [part~='entry']:hover,
-      [part~='entry']:focus-within {
+      [part~='entry']:focus-within,
+      [part~='entry'][data-clause~='filter'] {
         background: var(--_tessera-surface-2);
       }
+      [part~='entry'][data-clause] {
+        font-weight: 500;
+      }
+      [part~='entry'][data-clause~='highlight'],
       [part~='entry'][data-state='lit'] {
         background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
+      }
+      /* Room at the end of a row for its pressed buttons, which sit over it. */
+      [part~='entry'][data-clause='filter'],
+      [part~='entry'][data-clause='highlight'] {
+        padding-right: 26px;
+      }
+      [part~='entry'][data-clause='filter highlight'] {
+        padding-right: 48px;
       }
       [part='swatch'] {
         --c: transparent;
         display: inline-block;
-        width: 12px;
-        height: 12px;
-        border-radius: 3px;
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
         background: var(--c);
       }
       button[part='swatch'] {
@@ -210,37 +254,38 @@ export class TesseraLegend extends TesseraElement {
       [data-state='dim'] [part='name'] {
         color: var(--_tessera-ink-3);
       }
-      [data-state='lit'] [part='name'] {
-        font-weight: 600;
-      }
+      /* The buttons sit over the row's end, on the row's own fill, so showing them moves nothing. */
       .verbs {
+        position: absolute;
+        top: 50%;
+        right: 2px;
+        transform: translateY(-50%);
         display: flex;
         gap: 2px;
+        padding-left: 4px;
+        border-radius: 5px;
+        background: inherit;
       }
       .verbs button {
-        width: 22px;
-        height: 22px;
+        width: 20px;
+        height: 20px;
         display: grid;
         place-items: center;
-        border-radius: 5px;
+        border-radius: 4px;
         color: var(--_tessera-ink-2);
-        opacity: 0;
+      }
+      .verbs button[aria-pressed='false'] {
+        display: none;
       }
       [part~='entry']:hover .verbs button,
-      [part~='entry']:focus-within .verbs button,
-      .verbs button[aria-pressed='true'] {
-        opacity: 1;
+      [part~='entry']:focus-within .verbs button {
+        display: grid;
       }
       .verbs button:hover {
         background: var(--_tessera-surface-3);
       }
-      [part='filter'][aria-pressed='true'] {
-        background: var(--_tessera-accent);
-        color: var(--_tessera-accent-ink);
-      }
       [part='highlight'][aria-pressed='true'] {
-        background: var(--_tessera-highlight);
-        color: var(--_tessera-highlight-ink);
+        color: var(--_tessera-highlight);
       }
       [part='count'] {
         text-align: right;
@@ -712,14 +757,14 @@ export class TesseraLegend extends TesseraElement {
     const menu = this.selectable && this.menuOpen ? this.colourMenu(options, column, colouring) : nothing;
     const levelSelect =
       this.selectable && cluster && levelsServed.length > 1
-        ? html`<div class="level"><span class="muted">Level</span><span class="choice">
+        ? html`<span class="choice">
             <select part="level-select" aria-label="Level" @change=${(e: Event) => this.chooseLevel((e.target as HTMLSelectElement).value)}>
-              <option value="" ?selected=${this.level === null}>${this.autoLevel === null ? 'Deepest' : `Automatic (${levelTitle(this.autoLevel)})`}</option>
+              <option value="" ?selected=${this.level === null}>${this.autoLevel === null ? 'Deepest level' : `Automatic (${levelTitle(this.autoLevel)})`}</option>
               ${levelsServed.map((l) => html`<option value=${l} ?selected=${this.level === l}>${levelTitle(l)}</option>`)}
-            </select>${icon('chev', 12, 1.4)}</span></div>`
+            </select>${icon('chev', 12, 1.4)}</span>`
         : nothing;
-    const heading = html`<h2 part="title">Colour${colourByButton}</h2>`;
-    const wrap = (body: unknown) => html`<div class="panel">${heading}${menu}${levelSelect}${body}${this.picking ? this.colourPicker(this.picking, colouring, legend.ranks[this.picking.column] ?? {}, legend.categories[this.picking.column] ?? []) : nothing}</div>`;
+    const heading = html`<h2 part="title">Colour<span class="choices">${levelSelect}${colourByButton}</span></h2>`;
+    const wrap = (body: unknown) => html`<div class="panel">${heading}${menu}${body}${this.picking ? this.colourPicker(this.picking, colouring, legend.ranks[this.picking.column] ?? {}, legend.categories[this.picking.column] ?? []) : nothing}</div>`;
     if (!this.readout && this.selectable) return wrap(html`<span part="state" data-state="shown"></span>`);
     if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);
 
@@ -735,7 +780,8 @@ export class TesseraLegend extends TesseraElement {
           }),
           plain(NEUTRAL, 'Not yet coloured')
         ],
-        false
+        false,
+        [...named.map((a) => artifactName(a, artifacts.attached) ?? UNNAMED), 'Not yet coloured'].map((name) => ({name, pressed: 0}))
       )}`);
     }
     if (!column) return wrap(html`<span part="state" data-state="refused"><span class="dot refuse"></span><span part="refusal">Column unavailable</span></span>`);
@@ -774,19 +820,20 @@ export class TesseraLegend extends TesseraElement {
       const count = counts?.[value.key];
       const onFilter = filtered.includes(value.key);
       const onLit = lit.includes(value.key);
-      return html`<div part="entry" role="listitem" data-key=${value.key} data-state=${stateOfKey(value.key)}>
+      const clause = [onFilter ? 'filter' : '', onLit ? 'highlight' : ''].filter(Boolean).join(' ');
+      return html`<div part="entry" role="listitem" data-key=${value.key} data-state=${stateOfKey(value.key)} data-clause=${clause || nothing}>
         <button part="swatch" type="button" style=${`--c:${colour}`} aria-haspopup="dialog" aria-label=${`Change colour of ${title}`}
           @click=${() => this.openPicker({column, key: value.key, title}, colour)}></button>
         <span part="name" title=${value.key}>${title}</span>
+        ${counted ? html`<span part="count">${count?.exact ? count.value.toLocaleString('en-GB') : ''}</span>` : nothing}
         ${filterable
           ? html`<span class="verbs">
-              <button part="highlight" type="button" aria-pressed=${onLit ? 'true' : 'false'} aria-label=${`Highlight ${title}`} title="Highlight"
-                @click=${() => this.applyVerb(column, value.key, 'highlight')}>${icon('highlight', 13)}</button>
-              <button part="filter" type="button" aria-pressed=${onFilter ? 'true' : 'false'} aria-label=${`Filter to ${title}`} title="Filter"
-                @click=${() => this.applyVerb(column, value.key, 'filter')}>${icon('filter', 13, 1.5)}</button>
+              <button part="highlight" type="button" aria-pressed=${onLit ? 'true' : 'false'} aria-label=${onLit ? `Stop highlighting ${title}` : `Highlight ${title}`}
+                title=${onLit ? 'Stop highlighting' : 'Highlight'} @click=${() => this.applyVerb(column, value.key, 'highlight')}>${onLit ? icon('close', 12) : icon('highlight', 13)}</button>
+              <button part="filter" type="button" aria-pressed=${onFilter ? 'true' : 'false'} aria-label=${onFilter ? `Stop filtering to ${title}` : `Filter to ${title}`}
+                title=${onFilter ? 'Stop filtering' : 'Filter'} @click=${() => this.applyVerb(column, value.key, 'filter')}>${onFilter ? icon('close', 12) : icon('filter', 13, 1.5)}</button>
             </span>`
-          : html`<span></span>`}
-        ${counted ? html`<span part="count">${count?.exact ? count.value.toLocaleString('en-GB') : ''}</span>` : nothing}
+          : nothing}
       </div>`;
     };
     // A value past the palette's end with a colour chosen for it has a row of its own; the rest
@@ -798,15 +845,21 @@ export class TesseraLegend extends TesseraElement {
       past.length > pastChosen.length
         ? [html`<div part="entry" role="listitem" data-state=${stateOfKey(null)}><span part="swatch" style=${`--c:${rgb(UNMAPPED)}`}></span><span part="name">Other</span></div>`]
         : [];
-    return this.rows([...shown.map(row), ...pastChosen.map(row), ...other], counted);
+    // Each pressed × takes room from its row's name.
+    const names = [...shown, ...pastChosen].map(({value}) => ({name: value.title ?? value.key, pressed: Number(filtered.includes(value.key)) + Number(lit.includes(value.key))}));
+    return this.rows([...shown.map(row), ...pastChosen.map(row), ...other], counted, other.length > 0 ? [...names, {name: 'Other', pressed: 0}] : names);
   }
 
-  /** The rows in one column, the first of them until "N more" is pressed. */
-  private rows(entries: TemplateResult[], counted: boolean): TemplateResult {
+  /**
+   * The rows, the first of them until "N more" is pressed, in two columns where every name shown
+   * is short enough to fit one and no count takes a row's end.
+   */
+  private rows(entries: TemplateResult[], counted: boolean, names: {name: string; pressed: number}[]): TemplateResult {
     const first = this.limit > 0 ? this.limit : ENTRIES_SHOWN;
     const cut = !this.expanded && entries.length > first;
     const shown = cut ? entries.slice(0, first) : entries;
-    return html`<div part="swatches" role="list" class=${counted ? 'counted' : ''}>${shown}</div>${cut
+    const columns = !counted && names.slice(0, shown.length).every((n) => lengthOf(n.name) <= SHORT_NAME - PER_DISMISS * n.pressed) ? 2 : 1;
+    return html`<div part="swatches" role="list" class=${counted ? 'counted' : ''} data-columns=${columns}>${shown}</div>${cut
       ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = true)}>${(entries.length - first).toLocaleString('en-GB')} more</button>`
       : nothing}`;
   }
