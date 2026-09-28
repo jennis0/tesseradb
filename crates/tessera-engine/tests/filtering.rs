@@ -3186,7 +3186,7 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
     };
     let suggested = || {
         let page = engine
-            .suggest(&session, "department", None, "", 20, false, 100_000, 0)
+            .suggest(&session, "department", None, None, "", 20, false, 100_000, 0)
             .expect("the column suggests")
             .expect("the column is a category");
         page.values

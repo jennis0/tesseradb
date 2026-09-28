@@ -430,6 +430,9 @@ pub struct SuggestPage {
     /// so the flag counted visible values alone — under-reports, and a broad prefix would hide
     /// visible values behind a flag saying there were none.
     pub more: bool,
+    /// How exactly the filter's `region` leaves were answered, where the request's filter holds
+    /// one and counts were taken under it.
+    pub region: Option<crate::RegionVerdict>,
 }
 
 impl Engine {
@@ -478,12 +481,18 @@ impl Engine {
     /// `view`, only items holding a row in that view count. An item ingested and not yet flushed
     /// holds no row in any view, so it counts without `view` and not with it. A value visible in
     /// another view counts 0 here. An unknown or unreachable view is refused as [`EngineError::UnknownView`].
+    ///
+    /// With `filter`, which needs `view`, only the view's items passing the filter count. The
+    /// filter narrows the counted set and nothing else: which values are offered, and their order,
+    /// are decided without it, so a value the filter excludes is offered with count 0. The filter
+    /// is admitted before the walk, and evaluated only when counts were asked for.
     #[allow(clippy::too_many_arguments)]
     pub fn suggest(
         &self,
         session: &Session,
         column: &str,
         view: Option<&str>,
+        filter: Option<&crate::filter::FilterExpr>,
         q: &str,
         limit: usize,
         counts: bool,
@@ -519,6 +528,17 @@ impl Engine {
                 Some(&data.row_space)
             }
         };
+        if let Some(expr) = filter {
+            if view.is_none() {
+                return Err(EngineError::FilterMalformed(
+                    "a filter is evaluated in a view; name the view as well".to_string(),
+                ));
+            }
+            generation
+                .filter_columns
+                .admit(expr, false, &|layer| self.reaches_layer(session, layer))
+                .map_err(crate::viewport::filter_refusal)?;
+        }
 
         // **The gate, before a single entry is read**, and it is `Engine::categories`' gate
         // verbatim. A `public` set has no predicate at all; a `derived` one is derived from inside
@@ -641,12 +661,20 @@ impl Engine {
             &unreadable,
             set.as_deref(),
         )?;
+        let mut region = None;
         let counted = match (&candidate, counts) {
             (Some(candidate), true) => {
                 let within;
-                let set = match row_space {
-                    None => candidate,
-                    Some(row_space) => {
+                let set = match (row_space, view.zip(filter)) {
+                    (None, _) => candidate,
+                    (Some(_), Some((view, expr))) => {
+                        let (filtered, verdict) =
+                            self.filtered_in_view(session, &generation, view, candidate, expr)?;
+                        region = verdict;
+                        within = filtered;
+                        &within
+                    }
+                    (Some(row_space), None) => {
                         let through = row_space.extents().last().map(|e| e.seg_id.as_str());
                         within = row_space
                             .restrict_to_view(candidate, through)
@@ -696,7 +724,76 @@ impl Engine {
             column: column.to_string(),
             values,
             more,
+            region,
         }))
+    }
+
+    /// The members of `candidate` holding a row in `view` that pass `expr`, and the coarsest
+    /// verdict its region leaves reached. The filter is routed as the viewport routes it, over the
+    /// view's composed mask: an entity-space answer is kept to the entities the mask's rows cover,
+    /// and a row-space one is taken under the mask over the whole view and crossed to entities.
+    fn filtered_in_view(
+        &self,
+        session: &Session,
+        generation: &crate::Generation,
+        view: &str,
+        candidate: &croaring::Bitmap,
+        expr: &crate::filter::FilterExpr,
+    ) -> Result<(croaring::Bitmap, Option<crate::RegionVerdict>)> {
+        use crate::compose::MaskedSet;
+        use crate::filter::RoutedFilter;
+        let open = self.open_view(
+            session,
+            generation,
+            view,
+            &None,
+            &mut crate::timing::Probe::new(),
+        )?;
+        let served = &open.served;
+        let row_space = &served.data.row_space;
+        let no_inverse = || {
+            EngineError::Malformed(format!(
+                "view '{view}' has no row-to-entity table, so a filter answered by its rows \
+                 cannot be counted by entity; rebuild the bundle"
+            ))
+        };
+        let resolved = crate::viewport::ResolvedLeaves::default();
+        self.route_filters_under(served, &open.mask, candidate, &resolved, &None, |route| {
+            match route(expr, false)? {
+                RoutedFilter::Entity(entities) => {
+                    // The mask's rows were projected through this extent, so the entities kept
+                    // are the ones the map shows.
+                    let within = row_space
+                        .restrict_to_view(&entities, open.geometry.projection.covers_through())
+                        .ok_or_else(|| {
+                            EngineError::Malformed(format!(
+                                "view '{view}' no longer holds the extent its projection was \
+                                 taken through"
+                            ))
+                        })?;
+                    Ok((within, None))
+                }
+                RoutedFilter::Row(tree) => {
+                    let total = row_space.total_rows();
+                    let whole = 0..u32::try_from(total).unwrap_or(u32::MAX);
+                    let matched = self.evaluate_row_route(
+                        &tree,
+                        served,
+                        std::slice::from_ref(&whole),
+                        total,
+                        false,
+                    )?;
+                    let rows = open.mask.visible_rows(matched.rows());
+                    let mut entities = self
+                        .pool
+                        .install(|| row_space.entities_of_rows(&rows))
+                        .ok_or_else(no_inverse)?;
+                    // The mask's rows are the candidate's in this view; kept to it all the same.
+                    entities.and_inplace(candidate);
+                    Ok((entities, tree.region_verdict()))
+                }
+            }
+        })
     }
 }
 
