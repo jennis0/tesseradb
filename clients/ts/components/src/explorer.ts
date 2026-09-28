@@ -471,9 +471,12 @@ export class TesseraExplorer extends TesseraElement {
       .compact [part='selection-card'] {
         width: 272px;
       }
+      .compact [part='detail'] tessera-item-card,
+      .compact [part='detail'] tessera-artifact-card {
+        font-size: 12px;
+      }
       .compact [part='detail'] {
         width: 272px;
-        font-size: 12px;
         --_tessera-panel-padding: 12px 12px 10px;
         --_tessera-title-size: 14px;
         --_tessera-key-width: 76px;
