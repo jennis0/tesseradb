@@ -229,7 +229,6 @@ function nameResponse(result: ViewportResult, table: SessionArtifactTable): {nam
     naming,
     generation,
     release: () => {
-      if (table.generation !== generation) return;
       for (const ordinals of held) table.release(ordinals);
     }
   };
@@ -263,7 +262,7 @@ function remapBand(n: ResponseNaming, from: number, to: number, table: SessionAr
 }
 
 /** Thrown where a response is split or stored after the table it was named in was cleared. */
-export function tableCleared(): Error {
+function tableCleared(): Error {
   return new DOMException('the artifact table was cleared under this response; it is asked for again', 'AbortError');
 }
 

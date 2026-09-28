@@ -6,14 +6,15 @@
  *
  * @module @tesseradb/react
  */
-import {useEffect, useRef, useState, useSyncExternalStore} from 'react';
+import {useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore} from 'react';
 import {createStore, type ProjectionName, type Projections, type Store, type StoreOptions, type TokenSupplier} from '@tesseradb/client';
 
 /** The options of {@link useTesseraStore}: the options of {@link createStore}, with `authorise` read through a ref. */
 export type UseTesseraStoreOptions = Omit<StoreOptions, 'authorise'> & {
   /**
    * A function the store calls for a new token before the current one expires. The hook reads it
-   * through a ref, so an inline function neither rebuilds the store nor goes stale.
+   * through a ref, so an inline function neither rebuilds the store nor goes stale. A store serves
+   * one viewer: to show another, call `clear()` on the store or give the component a new `key`.
    */
   authorise?: TokenSupplier;
 };
@@ -29,7 +30,9 @@ export type UseTesseraStoreOptions = Omit<StoreOptions, 'authorise'> & {
 export function useTesseraStore(options: UseTesseraStoreOptions): Store | null {
   const [store, setStore] = useState<Store | null>(null);
   const latest = useRef(options);
-  latest.current = options;
+  useLayoutEffect(() => {
+    latest.current = options;
+  });
   const {viewerUrl, token, view} = options;
   const hasAuthorise = options.authorise !== undefined;
   useEffect(() => {

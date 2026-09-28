@@ -127,3 +127,17 @@ describe('a hover over a mark', () => {
     expect(el.hover?.lines).toEqual(['14 November 2023, 22:13:20 UTC']);
   });
 });
+
+describe('a hover across a change of viewer', () => {
+  it('is dropped when the store’s meta goes null', async () => {
+    vi.useFakeTimers();
+    const {el, store} = await map([{name: 'name', arrowType: 'text'}], 'title-field="name"');
+    store.describe = async () => ({name: 'Sheena McCurrach Art'});
+    el.onHover(markAt(31728047486770n));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(el.hover?.title).toBe('Sheena McCurrach Art');
+
+    store.set('meta', null);
+    expect(el.hover).toBeNull();
+  });
+});

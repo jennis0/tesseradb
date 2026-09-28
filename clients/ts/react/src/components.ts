@@ -61,7 +61,9 @@ const wrap = <E extends HTMLElement, Ev extends Record<string, EventName>>(tagNa
 const withStableAuthorise = <C extends React.ForwardRefExoticComponent<any>>(Inner: C): C => {
   const Outer = React.forwardRef<unknown, {authorise?: TokenSupplier | null}>((props, ref) => {
     const latest = React.useRef(props.authorise);
-    latest.current = props.authorise;
+    React.useLayoutEffect(() => {
+      latest.current = props.authorise;
+    });
     const given = props.authorise != null;
     const authorise = React.useMemo(() => (given ? () => latest.current!() : null), [given]);
     return React.createElement(Inner, {...props, authorise, ref});

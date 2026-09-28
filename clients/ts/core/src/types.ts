@@ -1070,9 +1070,10 @@ export type ViewportResponse = {
   /** The server's timings. */
   timings: Timings;
   /**
-   * The key held data is partitioned by (`x-tessera-identity-key`). It covers the identity set,
-   * the credential, the principal's visible set and the view. Data held under one key must not be
-   * shown under another, so a client drops what it holds when this changes.
+   * The key held data is partitioned by (`x-tessera-identity-key`). It hashes the exact credential
+   * bytes presented at authorisation, the identity of the principal's visible-set fragment, which a
+   * compaction or a rebuilt bundle changes, and the view. Data held under one key must not be shown
+   * under another, so a client drops what it holds when this changes.
    */
   identityKey: string;
   /**

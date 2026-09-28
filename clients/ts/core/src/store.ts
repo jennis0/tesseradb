@@ -3,7 +3,7 @@ import {artifactBudgetFor} from './artifactBudget.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
 import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
 import {tileRectOfBbox, type DepthChoice} from './budget.js';
-import {TesseraClient, type TesseraClientOptions} from './client.js';
+import {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
 import {ArtifactColours} from './colours.js';
 import type {Composition} from './compose.js';
 import {dataToWorldXY, gridToWorld, MAX_DEPTH, rectToRequestBbox, WORLD_SIZE} from './coords.js';
@@ -94,8 +94,7 @@ export type StoreOptions = {
   /**
    * A function the store calls for a viewer token, and again to renew it before it expires (see
    * {@link TokenSupplier}). A store serves one viewer: to show another, call {@link Store.clear} or
-   * create a new store, as {@link Store} sets out. Without that, the previous viewer's data stays
-   * published until this supplier is next called, at the renewal, and one answer after it.
+   * create a new store. {@link Store} says how long a previous viewer's data stays without that.
    */
   authorise?: TokenSupplier;
   /**
@@ -446,26 +445,33 @@ type Listener = () => void;
  * Every count and artifact it publishes is computed over this viewer's visible set.
  *
  * A store serves one viewer. To show the map to another viewer, call {@link Store.clear} or create
- * a new store. A token renewal for the same viewer keeps what is drawn.
+ * a new store.
  *
- * Behind that rule the store checks, as far as it can, that each answer is for the viewer it holds.
- * Each viewport answer carries an identity key, which the server derives from the credential
- * presented at authorisation, the viewer's visible set and the view. A renewal whose token was
- * issued for different credential bytes therefore counts as another viewer, even for the same
- * person, and the key also changes for the same viewer after a compaction or a rebuilt bundle. The
- * store drops an answer, and everything the server has answered, where the answer's key differs
- * from the one held for its view, or where a renewal brought a token no answer has yet matched to a
- * held key and the answer's view holds none. What it drops: points, frames, counts, artifacts,
- * shapes, item records, legend values, typeahead pages, the picked item and opened artifact, the
- * `member_of` clauses, a region selected from an artifact, the region's counts, and `meta`. What it
- * keeps: a drawn region's shape, the filter controls, the layers, the colouring, the current view
- * and the camera. It then reads `meta` again under the token it holds, drops a kept input that
- * names a view, layer or column the new `meta` does not list, and asks again.
+ * Behind that rule the store checks each viewport answer's identity key, as far as answers allow.
+ * The server derives the key from the exact credential bytes presented to `/session/authorise`, the
+ * identity of the viewer's visible-set fragment, and the view. An ingest or a suppression does not
+ * change it. A compaction or a rebuilt bundle gives the fragment a new identity, and so a new key,
+ * for every viewer. A renewal that presents different credential bytes, such as a freshly signed
+ * token with a new issue time, also gives a new key, so the store treats it as another viewer even
+ * for the same person.
  *
- * The check runs only on answers. The store calls `authorise` again only when the token it holds
- * is due for renewal, and asks once as soon as the new token arrives, so without
- * {@link Store.clear} a previous viewer's data stays published until that renewal and one answer
- * after it.
+ * The store forgets what the server answered where an answer's key differs from the one held for
+ * its view; where, after a renewal, an answer arrives on a view that holds no key before any answer
+ * under the new token has matched a held key; where the server refuses the renewed token the
+ * current view, other than by shedding load or for an expired token; and at a renewal while it
+ * holds `meta` and no key. What it drops: points, frames, counts, artifacts, shapes, item records,
+ * legend values, typeahead pages, the picked item and opened artifact, the `member_of` clauses, a
+ * region selected from an artifact, the region's counts, and `meta`. What it keeps: a drawn
+ * region's shape, the filter controls, the layers, the colouring, the current view and the camera.
+ * It then reads `meta` again under the token it holds, drops a kept input that names a view, layer
+ * or column the new `meta` does not list, and asks again. A token renewal whose key matches keeps
+ * what is drawn.
+ *
+ * The check runs on answers. The store calls `authorise` only when the token it holds is due for
+ * renewal, and then asks for the current view's key at once. So without {@link Store.clear}, the
+ * previous viewer's data stays published until that renewal and the answer or refusal to that ask;
+ * where the ask is shed, fails or finds the token expired, until the next answer under the new
+ * token.
  *
  * @category Store
  */
@@ -589,7 +595,8 @@ export interface Store {
   /**
    * One item's fields for a hover, fetched once per id and held. Resolves to `null` where the
    * request was refused, and holds that too. It publishes nothing; {@link Store.pick} opens a card.
-   * {@link Store.clear} and an answer under another identity key drop what is held.
+   * When the store forgets what the server answered (see {@link Store}) it drops what is held, and
+   * an answer asked for before then resolves to `null`.
    */
   describe(id: bigint): Promise<Record<string, unknown> | null>;
   /**
@@ -632,8 +639,8 @@ export interface Store {
    */
   dataXY(worldX: number, worldY: number): [number, number];
   /**
-   * Forget the viewer, to show the map to another one; see {@link Store} for the rule. Without this
-   * call a previous viewer's data stays published until the next renewal and one answer after it.
+   * Forget the viewer, to show the map to another one. {@link Store} says how long a previous
+   * viewer's data stays without this call.
    * Drops the token, `meta`, every view's held tiles and artifacts, the session artifact table, the
    * shapes, item records, legend, typeahead pages, `member_of` clauses, region and selection, and
    * abandons every request in flight. Publishes the emptied projections, with `meta` as `null` and
@@ -728,20 +735,19 @@ export function createStore(options: StoreOptions): Store {
   const tokens = new TokenSupply(options.authorise, options.token, clock, (changed) => {
     // A renewal keeps what is held. Until an answer under the new token confirms a key held, `admit`
     // does not trust an answer on a view that holds no key, and one ask goes out at once so the key
-    // is seen without waiting for the camera.
+    // is seen without waiting for the camera. A store holding `meta` and no key yet has nothing to
+    // compare the next answer with, so it reads `meta` again.
     if (changed && identities.size > 0) {
       unconfirmed = tokens.current;
       void askIdentity();
+    } else if (changed && meta !== null) {
+      forgetAnswers();
     }
     // A warm-up that failed for want of a token runs again now there is one.
     if (meta === null) void ready().catch(() => {});
   });
 
-  /**
-   * The identity key of the answers held, by view. The server derives it from the viewer's
-   * credential, the viewer's visible set and the view, so an answer under another key is another
-   * principal's, or the same viewer's after a compaction or a rebuilt bundle.
-   */
+  /** The identity key of the answers held, by view; see {@link Store} for what it derives from. */
   const identities = new Map<string, string>();
   /** A token a renewal brought, until an answer under it matches a key in {@link identities}. */
   let unconfirmed: string | null = null;
@@ -894,11 +900,10 @@ export function createStore(options: StoreOptions): Store {
     let own: ViewMachinery | null = null;
     const current = () => own !== null && views.current === own;
     /**
-     * Whether an answer asked for under `token` may be held: for the current view, where
-     * {@link admit} keeps it; for another view, while the store still holds this machinery.
+     * Whether an answer asked for under `token` may be held: while the store still holds this
+     * machinery, and {@link admit} keeps it.
      */
-    const admitted = (identityKey: string, token: string): boolean =>
-      current() ? admit(id, identityKey, token) : own !== null && views.holds(own);
+    const admitted = (identityKey: string, token: string): boolean => own !== null && views.holds(own) && admit(id, identityKey, token);
 
     const built = new Replica(
       async (req, signal, background, onPart) => {
@@ -1020,19 +1025,24 @@ export function createStore(options: StoreOptions): Store {
   /**
    * Asks for the current view's identity key under a token a renewal brought: counts only, one tile
    * at depth 0, with no filter, highlight or layer, so nothing set for the previous viewer can have
-   * it refused. A refusal leaves the next answer to {@link admit}.
+   * it refused. The server refusing the view the previous token reached shows another viewer, and
+   * the store forgets as {@link admit} does. A shed request, an expired token or a failed fetch
+   * leaves the next answer to {@link admit}.
    */
   async function askIdentity(): Promise<void> {
     const current = views.current;
     const q = frameOrNull();
     if (!current || !q) return;
     const view = views.id;
+    let tok: string | null = null;
     try {
-      const tok = await tokens.get();
+      tok = await tokens.get();
       const response = await client.viewport(tok, {view, zoom: 0, bbox: rectToRequestBbox({x0: 0, y0: 0, x1: 0, y1: 0}, 0, q), k: 0, layers: []});
       if (!disposed && views.current === current) admit(view, response.identityKey, tok);
-    } catch {
-      // The point path and the channel still pass their answers through `admit`.
+    } catch (error) {
+      if (disposed || tok === null || unconfirmed !== tok || !(error instanceof TesseraError)) return;
+      if (error.status === 429 || error.status === 503 || tokens.isExpiry(refusalOf(error))) return;
+      forgetAnswers();
     }
   }
 

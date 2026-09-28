@@ -12,9 +12,8 @@ import type {Store} from './store.js';
  * and calls again before a request where the token has 5 seconds or less left. Concurrent requests
  * share one call. A rejection refuses the request that was waiting for the token.
  *
- * A store serves one viewer: to show another, call {@link Store.clear} or create a new store, as
- * {@link Store} sets out. Without that, the previous viewer's data stays published until this
- * supplier is next called, at the renewal, and one answer after it.
+ * A store serves one viewer: to show another, call {@link Store.clear} or create a new store.
+ * {@link Store} says how long a previous viewer's data stays without that.
  *
  * @category Store
  */

@@ -459,6 +459,12 @@ export class TesseraMap extends TesseraElement {
     return typeof matchMedia !== 'undefined' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
+  protected override resetServerData(): void {
+    // A hover's title is a record the server answered.
+    this.hover = null;
+    this.hoveredArtifact = null;
+  }
+
   protected override onStoreAdopted(store: Store | null): void {
     this.slab.clear();
     this.metaSeen = false;

@@ -1508,7 +1508,7 @@ describe('a store serves one viewer', () => {
     let issued = 0;
     const authorise = vi.fn(opts.authorise ?? (async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000})));
     const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    return {store, viewport, authorise, clock, scheduler};
+    return {store, client, viewport, authorise, clock, scheduler};
   }
 
   /** Whose answers a store shows, by the viewer each band, tile count, artifact and meta came from. */
@@ -1524,6 +1524,155 @@ describe('a store serves one viewer', () => {
   }
 
   const TWO_VIEWS = meta({...SHAPED, views: [...SHAPED.views, view('s1', {quantisation: SHAPED.views[0]!.quantisation})]});
+
+  it('forgets when the renewed token is refused the view the previous token reached', async () => {
+    // Viewer B is not served s0, which viewer A was drawing.
+    const metas = {a: SHAPED, b: meta({...SHAPED, views: [view('s1', {quantisation: SHAPED.views[0]!.quantisation})]})};
+    const refused: string[] = [];
+    const {store, clock, scheduler} = perViewer({
+      metaOf: (token) => (token === 't1' ? metas.a : metas.b),
+      refuse: (token, req) => {
+        const no = token === 't2' && req.view === 's0';
+        if (no) refused.push(req.view!);
+        return no;
+      }
+    });
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(refused.length).toBeGreaterThan(0);
+    expect(store.get('meta')).toBe(metas.b);
+    expect(store.get('view').id).toBe('s1');
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+  });
+
+  it('reads meta again at a renewal when it holds meta and no answer yet', async () => {
+    const metas = {a: SHAPED, b: meta({...SHAPED})};
+    const {store, authorise, clock} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
+    // A store with no camera, as behind a panel or a map not yet sized.
+    await clock.advance(1);
+    expect(store.get('meta')).toBe(metas.a);
+
+    await clock.advance(30_000);
+    await clock.advance(1);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(store.get('meta')).toBe(metas.b);
+  });
+
+  it('empties the colours of every held view’s artifacts when it forgets', async () => {
+    const both = {...TWO_VIEWS, layers: [layer('l', {views: ['s0', 's1'], computedContent: ['centroid', 'box', 'hull'], shape: 'derived'})]};
+    const metas = {a: meta(both), b: meta(both)};
+    const {store, viewport, clock, scheduler} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
+    // Each view serves its own artifact, and its points are members of it, so each view's rows
+    // hold an ordinal in the table.
+    const answered = viewport.getMockImplementation()!;
+    viewport.mockImplementation(async (token: string, req: FakeRequest) => {
+      const r = await answered(token, req);
+      const id = VIEWERS.a.artifact + (req.view === 's1' ? 100n : 0n);
+      const membership = {l: {index: Uint16Array.from({length: r.result.ids.length}, () => 1), ids: BigUint64Array.of(id)}};
+      return {...r, result: {...r.result, membership, artifacts: r.result.artifacts.map((a) => ({...a, tesseraId: id}))}};
+    });
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.setCurrentView('s1');
+    await settled(clock, scheduler);
+    const table = store.get('artifacts').table;
+    expect(table.ordinalOf('l', VIEWERS.a.artifact)).not.toBe(0);
+    expect(table.ordinalOf('l', VIEWERS.a.artifact + 100n)).not.toBe(0);
+    expect(store.get('artifacts').colours.size).toBeGreaterThanOrEqual(2);
+
+    const atForget: number[] = [];
+    store.subscribe('meta', (m) => {
+      if (m === null) atForget.push(store.get('artifacts').colours.size);
+    });
+    store.clear();
+    expect(atForget).toEqual([0]);
+  });
+
+  it('names nothing in the artifact table from an absorb a clear interrupts between slices', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const N = 200;
+    /** `N` one-point tiles, each point a member of its own artifact: ids from `base`. */
+    const many = (req: FakeRequest, base: bigint, identityKey: string): ViewportResponse => {
+      const scalars = {archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: N}, () => 5)}};
+      return responseOf(
+        servedResult(N, Array.from({length: N}, (_, i) => tile(BigInt(i), 1n, {served: 1n})), {
+          scalars,
+          membership: {l: {index: Uint16Array.from({length: N}, (_, i) => i + 1), ids: BigUint64Array.from({length: N}, (_, i) => base + BigInt(i))}}
+        }),
+        {identityKey, contentKey: `ck-${identityKey}`}
+      );
+    };
+    // Each servedResult puts all served points on its first tile; spread them one per tile.
+    const spread = (r: ViewportResponse): ViewportResponse => ({...r, result: {...r.result, tiles: r.result.tiles.map((t) => ({...t, served: 1n}))}});
+    let signedIn: Who = 'a';
+    const viewport = vi.fn(async (token: string, req: FakeRequest) => spread(many(req, token === 't-a' ? 1_000n : 5_000n, `ik-${token}`)));
+    const {client} = fakeClient(() => response('ck'), SHAPED);
+    Object.assign(client, {viewport});
+    const authorise = vi.fn(async () => ({token: `t-${signedIn}`, expiresAt: (Date.now() + 3_600_000) / 1000}));
+    // Every read of the clock is far past the last, so each slice ends after its first 64 tiles.
+    let now = 0;
+    const clockRead = vi.spyOn(performance, 'now').mockImplementation(() => (now += 1_000));
+    try {
+      let interrupted = false;
+      const store: Store = createStore({
+        viewerUrl: 'http://viewer',
+        authorise,
+        client,
+        clock,
+        scheduler,
+        prefetch: false,
+        replica: {
+          revalidateAfterMs: Infinity,
+          // The first slice of viewer A's answer is stored; the next waits for a frame, and the
+          // store is cleared for viewer B in between.
+          onPhase: (kind) => {
+            if (kind !== 'piece' || interrupted) return;
+            interrupted = true;
+            signedIn = 'b';
+            store.clear();
+          }
+        }
+      });
+      store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+      for (let i = 0; i < 20; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await clock.advance(50);
+        scheduler.flush();
+      }
+      expect(interrupted).toBe(true);
+      const table = store.get('artifacts').table;
+      const ids = table.liveEntries().map(({entry}) => entry.tesseraId);
+      expect(ids.length).toBe(N);
+      expect(ids.every((id) => id >= 5_000n)).toBe(true);
+    } finally {
+      clockRead.mockRestore();
+    }
+  });
+
+  it('resolves a hover’s record asked for before a forget to nothing', async () => {
+    const metas = {a: SHAPED, b: meta({...SHAPED})};
+    const {store, client, clock} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
+    let answer: () => void = () => {};
+    Object.assign(client, {
+      item: async () => {
+        await new Promise<void>((resolve) => (answer = resolve));
+        return {fields: {title: 'viewer A’s record'}, views: [], scoped: {}, labels: []};
+      }
+    });
+    await clock.advance(1);
+    const described = store.describe(7n);
+    await clock.advance(1);
+    store.clear();
+    answer();
+    expect(await described).toBeNull();
+  });
 
   it('does not trust the first answer on an unvisited view after a renewal, before a held key is matched', async () => {
     const metas = {a: meta({...TWO_VIEWS}), b: meta({...TWO_VIEWS})};

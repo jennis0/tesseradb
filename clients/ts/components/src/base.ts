@@ -61,6 +61,8 @@ export abstract class TesseraElement extends LitElement {
   private ownConfig: OwnConfig | null = null;
   /** The last store a provider answered with, adopted where nothing outranks it. */
   private contextStore: Store | null = null;
+  /** Whether the adopted store held `meta` at its last change, so a drop to `null` is seen. */
+  private metaHeld = false;
   private consumer: ContextConsumer<typeof storeContext, this> | null = null;
   private unsubscribe: (() => void) | null = null;
 
@@ -145,6 +147,8 @@ export abstract class TesseraElement extends LitElement {
     this.resolvedStore = store;
     this.storeSource = source;
     this.subscribeTo(store);
+    this.metaHeld = store.get('meta') !== null;
+    this.resetServerData();
     this.onStoreAdopted(store);
     this.onStoreChange();
     this.requestUpdate();
@@ -156,17 +160,34 @@ export abstract class TesseraElement extends LitElement {
     this.unsubscribe = null;
     this.resolvedStore = null;
     this.storeSource = 'detached';
+    this.metaHeld = false;
+    this.resetServerData();
     this.onStoreAdopted(null);
     this.requestUpdate();
   }
 
   private subscribeTo(store: Store): void {
     this.unsubscribe?.();
-    this.unsubscribe = store.subscribe(() => this.onStoreChange());
+    this.unsubscribe = store.subscribe(() => {
+      // `meta` goes to `null` when the store forgets what the server answered: a `clear()` or an
+      // answer under another identity key.
+      const held = store.get('meta') !== null;
+      if (this.metaHeld && !held) this.resetServerData();
+      this.metaHeld = held;
+      this.onStoreChange();
+    });
   }
 
   /** A hook for an element that wires more than a render to its store; `null` when it detaches. */
   protected onStoreAdopted(_store: Store | null): void {}
+
+  /**
+   * Forget what this element holds from the server, beyond what it reads from the store's
+   * projections: fetched pages, names, a hover's record. Called when the element adopts or
+   * detaches from a store, and when the store's `meta` goes to `null`, so nothing answered for one
+   * viewer shows beside another's.
+   */
+  protected resetServerData(): void {}
 
   /** Every projection change lands here; the default asks for a render. */
   protected onStoreChange(): void {
