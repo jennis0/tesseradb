@@ -596,14 +596,15 @@ export type SuggestValue = {
   /** Where the query matched. */
   match: MatchSpan;
   /**
-   * How many items carrying this value this principal can see, computed exactly per request.
-   * Present only when the request set `counts: true`.
+   * How many items carrying this value this principal can see, computed exactly per request, in
+   * the request's view where it named one and among the items passing its `filters` where it
+   * sent them. Present only when the request set `counts: true`.
    */
   count?: number;
 };
 
 /**
- * One page of `GET /v1/categories/{column}/suggest`.
+ * One page of `/v1/categories/{column}/suggest`.
  *
  * @category Requests and responses
  */
@@ -619,6 +620,8 @@ export type SuggestPage = {
    * `selection.maxSuggestionWalk` values. There is no cursor; a longer query narrows the answer.
    */
   more: boolean;
+  /** The verdict on the counts' `region` leaves (`x-tessera-region`), present only where the request's `filters` carried one and asked for counts. */
+  region?: RegionVerdict;
 };
 
 /**
