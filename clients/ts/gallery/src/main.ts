@@ -5,8 +5,9 @@ import {SECTIONS, type Context, type Section, type Specimen} from './specimens.j
 /**
  * The gallery page. Every choice is in the query string, so a screenshot script can address any
  * combination: `scheme` (light, dark), `theme` (default, editorial, console), `width` (natural,
- * 280, 420, wide) and `el` (all, or one element's name without `tessera-`); `shoot` unsticks the
- * header for a screenshot script. A change reloads the page, so every element starts from its own
+ * 280, 420, wide) and `el` (all, or one element's name without `tessera-`); `state`, where given,
+ * keeps only the specimens whose state contains it, so a page holds as few maps as a shot needs;
+ * `shoot` unsticks the header for a screenshot script. A change reloads the page, so every element starts from its own
  * store again.
  */
 
@@ -86,7 +87,9 @@ function renderSection(section: Section, ctx: Context, mounted: Mounted[]): HTML
   }
   const grid = document.createElement('div');
   grid.className = 'specimens';
+  const only = params.get('state');
   for (const specimen of section.specimens) {
+    if (only && !specimen.state.includes(only)) continue;
     const figure = document.createElement('figure');
     figure.className = `specimen${specimen.wide && state.width === 'natural' ? ' wide' : ''}`;
     figure.dataset.state = specimen.state;

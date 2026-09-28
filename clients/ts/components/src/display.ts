@@ -62,27 +62,6 @@ export const displayStyles = css`
   .display .gap {
     height: 8px;
   }
-  .switch {
-    width: 34px;
-    height: 20px;
-    padding: 2px;
-    border-radius: 10px;
-    background: var(--_tessera-surface-3);
-    display: flex;
-    justify-content: flex-start;
-    flex: none;
-  }
-  .switch[aria-checked='true'] {
-    background: var(--_tessera-accent);
-    justify-content: flex-end;
-  }
-  .switch .knob {
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: var(--_tessera-surface);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-  }
   .sliders {
     display: grid;
     grid-template-columns: 64px minmax(0, 1fr);

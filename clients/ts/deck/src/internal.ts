@@ -5,6 +5,6 @@
 export {artifactName, attachedTopics, clusterLayerOf, contourShapes, displayName, encodingOf, type TesseraLayerInternalProps} from './layer.js';
 export {MarkSlab} from './slab.js';
 export {artifactOfMark} from './pick.js';
-export {UNMAPPED, colourOfFraction, colourOfRank, css, encodingSignature, fractionOf, hexOf, lighter, paletteValues, rampAt, rgbOfHex} from './colour.js';
+export {UNMAPPED, colourOfFraction, colourOfRank, css, encodingSignature, fractionOf, hexOf, lighter, paletteValues, rampAt, rgbOfHex, valueAtFraction} from './colour.js';
 export {DENSITY_COLOUR_TITLES, densityStops} from './density.js';
 export {hoverAt, type ContourShape} from './contours.js';

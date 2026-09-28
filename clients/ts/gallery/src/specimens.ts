@@ -1,6 +1,8 @@
 import type {Artifact, ArtifactDetail, BrowsePage, PaletteScheme, Projections, RegionProjection, Store} from '@tesseradb/client';
 import {NO_MASKED} from '@tesseradb/client';
 import type {TesseraMap} from '@tesseradb/components';
+import type {Colouring} from '@tesseradb/deck';
+import {setColouring} from '../../components/src/colouring.js';
 import {fakeStore, meta as baseMeta, settle, status, type FakeStore} from '../../components/test/fake-store.js';
 import {AREA, FIELDS, LAYERS, MANY_FIELDS, META, TOPIC, VENUES, browseRow, emptyDraft, filtersOf, legendOf, mapState, paper, ranksOf, suggestion, topicArtifacts, withDraft} from './corpus.js';
 
@@ -118,7 +120,12 @@ async function search(el: HTMLElement, q: string, done: string): Promise<void> {
   await until(() => !!shadow(el, done), `search results for ${q}`);
 }
 
-const legendStore = (colourBy: string | null, over: Partial<Projections> = {}) => store({legend: legendOf(colourBy), ...over});
+/** A store colouring by `colourBy`, with the colour choices `colouring` names already made. */
+const legendStore = (colourBy: string | null, over: Partial<Projections> = {}, colouring: Partial<Colouring> = {}) => {
+  const s = store({legend: legendOf(colourBy), ...over});
+  if (Object.keys(colouring).length > 0) setColouring(s, colouring);
+  return s;
+};
 
 export const SECTIONS: Section[] = [
   {
@@ -229,6 +236,16 @@ export const SECTIONS: Section[] = [
       {state: 'loading (no meta yet)', build: () => make('tessera-legend', {store: store({meta: null, status: status({status: 'loading'})})})},
       {state: 'colour by none', build: () => make('tessera-legend', {store: legendStore(null)})},
       {state: 'category', build: () => make('tessera-legend', {store: legendStore('field')})},
+      {state: 'category, filtered to two values', build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV'], verb: 'filter'}}))})})},
+      {state: 'category, one value highlighted', build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV'], verb: 'highlight'}}))})})},
+      {
+        state: 'category, with exact counts where a store holds them',
+        build: () =>
+          make('tessera-legend', {
+            store: store({legend: legendOf('field', {counts: {field: Object.fromEntries(FIELDS.map((v, i) => [v.key, {value: Math.round(4_812_300 / (i + 1.2)), exact: true}]))}})})
+          })
+      },
+      {state: 'category, a chosen colour and the Okabe-Ito palette', build: () => make('tessera-legend', {store: legendStore('field', {}, {palette: 'okabe-ito', values: {field: {'cs.CV': '#6b3fa0'}}})})},
       {state: 'category, limit 4', build: () => make('tessera-legend', {store: legendStore('field')}, {limit: '4'})},
       {state: 'category, names loading', build: () => make('tessera-legend', {store: store({legend: legendOf('field', {categories: {}})})})},
       {
@@ -240,6 +257,8 @@ export const SECTIONS: Section[] = [
         build: () => make('tessera-legend', {store: store({legend: legendOf('field', {categoryErrors: {field: {code: 'vocabulary-withheld', detail: 'arxiv_fields is not listable for this session'}}})})})
       },
       {state: 'numeric ramp', build: () => make('tessera-legend', {store: legendStore('citations')})},
+      {state: 'numeric, a range filter on the ramp', build: () => make('tessera-legend', {store: legendStore('citations', {filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 2000, verb: 'filter'}}))})})},
+      {state: 'numeric, Magma on a log scale', build: () => make('tessera-legend', {store: legendStore('citations', {}, {ramp: 'magma', scale: 'log'})})},
       {state: 'numeric, no values on screen', build: () => make('tessera-legend', {store: store({legend: legendOf('citations', {domains: {}})})})},
       {state: 'a column that is not rendered', build: () => make('tessera-legend', {store: legendStore('published_at')})},
       {state: 'colour by cluster', build: () => make('tessera-legend', {store: legendStore('cluster:topics', {artifacts: mapState().artifacts})})},
@@ -595,6 +614,58 @@ function explorerSpecimens(): Specimen[] {
     {state: 'density only, hexagons, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'hex', 'no-points': ''}, 900), ready: readyFor(false)},
     {state: 'density only, grid, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'grid', 'no-points': ''}, 900), ready: readyFor(false)},
     {state: 'contours over the points, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'contours'}, 900), ready},
+    {
+      state: 'a highlight (Computer Vision lit), 1440 × 900',
+      pinned: 1440,
+      build: (ctx) =>
+        explorer(mapStore(ctx, 'field', {highlight: (m) => m.field === 2}, {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV'], verb: 'highlight'}}))}), {layout: 'overlay'}, 900),
+      ready
+    },
+    {
+      state: 'a number’s range filter on its ramp, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(mapStore(ctx, 'citations', {}, {filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 2000, verb: 'filter'}}))}), {layout: 'overlay'}, 900),
+      ready
+    },
+    {
+      state: 'the colour picker open for Computer Vision, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx), {layout: 'overlay'}, 900),
+      ready: async (el) => {
+        await ready(el);
+        const legend = () => el.shadowRoot?.querySelector('tessera-legend') ?? null;
+        await until(() => !!legend()?.shadowRoot?.querySelector('[data-key="cs.CV"] [part="swatch"]'), 'the legend rows');
+        legend()!.shadowRoot!.querySelector<HTMLElement>('[data-key="cs.CV"] [part="swatch"]')!.click();
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-popover"]'), 'the colour picker');
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'the Colour by menu open with the palettes, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx), {layout: 'overlay'}, 900),
+      ready: async (el) => {
+        await ready(el);
+        const legend = () => el.shadowRoot?.querySelector('tessera-legend') ?? null;
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-by"]'), 'the Colour by button');
+        legend()!.shadowRoot!.querySelector<HTMLElement>('[part="colour-by"]')!.click();
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-menu"]'), 'the Colour by menu');
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'the Colour by menu open with the ramps, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(mapStore(ctx, 'citations'), {layout: 'overlay'}, 900),
+      ready: async (el) => {
+        await ready(el);
+        const legend = () => el.shadowRoot?.querySelector('tessera-legend') ?? null;
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-by"]'), 'the Colour by button');
+        legend()!.shadowRoot!.querySelector<HTMLElement>('[part="colour-by"]')!.click();
+        await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-menu"]'), 'the Colour by menu');
+        await settle(el.parentElement!);
+      }
+    },
     {
       state: 'the Layers popover open over a smooth density, 1440 × 900',
       pinned: 1440,

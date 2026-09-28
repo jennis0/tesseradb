@@ -115,6 +115,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - The Colour by choice changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level choice changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-displaychange']>} tessera-displaychange - A setting in the Display section changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A colour was chosen or reset for one value in the legend.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The palette or ramp was chosen in the legend.
  * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - The session expired.
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A filter control or chip changed.

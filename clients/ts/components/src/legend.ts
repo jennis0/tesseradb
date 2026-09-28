@@ -1,9 +1,26 @@
-import {css, html, nothing, type TemplateResult} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, colourLayers, type Rgba} from '@tesseradb/client';
+import {CLUSTER_PREFIX, colourLayers, composeFilters, type CategoryValue, type FilterDraft, type Masked, type Meta, type Rgba, type Store} from '@tesseradb/client';
 import {NEUTRAL} from '@tesseradb/client/internal';
-import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck/internal';
+import {CATEGORY_PALETTES, RAMPS, type CategoryPaletteName, type Colouring, type RampName, type RampScale} from '@tesseradb/deck';
+import {
+  UNMAPPED,
+  artifactName,
+  clusterLayerOf,
+  colourOfFraction,
+  colourOfRank,
+  css as rgb,
+  fractionOf,
+  hexOf,
+  lighter,
+  paletteValues,
+  rgbOfHex,
+  valueAtFraction
+} from '@tesseradb/deck/internal';
 import {TesseraElement, UNNAMED, columnCaption, dateText, emit} from './base.js';
+import {colouringOf, setColouring, watchColouring, withValueColour} from './colouring.js';
+import {radioKeys} from './display.js';
+import {hsvOf, rgbOfHsv, type Hsv} from './hsv.js';
 import {icon} from './icons.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf} from './states.js';
@@ -12,17 +29,45 @@ import {chrome, tokens} from './tokens.js';
 /** The entries shown where `limit` is 0, as many as a card can hold. */
 const ENTRIES_SHOWN = 40;
 
+/** How far each lighter colour in the colour picker is taken towards white. */
+const LIGHTER = 0.45;
+
+type Column = Meta['declaredScalars'][number];
+
+/** A choice in Colour by: its value for `setColourBy` (with `@level` for one level of a layer), its title and its kind. */
+type ColourOption = {value: string; title: string; kind: string; checked: boolean; cluster: boolean};
+
+/** The value whose colour the picker is changing. */
+type Picking = {column: string; key: string; title: string};
+
 /**
- * What the colours mean, under a "Colour" heading. For a category column, the values the marks on
- * screen carry, by title, in their colours; for a numeric column, a ramp over the range of the
- * marks served, with its minimum and maximum; under colour by cluster, the served artifacts in
- * their colours. Entries sit in two columns. The first `limit` entries show, 40 where `limit` is
- * 0, with an "N more" button that shows the rest until the colouring changes.
+ * What the colours mean, under a "Colour" heading. For a category column, one row per value the
+ * points on screen carry, in its colour; for a number column, a ramp over the range of the points
+ * served, with its lowest and highest values; under colour by cluster, the served artifacts in their
+ * colours. The first `limit` rows show, 40 where `limit` is 0, with an "N more" button that shows
+ * the rest until the colouring changes.
  *
- * `selectable` puts the *Colour by* choice in the heading, drawn as text with a chevron. It offers
- * the rendered columns and every layer that can colour, drawn or not; colouring by a layer does not
- * draw it. A *Level* choice appears under colour by a levelled layer with several levels served.
- * Which layers are drawn is `<tessera-layer-picker>`'s.
+ * A category row is a swatch, the value's name, Highlight and Filter buttons, and a count where the
+ * store holds exact counts for the column (not built yet: no route serves them, so no count shows).
+ * The buttons show while the row is hovered or focused, and stay shown while pressed. Filter adds the
+ * value to the column's filter, which may hold several; the rows left out empty their swatch.
+ * Highlight picks the value out without changing any count; the other rows grey. A column holds one
+ * clause, so pressing the other verb moves the column's clause to it with that value alone. Both go
+ * through the store's filters, so the chips are the ones `<tessera-filter-panel>` shows. The buttons
+ * appear only where the column can be filtered by value.
+ *
+ * The swatch opens a colour picker: the palette's colours and a lighter row, a custom area with a
+ * hue bar and a hex field, and Reset, which gives the value its palette colour back. A choice applies
+ * at once and fires `tessera-valuecolour`. A number column's ramp carries a range with two handles,
+ * where the column can be filtered by range: dragging across the ramp or moving a handle (with the
+ * arrow keys, too) sets the column's range filter, and the range follows the filter's chip.
+ *
+ * `selectable` puts the *Colour by* choice in the heading, a button opening a menu of the rendered
+ * columns and every layer that can colour, drawn or not; colouring by a layer does not draw it. For
+ * a category column the menu offers the palettes, and for a number column the ramps, a linear or
+ * log scale and reversal, unless `hide-palettes` is set. The colour choices are shared with every
+ * map reading the same store. A *Level* choice appears under colour by a levelled layer with
+ * several levels served. Which layers are drawn is `<tessera-layer-picker>`'s.
  *
  * @summary What the map's colours mean, and the colour controls.
  * @tagname tessera-legend
@@ -31,19 +76,47 @@ const ENTRIES_SHOWN = 40;
  *   by choice changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level
  *   choice, or a levelled layer's entry in Colour by, chose a level.
- * @csspart title - The heading, holding the Colour by choice under `selectable`.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A value's
+ *   colour was chosen or reset in the colour picker.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The
+ *   palette, the ramp, its scale or its direction was chosen in Colour by.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A row's
+ *   Highlight or Filter button, or the ramp's range, changed the column's clause.
+ * @csspart title - The heading, holding the Colour by button under `selectable`.
  * @csspart state - The state line, with `data-state`.
  * @csspart refusal - "Values unavailable" where the names were refused, or "Column unavailable"
  *   where the column is not rendered, with `data-code` where the server gave one.
- * @csspart select - The Colour by select.
- * @csspart cluster-option - An entry in Colour by for a layer, or for one level of a levelled layer.
+ * @csspart colour-by - The Colour by button, naming what the points are coloured by.
+ * @csspart colour-menu - The Colour by menu, while it is open.
+ * @csspart option - An entry in the Colour by menu, with `data-value`, `aria-checked`, and
+ *   `data-kind`: `layer` for a layer or one level of a levelled layer, `category`, `number` or
+ *   `none`.
+ * @csspart palette - A palette in the Colour by menu, with `data-palette` and `aria-checked`.
+ * @csspart ramp-option - A ramp in the Colour by menu, with `data-ramp` and `aria-checked`.
+ * @csspart scale - The Linear and Log choice in the Colour by menu.
+ * @csspart reverse - The Reverse switch in the Colour by menu.
  * @csspart level-select - The Level select.
- * @csspart swatches - The list of colours.
- * @csspart swatch - One colour.
+ * @csspart swatches - The list of rows.
+ * @csspart entry - One row, with `data-key` for a category value and `data-state`: `filtered` or
+ *   `out` while the column is filtered, `lit` or `dim` while it is highlighted, else empty.
+ * @csspart swatch - A row's colour: for a category value, the button that opens the colour picker.
+ * @csspart name - A row's name.
+ * @csspart highlight - A row's Highlight button, with `aria-pressed`.
+ * @csspart filter - A row's Filter button, with `aria-pressed`.
+ * @csspart count - A row's exact count, where the store holds one.
  * @csspart more - The "N more" button, where there are more entries than show.
- * @csspart ramp - A numeric column's ramp.
- * @csspart label - The ramp's `min` and `max` captions.
- * @csspart value - The ramp's minimum and maximum.
+ * @csspart ramp - A number column's ramp.
+ * @csspart range - The span of the ramp the column's range filter keeps, while one is set.
+ * @csspart range-low - The handle of the range's low end, a slider.
+ * @csspart range-high - The handle of the range's high end, a slider.
+ * @csspart value - The ramp's lowest and highest values, beneath its ends.
+ * @csspart range-value - The range's ends, beneath the ramp, while a range is set.
+ * @csspart colour-popover - The colour picker, while it is open.
+ * @csspart choice - A colour in the picker's palette rows, with `aria-pressed`.
+ * @csspart sv - The picker's saturation and brightness area, a slider in two directions.
+ * @csspart hue - The picker's hue bar, a slider.
+ * @csspart hex - The picker's hex field.
+ * @csspart reset - The picker's Reset button.
  */
 export class TesseraLegend extends TesseraElement {
   static override styles = [
@@ -56,12 +129,21 @@ export class TesseraLegend extends TesseraElement {
       [part='title'] {
         margin-bottom: 10px;
       }
-      [part='title'] .choice {
+      [part='colour-by'] {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
         font-size: 12px;
         font-weight: 500;
         letter-spacing: 0;
         text-transform: none;
         color: var(--_tessera-ink);
+      }
+      [part='colour-by'] .t {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .level {
         display: flex;
@@ -74,51 +156,414 @@ export class TesseraLegend extends TesseraElement {
         font-weight: 500;
       }
       [part='swatches'] {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 4px 12px;
-        max-height: 220px;
+        display: flex;
+        flex-direction: column;
+        max-height: 340px;
         overflow-y: auto;
-        font-size: 12px;
+        margin: 0 -6px;
       }
-      .entry {
+      [part~='entry'] {
         display: grid;
-        grid-template-columns: 10px minmax(0, 1fr);
+        grid-template-columns: 12px minmax(0, 1fr) auto;
         align-items: center;
-        column-gap: 7px;
-        min-height: 18px;
+        column-gap: 8px;
+        min-height: 26px;
+        padding: 1px 6px;
+        border-radius: var(--_tessera-radius-control);
+      }
+      [part='swatches'].counted [part~='entry'] {
+        grid-template-columns: 12px minmax(0, 1fr) auto 72px;
+      }
+      [part~='entry']:hover,
+      [part~='entry']:focus-within {
+        background: var(--_tessera-surface-2);
+      }
+      [part~='entry'][data-state='lit'] {
+        background: var(--_tessera-highlight-soft);
       }
       [part='swatch'] {
+        --c: transparent;
         display: inline-block;
-        width: 10px;
-        height: 10px;
-        border-radius: 2px;
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
+        background: var(--c);
       }
-      .entry .v {
+      button[part='swatch'] {
+        cursor: pointer;
+      }
+      [data-state='out'] [part='swatch'] {
+        background: transparent;
+        box-shadow: inset 0 0 0 1.5px var(--c);
+      }
+      [data-state='dim'] [part='swatch'] {
+        background: color-mix(in srgb, var(--_tessera-ink-3) 30%, var(--_tessera-surface));
+      }
+      [part='name'] {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      [data-state='out'] [part='name'],
+      [data-state='dim'] [part='name'] {
+        color: var(--_tessera-ink-3);
+      }
+      [data-state='lit'] [part='name'] {
+        font-weight: 600;
+      }
+      .verbs {
+        display: flex;
+        gap: 2px;
+      }
+      .verbs button {
+        width: 22px;
+        height: 22px;
+        display: grid;
+        place-items: center;
+        border-radius: 5px;
+        color: var(--_tessera-ink-2);
+        opacity: 0;
+      }
+      [part~='entry']:hover .verbs button,
+      [part~='entry']:focus-within .verbs button,
+      .verbs button[aria-pressed='true'] {
+        opacity: 1;
+      }
+      .verbs button:hover {
+        background: var(--_tessera-surface-3);
+      }
+      [part='filter'][aria-pressed='true'] {
+        background: var(--_tessera-accent);
+        color: var(--_tessera-accent-ink);
+      }
+      [part='highlight'][aria-pressed='true'] {
+        background: var(--_tessera-highlight);
+        color: var(--_tessera-highlight-ink);
+      }
+      [part='count'] {
+        text-align: right;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        color: var(--_tessera-ink-2);
+      }
+      [data-state='lit'] [part='count'] {
+        color: var(--_tessera-highlight);
+      }
+      [data-state='out'] [part='count'],
+      [data-state='dim'] [part='count'] {
+        color: var(--_tessera-ink-3);
+      }
       [part='more'] {
         margin-top: 8px;
       }
+      /* A number column: the ramp, the range on it, and the values beneath. */
+      .track {
+        position: relative;
+        height: 22px;
+        margin: 2px 0 0;
+        touch-action: none;
+      }
+      .track.filterable {
+        cursor: crosshair;
+      }
       [part='ramp'] {
-        height: 8px;
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 6px;
+        height: 10px;
+        border-radius: 2px;
+      }
+      [part='range'] {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        background: color-mix(in srgb, var(--_tessera-ink) 6%, transparent);
+        border-left: 1.5px solid var(--_tessera-ink);
+        border-right: 1.5px solid var(--_tessera-ink);
+        pointer-events: none;
+      }
+      [part='range-low'],
+      [part='range-high'] {
+        position: absolute;
+        top: 1px;
+        width: 8px;
+        height: 20px;
+        margin-left: -4px;
+        border: 1.5px solid var(--_tessera-ink);
+        border-radius: 3px;
+        background: var(--_tessera-surface);
+        cursor: ew-resize;
+      }
+      .axis {
+        position: relative;
+        height: 18px;
+        margin-top: 2px;
+        font-size: 12px;
+        color: var(--_tessera-ink-2);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .axis > * {
+        position: absolute;
+      }
+      .axis .lo {
+        left: 0;
+      }
+      .axis .hi {
+        right: 0;
+      }
+      [part='range-value'] {
+        transform: translateX(-50%);
+        color: var(--_tessera-ink);
+        font-weight: 500;
+      }
+      /* The popovers: the Colour by menu and the colour picker, in the top layer. */
+      .pop {
+        position: fixed;
+        inset: auto;
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+        background: var(--_tessera-surface);
+        color: var(--_tessera-ink);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius);
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
+        font-size: 13px;
+        max-height: calc(100vh - 16px);
+        overflow-y: auto;
+      }
+      .menu {
+        width: 280px;
+        padding: 6px 0;
+      }
+      .menu .hd {
+        margin: 0;
+        padding: 6px 14px 4px;
+      }
+      .menu .hd.rule {
+        margin-top: 6px;
+        padding-top: 10px;
+        border-top: 1px solid var(--_tessera-line-2);
+      }
+      .menu [role='radio'] {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        width: 100%;
+        padding: 7px 14px;
+        text-align: left;
+      }
+      .menu [role='radio']:hover,
+      .menu [role='radio'][aria-checked='true'] {
+        background: var(--_tessera-surface-2);
+      }
+      .pop [role='radio']:focus-visible,
+      .pop button:focus-visible {
+        outline-offset: -2px;
+      }
+      .menu [part~='option'][aria-checked='true'] {
+        font-weight: 500;
+      }
+      .menu .kind {
+        font-size: 12px;
+        color: var(--_tessera-ink-3);
+      }
+      .menu [part='palette'],
+      .menu [part='ramp-option'] {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 5px;
+        padding: 9px 14px;
+      }
+      .menu .pt {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .menu .tag {
+        padding: 0 5px;
+        border: 1px solid var(--_tessera-line);
         border-radius: 4px;
-        margin: 2px 0 6px;
+        font-size: 11px;
+        color: var(--_tessera-ink-2);
+      }
+      .menu .strip {
+        display: flex;
+        gap: 2px;
+      }
+      .menu .strip span {
+        width: 18px;
+        height: 10px;
+        border-radius: 2px;
+      }
+      .menu .bar {
+        display: block;
+        width: 100%;
+        height: 10px;
+        border-radius: 2px;
+      }
+      .menu .opts {
+        display: grid;
+        grid-template-columns: 80px minmax(0, 1fr);
+        align-items: center;
+        row-gap: 8px;
+        margin-top: 6px;
+        padding: 10px 14px 6px;
+        border-top: 1px solid var(--_tessera-line-2);
+        font-size: 12px;
+        color: var(--_tessera-ink-2);
+      }
+      .seg2 {
+        display: inline-flex;
+        justify-self: start;
+        padding: 2px;
+        border-radius: 7px;
+        background: var(--_tessera-surface-3);
+      }
+      .menu .seg2 [role='radio'] {
+        width: auto;
+        padding: 3px 10px;
+        border-radius: 5px;
+        font-size: 12px;
+        color: var(--_tessera-ink-2);
+      }
+      .menu .seg2 [role='radio'][aria-checked='true'] {
+        background: var(--_tessera-surface);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+        color: var(--_tessera-ink);
+        font-weight: 500;
+      }
+      .menu .opts .switch {
+        justify-self: start;
+      }
+      .picker {
+        width: 264px;
+      }
+      .picker .head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 12px 14px 8px;
+      }
+      .picker .head .t {
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .picker .choices {
+        display: grid;
+        gap: 6px;
+        padding: 0 14px 10px;
+      }
+      [part='choice'] {
+        aspect-ratio: 1;
+        width: 100%;
+        border-radius: 5px;
+      }
+      [part='choice'][aria-pressed='true'] {
+        box-shadow:
+          0 0 0 2px var(--_tessera-surface),
+          0 0 0 3.5px var(--_tessera-ink);
+      }
+      .picker .hd {
+        margin: 0;
+        padding: 10px 14px 4px;
+        border-top: 1px solid var(--_tessera-line-2);
+      }
+      .picker .custom {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 4px 14px 14px;
+      }
+      [part='sv'],
+      [part='hue'] {
+        position: relative;
+        touch-action: none;
+        cursor: crosshair;
+      }
+      [part='sv'] {
+        height: 120px;
+        border-radius: var(--_tessera-radius-control);
+      }
+      [part='hue'] {
+        height: 10px;
+        border-radius: 5px;
+        background: linear-gradient(90deg, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000);
+      }
+      .knob {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        margin: -6px 0 0 -6px;
+        border: 2px solid #ffffff;
+        border-radius: 50%;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
+        pointer-events: none;
+      }
+      [part='hue'] .knob {
+        top: 50%;
+      }
+      .picker label {
+        display: grid;
+        grid-template-columns: 28px minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--_tessera-ink-2);
+      }
+      [part='hex'] {
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
       }
     `
   ];
 
   /** Puts the Colour by choice in the heading. */
   @property({type: Boolean}) accessor selectable = false;
-  /** Under `selectable`, also renders the swatches or the ramp below the heading. */
+  /** Under `selectable`, also renders the rows or the ramp below the heading. */
   @property({type: Boolean}) accessor readout = false;
   /** How many entries show before "N more" offers the rest; 0 shows the first 40. */
   @property({type: Number}) accessor limit = 0;
+  /** Leaves the palette and ramp choices out of the Colour by menu, for a host that sets them. */
+  @property({type: Boolean, attribute: 'hide-palettes'}) accessor hidePalettes = false;
   /** Whether "N more" was pressed, for the colouring it was pressed under. @internal */
   @state() accessor expanded = false;
+  /** Whether the Colour by menu is open. @internal */
+  @state() accessor menuOpen = false;
+  /** The value the colour picker is open for. @internal */
+  @state() accessor picking: Picking | null = null;
+  /** The colour picker's custom colour. @internal */
+  @state() accessor hsv: Hsv = [0, 0, 0];
+  /** A range being dragged on the ramp, as fractions of it, before it is sent. @internal */
+  @state() accessor dragging: {low: number; high: number} | null = null;
   private expandedFor: string | null = null;
+  private unwatchColouring: (() => void) | null = null;
+  /** Where a drag on the ramp started, and which end it moves. */
+  private dragFrom: {anchor: number; end: 'low' | 'high' | 'new'} | null = null;
+
+  protected override onStoreAdopted(store: Store | null): void {
+    this.unwatchColouring?.();
+    this.unwatchColouring = store ? watchColouring(store, () => this.requestUpdate()) : null;
+  }
+
+  protected override resetServerData(): void {
+    // The picker and the menu name values and layers the server answered.
+    this.closePopovers(false);
+    this.dragging = null;
+    this.dragFrom = null;
+  }
+
+  override disconnectedCallback(): void {
+    this.closePopovers(false);
+    document.removeEventListener('pointerdown', this.onOutside, true);
+    super.disconnectedCallback();
+  }
 
   protected override onStoreChange(): void {
     // A new colouring is a new list, which starts cut again.
@@ -126,6 +571,7 @@ export class TesseraLegend extends TesseraElement {
     if (colourBy !== this.expandedFor) {
       this.expandedFor = colourBy;
       this.expanded = false;
+      this.picking = null;
     }
     super.onStoreChange();
   }
@@ -152,12 +598,52 @@ export class TesseraLegend extends TesseraElement {
     emit(this, 'tessera-levelchange', {level});
   }
 
+  /** Change the palette, the ramp, its scale or its direction, and report all four. */
+  private choosePalette(patch: Partial<Pick<Colouring, 'palette' | 'ramp' | 'scale' | 'reverse'>>): void {
+    const s = this.resolvedStore;
+    if (!s) return;
+    setColouring(s, patch);
+    const {palette, ramp, scale, reverse} = colouringOf(s);
+    emit(this, 'tessera-palettechange', {palette, ramp, scale, reverse});
+  }
+
+  /**
+   * Put `key` in or out of `column`'s clause in the position `verb`. A column holds one clause, so a
+   * clause in the other position is replaced by one holding `key` alone.
+   */
+  private applyVerb(column: string, key: string, verb: 'filter' | 'highlight'): void {
+    const s = this.resolvedStore;
+    if (!s) return;
+    const draft = s.get('filters').draft;
+    const held = draft[column];
+    if (!held || held.family !== 'category') return;
+    const keys = held.verb === verb ? (held.keys.includes(key) ? held.keys.filter((k) => k !== key) : [...held.keys, key]) : [key];
+    const next: FilterDraft = {...draft, [column]: {family: 'category', keys, verb}};
+    s.setFilters(next);
+    emit(this, 'tessera-filterchange', {column, expr: composeFilters(next)});
+  }
+
+  /** Set `column`'s range filter to `[gte, lte]` in the column's units, rounded as the column stores them. */
+  private applyRange(column: Column, gte: number, lte: number): void {
+    const s = this.resolvedStore;
+    if (!s) return;
+    const draft = s.get('filters').draft;
+    const held = draft[column.name];
+    if (!held || held.family !== 'numeric') return;
+    const whole = column.arrowType !== 'f32' && column.arrowType !== 'f64';
+    const round = (v: number) => (whole ? Math.round(v) : Number(v.toPrecision(6)));
+    const next: FilterDraft = {...draft, [column.name]: {family: 'numeric', gte: round(Math.min(gte, lte)), lte: round(Math.max(gte, lte)), verb: 'filter'}};
+    s.setFilters(next);
+    emit(this, 'tessera-filterchange', {column: column.name, expr: composeFilters(next)});
+  }
+
   override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const meta = s?.get('meta') ?? null;
     if (!s || !meta) return html`<div class="panel"><h2 part="title">Colour</h2>${renderState(stateOf(s?.get('status')), s?.get('status'))}</div>`;
     const legend = s.get('legend');
     const artifacts = s.get('artifacts');
+    const colouring = colouringOf(s);
     const columns = meta.declaredScalars.filter((c) => c.render);
     const colourBy = legend.colourBy;
     // The level options are the rungs present among the colouring layer's served artifacts,
@@ -173,24 +659,30 @@ export class TesseraLegend extends TesseraElement {
     const levelTitle = (l: number) => clusterMeta?.levels.find((x) => x.level === l)?.title ?? `Level ${l}`;
     // The level drawn: the one chosen, else the explorer's, else the deepest served.
     const drawnLevel = this.level ?? this.autoLevel ?? levelsServed.at(-1) ?? null;
-    const choice = this.selectable
-      ? html`<span class="choice"><select part="select" aria-label="Colour by" @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}>
-            <option value="" ?selected=${colourBy === null}>None</option>
-            ${colourLayers(meta.layers).flatMap((decl) => {
-              // A levelled layer is offered once per level, by the declared level titles, since
-              // colouring it is membership at one level. Any other layer is offered once.
-              const value = `${CLUSTER_PREFIX}${decl.name}`;
-              if (decl.levels.length === 0) {
-                return [html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>${decl.title || decl.name}</option>`];
-              }
-              return decl.levels.map(
-                (lv) =>
-                  html`<option part="cluster-option" value=${`${value}@${lv.level}`} ?selected=${colourBy === value && (drawnLevel ?? decl.levels.at(-1)!.level) === lv.level}>${lv.title || `Level ${lv.level}`}</option>`
-              );
-            })}
-            ${columns.map((c) => html`<option value=${c.name} ?selected=${colourBy === c.name}>${columnCaption(c.name)}</option>`)}
-          </select>${icon('chev', 12, 1.4)}</span>`
+    const options: ColourOption[] = [
+      {value: '', title: 'None', kind: '', checked: colourBy === null, cluster: false},
+      ...colourLayers(meta.layers).flatMap((decl): ColourOption[] => {
+        // A levelled layer is offered once per level, by the declared level titles, since
+        // colouring it is membership at one level. Any other layer is offered once.
+        const value = `${CLUSTER_PREFIX}${decl.name}`;
+        if (decl.levels.length === 0) return [{value, title: decl.title || decl.name, kind: 'Layer', checked: colourBy === value, cluster: true}];
+        return decl.levels.map((lv) => ({
+          value: `${value}@${lv.level}`,
+          title: lv.title || `Level ${lv.level}`,
+          kind: 'Layer',
+          checked: colourBy === value && (drawnLevel ?? decl.levels.at(-1)!.level) === lv.level,
+          cluster: true
+        }));
+      }),
+      ...columns.map((c) => ({value: c.name, title: columnCaption(c.name), kind: c.category ? 'Category' : 'Number', checked: colourBy === c.name, cluster: false}))
+    ];
+    const current = options.find((o) => o.checked);
+    const colourByButton = this.selectable
+      ? html`<button part="colour-by" type="button" aria-haspopup="dialog" aria-expanded=${this.menuOpen ? 'true' : 'false'} aria-label=${`Colour by: ${current?.title ?? 'None'}`}
+          @click=${() => (this.menuOpen = !this.menuOpen)}><span class="t">${current?.title ?? 'None'}</span>${icon('chev', 12, 1.4)}</button>`
       : nothing;
+    const column = columns.find((c) => c.name === colourBy) ?? null;
+    const menu = this.selectable && this.menuOpen ? this.colourMenu(options, column, colouring) : nothing;
     const levelSelect =
       this.selectable && cluster && levelsServed.length > 1
         ? html`<div class="level"><span class="muted">Level</span><span class="choice">
@@ -199,57 +691,438 @@ export class TesseraLegend extends TesseraElement {
               ${levelsServed.map((l) => html`<option value=${l} ?selected=${this.level === l}>${levelTitle(l)}</option>`)}
             </select>${icon('chev', 12, 1.4)}</span></div>`
         : nothing;
-    const heading = html`<h2 part="title">Colour${choice}</h2>`;
-    const wrap = (body: unknown) => html`<div class="panel">${heading}${levelSelect}${body}</div>`;
+    const heading = html`<h2 part="title">Colour${colourByButton}</h2>`;
+    const wrap = (body: unknown) => html`<div class="panel">${heading}${menu}${levelSelect}${body}${this.picking ? this.colourPicker(this.picking, colouring, legend.ranks[this.picking.column] ?? {}, legend.categories[this.picking.column] ?? []) : nothing}</div>`;
     if (!this.readout && this.selectable) return wrap(html`<span part="state" data-state="shown"></span>`);
     if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);
 
-    const entry = (c: Rgba | readonly number[], text: string, title = text) =>
-      html`<div class="entry"><span part="swatch" style=${`background:${rgb(c as Rgba)}`}></span><span class="v" title=${title}>${text}</span></div>`;
-    const clusterLayer = clusterLayerOf(colourBy);
-    if (clusterLayer) {
+    const plain = (c: Rgba | readonly number[], text: string, title = text) =>
+      html`<div part="entry" role="listitem"><span part="swatch" style=${`--c:${rgb(c as Rgba)}`}></span><span part="name" title=${title}>${text}</span></div>`;
+    if (cluster) {
       const named = artifacts.colourServed;
-      return wrap(html`<span part="state" data-state="shown"></span>${this.swatches([
-        ...named.map((a) => entry(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, artifactName(a) ?? UNNAMED)),
-        entry(NEUTRAL, 'Not yet coloured')
-      ])}`);
+      return wrap(html`<span part="state" data-state="shown"></span>${this.rows(
+        [...named.map((a) => plain(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, artifactName(a) ?? UNNAMED)), plain(NEUTRAL, 'Not yet coloured')],
+        false
+      )}`);
     }
-    const column = columns.find((c) => c.name === colourBy);
     if (!column) return wrap(html`<span part="state" data-state="refused"><span class="dot refuse"></span><span part="refusal">Column unavailable</span></span>`);
-    const error = legend.categoryErrors[colourBy];
+    const error = legend.categoryErrors[column.name];
     if (error) return wrap(html`<span part="state" data-state="refused"><span class="dot refuse"></span><span part="refusal" data-code=${error.code}>Values unavailable</span></span>`);
     if (column.category) {
-      const values = legend.categories[colourBy];
+      const values = legend.categories[column.name];
       if (!values) return wrap(renderState('loading', s.get('status')));
-      const shown = paletteValues(values, legend.ranks[colourBy] ?? {});
-      // Values past the palette share one colour, named once.
-      return wrap(html`<span part="state" data-state="shown"></span>${this.swatches([
-        ...shown.map(({value, rank}) => entry(colourOfRank(rank), value.title ?? value.key, value.key)),
-        entry(UNMAPPED, 'Other')
-      ])}`);
+      return wrap(html`<span part="state" data-state="shown"></span>${this.categoryRows(s, column.name, values, legend.ranks[column.name] ?? {}, colouring, legend.counts?.[column.name])}`);
     }
-    const domain = legend.domains[colourBy];
+    const domain = legend.domains[column.name];
     if (!domain) return wrap(html`<span part="state" data-state="empty">Nothing in view</span>`);
-    const stops = Array.from({length: 12}, (_, i) => rgb(colourOfFraction(i / 11))).join(', ');
-    const fmt = (n: number) => {
-      if (column.arrowType === 'timestamp_us') return dateText(n);
-      if (Math.abs(n) >= 1e6 || (n !== 0 && Math.abs(n) < 1e-3)) return n.toExponential(2);
-      return n.toLocaleString('en-GB');
-    };
-    return wrap(html`<span part="state" data-state="shown"></span>
-      <div part="ramp" style=${`background:linear-gradient(to right, ${stops})`}></div>
-      <div class="kv sm"><span part="label">Lowest</span><span part="value" class="v">${fmt(domain.min)}</span><span part="label">Highest</span><span part="value" class="v">${fmt(domain.max)}</span></div>`);
+    return wrap(html`<span part="state" data-state="shown"></span>${this.numeric(s, column, domain, colouring)}`);
   }
 
-  /** The entries in two columns, the first of them until "N more" is pressed. */
-  private swatches(entries: TemplateResult[]): TemplateResult {
+  /** The rows of a category column: swatch, name, the two verbs and the count. */
+  private categoryRows(s: Store, column: string, values: CategoryValue[], ranks: Record<number, number>, colouring: Colouring, counts: Record<string, Masked> | undefined): TemplateResult {
+    const meta = s.get('meta');
+    const held = s.get('filters').draft[column];
+    const filterable = held?.family === 'category' && (meta?.filterOperands.some((o) => o.column === column && o.operands.includes('in')) ?? false);
+    const keys = held?.family === 'category' ? held.keys : [];
+    const filtered = held?.verb === 'filter' ? keys : [];
+    const lit = held?.verb === 'highlight' ? keys : [];
+    const stateOfKey = (key: string | null) =>
+      filtered.length > 0 ? (key !== null && filtered.includes(key) ? 'filtered' : 'out') : lit.length > 0 ? (key !== null && lit.includes(key) ? 'lit' : 'dim') : '';
+    const chosen = colouring.values[column] ?? {};
+    const shown = paletteValues(values, ranks, colouring.palette);
+    const counted = counts !== undefined;
+    const row = ({value, rank}: {value: CategoryValue; rank: number}) => {
+      const title = value.title ?? value.key;
+      const colour = chosen[value.key] ?? rgb(colourOfRank(rank, colouring.palette));
+      const count = counts?.[value.key];
+      const onFilter = filtered.includes(value.key);
+      const onLit = lit.includes(value.key);
+      return html`<div part="entry" role="listitem" data-key=${value.key} data-state=${stateOfKey(value.key)}>
+        <button part="swatch" type="button" style=${`--c:${colour}`} aria-haspopup="dialog" aria-label=${`Change colour of ${title}`}
+          @click=${() => this.openPicker({column, key: value.key, title}, colour)}></button>
+        <span part="name" title=${value.key}>${title}</span>
+        ${filterable
+          ? html`<span class="verbs">
+              <button part="highlight" type="button" aria-pressed=${onLit ? 'true' : 'false'} aria-label=${`Highlight ${title}`} title="Highlight"
+                @click=${() => this.applyVerb(column, value.key, 'highlight')}>${icon('highlight', 13)}</button>
+              <button part="filter" type="button" aria-pressed=${onFilter ? 'true' : 'false'} aria-label=${`Filter to ${title}`} title="Filter"
+                @click=${() => this.applyVerb(column, value.key, 'filter')}>${icon('filter', 13, 1.5)}</button>
+            </span>`
+          : html`<span></span>`}
+        ${counted ? html`<span part="count">${count?.exact ? count.value.toLocaleString('en-GB') : ''}</span>` : nothing}
+      </div>`;
+    };
+    // Values past the palette share one colour, named once.
+    const other = html`<div part="entry" role="listitem" data-state=${stateOfKey(null)}><span part="swatch" style=${`--c:${rgb(UNMAPPED)}`}></span><span part="name">Other</span></div>`;
+    return this.rows([...shown.map(row), other], counted);
+  }
+
+  /** The rows in one column, the first of them until "N more" is pressed. */
+  private rows(entries: TemplateResult[], counted: boolean): TemplateResult {
     const first = this.limit > 0 ? this.limit : ENTRIES_SHOWN;
     const cut = !this.expanded && entries.length > first;
     const shown = cut ? entries.slice(0, first) : entries;
-    return html`<div part="swatches">${shown}</div>${cut
+    return html`<div part="swatches" role="list" class=${counted ? 'counted' : ''}>${shown}</div>${cut
       ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = true)}>${(entries.length - first).toLocaleString('en-GB')} more</button>`
       : nothing}`;
   }
+
+  /**
+   * A number column's ramp, with the range filter on it where the column can be filtered by range.
+   * The handles sit where the filter's bounds fall on the ramp under the ramp's scale, so a value's
+   * handle sits on its colour.
+   */
+  private numeric(s: Store, column: Column, domain: {min: number; max: number}, colouring: Colouring): TemplateResult {
+    const ramp = RAMPS[colouring.ramp];
+    const stops = Array.from({length: 12}, (_, i) => rgb(colourOfFraction(i / 11, colouring.ramp, colouring.reverse))).join(', ');
+    const fmt = (n: number) => {
+      if (column.arrowType === 'timestamp_us') return dateText(n);
+      if (Math.abs(n) >= 1e6 || (n !== 0 && Math.abs(n) < 1e-3)) return n.toExponential(2);
+      return n.toLocaleString('en-GB', {maximumFractionDigits: 2});
+    };
+    const held = s.get('filters').draft[column.name];
+    const filterable = held?.family === 'numeric' && (s.get('meta')?.filterOperands.some((o) => o.column === column.name && o.operands.includes('range')) ?? false);
+    const at = (v: number) => Math.min(1, Math.max(0, fractionOf(v, domain, colouring.scale, ramp.diverging)));
+    const valueAt = (t: number) => valueAtFraction(t, domain, colouring.scale, ramp.diverging);
+    const set = held?.family === 'numeric' && held.verb === 'filter' && (held.gte !== null || held.lte !== null);
+    const range = this.dragging ?? (set && held?.family === 'numeric' ? {low: held.gte === null ? 0 : at(held.gte), high: held.lte === null ? 1 : at(held.lte)} : null);
+    const low = range?.low ?? 0;
+    const high = range?.high ?? 1;
+    const pct = (t: number) => `${(t * 100).toFixed(2)}%`;
+    const caption = columnCaption(column.name);
+    const commit = (lo: number, hi: number) => this.applyRange(column, valueAt(lo), valueAt(hi));
+    const key = (end: 'low' | 'high') => (e: KeyboardEvent) => {
+      const step = e.shiftKey ? 0.1 : 0.01;
+      const from = end === 'low' ? low : high;
+      const next = {ArrowLeft: from - step, ArrowDown: from - step, ArrowRight: from + step, ArrowUp: from + step, Home: 0, End: 1}[e.key];
+      if (next === undefined) return;
+      e.preventDefault();
+      const t = Math.min(1, Math.max(0, next));
+      if (end === 'low') commit(Math.min(t, high), high);
+      else commit(low, Math.max(t, low));
+    };
+    const valueText = (t: number) => ({now: valueAt(t), text: fmt(valueAt(t))});
+    const lowAt = valueText(low);
+    const highAt = valueText(high);
+    const labels = range
+      ? html`<span part="range-value" style=${`left:${pct(low)}`}>${fmt(valueAt(low))}</span><span part="range-value" style=${`left:${pct(high)}`}>${fmt(valueAt(high))}</span>`
+      : nothing;
+    return html`<div class=${`track${filterable ? ' filterable' : ''}`} @pointerdown=${filterable ? (e: PointerEvent) => this.dragStart(e, low, high) : nothing}
+        @pointermove=${filterable ? (e: PointerEvent) => this.dragMove(e) : nothing} @pointerup=${filterable ? (e: PointerEvent) => this.dragEnd(e, commit) : nothing}
+        @pointercancel=${() => this.dragCancel()}>
+        <div part="ramp" style=${`background:linear-gradient(to right, ${stops})`}></div>
+        ${range ? html`<div part="range" style=${`left:${pct(low)};right:${pct(1 - high)}`}></div>` : nothing}
+        ${filterable
+          ? html`<span part="range-low" role="slider" tabindex="0" style=${`left:${pct(low)}`} aria-label=${`Lowest ${caption}`} aria-valuemin=${domain.min} aria-valuemax=${domain.max}
+                aria-valuenow=${lowAt.now} aria-valuetext=${lowAt.text} @keydown=${key('low')}></span
+              ><span part="range-high" role="slider" tabindex="0" style=${`left:${pct(high)}`} aria-label=${`Highest ${caption}`} aria-valuemin=${domain.min} aria-valuemax=${domain.max}
+                aria-valuenow=${highAt.now} aria-valuetext=${highAt.text} @keydown=${key('high')}></span>`
+          : nothing}
+      </div>
+      <div class="axis">
+        ${!range || low > 0.18 ? html`<span part="value" class="lo">${fmt(domain.min)}</span>` : nothing}${labels}${!range || high < 0.82 ? html`<span part="value" class="hi">${fmt(domain.max)}</span>` : nothing}
+      </div>`;
+  }
+
+  /** Where a pointer is along the ramp, from 0 to 1. */
+  private along(e: PointerEvent): number {
+    const track = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    return track.width > 0 ? Math.min(1, Math.max(0, (e.clientX - track.left) / track.width)) : 0;
+  }
+
+  private dragStart(e: PointerEvent, low: number, high: number): void {
+    if (e.button !== 0) return;
+    const t = this.along(e);
+    const width = (e.currentTarget as HTMLElement).getBoundingClientRect().width || 1;
+    // Near a handle, the drag moves it; elsewhere it draws a new range from the pointer.
+    const near = 8 / width;
+    const end = Math.abs(t - low) <= near ? 'low' : Math.abs(t - high) <= near ? 'high' : 'new';
+    this.dragFrom = {anchor: end === 'low' ? high : end === 'high' ? low : t, end};
+    this.dragging = end === 'new' ? {low: t, high: t} : {low, high};
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+  }
+
+  private dragMove(e: PointerEvent): void {
+    if (!this.dragFrom) return;
+    const t = this.along(e);
+    const a = this.dragFrom.anchor;
+    this.dragging = {low: Math.min(a, t), high: Math.max(a, t)};
+  }
+
+  private dragEnd(e: PointerEvent, commit: (low: number, high: number) => void): void {
+    if (!this.dragFrom || !this.dragging) return;
+    this.dragMove(e);
+    const {low, high} = this.dragging;
+    this.dragFrom = null;
+    this.dragging = null;
+    // A press without a drag draws no range.
+    if (high - low < 0.005) return;
+    commit(low, high);
+  }
+
+  private dragCancel(): void {
+    this.dragFrom = null;
+    this.dragging = null;
+  }
+
+  /** The Colour by menu: the choices, then the palettes for a category column or the ramps for a number. */
+  private colourMenu(options: ColourOption[], column: Column | null, colouring: Colouring): TemplateResult {
+    const at = Math.max(0, options.findIndex((o) => o.checked));
+    const radio = <T,>(items: readonly T[], checked: (item: T) => boolean, pick: (item: T) => void, i: number, item: T) => ({
+      role: 'radio',
+      checked: checked(item) ? 'true' : 'false',
+      tabindex: checked(item) || (i === 0 && !items.some(checked)) ? '0' : '-1',
+      click: () => pick(item),
+      keydown: (e: KeyboardEvent) => radioKeys(e, items.length, i, (j) => pick(items[j]!))
+    });
+    const names = Object.keys(CATEGORY_PALETTES) as CategoryPaletteName[];
+    const ramps = Object.keys(RAMPS) as RampName[];
+    const scales: RampScale[] = ['linear', 'log'];
+    const palettes =
+      !this.hidePalettes && column?.category
+        ? html`<div class="hd rule" id="palette-label">Palette</div>
+            <div role="radiogroup" aria-labelledby="palette-label">
+              ${names.map((name, i) => {
+                const r = radio(names, (n) => n === colouring.palette, (n) => this.choosePalette({palette: n}), i, name);
+                const p = CATEGORY_PALETTES[name];
+                return html`<button part="palette" type="button" role="radio" data-palette=${name} aria-checked=${r.checked} tabindex=${r.tabindex} @click=${r.click} @keydown=${r.keydown}>
+                  <span class="pt">${p.title}${p.colourBlindSafe ? html`<span class="tag">Colour-blind safe</span>` : nothing}</span>
+                  <span class="strip">${p.colours.slice(0, 8).map((c) => html`<span style=${`background:${hexOf(c)}`}></span>`)}</span>
+                </button>`;
+              })}
+            </div>`
+        : nothing;
+    const rampChoices =
+      !this.hidePalettes && column && !column.category
+        ? html`<div class="hd rule" id="ramp-label">Ramp for ${columnCaption(column.name)}</div>
+            <div role="radiogroup" aria-labelledby="ramp-label">
+              ${ramps.map((name, i) => {
+                const r = radio(ramps, (n) => n === colouring.ramp, (n) => this.choosePalette({ramp: n}), i, name);
+                const bar = Array.from({length: 8}, (_, k) => rgb(colourOfFraction(k / 7, name, colouring.reverse))).join(', ');
+                return html`<button part="ramp-option" type="button" role="radio" data-ramp=${name} aria-checked=${r.checked} tabindex=${r.tabindex} @click=${r.click} @keydown=${r.keydown}>
+                  <span>${RAMPS[name].title}</span><span class="bar" style=${`background:linear-gradient(to right, ${bar})`}></span>
+                </button>`;
+              })}
+            </div>
+            <div class="opts">
+              <span id="scale-label">Scale</span>
+              <div part="scale" class="seg2" role="radiogroup" aria-labelledby="scale-label">
+                ${scales.map((scale, i) => {
+                  const r = radio(scales, (x) => x === colouring.scale, (x) => this.choosePalette({scale: x}), i, scale);
+                  return html`<button type="button" role="radio" data-scale=${scale} aria-checked=${r.checked} tabindex=${r.tabindex} @click=${r.click} @keydown=${r.keydown}>${scale === 'linear' ? 'Linear' : 'Log'}</button>`;
+                })}
+              </div>
+              <span id="reverse-label">Reverse</span>
+              <button part="reverse" class="switch" type="button" role="switch" aria-checked=${colouring.reverse ? 'true' : 'false'} aria-labelledby="reverse-label"
+                @click=${() => this.choosePalette({reverse: !colouring.reverse})}><span class="knob"></span></button>
+            </div>`
+        : nothing;
+    return html`<div part="colour-menu" class="pop menu" popover="manual" role="dialog" aria-label="Colour by" @keydown=${this.onPopoverKey}>
+      <div class="hd" id="colour-by-label">Colour by</div>
+      <div role="radiogroup" aria-labelledby="colour-by-label">
+        ${options.map(
+          (o, i) => html`<button part="option" type="button" role="radio" data-value=${o.value} data-kind=${o.cluster ? 'layer' : o.kind.toLowerCase() || 'none'} aria-checked=${o.checked ? 'true' : 'false'}
+            tabindex=${i === at ? '0' : '-1'} @click=${() => this.choose(o.value)}
+            @keydown=${(e: KeyboardEvent) => radioKeys(e, options.length, i, (j) => this.choose(options[j]!.value))}><span>${o.title}</span><span class="kind">${o.kind}</span></button>`
+        )}
+      </div>
+      ${palettes}${rampChoices}
+    </div>`;
+  }
+
+  /** Open the colour picker for one value, starting from its colour now. */
+  private openPicker(picking: Picking, colour: string): void {
+    this.menuOpen = false;
+    const c = rgbOfHex(colour) ?? rgbOfHex(hexOf(parseRgb(colour))) ?? [0, 0, 0];
+    this.hsv = hsvOf(c);
+    this.picking = picking;
+  }
+
+  /** Give the value being picked `hex`, or its palette colour back where `hex` is null, and report it when `final`. */
+  private pick(hex: string | null, final = true): void {
+    const s = this.resolvedStore;
+    const p = this.picking;
+    if (!s || !p) return;
+    setColouring(s, {values: withValueColour(colouringOf(s).values, p.column, p.key, hex)});
+    if (final) emit(this, 'tessera-valuecolour', {column: p.column, value: p.key, colour: hex});
+  }
+
+  /** The colour picker for one value. */
+  private colourPicker(p: Picking, colouring: Colouring, ranks: Record<number, number>, values: CategoryValue[]): TemplateResult {
+    const palette = CATEGORY_PALETTES[colouring.palette].colours;
+    const code = values.find((v) => v.key === p.key)?.code;
+    const own = hexOf(colourOfRank(code === undefined ? undefined : ranks[code], colouring.palette));
+    const current = colouring.values[p.column]?.[p.key] ?? own;
+    const choices = [...palette, ...palette.map((c) => lighter(c, LIGHTER))].map(hexOf);
+    const [h, sat, val] = this.hsv;
+    const custom = hexOf(rgbOfHsv(this.hsv));
+    const setHsv = (next: Hsv, final: boolean) => {
+      this.hsv = next;
+      this.pick(hexOf(rgbOfHsv(next)), final);
+    };
+    const svAt = (e: PointerEvent): Hsv => {
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const x = r.width > 0 ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) : sat;
+      const y = r.height > 0 ? Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) : 1 - val;
+      return [h, x, 1 - y];
+    };
+    const hueAt = (e: PointerEvent): Hsv => {
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      return [r.width > 0 ? Math.min(359, Math.max(0, ((e.clientX - r.left) / r.width) * 360)) : h, sat, val];
+    };
+    const drag = (read: (e: PointerEvent) => Hsv) => ({
+      down: (e: PointerEvent) => {
+        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+        setHsv(read(e), false);
+      },
+      move: (e: PointerEvent) => {
+        if ((e.currentTarget as HTMLElement).hasPointerCapture?.(e.pointerId)) setHsv(read(e), false);
+      },
+      up: (e: PointerEvent) => setHsv(read(e), true)
+    });
+    const sv = drag(svAt);
+    const hue = drag(hueAt);
+    const svKey = (e: KeyboardEvent) => {
+      const step = e.shiftKey ? 0.1 : 0.01;
+      const clamp = (n: number) => Math.min(1, Math.max(0, n));
+      const next: Hsv | undefined = {
+        ArrowLeft: [h, clamp(sat - step), val] as Hsv,
+        ArrowRight: [h, clamp(sat + step), val] as Hsv,
+        ArrowDown: [h, sat, clamp(val - step)] as Hsv,
+        ArrowUp: [h, sat, clamp(val + step)] as Hsv
+      }[e.key];
+      if (!next) return;
+      e.preventDefault();
+      setHsv(next, true);
+    };
+    const hueKey = (e: KeyboardEvent) => {
+      const step = e.shiftKey ? 10 : 1;
+      const next = {ArrowLeft: h - step, ArrowDown: h - step, ArrowRight: h + step, ArrowUp: h + step, Home: 0, End: 359}[e.key];
+      if (next === undefined) return;
+      e.preventDefault();
+      setHsv([(next + 360) % 360, sat, val], true);
+    };
+    return html`<div part="colour-popover" class="pop picker" popover="manual" role="dialog" aria-label=${`Colour of ${p.title}`} @keydown=${this.onPopoverKey}>
+      <div class="head"><span class="t">${p.title}</span><button part="reset" class="quiet" type="button" @click=${() => {
+        this.hsv = hsvOf(rgbOfHex(own)!);
+        this.pick(null);
+      }}>Reset</button></div>
+      <div class="choices" role="group" aria-label="Palette colours" style=${`grid-template-columns:repeat(${palette.length}, minmax(0, 1fr))`}>
+        ${choices.map(
+          (c) => html`<button part="choice" type="button" style=${`background:${c}`} aria-label=${c} aria-pressed=${c === current ? 'true' : 'false'}
+            @click=${() => {
+              this.hsv = hsvOf(rgbOfHex(c)!);
+              this.pick(c);
+            }}></button>`
+        )}
+      </div>
+      <div class="hd">Custom</div>
+      <div class="custom">
+        <div part="sv" role="slider" tabindex="0" aria-label="Saturation and brightness" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(sat * 100)}
+          aria-valuetext=${`Saturation ${Math.round(sat * 100)}%, brightness ${Math.round(val * 100)}%`}
+          style=${`background:linear-gradient(to top, #000000, rgba(0, 0, 0, 0)), linear-gradient(to right, #ffffff, hsl(${h.toFixed(0)}, 100%, 50%))`}
+          @pointerdown=${sv.down} @pointermove=${sv.move} @pointerup=${sv.up} @keydown=${svKey}>
+          <span class="knob" style=${`left:${(sat * 100).toFixed(1)}%;top:${((1 - val) * 100).toFixed(1)}%`}></span>
+        </div>
+        <div part="hue" role="slider" tabindex="0" aria-label="Hue" aria-valuemin="0" aria-valuemax="359" aria-valuenow=${Math.round(h)}
+          @pointerdown=${hue.down} @pointermove=${hue.move} @pointerup=${hue.up} @keydown=${hueKey}>
+          <span class="knob" style=${`left:${((h / 360) * 100).toFixed(1)}%`}></span>
+        </div>
+        <label>Hex<input part="hex" type="text" spellcheck="false" .value=${custom.toUpperCase()}
+          @change=${(e: Event) => {
+            const input = e.target as HTMLInputElement;
+            const text = input.value.trim();
+            const c = rgbOfHex(text.startsWith('#') ? text : `#${text}`);
+            if (!c) {
+              input.value = custom.toUpperCase();
+              return;
+            }
+            this.hsv = hsvOf(c);
+            this.pick(hexOf(c));
+          }} /></label>
+      </div>
+    </div>`;
+  }
+
+  /** Escape closes an open popover and puts focus back on what opened it. */
+  private onPopoverKey = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    e.preventDefault();
+    this.closePopovers(true);
+  };
+
+  /** A press outside an open popover and what opened it closes the popover. */
+  private onOutside = (e: PointerEvent): void => {
+    const path = e.composedPath();
+    const inside = Array.from(this.renderRoot.querySelectorAll('.pop, [part="colour-by"], button[part="swatch"]')).some((el) => path.includes(el));
+    if (!inside) this.closePopovers(false);
+  };
+
+  /** Close the menu and the picker; with `refocus`, focus goes back to the button that opened the one open. */
+  private closePopovers(refocus: boolean): void {
+    const anchor = refocus ? this.anchor() : null;
+    this.menuOpen = false;
+    this.picking = null;
+    anchor?.focus();
+  }
+
+  /** The button the open popover belongs to. */
+  private anchor(): HTMLElement | null {
+    if (this.picking) return this.renderRoot.querySelector<HTMLElement>(`[part~="entry"][data-key="${CSS.escape(this.picking.key)}"] [part="swatch"]`);
+    if (this.menuOpen) return this.renderRoot.querySelector<HTMLElement>('[part="colour-by"]');
+    return null;
+  }
+
+  /**
+   * An open popover is shown in the top layer, so no scrolling panel clips it, and placed beside the
+   * button that opened it: the menu beneath the Colour by button, the picker to the right of the
+   * legend, level with the swatch. Focus goes into it as it opens.
+   */
+  protected override updated(changed: PropertyValues<this>): void {
+    const open = this.menuOpen || this.picking !== null;
+    if (changed.has('menuOpen') || changed.has('picking')) {
+      if (open) document.addEventListener('pointerdown', this.onOutside, true);
+      else document.removeEventListener('pointerdown', this.onOutside, true);
+    }
+    const pop = this.renderRoot.querySelector<HTMLElement>('.pop');
+    const anchor = this.anchor();
+    if (!pop || !anchor) return;
+    const fresh = !pop.matches?.(':popover-open');
+    if (fresh && typeof pop.showPopover === 'function') {
+      try {
+        pop.showPopover();
+      } catch {
+        // Shown already, or the popover API is absent; the element is in the page either way.
+      }
+    }
+    const a = anchor.getBoundingClientRect();
+    // The picker stands clear of the legend, beside the row it colours.
+    const own = this.getBoundingClientRect();
+    const width = pop.offsetWidth || 264;
+    const height = pop.offsetHeight || 0;
+    const vw = typeof innerWidth === 'number' ? innerWidth : 1024;
+    const vh = typeof innerHeight === 'number' ? innerHeight : 768;
+    const menu = pop.classList.contains('menu');
+    let left = menu ? a.right - width : own.right + 12;
+    let top = menu ? a.bottom + 6 : a.top - 40;
+    if (!menu && left + width > vw - 8) left = own.left - width - 12;
+    left = Math.max(8, Math.min(left, vw - width - 8));
+    top = Math.max(8, Math.min(top, vh - height - 8));
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+    if (changed.has('menuOpen') || (changed.has('picking') && changed.get('picking') === null)) {
+      const target = pop.querySelector<HTMLElement>('[aria-checked="true"], [aria-pressed="true"]') ?? pop.querySelector<HTMLElement>('button, [tabindex="0"]');
+      target?.focus();
+    }
+  }
+}
+
+/** `rgb(r, g, b)` as RGB, for a swatch colour that is not a hex string. */
+function parseRgb(text: string): [number, number, number] {
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(text);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
 }
 
 attachContextRoot();

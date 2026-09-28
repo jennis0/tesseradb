@@ -77,14 +77,14 @@ export const DULL_RADIUS_SCALE = 1;
 export const LIT_RADIUS_SCALE = 1.4;
 
 /** The glow's radius, as a multiple of a lit mark's radius. */
-export const GLOW_RADIUS_SCALE = 3.5;
+export const GLOW_RADIUS_SCALE = 4;
 
 /**
- * The glow's alpha at its centre, as a fraction of the lit mark's. It falls to nothing at its edge
- * with the square of the distance, and follows the frame's alpha, so a dense highlight's glows
- * overlap into a tint and do not cover the map.
+ * The glow's alpha at its centre, as a fraction of the lit mark's. It falls linearly to nothing at
+ * its edge, and follows the frame's alpha, so a dense highlight's glows overlap into a tint and do
+ * not cover the map.
  */
-export const GLOW_ALPHA = 0.35;
+export const GLOW_ALPHA = 0.5;
 
 /**
  * Which marks a pass draws. With no highlight there is one pass, `'all'`.
@@ -167,8 +167,7 @@ color.a *= mix(tesseraLut.dull, 1.0, lit) * tesseraInPass(lit) * mix(1.0, ${GLOW
         // The glow fades from its centre to nothing at its edge.
         'fs:DECKGL_FILTER_COLOR': /* glsl */ `\
 if (tesseraLut.pass > 2.5) {
-  float tesseraFade = 1.0 - min(1.0, length(geometry.uv));
-  color.a *= tesseraFade * tesseraFade;
+  color.a *= 1.0 - min(1.0, length(geometry.uv));
 }
 `
       }

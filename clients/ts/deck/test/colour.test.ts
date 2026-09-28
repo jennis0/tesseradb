@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
-import type {ScalarColumn} from '@tesseradb/client';
-import {CATEGORY_PALETTES, RAMPS, UNMAPPED, colourOfFraction, formatScalar, fractionOf, hexOf, rgbOfHex, writeColours, type CategoryPaletteName, type Encoding, type RampName, type Rgb} from '../src/colour.js';
+import type {LegendProjection, Meta, ScalarColumn} from '@tesseradb/client';
+import {encodingOf} from '../src/layer.js';
+import {CATEGORY_PALETTES, DEFAULT_COLOURING, RAMPS, UNMAPPED, colourOfFraction, formatScalar, fractionOf, hexOf, rgbOfHex, valueAtFraction, writeColours, type CategoryPaletteName, type Encoding, type RampName, type Rgb} from '../src/colour.js';
 
 /** The colour `writeColours` wrote for each mark. */
 function colours(column: ScalarColumn, domain: {min: number; max: number}): number[][] {
@@ -86,5 +87,40 @@ describe('named palettes and ramps', () => {
     expect(rgbOfHex('#F28E2B')).toEqual([242, 142, 43]);
     expect(rgbOfHex('f28e2b')).toBeNull();
     expect(hexOf([242, 142, 43])).toBe('#f28e2b');
+  });
+});
+
+describe('valueAtFraction', () => {
+  it('undoes fractionOf on every scale', () => {
+    const cases: [{min: number; max: number}, 'linear' | 'log', boolean][] = [
+      [{min: 0, max: 1000}, 'linear', false],
+      [{min: 5, max: 12_400}, 'log', false],
+      [{min: -10, max: 30}, 'linear', true],
+      [{min: -10, max: 30}, 'log', true]
+    ];
+    for (const [domain, scale, diverging] of cases) {
+      for (const v of [domain.min, 0.3 * domain.max, domain.max]) {
+        expect(valueAtFraction(fractionOf(v, domain, scale, diverging), domain, scale, diverging)).toBeCloseTo(v, 6);
+      }
+    }
+  });
+});
+
+describe('encodingOf', () => {
+  const meta = {
+    declaredScalars: [{name: 'field', arrowType: 'u16', category: {vocabulary: 'f', kind: 'declared', visibility: 'public'}, render: true}]
+  } as unknown as Meta;
+  const legend: LegendProjection = {
+    ranks: {field: {1: 0, 2: 1}},
+    domains: {},
+    categories: {field: [{code: 1, key: 'cs.LG', title: null}, {code: 2, key: 'cs.CV', title: null}]},
+    categoryErrors: {},
+    colourBy: 'field'
+  };
+
+  it('takes the palette chosen and a colour chosen for a value, by the value’s key', () => {
+    const encoding = encodingOf(meta, legend, {...DEFAULT_COLOURING, palette: 'dark2', values: {field: {'cs.CV': '#010203', 'not-drawn': '#ffffff'}}});
+    expect(encoding).toMatchObject({kind: 'category', palette: 'dark2'});
+    expect(encoding.kind === 'category' && [...encoding.chosen]).toEqual([[2, [1, 2, 3]]]);
   });
 });

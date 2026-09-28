@@ -252,6 +252,20 @@ export function fractionOf(v: number, domain: {min: number; max: number}, scale:
   return scale === 'log' ? Math.log1p(Math.max(0, v - min)) / Math.log1p(span) : (v - min) / span;
 }
 
+/** The value at `t` on a ramp over `domain` under `scale`: the inverse of {@link fractionOf}. */
+export function valueAtFraction(t: number, domain: {min: number; max: number}, scale: RampScale, diverging: boolean): number {
+  const {min, max} = domain;
+  const c = Math.min(1, Math.max(0, t));
+  if (diverging) {
+    const mid = min < 0 && max > 0 ? 0 : (min + max) / 2;
+    const half = Math.max(max - mid, mid - min);
+    const s = (c - 0.5) * 2;
+    return mid + (scale === 'log' ? Math.sign(s) * Math.expm1(Math.abs(s) * Math.log1p(half)) : s * half);
+  }
+  const span = max - min;
+  return min + (scale === 'log' ? Math.expm1(c * Math.log1p(span)) : c * span);
+}
+
 /** `#rrggbb` as RGB, or null where it is not six hex digits after a `#`. */
 export function rgbOfHex(text: string): Rgb | null {
   return /^#[0-9a-f]{6}$/i.test(text) ? hex(text) : null;
