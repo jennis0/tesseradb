@@ -44,9 +44,9 @@ Check the declaration against the column schemas of the files it names, without 
 
 `tessera check` finds `tessera.toml`, the declaration and the `--file` overrides as `tessera build` does, and stops at the first error in `tessera.toml` or the declaration, such as a missing key or a TOML syntax error. Once both parse, it reads the footer of each source Parquet file and reports every column that is missing or has the wrong type, not only the first. It reads no rows except the geometry of shape layers, which it reads to size them.
 
-The report goes to stderr: the files read, the findings, warnings, the frames the views will have, the view groups, the shape layers' sizes, and on a clean check the disclosure table. The exit status is non-zero when there is a finding; a warning does not change it.
+The report goes to stderr: the files read, the findings, warnings, the columns each file names items by, the frames the views will have, the view groups, the shape layers' sizes, and on a clean check the disclosure table. The exit status is non-zero when there is a finding, such as a file other than a view's points with no column to name items by; a warning does not change it.
 
-It cannot check anything that needs a row: whether a closed vocabulary covers the values in the data, whether a member id resolves, or where the data lies in its view's extent. `tessera build` reports those.
+It cannot check anything that needs a row: whether a closed vocabulary covers the values in the data, which rows the identity rule refuses, or where the data lies in its view's extent. `tessera build` reports those.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |

@@ -208,9 +208,12 @@ pub struct GenerationStamp {
 // 28: a side-manifest carries no `external_id_runs` or `locator_extents`, and a bundle holds no
 // external-id runs or locator; the build joins its files on `[defaults].join_field`. A 27 bundle
 // is refused.
+// 29: a build names each row's item by the identity rule over the attributes declared `unique`,
+// and numbers items in the order its files create them; a declaration has no `join_field`. A 28
+// bundle is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 28;
+pub const BUNDLE_FORMAT: u32 = 29;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

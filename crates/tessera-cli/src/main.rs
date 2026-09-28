@@ -133,14 +133,15 @@ enum Command {
     /// not only the first. It reads no rows except the geometry of shape layers, which it reads
     /// to size them.
     ///
-    /// The report goes to stderr: the files read, the findings, warnings, the frames the views
-    /// will have, the view groups, the shape layers' sizes, and on a clean check the disclosure
-    /// table. The exit status is non-zero when
-    /// there is a finding; a warning does not change it.
+    /// The report goes to stderr: the files read, the findings, warnings, the columns each file
+    /// names items by, the frames the views will have, the view groups, the shape layers' sizes,
+    /// and on a clean check the disclosure table. The exit status is non-zero when there is a
+    /// finding, such as a file other than a view's points with no column to name items by; a
+    /// warning does not change it.
     ///
     /// It cannot check anything that needs a row: whether a closed vocabulary covers the values
-    /// in the data, whether a member id resolves, or where the data lies in its view's extent.
-    /// `tessera build` reports those.
+    /// in the data, which rows the identity rule refuses, or where the data lies in its view's
+    /// extent. `tessera build` reports those.
     Check {
         /// Read this `tessera.toml` instead of searching for one upward from the working
         /// directory.
