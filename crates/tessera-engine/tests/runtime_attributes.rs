@@ -5,9 +5,10 @@
 //! failing the flush, a restart replays the declaration, the fold writes the column into the
 //! base, and a redeclaration answers the column that exists or refuses a different identity.
 //!
-//! The fixture declares two columns at the build (a rendered `u8` category and a rendered,
-//! indexed `f32`), so every case runs over a schema in which the build's columns and the runtime
-//! ones are one list, and the runtime ones append after positions the build already filled.
+//! The fixture declares three columns at the build (a rendered `u8` category, a rendered, indexed
+//! `f32`, and the indexed unique `id` its access relation names items by), so every case runs over a
+//! schema in which the build's columns and the runtime ones are one list, and the runtime ones
+//! append after positions the build already filled.
 
 mod common;
 
@@ -71,6 +72,14 @@ name   = "score"
 type   = "f32"
 render = true
 index  = true
+
+# Indexed, so no build column is blob-resident and a built item's card opens no blob.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+index  = true
+field  = "entity_id"
 "#;
 
 fn band_of(entity: u64) -> &'static str {
@@ -208,8 +217,7 @@ fn request(name: &str, ty: &str) -> AttributeRequest {
     }
 }
 
-/// One row carrying the build's two columns and nothing else, at the arity the build declared,
-/// under the label every principal of the fixture holds.
+/// One row carrying `scalars`, under the label every principal of the fixture holds.
 fn row(terms: &Engine, scalars: Vec<WalScalar>) -> UnallocatedRow {
     row_under(terms, b"0", scalars)
 }
@@ -232,8 +240,13 @@ fn row_under(
     }
 }
 
+/// The build's columns, with no `id`, so the row creates an item.
 fn build_columns(band: &str, score: f32) -> Vec<WalScalar> {
-    vec![WalScalar::Utf8(band.to_string()), WalScalar::F32(score)]
+    vec![
+        WalScalar::Utf8(band.to_string()),
+        WalScalar::F32(score),
+        WalScalar::Null,
+    ]
 }
 
 fn ingest(engine: &Engine, batch: &str, rows: Vec<UnallocatedRow>) -> Vec<EntityId> {
@@ -370,7 +383,7 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     }
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "sentiment", "note", "prose", "tag", "memo"],
+        ["band", "score", "id", "sentiment", "note", "prose", "tag", "memo"],
         "the runtime columns append after the build's, in declaration order"
     );
     let meta = engine.meta();
@@ -420,7 +433,7 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     let old_fields = fields_of(&engine, &session, old);
     assert_eq!(
         old_fields.keys().cloned().collect::<Vec<_>>(),
-        ["band", "score"],
+        ["band", "id", "score"],
         "an entity that predates the declaration carries none of the new columns"
     );
     assert_eq!(
@@ -570,8 +583,8 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
         matches!(
             refused,
             AcceptError::ScalarArity {
-                got: 4,
-                expected: 3,
+                got: 5,
+                expected: 4,
                 ..
             }
         ),
@@ -630,7 +643,7 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
         .expect("the declaration is accepted");
     // Nothing published: the declaration is in the log alone.
     let engine = restart(&fx, engine);
-    assert_eq!(declared_names(&engine), ["band", "score", "sentiment"]);
+    assert_eq!(declared_names(&engine), ["band", "score", "id", "sentiment"]);
     assert!(
         engine
             .declare_attribute(AttributeRequest {
@@ -664,7 +677,7 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
 
     // Published: the manifest carries it, and the log may not.
     let engine = restart(&fx, engine);
-    assert_eq!(declared_names(&engine), ["band", "score", "sentiment"]);
+    assert_eq!(declared_names(&engine), ["band", "score", "id", "sentiment"]);
     let session = session(&engine);
     let id = |e: EntityId| engine.tessera_id_of(e).unwrap().raw();
     assert!(!fields_of(&engine, &session, before[0]).contains_key("sentiment"));
@@ -729,7 +742,7 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        ["band", "score", "sentiment", "never"],
+        ["band", "score", "id", "sentiment", "never"],
         "the new MANIFEST.json declares the runtime columns after the build's"
     );
     assert!(
@@ -766,7 +779,7 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
     let engine = restart(&fx, engine);
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "sentiment", "never"]
+        ["band", "score", "id", "sentiment", "never"]
     );
     let session = self::session(&engine);
     assert_eq!(
@@ -867,7 +880,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    // Declared while the fold holds: after `before`, at position 3.
+    // Declared while the fold holds: after `before`, at position 4.
     engine
         .declare_attribute(AttributeRequest {
             index: true,
@@ -903,7 +916,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
 
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "before", "during"],
+        ["band", "score", "id", "before", "during"],
         "the folded column keeps its place and the one declared during the fold follows it"
     );
     let folded = open_bundle(&fx.root).unwrap();
@@ -914,7 +927,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        ["band", "score", "before"],
+        ["band", "score", "id", "before"],
         "the fold's MANIFEST.json carries the schema as it stood at the plan"
     );
     let side: Vec<&str> = folded
@@ -953,7 +966,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
     let engine = restart(&fx, engine);
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "before", "during"]
+        ["band", "score", "id", "before", "during"]
     );
     check(&engine);
 }
@@ -973,7 +986,7 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         engine.declare_attribute(sentiment.clone()).unwrap(),
         "identical: accepted with no effect"
     );
-    assert_eq!(declared_names(&engine), ["band", "score", "sentiment"]);
+    assert_eq!(declared_names(&engine), ["band", "score", "id", "sentiment"]);
 
     let conflict = |r: AttributeRequest| match engine.declare_attribute(r) {
         Err(AcceptError::Exec(ExecError::AttributeConflict { .. })) => {}
@@ -1042,7 +1055,7 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         .expect("restating a held column answers it"));
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "sentiment"],
+        ["band", "score", "id", "sentiment"],
         "a refusal declares nothing"
     );
 }

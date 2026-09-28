@@ -1135,7 +1135,7 @@ fn built_fixture() -> Fixture {
     let members_schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new("rank", DataType::UInt32, true),
-        Field::new("entity", DataType::UInt64, false),
+        Field::new("entity_id", DataType::UInt64, false),
     ]));
     let rows: Vec<u64> = BUILT_MEMBERS.collect();
     write_parquet(

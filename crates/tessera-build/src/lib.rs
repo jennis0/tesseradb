@@ -1000,8 +1000,11 @@ pub(crate) fn attribute_scans<'a>(
 }
 
 /// Write the rows the identity rule refused to `reports/refused.json` under the bundle, beside
-/// `disclosure.json`.
+/// `disclosure.json`; a build that refused none writes nothing.
 pub fn write_refused_report(out: &Path, refused: &[RefusedRows]) -> Result<()> {
+    if refused.is_empty() {
+        return Ok(());
+    }
     let dir = out.join("reports");
     fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
     write_json(&dir.join("refused.json"), &refused)

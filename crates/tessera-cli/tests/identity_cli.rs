@@ -94,7 +94,6 @@ control = "127.0.0.1:45721"
     std::fs::write(
         dir.join("schema.toml"),
         "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
-         [defaults]\njoin_field = \"id\"\n\
          [[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n\
          source = \"points\"\n\
          [[view]]\nname = \"s0\"\nextent = { min = 0.0, max = 10.0 }\n\

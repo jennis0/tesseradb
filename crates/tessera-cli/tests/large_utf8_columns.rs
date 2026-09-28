@@ -141,8 +141,7 @@ topics           = "topics.parquet"
 topic_members    = "topic-members.parquet"
 
 [defaults]
-source     = "points"
-join_field = "id"
+source = "points"
 
 # The points file's `entity_id`, which every file names its item by.
 [[attribute]]
@@ -190,6 +189,7 @@ content                   = { computed = ["centroid"] }
 
   [layer.members]
   source = "cluster_members"
+  fields = { id = "entity" }
 
   [layer.labels]
   source                    = "topics"
@@ -205,6 +205,7 @@ content                   = { computed = ["centroid"] }
 
     [layer.labels.members]
     source = "topic_members"
+    fields = { id = "entity" }
 "#;
 
 const DEPLOYMENT: &str = r#"

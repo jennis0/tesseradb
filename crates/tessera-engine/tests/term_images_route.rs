@@ -239,6 +239,7 @@ fn write_pairs(path: &Path) {
 fn build_fixture(out: &Path, points: &Path, pairs: &Path) {
     write_points(points);
     write_pairs(pairs);
+    let schema = id_schema();
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -253,7 +254,7 @@ fn build_fixture(out: &Path, points: &Path, pairs: &Path) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
         out: out.to_path_buf(),
         limit: None,
         strict: false,
@@ -266,7 +267,7 @@ fn build_fixture(out: &Path, points: &Path, pairs: &Path) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).expect("the fixture builds");
 }

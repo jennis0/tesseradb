@@ -66,7 +66,7 @@ enum Command {
         /// Without it, a row naming two items, naming an item or a unique value an earlier row of
         /// its file names, or, outside a view's points, naming no item, is left out and the build
         /// goes on. The refused rows are printed, and written to `reports/refused.json` in the
-        /// bundle.
+        /// bundle where there are any.
         #[arg(long)]
         strict: bool,
         /// Read this corpus declaration instead of `[build] schema` in `tessera.toml`.

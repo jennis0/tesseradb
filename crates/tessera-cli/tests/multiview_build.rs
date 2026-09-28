@@ -12,9 +12,10 @@ use std::process::Command;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float32Array, Float64Array, ListBuilder, StringArray, StringBuilder, UInt64Array,
-    UInt64Builder,
+    Array, ArrayRef, Float32Array, Float64Array, ListArray, ListBuilder, StringArray, StringBuilder,
+    StructArray, UInt64Array,
 };
+use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -124,19 +125,28 @@ fn write_discriminated(path: &Path) {
     );
 }
 
-/// One artifact per row: `key`, its members, one content value, and — on the scoped layer — the
-/// view it belongs to.
+/// One artifact per row: `key`, its members (each a struct naming its item by `entity_id`), one
+/// content value, and — on the scoped layer — the view it belongs to.
 fn write_artifacts(path: &Path, rows: &[(&str, Option<&str>, Vec<u64>)]) {
     let scoped = rows.iter().any(|(_, view, _)| view.is_some());
+    let entries = StructArray::from(vec![(
+        Arc::new(Field::new("entity_id", DataType::UInt64, false)),
+        Arc::new(UInt64Array::from(
+            rows.iter().flat_map(|(_, _, ids)| ids.iter().copied()).collect::<Vec<_>>(),
+        )) as ArrayRef,
+    )]);
+    let item = Arc::new(Field::new("item", entries.data_type().clone(), true));
+    let members = ListArray::new(
+        item.clone(),
+        OffsetBuffer::from_lengths(rows.iter().map(|(_, _, ids)| ids.len())),
+        Arc::new(entries),
+        None,
+    );
     let mut fields = vec![Field::new("key", DataType::Utf8, false)];
     if scoped {
         fields.push(Field::new("quarter", DataType::Utf8, false));
     }
-    fields.push(Field::new(
-        "members",
-        DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
-        false,
-    ));
+    fields.push(Field::new("members", DataType::List(item), false));
     fields.push(Field::new(
         "contents",
         DataType::List(Arc::new(Field::new(
@@ -147,13 +157,8 @@ fn write_artifacts(path: &Path, rows: &[(&str, Option<&str>, Vec<u64>)]) {
         false,
     ));
     let schema = Arc::new(Schema::new(fields));
-    let mut members = ListBuilder::new(UInt64Builder::new());
     let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
-    for (_, _, ids) in rows {
-        for id in ids {
-            members.values().append_value(*id);
-        }
-        members.append(true);
+    for _ in rows {
         contents.values().values().append_value("tag");
         contents.values().append(true);
         contents.append(true);
@@ -168,7 +173,7 @@ fn write_artifacts(path: &Path, rows: &[(&str, Option<&str>, Vec<u64>)]) {
                 .collect::<Vec<_>>(),
         )));
     }
-    columns.push(Arc::new(members.finish()));
+    columns.push(Arc::new(members));
     columns.push(Arc::new(contents.finish()));
     write(path, schema, columns);
 }
@@ -192,7 +197,6 @@ clusters = "clusters.parquet"
 
 [defaults]
 allocation_view = "world"
-join_field      = "id"
 
 # Every file names its item by its `entity_id`. No view's points hold every item, so the values
 # are read from a file that does.

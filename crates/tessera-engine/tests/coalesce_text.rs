@@ -111,9 +111,11 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
     write_pairs_n(&pairs, N);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = Config::parse(&schema_path, &HashMap::new())
-        .expect("the text schema parses")
-        .schema;
+    let schema = with_id(
+        Config::parse(&schema_path, &HashMap::new())
+            .expect("the text schema parses")
+            .schema,
+    );
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,

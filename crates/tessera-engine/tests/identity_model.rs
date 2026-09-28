@@ -35,7 +35,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{BooleanArray, Float32Array, Float64Array, Int64Array, StringArray, UInt64Array};
+use arrow::array::{
+    BooleanArray, Float32Array, Float64Array, Int64Array, StringArray, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -209,7 +211,6 @@ fn built_position(source: u64) -> (f64, f64) {
 fn write_points(path: &Path) {
     let ids: Vec<u64> = (0..BUILT).collect();
     let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         Field::new("gid", DataType::UInt64, false),
@@ -225,7 +226,6 @@ fn write_points(path: &Path) {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(UInt64Array::from(ids.clone())),
             Arc::new(Float64Array::from(
                 ids.iter().map(|s| built_position(*s).0).collect::<Vec<_>>(),
             )),
@@ -289,6 +289,28 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
+/// The access relation, naming each built item by its `gid`, with the terms [`terms_of`] gives it.
+fn write_pairs(path: &Path) {
+    let (gids, terms): (Vec<u64>, Vec<u32>) = (0..BUILT)
+        .flat_map(|s| terms_of(s).into_iter().map(move |t| (built_gid(s), t as u32)))
+        .unzip();
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("gid", DataType::UInt64, false),
+        Field::new("term_id", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(gids)),
+            Arc::new(UInt32Array::from(terms)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
 struct Fixture {
     tmp: tempfile::TempDir,
     root: std::path::PathBuf,
@@ -302,7 +324,7 @@ fn fixture() -> Fixture {
     write_points(&points);
     let group_points = tmp.path().join("group.parquet");
     write_group_points(&group_points);
-    write_pairs_n(&pairs, BUILT);
+    write_pairs(&pairs);
     let schema_path = tmp.path().join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
@@ -389,7 +411,7 @@ fn fixture() -> Fixture {
 fn write_group_points(path: &Path) {
     let ids: Vec<u64> = (0..BUILT).collect();
     let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("gid", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         Field::new(SCOPED[0], DataType::Float32, false),
@@ -398,7 +420,7 @@ fn write_group_points(path: &Path) {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(UInt64Array::from(ids.clone())),
+            Arc::new(UInt64Array::from_iter_values(ids.iter().map(|s| built_gid(*s)))),
             Arc::new(Float64Array::from_iter_values(
                 ids.iter().map(|s| built_position(*s).0),
             )),

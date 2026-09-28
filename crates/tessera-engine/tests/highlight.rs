@@ -140,7 +140,7 @@ fn fixture() -> Fixture {
     let bundle = dir.path().join("bundle");
     let schema_path = dir.path().join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = Config::parse(&schema_path, &HashMap::new()).unwrap().schema;
+    let schema = with_id(Config::parse(&schema_path, &HashMap::new()).unwrap().schema);
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
