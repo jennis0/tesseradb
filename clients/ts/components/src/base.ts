@@ -262,49 +262,49 @@ export function dateText(value: number | bigint): string {
   return DATE.format(new Date(Number(value) / 1000));
 }
 
-const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 /** Microseconds in a millisecond. */
 const US_PER_MS = 1000;
 
+/** A `timestamp_us` value as a `Date`, rounded down to its millisecond, so an instant before 1970 keeps its day. */
+const dateOf = (value: number): Date => new Date(Math.floor(value / US_PER_MS));
+
+/** The first instant of a UTC day as a `timestamp_us` value, for any year, 0 to 99 included. */
+function dayStart(year: number, month: number, day: number): number {
+  const d = new Date(0);
+  d.setUTCFullYear(year, month, day);
+  return d.getTime() * US_PER_MS;
+}
+
 /** A `timestamp_us` value's UTC day, month and year, the month short: `1 Jan 2019`. */
 export function shortDateText(value: number): string {
-  const d = new Date(value / US_PER_MS);
-  return `${d.getUTCDate()} ${SHORT_MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
-}
-
-/** Whether a `timestamp_us` value is the first instant of a UTC year. */
-function startsYear(value: number): boolean {
-  const d = new Date(value / US_PER_MS);
-  return d.getUTCMonth() === 0 && d.getUTCDate() === 1 && value % (86_400_000 * US_PER_MS) === 0;
-}
-
-/** Whether a `timestamp_us` value falls on 31 December, UTC. */
-function endsYear(value: number): boolean {
-  const d = new Date(value / US_PER_MS);
-  return d.getUTCMonth() === 11 && d.getUTCDate() === 31;
+  const d = dateOf(value);
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]!.slice(0, 3)} ${d.getUTCFullYear()}`;
 }
 
 /**
- * An inclusive range of `timestamp_us` values as a chip says it: `2019 – 2024` for whole years,
- * `3 Mar – 14 Jun 2024` within one year, `3 Mar 2019 – 14 Jun 2024` across years, and `from 3 Mar
- * 2019` or `until 14 Jun 2024` with one end open.
+ * An inclusive range of `timestamp_us` values as a chip says it: `2019 – 2024` for whole years
+ * (from the first instant of the first to the last instant of the last), `3 Mar – 14 Jun 2024`
+ * within one year, `3 Mar 2019 – 14 Jun 2024` across years, and `from 3 Mar 2019` or `until 14 Jun
+ * 2024` with one end open.
  */
 export function dateRangeText(gte: number | null, lte: number | null): string {
   if (gte === null && lte === null) return '';
   if (lte === null) return `from ${shortDateText(gte!)}`;
   if (gte === null) return `until ${shortDateText(lte)}`;
-  const from = new Date(gte / US_PER_MS).getUTCFullYear();
-  const to = new Date(lte / US_PER_MS).getUTCFullYear();
-  if (startsYear(gte) && endsYear(lte)) return from === to ? String(from) : `${from} – ${to}`;
-  if (from === to) return `${shortDateText(gte).replace(/ \d+$/, '')} – ${shortDateText(lte)}`;
+  const from = dateOf(gte).getUTCFullYear();
+  const to = dateOf(lte).getUTCFullYear();
+  if (gte === dayStart(from, 0, 1) && lte === dayStart(to + 1, 0, 1) - 1) return from === to ? String(from) : `${from} – ${to}`;
+  if (from === to) return `${shortDateText(gte).replace(/ -?\d+$/, '')} – ${shortDateText(lte)}`;
   return `${shortDateText(gte)} – ${shortDateText(lte)}`;
 }
 
 /**
  * A typed date as a `timestamp_us` value in UTC, or `null` where the text is not a date. It takes a
- * day, month and year (`1 Jan 2019`, `1 January 2019`, `2019-01-01`), a month and year, or a year.
- * `end` reads it as the last instant of the period it names, for the upper end of an inclusive
- * range; otherwise it is the first instant.
+ * day, month and year (`1 Jan 2019`, `1 January 2019`, `2019-01-01`), a month and year, or a year;
+ * a month's name may be shortened to its first three letters or more. `end` reads it as the last
+ * instant of the period it names, for the upper end of an inclusive range; otherwise it is the
+ * first instant.
  */
 export function parseDateText(text: string, end: boolean): number | null {
   const t = text.trim();
@@ -312,26 +312,26 @@ export function parseDateText(text: string, end: boolean): number | null {
   let month: number | null = null;
   let day: number | null = null;
   const iso = /^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$/.exec(t);
-  const words = /^(?:(\d{1,2})\s+)?([A-Za-z]+)\.?\s+(\d{4})$/.exec(t);
+  const words = /^(?:(\d{1,2})\s+)?([A-Za-z]{3,})\.?\s+(\d{4})$/.exec(t);
   if (/^\d{4}$/.test(t)) year = Number(t);
   else if (iso) {
     year = Number(iso[1]);
     month = Number(iso[2]) - 1;
     day = iso[3] ? Number(iso[3]) : null;
   } else if (words) {
-    const at = SHORT_MONTHS.findIndex((m) => words[2]!.toLowerCase().startsWith(m.toLowerCase()));
+    const at = MONTHS.findIndex((m) => m.toLowerCase().startsWith(words[2]!.toLowerCase()));
     if (at < 0) return null;
     year = Number(words[3]);
     month = at;
     day = words[1] ? Number(words[1]) : null;
   } else return null;
   if (month !== null && (month < 0 || month > 11)) return null;
-  const first = Date.UTC(year, month ?? 0, day ?? 1);
-  const check = new Date(first);
+  const first = dayStart(year, month ?? 0, day ?? 1);
+  const check = dateOf(first);
   if (day !== null && (check.getUTCDate() !== day || check.getUTCMonth() !== month)) return null;
-  if (!end) return first * US_PER_MS;
-  const next = day !== null ? Date.UTC(year, month!, day + 1) : month !== null ? Date.UTC(year, month + 1, 1) : Date.UTC(year + 1, 0, 1);
-  return next * US_PER_MS - 1;
+  if (!end) return first;
+  const next = day !== null ? dayStart(year, month!, day + 1) : month !== null ? dayStart(year, month + 1, 1) : dayStart(year + 1, 0, 1);
+  return next - 1;
 }
 
 /** What the map's pick resolved to where it found no item: a miss, or a broken pick. */

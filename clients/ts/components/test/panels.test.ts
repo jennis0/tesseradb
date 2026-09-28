@@ -504,5 +504,19 @@ describe('a date range as a chip says it', () => {
     expect(parseDateText('Jun 2024', true)).toBe(end(2024, 5, 30));
     expect(parseDateText('31 Feb 2024', false)).toBeNull();
     expect(parseDateText('soon', false)).toBeNull();
+    // The word typed is the start of a month's name, not a word that starts with one.
+    expect(parseDateText('Junk 2019', false)).toBeNull();
+    expect(parseDateText('Sept 2019', false)).toBe(at(2019, 8, 1));
+    // A year below 100 is that year, not one in the 1900s.
+    expect(dateRangeText(parseDateText('0050', false), null)).toBe('from 1 Jan 50');
+  });
+
+  it('keeps the day of an instant before 1970', () => {
+    expect(dateRangeText(null, end(1969, 5, 14))).toBe('until 14 Jun 1969');
+    expect(dateRangeText(at(1950, 0, 1), end(1959, 11, 31))).toBe('1950 – 1959');
+  });
+
+  it('calls a range whole years only from the first instant of one to the last instant of another', () => {
+    expect(dateRangeText(at(2019, 0, 1), at(2024, 11, 31))).toBe('1 Jan 2019 – 31 Dec 2024');
   });
 });
