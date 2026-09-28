@@ -8,10 +8,10 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, DictionaryArray, Float64Builder, Int8Array, StringArray, StringBuilder, UInt64Array,
+    ArrayRef, DictionaryArray, Float64Builder, Int32Array, Int8Array, StringArray, UInt64Array,
     UInt64Builder,
 };
-use arrow::datatypes::{Field as ArrowField, Int8Type, Schema};
+use arrow::datatypes::{Field as ArrowField, Int32Type, Int8Type, Schema};
 use arrow::record_batch::RecordBatch;
 
 use rayon::prelude::*;
@@ -240,8 +240,8 @@ impl Plan {
         let mut bytes = 0usize;
         let mut kept = 0usize;
         let mut cut_by_bytes = false;
-        for row in rows.iter().take(limit) {
-            let row_bytes = self.row_bytes(&groups, row);
+        for _ in rows.iter().take(limit) {
+            let row_bytes = self.row_bytes(&groups);
             if kept > 0 && bytes + row_bytes > limits.max_page_bytes {
                 cut_by_bytes = true;
                 break;
@@ -287,23 +287,18 @@ impl Plan {
         })
     }
 
-    /// The Arrow bytes a row adds to a page.
-    fn row_bytes(&self, groups: &Groups, row: &Row) -> usize {
-        let listed = groups.keys.get(row.group as usize);
+    /// The Arrow bytes a row adds to a page. A field's keys and titles are written once a page, a
+    /// small bound on a page of the rows of a few values, and are not counted here.
+    fn row_bytes(&self, groups: &Groups) -> usize {
         let mut bytes = 16;
         if !matches!(self.outer, Outer::None) {
-            bytes += 1 + match listed {
-                Some(Key::Text(key)) => 4 + key.len(),
-                Some(Key::Id(_)) => 8,
-                None => 4,
+            bytes += 1 + match &self.outer {
+                Outer::Layer(_) => 8,
+                _ => 4,
             };
         }
-        if let Some(Some(title)) = groups
-            .titles
-            .as_ref()
-            .and_then(|titles| titles.get(row.group as usize))
-        {
-            bytes += 4 + title.len();
+        if groups.titles.is_some() {
+            bytes += 4;
         }
         if self.cells.is_some() {
             bytes += 8;
@@ -342,22 +337,34 @@ impl Plan {
                     push("key", Arc::new(b.finish()), true);
                 }
                 _ => {
-                    let mut b = StringBuilder::new();
-                    for row in rows {
-                        match groups.keys.get(row.group as usize) {
-                            Some(Key::Text(key)) => b.append_value(key),
-                            _ => b.append_null(),
-                        }
+                    // Each listed value's key and title are written once, and each row carries the
+                    // listed position, null on the rest and none.
+                    let listed_at = |row: &Row| (row.group < listed).then_some(row.group as i32);
+                    let keys: Vec<&str> = groups
+                        .keys
+                        .iter()
+                        .map(|key| match key {
+                            Key::Text(text) => text.as_str(),
+                            Key::Id(_) => "",
+                        })
+                        .collect();
+                    let key = DictionaryArray::<Int32Type>::try_new(
+                        Int32Array::from_iter(rows.iter().map(listed_at)),
+                        Arc::new(StringArray::from(keys)),
+                    )
+                    .map_err(|e| EngineError::Malformed(format!("a key column: {e}")))?;
+                    push("key", Arc::new(key), true);
+                    if let Some(titles) = &groups.titles {
+                        let title = DictionaryArray::<Int32Type>::try_new(
+                            Int32Array::from_iter(rows.iter().map(|row| {
+                                listed_at(row).filter(|&g| titles[g as usize].is_some())
+                            })),
+                            Arc::new(StringArray::from_iter(titles.iter().map(Option::as_deref))),
+                        )
+                        .map_err(|e| EngineError::Malformed(format!("a title column: {e}")))?;
+                        push("title", Arc::new(title), true);
                     }
-                    push("key", Arc::new(b.finish()), true);
                 }
-            }
-            if let Some(titles) = &groups.titles {
-                let mut b = StringBuilder::new();
-                for row in rows {
-                    b.append_option(titles.get(row.group as usize).and_then(Option::as_deref));
-                }
-                push("title", Arc::new(b.finish()), true);
             }
         }
         if self.cells.is_some() {
