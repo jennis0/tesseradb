@@ -1,8 +1,7 @@
 //! **A build's unique columns**: every type `unique` applies to builds its index, and `tessera
-//! verify --deep` agrees the index with the column; a column holding a value twice refuses the
-//! build, naming how many values and some of them; `unique` on a type it does not apply to, or on
-//! a group-scoped column, is refused at the declaration; and a damaged index is refused by the
-//! deep verifier.
+//! verify --deep` agrees the index with the column; a row holding a value an earlier row holds is
+//! refused, reported and left out; `unique` on a type it does not apply to, or on a group-scoped
+//! column, is refused at the declaration; and a damaged index is refused by the deep verifier.
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -17,7 +16,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use sha2::{Digest, Sha256};
 
-use tessera_build::{build, verify_deep, BuildArgs, VerifyOpts};
+use tessera_build::{build, verify_deep, BuildArgs, BuildReport, VerifyOpts};
 use tessera_spatial::Bounds;
 use tessera_store::manifest::{CurrentPointer, SegmentsManifest};
 use tessera_types::IdentityKey;
@@ -179,6 +178,12 @@ unique = true
 name   = "at"
 type   = "timestamp_us"
 unique = true
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 "#;
 
 fn parse(dir: &Path, toml: &str) -> Result<tessera_build::config::Schema, String> {
@@ -190,6 +195,15 @@ fn parse(dir: &Path, toml: &str) -> Result<tessera_build::config::Schema, String
 }
 
 fn build_in(dir: &Path, repeat: bool, streaming: bool) -> Result<PathBuf, String> {
+    build_reported(dir, repeat, streaming).map(|(out, _)| out)
+}
+
+/// [`build_in`], keeping the build's report.
+fn build_reported(
+    dir: &Path,
+    repeat: bool,
+    streaming: bool,
+) -> Result<(PathBuf, BuildReport), String> {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points(&points, repeat);
@@ -229,7 +243,7 @@ fn build_in(dir: &Path, repeat: bool, streaming: bool) -> Result<PathBuf, String
         true => build(&args),
         false => tessera_build::build_in_memory(&args),
     };
-    built.map(|_| out).map_err(|e| e.to_string())
+    built.map(|report| (out, report)).map_err(|e| e.to_string())
 }
 
 fn segments_manifest(root: &Path) -> SegmentsManifest {
@@ -247,13 +261,15 @@ fn every_unique_type_builds_an_index_the_deep_verifier_accepts() {
     let root = build_in(temp.path(), false, true).expect("a build with distinct values");
     let indexes = segments_manifest(&root).unique_indexes;
     let names: Vec<&str> = indexes.iter().map(|i| i.attribute.as_str()).collect();
-    assert_eq!(names, ["doi", "small", "wide", "signed", "big", "at"]);
-    assert!(indexes.iter().all(|i| i.live.is_empty() && !i.base.is_empty()));
+    assert_eq!(names, ["doi", "small", "wide", "signed", "big", "at", "id"]);
+    assert!(indexes
+        .iter()
+        .all(|i| i.live.is_empty() && !i.base.is_empty()));
     let report = verify_deep(&root, &VerifyOpts::default()).expect("the bundle verifies deep");
     // Every value but the nulls: doi misses every 11th, small holds 250, wide misses every 13th,
-    // signed and big hold every item, at misses every 7th.
+    // signed, big and id hold every item, at misses every 7th.
     let held = |every: u64| N - N.div_ceil(every);
-    let expected = held(11) + 250 + held(13) + N + N + held(7);
+    let expected = held(11) + 250 + held(13) + N + N + held(7) + N;
     assert_eq!(report.unique_entries, expected);
 }
 
@@ -277,12 +293,28 @@ fn the_linear_build_writes_the_same_index() {
     }
 }
 
-/// **A column holding a value twice refuses the build**, on both build paths.
+/// **A row holding a value an earlier row holds is refused, reported and left out**, on both
+/// build paths: item 9's row repeats item 4's values, so the bundle holds every other item.
 #[test]
-fn a_value_held_twice_refuses_the_build() {
+fn a_value_held_twice_is_reported_and_left_out() {
     for streaming in [true, false] {
         let temp = tempfile::tempdir().unwrap();
-        assert!(build_in(temp.path(), true, streaming).is_err(), "the build is refused");
+        let (_, report) = build_reported(temp.path(), true, streaming).expect("the build goes on");
+        let refused: Vec<(&str, &str, u64)> = report
+            .refused
+            .iter()
+            .map(|entry| (entry.object.as_str(), entry.reason.as_str(), entry.rows))
+            .collect();
+        // The pairs row naming item 9 by its id names no item, since the item was never created.
+        assert_eq!(
+            refused,
+            [
+                ("view 's0'", "one_value_twice", 1),
+                ("point_visibility", "names_no_item", 1)
+            ],
+            "streaming {streaming}"
+        );
+        assert_eq!(report.items, N - 1, "streaming {streaming}");
     }
 }
 

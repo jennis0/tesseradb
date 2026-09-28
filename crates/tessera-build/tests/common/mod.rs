@@ -35,9 +35,13 @@ pub fn entities_of(
 }
 
 /// `schema` with a unique `id` column over the files' `entity_id` appended, for
-/// [`entities_of`] to find each item by. Appended, so every declared column keeps its position.
+/// [`entities_of`] to find each item by, unless it declares one. Appended, so every declared
+/// column keeps its position.
 #[allow(dead_code)]
 pub fn with_id(mut schema: tessera_build::config::Schema) -> tessera_build::config::Schema {
+    if schema.attributes.iter().any(|a| a.name == "id") {
+        return schema;
+    }
     schema.attributes.push(tessera_build::config::Attribute {
         field: Some("entity_id".to_string()),
         name: "id".to_string(),
@@ -51,6 +55,20 @@ pub fn with_id(mut schema: tessera_build::config::Schema) -> tessera_build::conf
         unique: true,
     });
     schema
+}
+
+/// A declaration of one unique attribute, `id`, over the files' `entity_id`, and its values read
+/// from the points file at `points`.
+#[allow(dead_code)]
+pub fn id_attributes(
+    points: &Path,
+) -> (
+    tessera_build::config::Schema,
+    Vec<tessera_build::config::AttributeSource>,
+) {
+    let schema = with_id(Default::default());
+    let sources = tessera_build::config::AttributeSource::over(points, &schema);
+    (schema, sources)
 }
 
 /// Every file of two bundles, compared byte for byte — `MANIFEST.json` with its wall-clock

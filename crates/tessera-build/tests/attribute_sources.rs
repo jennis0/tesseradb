@@ -1,15 +1,14 @@
-//! Attributes read from **more than one file**, joined on the join field and reported on
-//! (`configuration.md` §1's `[sources]` and `[defaults]`, §8's coverage report).
+//! Attributes read from **more than one file**, each row naming its item by the unique `id`
+//! (`configuration.md` §1's `[sources]` and `[defaults]`).
 //!
-//! A column read from a second file, joined on a column that file spells differently, lands on
-//! exactly the items it names and on no others.
+//! A column read from a second file, which spells the `id` column differently, lands on exactly
+//! the items it names and on no others.
 //!
 //! **Every item the build creates has a row in each attribute source**, as a new item at a running
 //! service carries every declared column; a null in that row is how the source says it has no
-//! value. A source that leaves an item out is refused naming it. Rows naming entities this build
-//! did not load are ignored, which is the ordinary case for a table covering a superset. The cases
-//! below drive each through the real declaration parser, so the surface and the pass are exercised
-//! together.
+//! value. A source that leaves an item out is refused. A row naming no item this build created is
+//! refused, reported and left out, and the build goes on. The cases below drive each through the
+//! real declaration parser, so the surface and the pass are exercised together.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -33,7 +32,7 @@ mod common;
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
 
-/// The points file: the join field `id`, geometry, and one column of its own.
+/// The points file: the unique `id`, geometry, and one column of its own.
 fn write_points(path: &Path) {
     write_points_counting(path, Count::Values(|e| Some((e * 11) as i64)));
 }
@@ -133,8 +132,9 @@ fn write_empty_pairs(path: &Path) {
     w.close().unwrap();
 }
 
-/// Two sources, two join columns, no column placed anywhere but the record blob — which is what
-/// lets the values be read back per entity without a serving path.
+/// Two sources, each naming items by `id` in a column of its own spelling, and no column placed
+/// anywhere but the record blob, which lets the values be read back per entity without a serving
+/// path.
 const DECLARATION: &str = r#"
 [sources]
 points = "points.parquet"
@@ -142,8 +142,7 @@ scores = "scores.parquet"
 pairs  = "pairs.parquet"
 
 [defaults]
-source     = "points"
-join_field = "id"
+source = "points"
 
 [[view]]
 name             = "s0"
@@ -254,9 +253,8 @@ fn rows_by_source(out: &Path) -> BTreeMap<u64, Vec<(u16, RecordValue)>> {
     rows
 }
 
-/// **A column from a second file lands on exactly the entities that file names.** The join is the
-/// join field — spelled `doc_id` there and `id` here — and nothing about the file decides which
-/// entity space a value belongs to.
+/// **A column from a second file lands on exactly the entities that file names**, by the unique
+/// `id`, spelled `doc_id` there and `id` here.
 #[test]
 fn a_column_from_a_second_source_lands_on_the_entities_it_names() {
     let dir = tempfile::tempdir().unwrap();
@@ -315,10 +313,10 @@ fn a_declared_column_the_file_omits_is_refused_and_a_column_of_nulls_builds() {
     }
 }
 
-/// **A source naming entities this build did not load is ignored, not refused.** That is what a
-/// join does, and it is the ordinary shape of a table covering a superset of one build's corpus.
+/// **A source's rows naming no item this build created are reported and left out**, and the build
+/// goes on: a table covering a superset of one build's corpus is the ordinary shape.
 #[test]
-fn rows_naming_entities_this_build_did_not_load_are_ignored() {
+fn rows_naming_no_item_are_reported_and_left_out() {
     let dir = tempfile::tempdir().unwrap();
     // A row for each of this build's entities, half of them valued, and a thousand ids no build
     // here ever assigns.
@@ -327,7 +325,17 @@ fn rows_naming_entities_this_build_did_not_load_are_ignored() {
     let ids: Vec<u64> = (0..N).chain(1_000..2_000).collect();
     let config = project(dir.path(), &ids, &covered);
     let out = dir.path().join("bundle");
-    build(&args(&config, out.clone())).expect("unmatched rows are ignored, never refused");
+    let report =
+        build(&args(&config, out.clone())).expect("unmatched rows are left out, never refused");
+    let refused: Vec<(&str, &str, u64)> = report
+        .refused
+        .iter()
+        .map(|entry| (entry.object.as_str(), entry.reason.as_str(), entry.rows))
+        .collect();
+    assert_eq!(
+        refused,
+        [("attribute source 'scores'", "names_no_item", 1_000)]
+    );
 
     let rows = rows_by_source(&out);
     for source in 0..N {
@@ -345,9 +353,9 @@ fn rows_naming_entities_this_build_did_not_load_are_ignored() {
     }
 }
 
-/// **A source without a row for an item the build creates is refused, at both builds**, naming
-/// the item, as a new item at a running service that leaves out a declared column is. The same
-/// item with a row of nulls builds.
+/// **A source without a row for an item the build creates is refused, at both builds**, as a new
+/// item at a running service that leaves out a declared column is. The same item with a row of
+/// nulls builds.
 #[test]
 fn a_source_without_a_row_for_an_item_the_build_creates_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -357,8 +365,7 @@ fn a_source_without_a_row_for_an_item_the_build_creates_is_refused() {
         ("streamed", build(&args(&config, dir.path().join("streamed")))),
         ("linear", build_in_memory(&args(&config, dir.path().join("linear")))),
     ] {
-        let err = result.expect_err("an item with no row in `scores` is refused");
-        assert!(err.to_string().contains(&format!("item {}", N - 1)), "{name}: {err}");
+        assert!(result.is_err(), "{name}: an item with no row in `scores` is refused");
     }
 
     let all: Vec<u64> = (0..N).collect();

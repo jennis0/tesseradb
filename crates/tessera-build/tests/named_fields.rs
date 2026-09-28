@@ -84,16 +84,15 @@ fn write_pairs(path: &Path) {
 
 /// One view, one open vocabulary and one category over it, all read from moved names.
 ///
-/// **The join field is named once, in `[defaults]`.** The points file spells it `id`, so the view,
-/// the attribute and the exploded relation all join on `id` without saying so.
+/// **The unique `id` is read from a column of its own name**, so the points and the exploded
+/// relation name their items by it without a `fields` entry.
 const MOVED: &str = r#"
 [sources]
 points = "points.parquet"
 pairs  = "pairs.parquet"
 
 [defaults]
-source     = "points"
-join_field = "id"
+source = "points"
 
 [[view]]
 name             = "s0"

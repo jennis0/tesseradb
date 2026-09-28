@@ -23,19 +23,6 @@ use tessera_types::{IdentityKey, TermId};
 
 mod common;
 
-/// One unique attribute, `id`, over the points file's `entity_id`.
-fn id_attributes(
-    points: &Path,
-) -> (
-    tessera_build::config::Schema,
-    Vec<tessera_build::config::AttributeSource>,
-) {
-    let schema = common::with_id(Default::default());
-    let sources = tessera_build::config::AttributeSource::over(points, &schema);
-    (schema, sources)
-}
-
-
 /// A fixed, non-degenerate test key shared by every fixture in this file.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -197,7 +184,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
-    let (schema, attribute_sources) = id_attributes(&points);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -489,6 +476,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -503,7 +491,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
         strict: false,
@@ -516,7 +504,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).unwrap();
     // A second build into the same root would leave the first bundle's files half-overwritten
@@ -538,6 +526,7 @@ fn an_empty_selection_builds_an_empty_bundle() {
     write_points(&points);
     write_pairs(&pairs);
     let out = tmp.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -552,7 +541,7 @@ fn an_empty_selection_builds_an_empty_bundle() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: Some(0),
         strict: false,
@@ -565,7 +554,7 @@ fn an_empty_selection_builds_an_empty_bundle() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a build that selects no rows writes a bundle with no items");
 
@@ -586,6 +575,7 @@ fn morton_input_requires_the_identity_extent() {
     let pairs = tmp.path().join("pairs.parquet");
     write_morton_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let args = |extent| BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -601,7 +591,7 @@ fn morton_input_requires_the_identity_extent() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: attribute_sources.clone(),
         out: tmp
             .path()
             .join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
@@ -616,7 +606,7 @@ fn morton_input_requires_the_identity_extent() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: schema.clone(),
     };
 
     // The caller's own extent, which the x/y branch would happily accept, must be rejected here.
@@ -642,6 +632,7 @@ fn morton_input_requires_the_identity_extent() {
         y_max: 65536.0,
     };
     let out = tmp.path().join("bundle-ok");
+    let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -656,7 +647,7 @@ fn morton_input_requires_the_identity_extent() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
         strict: false,
@@ -669,7 +660,7 @@ fn morton_input_requires_the_identity_extent() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .unwrap();
     let bundle = open_bundle(&out).unwrap();
@@ -698,6 +689,7 @@ fn build_rejects_an_unsafe_view_id() {
     let pairs = tmp.path().join("pairs.parquet");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
     assert!(build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -712,7 +704,7 @@ fn build_rejects_an_unsafe_view_id() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: tmp.path().join("bundle"),
         limit: None,
         strict: false,
@@ -725,7 +717,7 @@ fn build_rejects_an_unsafe_view_id() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .is_err());
 }
@@ -750,6 +742,7 @@ fn limit_filters_the_source_entity_id_prefix() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -765,7 +758,7 @@ fn limit_filters_the_source_entity_id_prefix() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: Some(100),
         strict: false,
@@ -778,7 +771,7 @@ fn limit_filters_the_source_entity_id_prefix() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .unwrap();
     assert_eq!(report.items, 100);
@@ -816,6 +809,8 @@ fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
     let mut w = ArrowWriter::try_new(File::create(&points).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
+    let (mut schema, attribute_sources) = common::id_attributes(&points);
+    schema.attributes[0].ty = tessera_spatial::tiler::ScalarType::I64;
 
     let report = build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -831,7 +826,7 @@ fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: Some(100),
         strict: false,
@@ -844,7 +839,7 @@ fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .unwrap();
     assert_eq!(report.items, 100, "ids 0 to 99 are below the limit");
@@ -861,6 +856,7 @@ fn verify_accepts_a_freshly_built_bundle() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -876,7 +872,7 @@ fn verify_accepts_a_freshly_built_bundle() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
         strict: false,
@@ -889,7 +885,7 @@ fn verify_accepts_a_freshly_built_bundle() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .unwrap();
 
@@ -911,6 +907,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -926,7 +923,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
         strict: false,
@@ -939,7 +936,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .unwrap();
 
@@ -1222,7 +1219,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         let pairs = tmp.path().join("pairs.parquet");
         let out = tmp.path().join("bundle");
         write_fixture(&points, &pairs);
-        let (schema, attribute_sources) = id_attributes(&points);
+        let (schema, attribute_sources) = common::id_attributes(&points);
 
         let args = BuildArgs {
             views: vec![tessera_build::ViewArgs {

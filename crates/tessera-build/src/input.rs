@@ -1531,13 +1531,23 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     if columns.is_empty() {
         return Ok(());
     }
-    let Source { path, .. } = src;
+    let Source { path, fields, .. } = src;
+    // A unique attribute sits where this file's map moved it; any other in its own column.
+    let named: Vec<&str> = columns
+        .iter()
+        .map(|attribute| {
+            fields
+                .unique_column(&attribute.name)
+                .unwrap_or(attribute.column())
+        })
+        .collect();
     let groups = FileGroups::open(path)?;
     let file_schema = groups.schema().clone();
     tessera_store::declaration::check_declared_present(
         columns
             .iter()
-            .map(|attribute| (attribute.name.as_str(), attribute.column())),
+            .zip(&named)
+            .map(|(attribute, column)| (attribute.name.as_str(), *column)),
         |column| file_schema.column_with_name(column).is_some(),
     )
     .map_err(|detail| BuildError::Schema {
@@ -1545,9 +1555,9 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
         detail: format!("{detail} (its columns are {})", column_names(&file_schema)),
     })?;
     let mut roots: Vec<usize> = Vec::with_capacity(columns.len());
-    for attribute in columns {
+    for column in &named {
         let (index, _) = file_schema
-            .column_with_name(attribute.column())
+            .column_with_name(column)
             .expect("every declared column was found above");
         if !roots.contains(&index) {
             roots.push(index);
@@ -1564,9 +1574,9 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
         // a test uses. A discovered category's mint pre-pass rides the same discipline: minting
         // is per distinct key in the batch, decided here, not per row.
         let mut decoded: Vec<BatchColumn> = Vec::with_capacity(columns.len());
-        for attribute in columns {
+        for (attribute, column) in columns.iter().zip(&named) {
             let column = batch
-                .column_by_name(attribute.column())
+                .column_by_name(column)
                 .expect("every declared column is projected");
             decoded.push(BatchColumn::decode(path, column, attribute, minters)?);
         }

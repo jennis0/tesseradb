@@ -244,7 +244,7 @@ impl RecordReader {
     }
 
     /// The next record, or `None` past the last, which is where the anchor is checked.
-    pub fn next(&mut self) -> Result<Option<&[u8]>> {
+    pub fn next_record(&mut self) -> Result<Option<&[u8]>> {
         use std::io::Read;
         if self.left == 0 {
             if self.anchor != self.receipt.anchor {

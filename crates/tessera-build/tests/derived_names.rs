@@ -144,6 +144,12 @@ source           = "narrow_points"
 extent           = { min = 0.0, max = 1000.0 }
 point_visibility = { default = "public" }
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[layer]]
 name = "clusters/a"
 title = "clusters"
@@ -159,6 +165,7 @@ content = { computed = ["centroid"] }
 
   [layer.members]
   source = "clusters_members"
+  fields = { id = "entity" }
 "#;
 
 /// A row-major label column's header: magic, version, width, a pad byte, the row count, the
@@ -203,7 +210,10 @@ fn two_views_derived_files_do_not_collide() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            dir.join("wide.parquet"),
+            &config.schema,
+        ),
         out: out.clone(),
         limit: None,
         strict: false,
@@ -216,7 +226,7 @@ fn two_views_derived_files_do_not_collide() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: config.schema,
     })
     .expect("a two-view build with a layer succeeds");
 

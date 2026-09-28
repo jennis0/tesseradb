@@ -9,6 +9,8 @@
 //! from `test_corpora/common/projection-vectors.json`, which is the contract this transform and
 //! the Python module that placed the built geographic corpora are both held to.
 
+mod common;
+
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -290,7 +292,7 @@ fn a_coordinate_outside_the_wgs84_range_is_refused() {
     let message = refused(&[0.0, 20_037_508.0], &[0.0, 6_710_219.0]);
     assert!(message.contains("is not a place"), "{message}");
     assert!(message.contains("WGS84"), "{message}");
-    assert!(message.contains("entity_id 1"), "{message}");
+    assert!(message.contains("row 1"), "{message}");
 
     let message = refused(&[0.0, 10.0, 20.0], &[0.0, 95.0, 0.0]);
     assert!(message.contains("lat 95"), "{message}");
@@ -404,6 +406,7 @@ fn build_bundle(
     let pairs = tmp.join("pairs.parquet");
     write_pairs(&pairs, rows);
     let out = tmp.join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(points);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -418,7 +421,7 @@ fn build_bundle(
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
         strict: false,
@@ -431,7 +434,7 @@ fn build_bundle(
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).expect("the build succeeds");
     out

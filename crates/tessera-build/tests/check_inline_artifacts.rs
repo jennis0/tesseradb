@@ -76,6 +76,11 @@ fn a_shape_on_a_layer_that_declares_none_is_a_finding() {
     let config = declaration(
         tmp.path(),
         r#"
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+
 [[layer]]
 name                      = "cases"
 views                     = ["atlas"]
@@ -85,7 +90,7 @@ visibility                = "public"
 artifact_visibility       = { default = "inherited" }
 require_member_visibility = "none"
 artifacts = [
-  { key = "unshaped", members = [0], bbox = [-1.0, -1.0, 1.0, 1.0] },
+  { key = "unshaped", members = { id = [0] }, bbox = [-1.0, -1.0, 1.0, 1.0] },
 ]
 "#,
     );

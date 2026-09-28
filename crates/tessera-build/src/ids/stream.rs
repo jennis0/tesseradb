@@ -561,9 +561,13 @@ fn decode<K: Key>(record: &[u8]) -> (K, u32) {
     )
 }
 
+/// One held run being read: its reader, the base its rows are numbered from where it has one,
+/// and the entry at its head.
+type HeldStream<K> = (RecordReader, Option<u32>, Option<(K, u32)>);
+
 /// The holdings of one field, read in key order to answer keys asked in ascending order.
 struct HeldCursor<K: Key> {
-    streams: Vec<(RecordReader, Option<u32>, Option<(K, u32)>)>,
+    streams: Vec<HeldStream<K>>,
 }
 
 impl<K: Key> HeldCursor<K> {
@@ -571,7 +575,7 @@ impl<K: Key> HeldCursor<K> {
         let mut streams = Vec::with_capacity(runs.len());
         for run in runs {
             let mut reader = RecordReader::open(&run.receipt, K::WIDTH + 4)?;
-            let head = reader.next()?.map(decode::<K>);
+            let head = reader.next_record()?.map(decode::<K>);
             streams.push((reader, run.base, head));
         }
         Ok(HeldCursor { streams })
@@ -585,7 +589,7 @@ impl<K: Key> HeldCursor<K> {
                 if held >= key {
                     break;
                 }
-                *head = reader.next()?.map(decode::<K>);
+                *head = reader.next_record()?.map(decode::<K>);
             }
             if let Some((held, value)) = *head {
                 if held == key {
@@ -599,7 +603,7 @@ impl<K: Key> HeldCursor<K> {
     /// Read every run to its end, which is where each is checked against its receipt.
     fn finish(mut self) -> Result<()> {
         for (reader, _, _) in &mut self.streams {
-            while reader.next()?.is_some() {}
+            while reader.next_record()?.is_some() {}
         }
         Ok(())
     }
@@ -803,10 +807,10 @@ fn walk(
             .min(total);
         let bytes = updates.load(k)?;
         hits.clear();
-        hits.extend(bytes.chunks_exact(8).map(|record| {
+        hits.extend(bytes.as_chunks::<8>().0.iter().map(|record| {
             (
-                u32::from_le_bytes(record[..4].try_into().expect("four")),
-                u32::from_le_bytes(record[4..].try_into().expect("four")),
+                u32::from_le_bytes([record[0], record[1], record[2], record[3]]),
+                u32::from_le_bytes([record[4], record[5], record[6], record[7]]),
             )
         }));
         drop(bytes);
@@ -857,15 +861,17 @@ fn decide_row(
         tally.refuse(reason, row);
         return Ok(());
     }
-    let named: Vec<(resolve::Identifier, EntityId)> = codes()
-        .map(|code| {
-            (
-                resolve::Identifier::Unique(0),
-                EntityId::new(u64::from(code - 1)),
-            )
-        })
-        .collect();
-    match resolve::name_row(&named) {
+    let named = |code: u32| {
+        (
+            resolve::Identifier::Unique(0),
+            EntityId::new(u64::from(code - 1)),
+        )
+    };
+    let verdict = match decisions {
+        [(_, code)] => Named::One(named(*code).1),
+        _ => resolve::name_row(&codes().map(named).collect::<Vec<_>>()),
+    };
+    match verdict {
         Named::One(item) => {
             *stored = item.raw() as u32 + 1;
             if let Some(sort) = named_items {
@@ -894,7 +900,7 @@ fn set_values<K: Key>(
     let mut reader = RecordReader::open(unset, K::WIDTH + 4)?;
     let mut writer = SpillWriter::create(path)?;
     let mut retired: Vec<u32> = Vec::new();
-    while let Some(entry) = reader.next()? {
+    while let Some(entry) = reader.next_record()? {
         let (key, row) = decode::<K>(entry);
         let row = u64::from(row);
         let item = match created.contains(row) {
@@ -925,7 +931,7 @@ fn set_values<K: Key>(
 fn filter_run<K: Key>(run: &HeldRun, path: &Path, items: &[u32]) -> Result<HeldRun> {
     let mut reader = RecordReader::open(&run.receipt, K::WIDTH + 4)?;
     let mut writer = SpillWriter::create(path)?;
-    while let Some(entry) = reader.next()? {
+    while let Some(entry) = reader.next_record()? {
         let (_, value) = decode::<K>(entry);
         let item = run.base.map_or(value, |base| base + value);
         if items.binary_search(&item).is_ok() {

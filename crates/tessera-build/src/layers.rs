@@ -1284,9 +1284,9 @@ fn read_members(
             );
         }
 
-        for row in 0..batch.num_rows() {
+        for (row, &source) in entity.iter().enumerate() {
             // **A row the rule refused is not read**: it names no item, and the report counts it.
-            if entity[row] == NO_SOURCE {
+            if source == NO_SOURCE {
                 continue;
             }
             match key.cells.is_list() {
@@ -1312,7 +1312,7 @@ fn read_members(
                         plan,
                         member,
                         path,
-                        entity[row],
+                        source,
                         rank.as_ref().and_then(|c| value_index(c, row)),
                     )?;
                 }
@@ -1331,7 +1331,6 @@ fn read_members(
                         unclustered += 1;
                         continue;
                     };
-                    let source = entity[row];
                     let rank = rank.as_ref().and_then(|c| value_index(c, row));
 
                     entries.clear();
@@ -3694,16 +3693,15 @@ fn file_lists(
                 let child = members.column_by_name(&field.column).expect("carried");
                 keys.push(crate::ids::scan::keys_of(path, child, field)?);
             }
-            let offsets = list.value_offsets();
-            for row in 0..batch.num_rows() {
+            for (row, bounds) in list.value_offsets().windows(2).enumerate() {
                 if list.is_null(row) {
                     continue;
                 }
-                for member in offsets[row] as usize..offsets[row + 1] as usize {
+                for member in bounds[0] as usize..bounds[1] as usize {
                     let null = members.is_null(member);
                     let mut parts = Vec::new();
                     for (at, field) in lists.carried.iter().enumerate() {
-                        let value = keys[at][member].filter(|_| !null);
+                        let value = keys[at].get(member).copied().flatten().filter(|_| !null);
                         lists.keys[at].push(value);
                         let child = members.column_by_name(&field.column).expect("carried");
                         if let Some(text) = crate::ids::scan::value_text(child.as_ref(), member)

@@ -11,6 +11,8 @@
 //! image of the right posting, and the only way to know is to project the posting again and
 //! compare.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -159,6 +161,7 @@ fn write_pairs(path: &Path) {
 }
 
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
+    let (schema, attribute_sources) = common::id_attributes(points);
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -173,7 +176,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out,
         limit: None,
         strict: false,
@@ -186,7 +189,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     }
 }
 

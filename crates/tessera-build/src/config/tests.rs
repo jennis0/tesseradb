@@ -3220,15 +3220,12 @@ fn a_scope_naming_a_members_group_points_at_the_owner() {
 /// view's values as every view's.
 #[test]
 fn a_scoped_attribute_may_read_its_own_source_through_fields_view() {
-    let text = format!(
-        "{}",
-        with_group(
-            "\n[[attribute]]\nname = \"id\"\ntype = \"keyword\"\nunique = true\n\
-             source = \"other\"\n\
-             \n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
-             scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
-             fields = { view = \"quarter\", id = \"doc\" }\n",
-        )
+    let text = with_group(
+        "\n[[attribute]]\nname = \"id\"\ntype = \"keyword\"\nunique = true\n\
+         source = \"other\"\n\
+         \n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+         scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
+         fields = { view = \"quarter\", id = \"doc\" }\n",
     );
     let config = ok(&text);
     let scoped = &config.scoped_attributes[0];
