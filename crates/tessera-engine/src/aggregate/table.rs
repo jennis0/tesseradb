@@ -18,6 +18,7 @@ use rayon::prelude::*;
 
 use super::cursor::Position;
 use super::set::Cx;
+use super::artifacts::Layer;
 use super::values::Field;
 use super::{AggregateTimings, By, Grouping, TableHead};
 use crate::cells::{count_chunk, count_chunk_by_ranges, CellCount, CellSet, GroupTable, RowGroups};
@@ -37,6 +38,7 @@ pub(super) struct Plan {
 enum Outer {
     None,
     Field(Field),
+    Layer(Layer),
 }
 
 /// One page of a table.
@@ -88,21 +90,19 @@ struct Row {
 impl Plan {
     /// `grouping`, the request's `index`th, resolved in `view`, or the refusal it earns.
     pub(super) fn of(
-        _engine: &Engine,
-        _session: &Session,
+        engine: &Engine,
+        session: &Session,
         generation: &Generation,
-        _view: &str,
+        view: &str,
         index: usize,
         grouping: &Grouping,
     ) -> Result<Plan> {
         let outer = match &grouping.by {
             None => Outer::None,
             Some(By::Field { column, pick }) => Outer::Field(Field::of(generation, column, pick)?),
-            Some(By::Layer { .. }) => {
-                return Err(EngineError::Malformed(
-                    "a layer grouping is not counted yet".to_string(),
-                ))
-            }
+            Some(By::Layer { layer, level, pick }) => Outer::Layer(Layer::of(
+                engine, session, generation, view, layer, *level, pick,
+            )?),
         };
         Ok(Plan {
             grouping: index as u32,
@@ -117,6 +117,7 @@ impl Plan {
             || match &self.outer {
                 Outer::None => false,
                 Outer::Field(field) => field.wants_rows(),
+                Outer::Layer(_) => true,
             }
     }
 
@@ -130,9 +131,15 @@ impl Plan {
         timings: &mut AggregateTimings,
     ) -> Result<Page> {
         cx.check_cancelled()?;
+        let mut served = None;
         let groups = match &self.outer {
             Outer::None => Groups::whole(cx),
             Outer::Field(field) => field.groups(cx, position.chosen.as_deref(), timings)?,
+            Outer::Layer(layer) => {
+                let (groups, held) = layer.groups(cx, position.chosen.as_deref(), timings)?;
+                served = Some(held);
+                groups
+            }
         };
         let head = TableHead {
             grouping: self.grouping,
@@ -148,6 +155,8 @@ impl Plan {
                 let started = std::time::Instant::now();
                 let table;
                 let codes;
+                let labels;
+                let parts;
                 let source = match &self.outer {
                     Outer::None => Source::Split(vec![(
                         cx.sets.set.cells(cx),
@@ -158,6 +167,35 @@ impl Plan {
                         table = GroupTable::new(&listed);
                         codes = field.entity_codes(cx.generation)?;
                         Source::Grouped(field.row_groups(cx, &table, &codes)?)
+                    }
+                    Outer::Layer(_) => {
+                        let served = served.as_ref().expect("a layer's groups were read");
+                        labels = served.label_table();
+                        match &labels {
+                            Some(labels) => Source::Grouped(served.row_groups(labels)),
+                            None => {
+                                let set = served.group_rows(cx, cx.sets.set.rows(cx));
+                                let reference = cx
+                                    .sets
+                                    .reference
+                                    .as_ref()
+                                    .map(|r| served.group_rows(cx, r.rows(cx)));
+                                parts = (set, reference);
+                                Source::Split(
+                                    parts
+                                        .0
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(g, rows)| {
+                                            (
+                                                CellSet::Rows(rows),
+                                                parts.1.as_ref().map(|r| CellSet::Rows(&r[g])),
+                                            )
+                                        })
+                                        .collect(),
+                                )
+                            }
+                        }
                     }
                 };
                 let counted =

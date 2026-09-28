@@ -189,7 +189,7 @@ const UNSERVED: u32 = u32::MAX;
 
 impl LabelTable {
     /// The table over `ordinals` ordinals, `served` the ordinals served and `listed` those listed,
-    /// in order. A listed ordinal must be served.
+    /// in order. A listed ordinal past `ordinals` stands for no artifact and counts nothing.
     pub fn new(ordinals: usize, served: impl IntoIterator<Item = u32>, listed: &[u32]) -> Self {
         let rest = listed.len() as u32;
         let mut by_ordinal = vec![UNSERVED; ordinals];

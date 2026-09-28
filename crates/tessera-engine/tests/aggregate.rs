@@ -1372,3 +1372,244 @@ fn a_cell_table_pages_from_any_cell() {
         }
     }
 }
+
+// ---- layers ---------------------------------------------------------------------------------
+
+/// The planted artifacts: a key, its members' source ids, and the label a viewer must hold.
+/// `t0` and `t1` overlap; `secret` carries a label no viewer holds, so its items outside `t2` are
+/// in no served artifact; `mine` carries the subset viewer's label and not the broad one's.
+fn planted() -> Vec<(&'static str, Vec<u64>, Option<&'static str>)> {
+    vec![
+        ("t0", (0..1200).collect(), None),
+        ("t1", (800..2000).collect(), None),
+        ("t2", (1900..2400).collect(), None),
+        ("secret", (2300..2700).collect(), Some("7")),
+        ("mine", (0..600).filter(|s| s % 3 == 0).collect(), Some("1")),
+    ]
+}
+
+/// Register `name` over the planted artifacts in `layout`, and answer each artifact's id.
+fn plant(
+    fx: &Fx,
+    name: &str,
+    layout: tessera_types::layer::ServingLayout,
+) -> BTreeMap<&'static str, tessera_types::TesseraId> {
+    use tessera_lifecycle::IncomingArtifact;
+    use tessera_types::layer::{
+        ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration,
+        MembershipSource,
+    };
+    let engine = &fx.engine;
+    engine
+        .register_layer(LayerDeclaration {
+            scope: Default::default(),
+            name: name.into(),
+            title: None,
+            views: vec!["s0".into()],
+            membership: MembershipSource::Enumerated,
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: ArtifactVisibility::carried("visibility"),
+            require_member_visibility: None,
+            hierarchy: Hierarchy {
+                kind: HierarchyKind::Flat,
+                prune_children: false,
+            },
+            content: ContentDeclaration::default(),
+            depends_on: Vec::new(),
+            levels: Vec::new(),
+            layout: Some(layout),
+            shape: None,
+        })
+        .unwrap();
+    let map = source_to_new_map(&fx.root, "v00000");
+    let artifacts = planted()
+        .into_iter()
+        .map(|(key, members, label)| {
+            let mut artifact = IncomingArtifact::from_entities(
+                Some(key.into()),
+                members.iter().map(|s| tessera_types::EntityId::new(map[s])).collect::<Vec<_>>(),
+            );
+            artifact.access = Some(label.map_or_else(Vec::new, |l| vec![l.as_bytes().to_vec()]));
+            artifact
+        })
+        .collect();
+    let ids = engine.publish_artifacts(name.into(), 0, artifacts).unwrap();
+    tick(engine);
+    planted().into_iter().map(|(key, _, _)| key).zip(ids).collect()
+}
+
+fn layer(name: &str, pick: Pick<tessera_types::TesseraId>) -> Grouping {
+    Grouping {
+        by: Some(By::Layer {
+            layer: name.to_string(),
+            level: None,
+            pick,
+        }),
+        cells: None,
+    }
+}
+
+/// **An artifact grouping's rows are the oracle's**: the served artifacts by count or as named, the
+/// rest in a served artifact and in no listed one, and none in no served artifact, so an item held
+/// only by a withheld artifact is in none; overlapping artifacts add to more than the set's size.
+/// Artifact-major and row-major levels answer alike, and a withheld artifact named by its id
+/// answers as an id naming nothing.
+#[test]
+fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
+    use tessera_types::layer::ServingLayout;
+    let fx = fixture();
+    let engine = &fx.engine;
+    let ids = plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
+    let row_ids = plant(&fx, "topics/rows", ServingLayout::RowMajorList);
+    assert_eq!(
+        engine.recorded_layout("topics/rows", 0),
+        Some(ServingLayout::RowMajorList)
+    );
+    let members: BTreeMap<&str, Vec<u64>> =
+        planted().into_iter().map(|(key, m, _)| (key, m)).collect();
+    for broad in [true, false] {
+        let session = fx.session(broad);
+        let held = |label: Option<&str>| match label {
+            None => true,
+            Some("1") => !broad,
+            Some(_) => false,
+        };
+        for (what, filter, keep) in [
+            ("no filter", None, &(|_: &Item| true) as &dyn Fn(&Item) -> bool),
+            (
+                "a filter",
+                Some(fx.is_in("kind", &["a", "b"])),
+                &|i: &Item| matches!(i.kind.as_deref(), Some("a" | "b")),
+            ),
+        ] {
+            let set: Vec<u64> = fx.visible(broad, keep).map(|i| i.source).collect();
+            let visible: Vec<u64> = fx.visible(broad, &|_| true).map(|i| i.source).collect();
+            let served: Vec<&str> = planted()
+                .into_iter()
+                .filter(|(_, m, label)| held(*label) && m.iter().any(|s| visible.contains(s)))
+                .map(|(key, _, _)| key)
+                .collect();
+            let count = |key: &str| members[key].iter().filter(|s| set.contains(s)).count() as u64;
+            let mut ranked: Vec<&str> = served.iter().copied().filter(|k| count(k) > 0).collect();
+            ranked.sort_by(|a, b| count(b).cmp(&count(a)).then(ids[a].cmp(&ids[b])));
+            let expected = |listed: &[&str], ids: &BTreeMap<&str, tessera_types::TesseraId>, always: bool| {
+                let mut out: Vec<(String, Option<String>, u64)> = listed
+                    .iter()
+                    .filter(|k| always || count(k) > 0)
+                    .map(|k| ("listed".to_string(), Some(ids[k].raw().to_string()), count(k)))
+                    .collect();
+                let in_any = |s: &u64, keys: &[&str]| keys.iter().any(|k| members[k].contains(s));
+                let rest = set
+                    .iter()
+                    .filter(|s| in_any(s, &served) && !in_any(s, listed))
+                    .count() as u64;
+                let none = set.iter().filter(|s| !in_any(s, &served)).count() as u64;
+                if rest > 0 {
+                    out.push(("rest".to_string(), None, rest));
+                }
+                if none > 0 {
+                    out.push(("none".to_string(), None, none));
+                }
+                out
+            };
+            for (name, ids) in [("topics/major", &ids), ("topics/rows", &row_ids)] {
+                let simple = |rows: &[Row]| -> Vec<(String, Option<String>, u64)> {
+                    rows.iter()
+                        .map(|r| (r.group.clone().unwrap(), r.key.clone(), r.count))
+                        .collect()
+                };
+                let groupings = [
+                    layer(name, Pick::Top(2)),
+                    layer(name, Pick::Named(vec![ids["t2"], ids["secret"], ids["t0"]])),
+                ];
+                let mut req = request(&groupings);
+                req.filter = filter.clone();
+                let tables = read_all(engine, &session, req);
+                let top: Vec<&str> = ranked.iter().copied().take(2).collect();
+                assert_eq!(
+                    simple(&tables[&0].1),
+                    expected(&top, ids, false),
+                    "{name}, broad {broad}, {what}: top two"
+                );
+                assert_eq!(
+                    tables[&0].0.groups,
+                    Some(ranked.len() as u64),
+                    "{name}, broad {broad}, {what}: groups"
+                );
+                assert_eq!(
+                    simple(&tables[&1].1),
+                    expected(&["t2", "t0"], ids, true),
+                    "{name}, broad {broad}, {what}: named, the withheld one dropped"
+                );
+                let secret_id = ids["secret"];
+                let nothing = tessera_types::TesseraId::new(secret_id.raw() ^ 0x5555);
+                let answer = |named: Vec<tessera_types::TesseraId>| {
+                    let groupings = [layer(name, Pick::Named(named))];
+                    let (collect, _) = respond(engine, &session, request(&groupings)).unwrap();
+                    collect
+                        .pages
+                        .iter()
+                        .flat_map(|(_, b, _)| rows_of(b))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    answer(vec![ids["t1"], secret_id]),
+                    answer(vec![ids["t1"], nothing]),
+                    "{name}: a withheld id answers as one naming nothing"
+                );
+            }
+        }
+    }
+    // The two layouts give the same cells.
+    let session = fx.session(false);
+    for depth in [3u8, 18] {
+        let read = |name: &str| {
+            let groupings = [Grouping {
+                by: Some(By::Layer {
+                    layer: name.to_string(),
+                    level: None,
+                    pick: Pick::Top(3),
+                }),
+                cells: Some(depth),
+            }];
+            table(engine, &session, request(&groupings))
+                .1
+                .into_iter()
+                .map(|r| (r.group, r.cell, r.count))
+                .collect::<Vec<_>>()
+        };
+        let major = read("topics/major");
+        assert!(!major.is_empty());
+        assert_eq!(major, read("topics/rows"), "depth {depth}");
+    }
+    assert_eq!(engine.layout_fallbacks(), 0, "the row-major level kept its column");
+    assert!(engine.columns_composed() >= 1);
+}
+
+/// **A `member_of` filter's set is what the viewport and items count**, and a layer this viewer
+/// does not reach is refused as an unknown layer.
+#[test]
+fn a_member_of_set_is_what_the_viewport_and_items_count() {
+    use tessera_types::layer::ServingLayout;
+    let fx = fixture();
+    let engine = &fx.engine;
+    let ids = plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
+    for broad in [true, false] {
+        let session = fx.session(broad);
+        for key in ["t0", "t1", "secret", "mine"] {
+            let filter = Some(FilterExpr::MemberOf(tessera_engine::filter::MemberOfLeaf {
+                layer: "topics/major".to_string(),
+                artifact: ids[key],
+            }));
+            let size = size_of(engine, &session, filter.clone());
+            assert_eq!(size, viewport_matched(engine, &session, filter.clone()), "{key}");
+            assert_eq!(size, items_count(engine, &session, filter), "{key}");
+        }
+        let groupings = [layer("topics/nowhere", Pick::Top(2))];
+        assert!(matches!(
+            respond(engine, &session, request(&groupings)),
+            Err(EngineError::RecordsRefused(tessera_engine::RecordsRefused::UnknownLayer(_)))
+        ));
+    }
+}

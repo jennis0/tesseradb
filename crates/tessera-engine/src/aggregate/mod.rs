@@ -11,6 +11,7 @@
 //! Rows carry vocabulary keys, artifacts' `tessera_id`s and cell prefixes. A code, an ordinal or an
 //! entity id reaches the caller only inside a sealed cursor.
 
+mod artifacts;
 mod cursor;
 mod set;
 mod table;
