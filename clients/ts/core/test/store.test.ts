@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import {createStore, type Store} from '../src/store.js';
 import {withVerb, type FilterDraft} from '../src/filters.js';
-import type {Artifact, Layer, MembershipColumn, Meta, ViewportResponse} from '../src/types.js';
+import type {Artifact, Layer, MembershipColumn, Meta, ViewportPart, ViewportResponse} from '../src/types.js';
 import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
@@ -1028,75 +1028,6 @@ describe('the token', () => {
     expect(clock.pending).toBe(0);
   });
 
-  it('forgets derived shapes and hovered records when the token changes, and keeps predicate shapes', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
-    const served = [artifact(1n, {layer: 'hulls'}), artifact(2n, {layer: 'regions'})];
-    const {client} = fakeClient((req) => {
-      const r = response('ck');
-      return (req.layers ?? []).length === 0 ? r : {...r, result: {...r.result, artifacts: served}};
-    }, meta({
-      ...META,
-      layers: [
-        layer('hulls', {computedContent: ['centroid', 'box', 'hull'], shape: 'derived'}),
-        layer('regions', {membership: 'spatial', computedContent: ['centroid', 'box'], shape: 'predicate'})
-      ]
-    }));
-    const shapeOf = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}));
-    const item = vi.fn(async (token: string) => ({fields: {asked: token}, views: [], scoped: {}, labels: []}));
-    Object.assign(client, {artifact: shapeOf, item});
-    let issued = 0;
-    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    store.setLayers(['hulls', 'regions']);
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
-    await clock.advance(600);
-    scheduler.flush();
-    await clock.advance(600);
-    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([1n, 2n]);
-    store.needShape(1n);
-    store.needShape(2n);
-    await clock.advance(1);
-    expect([...store.get('artifacts').shapes.keys()]).toEqual([1n, 2n]);
-    expect(await store.describe(7n)).toEqual({asked: 't1'});
-
-    // The renewal hands over another token, so another principal as far as the store knows.
-    await clock.advance(30_000);
-    expect(authorise).toHaveBeenCalledTimes(2);
-    expect([...store.get('artifacts').shapes.keys()]).toEqual([2n]);
-    expect(await store.describe(7n)).toEqual({asked: 't2'});
-  });
-
-  it('drops the view’s counts the moment the token changes, and counts again under the new one', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {client, viewport} = fakeClient(() => response('ck'));
-    let issued = 0;
-    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
-    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
-    await clock.advance(600);
-    scheduler.flush();
-    await clock.advance(600);
-    expect(store.get('view').matched.value).toBeGreaterThan(0);
-    // Every view published after the second token is issued, with the token it came under.
-    const after: {matched: number; exact: boolean}[] = [];
-    store.subscribe('view', (v) => {
-      if (authorise.mock.calls.length >= 2) after.push({matched: v.matched.value, exact: v.matched.exact});
-    });
-    await clock.advance(30_000);
-    scheduler.flush();
-    await clock.advance(600);
-    scheduler.flush();
-    expect(authorise).toHaveBeenCalledTimes(2);
-    // The first publish under the new token carries no count from the old one.
-    expect(after[0]).toEqual({matched: 0, exact: false});
-    // The counts that return were asked for with the new token.
-    expect(viewport.mock.calls.at(-1)![0]).toBe('t2');
-    expect(store.get('view').matched.value).toBeGreaterThan(0);
-  });
-
   it('answers every verb called before the first token lands, from one supplier call', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
@@ -1289,6 +1220,241 @@ describe('the token', () => {
     scheduler.flush();
     expect(viewport.mock.calls.length).toBeGreaterThan(asked);
     expect(store.get('status')).toMatchObject({status: 'refused', expired: true, refusal: {code: 'expired-token'}});
+  });
+});
+
+describe('a store serves one viewer', () => {
+  /** Two viewers' answers, told apart by identity key, by the visible count of a tile and by artifact. */
+  const VIEWERS = {
+    a: {identityKey: 'ik-a', visible: 1_000n, artifact: 1n},
+    b: {identityKey: 'ik-b', visible: 7n, artifact: 2n}
+  } as const;
+  type Who = keyof typeof VIEWERS;
+
+  const SHAPED = meta({...META, layers: [layer('l', {computedContent: ['centroid', 'box', 'hull'], shape: 'derived'})]});
+
+  /** One viewer's answer: three points spread over the corner of world space, and its artifact where a layer is asked for. */
+  function answerOf(who: Who, req: FakeRequest): ViewportResponse {
+    const v = VIEWERS[who];
+    const scalars = {archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: 3}, () => 5)}};
+    const world = Float32Array.from([0.1, 0.1, 4.5, 4.5, 9, 1]);
+    const artifacts = (req.layers ?? []).length === 0 ? [] : [artifact(v.artifact)];
+    return responseOf(servedResult(3, [tile(0n, v.visible)], {scalars, world, artifacts}), {contentKey: `ck-${who}`, identityKey: v.identityKey});
+  }
+
+  /** Whose answers a store is showing: the identity key of every band drawn, every tile counted and every artifact served. */
+  function showing(store: Store): Set<string> {
+    const who = new Set<string>();
+    const marks = store.get('marks');
+    for (const band of [...marks.bands, ...marks.standIn.map((piece) => piece.band)]) who.add(band.identityKey);
+    for (const t of store.get('tiles').tiles) {
+      if (t.counts) who.add(t.counts.visible === VIEWERS.a.visible ? 'ik-a' : 'ik-b');
+    }
+    for (const a of store.get('artifacts').served) who.add(a.tesseraId === VIEWERS.a.artifact ? 'ik-a' : 'ik-b');
+    return who;
+  }
+
+  /**
+   * A store behind a supplier that hands out `t1` and then `t2`, each for a minute, so the renewal
+   * falls 30 s in. `t1` is viewer A's; `t2` is viewer B's unless `renewal` says it is A's again.
+   * `gate` holds a `t2` request that fetches points open after its first part has been handed over.
+   */
+  function twoTokens(opts: {renewal: Who; gate?: Promise<void>}) {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const whose = (token: string): Who => (token === 't1' ? 'a' : opts.renewal);
+    const viewport = vi.fn(
+      async (token: string, req: FakeRequest, _signal?: AbortSignal, _background?: boolean, onPart?: (part: ViewportPart) => void | Promise<void>) => {
+        const answer = answerOf(whose(token), req);
+        if (opts.gate && token === 't2' && (req.k ?? 1) > 0 && onPart) {
+          await onPart({result: answer.result, identityKey: answer.identityKey, contentKey: answer.contentKey});
+          await opts.gate;
+          return {...answer, result: {...answer.result, ids: new BigUint64Array(0), codes: new BigUint64Array(0), positions: new Float64Array(0), world: new Float32Array(0), tiles: []}};
+        }
+        return answer;
+      }
+    );
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const client = {
+      meta: async () => SHAPED,
+      viewport,
+      item: async (token: string) => ({fields: {asked: token}, views: [], scoped: {}, labels: []}),
+      artifact: async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}),
+      categories: async () => [],
+      suggest: async () => ({status: 'ok' as const, column: 'archive', q: '', values: [], more: false}),
+      close: () => {}
+    } as unknown as TesseraClient;
+    let issued = 0;
+    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    return {store, viewport, authorise, clock, scheduler};
+  }
+
+  async function settled(clock: ReturnType<typeof fakeClock>, scheduler: ReturnType<typeof fakeScheduler>): Promise<void> {
+    for (let i = 0; i < 4; i++) {
+      await clock.advance(600);
+      scheduler.flush();
+    }
+  }
+
+  it('keeps what is drawn through a renewal for the same viewer, and asks with the new token', async () => {
+    const {store, viewport, authorise, clock, scheduler} = twoTokens({renewal: 'a'});
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.needShape(VIEWERS.a.artifact);
+    await clock.advance(1);
+    expect(showing(store)).toEqual(new Set(['ik-a']));
+    expect(store.get('artifacts').shapes.has(VIEWERS.a.artifact)).toBe(true);
+    const drawn = store.get('marks').bands.length;
+    expect(drawn).toBeGreaterThan(0);
+
+    const blanks: string[] = [];
+    store.subscribe(() => {
+      if (store.get('marks').bands.length === 0) blanks.push('marks');
+      if (store.get('artifacts').served.length === 0) blanks.push('artifacts');
+      if (store.get('view').composition === null) blanks.push('counts');
+    });
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(viewport.mock.calls.at(-1)![0]).toBe('t2');
+    expect(blanks).toEqual([]);
+    expect(showing(store)).toEqual(new Set(['ik-a']));
+    expect(store.get('marks').bands.length).toBe(drawn);
+    expect(store.get('artifacts').shapes.has(VIEWERS.a.artifact)).toBe(true);
+  });
+
+  it('drops everything held for viewer A before viewer B’s first answer is drawn', async () => {
+    const {store, authorise, clock, scheduler} = twoTokens({renewal: 'b'});
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.needShape(VIEWERS.a.artifact);
+    await clock.advance(1);
+    expect(showing(store)).toEqual(new Set(['ik-a']));
+
+    const mixed: Set<string>[] = [];
+    const late: Set<string>[] = [];
+    let sawB = false;
+    store.subscribe(() => {
+      const who = showing(store);
+      if (who.size > 1) mixed.push(who);
+      if (who.has('ik-b')) sawB = true;
+      if (sawB && who.has('ik-a')) late.push(who);
+    });
+    // The renewal hands over viewer B's token; nothing moves the camera.
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(mixed).toEqual([]);
+    expect(late).toEqual([]);
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+    expect(showing(store)).toEqual(new Set(['ik-b']));
+    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([VIEWERS.b.artifact]);
+    expect(store.get('artifacts').shapes.has(VIEWERS.a.artifact)).toBe(false);
+    expect(await store.describe(7n)).toEqual({asked: 't2'});
+  });
+
+  it('draws no stand-in from viewer A beside the first points streamed to viewer B', async () => {
+    let now = Date.now();
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      let open: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (open = resolve));
+      const {store, authorise, clock, scheduler} = twoTokens({renewal: 'b', gate});
+      store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+      await settled(clock, scheduler);
+      expect(showing(store)).toEqual(new Set(['ik-a']));
+
+      const mixed: Set<string>[] = [];
+      store.subscribe(() => {
+        const who = showing(store);
+        if (who.size > 1) mixed.push(who);
+      });
+      // Viewer A's token has four seconds left, so the next request renews it first, and the
+      // points for the zoomed view are asked for under viewer B's token. Until they come, viewer
+      // A's coarser points stand in.
+      now += 56_000;
+      store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+      for (let i = 0; i < 4; i++) {
+        await clock.advance(1);
+        scheduler.flush();
+      }
+      expect(authorise).toHaveBeenCalledTimes(2);
+      expect(mixed).toEqual([]);
+      expect(showing(store).has('ik-a')).toBe(false);
+
+      open();
+      await settled(clock, scheduler);
+      expect(mixed).toEqual([]);
+      expect(store.get('marks').bands.length).toBeGreaterThan(0);
+      expect(showing(store)).toEqual(new Set(['ik-b']));
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it('clear() forgets viewer A and serves viewer B from B’s own token and meta', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    // Viewer A may filter on a column viewer B is not told of.
+    const metaOf = (token: string) =>
+      token === 't-a' ? meta({...SHAPED, filterOperands: [...SHAPED.filterOperands, {column: 'secret', family: 'category', operands: ['in']}]}) : SHAPED;
+    const whose = (token: string): Who => (token === 't-a' ? 'a' : 'b');
+    const viewport = vi.fn(async (token: string, req: FakeRequest) => answerOf(whose(token), req));
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const client = {
+      meta: async (token: string) => metaOf(token),
+      viewport,
+      item: async (token: string) => ({fields: {asked: token}, views: [], scoped: {}, labels: []}),
+      artifact: async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}),
+      categories: async () => [{code: 5, key: 'cs', title: 'CS'}],
+      suggest: async () => ({status: 'ok' as const, column: 'archive', q: '', values: [], more: false}),
+      close: () => {}
+    } as unknown as TesseraClient;
+    // The host's supplier answers for whoever is signed in.
+    let signedIn: Who = 'a';
+    const authorise = vi.fn(async () => ({token: `t-${signedIn}`, expiresAt: (Date.now() + 3_600_000) / 1000}));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    store.setLayers(['l']);
+    store.setColourBy('archive');
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.needShape(VIEWERS.a.artifact);
+    await store.pick(7n);
+    store.select({kind: 'box', bbox: [0, 0, 50, 50]});
+    await settled(clock, scheduler);
+    expect(showing(store)).toEqual(new Set(['ik-a']));
+    expect(Object.keys(store.get('filters').draft)).toContain('secret');
+
+    signedIn = 'b';
+    store.clear();
+    const late: Set<string>[] = [];
+    store.subscribe(() => {
+      if (showing(store).has('ik-a')) late.push(showing(store));
+    });
+
+    // Nothing of viewer A's is published or drawn once the call returns.
+    expect(store.get('meta')).toBeNull();
+    expect(showing(store)).toEqual(new Set());
+    expect(store.get('marks')).toMatchObject({bands: [], standIn: []});
+    expect(store.get('view').composition).toBeNull();
+    expect(store.get('artifacts').shapes.size).toBe(0);
+    expect(store.get('selection').item).toBeNull();
+    expect(store.get('region')).toBeNull();
+    expect(store.get('legend').categories).toEqual({});
+
+    await settled(clock, scheduler);
+    expect(late).toEqual([]);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(store.get('meta')?.filterOperands.map((f) => f.column)).toEqual(['archive']);
+    expect(Object.keys(store.get('filters').draft)).not.toContain('secret');
+    expect(viewport.mock.calls.at(-1)![0]).toBe('t-b');
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+    expect(showing(store)).toEqual(new Set(['ik-b']));
   });
 });
 

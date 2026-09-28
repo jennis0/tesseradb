@@ -77,6 +77,15 @@ export class HeldViews {
     return incoming;
   }
 
+  /**
+   * Drop every view's machinery and any pending settle, keeping the current id. The caller cancels
+   * what each view has in flight first.
+   */
+  forget(): void {
+    this.byId.clear();
+    this.cancelSettle();
+  }
+
   /** Call `fire` after the settle, unless another switch comes first. */
   settle(fire: () => void): void {
     this.cancelSettle();

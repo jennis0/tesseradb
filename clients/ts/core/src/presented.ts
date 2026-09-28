@@ -219,6 +219,15 @@ export class Presenter {
   }
 
   /**
+   * Drops the presented frame and any verdict not yet drawn, and keeps what is in flight, so the
+   * next frame is derived from the replica alone.
+   */
+  forget(): void {
+    this.pending = null;
+    this.held = null;
+  }
+
+  /**
    * Verdicts coalesce to one per scheduler tick and the newest wins, except that a fold does not
    * replace a pending derive: a fold may be one step stale, while a dropped derive would leave the
    * driver's handle describing a frame the screen never showed.

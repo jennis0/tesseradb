@@ -45,7 +45,7 @@ Every element but `<tessera-count>` reads a store, and takes the first of these 
 2. the store of the nearest `<tessera-store>` or `<tessera-explorer>` above it;
 3. for `<tessera-map>`, `<tessera-explorer>` and `<tessera-store>` only, a store it builds from its `viewer-url` attribute and its `token` attribute or `authorise` property.
 
-With none, the element renders its detached state. An element that has built its own store keeps it when a provider appears above it later. A store the element built is replaced when `viewer-url` or `token` changes, and disposed by the element's `dispose()`. A store it was given is left for its owner to dispose. Disconnecting an element keeps its store, so moving it in the page does not fetch the view again.
+With none, the element renders its detached state. An element that has built its own store keeps it when a provider appears above it later. A store the element built is replaced when `viewer-url` or `token` changes or `authorise` is set or cleared, and disposed by the element's `dispose()`. A store serves one viewer: a renewal from `authorise` for the same viewer keeps what is drawn, and another viewer needs a new `token`, a new `viewer-url` or a new element. A store it was given is left for its owner to dispose. Disconnecting an element keeps its store, so moving it in the page does not fetch the view again.
 
 ## Events and styling
 
