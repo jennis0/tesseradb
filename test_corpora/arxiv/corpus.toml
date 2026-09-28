@@ -27,13 +27,13 @@ hdbscan_members       = "clusters-hdbscan-members.parquet"
 
 [defaults]
 source          = "points"
-join_field      = "id"
 
 # **Required, this declaration carrying more than one view** (decision 0112): within a signature
-# group, entity ids are ordered by the item's Morton code in the *anchor* view, then by join
-# value. Written explicitly so that reordering the view blocks below cannot silently re-key a
-# rebuild — the ids are permanent (I9). `knn` is the anchor because it is the layout the
-# clusterings are computed over; what matters is that it is named rather than inferred.
+# group, entity ids are ordered by the item's Morton code in the *anchor* view, then by the order
+# the points files create items in. Written explicitly so that reordering the view blocks below
+# cannot silently re-key a rebuild — the ids are permanent (I9). `knn` is the anchor because it is
+# the layout the clusterings are computed over; what matters is that it is named rather than
+# inferred.
 allocation_view = "knn"
 
 # ---------------------------------------------------------------------------------------------
@@ -93,7 +93,8 @@ source     = "primary_category"
 # is not a property of a projection, and the second view's file carries identity, position and the
 # access column and nothing else.
 
-# The join field: the row number `prepare.py` gives each paper (`entity` in the member files).
+# The row number `prepare.py` gives each paper. Every file names a paper by it: both points files
+# as `entity_id`, the member files as `entity`.
 [[attribute]]
 name   = "id"
 type   = "u64"
@@ -191,6 +192,7 @@ require_member_visibility = { count = 50 }
   # generating set of that ranked content rather than membership.
   [layer.members]
   source = "kmeans_members"
+  fields = { id = "entity" }
 
   # `hull` beside the box: the explorer draws a cluster as its served hull, and every computed
   # property is recomputed per viewer from `membership ∩ M_auth`, so a hull discloses no more than
@@ -220,6 +222,7 @@ require_member_visibility = { fraction = 0.05 }
 
   [layer.members]
   source = "hdbscan_members"
+  fields = { id = "entity" }
 
   [layer.content]
   computed = ["centroid", "box", "hull"]

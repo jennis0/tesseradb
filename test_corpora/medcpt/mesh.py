@@ -600,6 +600,7 @@ require_member_visibility = { count = 50 }
 
   [layer.members]
   source = "mesh_members"
+  fields = { id = "entity" }
 
   [layer.content]
   # **No computed content: this is a filter layer** (owner ruling, 2026-09-02). A descriptor's

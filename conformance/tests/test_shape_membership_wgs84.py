@@ -40,7 +40,6 @@ import pytest
 
 from oracle.harness import (
     CLI_BIN,
-    JOIN_FIELD,
     REPO_ROOT,
     ensure_cli_built,
     join_attribute_toml,
@@ -249,8 +248,7 @@ points = "points.parquet"
 pairs  = "pairs.parquet"
 
 [defaults]
-source     = "points"
-join_field = "{JOIN_FIELD}"
+source = "points"
 
 [[view]]
 name             = "{VIEW_ID}"

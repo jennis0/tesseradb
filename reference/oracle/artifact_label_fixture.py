@@ -36,7 +36,15 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, JOIN_FIELD, REPO_ROOT, ensure_cli_built, join_toml, write_deployment
+from .harness import (
+    CLI_BIN,
+    JOIN_COLUMN,
+    JOIN_FIELD,
+    REPO_ROOT,
+    ensure_cli_built,
+    join_attribute_toml,
+    write_deployment,
+)
 
 N_ITEMS = 200
 VIEW_ID = "s0"
@@ -176,7 +184,10 @@ def _write_teams(path: Path) -> None:
         pa.table(
             {
                 "key": pa.array([r[0] for r in TEAM_ROWS], pa.string()),
-                "members": pa.array([r[1] for r in TEAM_ROWS], pa.list_(pa.uint64())),
+                "members": pa.array(
+                    [[{JOIN_COLUMN: m} for m in r[1]] for r in TEAM_ROWS],
+                    pa.list_(pa.struct([(JOIN_COLUMN, pa.uint64())])),
+                ),
                 "team": pa.array([r[2] for r in TEAM_ROWS], pa.list_(pa.string())),
                 "parent": pa.array([r[3] for r in TEAM_ROWS], pa.string()),
             }
@@ -186,6 +197,8 @@ def _write_teams(path: Path) -> None:
 
 
 def _toml(value) -> str:
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{k} = {_toml(v)}" for k, v in value.items()) + " }"
     return json.dumps(value)
 
 
@@ -218,7 +231,7 @@ def _config(with_layers: bool) -> str:
         f"extent = {{ x = [0.0, {EXTENT_MAX}], y = [0.0, {EXTENT_MAX}] }}\n"
         'source = "points"\npoint_visibility = { source = "pairs", default = "public" }\n'
     )
-    text += "\n" + join_toml("points")
+    text += "\n" + join_attribute_toml("points")
     if not with_layers:
         return text
     text += _layer_toml(TEAMS, visibility="public", field="team", default="inherited",
@@ -226,14 +239,14 @@ def _config(with_layers: bool) -> str:
     text += _layer_toml(
         SEALED, visibility="public", field="team", default=UNCARRIED, kind="flat",
         extra=_inline(
-            {"key": key, "members": members, "access": labels or []}
+            {"key": key, "members": {JOIN_FIELD: members}, "access": labels or []}
             for key, members, labels in SEALED_ROWS
         ),
     )
     text += _layer_toml(
         GATED, visibility=GATE, field="team", default="inherited", kind="flat",
         extra=_inline(
-            {"key": key, "members": members, "access": labels or []}
+            {"key": key, "members": {JOIN_FIELD: members}, "access": labels or []}
             for key, members, labels in GATED_ROWS
         ),
     )

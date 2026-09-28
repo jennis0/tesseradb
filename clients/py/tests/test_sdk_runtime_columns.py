@@ -34,7 +34,7 @@ def fill(db, column: str, values) -> None:
     db.insert(
         column,
         pa.table({"entity_id": pa.array(HELD, pa.uint64()), column: values}),
-        id="entity_id",
+        columns={"id": "entity_id"},
         value=column,
     )
 
@@ -313,7 +313,7 @@ def test_a_unique_column_is_declared_filled_looked_up_and_refuses_a_held_value(s
     db.insert(
         "doi",
         pa.table({"entity_id": pa.array([HELD[-1] + 1], pa.uint64()), "doi": ["10.7/x"]}),
-        id="entity_id",
+        columns={"id": "entity_id"},
         value="doi",
     )
     with pytest.raises(Refusal):

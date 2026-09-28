@@ -26,7 +26,6 @@ def papers(ids, x=None, labels="public"):
 
 def declare_the_id(db) -> None:
     db.declare_attribute("id", type="keyword", unique=True)
-    db.declare_join_field("id")
 
 
 def unscored(ids, x):
@@ -39,7 +38,7 @@ def small(db) -> None:
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
     declare_the_id(db)
     db.declare_attribute("score", type="f64", index=True, render=False)
-    db.insert("map", papers([f"p{i}" for i in range(20)]), id="id", x="x", y="y",
+    db.insert("map", papers([f"p{i}" for i in range(20)]), x="x", y="y",
               access="labels")
     # The build reads `score` from this table, which holds a row for every item: a value on `p0`
     # and nulls on the rest.
@@ -51,7 +50,6 @@ def small(db) -> None:
                 "score": pa.array([0.5] + [None] * 19, pa.float64()),
             }
         ),
-        id="id",
         value="score",
     )
 
@@ -72,7 +70,7 @@ def test_an_insert_reports_its_rows_and_columns_and_prints_nothing(tmp_path, cap
     db = create(tmp_path / "db")
     db.declare_view("map")
     declare_the_id(db)
-    insert = db.insert("map", papers([f"p{i}" for i in range(1500)]), id="id", x="x", y="y")
+    insert = db.insert("map", papers([f"p{i}" for i in range(1500)]), x="x", y="y")
     summary = str(insert)
     assert insert.rows == 1500 and f"{insert.rows:,}" in summary
     assert all(column in summary for column in insert.read)
@@ -86,8 +84,11 @@ def test_a_check_before_the_first_commit_reports_its_rows_and_every_finding(tmp_
     db = create(tmp_path / "db")
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
     declare_the_id(db)
-    db.insert("map", pa.table({"id": pa.array(["p", None], pa.string()), "x": [0.0, 1.0],
-                               "y": [0.0, 0.0]}), id="id", x="x", y="y")
+    db.declare_layer("clusters", kind="flat", supplied=[("topic", "text", "all")])
+    rows = papers(["p", "q"])
+    db.insert("map", rows, x="x", y="y", access="labels")
+    # A layer declaring supplied content takes an artifacts table, and a key column is a finding.
+    db.insert("clusters", rows.append_column("cluster", pa.array(["a", "a"])), key="cluster")
     report = db.check()
     summary = str(report)
     assert not report.ok and report.findings
@@ -103,7 +104,7 @@ def test_a_check_names_a_declared_column_nothing_fills_and_the_commit_shows_its_
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
     declare_the_id(db)
     db.declare_attribute("score", type="f64", index=True)
-    db.insert("map", papers(["p0", "p1"]), id="id", x="x", y="y", access="labels")
+    db.insert("map", papers(["p0", "p1"]), x="x", y="y", access="labels")
     report = db.check()
     empty = [note for note in report.notes if "score" in note and "empty" in note]
     assert empty and all(note in str(report) for note in empty)
@@ -114,6 +115,25 @@ def test_a_check_names_a_declared_column_nothing_fills_and_the_commit_shows_its_
     refused = [line for line in failed.log.splitlines() if "refused" in line]
     assert refused and all(line in str(failed) for line in refused)
     assert capsys.readouterr().out == ""
+
+
+def test_the_first_commit_reports_each_row_the_build_left_out(tmp_path, corpus):
+    """A member naming no item is left out and the build goes on; the report counts it by file
+    and reason, with the value it carried."""
+    db = create(tmp_path / "db")
+    try:
+        small(db)
+        db.declare_layer("clusters", kind="flat")
+        db.insert(
+            "clusters", members=pa.table({"key": ["a", "a"], "id": ["p0", "nobody"]}), key="key"
+        )
+        report = db.commit()
+        assert report.ok, report.log
+        assert [(one["reason"], one["rows"]) for one in report.refused] == [("names_no_item", 1)]
+        assert any("nobody" in value for value in report.refused[0]["values"])
+        assert report.refused[0]["source"] in str(report)
+    finally:
+        db.close()
 
 
 def test_the_first_commit_reports_what_it_built_and_prints_nothing(tmp_path, corpus, capsys):
@@ -140,20 +160,17 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
     db = served(small)
     capsys.readouterr()
     # A row outside the view's frame commits on the frame's edge, and the summary counts it.
-    db.insert("map", unscored(["far"], x=[9_000.0]), id="id", x="x", y="y", access="labels")
+    db.insert("map", unscored(["far"], x=[9_000.0]), x="x", y="y", access="labels")
     report = db.commit()
     assert report.ok and report.clamped == 1
     assert "clamped" in str(report)
 
-    # A value row with no id is a finding, and the check and the commit both carry it.
+    # A members table naming its members by no unique attribute is a finding, and the check and
+    # the commit both carry it.
     db = served(small)
     capsys.readouterr()
-    db.insert(
-        "score",
-        pa.table({"id": pa.array([None], pa.string()), "score": pa.array([7.0], pa.float64())}),
-        id="id",
-        value="score",
-    )
+    db.declare_layer("clusters", kind="flat")
+    db.insert("clusters", members=pa.table({"key": ["a"], "paper": ["p0"]}), key="key")
     plan = db.check()
     assert plan.findings and all(str(finding) in str(plan) for finding in plan.findings)
     assert str(len(plan.plan)) in str(plan)
@@ -170,10 +187,9 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
     db.insert(
         "score",
         pa.table({"id": pa.array(["nobody"], pa.string()), "score": pa.array([9.0], pa.float64())}),
-        id="id",
         value="score",
     )
-    db.insert("map", unscored(["q0", "q1"], x=[1.5, 2.5]), id="id", x="x", y="y", access="labels")
+    db.insert("map", unscored(["q0", "q1"], x=[1.5, 2.5]), x="x", y="y", access="labels")
     report = db.commit()
     summary = str(report)
     assert report.rows_accepted == {"map": 2} and "2 rows to map" in summary

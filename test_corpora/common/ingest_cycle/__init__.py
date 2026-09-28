@@ -60,7 +60,7 @@ from .split import (
     declared_layers,
     filter_parquet,
     in_sorted,
-    join_field,
+    naming_field,
     member_table_columns,
     ranks_for,
     split_entities,

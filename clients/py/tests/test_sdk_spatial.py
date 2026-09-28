@@ -123,7 +123,7 @@ def test_an_inline_roster_built_at_the_first_commit_is_not_offered_again(served,
         db.declare_layer(
             "cohorts",
             kind="flat",
-            artifacts=[{"key": "all_but_three", "excluding": [1, 2, 3]}],
+            artifacts=[{"key": "all_but_three", "excluding": {"id": [1, 2, 3]}}],
             require_member_visibility={"count": 1},
             title="Cohorts",
         )

@@ -29,7 +29,6 @@ def db(tmp_path):
     database = create(tmp_path / "db")
     database.declare_view("s0")
     database.declare_attribute("entity", type="keyword", unique=True)
-    database.declare_join_field("entity")
     return database
 
 
@@ -82,7 +81,6 @@ def test_an_attribute_membership_is_a_predicate_over_a_declared_column(db, check
 def test_a_layer_scoped_to_a_view_group_keys_its_artifacts_per_view(tmp_path, checked):
     db = create(tmp_path / "db")
     db.declare_attribute("id", type="keyword", unique=True)
-    db.declare_join_field("id")
     db.declare_view_group("quarter", extent={"x": [0.0, 1.0], "y": [0.0, 1.0]})
     db.declare_layer(
         "quarter_clusters", kind="flat", views=["quarter"], scope={"group": "quarter"}
@@ -90,13 +88,12 @@ def test_a_layer_scoped_to_a_view_group_keys_its_artifacts_per_view(tmp_path, ch
     db.insert(
         "quarter",
         pd.DataFrame({"id": ["p0"], "x": [0.0], "y": [0.0], "q": ["q1"]}),
-        id="id",
         x="x",
         y="y",
         view="q",
     )
-    # A group's rows fill no attribute at the first commit, the join field included.
-    db.insert("id", pd.DataFrame({"id": ["p0"]}), id="id", value="id")
+    # A group's rows fill no attribute at the first commit, the unique one included.
+    db.insert("id", pd.DataFrame({"id": ["p0"]}), value="id")
     db.insert(
         "quarter_clusters",
         artifacts=pd.DataFrame({"key": ["a"], "quarter": ["q1"]}),
@@ -129,7 +126,8 @@ def test_an_artifacts_frame_written_in_the_declaration_carries_the_tables_column
         "cases",
         kind="flat",
         artifacts=pd.DataFrame(
-            {"key": ["a", "b"], "level": [0, 0], "excluding": [[0], [1]],
+            {"key": ["a", "b"], "level": [0, 0],
+             "excluding": [[{"entity": "p0"}], [{"entity": "p1"}]],
              "contents": [[["Ward A"]], [["Ward B"]]]}
         ),
         supplied=[("ward", "text", "inherited")],
@@ -139,12 +137,14 @@ def test_an_artifacts_frame_written_in_the_declaration_carries_the_tables_column
 
 def test_an_artifact_hangs_from_the_edge_attached_to_names(db, checked):
     """`attached_to` is the call's spelling; the declaration carries the layer and the key."""
-    db.declare_layer("clusters", kind="flat", artifacts=[{"key": "a", "members": [0]}])
+    db.declare_layer(
+        "clusters", kind="flat", artifacts=[{"key": "a", "members": {"entity": ["p0"]}}]
+    )
     db.declare_layer(
         "topics",
         kind="flat",
         depends_on=["clusters"],
-        artifacts=[{"key": "t0", "members": [0],
+        artifacts=[{"key": "t0", "members": {"entity": ["p0"]},
                     "attached_to": {"layer": "clusters", "key": "a", "level": 0}}],
     )
     assert checked(db).ok
@@ -158,7 +158,7 @@ def test_a_level_carries_its_own_zoom_range_and_a_layer_prunes_its_children(db, 
         levels=[(0, "Family", [0, 5]), (1, "Genus", [4, 10])],
         prune_children=True,
     )
-    db.insert("taxonomy", members=members(), id="entity", key="key")
+    db.insert("taxonomy", members=members(), key="key")
     assert checked(db).ok
 
 
@@ -208,12 +208,12 @@ def test_a_member_key_the_layer_declares_inline_is_not_a_new_artifact(db):
     creates nothing, so a layer that reads labels takes it; a key nothing declares is refused."""
     db.declare_layer(
         "teams", kind="flat", value_set="open", artifact_visibility=LABELLED,
-        artifacts=[{"key": "a", "members": [0], "access": None}],
+        artifacts=[{"key": "a", "members": {"entity": ["p0"]}, "access": None}],
     )
-    db.insert("teams", members=members(), id="entity", key="key")
+    db.insert("teams", members=members(), key="key")
     with pytest.raises(Refusal):
         db.insert(
-            "teams", members=pd.DataFrame({"key": ["b"], "entity": ["p1"]}), id="entity",
+            "teams", members=pd.DataFrame({"key": ["b"], "entity": ["p1"]}),
             key="key",
         )
 
@@ -233,12 +233,11 @@ def test_a_member_key_in_no_artifact_is_not_a_new_artifact(db):
     db.insert(
         "teams",
         members=pa.table({"key": pa.array([None, -1], pa.int64()), "entity": ["p0", "p1"]}),
-        id="entity",
         key="key",
     )
     with pytest.raises(Refusal):
         db.insert(
-            "teams", members=pd.DataFrame({"key": ["-1"], "entity": ["p2"]}), id="entity",
+            "teams", members=pd.DataFrame({"key": ["-1"], "entity": ["p2"]}),
             key="key",
         )
 
@@ -269,14 +268,12 @@ def test_a_list_member_key_names_one_artifact_per_element(db, large):
     db.insert(
         "taxonomy",
         members=pa.table({"key": pa.array([["f", "g"]], listed), "entity": ["p0"]}),
-        id="entity",
         key="key",
     )
     with pytest.raises(Refusal):
         db.insert(
             "taxonomy",
             members=pa.table({"key": pa.array([["g", "f"]], listed), "entity": ["p1"]}),
-            id="entity",
             key="key",
         )
 
@@ -357,7 +354,7 @@ def test_a_scoped_layers_insert_names_the_column_its_rows_carry_the_view_in(db):
     db.declare_view_group("quarter")
     db.declare_layer("q", kind="flat", views=["quarter"], scope={"group": "quarter"})
     with pytest.raises(Refusal):
-        db.insert("q", members=members(), id="entity", key="key")
+        db.insert("q", members=members(), key="key")
 
 
 def test_a_scoped_block_names_a_group_that_is_declared(db):

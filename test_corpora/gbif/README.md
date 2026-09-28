@@ -114,7 +114,8 @@ Owner ruling, 2026-09-09. Distinct and null figures are the census's, over its 2
 | u64 | `gbifid` | one a row | 0.0% | `unique = true`, neither flag: its unique index answers `eq` and `in` |
 
 `gbifid` is GBIF's key for a record, a string of digits on the share, declared a unique `u64`, and
-it is the declaration's `join_field`: the points and the member file both name a record by it. Its
+every file names a record by it: the points file in its `gbifid` column, the member file in its
+`entity` column, which `[layer.members]` maps with `fields = { gbifid = "entity" }`. Its
 index is 42.1 GB over the placed rows
 ([`probes/2026-09-26-identity-gbif-scale/`](../../probes/2026-09-26-identity-gbif-scale/README.md)).
 

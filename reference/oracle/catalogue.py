@@ -19,7 +19,7 @@ of terms) whose posting list **is** the intended entity set, exactly.
 Entity IDs are not the fixture's to choose — `tessera-build` assigns them, permanently (I9), in
 **term-signature order**: items are sorted by their sorted term-ID list and each item's entity ID is
 its position in that order (§11.1; `tessera_build::signature_sort_key`). The minor key is the
-**Morton code**, with the join value (`serial`) below it for totality
+**Morton code**, with the item's position in the points file below it for totality
 ([decision 0073](../../docs/decisions/0073-entity-ties-are-ordered-by-morton-code.md)).
 
 The corpus exploits the major key rather than working around it:
@@ -44,7 +44,7 @@ corpus went on being the shape it claims, and only the per-item joins moved.
 to break by source ID, so the assignment collapsed to the identity; they now break by geometry, so a
 block's entities are the same *set* in the same *range* and are internally permuted. Every join from
 a planted value to a served one must go through [`entities_by_source`] — the bundle's own index of
-the join field, `serial`, is the real bridge and always was. What makes this worth a paragraph is
+the unique field `serial` is the real bridge and always was. What makes this worth a paragraph is
 how it hid: `verify()`
 compares each block's postings against its entity range **as a set**, and a within-block permutation
 preserves a set exactly, so the check whose comment said it re-derived the identity never tested it.
@@ -85,9 +85,8 @@ which is what made the closure a test that flipped rather than a gap somebody ha
 
 ## `serial`
 
-The build's join field: the source id offset by [`PLANTED_ID_BASE`], declared `unique` and named by
-`[defaults].join_field`, the column both corpus files name their items by. It rises with the source
-id, so the build meets the items in source order, which the block layout above is designed against.
+The source id offset by [`PLANTED_ID_BASE`], declared `unique`: the column both corpus files carry,
+so each row names its item by it. It rises with the source id, so the build meets the items in source order, which the block layout above is designed against.
 The bundle's index of it is how this module carries a source id to the entity the build made of it
 ([`entities_by_source`]). The offset keeps it clear of the entity-id range, for the byte scan's
 reason: it is rendered, and served on every item card.
@@ -231,8 +230,7 @@ points = "{POINTS_NAME}"
 pairs  = "{PAIRS_NAME}"
 
 [defaults]
-source     = "points"
-join_field = "serial"
+source = "points"
 
 [[view]]
 name             = "{VIEW_ID}"
@@ -728,7 +726,7 @@ def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
         # drift this function exists to pin.
         "abstract": ("text", frozenset({"match", "phrase"})),
         "fx_key": ("numeric", frozenset({"eq", "in", "range"})),
-        # The join field: a rendered number, so the same family as `fx_key`.
+        # The unique field: a rendered number, so the same family as `fx_key`.
         "serial": ("numeric", frozenset({"eq", "in", "range"})),
     }
 
@@ -1169,7 +1167,7 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
     pq.write_table(
         pa.table(
             {
-                # The join field: how this row and the relation's rows name one item.
+                # The unique field: how this row and the relation's rows name one item.
                 "serial": pa.array(_serials(), type=pa.uint64()),
                 "x": pa.array([g[0] for g in geometry], type=pa.float32()),
                 "y": pa.array([g[1] for g in geometry], type=pa.float32()),
@@ -1251,8 +1249,8 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
-        # 10: the build joins the two files on `serial`, the source id offset past the entity-id
-        #     range, which both files carry in place of the source id (2026-09-27).
+        # 10: both files name their items by `serial`, the source id offset past the entity-id
+        #     range, which both carry in place of the source id (2026-09-27).
         # 9: the corpus gained the keyword column (`submitter`) and its planting rules, for the
         #    keyword family's conformance coverage (2026-08-13).
         # 8: every planted value that writes an id into free text (`note`, `title`) offsets it by

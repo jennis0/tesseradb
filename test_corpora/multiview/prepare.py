@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -136,6 +137,26 @@ def quarter_layout(entity_id: np.ndarray, quarter_idx: int) -> tuple[np.ndarray,
     return np.clip(xr, -39.5, 39.5), np.clip(yr, -39.5, 39.5)
 
 
+#: The Arrow type of each integer attribute type a member may be named by.
+ARROW_INT = {"i64": pa.int64(), "u64": pa.uint64()}
+
+
+def member_field(declaration: Path) -> pa.Field:
+    """The struct field a member list names each place by: `geonameid`'s column and type."""
+    attributes = tomllib.loads(declaration.read_text())["attribute"]
+    (geonameid,) = [a for a in attributes if a["name"] == "geonameid" and a.get("unique")]
+    return pa.field(geonameid.get("field", "geonameid"), ARROW_INT[geonameid["type"]])
+
+
+def member_lists(lists: list[list[int]], field: pa.Field) -> pa.Array:
+    """One `list<struct<field>>` per artifact, each member named by its `geonameid`."""
+    offsets = np.cumsum([0] + [len(m) for m in lists])
+    values = pa.array([v for m in lists for v in m], field.type)
+    return pa.ListArray.from_arrays(
+        pa.array(offsets, pa.int32()), pa.StructArray.from_arrays([values], fields=[field])
+    )
+
+
 def load_geonames_sample(points_path: Path, n_total: int, rng: np.random.Generator) -> pa.Table:
     """`n_total` rows sampled without replacement from a built GeoNames rung's own points file."""
     if not points_path.exists():
@@ -174,6 +195,8 @@ def main() -> None:
     points_path = args.geonames_points or (repo_root / "data" / "ladder" / "geonames" / "points.parquet")
 
     out = ladder(RUNG)
+    here = Path(__file__).parent
+    member = member_field(here / "corpus.toml")
 
     print(f"multiview: sampling {n_total:,} entities from {points_path}")
     sample = load_geonames_sample(points_path, n_total, rng)
@@ -383,7 +406,7 @@ def main() -> None:
         {
             "key": pa.array(coll_rows["key"], type=pa.string()),
             "contents": pa.array(coll_rows["contents"], type=pa.list_(pa.list_(pa.string()))),
-            "members": pa.array(coll_rows["members"], type=pa.list_(pa.uint64())),
+            "members": member_lists(coll_rows["members"], member),
             "access": pa.array(coll_rows["access"], type=pa.list_(pa.string())),
         }
     )
@@ -413,13 +436,12 @@ def main() -> None:
             "key": pa.array(clus_rows["key"], type=pa.string()),
             "quarter": pa.array(clus_rows["quarter"], type=pa.string()),
             "contents": pa.array(clus_rows["contents"], type=pa.list_(pa.list_(pa.string()))),
-            "members": pa.array(clus_rows["members"], type=pa.list_(pa.uint64())),
+            "members": member_lists(clus_rows["members"], member),
         }
     )
     pq.write_table(clus_table, out / "clusters-quarter.parquet")
 
     # === the declaration, copied beside the data it declares ==========================
-    here = Path(__file__).parent
     shutil.copy(here / "corpus.toml", out / "corpus.toml")
 
     print("\nwrote:")

@@ -189,7 +189,7 @@ class Vocabulary:
 
 
 def fx_column() -> Column:
-    """The join column every deployment carries from its build: the source id, rendered, so a
+    """The column every deployment carries from its build: the source id, rendered, so a
     served point names its item without a second request, and unique, so every file and every row
     a test writes names its item by it."""
     return Column("fx", "u64", pa.uint64(), lambda i: i, render=True, unique=True)
@@ -206,8 +206,8 @@ class Corpus:
     vocabularies, and any other source file by name.
 
     `points` maps a source name to `(source ids, columns, position seed, frame)`. Every points
-    file carries `fx`, `x`, `y` and `access`, and then the columns given for it. The declaration
-    joins its files on `fx`, which a deployment's blocks must declare ([`fx_column`]).
+    file carries `fx`, `x`, `y` and `access`, and then the columns given for it. Every file names
+    its items by `fx`, which a deployment's blocks must declare unique ([`fx_column`]).
     """
 
     blocks: list[str]
@@ -238,7 +238,7 @@ class Corpus:
             sources.append(f'{name} = "{name}.parquet"')
             pq.write_table(table, work / f"{name}.parquet")
         text = "[sources]\n" + "\n".join(sources) + "\n\n"
-        text += f'[defaults]\nsource = "{WORLD}"\njoin_field = "fx"\n'
+        text += f'[defaults]\nsource = "{WORLD}"\n'
         text += f'allocation_view = "{WORLD}"\n\n'
         text += "\n".join(v.toml() for v in self.vocabularies) + "\n"
         text += "\n".join(self.blocks)

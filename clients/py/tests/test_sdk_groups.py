@@ -116,7 +116,6 @@ def grouped(tmp_path, corpus):
     """
     db = create(tmp_path / "db")
     db.declare_attribute("entity_id", type="u64", unique=True)
-    db.declare_join_field("entity_id")
     db.declare_view_group(
         "slices",
         title="Slices",
@@ -127,18 +126,16 @@ def grouped(tmp_path, corpus):
     db.insert(
         "slices",
         pa.concat_tables([points(IDS, 0.0, "a"), points(IDS, 40.0, "b")]),
-        id="entity_id",
         x="x",
         y="y",
         access="access",
         view="slice",
     )
-    # A group's rows fill no attribute at the first commit, the join field included, so its
+    # A group's rows fill no attribute at the first commit, the unique one included, so its
     # values are an insert of their own.
     db.insert(
         "entity_id",
         pa.table({"entity_id": pa.array(IDS, pa.uint64())}),
-        id="entity_id",
         value="entity_id",
     )
     # A scoped family: one value per view of the group, so every insert names the view column.
@@ -146,12 +143,11 @@ def grouped(tmp_path, corpus):
     db.insert(
         "quality",
         pa.concat_tables([quality(IDS, "a"), quality(IDS, "b")]),
-        id="entity_id",
         value="quality",
         view="slice",
     )
     db.declare_attribute("coverage", type="f32", scope={"group": "slices"}, index=True)
-    db.insert("coverage", coverage(IDS, "a"), id="entity_id", value="coverage", view="slice")
+    db.insert("coverage", coverage(IDS, "a"), value="coverage", view="slice")
     db.declare_layer(
         "clusters",
         kind="flat",
@@ -180,7 +176,7 @@ def grouped(tmp_path, corpus):
                 memberships("shared", "b", IDS[60:]),
             ]
         ),
-        id="entity",
+        columns={"entity_id": "entity"},
         key="key",
         level="level",
         view="slice",
@@ -278,19 +274,19 @@ def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_
     db.insert(
         "slices",
         rows,
-        id="entity_id",
         x="x",
         y="y",
         access="access",
         view="slice",
     )
     db.insert(
-        "coverage", coverage(IDS[:50], "b", value=1.0), id="entity_id", value="coverage",
+        "coverage", coverage(IDS[:50], "b", value=1.0), value="coverage",
         view="slice",
     )
     db.insert("clusters", artifacts=artifacts(["c1"], ["b"]), key="key", level="level",
               view="slice")
-    db.insert("clusters", members=memberships("c1", "b", fresh), id="entity", key="key",
+    db.insert("clusters", members=memberships("c1", "b", fresh), key="key",
+              columns={"entity_id": "entity"},
               level="level", view="slice")
 
     plan = db.check()
@@ -357,7 +353,7 @@ def test_a_plain_view_declared_after_the_first_commit_is_created_and_served(grou
     # A frame inserted into a plain view carries no group-scoped family: there is no view of the
     # group for the value to belong to (views.md §5), and a column no target reads is ignored.
     inserted = points(list(range(9201, 9216)), 10.0, "a")
-    db.insert("extra", inserted, id="entity_id", x="x", y="y", access="access")
+    db.insert("extra", inserted, x="x", y="y", access="access")
     report = db.commit()
     assert report.ok, report.refusals
     assert report.plan[0] == "declare view 'extra'"
@@ -384,7 +380,7 @@ def test_a_later_commit_publishes_one_key_on_every_view_its_rows_name(grouped):
             [memberships(key, "a", IDS[: i + 1]) for i, key in enumerate(keys)]
             + [memberships(key, "b", IDS[: i + 11]) for i, key in enumerate(keys)]
         ),
-        id="entity",
+        columns={"entity_id": "entity"},
         key="key",
         level="level",
         view="slice",

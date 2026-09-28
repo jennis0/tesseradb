@@ -50,7 +50,7 @@ def cells_within(entities: np.ndarray, budget: int) -> int:
 
 
 def json_list(entities: np.ndarray) -> bytes:
-    """A JSON array of entity ids as decimal strings, the join field's values, as bytes: one
+    """A JSON array of entity ids as decimal strings, the naming field's values, as bytes: one
     `(n, 23)` byte array holding each id's quote, twenty digits, quote and comma, masked to the
     digits each id takes, then one copy, rather than a Python string built per member.
     """
@@ -218,7 +218,7 @@ def rank_groups(idx: np.ndarray, rank: np.ndarray, entity: np.ndarray):
 
 class Publication:
     """One declared layer's roster, published in batches under a byte cap. Every artifact
-    carries its whole member set, named by the join field `field`; one whose body would exceed
+    carries its whole member set, named by the naming field `field`; one whose body would exceed
     `--publish-max-bytes` is published with as many members as fit, then grown through
     `PATCH /control/layers/{name}/artifacts`. Only an artifact whose key, content and parents
     alone do not fit is declined.
@@ -241,12 +241,15 @@ class Publication:
         bucket_rows: int,
         limits: dict,
         field: str,
+        member_field: str,
         view_column: str | None = None,
         access_column: str | None = None,
     ):
         self.table = in_parent_order(roster_table(roster))
-        #: The join field every member, as a decimal value, is named by.
+        #: The naming field every member, as a decimal value, is named by.
         self.field = field
+        #: The struct field a roster's own `members` list holds the naming field's value in.
+        self.member_field = member_field
         #: The roster column naming the view each artifact belongs to, on a group-scoped layer.
         self.view_column = view_column
         #: The roster column each artifact's own access label is read from, sent as `access`.
@@ -293,11 +296,16 @@ class Publication:
     def members(self):
         """Yield `(roster index, {rank: entities})` for every artifact, parents before children."""
         if self.members_path is None:
-            # A roster may carry each artifact's members itself, as a list of entity ids.
+            # A roster may carry each artifact's members itself, as a list of structs naming
+            # each member by its unique fields.
             inline = "members" in self.table.schema.names
             self.stats["read_path"] = "the roster's members column" if inline else "no member table"
             for i, row in enumerate(self.rows):
-                members = np.array(row["members"] or [], np.uint64) if inline else None
+                members = (
+                    np.array([m[self.member_field] for m in row["members"] or []], np.uint64)
+                    if inline
+                    else None
+                )
                 yield i, {} if members is None else {-1: members}
             return
         ranges = key_ranges(self.members_path)

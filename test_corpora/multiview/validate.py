@@ -47,7 +47,7 @@ def main() -> None:
 
     checks = 0
 
-    # --- per-(entity, view) row uniqueness: one join value names one row of a view ---
+    # --- per-(entity, view) row uniqueness: one `geonameid` names one row of a view ---
     def assert_unique(table, label):
         nonlocal checks
         ids = table["entity_id"].to_pylist()
@@ -226,8 +226,10 @@ def main() -> None:
     print(f"  [{checks}] quarter_alt declares members=quarter and no roster of its own: OK")
 
     # --- layers: collections' members are real entity ids; clusters_q's quarter column is closed ---
+    (geonameid,) = [a for a in corpus["attribute"] if a["name"] == "geonameid"]
+    named_by = geonameid.get("field", "geonameid")
     coll_members = collections["members"].to_pylist()
-    coll_ids = set(eid for members in coll_members for eid in members)
+    coll_ids = set(m[named_by] for members in coll_members for m in members)
     assert coll_ids <= attrs_ids, "collections layer names entities outside the corpus"
     checks += 1
     print(f"  [{checks}] collections layer's {len(coll_ids):,} member ids are all real entities: OK")
@@ -238,10 +240,10 @@ def main() -> None:
     assert len(clus_keys) == len(set(clus_keys)), "clusters_q: duplicate artifact key"
     for q in QUARTERS:
         clus_members = [
-            eid
+            m[named_by]
             for row_q, members in zip(clusters_q["quarter"].to_pylist(), clusters_q["members"].to_pylist())
             if row_q == q
-            for eid in members
+            for m in members
         ]
         assert set(clus_members) == quarter_ids[q], f"{q}: cluster membership doesn't partition the quarter"
     checks += 1

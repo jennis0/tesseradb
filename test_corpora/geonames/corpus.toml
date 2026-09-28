@@ -26,7 +26,6 @@ artifacts_admin = "artifacts-admin.parquet"
 
 [defaults]
 source     = "points"
-join_field = "id"
 
 # **The access side is synthetic, and every figure this corpus produces says so.** GeoNames carries
 # no rights or audience field, so each point's access term is its own country code — a real column
@@ -129,7 +128,8 @@ source     = "timezone"
 # both on the small categories is what lets decision 0068 route on cost.
 # ---------------------------------------------------------------------------------------------
 
-# The join field: the row number `prepare.py` gives each feature (`entity` in the member files).
+# The row number `prepare.py` gives each feature. Every file names a feature by it: the points file
+# as `entity_id`, the member files as `entity`.
 [[attribute]]
 name   = "id"
 type   = "i64"
@@ -259,6 +259,7 @@ zoom  = [5, 16]
 
 [layer.members]
 source = "members_feature"
+fields = { id = "entity" }
 
 # 463,283 artifacts across five levels, against 698 for the taxonomy above — and average members
 # per artifact of 52,979 · 2,784 · 189 · 22.8 · 3.6. With 3.6 members each, most of the finest
@@ -325,3 +326,4 @@ require_member_visibility = "inherited"
 
 [layer.members]
 source = "members_admin"
+fields = { id = "entity" }

@@ -62,14 +62,13 @@ def expected(first: int, count: int) -> dict:
     }
 
 
-def declare_the_join_field(db) -> None:
+def declare_the_id(db) -> None:
     db.declare_attribute("id", type="keyword", unique=True)
-    db.declare_join_field("id")
 
 
 def declare(db, frame: pa.Table) -> None:
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]}, default_label=None)
-    declare_the_join_field(db)
+    declare_the_id(db)
     db.declare_vocabulary("venue")
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     db.declare_layer("clusters", kind="flat")
@@ -77,8 +76,8 @@ def declare(db, frame: pa.Table) -> None:
 
 
 def insert(db, frame: pa.Table) -> None:
-    db.insert("map", frame, id="id", x="x", y="y", access="label")
-    db.insert("clusters", frame, id="id", key="cluster")
+    db.insert("map", frame, x="x", y="y", access="label")
+    db.insert("clusters", frame, key="cluster")
 
 
 def served_counts(db) -> dict:
@@ -111,9 +110,9 @@ def test_declare_columns_declares_a_categorical_column_a_category(served, corpus
 
     def declare_from_the_frame(db):
         db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]}, default_label=None)
-        declare_the_join_field(db)
+        declare_the_id(db)
         db.declare_columns(frame, skip=["id", "x", "y", "cluster", "label"], index=["venue"])
-        db.insert("map", frame, id="id", x="x", y="y", access="label")
+        db.insert("map", frame, x="x", y="y", access="label")
 
     db = served(declare_from_the_frame)
     assert sorted(db.categories("venue").column("key").to_pylist()) == sorted(VENUES)
@@ -142,13 +141,13 @@ def test_a_pandas_string_frame_inserted_after_the_first_commit_lands(served, cor
     def first_commit(db):
         declare(db, strings(0, 30))
         db.declare_attribute("doi", type="keyword", index=True)
-        db.insert("doi", strings(0, 30), id="id", value="doi")
+        db.insert("doi", strings(0, 30), value="doi")
 
     later = strings(30, 12)
     assert pa.types.is_large_string(later.schema.field("id").type)
     db = served(first_commit)
     insert(db, later)
-    db.insert("doi", later, id="id", value="doi")
+    db.insert("doi", later, value="doi")
     report = db.commit()
     assert report.ok, report
     assert served_counts(db) == expected(0, 42)

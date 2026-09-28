@@ -139,9 +139,9 @@ def _(mo):
       own way. `index=["title"]` makes titles searchable and filterable. A column that is not
       indexed is stored with the paper and shown when you open it.
     - `declare_attribute("entity_id", type="u64", unique=True)` declares the papers' own id as
-      a **unique** column: no two papers hold one value, so a value names one paper.
-      `declare_join_field("entity_id")` makes it the column that ties the tables together: a
-      row of any table names its paper by this value.
+      a **unique** column: no two papers hold one value, so a value names one paper. It is the
+      column that ties the tables together: a row of any table carrying an `entity_id` column
+      names its paper by that value.
     - `declare_layer("topics", kind="flat")` declares a **layer**: a set of groups of points
       drawn over the map, here a clustering. `kind="flat"` means one level of clusters with no
       hierarchy. Section 2 has layers of the other kinds, whose clusters sit inside larger ones.
@@ -150,13 +150,12 @@ def _(mo):
 
     The inserts then give it the data, and each names the frame's columns it uses:
 
-    - `insert("map", frame, id="entity_id", x="x", y="y")` makes each row a point. `id` names
-      the column holding each paper's value of the join field, and `x` and `y` the columns
-      holding its position. The view also takes `title`, because a column of that name was
-      declared.
-    - `insert("topics", frame, id="entity_id", key="cluster")` puts each paper in a cluster.
-      `key` names the column that says which cluster, and each distinct key becomes one
-      cluster. A paper with no cluster is in none.
+    - `insert("map", frame, x="x", y="y")` makes each row a point, `x` and `y` naming the
+      columns holding its position. The frame's `entity_id` column names each paper, and the
+      view also takes `title`: columns of those names were declared.
+    - `insert("topics", frame, key="cluster")` puts each paper, named by its `entity_id`, in a
+      cluster. `key` names the column that says which cluster, and each distinct key becomes
+      one cluster. A paper with no cluster is in none.
     - `insert("names", topic_names)` takes a dictionary from cluster key to text.
 
     Each insert returns a record of the columns it read and the columns it ignored.
@@ -174,12 +173,11 @@ def _(frame, td, topic_names):
     simple.declare_view("map")
     simple.declare_columns(frame, skip=["entity_id", "x", "y", "cluster"], index=["title"])
     simple.declare_attribute("entity_id", type="u64", unique=True)
-    simple.declare_join_field("entity_id")
     simple.declare_layer("topics", kind="flat")
     simple.declare_labels("names", of="topics")
 
-    simple.insert("map", frame, id="entity_id", x="x", y="y")
-    simple.insert("topics", frame, id="entity_id", key="cluster")
+    simple.insert("map", frame, x="x", y="y")
+    simple.insert("topics", frame, key="cluster")
     simple.insert("names", topic_names)
     simple.commit()
     return (simple,)
@@ -329,7 +327,7 @@ def _(mo):
     is matched exactly, as an arXiv ID is. `render=True` keeps the value with each point, so the
     map can colour and filter by it. `index=True` makes the column searchable or filterable. A
     column with neither is stored with the paper and shown when you open it. `entity_id` is
-    unique and the join field, as in section 1.
+    unique, as in section 1, so every table carrying it names its papers by it.
 
     The clustering is a layer. `views` says which views it is drawn on. `kind="tiered"` means
     fixed levels, from coarse to fine, which `levels` names.
@@ -359,7 +357,6 @@ def _(SCALE, td):
     db.declare_attribute("abstract", type="text", index=True)
     db.declare_attribute("arxiv_id", type="keyword", index=True, title="arXiv ID")
     db.declare_attribute("entity_id", type="u64", unique=True, title="Paper id")
-    db.declare_join_field("entity_id")
 
     # How many of a topic's papers a reader must see before the topic is shown to them.
     _floor = {"whole": 50, "sample": 5}[SCALE]
@@ -388,7 +385,8 @@ def _(mo):
     text, `attached_layer`, `attached_level` and `attached_key` name the cluster a label
     belongs to, and `rank` in a members table marks the papers a topic name was written from.
     The clusters' members table carries `rank` empty, and a column a table carries is always
-    named.
+    named. The members tables call the paper's id `entity`, and `columns={"entity_id":
+    "entity"}` says that column holds `entity_id`.
     """)
     return
 
@@ -399,20 +397,21 @@ def _(DATA, db, members, pa, points, named_topics, years):
     db.insert("primary_category", str(DATA / "primary_category.parquet"), key="key",
               title="title", code="code")
 
-    db.insert("papers", points, id="entity_id", x="x", y="y", access="categories")
+    db.insert("papers", points, x="x", y="y", access="categories")
     db.insert("years", roster=pa.table({"year": years}), key="year")
     db.insert("years", points.select(["entity_id", "x", "y", "categories", "year"]),
-              id="entity_id", x="x", y="y", access="categories", view="year")
+              x="x", y="y", access="categories", view="year")
 
     _columns = dict(key="key", level="level", parent="parent", contents="contents",
                     attached_layer="attached_layer", attached_level="attached_level",
                     attached_key="attached_key")
     db.insert("topics", artifacts=str(DATA / "clusters-toponymy.parquet"), **_columns)
-    db.insert("topics", members=members["clusters-toponymy"], id="entity", key="key",
-              level="level", rank="rank")
+    _paper = {"entity_id": "entity"}
+    db.insert("topics", members=members["clusters-toponymy"], key="key", level="level",
+              rank="rank", columns=_paper)
     db.insert("topic_names", named_topics, **_columns)
-    db.insert("topic_names", members=members["topics-toponymy"], id="entity", key="key",
-              level="level", rank="rank")
+    db.insert("topic_names", members=members["topics-toponymy"], key="key", level="level",
+              rank="rank", columns=_paper)
     db.check()
     return
 
@@ -678,7 +677,7 @@ def _(KMeans, db, points):
 
     db.declare_layer("yearly", kind="flat", scope={"group": "years"},
                      require_member_visibility={"count": 1}, title="Clusters of each year")
-    db.insert("yearly", yearly, id="entity_id", key="cluster", view="year")
+    db.insert("yearly", yearly, key="cluster", view="year")
     yearly_report = db.commit()
     yearly_report
     return fitted, yearly_report
@@ -720,22 +719,22 @@ def _(db, years):
 
 @app.cell
 def _(db, fitted, week, week_members, week_topics):
-    db.insert("papers", week, id="entity_id", x="x", y="y", access="categories")
+    db.insert("papers", week, x="x", y="y", access="categories")
     db.insert("years", week.select(["entity_id", "x", "y", "categories", "year"]),
-              id="entity_id", x="x", y="y", access="categories", view="year")
-    db.insert("topics", members=week_members["clusters-toponymy"], id="entity", key="key",
-              level="level", rank="rank")
+              x="x", y="y", access="categories", view="year")
+    db.insert("topics", members=week_members["clusters-toponymy"], key="key", level="level",
+              rank="rank", columns={"entity_id": "entity"})
     db.insert("topic_names", week_topics, key="key", level="level", parent="parent",
               contents="contents", attached_layer="attached_layer",
               attached_level="attached_level", attached_key="attached_key")
-    db.insert("topic_names", members=week_members["topics-toponymy"], id="entity", key="key",
-              level="level", rank="rank")
+    db.insert("topic_names", members=week_members["topics-toponymy"], key="key",
+              level="level", rank="rank", columns={"entity_id": "entity"})
 
     _placed = week.select(["entity_id", "x", "y", "year"]).to_pandas()
     for _year, _papers in _placed.groupby("year"):
         _predicted = fitted[_year].predict(_papers[["x", "y"]])
         _placed.loc[_papers.index, "cluster"] = [f"{one:02d}" for one in _predicted]
-    db.insert("yearly", _placed, id="entity_id", key="cluster", view="year")
+    db.insert("yearly", _placed, key="cluster", view="year")
 
     week_report = db.commit()
     week_report

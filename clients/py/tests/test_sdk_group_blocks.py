@@ -38,17 +38,16 @@ def rows(keys):
 
 
 def join_values(db, n):
-    """The join field's values for items `0..n`: a group's rows fill no attribute at the first
-    commit, the join field included, so its values are an insert of their own."""
+    """The unique attribute's values for items `0..n`: a group's rows fill no attribute at the
+    first commit, the unique one included, so its values are an insert of their own."""
     ids = pa.table({"entity_id": pa.array(range(n), pa.uint64())})
-    db.insert("entity_id", ids, id="entity_id", value="entity_id")
+    db.insert("entity_id", ids, value="entity_id")
 
 
 @pytest.fixture
 def db(tmp_path):
     database = create(tmp_path / "db")
     database.declare_attribute("entity_id", type="u64", unique=True)
-    database.declare_join_field("entity_id")
     return database
 
 
@@ -61,7 +60,6 @@ def test_a_roster_is_a_table_and_the_rows_carry_the_view_each_belongs_to(db, che
     db.insert(
         "quarter",
         rows(["2026-Q1", "2026-Q2"]),
-        id="entity_id",
         x="x",
         y="y",
         access="access",
@@ -78,7 +76,7 @@ def test_a_group_whose_views_each_have_their_own_file_inserts_one_table_per_view
     db.declare_view_group("quarter", extent=BOX, metadata={"label": "text"})
     db.insert("quarter", roster=roster(["q1", "q2"]), key="quarter", label="label")
     for key in ("q1", "q2"):
-        db.insert("quarter", rows([key]), id="entity_id", x="x", y="y", access="access",
+        db.insert("quarter", rows([key]), x="x", y="y", access="access",
                   view_key=key)
     join_values(db, 1)
     assert checked(db).ok
@@ -93,7 +91,7 @@ def test_a_members_group_takes_its_own_points_and_declares_no_metadata(db, check
     with pytest.raises(Refusal):
         db.declare_view_group("third", members="quarter", metadata={"label": "text"})
     db.insert("quarter", roster=roster(["q1"]), key="quarter", label="label")
-    db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access",
+    db.insert("quarter", rows(["q1"]), x="x", y="y", access="access",
               view="quarter")
     join_values(db, 1)
     assert checked(db).ok
@@ -123,7 +121,6 @@ def test_a_scoped_attribute_names_its_group_and_its_insert_names_the_view_column
     db.insert(
         "quarter",
         rows(["2026-Q1"]),
-        id="entity_id",
         x="x",
         y="y",
         access="access",
@@ -138,7 +135,6 @@ def test_a_scoped_attribute_names_its_group_and_its_insert_names_the_view_column
                 "sentiment": pa.array([0.5], pa.float32()),
             }
         ),
-        id="entity_id",
         value="sentiment",
         view="quarter",
     )
@@ -160,7 +156,7 @@ def test_a_scoped_layer_with_no_views_is_drawn_on_its_group(db, checked):
     db.declare_view_group("quarter", extent=BOX)
     db.declare_layer("q", kind="flat", scope={"group": "quarter"})
     db.insert("quarter", roster=roster(["q1"]), key="quarter")
-    db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access",
+    db.insert("quarter", rows(["q1"]), x="x", y="y", access="access",
               view="quarter")
     join_values(db, 1)
     assert checked(db).ok
@@ -206,7 +202,7 @@ def test_a_roster_column_the_call_did_not_name_is_refused(db):
 def test_a_groups_rows_name_the_view_one_way_or_the_other(db):
     db.declare_view_group("quarter", extent=BOX)
     with pytest.raises(Refusal):
-        db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access")
+        db.insert("quarter", rows(["q1"]), x="x", y="y", access="access")
     with pytest.raises(Refusal):
-        db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access",
+        db.insert("quarter", rows(["q1"]), x="x", y="y", access="access",
                   view="quarter", view_key="q1")

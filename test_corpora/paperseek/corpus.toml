@@ -25,7 +25,6 @@ topics_members  = "topics-openalex-members.parquet"
 
 [defaults]
 source     = "points"
-join_field = "id"
 
 # ---------------------------------------------------------------------------------------------
 # **One view.** Stella V5 embeds a title and an abstract as one general text encoding, so the map
@@ -95,7 +94,8 @@ source     = "type"
 # box's memory. Nothing here is trimmed to make it fit (owner ruling, 2026-09-02).
 # ---------------------------------------------------------------------------------------------
 
-# The join field: the row number `prepare.py` gives each work (`entity` in the member files).
+# The row number `prepare.py` gives each work. Every file names a work by it: the points file
+# as `entity_id`, the member files as `entity`.
 [[attribute]]
 name   = "id"
 type   = "u64"
@@ -188,6 +188,7 @@ require_member_visibility = { count = 50 }
 
   [layer.members]
   source = "kmeans_members"
+  fields = { id = "entity" }
 
   [layer.content]
   computed = ["centroid", "box", "hull"]

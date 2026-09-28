@@ -1,7 +1,7 @@
 //! Sustained point ingest into a running server, carrying the attribute column and a membership.
 //!
 //! **The wire body comes from the generator, not from a transcription of it.**
-//! `Corpus::ingest_batch` builds `/control/ingest`'s shape for a range of items — the join field
+//! `Corpus::ingest_batch` builds `/control/ingest`'s shape for a range of items — the unique field
 //! `id`, geometry, access label and every declared scalar — and this binary adds the two columns the
 //! campaign needs beside it and that the generator's own batch does not carry:
 //!

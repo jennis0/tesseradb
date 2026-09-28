@@ -230,8 +230,7 @@ points = "points.parquet"
 pairs  = "pairs.parquet"
 
 [defaults]
-source     = "points"
-join_field = "{JOIN_FIELD}"
+source = "points"
 
 [[view]]
 name             = "{VIEW_ID}"

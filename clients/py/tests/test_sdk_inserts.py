@@ -1,8 +1,8 @@
 """Inserting, identity and the directory.
 
 `declare_*` says what exists; `insert` hands it a table and names the columns it reads. Nothing
-here is matched by name except an attribute's value column on the allocation view's own insert,
-which `test_sdk_columns.py` covers.
+here is matched by name except a unique attribute's column, which names each row's item, and an
+attribute's value column on the allocation view's own insert, which `test_sdk_columns.py` covers.
 """
 
 import pyarrow as pa
@@ -22,28 +22,28 @@ def frame(n=3, **columns):
 
 
 def joined(db, name="id", type="keyword"):
-    """The frames' id column, declared the join field."""
+    """The frames' id column, declared unique."""
     db.declare_attribute(name, type=type, unique=True)
-    db.declare_join_field(name)
 
 
-def mapped(tmp_path, name="db", join="id", type="keyword"):
+def mapped(tmp_path, name="db", unique="id", type="keyword"):
     db = create(tmp_path / name)
     db.declare_view("map")
-    joined(db, join, type)
+    joined(db, unique, type)
     return db
 
 
 def test_a_frame_is_written_as_it_was_given_and_the_declaration_names_the_columns(tmp_path):
     db = mapped(tmp_path)
-    insert = db.insert("map", frame(id=["p", "q", "r"]), id="id", x="x", y="y")
+    insert = db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")
     table = pq.read_table(insert.path)
-    # Nothing is minted and nothing is renamed: the file is the frame, and the declaration is
-    # what says where identity is.
+    # Nothing is minted and nothing is renamed: the file is the frame, and the unique column
+    # names each row's item under its own name.
     assert table.column_names == ["x", "y", "id"]
     assert table["id"].to_pylist() == ["p", "q", "r"]
-    assert insert.columns == {"id": "id", "x": "x", "y": "y"}
-    assert 'join_field = "id"' in db.declaration
+    assert insert.columns == {"x": "x", "y": "y"}
+    assert insert.items == {"id": "id"}
+    assert insert.read == ["x", "y", "id"]
 
 
 def test_every_insert_returns_the_columns_it_read_and_the_columns_it_ignored(tmp_path):
@@ -69,7 +69,7 @@ def test_a_column_the_target_needs_and_the_call_does_not_name_is_refused(tmp_pat
 def test_a_name_that_is_no_column_of_the_table_is_refused_naming_the_columns(tmp_path):
     db = mapped(tmp_path)
     with pytest.raises(Refusal):
-        db.insert("map", frame(), x="x", y="y", id="paper")
+        db.insert("map", frame(), x="x", y="y", columns={"id": "paper"})
 
 
 def test_an_insert_on_something_undeclared_names_the_verb_that_declares_it(tmp_path):
@@ -78,17 +78,14 @@ def test_an_insert_on_something_undeclared_names_the_verb_that_declares_it(tmp_p
         db.insert("map", frame(), x="x", y="y")
 
 
-def test_a_frame_with_no_id_is_the_tessera_id_route(tmp_path):
-    """A row position names a row only while the frame is the whole corpus.
-
-    A frame inserted with no `id=` is the Tessera-id route: each row is an item of its own,
-    addressable by the `tessera_id` a pick or the ingest route hands back.
-    """
+def test_a_frame_with_no_unique_column_makes_each_row_an_item(tmp_path):
+    """A frame carrying no column of a unique attribute names no item: each row is an item of its
+    own, addressable by the `tessera_id` a pick or the ingest route hands back."""
     db = create(tmp_path / "db")
     db.declare_view("map")
     insert = db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")
-    assert insert.id_column is None
-    assert "join_field" not in db.declaration
+    assert insert.items == {}
+    assert "unique" not in db.declaration
 
 
 def test_a_file_is_read_where_it_lies_whatever_its_id_column_holds(tmp_path):
@@ -99,9 +96,9 @@ def test_a_file_is_read_where_it_lies_whatever_its_id_column_holds(tmp_path):
         path = tmp_path / f"{column}.parquet"
         pq.write_table(pa.table({column: values, "x": [1.0, 2.0], "y": [0.0, 0.0]}), path)
         db = mapped(tmp_path, f"db-{column}", column, type)
-        insert = db.insert("map", str(path), id=column, x="x", y="y")
+        insert = db.insert("map", str(path), x="x", y="y")
         assert insert.in_place and insert.path == path
-        assert insert.id_column == column
+        assert insert.items == {column: column}
         assert not insert.declared_path.startswith("/")
 
 
@@ -114,8 +111,8 @@ def test_a_path_that_does_not_exist_is_refused(tmp_path):
 def test_several_inserts_on_one_target_before_a_commit_accumulate(tmp_path):
     """A corpus in parts is loaded by the same calls as one file."""
     db = mapped(tmp_path)
-    db.insert("map", frame(2, id=["p", "q"]), id="id", x="x", y="y")
-    insert = db.insert("map", frame(3, id=["r", "s", "t"]), id="id", x="x", y="y")
+    db.insert("map", frame(2, id=["p", "q"]), x="x", y="y")
+    insert = db.insert("map", frame(3, id=["r", "s", "t"]), x="x", y="y")
     assert insert.rows == 5
     assert len([one for one in db.inserts if one.target == "map"]) == 1
     assert db.declaration.count("map = ") == 1
@@ -123,20 +120,20 @@ def test_several_inserts_on_one_target_before_a_commit_accumulate(tmp_path):
 
 def test_a_second_part_naming_its_columns_differently_is_refused(tmp_path):
     db = mapped(tmp_path)
-    db.insert("map", frame(2, id=["p", "q"]), id="id", x="x", y="y")
+    db.insert("map", frame(2, id=["p", "q"]), x="x", y="y")
     with pytest.raises(Refusal):
-        db.insert("map", frame(2, paper=["r", "s"]), id="paper", x="x", y="y")
+        db.insert("map", frame(2, paper=["r", "s"]), columns={"id": "paper"}, x="x", y="y")
 
 
 def test_a_second_part_whose_schema_differs_is_refused_naming_the_two_types(tmp_path):
     """The parts are written as one file, so a promoted column would be a type neither
     part was written in."""
     db = mapped(tmp_path)
-    db.insert("map", frame(2, id=["p", "q"]), id="id", x="x", y="y")
+    db.insert("map", frame(2, id=["p", "q"]), x="x", y="y")
     with pytest.raises(Refusal):
-        db.insert("map", frame(2, id=[1, 2]), id="id", x="x", y="y")
+        db.insert("map", frame(2, id=[1, 2]), x="x", y="y")
     with pytest.raises(Refusal):
-        db.insert("map", frame(2, id=["r", "s"], extra=[1, 2]), id="id", x="x", y="y")
+        db.insert("map", frame(2, id=["r", "s"], extra=[1, 2]), x="x", y="y")
 
 
 def test_two_tables_in_one_call_are_refused_naming_the_two_calls(tmp_path):
@@ -148,19 +145,21 @@ def test_two_tables_in_one_call_are_refused_naming_the_two_calls(tmp_path):
             "clusters",
             artifacts=pd.DataFrame({"key": ["a"]}),
             members=pd.DataFrame({"key": ["a"], "entity": ["p"]}),
-            id="entity",
+            columns={"id": "entity"},
         )
 
 
 def test_a_layers_two_tables_are_two_inserts_with_their_own_column_names(tmp_path):
     db = mapped(tmp_path)
     db.declare_layer("clusters", kind="flat")
-    db.insert("map", frame(id=["p", "q", "r"]), id="id", x="x", y="y")
+    db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")
     db.insert("clusters", artifacts=pd.DataFrame({"k": ["a"]}), key="k")
-    db.insert("clusters", members=pd.DataFrame({"k": ["a"], "e": ["p"]}), id="e", key="k")
+    db.insert(
+        "clusters", members=pd.DataFrame({"k": ["a"], "e": ["p"]}), key="k", columns={"id": "e"}
+    )
     text = db.declaration
     assert 'fields = { key = "k" }' in text
-    assert 'fields = { key = "k", entity = "e" }' in text
+    assert 'fields = { key = "k", id = "e" }' in text
 
 
 def test_a_column_the_build_reads_under_its_own_name_takes_no_other(tmp_path):
@@ -230,7 +229,7 @@ def test_save_copies_a_temporary_database_out(tmp_path):
     db = create()
     db.declare_view("map")
     joined(db)
-    db.insert("map", frame(id=["p", "q", "r"]), id="id", x="x", y="y")
+    db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")
     db.write()
     target = db.save(tmp_path / "kept")
     assert (target / "schema.toml").exists() and (target / "tessera.toml").exists()
@@ -240,7 +239,7 @@ def test_save_copies_a_temporary_database_out(tmp_path):
 
 def test_open_reads_the_blocks_and_the_inserts_back_from_the_sdks_own_copy(tmp_path):
     db = mapped(tmp_path)
-    db.insert("map", frame(id=["p", "q", "r"]), id="id", x="x", y="y")
+    db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")
     db.declare_attribute("y", type="f64", render=True)
     db.write()
     from tesseradb._database import open as open_database
@@ -250,7 +249,7 @@ def test_open_reads_the_blocks_and_the_inserts_back_from_the_sdks_own_copy(tmp_p
     again = open_database(tmp_path / "db")
     assert again.blocks.view_names() == ["map"]
     assert [one.target for one in again.inserts] == ["map"]
-    assert again.inserts[0].id_column == "id"
+    assert again.inserts[0].items == {"id": "id"}
     assert again.declaration == db.declaration
     again.declare_attribute("z", type="f64")
     assert 'name = "z"' in again.declaration
@@ -287,9 +286,9 @@ def test_a_key_column_is_inserted_into_a_layer_at_any_commit(tmp_path):
     db.declare_layer("clusters", kind="flat")
     db.built = True
     insert = db.insert(
-        "clusters", frame(id=["p", "q", "r"], cluster=["a", "a", "b"]), id="id", key="cluster"
+        "clusters", frame(id=["p", "q", "r"], cluster=["a", "a", "b"]), key="cluster"
     )
-    assert insert.columns == {"id": "id", "key": "cluster"}
+    assert insert.columns == {"key": "cluster"} and insert.items == {"id": "id"}
     assert [one.target for one in db.pending] == ["clusters"]
 
 
@@ -298,9 +297,9 @@ def test_a_label_set_takes_its_text_and_needs_no_members_of_its_own(tmp_path):
     db = mapped(tmp_path)
     db.declare_layer("clusters", kind="flat")
     db.declare_labels("topics", of="clusters")
-    db.insert("map", frame(id=["p", "q", "r"]), id="id", x="x", y="y")
+    db.insert("map", frame(id=["p", "q", "r"]), x="x", y="y")
     db.insert("clusters", members=pd.DataFrame({"key": ["a"], "entity": ["p"]}),
-              id="entity", key="key")
+              columns={"id": "entity"}, key="key")
     db.insert("topics", {"a": "Diffusion models"})
     assert db._preflight(db._document()) == []
 
@@ -319,9 +318,9 @@ def test_a_second_views_insert_without_the_access_column_is_refused_naming_it(tm
     db.declare_view("knn")
     db.declare_view("pca")
     joined(db)
-    db.insert("knn", first, id="id", x="x", y="y", access="terms")
+    db.insert("knn", first, x="x", y="y", access="terms")
     with pytest.raises(Refusal):
-        db.insert("pca", first.drop(columns=["terms"]), id="id", x="x", y="y")
+        db.insert("pca", first.drop(columns=["terms"]), x="x", y="y")
 
 
 def test_a_first_commit_with_no_rows_refuses_every_fitted_frame(tmp_path):
@@ -329,20 +328,20 @@ def test_a_first_commit_with_no_rows_refuses_every_fitted_frame(tmp_path):
         db = create(tmp_path / f"db{extent!s:.6}", replace=True)
         db.declare_view("s0", extent=extent)
         joined(db)
-        db.insert("s0", pd.DataFrame({"id": [], "x": [], "y": []}), id="id", x="x", y="y")
+        db.insert("s0", pd.DataFrame({"id": [], "x": [], "y": []}), x="x", y="y")
         with pytest.raises(Refusal):
             db.commit()
     db = create(tmp_path / "stated")
     db.declare_view("s0", extent={"x": [0.0, 1.0], "y": [0.0, 1.0]})
     joined(db)
-    db.insert("s0", pd.DataFrame({"id": [], "x": [], "y": []}), id="id", x="x", y="y")
+    db.insert("s0", pd.DataFrame({"id": [], "x": [], "y": []}), x="x", y="y")
     db._refuse_an_empty_build(db._document())
 
 
 def test_one_name_held_by_two_kinds_is_told_apart_by_the_columns_the_call_names(tmp_path):
     """A category column and the value set it reads are declared under one name.
 
-    An attribute reads `id=` and `value=`; a vocabulary reads `key=`, `title=` and `code=`. The
+    An attribute reads `value=`; a vocabulary reads `key=`, `title=` and `code=`. The
     columns the call names are what say which of the two the table is for.
     """
     db = mapped(tmp_path)
@@ -355,7 +354,6 @@ def test_one_name_held_by_two_kinds_is_told_apart_by_the_columns_the_call_names(
     cells = db.insert(
         "venue",
         pd.DataFrame({"id": ["p0"], "venue": ["icml"]}),
-        id="id",
         value="venue",
     )
     assert cells.kind == "attribute"
@@ -375,7 +373,7 @@ def test_a_committed_database_reopens_and_takes_the_next_commit(tmp_path):
     db.declare_view("map", extent={"min": 0.0, "max": 8.0})
     joined(db, type="i64")
     db.insert("map", frame(id=[1, 2, 3], access=["public"] * 3),
-              id="id", x="x", y="y", access="access")
+              x="x", y="y", access="access")
     first = db.commit()
     assert first.ok, first.log
     db.close()
@@ -386,7 +384,7 @@ def test_a_committed_database_reopens_and_takes_the_next_commit(tmp_path):
         assert again.blocks.view_names() == ["map"]
         assert [view["id"] for view in again.meta()["views"]] == ["map"]
         again.insert("map", frame(n=2, id=[4, 5], access=["public"] * 2),
-                     id="id", x="x", y="y", access="access")
+                     x="x", y="y", access="access")
         second = again.commit()
         assert second.ok, second
         assert second.sent and second.rows == 2
@@ -414,7 +412,7 @@ def test_a_padded_label_serves_trimmed_and_a_control_character_is_kept_at_each_c
     def first_commit(db):
         db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]}, default_label=" sealed ")
         joined(db)
-        db.insert("map", labelled(0), id="id", x="x", y="y", access="access")
+        db.insert("map", labelled(0), x="x", y="y", access="access")
 
     db = served(first_commit)
 
@@ -423,7 +421,7 @@ def test_a_padded_label_serves_trimmed_and_a_control_character_is_kept_at_each_c
 
     assert counts() == {"red": 1, "\x1fred": 1, "sealed": 1}
 
-    db.insert("map", labelled(10), id="id", x="x", y="y", access="access")
+    db.insert("map", labelled(10), x="x", y="y", access="access")
     report = db.commit()
     assert report.ok, report
     assert counts() == {"red": 2, "\x1fred": 2, "sealed": 2}

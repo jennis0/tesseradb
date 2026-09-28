@@ -100,7 +100,7 @@ mkdir -p "$FIXTURES" "$LOG_DIR"
 
 # One declaration for every fixture: one view over the scaled geometry, its points' labels in the
 # exploded relation each label set supplies, the identity extent the Morton branch requires, and
-# the join field the relation and `--limit` both read.
+# the unique `id` the relation names each point by and `--limit` keeps a prefix of.
 # The label set differs per build, so that source is overridden on the command line by its own
 # name (`--file labels=…`, configuration.md §8); the geometry is the same file every time and its
 # path is written here.
@@ -112,9 +112,8 @@ labels   = "pairs/categories-subclass.pairs.parquet"
 
 [defaults]
 source     = "geometry"
-join_field = "id"
 
-# The join field: the dense `entity_id` the geometry and every label relation carry.
+# The dense `entity_id` the geometry and every label relation name each point by.
 [[attribute]]
 name   = "id"
 type   = "u32"

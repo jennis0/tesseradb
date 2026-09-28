@@ -39,6 +39,7 @@ content = { computed = ["centroid", "box", "hull"] }
 
   [layer.members]
   source = "toponymy_members"
+  fields = { id = "entity" }
 
   [layer.labels]
   name                = "topics/toponymy"
@@ -58,3 +59,4 @@ content = { computed = ["centroid", "box", "hull"] }
 
     [layer.labels.members]
     source = "toponymy_topic_members"
+    fields = { id = "entity" }

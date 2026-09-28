@@ -37,7 +37,7 @@ from .split import (
     declared_entities,
     declared_layers,
     declared_views,
-    join_field,
+    naming_field,
     ranks_for,
     read_view_rows,
     split_entities,
@@ -152,8 +152,8 @@ class Cycle:
         self.served: Deployment | None = None
         self.session_cred = ""
         self.all_terms: list[str] = []
-        #: The rung's join field, which every row, change and membership names its item by.
-        self.join = join_field(self.rung)
+        #: The rung's naming field, which every row, change and membership names its item by.
+        self.naming = naming_field(self.rung)
 
     @property
     def view_names(self) -> list[str]:
@@ -640,7 +640,8 @@ class Cycle:
             self.args.publish_max_bytes,
             self.args.publish_bucket_rows,
             self.limits,
-            self.join["name"],
+            self.naming["name"],
+            layer["fields"].get(self.naming["name"], self.naming["column"]),
             view_column=layer.get("view_column"),
             access_column=layer.get("access_column"),
         )
@@ -1057,9 +1058,9 @@ class Cycle:
         return r, wall
 
     def change_and_wait(self, control, op: str, values: list[str], start_visible: int) -> dict:
-        """One change op over the items the join field's `values` name, and the wait for the count
+        """One change op over the items the naming field's `values` name, and the wait for the count
         it takes the deployment to."""
-        field = self.join["name"]
+        field = self.naming["name"]
         r, wall = self.send_changes(
             control, [{"field": field, "value": value, "op": op} for value in values]
         )
@@ -1078,7 +1079,7 @@ class Cycle:
 
     def do_write_cycle(self, control, hold) -> dict:
         """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, 1,000 edits, a fold, and the count
-        again in every view, each item named by its join field value, which a deleted holder never
+        again in every view, each item named by its naming field value, which a deleted holder never
         blocks a re-ingest of. A re-ingest sends the item's rows in every view it was in, the
         anchor's first, and each view must end at its count less the suppressed items it holds. An
         edit sends a live item's anchor row once as it is, which changes nothing, and once moved,
@@ -1126,7 +1127,7 @@ class Cycle:
         for figures in passes:
             for status, count in figures["statuses"].items():
                 out["reingest"]["statuses"][status] = out["reingest"]["statuses"].get(status, 0) + count
-        # One join value is one entity: every view's pass answers it with one tessera_id.
+        # One value of the naming field is one entity: every view's pass answers it with one tessera_id.
         out["reingest"]["items_with_several_ids"] = sum(1 for tids in answered.values() if len(tids) > 1)
 
         # The third n items, live and neither deleted nor suppressed, restated and then moved in
