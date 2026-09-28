@@ -33,13 +33,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use croaring::Bitmap;
+use tessera_roaring::for_each_run_in;
 use tessera_store::read::SegmentData;
 use tessera_types::EntityId;
 
 use super::cursor::{Key, Position};
 use super::{RecordsOrder, ResponseEndedBy};
 use crate::cancel::CancelToken;
-use crate::compose::{for_each_run_in, FilterRows, MaskedSet};
+use crate::compose::{FilterRows, MaskedSet};
 use crate::engine::Engine;
 use crate::error::Result;
 use crate::filter::FilterExpr;
