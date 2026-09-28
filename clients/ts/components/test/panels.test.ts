@@ -145,13 +145,29 @@ describe('<tessera-filter> on a category', () => {
     expect(store.calls.filter((c) => c.name === 'suggest').map((c) => c.args)).toEqual([['archive', 'ma']]);
   });
 
-  it('submits a typed key never listed, and never renders "no such value"', async () => {
-    const {host, store} = await mountFilter('archive', empty());
+  it('chooses the suggestion the arrow keys reach with Enter, the first by default, and nothing for text that suggests nothing', async () => {
+    const {host, store, el} = await mountFilter('archive', empty());
     const entry = await type(host, 'zz.unlisted');
-    entry.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter'}));
+    const key = async (k: string) => {
+      entry.dispatchEvent(new KeyboardEvent('keydown', {key: k}));
+      await settle(host);
+    };
+    await key('Enter');
+    expect(drafts(store)).toHaveLength(0);
+    await type(host, 'c');
+    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', values: [value(1, 'cs', 'CS'), value(2, 'cond', null), value(3, 'chem', null)], more: false}}});
     await settle(host);
-    expect((drafts(store)[0]!.filter['archive'] as {keys: string[]}).keys).toEqual(['zz.unlisted']);
-    expect(deep(host, '[part="refusal"]')).toBeNull();
+    await key('Enter');
+    expect(drafts(store).at(-1)!.filter['archive']).toEqual({family: 'category', keys: ['cs']});
+    await key('ArrowDown');
+    await key('ArrowDown');
+    expect(el.shadowRoot!.querySelector('[part~="tick"][data-active]')!.id).toBe(entry.getAttribute('aria-activedescendant'));
+    await key('Enter');
+    expect(drafts(store).at(-1)!.filter['archive']).toEqual({family: 'category', keys: ['cs', 'chem']});
+    // Past the last it wraps to the first, and Enter on a chosen value takes it out.
+    await key('ArrowDown');
+    await key('Enter');
+    expect(drafts(store).at(-1)!.filter['archive']).toEqual({family: 'category', keys: ['chem']});
   });
 
   it('renders only the page that answers the box in front of it, and chooses a suggestion', async () => {
@@ -175,14 +191,15 @@ describe('<tessera-filter> on a category', () => {
     expect((drafts(store)[0]!.filter['archive'] as {keys: string[]}).keys).toEqual(['cs.LG']);
   });
 
-  it('shows each value’s count and its share of what the map matches now', async () => {
+  it('shows each value’s count and its share of the items the counts are counted over', async () => {
     const {host, store} = await mountFilter('archive', empty());
-    store.set('view', {...store.get('view'), matched: {value: 1000, exact: true}});
+    // The counts are over every item visible in the view, not over what the filter matches.
+    store.set('view', {...store.get('view'), visible: {value: 1000, exact: true}, matched: {value: 400, exact: true}});
     await type(host, 'c');
     store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', values: [value(1, 'cs', 'CS', 250), value(2, 'cond', null, 0)], more: false}}});
     await settle(host);
     expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['250', '0']);
-    // The bar is the value's share of the matched total, not of the commonest value.
+    // The bar is the value's share of the visible total, not of the matched total or the commonest value.
     expect(deepAll(host, '[part="bar"]').map((b) => (b as HTMLElement).style.width)).toEqual(['25.0%', '0.0%']);
   });
 

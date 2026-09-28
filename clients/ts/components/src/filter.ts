@@ -31,11 +31,12 @@ const BAR_FLOOR = 2;
  *
  * A category is a search box over `/v1/categories/{column}/suggest`, which lists nothing until
  * something is typed. Each value suggested shows its count in the current view and a bar, its
- * share of the items the map matches now. In the highlight position a value the column's filter
- * leaves out is greyed, counted 0 and cannot be chosen. The values chosen sit under the box as
- * chips, each with a ×. A value typed and entered is added whether or not it was suggested; a key
- * the viewer cannot see matches nothing, as a key that does not exist does. Where the legend holds
- * the column's values, the heading says how many there are.
+ * share of every item the viewer can see in the view, which is what the counts are counted over.
+ * In the highlight position a value the column's filter leaves out is greyed, counted 0 and cannot
+ * be chosen. The arrow keys move through the suggestions, and Enter chooses the one reached, the
+ * first by default, or takes it out where it is chosen; text that suggests nothing chooses
+ * nothing. The values chosen sit under the box as chips, each with a ×. Where the legend holds the
+ * column's values, the heading says how many there are.
  *
  * A number is two inputs, and a date two text inputs that read and write dates as day, month and
  * year (`1 Jan 2019`); a date typed as a month or a year means its first day in the lower input
@@ -151,7 +152,7 @@ export class TesseraFilter extends TesseraElement {
         text-align: left;
       }
       [part~='tick']:hover,
-      [part~='tick']:focus-visible {
+      [part~='tick'][data-active] {
         background: var(--_tessera-surface-2);
       }
       [part~='tick'][aria-selected='true'] {
@@ -267,6 +268,8 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor draft: ColumnDraft | null = null;
   /** @internal */
   @state() accessor search = '';
+  /** The suggestion the arrow keys moved to, by code; `null` is the first that can be chosen. @internal */
+  @state() accessor activeCode: number | null = null;
   /** The date inputs whose text did not read as a date, which keep the text typed. @internal */
   @state() accessor invalid: {gte?: string; lte?: string} = {};
   private sent: ColumnDraft | null = null;
@@ -308,6 +311,16 @@ export class TesseraFilter extends TesseraElement {
 
   private get resolvedSuggestRefusal(): Refusal | null {
     return this.resolvedStore?.get('filters').suggestErrors[this.column] ?? null;
+  }
+
+  /**
+   * The number the suggestion counts are counted over, which a value's bar is a share of: every item
+   * this viewer can see in the view, since the suggest route counts within the view and not within
+   * the filter. `null` before the view is counted.
+   */
+  private countedOver(): number | null {
+    const visible = this.resolvedStore?.get('view').visible;
+    return visible && visible.value > 0 ? visible.value : null;
   }
 
   /** Ask the store's typeahead for `q`, once per distinct `q`; nothing is asked before anything is typed. */
@@ -483,48 +496,56 @@ export class TesseraFilter extends TesseraElement {
     // In the highlight position, the values the column's own filter leaves out cannot be lit.
     const filtered = this.verb === 'highlight' ? s?.get('filters').draft.filter[this.column] : undefined;
     const kept = filtered?.family === 'category' && filtered.keys.length > 0 ? new Set(filtered.keys) : null;
-    const matched = s?.get('view').matched;
-    const total = matched && matched.value > 0 ? matched.value : null;
+    const total = this.countedOver();
     const toggle = (key: string) => this.change({...draft, keys: chosen.has(key) ? draft.keys.filter((k) => k !== key) : [...draft.keys, key]}, true);
-
-    // Enter submits what is typed, suggested or not; see the element's doc.
-    const submit = () => {
-      const key = this.search.trim();
-      if (!key || chosen.has(key)) return;
-      this.change({...draft, keys: [...draft.keys, key]}, true);
+    const typed = this.search !== '';
+    const rows = typed ? (suggestion?.values ?? []) : [];
+    const out = (v: SuggestValue) => kept !== null && !kept.has(v.key);
+    // The row the keys act on: the one the arrows reached, else the first that can be chosen.
+    const choosable = rows.filter((v) => !out(v));
+    const active = choosable.find((v) => v.code === this.activeCode) ?? choosable[0] ?? null;
+    const move = (by: 1 | -1) => {
+      if (choosable.length === 0) return;
+      const at = active ? choosable.indexOf(active) : -1;
+      this.activeCode = choosable[(at + by + choosable.length) % choosable.length]!.code;
     };
     const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder="Type a value"
+        role="combobox" aria-expanded=${rows.length > 0 ? 'true' : 'false'} aria-controls="values" aria-activedescendant=${active ? `value-${active.code}` : nothing}
         .value=${this.search}
         @input=${(e: Event) => {
           this.search = (e.target as HTMLInputElement).value;
+          this.activeCode = null;
           this.ask(this.search);
         }}
         @keydown=${(e: KeyboardEvent) => {
-          if (e.key === 'Enter') submit();
-          if (e.key === 'Escape' && this.search) {
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            move(e.key === 'ArrowDown' ? 1 : -1);
+          } else if (e.key === 'Enter') {
+            if (active) toggle(active.key);
+          } else if (e.key === 'Escape' && this.search) {
             e.stopPropagation();
             this.search = '';
           }
         }} /></div>`;
 
     const option = (v: SuggestValue) => {
-      const out = kept !== null && !kept.has(v.key);
-      const count = out ? 0 : v.count;
+      const left = out(v);
+      const count = left ? 0 : v.count;
       const share = count === undefined || total === null ? null : count === 0 ? 0 : Math.min(100, Math.max(BAR_FLOOR, (100 * count) / total));
-      return html`<button type="button" part="tick" role="option" aria-selected=${chosen.has(v.key) ? 'true' : 'false'} aria-disabled=${out ? 'true' : 'false'}
-        @click=${() => !out && toggle(v.key)}>
+      return html`<button type="button" part="tick" role="option" id=${`value-${v.code}`} tabindex="-1" ?data-active=${v === active}
+        aria-selected=${chosen.has(v.key) ? 'true' : 'false'} aria-disabled=${left ? 'true' : 'false'}
+        @click=${() => !left && toggle(v.key)}>
         <span class="opt">
-          <span class="t"><span class="name">${this.suggestionText(v)}</span>${out ? html`<span class="out">filtered out</span>` : nothing}</span>
+          <span class="t"><span class="name">${this.suggestionText(v)}</span>${left ? html`<span class="out">filtered out</span>` : nothing}</span>
           ${share === null ? nothing : html`<span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span>`}
         </span>
         ${count === undefined ? nothing : html`<span part="value-count">${count.toLocaleString('en-GB')}</span>`}
       </button>`;
     };
-    const typed = this.search !== '';
-    const rows = suggestion?.values ?? [];
     const list =
-      typed && rows.length > 0
-        ? html`<div part="values" role="listbox" aria-label=${`${columnCaption(this.column)} values`}>${repeat(rows, (v) => v.code, option)}</div>`
+      rows.length > 0
+        ? html`<div part="values" id="values" role="listbox" aria-label=${`${columnCaption(this.column)} values`}>${repeat(rows, (v) => v.code, option)}</div>`
         : nothing;
     const note = !typed
       ? nothing
@@ -542,7 +563,7 @@ export class TesseraFilter extends TesseraElement {
         ? html`<div class="chosen">
             ${draft.keys.map((key) => {
               const title = keyTitle(s, this.column, key);
-              return html`<span part="chosen" class="chip" data-verb=${this.verb}>${title}<button type="button" aria-label=${`Remove ${title}`} @click=${() => toggle(key)}>${icon('close', 12)}</button></span>`;
+              return html`<span part="chosen" class="chip" data-verb=${this.verb}>${title}<button type="button" aria-label=${`Remove ${title} from ${columnCaption(this.column)}`} @click=${() => toggle(key)}>${icon('close', 12)}</button></span>`;
             })}
           </div>`
         : nothing;
