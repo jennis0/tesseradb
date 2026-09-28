@@ -20,9 +20,12 @@ What this module covers:
 - **The size of the set** equals the viewport's matched count.
 - **A field that cannot be counted** (a `keyword`) is refused with `422`.
 
-What it does not cover, so the gap is stated: artifacts planted to overlap within one layer, an
-artifact withheld by its own label or membership requirement (the engine's own tests plant both),
-a suppression between pages, and timing.
+- **Overlapping and withheld artifacts**, over `oracle.artifact_label_fixture`: a tree whose
+  artifacts overlap, withheld by their own label, by a label no point carries, by the membership
+  requirement and by the layer's default label, under that fixture's six principals, so `rest` and
+  `none` count only what each principal is served.
+
+What it does not cover, so the gap is stated: a suppression between pages, and timing.
 """
 
 from __future__ import annotations
@@ -34,10 +37,12 @@ import pyarrow.ipc as ipc
 import pytest
 
 from oracle import aggregate as agg
+from oracle import artifact_label_fixture as lfx
 from oracle import catalogue as cat
 from oracle import filters as filt
 from oracle import morton
 from oracle.filters import NumericColumn, RegionColumn
+from oracle.harness import spawn_server, stop_server
 from oracle.wire import decode_viewport, decode_viewport_artifacts, split_aggregate_frames
 
 from test_member_of import member_server  # noqa: F401  (a fixture this module shares)
@@ -290,6 +295,67 @@ def test_every_artifact_table_is_the_oracles(member_server, terms):  # noqa: F81
                 items=items, reference=m_auth, groups=groups, pick=pick,
                 listable=lambda key: key in groups,
                 depth=grouping.get("cells", {}).get("depth"), position=position,
+            )
+            what = f"{terms} / {layer} / {grouping}"
+            served_head = {k: v for k, v in heads[index].items() if k not in ("grouping", "resumed")}
+            assert served_head == want_head, f"{what}: head {heads[index]}"
+            assert_rows_equal(tables[index], want_rows, what)
+
+
+# ---------------------------------------------------------------------------------------------
+# Overlapping artifacts and artifacts withheld, over the own-label fixture
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def label_server(tmp_path_factory):
+    bundle = lfx.build_bundle(tmp_path_factory.mktemp("aggregate-labels"), with_layers=True)
+    server, proc = spawn_server(bundle, tmp_path_factory.mktemp("aggregate-labels-serve"))
+    yield server
+    stop_server(proc)
+
+
+def _served_ids(server, terms) -> dict[tuple[str, str], int]:
+    token = server.authorise(terms)["token"]
+    body = server.viewport(token, lfx.VIEW_ID, 0, [0.0, 0.0, lfx.EXTENT_MAX, lfx.EXTENT_MAX],
+                           k=1000, artifact_budget=1000)
+    return {(a.layer, a.key): a.tessera_id for a in decode_viewport_artifacts(body)}
+
+
+@pytest.mark.parametrize("terms", lfx.PRINCIPALS, ids=["-".join(t) for t in lfx.PRINCIPALS])
+def test_overlapping_and_withheld_artifacts_are_the_oracles(label_server, terms):
+    """`teams` is a tree whose artifacts overlap, some withheld by their own label and one by its
+    membership requirement; `sealed` withholds its unlabelled artifact by the layer's default
+    label. `rest` and `none` count only the artifacts this principal is served, so an item held
+    only by a withheld artifact is in `none`, and a withheld artifact named by its id gets no
+    row."""
+    every = _served_ids(label_server, lfx.PRINCIPALS[-2])
+    token = label_server.authorise(terms)["token"]
+    served = lfx.served(terms)
+    visible_items = lfx.visible_to(terms)
+    rows_of = {
+        lfx.TEAMS: {key: set(members) for key, members, _l, _p in lfx.TEAM_ROWS},
+        lfx.SEALED: {key: set(members) for key, members, _l in lfx.SEALED_ROWS},
+    }
+    # The entity ids behind the tessera_ids differ from the sources, so the oracle's groups are
+    # keyed by tessera_id and hold source ids, and the set is the visible sources.
+    for layer, members_of in rows_of.items():
+        assert all((layer, key) in every for key in members_of), f"{layer}: the widest is served all"
+        groups = {every[(layer, key)]: members_of[key] for key in members_of if (layer, key) in served}
+        named = [every[(layer, key)] for key in sorted(members_of)]
+        groupings = [
+            {"by": {"layer": layer, "top": 3}},
+            {"by": {"layer": layer, "artifacts": [str(i) for i in named]}},
+        ]
+        heads, tables = read_tables(
+            label_server, token, {"view": lfx.VIEW_ID, "reference": {}, "groupings": groupings}
+        )
+        for index, grouping in enumerate(groupings):
+            by = grouping["by"]
+            pick = ("top", by["top"]) if "top" in by else ("named", named)
+            want_head, want_rows = agg.table(
+                items=visible_items, reference=visible_items, groups=groups, pick=pick,
+                listable=lambda key: key in groups, depth=None, position={},
             )
             what = f"{terms} / {layer} / {grouping}"
             served_head = {k: v for k, v in heads[index].items() if k not in ("grouping", "resumed")}
