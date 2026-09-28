@@ -21,8 +21,10 @@ use croaring::Bitmap;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use tessera_store::read::{first_code_at_or_past, ScalarSlice, SegmentData};
+use tessera_store::RowEntities;
 
 use crate::compose::EffectiveMask;
+use crate::filter::EntityCodes;
 
 /// About how many rows one chunk of the pass holds.
 const CHUNK_ROWS: u64 = 1 << 20;
@@ -182,6 +184,14 @@ pub enum RowGroups<'a> {
         codes: Vec<Option<ScalarSlice<'a>>>,
         table: &'a GroupTable,
     },
+    /// Each row's entity's code in an indexed column, through `table`: the row's entity from
+    /// `tables`, the entity's code from `codes`. `row_bases[s]` is segment `s`'s first row.
+    Entity {
+        row_bases: Vec<u32>,
+        tables: RowEntities<'a>,
+        codes: &'a EntityCodes<'a>,
+        table: &'a GroupTable,
+    },
 }
 
 impl<'a> RowGroups<'a> {
@@ -200,11 +210,28 @@ impl<'a> RowGroups<'a> {
         }
     }
 
+    /// The groups of an indexed column's codes, read through each row's entity, by `table`.
+    pub fn entity(
+        segments: &[(&SegmentData, u32)],
+        tables: RowEntities<'a>,
+        codes: &'a EntityCodes<'a>,
+        table: &'a GroupTable,
+    ) -> RowGroups<'a> {
+        RowGroups::Entity {
+            row_bases: segments.iter().map(|&(_, row_base)| row_base).collect(),
+            tables,
+            codes,
+            table,
+        }
+    }
+
     /// How many groups a row can fall in, numbered from 0.
     fn count(&self) -> usize {
         match self {
             RowGroups::None => 1,
-            RowGroups::Drawn { table, .. } => table.none() as usize + 1,
+            RowGroups::Drawn { table, .. } | RowGroups::Entity { table, .. } => {
+                table.none() as usize + 1
+            }
         }
     }
 
@@ -221,6 +248,12 @@ impl<'a> RowGroups<'a> {
                 };
                 table.group(code)
             }
+            RowGroups::Entity {
+                row_bases,
+                tables,
+                codes,
+                table,
+            } => table.group(codes.code_of(tables.entity_of(row_bases[segment] + local as u32))),
         }
     }
 }

@@ -63,7 +63,7 @@ pub use record::{
 };
 pub use record_stack::{RecordExtentPaths, RecordStack};
 pub use values::{
-    as_f64, narrow_hi, narrow_lo, take_scan_work, Access, CodeSet, Codes, Endpoint, Narrowed,
+    as_f64, narrow_hi, narrow_lo, take_scan_work, Access, Block, CodeSet, Codes, Endpoint, Narrowed,
     NativeBound, Scalar, ScanWork, ValueColumn, PRESENCE_FILE, VALUES_FILE,
 };
 pub use values_writer::{write_value_column, ColumnKind, ValueColumnWriter};

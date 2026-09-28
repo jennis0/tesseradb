@@ -19,7 +19,7 @@
 
 mod runs;
 
-pub use runs::{for_each_run_in, RankedRuns, Runs};
+pub use runs::{for_each_run_in, split_by_cardinality, RankedRuns, Runs};
 
 use croaring::{Bitmap, Portable};
 

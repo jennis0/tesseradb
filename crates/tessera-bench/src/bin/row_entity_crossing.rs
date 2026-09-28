@@ -1,18 +1,22 @@
-//! **What does it cost to cross a region's rows to their entities?**
+//! **What does it cost to cross a region's rows to their entities, and to count them by value?**
 //!
-//! `RowSpace::entities_of_rows` reads a row set as runs, each run as one slice of the view's
-//! `row-entity.u32` or of the extent inverse, in parallel chunks of 2^20 rows. This times it over
-//! the rows of a principal's visible set under a polygon, on a pool of one thread and on a pool
-//! of the engine's width, beside the row-at-a-time walk it replaces (`RowSpace::entity_of` per
-//! row, then a sort), and checks that both give the same entities.
+//! `RowSpace::entities_of_rows` buckets the rows' entities by container key and builds each
+//! container from its buckets. This times it over the rows of a principal's visible set under a
+//! polygon, on pools of 1, 2, 4 and the engine's width, beside the row-at-a-time walk
+//! (`RowSpace::entity_of` per row, then a sort), and checks both give the same entities. With
+//! `--column`, it also times `FilterColumns::category_counts_of_rows`, which counts the rows by
+//! their entity's value without building the entity set, beside crossing then
+//! `category_counts`, and checks both give the same counts. Last, it times the copy, sort and
+//! `Bitmap::of` steps of the route the bucketed crossing replaced.
 //!
-//! Every figure is the median of `--repeat` runs, printed with the fastest and slowest.
+//! Every figure is the median of `--repeat` runs, with the fastest, the slowest and the median
+//! CPU time of the process beside it.
 //!
 //! ```text
 //! cargo build --release -p tessera-bench --bin row_entity_crossing
 //! systemd-run --user --scope --collect -p MemoryMax=16G -p MemorySwapMax=2G -- \
 //!     target/release/row_entity_crossing \
-//!     --bundle data/ladder/geonames/bundle-final --view world \
+//!     --bundle data/ladder/geonames/bundle-final --view world --column admin1 \
 //!     --polygon '0.4722,0.3927;0.5833,0.3927;0.6111,0.2904;0.4722,0.2904'
 //! ```
 //!
@@ -28,6 +32,7 @@ use croaring::Bitmap;
 use serde_json::{json, Value};
 
 use tessera_engine::compose::MaskedSet;
+use tessera_engine::filter::CountCodes;
 use tessera_engine::region::RegionDecomposition;
 use tessera_engine::shapes::{Bounds, ShapeF64, Space};
 use tessera_engine::viewport::{segments_with_row_bases, ViewportRequest};
@@ -49,24 +54,53 @@ struct Args {
     polygon: String,
     #[arg(long, default_value_t = 5)]
     repeat: usize,
+    /// An indexed category column to count the region's items by, each row through its entity.
+    #[arg(long)]
+    column: Option<String>,
 }
 
-/// The median, fastest and slowest of `repeat` runs of `f`, and its last answer.
+/// The process's CPU time so far, over every thread.
+fn cpu() -> Duration {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `t` is a valid, writable timespec.
+    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut t) };
+    Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+}
+
+thread_local! {
+    /// The median CPU time of the last [`timed`] call, over every thread of the process.
+    static LAST_CPU: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// The median, fastest and slowest wall time of `repeat` runs of `f`, and its last answer. The
+/// median CPU time is left in [`LAST_CPU`].
 fn timed<T>(repeat: usize, mut f: impl FnMut() -> T) -> (T, Duration, Duration, Duration) {
     let mut samples = Vec::with_capacity(repeat);
+    let mut cpus = Vec::with_capacity(repeat);
     let mut last = None;
     for _ in 0..repeat.max(1) {
-        let started = Instant::now();
+        let (started, used) = (Instant::now(), cpu());
         last = Some(f());
         samples.push(started.elapsed());
+        cpus.push(cpu() - used);
     }
     samples.sort_unstable();
+    cpus.sort_unstable();
+    LAST_CPU.with(|c| c.set(cpus[cpus.len() / 2]));
     (
         last.expect("at least one run"),
         samples[samples.len() / 2],
         samples[0],
         samples[samples.len() - 1],
     )
+}
+
+/// The last [`timed`] call's median CPU time, in milliseconds.
+fn cpu_ms() -> f64 {
+    ms(LAST_CPU.with(|c| c.get()))
 }
 
 fn ms(d: Duration) -> f64 {
@@ -188,7 +222,9 @@ fn main() -> Result<(), BoxError> {
         "entities": want.cardinality(),
         "row_at_a_time_ms": {"median": ms(walk), "fastest": ms(walk_lo), "slowest": ms(walk_hi)},
     })];
-    for width in [1, threads] {
+    let columns = &generation.filter_columns;
+    let no_buffer = |_: &mut dyn FnMut(u32, u32)| {};
+    for width in [1, 2, 4, threads] {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(width).build()?;
         let (got, median, lo, hi) = timed(args.repeat, || {
             pool.install(|| row_space.entities_of_rows(&rows))
@@ -196,10 +232,78 @@ fn main() -> Result<(), BoxError> {
         let got = got.ok_or("the view has no row-entity.u32, so the crossing has no answer")?;
         report.push(json!({
             "threads": width,
-            "entities_of_rows_ms": {"median": ms(median), "fastest": ms(lo), "slowest": ms(hi)},
+            "entities_of_rows_ms": {"median": ms(median), "fastest": ms(lo), "slowest": ms(hi), "cpu": cpu_ms()},
             "agrees": got == want,
         }));
+        let Some(column) = &args.column else {
+            continue;
+        };
+        let (direct, all_median, all_lo, all_hi) = timed(args.repeat, || {
+            pool.install(|| {
+                columns.category_counts_of_rows(
+                    column,
+                    &rows,
+                    row_space,
+                    CountCodes::All(&|_| {}),
+                    &no_buffer,
+                )
+            })
+        });
+        let direct_cpu = cpu_ms();
+        let direct = direct?.ok_or("no row-entity.u32")?;
+        let seen: Vec<u32> = direct.nonzero().into_iter().map(|(code, _)| code).collect();
+        let (crossed, cross_median, cross_lo, cross_hi) = timed(args.repeat, || {
+            pool.install(|| {
+                let entities = row_space.entities_of_rows(&rows).expect("the rows cross");
+                columns.category_counts(
+                    column,
+                    &entities,
+                    CountCodes::All(&|visit| seen.iter().for_each(|&c| visit(c))),
+                    &no_buffer,
+                )
+            })
+        });
+        let cross_cpu = cpu_ms();
+        let crossed = crossed?;
+        report.push(json!({
+            "threads": width,
+            "column": column,
+            "values_carried": seen.len(),
+            "counts_of_rows_every_code_ms": {"median": ms(all_median), "fastest": ms(all_lo), "slowest": ms(all_hi), "cpu": direct_cpu},
+            "cross_then_count_ms": {"median": ms(cross_median), "fastest": ms(cross_lo), "slowest": ms(cross_hi), "cpu": cross_cpu},
+            "agrees": direct.nonzero() == crossed.nonzero() && direct.none() == crossed.none(),
+        }));
     }
+    // The copy-sort-build route this crossing replaced, a step at a time on this thread.
+    let tables = row_space.row_entities().ok_or("no row-entity.u32")?;
+    let (copied, copy, _, _) = timed(args.repeat, || {
+        let mut entities: Vec<u32> = Vec::with_capacity(rows.cardinality() as usize);
+        tessera_roaring::for_each_run_in(&rows, 0..tables.len(), &mut |run| {
+            tables.for_each_slice(run, |slice| entities.extend_from_slice(slice));
+        });
+        entities
+    });
+    let runs = {
+        let mut n = 0u64;
+        tessera_roaring::for_each_run_in(&rows, 0..tables.len(), &mut |_| n += 1);
+        n
+    };
+    let (sorted, sort, _, _) = timed(args.repeat, || {
+        let mut v = copied.clone();
+        v.sort_unstable();
+        v
+    });
+    let (_, clone, _, _) = timed(args.repeat, || copied.clone());
+    let (_, of, _, _) = timed(args.repeat, || Bitmap::of(&sorted));
+    report.push(json!({
+        "sort_route_steps_ms": {
+            "runs": runs,
+            "walk_runs_and_copy_slices": ms(copy),
+            "sort_unstable_including_a_clone": ms(sort),
+            "the_clone_alone": ms(clone),
+            "bitmap_of_sorted": ms(of),
+        }
+    }));
     for line in report {
         println!("{line}");
     }

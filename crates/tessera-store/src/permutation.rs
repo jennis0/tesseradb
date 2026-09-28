@@ -1676,6 +1676,138 @@ impl SegmentExtent {
     }
 }
 
+/// A row set's entities grouped by their high 16 bits, from [`RowSpace::entity_buckets`].
+pub struct EntityBuckets {
+    pieces: Vec<Buckets16>,
+    keys: Vec<u16>,
+}
+
+impl EntityBuckets {
+    /// Every key holding an entity, ascending.
+    pub fn keys(&self) -> &[u16] {
+        &self.keys
+    }
+
+    /// How many entities `key` holds.
+    pub fn count(&self, key: u16) -> u32 {
+        self.pieces.iter().map(|p| p.lows(key).len() as u32).sum()
+    }
+
+    /// The low 16 bits of `key`'s entities, a piece's bucket at a time, in no particular order.
+    pub fn for_each_bucket(&self, key: u16, mut f: impl FnMut(&[u16])) {
+        for piece in &self.pieces {
+            let lows = piece.lows(key);
+            if !lows.is_empty() {
+                f(lows);
+            }
+        }
+    }
+}
+
+/// One piece of a row set's entities, bucketed by their high 16 bits: each key present, ascending,
+/// with where its low 16 bits start in `lows`.
+struct Buckets16 {
+    keys: Vec<(u16, u32)>,
+    lows: Vec<u16>,
+}
+
+impl Buckets16 {
+    /// Count each key, then place each entity's low bits in its key's bucket, reading the rows'
+    /// entities twice rather than holding them.
+    fn of(
+        rows: &croaring::Bitmap,
+        piece: std::ops::Range<u32>,
+        tables: RowEntities<'_>,
+        keys_below: usize,
+    ) -> Self {
+        let mut at = vec![0u32; keys_below.min(1 << 16)];
+        tessera_roaring::for_each_run_in(rows, piece.clone(), &mut |run| {
+            tables.for_each_slice(run, |slice| {
+                for &e in slice {
+                    at[(e >> 16) as usize] += 1;
+                }
+            });
+        });
+        let mut keys = Vec::new();
+        let mut total = 0u32;
+        for (key, slot) in at.iter_mut().enumerate() {
+            if *slot > 0 {
+                keys.push((key as u16, total));
+                let n = *slot;
+                *slot = total;
+                total += n;
+            }
+        }
+        let mut lows = vec![0u16; total as usize];
+        tessera_roaring::for_each_run_in(rows, piece, &mut |run| {
+            tables.for_each_slice(run, |slice| {
+                for &e in slice {
+                    let slot = &mut at[(e >> 16) as usize];
+                    lows[*slot as usize] = e as u16;
+                    *slot += 1;
+                }
+            });
+        });
+        Buckets16 { keys, lows }
+    }
+
+    /// The low bits bucketed under `key`, empty where the piece has none.
+    fn lows(&self, key: u16) -> &[u16] {
+        match self.keys.binary_search_by_key(&key, |&(k, _)| k) {
+            Ok(i) => {
+                let start = self.keys[i].1 as usize;
+                let end = self
+                    .keys
+                    .get(i + 1)
+                    .map_or(self.lows.len(), |&(_, next)| next as usize);
+                &self.lows[start..end]
+            }
+            Err(_) => &[],
+        }
+    }
+}
+
+/// A view's row-to-entity direction: the base's `row-entity.u32` for rows below the base's row
+/// count, and the extents' inverse above it.
+#[derive(Debug, Clone, Copy)]
+pub struct RowEntities<'a> {
+    base: &'a [u32],
+    tail: &'a [u32],
+}
+
+impl RowEntities<'_> {
+    /// How many rows the tables cover.
+    pub fn len(&self) -> u32 {
+        (self.base.len() + self.tail.len()) as u32
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The entity at `row`. Panics where `row` is past [`Self::len`].
+    #[inline]
+    pub fn entity_of(&self, row: u32) -> u32 {
+        match self.base.get(row as usize) {
+            Some(&entity) => entity,
+            None => self.tail[row as usize - self.base.len()],
+        }
+    }
+
+    /// The entities of `rows` as at most two slices, in row order: the base's part, then the
+    /// extents'. Panics where `rows` runs past [`Self::len`].
+    #[inline]
+    pub fn for_each_slice(&self, rows: std::ops::Range<u32>, mut f: impl FnMut(&[u32])) {
+        let (start, end, split) = (rows.start as usize, rows.end as usize, self.base.len());
+        if start < split {
+            f(&self.base[start..end.min(split)]);
+        }
+        if end > split {
+            f(&self.tail[start.max(split) - split..end - split]);
+        }
+    }
+}
+
 /// One view's whole entity→row mapping: the built base permutation, plus the extents flush has
 /// appended and merge has collapsed since.
 ///
@@ -1942,47 +2074,93 @@ impl RowSpace {
         Some(out)
     }
 
-    /// The entities of `rows`, or `None` where the base published no `row-entity.u32` and so
-    /// cannot be inverted.
-    ///
-    /// Rows are read as runs and each run as one slice of the row-to-entity tables, in chunks of
-    /// 2^20 rows run in parallel on the current rayon pool. Rows at or past [`Self::total_rows`]
-    /// have no entity and contribute nothing.
-    pub fn entities_of_rows(&self, rows: &croaring::Bitmap) -> Option<croaring::Bitmap> {
-        use rayon::prelude::*;
-        const CHUNK: u64 = 1 << 20;
-        let base_rows = self.base_rows;
-        let base = match &self.base_inverse {
-            Some(table) if table.row_count() >= base_rows => Some(table.as_ref()),
-            None if base_rows == 0 => None,
+    /// The row-to-entity tables of this row space, or `None` where the base published no
+    /// `row-entity.u32` and so cannot be inverted.
+    pub fn row_entities(&self) -> Option<RowEntities<'_>> {
+        let base: &[u32] = match &self.base_inverse {
+            Some(table) if table.row_count() >= self.base_rows => table.slice(0..self.base_rows),
+            None if self.base_rows == 0 => &[],
             _ => return None,
         };
-        let tail = if self.total_rows > u64::from(base_rows) {
+        let tail: &[u32] = if self.total_rows > u64::from(self.base_rows) {
             self.extent_inverse
                 .get_or_init(|| self.build_extent_inverse())
                 .as_slice()
         } else {
             &[]
         };
-        let total = self.total_rows;
-        let parts: Vec<croaring::Bitmap> = (0..total.div_ceil(CHUNK))
-            .into_par_iter()
-            .map(|chunk| {
-                let start = (chunk * CHUNK) as u32;
-                let end = ((chunk + 1) * CHUNK).min(total) as u32;
-                let mut entities: Vec<u32> = Vec::new();
-                tessera_roaring::for_each_run_in(rows, start..end, &mut |run| {
-                    if run.start < base_rows {
-                        let table = base.expect("a base with rows has a table here");
-                        entities.extend_from_slice(table.slice(run.start..run.end.min(base_rows)));
+        Some(RowEntities { base, tail })
+    }
+
+    /// The entities of `rows` grouped by their high 16 bits, the Roaring container key, keeping
+    /// the low 16; `None` where the base published no `row-entity.u32` and so cannot be inverted.
+    /// Rows at or past [`Self::total_rows`] have no entity and contribute nothing.
+    ///
+    /// The rows are cut into pieces of equal cardinality on the current rayon pool, and each
+    /// piece reads its entities a run at a time as slices of the row-to-entity tables, twice: once
+    /// to count each key and once to place each entity in its key's bucket. Two bytes per row are
+    /// held, and nothing is sorted. The entities of a view's rows are distinct.
+    pub fn entity_buckets(&self, rows: &croaring::Bitmap) -> Option<EntityBuckets> {
+        use rayon::prelude::*;
+        let tables = self.row_entities()?;
+        // Every entity with a row here is below the floor, so its key is below this.
+        let keys_below = (self.entity_floor().min(1 << 32) >> 16) as usize + 1;
+        let pieces = tessera_roaring::split_by_cardinality(
+            rows,
+            0..tables.len(),
+            rayon::current_num_threads() * 4,
+        );
+        let pieces: Vec<Buckets16> = pieces
+            .par_iter()
+            .map(|piece| Buckets16::of(rows, piece.clone(), tables, keys_below))
+            .collect();
+        let mut keys: Vec<u16> = pieces
+            .iter()
+            .flat_map(|b| b.keys.iter().map(|&(key, _)| key))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        Some(EntityBuckets { pieces, keys })
+    }
+
+    /// The entities of `rows`, or `None` where the base published no `row-entity.u32` and so
+    /// cannot be inverted. Rows at or past [`Self::total_rows`] have no entity and contribute
+    /// nothing.
+    ///
+    /// Built from [`Self::entity_buckets`] on the current rayon pool, one container per key: a
+    /// bitset stamped directly from the key's buckets, or a sorted array where it holds
+    /// [`tessera_roaring::ARRAY_MAX`] members or fewer.
+    pub fn entities_of_rows(&self, rows: &croaring::Bitmap) -> Option<croaring::Bitmap> {
+        use rayon::prelude::*;
+        let buckets = self.entity_buckets(rows)?;
+        let keys = buckets.keys();
+        let groups = (rayon::current_num_threads() * 4).clamp(1, keys.len().max(1));
+        let parts: Vec<croaring::Bitmap> = keys
+            .par_chunks(keys.len().div_ceil(groups).max(1))
+            .map(|keys| {
+                let mut sink = tessera_roaring::Sink::new();
+                let mut words = [0u64; tessera_roaring::WORDS];
+                let mut members: Vec<u32> = Vec::new();
+                for &key in keys {
+                    let card = buckets.count(key);
+                    if card > tessera_roaring::ARRAY_MAX {
+                        words.fill(0);
+                        buckets.for_each_bucket(key, |lows| {
+                            for &low in lows {
+                                words[usize::from(low >> 6)] |= 1 << (low & 63);
+                            }
+                        });
+                        sink.push_block(key, card, &words);
+                    } else {
+                        members.clear();
+                        buckets.for_each_bucket(key, |lows| {
+                            members.extend(lows.iter().map(|&low| u32::from(low)));
+                        });
+                        members.sort_unstable();
+                        sink.push_members(key, &members);
                     }
-                    if run.end > base_rows {
-                        let lo = (run.start.max(base_rows) - base_rows) as usize;
-                        entities.extend_from_slice(&tail[lo..(run.end - base_rows) as usize]);
-                    }
-                });
-                entities.sort_unstable();
-                croaring::Bitmap::of(&entities)
+                }
+                sink.finish()
             })
             .collect();
         let refs: Vec<&croaring::Bitmap> = parts.iter().collect();
@@ -2256,7 +2434,11 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(space.restrict_to_view(&set, None), Some(want(&[])), "the base");
+        assert_eq!(
+            space.restrict_to_view(&set, None),
+            Some(want(&[])),
+            "the base"
+        );
         for (i, extent) in extents.iter().enumerate() {
             assert_eq!(
                 space.restrict_to_view(&set, Some(&extent.seg_id)),
@@ -2286,10 +2468,21 @@ mod tests {
         )
         .expect("the merged extent is well formed");
         let seg_ids: Vec<String> = extents.iter().map(|e| e.seg_id.clone()).collect();
-        let merged_space = space.collapsing(&seg_ids, merged).expect("the merge applies");
-        assert_eq!(merged_space.restrict_to_view(&set, Some(&extents[0].seg_id)), None);
-        assert_eq!(merged_space.restrict_to_view(&set, Some(&extents[1].seg_id)), None);
-        assert_eq!(merged_space.restrict_to_view(&set, Some("m")), Some(want(&extents)));
+        let merged_space = space
+            .collapsing(&seg_ids, merged)
+            .expect("the merge applies");
+        assert_eq!(
+            merged_space.restrict_to_view(&set, Some(&extents[0].seg_id)),
+            None
+        );
+        assert_eq!(
+            merged_space.restrict_to_view(&set, Some(&extents[1].seg_id)),
+            None
+        );
+        assert_eq!(
+            merged_space.restrict_to_view(&set, Some("m")),
+            Some(want(&extents))
+        );
         assert_eq!(merged_space.restrict_to_view(&set, None), Some(want(&[])));
     }
 

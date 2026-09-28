@@ -194,6 +194,28 @@ pub fn for_each_run_in(bitmap: &Bitmap, r: Range<u32>, f: &mut impl FnMut(Range<
     }
 }
 
+/// `bitmap ∩ within` cut into at most `pieces` consecutive row ranges holding about the same number
+/// of members each, ascending and together covering every member in `within`.
+pub fn split_by_cardinality(bitmap: &Bitmap, within: Range<u32>, pieces: usize) -> Vec<Range<u32>> {
+    if within.start >= within.end {
+        return Vec::new();
+    }
+    let below = bitmap.range_cardinality(0..within.start);
+    let members = bitmap.range_cardinality(within.clone());
+    let pieces = (pieces.max(1) as u64).min(members.max(1));
+    let mut bounds = vec![within.start];
+    for i in 1..pieces {
+        let rank = below + i * members / pieces;
+        if let Some(at) = bitmap.select(rank as u32) {
+            if at > *bounds.last().expect("bounds start at within.start") && at < within.end {
+                bounds.push(at);
+            }
+        }
+    }
+    bounds.push(within.end);
+    bounds.windows(2).map(|w| w[0]..w[1]).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +468,36 @@ mod run_walk_tests {
                 assert_flattens_to_intersection(&b, a.min(z)..a.max(z));
             }
         }
+    }
+
+    /// The pieces are consecutive, cover `within`, and each holds about its share of the members.
+    #[test]
+    fn a_split_by_cardinality_covers_the_range_in_equal_shares() {
+        let mut b = Bitmap::new();
+        b.add_range(1_000..=1_999);
+        b.add_range(500_000..=500_999);
+        for pieces in [1usize, 2, 3, 7, 5_000] {
+            let split = split_by_cardinality(&b, 10..600_000, pieces);
+            assert_eq!(split.first().map(|r| r.start), Some(10));
+            assert_eq!(split.last().map(|r| r.end), Some(600_000));
+            assert!(split
+                .windows(2)
+                .all(|w| w[0].end == w[1].start && w[0].start < w[0].end));
+            let shares: Vec<u64> = split
+                .iter()
+                .map(|r| b.range_cardinality(r.clone()))
+                .collect();
+            assert_eq!(shares.iter().sum::<u64>(), 2_000);
+            let most = 2_000u64.div_ceil(pieces.min(2_000) as u64);
+            assert!(
+                shares.iter().all(|&n| n <= most + 1),
+                "{pieces} pieces: {shares:?}"
+            );
+        }
+        assert!(split_by_cardinality(&b, 5..5, 4).is_empty());
+        assert_eq!(
+            split_by_cardinality(&Bitmap::new(), 0..100, 4),
+            vec![0..100]
+        );
     }
 }

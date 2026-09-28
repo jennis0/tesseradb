@@ -33,7 +33,7 @@ use tessera_store::read::{ScalarSlice, SegmentData};
 
 const N: u64 = 5_000;
 
-/// A drawn category whose keys the build and the ingest mint.
+/// A drawn and indexed category whose keys the build and the ingest mint.
 const SCHEMA: &str = r#"
 [[vocabulary]]
 name       = "kind"
@@ -45,6 +45,7 @@ visibility = "public"
 name       = "kind"
 type       = "category"
 render     = true
+index      = true
 vocabulary = "kind"
 "#;
 
@@ -247,6 +248,15 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
         _ => 3,
     };
     let groups = RowGroups::drawn(&segments, "kind", &table);
+    let tables = view_data
+        .row_space
+        .row_entities()
+        .expect("the view has row-entity.u32");
+    let codes = generation
+        .filter_columns
+        .entity_codes("kind", &|_| {})
+        .expect("kind is indexed");
+    let through_entities = RowGroups::entity(&segments, tables, &codes, &table);
 
     let mut rng = StdRng::seed_from_u64(11);
     let total = view_data.row_space.total_rows() as u32;
@@ -274,10 +284,16 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
                 alone,
                 "{what}, depth {depth}, in chunks of 500 rows"
             );
+            let grouped = oracle(set, &segments, depth, &by_table);
             assert_eq!(
                 pass_in_chunks(set, &segments, depth, &groups, 500),
-                oracle(set, &segments, depth, &by_table),
+                grouped,
                 "{what}, depth {depth}, grouped by the drawn code"
+            );
+            assert_eq!(
+                pass_in_chunks(set, &segments, depth, &through_entities, 500),
+                grouped,
+                "{what}, depth {depth}, grouped by the entity's indexed code"
             );
             if depth <= 16 {
                 let ranged = count_by_ranges(whole_view(), depth, 0..1u64 << (2 * depth), &|r| {
@@ -286,6 +302,70 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
                 let cells: Vec<(u64, u64)> = alone.iter().map(|e| (e.cell, e.count)).collect();
                 assert_eq!(ranged.cells, cells, "{what}, depth {depth}, range counts");
             }
+        }
+    }
+}
+
+/// Counting codes row by row through each row's entity gives what crossing the rows to their
+/// entity set and counting that gives, for every code and for a named list.
+#[test]
+fn counting_rows_by_their_entities_code_is_counting_their_entity_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = build_bundle(dir.path());
+    let engine = engine_at(dir.path(), &root, 3600);
+    flush_items(&engine, 3_000);
+
+    let session = engine.authorise(&subset_credential()).unwrap();
+    let (generation, mask) = engine
+        .composed_mask(&session, "s0")
+        .expect("the mask composes");
+    let row_space = &generation.bundle.partitions["default"].views["s0"].row_space;
+    let tables = row_space
+        .row_entities()
+        .expect("the view has row-entity.u32");
+    let total = row_space.total_rows() as u32;
+    let mut rng = StdRng::seed_from_u64(5);
+    let sample: Bitmap = (0..total).filter(|_| rng.gen_bool(0.4)).collect();
+    let every: Vec<u32> = {
+        let codes = generation
+            .filter_columns
+            .entity_codes("kind", &|_| {})
+            .unwrap();
+        let mut seen: Vec<u32> = (0..tables.len())
+            .map(|row| codes.code_of(tables.entity_of(row)))
+            .filter(|&code| code != 0)
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen
+    };
+    assert!(every.len() >= 4);
+    let named = [every[1], every[3], 12_345];
+    for rows in [
+        mask.visible_rows(&Bitmap::from_range(0..total)),
+        mask.visible_rows(&sample),
+        Bitmap::new(),
+    ] {
+        let entities = row_space.entities_of_rows(&rows).expect("the rows cross");
+        let columns = &generation.filter_columns;
+        for codes in [
+            tessera_engine::filter::CountCodes::All(&|visit| every.iter().for_each(|&c| visit(c))),
+            tessera_engine::filter::CountCodes::Only(&named),
+        ] {
+            let crossed = columns
+                .category_counts("kind", &entities, codes, &|_| {})
+                .unwrap();
+            let direct = columns
+                .category_counts_of_rows("kind", &rows, row_space, codes, &|_| {})
+                .unwrap()
+                .expect("the rows cross");
+            assert_eq!(
+                direct.nonzero(),
+                crossed.nonzero(),
+                "{} rows",
+                rows.cardinality()
+            );
+            assert_eq!(direct.none(), crossed.none(), "{} rows", rows.cardinality());
         }
     }
 }
