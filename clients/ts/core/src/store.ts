@@ -447,12 +447,15 @@ type Listener = () => void;
  * A store serves one viewer. To show the map to another viewer, create a new store or call
  * {@link Store.clear}; a token renewal for the same viewer keeps what is drawn. Each viewport answer
  * carries an identity key, which the server derives from the viewer, the viewer's visible set and
- * the view. Where an answer's key differs from the one held for its view, the store drops that
- * answer and forgets the viewer as {@link Store.clear} does, `meta` included, keeping the token it
- * holds. It then reads `meta` again and asks again for the camera, so nothing answered for the
- * previous viewer is published or drawn beside the next viewer's answers. The key also changes for
- * the same viewer after a compaction or a rebuilt bundle, and the map is then drawn again in the
- * same way.
+ * the view. The key also changes for the same viewer after a compaction or a rebuilt bundle.
+ * Where an answer's key differs from the one held for its view, the store drops that answer and
+ * everything else the server answered: points, frames, counts, artifacts, shapes, records, legend
+ * values, typeahead pages, the picked item and opened artifact, the region's counts and `meta`. It
+ * keeps the host's inputs: the region's shape, the filters, the `member_of` clauses, the layers,
+ * the colouring, the current view and the camera. It then reads `meta` again under the token it
+ * holds, drops an input that names a view, layer or column the new `meta` does not list, and asks
+ * again for the camera and the region's counts. Nothing answered under the previous key is
+ * published or drawn beside an answer under the new one.
  *
  * @category Store
  */
@@ -628,8 +631,9 @@ export interface Store {
    *
    * The filters set with `setFilters`, the `member_of` clauses, the layers, the colouring, the
    * current view and the camera are kept. A filter draft the store seeded from `meta` is seeded
-   * again from the next. Where the next `meta` does not list the current view, the store opens on
-   * its first view and drops the camera.
+   * again from the next. A filter control, clause, layer or colouring naming a column or layer the
+   * next `meta` does not list is dropped. Where the next `meta` does not list the current view, the
+   * store opens on its first view and drops the camera.
    */
   clear(): void;
   /**
@@ -983,14 +987,15 @@ export function createStore(options: StoreOptions): Store {
    * Every viewport answer, on the point path and the artifact channel, passes through here before
    * anything in it is held. An answer under another identity key than the one held for its view is
    * another principal's, or the same viewer's after a compaction or a rebuilt bundle. The store then
-   * forgets the viewer as {@link clear} does, keeping the token it has, and reads `meta` again.
+   * drops what the server answered, `meta` among it, keeps the host's inputs and its token, and
+   * reads `meta` again; see {@link forgetAnswers}.
    *
    * @returns Whether the answer may be held. False drops it: the machinery that asked is gone.
    */
   function admit(view: string, identityKey: string): boolean {
     const held = identities.get(view);
     if (held !== undefined && held !== identityKey) {
-      forgetViewer(false);
+      forgetAnswers();
       return false;
     }
     identities.set(view, identityKey);
@@ -1026,9 +1031,11 @@ export function createStore(options: StoreOptions): Store {
         onTrace('view-switch', {refused: 1, id: views.id});
         lastView = null;
         queuedView = null;
+        region.drop();
       }
       views.name(meta.views[0]?.id ?? '');
     }
+    if (epoch > 0) dropUnoffered(meta);
     replaceProjection('meta', meta);
     replaceProjection('view', {...projections.view, id: views.id});
     // One empty control per operand set the bundle publishes.
@@ -1048,6 +1055,36 @@ export function createStore(options: StoreOptions): Store {
     } else if (lastView) {
       setView(lastView.input);
     }
+  }
+
+  /**
+   * After `meta` is read again, drop the host's inputs that name what it no longer offers: filter
+   * controls on columns it does not list, `member_of` clauses and layers on layers it does not
+   * list, and a colouring by a column or layer it does not list.
+   */
+  function dropUnoffered(m: Meta): void {
+    const columns = new Set(m.filterOperands.map((f) => f.column));
+    const layerNames = new Set(m.layers.map((l) => l.name));
+    const {draft, members} = projections.filters;
+    const keptDraft = Object.fromEntries(Object.entries(draft).filter(([column]) => columns.has(column)));
+    const keptMembers = members.filter((c) => layerNames.has(c.layer));
+    if (Object.keys(keptDraft).length !== Object.keys(draft).length || keptMembers.length !== members.length) {
+      replaceProjection('filters', {
+        ...projections.filters,
+        draft: keptDraft,
+        expr: composeFilters(keptDraft, 'filter'),
+        highlight: composeFilters(keptDraft, 'highlight'),
+        members: keptMembers
+      });
+    }
+    layersOn = layersOn.filter((name) => layerNames.has(name));
+    const colourBy = legend.colourBy;
+    const offered =
+      colourBy === null ||
+      (colourBy.startsWith(CLUSTER_PREFIX)
+        ? colourLayers(m.layers).some((l) => CLUSTER_PREFIX + l.name === colourBy)
+        : m.declaredScalars.some((c) => c.name === colourBy));
+    if (!offered) legend.setColourBy(null);
   }
 
   function onStatus(status: PresentedStatus, refusal: Refusal | null): void {
@@ -1577,15 +1614,27 @@ export function createStore(options: StoreOptions): Store {
   let filtersSet = false;
 
   function clear(): void {
-    forgetViewer(true);
+    forgetViewer('viewer');
   }
 
   /**
-   * Drop everything held for the viewer, `meta` among it, publish the emptied projections, and read
-   * `meta` again, after which the camera is asked for again. `forgetToken` drops the supplied token
-   * too, so the next is asked for.
+   * Drop what the server answered: points, frames, counts, artifacts, shapes, records, legend
+   * values, typeahead pages, the picked item and opened artifact, the region's held marks and
+   * counts, and `meta`. The region's shape, the filters, the `member_of` clauses, the layers, the
+   * colouring, the current view and the camera are the host's and are kept, except where the next
+   * `meta` no longer offers the view, layer or column they name. The store reads `meta` again under
+   * the token it holds and asks again for the camera, the region's counts with it.
    */
-  function forgetViewer(forgetToken: boolean): void {
+  function forgetAnswers(): void {
+    forgetViewer('answers');
+  }
+
+  /**
+   * Drop what is held, publish the emptied projections, and read `meta` again, after which the
+   * camera is asked for again. `viewer` also drops the supplied token and the region, as
+   * {@link clear} documents; `answers` is {@link forgetAnswers}.
+   */
+  function forgetViewer(what: 'viewer' | 'answers'): void {
     clears += 1;
     suggestions.reset();
     for (const held of views.all()) {
@@ -1604,18 +1653,20 @@ export function createStore(options: StoreOptions): Store {
     contentKeyAtFrame = '';
     colourAsked.clear();
     awaitingSwitchFrame = false;
-    if (forgetToken) tokens.forget();
+    if (what === 'viewer') tokens.forget();
+    replaceProjection('view', noFrame(views.id));
+    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
+    replaceProjection('tiles', {tiles: []});
+    // The region's shape is placed against the view's frame, so it is published before `meta` goes.
+    if (what === 'viewer') region.drop();
+    else region.loading(projections.marks);
     meta = null;
     warming = null;
     replaceProjection('meta', null);
     // A seeded draft names the previous viewer's scoped columns.
     if (!filtersSet) replaceProjection('filters', {...projections.filters, draft: {}, expr: null, highlight: null});
-    replaceProjection('view', noFrame(views.id));
-    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
-    replaceProjection('tiles', {tiles: []});
     legend.clear();
     replaceProjection('status', {...NO_STATUS});
-    region.drop();
     publishReplica(null);
     void ready().catch(() => {});
   }

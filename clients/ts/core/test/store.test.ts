@@ -1434,6 +1434,55 @@ describe('a store serves one viewer', () => {
     }
   });
 
+  it('keeps the region and the filters through an identity change under the same meta, and counts them again', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    // A compaction: the same token and meta, and answers under a new identity key from a point on.
+    let compacted = false;
+    const viewport = vi.fn(async (_token: string, req: FakeRequest) => answerOf(compacted ? 'b' : 'a', req));
+    const metaRead = vi.fn(async () => SHAPED);
+    const {client} = fakeClient(() => response('ck'), SHAPED);
+    Object.assign(client, {viewport, meta: metaRead});
+    // Held tiles are revalidated after a second, so the same camera asks again.
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: 1_000}});
+    await clock.advance(1);
+    store.setColourBy('archive');
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    const filters: FilterDraft = {archive: {family: 'category', keys: ['cs'], verb: 'filter'}};
+    store.setFilters(filters);
+    const shape = {kind: 'box' as const, bbox: [0, 0, 50, 50] as [number, number, number, number]};
+    store.select(shape);
+    await settled(clock, scheduler);
+    expect(store.get('region')).toMatchObject({status: 'shown', matched: {value: Number(VIEWERS.a.visible)}});
+
+    compacted = true;
+    let changed = false;
+    const stale: string[] = [];
+    store.subscribe(() => {
+      if (store.get('meta') === null || showing(store).has('ik-b')) changed = true;
+      if (!changed) return;
+      if (showing(store).has('ik-a')) stale.push('mark');
+      const r = store.get('region');
+      if (r?.status === 'shown' && r.matched.value === Number(VIEWERS.a.visible)) stale.push('region count');
+      if (store.get('view').matched.value === Number(VIEWERS.a.visible)) stale.push('view count');
+    });
+    await clock.advance(2_000);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+
+    expect(changed).toBe(true);
+    expect(stale).toEqual([]);
+    expect(metaRead).toHaveBeenCalledTimes(2);
+    expect(store.get('region')?.shape).toBe(shape);
+    expect(store.get('region')).toMatchObject({status: 'shown', matched: {value: Number(VIEWERS.b.visible)}});
+    expect(store.get('filters').draft.archive).toEqual(filters.archive);
+    expect(store.get('legend').colourBy).toBe('archive');
+    const asked = viewport.mock.calls.at(-1)![1];
+    expect(JSON.stringify(asked.filters)).toContain('region');
+    expect(JSON.stringify(asked.filters)).toContain('archive');
+    expect(showing(store)).toEqual(new Set(['ik-b']));
+  });
+
   it('clear() forgets viewer A and serves viewer B from B’s own token and meta', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
