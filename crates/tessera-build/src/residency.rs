@@ -3567,7 +3567,6 @@ members = "{members}"
 
 [defaults]
 source = "points"
-join_field = "id"
 
 [[view]]
 name = "s0"
@@ -3608,6 +3607,7 @@ require_member_visibility = "none"
 
   [layer.members]
   source = "members"
+  fields = {{ id = "entity" }}
 "#,
             points = "points.parquet",
             pairs = "pairs.parquet",

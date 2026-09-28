@@ -428,7 +428,10 @@ impl Pass {
                 }
                 let mut claimed: FxHashMap<(u16, u128), usize> = FxHashMap::default();
                 for (row, values) in involved {
-                    if numbers[row as usize] == 0 {
+                    // A refused row claims nothing, nor does one naming no item where rows do not
+                    // create: the numbering refuses it.
+                    let stored = numbers[row as usize];
+                    if stored == 0 || (stored == PENDING && !creates) {
                         continue;
                     }
                     if resolve::one_value_twice(&mut claimed, row as usize, &values).is_some() {

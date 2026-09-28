@@ -4471,7 +4471,7 @@ mod tests {
         }))
         .expect("the fixture declaration is well-formed");
         let row = |key: &str, members: &[u64]| -> InlineArtifact {
-            serde_json::from_value(serde_json::json!({ "key": key, "members": members }))
+            serde_json::from_value(serde_json::json!({ "key": key, "members": { "id": members } }))
                 .expect("the fixture row is well-formed")
         };
         let sources = vec![LayerSources {
@@ -4484,10 +4484,14 @@ mod tests {
         }];
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let prefix = tempfile::tempdir().expect("a prefix directory");
+        // The members the rule numbered, in the order the rows list them: each names the item of
+        // its own number.
+        let numbering =
+            crate::ids::Numbering::with_lists(0, [1, 2, 3, 900, 4, 5].map(|item| item + 1).to_vec());
         let mut plan = read(
             std::slice::from_ref(&declaration),
             &sources,
-            &crate::ids::Numbering::empty(),
+            &numbering,
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world",

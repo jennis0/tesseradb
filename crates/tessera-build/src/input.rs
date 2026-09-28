@@ -1586,25 +1586,33 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     })
 }
 
-/// The refusal for the items this build created that have no row in the attribute source at
-/// `path`, which carries `columns`: every item has one, as a new item at a running service carries
-/// every declared column, and a row of nulls is how a source says it has no value.
+/// The refusal for `items` items this build created that have no row in the attribute source at
+/// `path`, which carries `columns`, or `None` where it owes them none.
+///
+/// Every item has a row in each source, as a new item at a running service carries every declared
+/// column, and a row of nulls is how a source says it has no value. A unique field is the
+/// exception: its values come from every file carrying its column, so an item another file created
+/// with its value, or without one, owes the field's own source no row.
 pub(crate) fn items_without_a_row(
     path: &Path,
     columns: &[&crate::config::Attribute],
     items: u64,
-) -> BuildError {
+) -> Option<BuildError> {
+    let owed: Vec<&crate::config::Attribute> =
+        columns.iter().copied().filter(|a| !a.unique).collect();
+    if items == 0 || owed.is_empty() {
+        return None;
+    }
     let detail = tessera_store::declaration::check_declared_present(
-        columns
-            .iter()
+        owed.iter()
             .map(|attribute| (attribute.name.as_str(), attribute.column())),
         |_| false,
     )
     .expect_err("an attribute source carries at least one column");
-    BuildError::Schema {
+    Some(BuildError::Schema {
         path: path.to_path_buf(),
         detail: format!("{items} item(s) have no row: {detail}"),
-    }
+    })
 }
 
 /// How many rows one decoded batch of an attribute source carries — the Parquet reader's batch

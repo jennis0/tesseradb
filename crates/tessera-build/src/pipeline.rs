@@ -2251,8 +2251,8 @@ fn read_attributes_by_entity(
             .map(|&i| &args.schema.attributes[i])
             .collect();
         let met: u64 = tally.met.iter().map(|w| u64::from(w.count_ones())).sum();
-        if met < n {
-            return Err(input::items_without_a_row(&group.path, &columns, n - met));
+        if let Some(refusal) = input::items_without_a_row(&group.path, &columns, n - met) {
+            return Err(refusal);
         }
         coverage.push(crate::AttributeCoverage {
             source: group.name.clone(),

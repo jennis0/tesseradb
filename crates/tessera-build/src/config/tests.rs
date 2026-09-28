@@ -2155,7 +2155,7 @@ fn a_field_map_beside_inline_artifacts_is_refused() {
 fn an_inline_artifact_declaring_both_members_and_excluding_is_refused() {
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nartifacts                 = [{ key = \"c-0\", members = [1], excluding = [2] }]",
+        "views                     = [\"s0\"]\nartifacts                 = [{ key = \"c-0\", members = { id = [1] }, excluding = { id = [2] } }]",
     );
     let message = bound_err(&text, &[]);
     assert!(

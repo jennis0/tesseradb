@@ -1539,12 +1539,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 true => staged.len(),
                 false => met[index].iter().filter(|met| !**met).count(),
             };
-            if unmet > 0 {
-                return Err(input::items_without_a_row(
-                    &group.path,
-                    &columns,
-                    unmet as u64,
-                ));
+            if let Some(refusal) = input::items_without_a_row(&group.path, &columns, unmet as u64)
+            {
+                return Err(refusal);
             }
             attribute_coverage.push(AttributeCoverage {
                 source: group.name.clone(),

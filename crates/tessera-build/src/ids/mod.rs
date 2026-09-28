@@ -325,6 +325,24 @@ impl Numbering {
         }
     }
 
+    /// One layer's listed members numbered, as stored (the item plus one), and nothing else.
+    #[cfg(test)]
+    pub(crate) fn with_lists(layer: usize, stored: Vec<u32>) -> Numbering {
+        Numbering {
+            reads: vec![(
+                ReadKind::Lists(layer),
+                ReadRows {
+                    numbers: Numbers::Held(stored),
+                    groups: None,
+                    named: 0,
+                    mixed: 0,
+                },
+            )],
+            items: 0,
+            refused: Vec::new(),
+        }
+    }
+
     pub(crate) fn of(&self, kind: ReadKind) -> Option<&ReadRows> {
         self.reads
             .iter()

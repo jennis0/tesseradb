@@ -9,7 +9,7 @@ Every table refuses a key it does not know. Where a key is refused beside anothe
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `sources` | table of strings | not set | The files the declaration reads, as `name = "path"`, each path relative to the directory the declaration is in. Every `source` key elsewhere names one of these. An empty name, an empty path and an absolute path are refused; `--file NAME=PATH` replaces a path from the command line. |
-| `defaults` | table | not set | The source a block takes when it names none, and the field every source joins on. |
+| `defaults` | table | not set | The source a block takes when it names none, and the view that orders internal ids. |
 | `view` | array of tables | `[]` | Coordinate systems, each giving the items it holds a position on a map. |
 | `view_group` | array of tables | `[]` | Sets of views that share every setting and differ by a key. |
 | `vocabulary` | array of tables | `[]` | Named value sets, which `category` attributes draw on. |
@@ -18,12 +18,11 @@ Every table refuses a key it does not know. Where a key is refused beside anothe
 
 ## `[defaults]`
 
-What a block takes when it names no source of its own, and the field a build joins its files on. `source` reaches a `[[view]]` and an entity-scoped `[[attribute]]`, and nothing else: a vocabulary, a layer, a view group and `point_visibility` with no source of their own read no file.
+What a block takes when it names no source of its own. `source` reaches a `[[view]]` and an entity-scoped `[[attribute]]`, and nothing else: a vocabulary, a layer, a view group and `point_visibility` with no source of their own read no file.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `source` | string | not set | A name in `[sources]`, read by a `[[view]]` and an entity-scoped `[[attribute]]` that name no `source`. A name `[sources]` does not have is refused. |
-| `join_field` | string | not set | The `[[attribute]]` a build joins its files on: a row of a view's points, an attribute's source, a layer's members or an access relation names its item by this field's value. The attribute must be declared `unique`, and be a `keyword` or an integer. Every file carries it in the attribute's own column (its `field`, or its name), and a block whose file calls it something else says so in its `fields`, under the join field's name. One value twice in one view's points is refused, naming how many values and up to ten of them; one value in two views' points is one item in both views. Without it, each row of the points file is an item of its own. The build then reads every attribute from that file, and refuses a second view, a second attribute file, a members file, an access relation and `--limit`, which would need a join. |
 | `allocation_view` | string | not set | The view whose map positions order the entity ids a build assigns to items with the same access labels. A build of more than one view, counting each view of a group, is refused without it. A view of a group is named `<group>:<key>`, and a name that is not one of the build's views is refused. |
 
 ## `[[view]]`
@@ -36,7 +35,7 @@ One coordinate system: a position for each item it holds, the frame those positi
 | `title` | string | not set | A display title. Not built yet: the title is accepted and not published. |
 | `projection` | string | `"none"` | How a longitude and latitude become a position on the map: `web_mercator`, `equirectangular` (also written `plate_carree`), `gall_isographic`, or `none` for coordinates that are not places on the Earth. It decides which spellings `extent` and `fields` take. Any other name is refused. |
 | `source` | string | the value of `[defaults].source` | A name in `[sources]`: the file holding the view's points, one row per item. A build refuses a view with no source; `tessera check` accepts one. |
-| `fields` | table of strings | not set | Where the points file keeps each field, as `field = "column"`. The fields are the join field, under its own name, with either `x` and `y` or `morton` and `residual`; a projected view's are the join field, `lon` and `lat`. A field not named here is read from the column of its own name. A field the view does not have, both kinds of position, `residual` without `morton`, and `fields` where the view has no source are refused. |
+| `fields` | table of strings | not set | Where the points file keeps each field, as `field = "column"`. The fields are either `x` and `y` or `morton` and `residual`, or on a projected view `lon` and `lat`, and each attribute declared `unique`, whose column is its `field` or its name where this map does not move it. A field not named here is read from the column of its own name. A field the view does not have, both kinds of position, `residual` without `morton`, and `fields` where the view has no source are refused. |
 | `extent` | string or table | required | The frame positions are stored across, as a 32-bit position on each axis. A point outside it is stored on its edge, and a build refuses a frame that more than half the points fall outside. The spellings are under `[view.extent]`. |
 | `point_visibility` | table | required | Where each point's access label comes from: keys under `[view.point_visibility]`. |
 | `visibility` | string or array of strings | `"public"` | The access label a viewer must hold to reach the view, or a list of labels of which they must hold one. `public` alone admits every viewer. An empty list, an empty label, `inherited`, `public` beside another label, and a label the plugin maps to no term are refused. |
@@ -79,7 +78,7 @@ Where each point's access label comes from. A viewer sees a point when they hold
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `field` | string | not set | A column of the view's points file holding each point's access label, as a string or a list of strings. A null or an empty list is no label. An empty name is refused. |
-| `source` | string | not set | A name in `[sources]`: a file of the join field and an integer `term_id`, one row per point and access term. If one view of a build reads labels this way, every view must, from the same file. |
+| `source` | string | not set | A name in `[sources]`: a file of an integer `term_id` beside the column of at least one attribute declared `unique`, which names the point, one row per point and access term. If one view of a build reads labels this way, every view must, from the same file. |
 | `default` | string | not set | The label a point with none of its own takes: `public` for every viewer, or an access label the plugin maps to a term. `inherited` is refused. Without it, a point with no label is refused, at a build and at `/control/ingest` alike. |
 
 ## `[[view_group]]`
@@ -151,14 +150,14 @@ A column each item carries. `render` and `index` decide where its value is kept,
 | `name` | string | required | The column's name, which filters and `/v1/categories/{column}` use. ASCII letters, digits, `_` and `-`, unique among attributes. `tessera_id`, `residual`, `x`, `y`, `access`, `node_id`, `record`, `all_of`, `any_of`, `none_of`, `region`, `member_of` and `highlighted` are refused. |
 | `title` | string | not set | A display title. Not built yet: the title is accepted and not published. |
 | `field` | string | the attribute's `name` | The column of the source file holding the values. An empty name is refused. |
-| `source` | string | the value of `[defaults].source` | A name in `[sources]`: the file the values are read from, joined to the points on the join field. A build refuses an entity-scoped attribute with no source here or in `[defaults]`. A group-scoped attribute with none reads each view's own points file, and `[defaults]` does not reach it. |
+| `source` | string | the value of `[defaults].source` | A name in `[sources]`: the file the values are read from. A file other than a view's points names the item each row belongs to by the columns of the attributes declared `unique`. A build refuses an entity-scoped attribute with no source here or in `[defaults]`. A group-scoped attribute with none reads each view's own points file, and `[defaults]` does not reach it. |
 | `type` | string | required | The type of value the column holds, one of the types below. |
 | `vocabulary` | string | not set | The `[[vocabulary]]` a `category` draws on. Required on a `category`, refused on every other type, and a name no `[[vocabulary]]` declares is refused. |
 | `render` | boolean | `false` | Store the value beside each point's position. Refused on `keyword` and `text`. |
 | `index` | boolean | `false` | Build an index that filters and searches by the value. A group-scoped `text` column needs it. |
-| `unique` | boolean | `false` | No two items may hold one value. The build refuses a source holding one value twice, naming how many values and up to ten of them, and an ingest giving an item a value another item holds is refused. `eq` and `in` filters on the column are answered from its index, with or without `index = true`; without it, they are the only filters it takes. Applies to `keyword`, integer and `timestamp_us` columns scoped to the entity. A null is no value, so any number of items may hold one. |
+| `unique` | boolean | `false` | No two items may hold one value, and a row carrying a value names the item holding it. Every file the build reads names items by the columns of these attributes where it carries them. A points row naming no item creates one, and a row of any other file naming none is refused. A later row naming an item an earlier row of its file names, or giving a second item a value, is refused. A build reports the rows it refuses; an ingest giving an item a value another item holds is refused. `eq` and `in` filters on the column are answered from its index, with or without `index = true`; without it, they are the only filters it takes. Applies to `keyword`, integer and `timestamp_us` columns scoped to the entity. A null is no value, so any number of items may hold one. |
 | `scope` | string or table | `"entity"` | `"entity"`: one value per item, the same under every view. `{ group = "<name>" }`: one value per item and view of that group, which must own its views rather than name `members`. |
-| `fields` | table of strings | not set | Where this attribute's `source` keeps two fields, as `field = "column"`. The join field, under its own name, where the source calls its column something else; and on a group-scoped attribute, `view`, the column saying which view each row's value is for, `view` if absent. Any other field, and `fields` on an attribute with no `source`, is refused. |
+| `fields` | table of strings | not set | Where this attribute's `source` keeps the fields that name each row's item, as `field = "column"`: each attribute declared `unique`, under its own name, where the source calls its column something else; and on a group-scoped attribute, `view`, the column saying which view each row's value is for, `view` if absent. Any other field, and `fields` on an attribute with no `source`, is refused. |
 | `analyser` | string | `"unicode"` | The analyser that turns a `text` column into search terms. This build has `unicode`, and refuses any other name. Refused on every other type. |
 
 The types `type` takes:
@@ -220,8 +219,8 @@ One artifact written in the declaration, for a layer a person authors rather tha
 | --- | --- | --- | --- |
 | `key` | string | required | The artifact's key, which `parent` and `attached_key` name it by. |
 | `level` | integer | `0` | The level the artifact is at: 0 on a layer with no levels. |
-| `members` | array of strings or integers | not set | The members, as values of the join field: a string for a `keyword` join field, and an integer or a string of its decimal digits for an integer one, the string holding a value TOML cannot write as an integer, such as a `u64` from 2^63. Only on an `enumerated` layer, and refused beside `excluding`. |
-| `excluding` | array of strings or integers | not set | The members by exclusion: the join values of the items the artifact leaves out, written as `members` is, which the build turns into `members`. Only on an `enumerated` layer, and refused beside `members`. |
+| `members` | table of arrays of strings or integers | not set | The members, as a table of columns keyed by the names of attributes declared `unique`, each an array of one length, the entries at one position naming one member: `members = { geonameid = [2643743, 2988507] }`. A value is a string for a `keyword` field, and an integer or a string of its decimal digits for an integer one, the string holding a value TOML cannot write as an integer, such as a `u64` from 2^63. A member naming no item is refused and reported, and the artifact holds the rest. Only on an `enumerated` layer, and refused beside `excluding`. |
+| `excluding` | table of arrays of strings or integers | not set | The members by exclusion: the items the artifact leaves out, written as `members` is, which the build turns into `members`. Only on an `enumerated` layer, and refused beside `members`. |
 | `contents` | array of arrays of strings | `[]` | The artifact's content, best first: one array per rank, holding a value for each `[[layer.content.supplied]]` entry in order. |
 | `bbox` | array of numbers | not set | A `bbox` layer's shape: `[min_x, min_y, max_x, max_y]`. |
 | `circle` | array of numbers | not set | A `circle` layer's shape: `[cx, cy, r]`. |

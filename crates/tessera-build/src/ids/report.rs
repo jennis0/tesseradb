@@ -19,7 +19,7 @@ pub struct RefusedRows {
     /// `unknown_tessera_id`.
     pub reason: String,
     pub rows: u64,
-    /// Up to ten of the refused rows, the first in the file.
+    /// The values of the first ten refused rows in the file, each once.
     pub values: Vec<String>,
 }
 
@@ -61,7 +61,7 @@ impl Tally {
         rows
     }
 
-    /// The report entries, a row's values found by `value_of`.
+    /// The report entries, a row's values found by `value_of`: each value once, in file order.
     pub(crate) fn finish(
         self,
         source: &str,
@@ -70,12 +70,20 @@ impl Tally {
     ) -> Vec<RefusedRows> {
         self.reasons
             .into_iter()
-            .map(|(reason, (rows, first))| RefusedRows {
-                source: source.to_string(),
-                object: object.to_string(),
-                reason: reason.to_string(),
-                rows,
-                values: first.into_sorted_vec().into_iter().map(&value_of).collect(),
+            .map(|(reason, (rows, first))| {
+                let mut values: Vec<String> = Vec::new();
+                for text in first.into_sorted_vec().into_iter().map(&value_of) {
+                    if !values.contains(&text) {
+                        values.push(text);
+                    }
+                }
+                RefusedRows {
+                    source: source.to_string(),
+                    object: object.to_string(),
+                    reason: reason.to_string(),
+                    rows,
+                    values,
+                }
             })
             .collect()
     }
