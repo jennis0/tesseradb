@@ -1550,6 +1550,64 @@ describe('a store serves one viewer', () => {
     expect(whoShows(store, metas)).toEqual(new Set(['b']));
   });
 
+  it('forgets on a streamed part under a new key for a view it has left, and holds none of it for the return', async () => {
+    const metas = {a: meta({...TWO_VIEWS}), b: meta({...TWO_VIEWS})};
+    // Whose answers the server gives, and whose meta, from here on.
+    let who: Who = 'a';
+    let gate: Promise<void> | null = null;
+    const {store, viewport, clock, scheduler} = perViewer({metaOf: () => (who === 'a' ? metas.a : metas.b)});
+    const answer = (req: FakeRequest) => ({...answerOf(who, req), identityKey: `${who}:${req.view}`});
+    type Fetch = (token: string, req: FakeRequest, signal?: AbortSignal, background?: boolean, onPart?: (part: ViewportPart) => void | Promise<void>) => Promise<ViewportResponse>;
+    (viewport as unknown as {mockImplementation(f: Fetch): void}).mockImplementation(async (_token, req, _signal, _background, onPart) => {
+      // One request for s0 hands over a part only once the gate opens, and never answers.
+      if (gate && req.view === 's0' && (req.k ?? 1) > 0 && onPart) {
+        const held = gate;
+        gate = null;
+        await held;
+        const a = answer(req);
+        await onPart({result: a.result, identityKey: a.identityKey, contentKey: a.contentKey});
+        return new Promise<never>(() => {});
+      }
+      return answer(req);
+    });
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    // A zoom on s0 whose points are still on the way when the host moves to s1.
+    let open: () => void = () => {};
+    gate = new Promise<void>((resolve) => (open = resolve));
+    store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+    await clock.advance(1);
+    scheduler.flush();
+    store.setCurrentView('s1');
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    const mixed: Set<Who>[] = [];
+    store.subscribe(() => {
+      const shown = whoShows(store, metas);
+      if (shown.size > 1) mixed.push(shown);
+    });
+    // The part for s0 arrives under viewer B's key after s0 was left.
+    who = 'b';
+    open();
+    await settled(clock, scheduler);
+    // The key changed, so the store forgot at once and read meta again, with nothing asked for s1.
+    expect(store.get('meta')).toBe(metas.b);
+
+    // Back on s0, nothing from the part is held to draw from before s0 asks.
+    store.setCurrentView('s0');
+    scheduler.flush();
+    expect(store.get('replica').bands).toBe(0);
+    expect(store.get('marks').bands).toEqual([]);
+    await settled(clock, scheduler);
+
+    expect(mixed).toEqual([]);
+    expect(store.get('meta')).toBe(metas.b);
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+  });
+
   it('reads meta again at a renewal when it holds meta and no answer yet', async () => {
     const metas = {a: SHAPED, b: meta({...SHAPED})};
     const {store, authorise, clock} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
