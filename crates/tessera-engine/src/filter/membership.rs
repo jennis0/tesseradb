@@ -41,15 +41,11 @@ impl FilterColumns {
                 *from_extents.entry(code).or_default() += 1;
             });
         }
-        // Cardinality does not distribute over a union, so a category column with postings tiers
-        // would need the materialising route; `carries` is unaffected, since existence does.
-        let postings_are_single_source = postings.is_none_or(|p| !p.has_tiers());
         Ok(CategoryMembership {
             column: column.to_string(),
             postings,
             candidate,
             from_extents,
-            postings_are_single_source,
         })
     }
 }
@@ -66,9 +62,6 @@ pub struct CategoryMembership<'a> {
     /// The codes the candidate's post-build entities carry, and how many, the half no posting
     /// covers, disjoint from the postings' half.
     from_extents: FxHashMap<u32, u64>,
-    /// Whether the column's postings are one record per value rather than a base plus live tiers.
-    /// [`Self::count`] refuses otherwise.
-    postings_are_single_source: bool,
 }
 
 impl CategoryMembership<'_> {
@@ -105,9 +98,6 @@ impl CategoryMembership<'_> {
     pub fn count(&self, code: u32) -> Result<u64, FilterError> {
         if code == UNRESOLVABLE_VALUE.raw() {
             return Ok(0);
-        }
-        if !self.postings_are_single_source {
-            return Err(FilterError::MembershipUnavailable(self.column.clone()));
         }
         let extents = self.from_extents.get(&code).copied().unwrap_or(0);
         let base = match self.postings {
