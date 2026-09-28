@@ -8,7 +8,8 @@
 row per item in each. The ids have GBIF's spacing: blocks of ten ids over eighteen values, the two
 gaps of one in each block placed at random, so the gaps average 1.8. With `--order shuffled` the
 points file holds the ranks in the order `(a * row + c) mod items` and the members file in another
-such order; with `--order file` both hold them ascending.
+such order; with `--order aligned` the members file holds them in the points' order, as GBIF's
+does; with `--order file` both hold them ascending.
 
 `run` builds under a transient systemd scope with `MemoryMax` and `MemorySwapMax=2G` and samples
 the process once a second: resident and anonymous memory, the scope's charge, bytes read and written
@@ -103,7 +104,8 @@ def make(args: argparse.Namespace) -> None:
         points.write_table(
             pa.table({"id": ids_of(ranks), "x": x, "y": y}), row_group_size=1 << 20
         )
-        ranks = ranks_at(rows, n, args.order, *members_order)
+        if args.order != "aligned":
+            ranks = ranks_at(rows, n, args.order, *members_order)
         key = (mix(ranks) % np.uint64(KEYS)).astype(np.int32)
         members.write_table(
             pa.table({"entity": ids_of(ranks), "key": key}), row_group_size=1 << 20
@@ -311,7 +313,7 @@ def main() -> int:
     sub = ap.add_subparsers(dest="command", required=True)
     m = sub.add_parser("make")
     m.add_argument("--items", type=int, required=True)
-    m.add_argument("--order", choices=["shuffled", "file"], required=True)
+    m.add_argument("--order", choices=["shuffled", "aligned", "file"], required=True)
     m.add_argument("--out", type=Path, required=True)
     r = sub.add_parser("run")
     r.add_argument("--binary", type=Path, required=True)

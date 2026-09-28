@@ -3,7 +3,7 @@
 Does a build whose one unique id is sparse and out of file order still build within a memory cap
 below 8 B an item, in about the time the same corpus takes with its ids in file order? GBIF's
 `gbifid` is that shape, and on main such a build held arrays indexed by the id's span and
-thrashed. This probe measures branch `identity/no-join-field-a`, where every file names its items
+thrashed (`probes/2026-09-27-gbif-final-main/` on branch `probe/gbif-final-main`). This probe measures branch `identity/no-join-field-a`, where every file names its items
 by the unique field through a sort-merge, against itself and against main `f99da0dc`.
 
 Every figure is in [`results.json`](results.json). The box is WSL2 with 12 cores and 47 GiB, and
@@ -15,8 +15,8 @@ other sessions were building and testing Rust throughout.
 (`entity` u64, `key` i32 of 1,000 values), one row per item in each, and a declaration naming the
 members by `fields = { id = "entity" }`. The ids have GBIF's spacing: each block of ten spans
 eighteen values, with the two gaps of one placed at random, so gaps average 1.8. In the shuffled
-corpus the points file holds item `(a·row + c) mod n` at each row and the members file another
-such order; in the file-order corpus both are ascending. `corpus-main.toml` is the same
+corpus the points file holds item `(a·row + c) mod n` at each row, an affine permutation and not a
+random one, and the members file another such order; in the file-order corpus both are ascending. `corpus-main.toml` is the same
 declaration as main reads it, with `join_field = "id"`.
 
 `probe.py run` builds under `systemd-run --user --scope -p MemoryMax=<cap> -p MemorySwapMax=2G`
@@ -34,8 +34,8 @@ I/O and faults are 1 Hz samples, so a short stage's figures are rough.
 | major faults | 56,549 | 55,139 |
 | bundle | 48.4 GB | |
 
-Shuffled over file order is 1.07× on the whole build and 1.25× on the identity pass. No stage
-differs by more than 1.3×. The identity pass's scratch peaked at an estimated 45 GiB of disc.
+Shuffled over file order is 1.07× on the whole build, 128 s more, and 1.25× on the identity pass,
+65 s more. No stage but `column_release`, which takes under a second, differs by more than 1.3×. The identity pass's scratch peaked at an estimated 45 GiB of disc.
 
 ## 10⁸ items against main, cap 4 GiB, budget 3 GiB
 
@@ -73,3 +73,29 @@ A 30-second sample of the pass at 10⁸ shuffled (`ipsample.py` from
 busy about 55% of the time, the rest waiting on the disc: libc copies and writes 28%, the row
 partition's `push_to` 10%, sorting `(key, row)` pairs 13%, the spill writer 6%, loading partition
 buckets 5%, and Parquet decoding 6%. The pass is single-threaded and sequential per file.
+
+## The identity pass cut, 2026-09-28
+
+[`identity.py`](identity.py) builds under the same 7 GiB cap and 6 GiB budget and stops the build
+once `source_ids` ends. "Before" is the stage A commit `13ad8601`; every other row adds to the one
+above it. Figures are in [`identity-results.json`](identity-results.json).
+
+| 10⁹ items, shuffled ids, members in another order | `source_ids` | read | written |
+|---|---|---|---|
+| before | 350 s | 76.3 GB | 50.0 GB |
+| sorts in parallel, a bucket's decisions applied unsorted where a file carries one field | 315 s | 72.3 GB | 49.9 GB |
+| spill files not synced | 297 s | 71.6 GB | 51.6 GB |
+| held values as key gaps, not whole keys | 286 s | 62.6 GB | 46.5 GB |
+| a members file compared row by row with the points (no match here, so it stops) | 273 s | 58.4 GB | 45.1 GB |
+
+| 10⁹ items, one field | before | after |
+|---|---|---|
+| shuffled ids, members in the points' order, as GBIF's are (`--order aligned`) | 322 s, 52.3 GB written | **133 s**, 20.0 GB written |
+| ids and members in file order | 251 s, 61.0 GB written | **120 s**, 20.0 GB written |
+
+The last change is the large one on GBIF's shape. A members file carrying the one field a single
+points file set is read in row order beside that file's column, and a row whose value is the one
+at its position there names that row's item; only the rows that differ go through the sort and the
+merge. After 2²⁰ compared rows a file in which fewer than half matched stops being compared. The
+pass is still bound by the disc: the points file's sort spills its `(key, row)` pairs and reads
+them back, which is most of what remains.
