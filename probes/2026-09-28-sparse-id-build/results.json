@@ -1,0 +1,940 @@
+{
+ "new-s1e9-7G": {
+  "binary": "identity/no-join-field-a",
+  "cmd": "build --deployment scratch/probe/s1e9/tessera.toml --config scratch/probe/s1e9/corpus.toml --out scratch/probe/s1e9/bundle-probe --no-oracle-pairs --stage-timings-json scratch/probe/s1e9/stages.json --memory-budget 6g",
+  "cap": "7G",
+  "exit": 0,
+  "wall_s": 1841.6,
+  "peak_anon_mib": 4154,
+  "scope_peak_mib": 7168,
+  "read_mib": 294717,
+  "written_mib": 186467,
+  "major_faults": 56549,
+  "stages": {
+   "source_ids": {
+    "wall_s": 323.0,
+    "read_mib": 55708,
+    "written_mib": 45886,
+    "major_faults": 574,
+    "peak_anon_mib": 1082
+   },
+   "dictionary": {
+    "wall_s": 6.1,
+    "read_mib": 17,
+    "written_mib": 29,
+    "major_faults": 44,
+    "peak_anon_mib": 1154
+   },
+   "geometry_read": {
+    "wall_s": 46.0,
+    "read_mib": 18582,
+    "written_mib": 15448,
+    "major_faults": 4981,
+    "peak_anon_mib": 2326
+   },
+   "pairs_pack": {
+    "wall_s": 2.3,
+    "read_mib": 536,
+    "written_mib": 562,
+    "major_faults": 15327,
+    "peak_anon_mib": 1313
+   },
+   "signature_sort": {
+    "wall_s": 41.8,
+    "read_mib": 13012,
+    "written_mib": 4223,
+    "major_faults": 4798,
+    "peak_anon_mib": 1439
+   },
+   "assignment": {
+    "wall_s": 305.3,
+    "read_mib": 7637,
+    "written_mib": 13025,
+    "major_faults": 64,
+    "peak_anon_mib": 1439
+   },
+   "postings_write": {
+    "wall_s": 16.4,
+    "read_mib": 1857,
+    "written_mib": 99,
+    "major_faults": 13,
+    "peak_anon_mib": 4154
+   },
+   "attribute_tail": {
+    "wall_s": 155.9,
+    "read_mib": 27975,
+    "written_mib": 19579,
+    "major_faults": 6,
+    "peak_anon_mib": 688
+   },
+   "layers": {
+    "wall_s": 176.6,
+    "read_mib": 21430,
+    "written_mib": 6164,
+    "major_faults": 5176,
+    "peak_anon_mib": 879
+   },
+   "unique_indexes": {
+    "wall_s": 117.3,
+    "read_mib": 17714,
+    "written_mib": 14261,
+    "major_faults": 17,
+    "peak_anon_mib": 631
+   },
+   "text_index": {
+    "wall_s": 0.0,
+    "read_mib": 132,
+    "written_mib": 64,
+    "major_faults": 5,
+    "peak_anon_mib": 488
+   },
+   "filter_postings": {
+    "wall_s": 0.0,
+    "read_mib": 132,
+    "written_mib": 64,
+    "major_faults": 5,
+    "peak_anon_mib": 488
+   },
+   "record_blob": {
+    "wall_s": 84.4,
+    "read_mib": 7556,
+    "written_mib": 3799,
+    "major_faults": 138,
+    "peak_anon_mib": 555
+   },
+   "column_release": {
+    "wall_s": 0.3,
+    "read_mib": 146,
+    "written_mib": 0,
+    "major_faults": 108,
+    "peak_anon_mib": 555
+   },
+   "tiler_sort": {
+    "wall_s": 108.6,
+    "read_mib": 19959,
+    "written_mib": 11453,
+    "major_faults": 9561,
+    "peak_anon_mib": 786
+   },
+   "segment_write": {
+    "wall_s": 149.3,
+    "read_mib": 23377,
+    "written_mib": 37215,
+    "major_faults": 110,
+    "peak_anon_mib": 896
+   },
+   "artifact_pass": {
+    "wall_s": 153.8,
+    "read_mib": 16917,
+    "written_mib": 9536,
+    "major_faults": 21928,
+    "peak_anon_mib": 971
+   },
+   "term_images": {
+    "wall_s": 8.2,
+    "read_mib": 3311,
+    "written_mib": 45,
+    "major_faults": 1609,
+    "peak_anon_mib": 961
+   },
+   "manifests": {
+    "wall_s": 14.4,
+    "read_mib": 41018,
+    "written_mib": 0,
+    "major_faults": 469,
+    "peak_anon_mib": 715
+   }
+  }
+ },
+ "new-f1e9-7G": {
+  "binary": "identity/no-join-field-a",
+  "cmd": "build --deployment scratch/probe/f1e9/tessera.toml --config scratch/probe/f1e9/corpus.toml --out scratch/probe/f1e9/bundle-probe --no-oracle-pairs --stage-timings-json scratch/probe/f1e9/stages.json --memory-budget 6g",
+  "cap": "7G",
+  "exit": 0,
+  "wall_s": 1714.1,
+  "peak_anon_mib": 3923,
+  "scope_peak_mib": 7168,
+  "read_mib": 272145,
+  "written_mib": 196643,
+  "major_faults": 55139,
+  "stages": {
+   "source_ids": {
+    "wall_s": 257.5,
+    "read_mib": 50172,
+    "written_mib": 49450,
+    "major_faults": 40,
+    "peak_anon_mib": 887
+   },
+   "dictionary": {
+    "wall_s": 6.2,
+    "read_mib": 455,
+    "written_mib": 178,
+    "major_faults": 2,
+    "peak_anon_mib": 1285
+   },
+   "geometry_read": {
+    "wall_s": 46.8,
+    "read_mib": 15206,
+    "written_mib": 15444,
+    "major_faults": 18537,
+    "peak_anon_mib": 2444
+   },
+   "pairs_pack": {
+    "wall_s": 2.8,
+    "read_mib": 605,
+    "written_mib": 583,
+    "major_faults": 23313,
+    "peak_anon_mib": 2216
+   },
+   "signature_sort": {
+    "wall_s": 42.8,
+    "read_mib": 13593,
+    "written_mib": 4427,
+    "major_faults": 5152,
+    "peak_anon_mib": 1372
+   },
+   "assignment": {
+    "wall_s": 305.5,
+    "read_mib": 8842,
+    "written_mib": 13458,
+    "major_faults": 59,
+    "peak_anon_mib": 1372
+   },
+   "postings_write": {
+    "wall_s": 17.3,
+    "read_mib": 1985,
+    "written_mib": 229,
+    "major_faults": 32,
+    "peak_anon_mib": 3923
+   },
+   "attribute_tail": {
+    "wall_s": 163.1,
+    "read_mib": 18525,
+    "written_mib": 21296,
+    "major_faults": 748,
+    "peak_anon_mib": 1372
+   },
+   "layers": {
+    "wall_s": 153.6,
+    "read_mib": 16064,
+    "written_mib": 5670,
+    "major_faults": 1739,
+    "peak_anon_mib": 797
+   },
+   "unique_indexes": {
+    "wall_s": 152.0,
+    "read_mib": 28740,
+    "written_mib": 26149,
+    "major_faults": 157,
+    "peak_anon_mib": 1461
+   },
+   "text_index": {
+    "wall_s": 0.0,
+    "read_mib": 82,
+    "written_mib": 56,
+    "major_faults": 128,
+    "peak_anon_mib": 537
+   },
+   "filter_postings": {
+    "wall_s": 0.0,
+    "read_mib": 82,
+    "written_mib": 56,
+    "major_faults": 128,
+    "peak_anon_mib": 537
+   },
+   "record_blob": {
+    "wall_s": 86.6,
+    "read_mib": 7670,
+    "written_mib": 4009,
+    "major_faults": 161,
+    "peak_anon_mib": 598
+   },
+   "column_release": {
+    "wall_s": 0.1,
+    "read_mib": 238,
+    "written_mib": 37,
+    "major_faults": 194,
+    "peak_anon_mib": 598
+   },
+   "tiler_sort": {
+    "wall_s": 113.7,
+    "read_mib": 23058,
+    "written_mib": 11693,
+    "major_faults": 9250,
+    "peak_anon_mib": 840
+   },
+   "segment_write": {
+    "wall_s": 145.5,
+    "read_mib": 20346,
+    "written_mib": 39057,
+    "major_faults": 23,
+    "peak_anon_mib": 975
+   },
+   "artifact_pass": {
+    "wall_s": 143.2,
+    "read_mib": 22785,
+    "written_mib": 9536,
+    "major_faults": 4705,
+    "peak_anon_mib": 894
+   },
+   "term_images": {
+    "wall_s": 8.8,
+    "read_mib": 385,
+    "written_mib": 0,
+    "major_faults": 4754,
+    "peak_anon_mib": 894
+   },
+   "manifests": {
+    "wall_s": 13.4,
+    "read_mib": 40294,
+    "written_mib": 0,
+    "major_faults": 4,
+    "peak_anon_mib": 894
+   }
+  }
+ },
+ "new-s1e8-4G": {
+  "binary": "identity/no-join-field-a",
+  "cmd": "build --deployment scratch/probe/s1e8/tessera.toml --config scratch/probe/s1e8/corpus.toml --out scratch/probe/s1e8/bundle-probe --no-oracle-pairs --stage-timings-json scratch/probe/s1e8/stages.json --memory-budget 3g",
+  "cap": "4G",
+  "exit": 0,
+  "wall_s": 193.0,
+  "peak_anon_mib": 2161,
+  "scope_peak_mib": 4096,
+  "read_mib": 13298,
+  "written_mib": 18259,
+  "major_faults": 85737,
+  "stages": {
+   "source_ids": {
+    "wall_s": 34.0,
+    "read_mib": 1333,
+    "written_mib": 4702,
+    "major_faults": 6,
+    "peak_anon_mib": 737
+   },
+   "dictionary": {
+    "wall_s": 1.2,
+    "read_mib": 0,
+    "written_mib": 35,
+    "major_faults": 0,
+    "peak_anon_mib": 737
+   },
+   "geometry_read": {
+    "wall_s": 10.6,
+    "read_mib": 2249,
+    "written_mib": 1563,
+    "major_faults": 83924,
+    "peak_anon_mib": 2161
+   },
+   "pairs_pack": {
+    "wall_s": 0.2,
+    "read_mib": 240,
+    "written_mib": 257,
+    "major_faults": 1228,
+    "peak_anon_mib": 1041
+   },
+   "signature_sort": {
+    "wall_s": 4.5,
+    "read_mib": 1121,
+    "written_mib": 497,
+    "major_faults": 1248,
+    "peak_anon_mib": 1563
+   },
+   "assignment": {
+    "wall_s": 31.8,
+    "read_mib": 88,
+    "written_mib": 1521,
+    "major_faults": 4,
+    "peak_anon_mib": 1563
+   },
+   "postings_write": {
+    "wall_s": 1.7,
+    "read_mib": 0,
+    "written_mib": 0,
+    "major_faults": 0,
+    "peak_anon_mib": 161
+   },
+   "attribute_tail": {
+    "wall_s": 17.5,
+    "read_mib": 917,
+    "written_mib": 2238,
+    "major_faults": 22,
+    "peak_anon_mib": 372
+   },
+   "layers": {
+    "wall_s": 18.0,
+    "read_mib": 1185,
+    "written_mib": 583,
+    "major_faults": 830,
+    "peak_anon_mib": 597
+   },
+   "unique_indexes": {
+    "wall_s": 10.7,
+    "read_mib": 1408,
+    "written_mib": 1565,
+    "major_faults": 11,
+    "peak_anon_mib": 597
+   },
+   "text_index": {
+    "wall_s": 0.0,
+    "read_mib": 73,
+    "written_mib": 62,
+    "major_faults": 4,
+    "peak_anon_mib": 93
+   },
+   "filter_postings": {
+    "wall_s": 0.0,
+    "read_mib": 73,
+    "written_mib": 62,
+    "major_faults": 4,
+    "peak_anon_mib": 93
+   },
+   "record_blob": {
+    "wall_s": 8.1,
+    "read_mib": 73,
+    "written_mib": 454,
+    "major_faults": 30,
+    "peak_anon_mib": 204
+   },
+   "column_release": {
+    "wall_s": 0.0,
+    "read_mib": 0,
+    "written_mib": 34,
+    "major_faults": 25,
+    "peak_anon_mib": 204
+   },
+   "tiler_sort": {
+    "wall_s": 13.1,
+    "read_mib": 48,
+    "written_mib": 1168,
+    "major_faults": 683,
+    "peak_anon_mib": 345
+   },
+   "segment_write": {
+    "wall_s": 13.0,
+    "read_mib": 552,
+    "written_mib": 3690,
+    "major_faults": 6,
+    "peak_anon_mib": 345
+   },
+   "artifact_pass": {
+    "wall_s": 12.7,
+    "read_mib": 2996,
+    "written_mib": 953,
+    "major_faults": 17,
+    "peak_anon_mib": 233
+   },
+   "term_images": {
+    "wall_s": 0.6,
+    "read_mib": 2541,
+    "written_mib": 52,
+    "major_faults": 7,
+    "peak_anon_mib": 177
+   },
+   "manifests": {
+    "wall_s": 1.4,
+    "read_mib": 2541,
+    "written_mib": 0,
+    "major_faults": 0,
+    "peak_anon_mib": 177
+   }
+  }
+ },
+ "new-f1e8-4G": {
+  "binary": "identity/no-join-field-a",
+  "cmd": "build --deployment scratch/probe/f1e8/tessera.toml --config scratch/probe/f1e8/corpus.toml --out scratch/probe/f1e8/bundle-probe --no-oracle-pairs --stage-timings-json scratch/probe/f1e8/stages.json --memory-budget 3g",
+  "cap": "4G",
+  "exit": 0,
+  "wall_s": 213.6,
+  "peak_anon_mib": 2145,
+  "scope_peak_mib": 4096,
+  "read_mib": 10420,
+  "written_mib": 18630,
+  "major_faults": 3507,
+  "stages": {
+   "source_ids": {
+    "wall_s": 36.3,
+    "read_mib": 221,
+    "written_mib": 5128,
+    "major_faults": 6,
+    "peak_anon_mib": 738
+   },
+   "dictionary": {
+    "wall_s": 1.4,
+    "read_mib": 0,
+    "written_mib": 60,
+    "major_faults": 0,
+    "peak_anon_mib": 738
+   },
+   "geometry_read": {
+    "wall_s": 7.8,
+    "read_mib": 1499,
+    "written_mib": 1538,
+    "major_faults": 12,
+    "peak_anon_mib": 2145
+   },
+   "pairs_pack": {
+    "wall_s": 0.0,
+    "read_mib": 306,
+    "written_mib": 249,
+    "major_faults": 0,
+    "peak_anon_mib": 1166
+   },
+   "signature_sort": {
+    "wall_s": 6.2,
+    "read_mib": 1147,
+    "written_mib": 305,
+    "major_faults": 2,
+    "peak_anon_mib": 1584
+   },
+   "assignment": {
+    "wall_s": 40.0,
+    "read_mib": 426,
+    "written_mib": 1509,
+    "major_faults": 97,
+    "peak_anon_mib": 1584
+   },
+   "postings_write": {
+    "wall_s": 1.8,
+    "read_mib": 121,
+    "written_mib": 245,
+    "major_faults": 17,
+    "peak_anon_mib": 1533
+   },
+   "attribute_tail": {
+    "wall_s": 19.9,
+    "read_mib": 339,
+    "written_mib": 2136,
+    "major_faults": 592,
+    "peak_anon_mib": 400
+   },
+   "layers": {
+    "wall_s": 16.8,
+    "read_mib": 544,
+    "written_mib": 561,
+    "major_faults": 651,
+    "peak_anon_mib": 496
+   },
+   "unique_indexes": {
+    "wall_s": 13.4,
+    "read_mib": 790,
+    "written_mib": 1855,
+    "major_faults": 91,
+    "peak_anon_mib": 496
+   },
+   "text_index": {
+    "wall_s": 0.0,
+    "read_mib": 1,
+    "written_mib": 60,
+    "major_faults": 74,
+    "peak_anon_mib": 76
+   },
+   "filter_postings": {
+    "wall_s": 0.0,
+    "read_mib": 1,
+    "written_mib": 60,
+    "major_faults": 74,
+    "peak_anon_mib": 76
+   },
+   "record_blob": {
+    "wall_s": 8.0,
+    "read_mib": 25,
+    "written_mib": 453,
+    "major_faults": 166,
+    "peak_anon_mib": 193
+   },
+   "column_release": {
+    "wall_s": 0.1,
+    "read_mib": 16,
+    "written_mib": 30,
+    "major_faults": 7,
+    "peak_anon_mib": 193
+   },
+   "tiler_sort": {
+    "wall_s": 15.6,
+    "read_mib": 216,
+    "written_mib": 1329,
+    "major_faults": 623,
+    "peak_anon_mib": 341
+   },
+   "segment_write": {
+    "wall_s": 14.7,
+    "read_mib": 1057,
+    "written_mib": 3504,
+    "major_faults": 12,
+    "peak_anon_mib": 341
+   },
+   "artifact_pass": {
+    "wall_s": 14.4,
+    "read_mib": 2966,
+    "written_mib": 953,
+    "major_faults": 989,
+    "peak_anon_mib": 230
+   },
+   "term_images": {
+    "wall_s": 0.5,
+    "read_mib": 2828,
+    "written_mib": 39,
+    "major_faults": 988,
+    "peak_anon_mib": 179
+   },
+   "manifests": {
+    "wall_s": 1.5,
+    "read_mib": 2822,
+    "written_mib": 0,
+    "major_faults": 80,
+    "peak_anon_mib": 179
+   }
+  }
+ },
+ "main-s1e8-4G": {
+  "binary": "main f99da0dc",
+  "cmd": "build --deployment scratch/probe/s1e8/tessera.toml --config scratch/probe/s1e8/corpus-main.toml --out scratch/probe/s1e8/bundle-probe --no-oracle-pairs --stage-timings-json scratch/probe/s1e8/stages.json --memory-budget 3g",
+  "cap": "4G",
+  "exit": 0,
+  "wall_s": 312.6,
+  "peak_anon_mib": 2517,
+  "scope_peak_mib": 4096,
+  "read_mib": 11564,
+  "written_mib": 16818,
+  "major_faults": 5521,
+  "stages": {
+   "source_ids": {
+    "wall_s": 6.2,
+    "read_mib": 161,
+    "written_mib": 762,
+    "major_faults": 1,
+    "peak_anon_mib": 143
+   },
+   "dictionary": {
+    "wall_s": 4.2,
+    "read_mib": 0,
+    "written_mib": 762,
+    "major_faults": 1,
+    "peak_anon_mib": 2076
+   },
+   "geometry_read": {
+    "wall_s": 13.9,
+    "read_mib": 2934,
+    "written_mib": 3934,
+    "major_faults": 78,
+    "peak_anon_mib": 2517
+   },
+   "pairs_pack": {
+    "wall_s": 0.0,
+    "read_mib": 380,
+    "written_mib": 6,
+    "major_faults": 3,
+    "peak_anon_mib": 801
+   },
+   "signature_sort": {
+    "wall_s": 4.9,
+    "read_mib": 1092,
+    "written_mib": 236,
+    "major_faults": 13,
+    "peak_anon_mib": 1700
+   },
+   "assignment": {
+    "wall_s": 41.6,
+    "read_mib": 483,
+    "written_mib": 1452,
+    "major_faults": 2,
+    "peak_anon_mib": 1701
+   },
+   "postings_write": {
+    "wall_s": 1.6,
+    "read_mib": 868,
+    "written_mib": 209,
+    "major_faults": 8,
+    "peak_anon_mib": 1634
+   },
+   "attribute_tail": {
+    "wall_s": 31.6,
+    "read_mib": 1444,
+    "written_mib": 2311,
+    "major_faults": 443,
+    "peak_anon_mib": 554
+   },
+   "layers": {
+    "wall_s": 108.3,
+    "read_mib": 393,
+    "written_mib": 574,
+    "major_faults": 1118,
+    "peak_anon_mib": 274
+   },
+   "unique_indexes": {
+    "wall_s": 15.4,
+    "read_mib": 3,
+    "written_mib": 1751,
+    "major_faults": 156,
+    "peak_anon_mib": 683
+   },
+   "text_index": {
+    "wall_s": 0.0,
+    "read_mib": 1,
+    "written_mib": 34,
+    "major_faults": 154,
+    "peak_anon_mib": 174
+   },
+   "filter_postings": {
+    "wall_s": 0.0,
+    "read_mib": 1,
+    "written_mib": 34,
+    "major_faults": 154,
+    "peak_anon_mib": 174
+   },
+   "record_blob": {
+    "wall_s": 10.3,
+    "read_mib": 1,
+    "written_mib": 401,
+    "major_faults": 171,
+    "peak_anon_mib": 297
+   },
+   "column_release": {
+    "wall_s": 0.1,
+    "read_mib": 0,
+    "written_mib": 1,
+    "major_faults": 7,
+    "peak_anon_mib": 297
+   },
+   "tiler_sort": {
+    "wall_s": 13.5,
+    "read_mib": 66,
+    "written_mib": 1445,
+    "major_faults": 48,
+    "peak_anon_mib": 426
+   },
+   "segment_write": {
+    "wall_s": 13.5,
+    "read_mib": 408,
+    "written_mib": 3161,
+    "major_faults": 15,
+    "peak_anon_mib": 327
+   },
+   "artifact_pass": {
+    "wall_s": 20.0,
+    "read_mib": 2698,
+    "written_mib": 909,
+    "major_faults": 22,
+    "peak_anon_mib": 315
+   },
+   "term_images": {
+    "wall_s": 0.6,
+    "read_mib": 2359,
+    "written_mib": 0,
+    "major_faults": 1,
+    "peak_anon_mib": 246
+   },
+   "manifests": {
+    "wall_s": 2.7,
+    "read_mib": 3181,
+    "written_mib": 0,
+    "major_faults": 2749,
+    "peak_anon_mib": 246
+   }
+  }
+ },
+ "main-f1e8-4G": {
+  "binary": "main f99da0dc",
+  "cmd": "build --deployment scratch/probe/f1e8/tessera.toml --config scratch/probe/f1e8/corpus-main.toml --out scratch/probe/f1e8/bundle-probe --no-oracle-pairs --stage-timings-json scratch/probe/f1e8/stages.json --memory-budget 3g",
+  "cap": "4G",
+  "exit": 0,
+  "wall_s": 235.5,
+  "peak_anon_mib": 2081,
+  "scope_peak_mib": 4096,
+  "read_mib": 0,
+  "written_mib": 0,
+  "major_faults": 2590,
+  "stages": {
+   "source_ids": {
+    "wall_s": 2.7,
+    "read_mib": 70,
+    "written_mib": 762,
+    "major_faults": 1,
+    "peak_anon_mib": 152
+   },
+   "dictionary": {
+    "wall_s": 3.0,
+    "read_mib": 0,
+    "written_mib": 146,
+    "major_faults": 0,
+    "peak_anon_mib": 1049
+   },
+   "geometry_read": {
+    "wall_s": 13.2,
+    "read_mib": 402,
+    "written_mib": 2301,
+    "major_faults": 46,
+    "peak_anon_mib": 2081
+   },
+   "pairs_pack": {
+    "wall_s": 0.0,
+    "read_mib": 88,
+    "written_mib": 391,
+    "major_faults": 1,
+    "peak_anon_mib": 1192
+   },
+   "signature_sort": {
+    "wall_s": 5.7,
+    "read_mib": 1800,
+    "written_mib": 602,
+    "major_faults": 26,
+    "peak_anon_mib": 1696
+   },
+   "assignment": {
+    "wall_s": 38.1,
+    "read_mib": 472,
+    "written_mib": 1525,
+    "major_faults": 6,
+    "peak_anon_mib": 1696
+   },
+   "postings_write": {
+    "wall_s": 1.5,
+    "read_mib": 246,
+    "written_mib": 286,
+    "major_faults": 13,
+    "peak_anon_mib": 1620
+   },
+   "attribute_tail": {
+    "wall_s": 17.8,
+    "read_mib": 786,
+    "written_mib": 2032,
+    "major_faults": 15,
+    "peak_anon_mib": 425
+   },
+   "layers": {
+    "wall_s": 64.9,
+    "read_mib": 41,
+    "written_mib": 542,
+    "major_faults": 294,
+    "peak_anon_mib": 261
+   },
+   "unique_indexes": {
+    "wall_s": 11.4,
+    "read_mib": 4,
+    "written_mib": 2086,
+    "major_faults": 351,
+    "peak_anon_mib": 667
+   },
+   "text_index": {
+    "wall_s": 0.0,
+    "read_mib": 1,
+    "written_mib": 47,
+    "major_faults": 79,
+    "peak_anon_mib": 157
+   },
+   "filter_postings": {
+    "wall_s": 0.0,
+    "read_mib": 1,
+    "written_mib": 47,
+    "major_faults": 79,
+    "peak_anon_mib": 157
+   },
+   "record_blob": {
+    "wall_s": 8.3,
+    "read_mib": 3,
+    "written_mib": 412,
+    "major_faults": 90,
+    "peak_anon_mib": 282
+   },
+   "column_release": {
+    "wall_s": 0.1,
+    "read_mib": 2,
+    "written_mib": 18,
+    "major_faults": 11,
+    "peak_anon_mib": 282
+   },
+   "tiler_sort": {
+    "wall_s": 11.6,
+    "read_mib": 67,
+    "written_mib": 1489,
+    "major_faults": 648,
+    "peak_anon_mib": 421
+   },
+   "segment_write": {
+    "wall_s": 13.1,
+    "read_mib": 224,
+    "written_mib": 3468,
+    "major_faults": 8,
+    "peak_anon_mib": 421
+   },
+   "artifact_pass": {
+    "wall_s": 22.6,
+    "read_mib": 1380,
+    "written_mib": 953,
+    "major_faults": 1056,
+    "peak_anon_mib": 309
+   },
+   "term_images": {
+    "wall_s": 0.6,
+    "read_mib": 1283,
+    "written_mib": 46,
+    "major_faults": 1056,
+    "peak_anon_mib": 237
+   },
+   "manifests": {
+    "wall_s": 1.5,
+    "read_mib": 1259,
+    "written_mib": 0,
+    "major_faults": 888,
+    "peak_anon_mib": 237
+   }
+  }
+ },
+ "new-s1e8-640M": {
+  "binary": "identity/no-join-field-a",
+  "cmd": "build --deployment scratch/probe/s1e8/tessera.toml --config scratch/probe/s1e8/corpus.toml --out scratch/probe/s1e8/bundle-probe --no-oracle-pairs --stage-timings-json scratch/probe/s1e8/stages.json --memory-budget 512m",
+  "cap": "640M",
+  "exit": 1,
+  "wall_s": 83.7,
+  "peak_anon_mib": 635,
+  "scope_peak_mib": 640,
+  "read_mib": 9601,
+  "written_mib": 5159,
+  "major_faults": 179492,
+  "stages": {
+   "source_ids": {
+    "wall_s": 47.6,
+    "read_mib": 6133,
+    "written_mib": 4954,
+    "major_faults": 184,
+    "peak_anon_mib": 487
+   },
+   "dictionary": {
+    "wall_s": 25.8,
+    "read_mib": 1389,
+    "written_mib": 0,
+    "major_faults": 179303,
+    "peak_anon_mib": 635
+   }
+  }
+ },
+ "main-s1e8-640M": {
+  "binary": "main f99da0dc",
+  "cmd": "build --deployment scratch/probe/s1e8/tessera.toml --config scratch/probe/s1e8/corpus-main.toml --out scratch/probe/s1e8/bundle-probe --no-oracle-pairs --stage-timings-json scratch/probe/s1e8/stages.json --memory-budget 512m",
+  "cap": "640M",
+  "exit": 1,
+  "wall_s": 175.0,
+  "peak_anon_mib": 632,
+  "scope_peak_mib": 640,
+  "read_mib": 23353,
+  "written_mib": 762,
+  "major_faults": 3948695,
+  "stages": {
+   "source_ids": {
+    "wall_s": 7.0,
+    "read_mib": 2353,
+    "written_mib": 762,
+    "major_faults": 64,
+    "peak_anon_mib": 142
+   },
+   "dictionary": {
+    "wall_s": 151.2,
+    "read_mib": 17798,
+    "written_mib": 0,
+    "major_faults": 3886105,
+    "peak_anon_mib": 632
+   }
+  }
+ }
+}
