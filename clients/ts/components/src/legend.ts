@@ -30,6 +30,12 @@ const ENTRIES_SHOWN = 40;
 
 /** The longest name, in characters, that a row in two columns shows whole at 12 px in a 300 px card. */
 const SHORT_NAME = 20;
+/** The characters a row gives up for each pressed × at its end. */
+const PER_DISMISS = 4;
+
+const graphemes = new Intl.Segmenter('en', {granularity: 'grapheme'});
+/** A name's length as a reader counts it: characters, not UTF-16 units. */
+const lengthOf = (text: string): number => [...graphemes.segment(text)].length;
 
 /** How far each lighter colour in the colour picker is taken towards white. */
 const LIGHTER = 0.45;
@@ -775,7 +781,7 @@ export class TesseraLegend extends TesseraElement {
           plain(NEUTRAL, 'Not yet coloured')
         ],
         false,
-        [...named.map((a) => artifactName(a, artifacts.attached) ?? UNNAMED), 'Not yet coloured']
+        [...named.map((a) => artifactName(a, artifacts.attached) ?? UNNAMED), 'Not yet coloured'].map((name) => ({name, pressed: 0}))
       )}`);
     }
     if (!column) return wrap(html`<span part="state" data-state="refused"><span class="dot refuse"></span><span part="refusal">Column unavailable</span></span>`);
@@ -839,19 +845,20 @@ export class TesseraLegend extends TesseraElement {
       past.length > pastChosen.length
         ? [html`<div part="entry" role="listitem" data-state=${stateOfKey(null)}><span part="swatch" style=${`--c:${rgb(UNMAPPED)}`}></span><span part="name">Other</span></div>`]
         : [];
-    const names = [...shown, ...pastChosen].map(({value}) => value.title ?? value.key);
-    return this.rows([...shown.map(row), ...pastChosen.map(row), ...other], counted, other.length > 0 ? [...names, 'Other'] : names);
+    // Each pressed × takes room from its row's name.
+    const names = [...shown, ...pastChosen].map(({value}) => ({name: value.title ?? value.key, pressed: Number(filtered.includes(value.key)) + Number(lit.includes(value.key))}));
+    return this.rows([...shown.map(row), ...pastChosen.map(row), ...other], counted, other.length > 0 ? [...names, {name: 'Other', pressed: 0}] : names);
   }
 
   /**
    * The rows, the first of them until "N more" is pressed, in two columns where every name shown
    * is short enough to fit one and no count takes a row's end.
    */
-  private rows(entries: TemplateResult[], counted: boolean, names: string[]): TemplateResult {
+  private rows(entries: TemplateResult[], counted: boolean, names: {name: string; pressed: number}[]): TemplateResult {
     const first = this.limit > 0 ? this.limit : ENTRIES_SHOWN;
     const cut = !this.expanded && entries.length > first;
     const shown = cut ? entries.slice(0, first) : entries;
-    const columns = !counted && names.slice(0, shown.length).every((n) => n.length <= SHORT_NAME) ? 2 : 1;
+    const columns = !counted && names.slice(0, shown.length).every((n) => lengthOf(n.name) <= SHORT_NAME - PER_DISMISS * n.pressed) ? 2 : 1;
     return html`<div part="swatches" role="list" class=${counted ? 'counted' : ''} data-columns=${columns}>${shown}</div>${cut
       ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = true)}>${(entries.length - first).toLocaleString('en-GB')} more</button>`
       : nothing}`;

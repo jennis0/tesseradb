@@ -146,6 +146,17 @@ describe('<tessera-legend> rows as a filter and a highlight', () => {
     document.body.innerHTML = '';
     const long = await mountLegend('field', undefined, {categories: {field: [...VALUES, {code: 4, key: 'cs.CL', title: 'Computation and Language'}]}, ranks: {field: {1: 0, 2: 1, 3: 2, 4: 3}}});
     expect(deep(long.host, '[part="swatches"]')!.getAttribute('data-columns')).toBe('1');
+    document.body.innerHTML = '';
+    // Twenty characters, each an accented letter written as two code points, is short.
+    const accented = await mountLegend('field', undefined, {categories: {field: [...VALUES, {code: 4, key: 'x', title: 'é'.repeat(20)}]}, ranks: {field: {1: 0, 2: 1, 3: 2, 4: 3}}});
+    expect(deep(accented.host, '[part="swatches"]')!.getAttribute('data-columns')).toBe('2');
+  });
+
+  it('gives a row holding both × buttons their room, in one column where its name would not fit beside them', async () => {
+    const {host, store} = await mountLegend('field');
+    store.set('filters', filtersOf({filter: {field: {family: 'category', keys: ['hep-th']}}, highlight: {field: {family: 'category', keys: ['hep-th']}}}));
+    await settle(host);
+    expect(deep(host, '[part="swatches"]')!.getAttribute('data-columns')).toBe('1');
   });
 
   it('offers the verbs from the published operands, with no filter control seeded', async () => {

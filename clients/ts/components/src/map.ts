@@ -1121,10 +1121,11 @@ export class TesseraMap extends TesseraElement {
     const {width, height} = this.size;
     const scale = 2 ** this.viewState.zoom;
     const [tx, ty] = this.viewState.target;
-    // Kept inside the map where the corner is off its top or left edge.
-    const left = Math.max(4, (corner[0] - tx!) * scale + width / 2);
+    // Kept inside the map where the corner is off its top edge, and no further left than the
+    // top-left corner's content starts, right of whatever the host keeps over the map's left side.
+    const left = (corner[0] - tx!) * scale + width / 2;
     const top = Math.max(30, (corner[1] - ty!) * scale + height / 2);
-    return html`<div part="region-tag" style=${`left:${left}px;top:${top}px`}>
+    return html`<div part="region-tag" style=${`left:max(calc(var(--_tessera-space) + var(--tessera-map-inset-left, 0px)), ${left}px);top:${top}px`}>
       <tessera-count .masked=${region.matched}></tessera-count><span>${region.shape.outside ? 'outside' : 'inside'}</span>
       <button type="button" aria-label="Clear selection" title="Clear selection" @click=${() => this.select(null)}>${icon('close', 12, 1.4)}</button>
     </div>`;
