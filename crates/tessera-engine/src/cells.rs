@@ -25,6 +25,7 @@ use tessera_store::RowEntities;
 
 use crate::compose::EffectiveMask;
 use crate::filter::EntityCodes;
+use crate::row_column::RowColumn;
 
 /// About how many rows one chunk of the pass holds.
 const CHUNK_ROWS: u64 = 1 << 20;
@@ -47,7 +48,7 @@ impl CellSet<'_> {
         }
     }
 
-    fn for_each_run(&self, rows: Range<u32>, f: &mut impl FnMut(Range<u32>)) {
+    pub(crate) fn for_each_run(&self, rows: Range<u32>, f: &mut impl FnMut(Range<u32>)) {
         match self {
             CellSet::Mask(mask) => mask.for_each_visible_run(rows, f),
             CellSet::Rows(set) => tessera_roaring::for_each_run_in(set, rows, f),
@@ -123,7 +124,7 @@ pub struct GroupTable {
 }
 
 enum Lookup {
-    /// Indexed by code, for codes below 2^16.
+    /// Indexed by code, for codes below 2^16, code 0 included.
     Dense(Vec<u32>),
     Sparse(FxHashMap<u32, u32>),
 }
@@ -137,6 +138,7 @@ impl GroupTable {
             for (group, &code) in listed.iter().enumerate().rev() {
                 dense[code as usize] = group as u32;
             }
+            dense[tessera_store::vocabulary::ABSENT_CODE as usize] = rest + 1;
             Lookup::Dense(dense)
         } else {
             let mut sparse = FxHashMap::default();
@@ -163,17 +165,62 @@ impl GroupTable {
 
     #[inline]
     fn group(&self, code: u32) -> u32 {
-        if code == tessera_store::vocabulary::ABSENT_CODE {
-            return self.none();
-        }
         match &self.lookup {
             Lookup::Dense(dense) => dense.get(code as usize).copied().unwrap_or(self.listed),
-            Lookup::Sparse(sparse) => sparse.get(&code).copied().unwrap_or(self.listed),
+            Lookup::Sparse(sparse) => {
+                if code == tessera_store::vocabulary::ABSENT_CODE {
+                    return self.none();
+                }
+                sparse.get(&code).copied().unwrap_or(self.listed)
+            }
         }
     }
 }
 
-/// Where the pass reads each row's group.
+/// Which group each artifact of a row-major level counts in: a listed artifact in its position
+/// in the list, one served and not listed in [`LabelTable::rest`], and one not served in none.
+pub struct LabelTable {
+    listed: u32,
+    by_ordinal: Vec<u32>,
+}
+
+/// An ordinal no group counts.
+const UNSERVED: u32 = u32::MAX;
+
+impl LabelTable {
+    /// The table over `ordinals` ordinals, `served` the ordinals served and `listed` those listed,
+    /// in order. A listed ordinal must be served.
+    pub fn new(ordinals: usize, served: impl IntoIterator<Item = u32>, listed: &[u32]) -> Self {
+        let rest = listed.len() as u32;
+        let mut by_ordinal = vec![UNSERVED; ordinals];
+        for ordinal in served {
+            if let Some(slot) = by_ordinal.get_mut(ordinal as usize) {
+                *slot = rest;
+            }
+        }
+        for (group, &ordinal) in listed.iter().enumerate().rev() {
+            if let Some(slot) = by_ordinal.get_mut(ordinal as usize) {
+                *slot = group as u32;
+            }
+        }
+        LabelTable {
+            listed: rest,
+            by_ordinal,
+        }
+    }
+
+    /// The group of the rows in a served artifact and in no listed one.
+    pub fn rest(&self) -> u32 {
+        self.listed
+    }
+
+    /// The group of the rows in no served artifact.
+    pub fn none(&self) -> u32 {
+        self.listed + 1
+    }
+}
+
+/// Where the pass reads each row's groups.
 pub enum RowGroups<'a> {
     /// Every row in group 0.
     None,
@@ -185,12 +232,18 @@ pub enum RowGroups<'a> {
         table: &'a GroupTable,
     },
     /// Each row's entity's code in an indexed column, through `table`: the row's entity from
-    /// `tables`, the entity's code from `codes`. `row_bases[s]` is segment `s`'s first row.
+    /// `tables`, the entity's code from `codes`.
     Entity {
-        row_bases: Vec<u32>,
         tables: RowEntities<'a>,
         codes: &'a EntityCodes<'a>,
         table: &'a GroupTable,
+    },
+    /// The artifacts a row-major level labels each row with, through `table`: every listed one
+    /// labelling it, else the rest where a served one does, else none. A row can count in
+    /// several listed groups.
+    Labels {
+        column: &'a RowColumn,
+        table: &'a LabelTable,
     },
 }
 
@@ -212,13 +265,11 @@ impl<'a> RowGroups<'a> {
 
     /// The groups of an indexed column's codes, read through each row's entity, by `table`.
     pub fn entity(
-        segments: &[(&SegmentData, u32)],
         tables: RowEntities<'a>,
         codes: &'a EntityCodes<'a>,
         table: &'a GroupTable,
     ) -> RowGroups<'a> {
         RowGroups::Entity {
-            row_bases: segments.iter().map(|&(_, row_base)| row_base).collect(),
             tables,
             codes,
             table,
@@ -226,34 +277,86 @@ impl<'a> RowGroups<'a> {
     }
 
     /// How many groups a row can fall in, numbered from 0.
-    fn count(&self) -> usize {
+    pub fn count(&self) -> usize {
         match self {
             RowGroups::None => 1,
             RowGroups::Drawn { table, .. } | RowGroups::Entity { table, .. } => {
                 table.none() as usize + 1
             }
+            RowGroups::Labels { table, .. } => table.none() as usize + 1,
         }
     }
+}
 
-    #[inline]
-    fn group(&self, segment: usize, local: usize) -> u32 {
-        match self {
-            RowGroups::None => 0,
-            RowGroups::Drawn { codes, table } => {
-                let code = match &codes[segment] {
-                    Some(ScalarSlice::U8(v)) => u32::from(v[local]),
-                    Some(ScalarSlice::U16(v)) => u32::from(v[local]),
-                    Some(ScalarSlice::U32(v)) => v[local],
-                    _ => tessera_store::vocabulary::ABSENT_CODE,
-                };
-                table.group(code)
+/// One segment's way of naming a row's groups, resolved once per segment so the walk over its rows
+/// is compiled for it.
+trait Grouper {
+    /// Call `f` with each group of the row at `local` in its segment, `row` in the view.
+    fn each(&self, local: usize, row: u32, f: impl FnMut(u32));
+}
+
+/// Every row in one group.
+struct Constant(u32);
+
+impl Grouper for Constant {
+    #[inline(always)]
+    fn each(&self, _: usize, _: u32, mut f: impl FnMut(u32)) {
+        f(self.0)
+    }
+}
+
+/// A drawn code of one width, through a table.
+struct Drawn<'a, T> {
+    codes: &'a [T],
+    table: &'a GroupTable,
+}
+
+impl<T: Copy + Into<u32>> Grouper for Drawn<'_, T> {
+    #[inline(always)]
+    fn each(&self, local: usize, _: u32, mut f: impl FnMut(u32)) {
+        f(self.table.group(self.codes[local].into()))
+    }
+}
+
+/// An indexed code read through the row's entity.
+struct ByEntity<'a> {
+    tables: RowEntities<'a>,
+    codes: &'a EntityCodes<'a>,
+    table: &'a GroupTable,
+}
+
+impl Grouper for ByEntity<'_> {
+    #[inline(always)]
+    fn each(&self, _: usize, row: u32, mut f: impl FnMut(u32)) {
+        f(self.table
+            .group(self.codes.code_of(self.tables.entity_of(row))))
+    }
+}
+
+/// A row-major level's labels.
+struct ByLabel<'a> {
+    column: &'a RowColumn,
+    table: &'a LabelTable,
+}
+
+impl Grouper for ByLabel<'_> {
+    #[inline(always)]
+    fn each(&self, _: usize, row: u32, mut f: impl FnMut(u32)) {
+        let rest = self.table.rest();
+        let mut served = false;
+        let mut listed = false;
+        self.column.for_each_label(row, |ordinal| {
+            match self.table.by_ordinal.get(ordinal as usize) {
+                Some(&group) if group < rest => {
+                    listed = true;
+                    f(group);
+                }
+                Some(&group) if group == rest => served = true,
+                _ => {}
             }
-            RowGroups::Entity {
-                row_bases,
-                tables,
-                codes,
-                table,
-            } => table.group(codes.code_of(tables.entity_of(row_bases[segment] + local as u32))),
+        });
+        if !listed {
+            f(if served { rest } else { self.table.none() });
         }
     }
 }
@@ -288,42 +391,17 @@ pub fn pass_in_chunks(
     chunk_rows: u64,
 ) -> Vec<CellCount> {
     assert!(depth <= 32, "a position has 32 levels");
-    let chunks = chunks(segments, depth.min(16), chunk_rows);
-    let parts: Vec<Vec<CellCount>> = chunks
+    let parts: Vec<Vec<CellCount>> = chunks(segments, depth, chunk_rows)
         .par_iter()
-        .map(|prefixes| {
-            let coarse = u32::from(depth.min(16));
-            let shift = 32 - 2 * coarse;
-            let mut entries: Vec<CellCount> = Vec::new();
-            for (s, &(segment, row_base)) in segments.iter().enumerate() {
-                let n = segment.row_count;
-                let lo = first_code_at_or_past(segment, prefixes.start << shift, 0..n);
-                let hi = first_code_at_or_past(segment, prefixes.end << shift, lo..n);
-                if lo < hi {
-                    let rows = row_base + lo..row_base + hi;
-                    count_segment(set, segment, s, row_base, rows, depth, groups, &mut entries);
-                }
-            }
-            if segments.len() > 1 {
-                entries = add_equal_keys(
-                    entries
-                        .into_iter()
-                        .map(|e| ((e.cell, e.group), e.count))
-                        .collect(),
-                )
-                .into_iter()
-                .map(|((cell, group), count)| CellCount { cell, group, count })
-                .collect();
-            }
-            entries
-        })
+        .map(|prefixes| count_chunk(set, segments, depth, groups, prefixes.clone()))
         .collect();
     parts.concat()
 }
 
-/// Ranges of depth-`coarse` cell prefixes, ascending and together covering every cell, each
-/// holding about `chunk_rows` rows. Cut at the largest segment's quantiles.
-fn chunks(segments: &[(&SegmentData, u32)], coarse: u8, chunk_rows: u64) -> Vec<Range<u64>> {
+/// Ranges of depth-`min(depth, 16)` cell prefixes, ascending and together covering every cell,
+/// each holding about `chunk_rows` rows of the view. Cut at the largest segment's quantiles.
+pub fn chunks(segments: &[(&SegmentData, u32)], depth: u8, chunk_rows: u64) -> Vec<Range<u64>> {
+    let coarse = depth.min(16);
     let cells = 1u64 << (2 * u32::from(coarse));
     let total: u64 = segments.iter().map(|(s, _)| u64::from(s.row_count)).sum();
     let Some((largest, _)) = segments.iter().max_by_key(|(s, _)| s.row_count) else {
@@ -344,24 +422,117 @@ fn chunks(segments: &[(&SegmentData, u32)], coarse: u8, chunk_rows: u64) -> Vec<
     bounds.windows(2).map(|w| w[0]..w[1]).collect()
 }
 
+/// The table of one chunk from [`chunks`]: the set's rows whose depth-`min(depth, 16)` prefix is in
+/// `prefixes`, counted by depth-`depth` cell and group, ascending by cell then group.
+pub fn count_chunk(
+    set: CellSet<'_>,
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+    groups: &RowGroups<'_>,
+    prefixes: Range<u64>,
+) -> Vec<CellCount> {
+    let shift = 32 - 2 * u32::from(depth.min(16));
+    let width = groups.count();
+    let mut entries: Vec<CellCount> = Vec::new();
+    for (s, &(segment, row_base)) in segments.iter().enumerate() {
+        let n = segment.row_count;
+        let lo = first_code_at_or_past(segment, prefixes.start << shift, 0..n);
+        let hi = first_code_at_or_past(segment, prefixes.end << shift, lo..n);
+        if lo >= hi {
+            continue;
+        }
+        let rows = row_base + lo..row_base + hi;
+        let out = &mut entries;
+        match groups {
+            RowGroups::None => {
+                count_segment(set, segment, row_base, rows, depth, width, &Constant(0), out)
+            }
+            RowGroups::Drawn { codes, table } => match &codes[s] {
+                Some(ScalarSlice::U8(codes)) => {
+                    let g = Drawn { codes, table };
+                    count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                }
+                Some(ScalarSlice::U16(codes)) => {
+                    let g = Drawn { codes, table };
+                    count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                }
+                Some(ScalarSlice::U32(codes)) => {
+                    let g = Drawn { codes, table };
+                    count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                }
+                _ => {
+                    let g = Constant(table.none());
+                    count_segment(set, segment, row_base, rows, depth, width, &g, out)
+                }
+            },
+            RowGroups::Entity {
+                tables,
+                codes,
+                table,
+            } => {
+                let g = ByEntity {
+                    tables: *tables,
+                    codes,
+                    table,
+                };
+                count_segment(set, segment, row_base, rows, depth, width, &g, out)
+            }
+            RowGroups::Labels { column, table } => {
+                let g = ByLabel { column, table };
+                count_segment(set, segment, row_base, rows, depth, width, &g, out)
+            }
+        }
+    }
+    if segments.len() > 1 {
+        entries = add_equal_keys(
+            entries
+                .into_iter()
+                .map(|e| ((e.cell, e.group), e.count))
+                .collect(),
+        )
+        .into_iter()
+        .map(|((cell, group), count)| CellCount { cell, group, count })
+        .collect();
+    }
+    entries
+}
+
+/// [`count_chunk`] by range counts, for a depth of 16 or less and every row in group 0: the
+/// occupied cells of `prefixes` found by binary search and each counted over its row range.
+pub fn count_chunk_by_ranges(
+    set: CellSet<'_>,
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+    prefixes: Range<u64>,
+) -> RangeCounts {
+    count_by_ranges(
+        segments
+            .iter()
+            .map(|&(segment, row_base)| (segment, row_base, 0..segment.row_count)),
+        depth,
+        prefixes,
+        &|rows| set.count(rows),
+    )
+}
+
 /// Add to `out` the counts of one segment's rows `rows` (view row space), whose depth-16 cells
-/// the chunk holds whole.
+/// the chunk holds whole, each row in the groups `groups` names, of which there are `width`.
 #[allow(clippy::too_many_arguments)]
-fn count_segment(
+fn count_segment<G: Grouper>(
     set: CellSet<'_>,
     segment: &SegmentData,
-    s: usize,
     row_base: u32,
     rows: Range<u32>,
     depth: u8,
-    groups: &RowGroups<'_>,
+    width: usize,
+    groups: &G,
     out: &mut Vec<CellCount>,
 ) {
     let morton = segment.morton.u32();
     if depth <= 16 {
         let shift = 32 - 2 * u32::from(depth);
         // One counter per group, and the groups the current cell has touched.
-        let mut counts = vec![0u64; groups.count()];
+        let mut counts = vec![0u64; width];
         let mut touched: Vec<u32> = Vec::new();
         let mut current: Option<u64> = None;
         let emit =
@@ -386,12 +557,13 @@ fn count_segment(
                     }
                     current = Some(at);
                 }
-                let group = groups.group(s, i);
-                let slot = &mut counts[group as usize];
-                if *slot == 0 {
-                    touched.push(group);
-                }
-                *slot += 1;
+                groups.each(i, row, |group| {
+                    let slot = &mut counts[group as usize];
+                    if *slot == 0 {
+                        touched.push(group);
+                    }
+                    *slot += 1;
+                });
             }
         });
         if let Some(done) = current {
@@ -418,7 +590,7 @@ fn count_segment(
                     current = Some(morton[i]);
                 }
                 let position = (u64::from(morton[i]) << 32) | u64::from(residual[i]);
-                cell.push(((position >> shift, groups.group(s, i)), 1));
+                groups.each(i, row, |group| cell.push(((position >> shift, group), 1)));
             }
         });
         emit(&mut cell, out);

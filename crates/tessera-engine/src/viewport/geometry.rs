@@ -9,7 +9,7 @@ pub(crate) struct OpenView<'a> {
     /// The composed mask, before any filter narrows it.
     pub(crate) mask: EffectiveMask,
     /// Kept beside the mask for the background ladder fill, which takes the whole entry.
-    pub(super) geometry: Arc<SessionGeometry>,
+    pub(crate) geometry: Arc<SessionGeometry>,
     /// The generation `geometry` was taken for: one behind `generation` while a refresh has not
     /// yet replaced the session's projection.
     pub(super) stamp: GenerationStamp,

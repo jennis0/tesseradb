@@ -38,11 +38,12 @@ use crate::viewport::{filter_refusal, meta_of, OpenView, SinkClosed, SinkResult}
 use crate::Generation;
 
 pub use artifacts::ArtifactsRequest;
-pub(crate) use cursor::CursorKey;
-use cursor::{Binding, ItemsCursor, Position, Route};
+pub(crate) use cursor::{Binding, CursorKey, Route};
+pub(crate) use walk::Clock;
+use cursor::{ItemsCursor, Position};
 use columns::{empty_page, read_page};
 use plan::FieldPlan;
-use walk::{filter_rows, Clock, Collected, PageCx, Walk, Walked};
+use walk::{filter_rows, Collected, PageCx, Walk, Walked};
 
 /// The order a read returns its rows in. Both return the same rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,6 +415,7 @@ impl Engine {
             incarnation: manifest.incarnation_of(req.view).ok_or_else(unknown_view)?,
             auth_data_hash: session.auth_data_hash(),
             layer: None,
+            request: None,
         };
         let resumed = match req.cursor {
             None => None,
@@ -736,12 +738,12 @@ impl Pager for ItemsPager<'_> {
 }
 
 /// The page size a request is served: its own, held to the ceiling, or the ceiling.
-fn page_rows_of(asked: Option<u32>, limits: &RecordsLimits) -> u32 {
+pub(crate) fn page_rows_of(asked: Option<u32>, limits: &RecordsLimits) -> u32 {
     asked.unwrap_or(u32::MAX).min(limits.max_page_rows.max(1))
 }
 
 /// The refusals a request's own paging arguments decide, before anything is read.
-fn refuse_shape(
+pub(crate) fn refuse_shape(
     page_rows: Option<u32>,
     pages: Option<u32>,
     count: bool,

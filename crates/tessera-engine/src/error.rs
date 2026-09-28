@@ -103,6 +103,9 @@ pub enum EngineError {
     /// route, view, view incarnation or order. One variant with one message for every reason, so
     /// the refusal does not say which binding failed.
     CursorRefused,
+    /// A `POST /v1/aggregate` request the caller can correct. Every arm names only what the
+    /// caller sent and published schema.
+    AggregateRefused(crate::aggregate::AggregateRefused),
 }
 
 impl std::fmt::Display for EngineError {
@@ -175,6 +178,7 @@ impl std::fmt::Display for EngineError {
                 "this cursor was not issued for this request; pass the cursor the previous \
                  response of this read returned, or start again without one"
             ),
+            EngineError::AggregateRefused(why) => write!(f, "{why}"),
         }
     }
 }
