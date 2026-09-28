@@ -228,9 +228,11 @@ impl ExtentColumn {
         })
     }
 
-    /// Unlink the extents. Called once both readers are done with them; a build that fails
-    /// earlier leaves them to [`crate::spill::TmpDir`] with the rest of `.build-tmp/`.
+    /// Unlink the extents and stop the column's compressor threads. Called once both readers are
+    /// done with them; a build that fails earlier leaves them to [`crate::spill::TmpDir`] with the
+    /// rest of `.build-tmp/`.
     pub(crate) fn remove(&mut self) {
+        self.pool = None;
         for paths in self.extents.drain(..) {
             for path in [paths.blocks, paths.hasrow, paths.directory] {
                 let _ = std::fs::remove_file(path);
