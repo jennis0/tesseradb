@@ -161,7 +161,10 @@ export type StoreOptions = {
  * @category Store
  */
 export type Projections = {
-  /** The `/v1/meta` the store read or was given, or `null` before it has arrived and after {@link Store.clear} until it is read again. */
+  /**
+   * The `/v1/meta` the store read or was given, or `null` before it has arrived, and after
+   * {@link Store.clear} or an answer under another identity key until it is read again.
+   */
   meta: Meta | null;
   /** Whether the current view's map is loading, shown, empty or refused. */
   status: StatusProjection;
@@ -444,10 +447,12 @@ type Listener = () => void;
  * A store serves one viewer. To show the map to another viewer, create a new store or call
  * {@link Store.clear}; a token renewal for the same viewer keeps what is drawn. Each viewport answer
  * carries an identity key, which the server derives from the viewer, the viewer's visible set and
- * the view. Where an answer's key differs from the one held for its view, the store drops every
- * band, frame, artifact, shape, hovered record and count it holds before anything from that answer
- * is drawn. The key also changes for the same viewer after a compaction or a rebuilt bundle, and
- * the map is then drawn again from the new answers.
+ * the view. Where an answer's key differs from the one held for its view, the store drops that
+ * answer and forgets the viewer as {@link Store.clear} does, `meta` included, keeping the token it
+ * holds. It then reads `meta` again and asks again for the camera, so nothing answered for the
+ * previous viewer is published or drawn beside the next viewer's answers. The key also changes for
+ * the same viewer after a compaction or a rebuilt bundle, and the map is then drawn again in the
+ * same way.
  *
  * @category Store
  */
@@ -871,9 +876,12 @@ export function createStore(options: StoreOptions): Store {
     /** Assigned below. Machinery a `clear` dropped is never current again. */
     let own: ViewMachinery | null = null;
     const current = () => own !== null && views.current === own;
-    const admitted = (identityKey: string) => {
-      if (current()) admit(id, identityKey);
-    };
+    /**
+     * Whether an answer may be held: for the current view, where {@link admit} keeps it; for another
+     * view, while the store still holds this machinery.
+     */
+    const admitted = (identityKey: string): boolean =>
+      current() ? admit(id, identityKey) : [...views.all()].includes(own!);
 
     const built = new Replica(
       async (req, signal, background, onPart) => {
@@ -898,11 +906,11 @@ export function createStore(options: StoreOptions): Store {
           background,
           onPart &&
             ((part) => {
-              admitted(part.identityKey);
+              if (!admitted(part.identityKey)) throw viewerChanged();
               return onPart(part);
             })
         );
-        admitted(response.identityKey);
+        if (!admitted(response.identityKey)) throw viewerChanged();
         return response;
       },
       q,
@@ -973,40 +981,20 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * Every viewport answer, on the point path and the artifact channel, passes through here before
-   * anything in it is held. An answer under another identity key than the one held for its view
-   * drops every view's bands, frames and artifacts, the shapes and the hovered records, and
-   * publishes empty marks and counts, before the answer is absorbed. The current view then asks
-   * again for its camera.
+   * anything in it is held. An answer under another identity key than the one held for its view is
+   * another principal's, or the same viewer's after a compaction or a rebuilt bundle. The store then
+   * forgets the viewer as {@link clear} does, keeping the token it has, and reads `meta` again.
+   *
+   * @returns Whether the answer may be held. False drops it: the machinery that asked is gone.
    */
-  function admit(view: string, identityKey: string): void {
+  function admit(view: string, identityKey: string): boolean {
     const held = identities.get(view);
-    if (held === identityKey) return;
-    if (held !== undefined) forgetAnswers();
-    identities.set(view, identityKey);
-  }
-
-  /** What {@link admit} drops. The current view's request in flight is kept: it may be the new answer. */
-  function forgetAnswers(): void {
-    const current = views.current;
-    for (const held of views.all()) {
-      held.replica.reset();
-      if (held === current) held.presenter.forget();
-      else held.presenter.cancel();
-      // The channel asks again when the next frame is drawn.
-      held.channel.reset();
+    if (held !== undefined && held !== identityKey) {
+      forgetViewer(false);
+      return false;
     }
-    identities.clear();
-    table.clear();
-    shapes.forget('all');
-    records.forget();
-    contentKeyAtFrame = '';
-    colourAsked.clear();
-    replaceProjection('view', noFrame(views.id));
-    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
-    replaceProjection('tiles', {tiles: []});
-    region.loading(projections.marks);
-    publishReplica(projections.replica.lastPlan);
-    current?.presenter.reschedule();
+    identities.set(view, identityKey);
+    return true;
   }
 
   async function warm(): Promise<void> {
@@ -1589,6 +1577,15 @@ export function createStore(options: StoreOptions): Store {
   let filtersSet = false;
 
   function clear(): void {
+    forgetViewer(true);
+  }
+
+  /**
+   * Drop everything held for the viewer, `meta` among it, publish the emptied projections, and read
+   * `meta` again, after which the camera is asked for again. `forgetToken` drops the supplied token
+   * too, so the next is asked for.
+   */
+  function forgetViewer(forgetToken: boolean): void {
     clears += 1;
     suggestions.reset();
     for (const held of views.all()) {
@@ -1607,7 +1604,7 @@ export function createStore(options: StoreOptions): Store {
     contentKeyAtFrame = '';
     colourAsked.clear();
     awaitingSwitchFrame = false;
-    tokens.forget();
+    if (forgetToken) tokens.forget();
     meta = null;
     warming = null;
     replaceProjection('meta', null);
@@ -1628,6 +1625,11 @@ export function createStore(options: StoreOptions): Store {
     views.current?.channel.reset();
     region.loading(projections.marks);
     if (lastView) setView(lastView.input);
+  }
+
+  /** Thrown into an answer {@link admit} refused, so nothing in it is held. */
+  function viewerChanged(): Error {
+    return new DOMException('the viewer changed; the store asks again', 'AbortError');
   }
 
   /** Set by `dispose`: an answer that lands afterwards writes nothing. */

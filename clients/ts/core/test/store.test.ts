@@ -1258,8 +1258,9 @@ describe('a store serves one viewer', () => {
    * A store behind a supplier that hands out `t1` and then `t2`, each for a minute, so the renewal
    * falls 30 s in. `t1` is viewer A's; `t2` is viewer B's unless `renewal` says it is A's again.
    * `gate` holds a `t2` request that fetches points open after its first part has been handed over.
+   * `metaOf` answers `/v1/meta` per token.
    */
-  function twoTokens(opts: {renewal: Who; gate?: Promise<void>}) {
+  function twoTokens(opts: {renewal: Who; gate?: Promise<void>; metaOf?: (token: string) => Meta}) {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const whose = (token: string): Who => (token === 't1' ? 'a' : opts.renewal);
@@ -1275,8 +1276,9 @@ describe('a store serves one viewer', () => {
       }
     );
     const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const metaRead = vi.fn(async (token: string) => opts.metaOf?.(token) ?? SHAPED);
     const client = {
-      meta: async () => SHAPED,
+      meta: metaRead,
       viewport,
       item: async (token: string) => ({fields: {asked: token}, views: [], scoped: {}, labels: []}),
       artifact: async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}),
@@ -1287,7 +1289,7 @@ describe('a store serves one viewer', () => {
     let issued = 0;
     const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
     const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    return {store, viewport, authorise, clock, scheduler};
+    return {store, viewport, authorise, metaRead, clock, scheduler};
   }
 
   async function settled(clock: ReturnType<typeof fakeClock>, scheduler: ReturnType<typeof fakeScheduler>): Promise<void> {
@@ -1356,6 +1358,41 @@ describe('a store serves one viewer', () => {
     expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([VIEWERS.b.artifact]);
     expect(store.get('artifacts').shapes.has(VIEWERS.a.artifact)).toBe(false);
     expect(await store.describe(7n)).toEqual({asked: 't2'});
+  });
+
+  it('publishes none of viewer A’s meta once viewer B’s first answer arrives, and reads B’s', async () => {
+    // Viewer A is told of a layer and a view viewer B may not reach.
+    const metaA = meta({
+      ...SHAPED,
+      views: [...SHAPED.views, view('hidden', {quantisation: SHAPED.views[0]!.quantisation})],
+      layers: [...SHAPED.layers, layer('secret', {computedContent: ['centroid', 'box']})]
+    });
+    const metaB = SHAPED;
+    const {store, metaRead, clock, scheduler} = twoTokens({renewal: 'b', metaOf: (token) => (token === 't1' ? metaA : metaB)});
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(store.get('meta')).toBe(metaA);
+
+    const late: (Meta | null)[] = [];
+    let sawB = false;
+    store.subscribe(() => {
+      if (showing(store).has('ik-b')) sawB = true;
+      if (sawB && store.get('meta') === metaA) late.push(store.get('meta'));
+    });
+    const published: (Meta | null)[] = [];
+    store.subscribe('meta', (m) => published.push(m));
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(sawB).toBe(true);
+    expect(late).toEqual([]);
+    // Dropped when B's first answer came, then read again under B's token.
+    expect(published).toEqual([null, metaB]);
+    expect(metaRead.mock.calls.at(-1)![0]).toBe('t2');
+    expect(store.get('meta')?.layers.map((l) => l.name)).toEqual(['l']);
+    expect(store.get('meta')?.views.map((v) => v.id)).toEqual(['s0']);
+    expect(showing(store)).toEqual(new Set(['ik-b']));
   });
 
   it('draws no stand-in from viewer A beside the first points streamed to viewer B', async () => {
