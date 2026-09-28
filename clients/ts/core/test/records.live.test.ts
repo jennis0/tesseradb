@@ -332,36 +332,53 @@ describe('bulk reads against a live server', () => {
     }
   });
 
-  it('names a clustering’s artifacts by the labels attached to them, as each viewer is served them', async (ctx) => {
+  it('colours by a clustering with its labels naming the rows, and asks the point path for no label column', async (ctx) => {
     live(ctx);
-    const labelsFor = async (token: string) => {
-      const store = createStore({viewerUrl: (served as Served).viewerUrl, token, client, prefetch: false});
-      try {
-        return await store.attachedText('clusters/hdbscan');
-      } finally {
-        store.dispose();
-      }
-    };
     // A label's text is read only by a viewer who can see every paper it was drawn from. A paper
     // carries its primary category among its terms, so a viewer holding every primary category
-    // sees every paper, and one without `hep-ph` does not.
+    // sees every paper.
     const primary = (await client.categories(session.token, 'primary_category', {limit: 1000})).map((v) => v.key);
     const everything = (await client.authorise(primary)).token;
-    const broad = await labelsFor(everything);
-    const {tables} = await readAll(() => client.artifacts(everything, {view: 's0', layer: 'topics/hdbscan', fields: ['target']}));
-    expect(broad.size).toBeGreaterThan(0);
-    expect(new Set(broad.keys())).toEqual(new Set(column(tables, 'target') as bigint[]));
-    // The roots carry no text of their own and are named by their labels.
-    const roots = await client.browse(everything, {view: 's0', layer: 'clusters/hdbscan'});
-    expect(roots.artifacts.length).toBeGreaterThan(0);
-    for (const row of roots.artifacts) {
-      expect(row.name).toBeNull();
-      expect(artifactName(row, broad)).toBe(broad.get(row.tesseraId)!);
-    }
+    const bodies: {k?: number; layers?: string[]}[] = [];
+    const watching = new TesseraClient({
+      viewerUrl: (served as Served).viewerUrl,
+      sessionUrl: (served as Served).sessionUrl,
+      fetch: (url, init) => {
+        if (String(url).endsWith('/v1/viewport') && init?.body) bodies.push(JSON.parse(String(init.body)) as {k?: number; layers?: string[]});
+        return fetch(url, init);
+      }
+    });
+    const store = createStore({viewerUrl: (served as Served).viewerUrl, token: everything, client: watching, prefetch: false});
+    try {
+      store.setColourBy('cluster:clusters/hdbscan');
+      const q = meta.views.find((v) => v.id === 's0')!.quantisation;
+      store.setView({bbox: [q.xMin, q.yMin, q.xMax, q.yMax], width: 800, height: 800});
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline && (store.get('artifacts').colourServed.length === 0 || store.get('marks').bands.length === 0)) await new Promise((r) => setTimeout(r, 50));
+      const a = store.get('artifacts');
+      expect(a.colourServed.length).toBeGreaterThan(0);
+      const names = a.colourServed.map((x) => artifactName(x, a.attached));
+      expect(names.filter((n) => n !== null).length).toBeGreaterThan(0);
 
-    const narrow = await labelsFor((await client.authorise(primary.filter((k) => k !== 'hep-ph'))).token);
-    expect(narrow.size).toBeLessThan(broad.size);
-    for (const target of narrow.keys()) expect(broad.has(target)).toBe(true);
+      // The same labels a bulk read of the label layer serves this viewer.
+      const {tables} = await readAll(() => client.artifacts(everything, {view: 's0', layer: 'topics/hdbscan', fields: ['target', 'content']}));
+      const targets = column(tables, 'target') as bigint[];
+      const texts = column(tables, 'content').map((list) => [...(list as Iterable<string>)][0]);
+      for (const x of a.colourServed) {
+        const i = targets.indexOf(x.tesseraId);
+        expect(artifactName(x, a.attached)).toBe(i === -1 ? null : texts[i]);
+      }
+
+      // The points carry the coloured layer's column and not its labels'; the channel asks for both.
+      const points = bodies.filter((b) => b.k !== 0);
+      expect(points.length).toBeGreaterThan(0);
+      for (const b of points) expect(b.layers).toEqual(['clusters/hdbscan']);
+      expect(bodies.some((b) => b.k === 0 && b.layers?.includes('topics/hdbscan'))).toBe(true);
+      for (const band of store.get('marks').bands) expect(Object.keys(band.membership)).toEqual(['clusters/hdbscan']);
+    } finally {
+      store.dispose();
+      watching.close();
+    }
   });
 
   it('refuses a bad request with a TesseraError before any page', async (ctx) => {

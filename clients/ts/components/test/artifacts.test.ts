@@ -59,7 +59,7 @@ function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']
     layers,
     served,
     colourServed: [],
-    attached: attachedTextOf(served),
+    attached: attachedTextOf(served, META.layers.map((l) => l.name)),
     lineage: servedLineage(served),
     status: 'shown',
     refusal: null,
@@ -461,6 +461,16 @@ describe('a cluster named by the label attached to it', () => {
     expect(deep(host, '[part="item"][data-id="2"] [part="name"]')?.hasAttribute('data-unnamed')).toBe(true);
     // The label is the cluster's name, not a row of its own.
     expect(deep(host, '[part="item"][data-id="9"]')).toBeNull();
+  });
+
+  it('lists a drawn dependent layer’s rows where only the colour layer’s labels are served', async () => {
+    const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
+    // The drawn label on 1 carries no text; the text in `attached` is the colour layer's, on 5.
+    const bare: Artifact = {...artifact(9n, 100n), layer: 'labels', target: 1n};
+    const store = fakeStore({meta: META, status: status({}), artifacts: {...artifactsProjection([artifact(1n, 100n), bare]), attached: new Map([[5n, 'a colour label']])}});
+    (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    expect(deep(host, '[part="item"][data-id="9"]')).not.toBeNull();
   });
 
   it('in the artifact card, and on the clause the card makes', async () => {

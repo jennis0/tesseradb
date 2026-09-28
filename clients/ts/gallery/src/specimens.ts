@@ -1,6 +1,5 @@
 import type {Artifact, ArtifactDetail, BrowsePage, PaletteScheme, Projections, RegionProjection, Store} from '@tesseradb/client';
 import {NO_MASKED} from '@tesseradb/client';
-import {attachedTextOf} from '@tesseradb/client/internal';
 import type {TesseraMap} from '@tesseradb/components';
 import type {Colouring} from '@tesseradb/deck';
 import {setColouring} from '../../components/src/colouring.js';
@@ -98,9 +97,8 @@ const page = (rows: BrowsePage['artifacts'], next: string | null = null): Browse
 /** A store whose browse answers the topic hierarchy: the areas, and the topics under the first. */
 function hierarchyStore(over: Partial<Projections> = {}, matched = false): FakeStore {
   const s = store(over);
-  const {areas, topics, labels} = topicArtifacts();
+  const {areas, topics} = topicArtifacts();
   const m = (a: Artifact) => (matched ? a.maskedCount / 7n : null);
-  s.setAttached('topics', attachedTextOf(labels));
   s.setBrowse('roots', page(areas.map((a) => browseRow(a, m(a))), 'c1'));
   s.setBrowse(`p:${areas[0]!.tesseraId}`, page(topics.filter((t) => t.parentIds[0] === areas[0]!.tesseraId).map((t) => browseRow(t, m(t)))));
   s.setBrowse('q:galaxy', page([browseRow(topics[4]!)]));

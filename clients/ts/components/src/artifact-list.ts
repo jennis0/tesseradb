@@ -95,7 +95,10 @@ export class TesseraArtifactList extends TesseraElement {
     if (a.served.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">Nothing in view</span></div>`;
     const stale = this.resolvedStore?.get('status').stale ?? false;
     const opened = this.resolvedStore?.get('selection').artifact?.id ?? null;
-    const listed = flatten(a.lineage).filter(({artifact}) => !a.attached.size || !(this.resolvedStore?.get('meta')?.layers.find((l) => l.name === artifact.layer)?.depsOn.length));
+    // A drawn layer's labels name their clusters and are not rows of their own. Where no drawn
+    // label carries text, a dependent layer's rows are listed.
+    const drawnLabels = a.served.some((x) => x.target !== null && x.content.length > 0);
+    const listed = flatten(a.lineage).filter(({artifact}) => !drawnLabels || !(this.resolvedStore?.get('meta')?.layers.find((l) => l.name === artifact.layer)?.depsOn.length));
     const shown = listed.slice(0, this.rows + this.extra);
     const n = a.lineage.linked ? a.lineage.roots.length : a.served.length;
     return html`<div class="panel">${heading(`${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`)}

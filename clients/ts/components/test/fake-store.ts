@@ -11,8 +11,6 @@ export type FakeStore = Store & {
   setFrame(q: Quantisation): void;
   /** Script one browse answer: `roots`, `roots:<cursor>`, `p:<id>`, `p:<id>:<cursor>`, `q:<text>`. */
   setBrowse(key: string, page: BrowsePage): void;
-  /** Script the labels `attachedText(layer)` answers with. */
-  setAttached(layer: string, text: Map<bigint, string>): void;
   calls: {name: string; args: unknown[]}[];
 };
 
@@ -74,7 +72,6 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const perName = new Map<ProjectionName, Set<() => void>>();
   const calls: {name: string; args: unknown[]}[] = [];
   const browsePages = new Map<string, BrowsePage>();
-  const attachedText = new Map<string, Map<bigint, string>>();
   const spy =
     (name: string) =>
     (...args: unknown[]) => {
@@ -111,10 +108,6 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
       const key = req.q !== undefined ? `q:${req.q}` : req.parent !== undefined ? `p:${req.parent}${req.cursor ? `:${req.cursor}` : ''}` : `roots${req.cursor ? `:${req.cursor}` : ''}`;
       return browsePages.get(key) ?? {artifacts: [], parents: [], next: null};
     },
-    attachedText: async (layer: string) => {
-      calls.push({name: 'attachedText', args: [layer]});
-      return new Map(attachedText.get(layer) ?? []);
-    },
     suggest: spy('suggest'),
     setLayers: spy('setLayers'),
     setColourBy: spy('setColourBy'),
@@ -129,9 +122,6 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     },
     setBrowse(key: string, page: BrowsePage) {
       browsePages.set(key, page);
-    },
-    setAttached(layer: string, text: Map<bigint, string>) {
-      attachedText.set(layer, text);
     },
     // The composed request, from the projections a test sets, through the client's own
     // composition: the filter-position expression, the clauses in that position, the region.

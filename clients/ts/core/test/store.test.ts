@@ -1,4 +1,3 @@
-import {Field, List, Table, Uint64, Utf8, vectorFromArray} from 'apache-arrow';
 import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import {createStore, type Store} from '../src/store.js';
@@ -918,7 +917,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
 
   const layersOf = (artifacts: readonly Artifact[]) => [...new Set(artifacts.map((a) => a.layer))];
 
-  it('colours by a layer with nothing drawn: the request names the layer and its labels, points carry it, and nothing of it is drawn', async () => {
+  it('colours by a layer with nothing drawn: points carry its column and not its labels’, the channel asks for both, and nothing of it is drawn', async () => {
     const {store, settle, asked} = await open();
     store.setColourBy('cluster:topics');
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
@@ -927,17 +926,19 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     const points = asked().filter((r) => r.k !== 0);
     expect(points.length).toBeGreaterThan(0);
     for (const r of points) {
-      // The colour layer and its labels, which name the legend's rows.
-      expect(r.layers).toEqual(['topics', 'topic_names']);
+      // The colour layer alone: a label's membership column is read by nothing.
+      expect(r.layers).toEqual(['topics']);
       expect(r.levels).toEqual([0, 1, 2, 3]);
       expect(r.artifactBudget).toBeGreaterThan(0);
     }
-    expect(asked().some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('topics'))).toBe(true);
+    // The channel asks for the labels too, which name the legend's rows.
+    expect(asked().some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('topics') && r.layers.includes('topic_names'))).toBe(true);
 
     const bands = store.get('marks').bands;
     expect(bands.length).toBeGreaterThan(0);
     const a = store.get('artifacts');
     for (const band of bands) {
+      expect(Object.keys(band.membership)).toEqual(['topics']);
       const m = band.membership['topics']!;
       expect(m).toBeDefined();
       for (const ordinal of m.distinct) expect(a.table.resolve(ordinal, a.colours)).not.toBe(0);
@@ -951,35 +952,6 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     expect(a.colourServed.map((x) => artifactName(x, a.attached))).toEqual(['a name']);
   });
 
-  it('reads the labels attached to a layer as the viewer is served them, without the map’s filter', async () => {
-    const {client} = fakeClient(answer, LAYERED);
-    // As the server answers: the labels this viewer is served, a page at a time. The label on 12
-    // is withheld from this viewer, so it is not in the answer.
-    const labels = new Table({
-      target: vectorFromArray([11n, null], new Uint64()),
-      content: vectorFromArray([['spin magnetic effect', 'a cluster of papers'], ['orphan']], new List(new Field('item', new Utf8(), true)))
-    });
-    const artifacts = vi.fn(async () => ({
-      async *[Symbol.asyncIterator]() {
-        yield labels;
-      }
-    }));
-    (client as unknown as {artifacts: typeof artifacts}).artifacts = artifacts;
-    const clock = fakeClock();
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler: fakeScheduler(), prefetch: false, replica: {revalidateAfterMs: Infinity}});
-    await clock.advance(1);
-    store.setMembers([withMember([], {layer: 'topics', artifact: 11n, outside: false, verb: 'filter'})[0]!]);
-
-    const text = await store.attachedText('topics');
-    expect([...text]).toEqual([[11n, 'spin magnetic effect']]);
-    // One read, of the layer attached to `topics`, with no filter: a label is served on the
-    // viewer's visible set and a filter can only hide.
-    expect(artifacts.mock.calls.map((c) => (c as unknown[])[1])).toEqual([{view: 's0', layer: 'topic_names', fields: ['target', 'content']}]);
-    expect(artifactName({tesseraId: 11n, name: null}, text)).toBe('spin magnetic effect');
-    expect(artifactName({tesseraId: 12n, name: null}, text)).toBeNull();
-    expect(artifactName({tesseraId: 11n, name: 'its own'}, text)).toBe('its own');
-  });
-
   it('draws a layer with its labels and colours by another, and each surface sees its own', async () => {
     const {store, settle, asked} = await open();
     store.setLayers(['topics']);
@@ -987,7 +959,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await settle();
 
-    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'topic_names', 'kmeans']);
+    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'kmeans']);
     const a = store.get('artifacts');
     expect(a.layers).toEqual(['topics', 'topic_names']);
     expect(layersOf(a.served)).toEqual(['topics', 'topic_names']);

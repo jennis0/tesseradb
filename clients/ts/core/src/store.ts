@@ -538,16 +538,6 @@ export interface Store {
    */
   browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage>;
   /**
-   * The text of the artifacts attached to `layer`'s (a clustering's topic labels) that this viewer
-   * is served in the current view, keyed by the artifact each is attached to: what
-   * {@link artifactName} needs to name a {@link Store.browse} row. Read through `POST /v1/artifacts`
-   * for each layer attached to `layer`, without the map's filters. Waits for `/v1/meta`.
-   *
-   * @throws {@link TesseraError} where the server refuses a read, or where the store's read of
-   *   `/v1/meta` was refused.
-   */
-  attachedText(layer: string): Promise<Map<bigint, string>>;
-  /**
    * The `filters` expression every request carries: the filter-position controls, the `member_of`
    * clauses in that position and the selected region's leaf, joined by `all_of`. `null` where none
    * is set. The expression is JSON-safe: an artifact in a `member_of` or `region` leaf is a decimal
@@ -930,7 +920,7 @@ export function createStore(options: StoreOptions): Store {
         // (`k = 0`) absorbs no points, so it names none. The artifact budget and levels are the
         // channel's, so a point's membership names an artifact of the cut the panels show.
         const zoom = ownPresenter?.view?.view.zoom ?? 0;
-        const layers = req.k === 0 ? [] : layersAsked();
+        const layers = req.k === 0 ? [] : pointLayers();
         const response = await client.viewport(
           tok,
           {
@@ -1316,7 +1306,7 @@ export function createStore(options: StoreOptions): Store {
       served,
       colourServed: coloured === null ? [] : state.artifacts.filter((a) => a.layer === coloured),
       lineage: servedLineage(served),
-      attached: attachedTextOf(state.artifacts),
+      attached: attachedTextOf(state.artifacts, meta?.layers.map((l) => l.name) ?? []),
       status: state.status,
       refusal: state.refusal,
       version: state.version,
@@ -1332,15 +1322,15 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * Publish the colour coverage of the bands in view, and fetch the colour-stale ones again, once
-   * per served-set version. A band is colour-stale when it has no membership column for a layer
-   * asked for, or names an ordinal that resolves to no colour. It resolves against the colours,
-   * which cover every artifact the table holds, so a band fetched under a coarser cut is still
-   * coloured. In view is the visible box: the point path also fetches a margin, whose bands name
+   * per served-set version. A band is colour-stale when it has no membership column for a layer a
+   * point request names ({@link pointLayers}), or names an ordinal that resolves to no colour. It
+   * resolves against the colours, which cover every artifact the table holds, so a band fetched
+   * under a coarser cut is still coloured. In view is the visible box: the point path also fetches a margin, whose bands name
    * artifacts the channel did not serve for this view.
    */
   function checkColourCoverage(): void {
     const a = projections.artifacts;
-    const layers = layersAsked();
+    const layers = pointLayers();
     const machinery = views.current;
     if (!machinery || a.status !== 'shown' || layers.length === 0) {
       if (a.coverage.stale !== 0 || a.coverage.current !== 0) replaceProjection('artifacts', {...a, coverage: {current: 0, stale: 0}});
@@ -1498,13 +1488,23 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /**
-   * The layers a viewport request names: the drawn layers and the colour layer, each with its
+   * The layers the artifact channel asks for: the drawn layers and the colour layer, each with its
    * closure, so the colour layer's labels name the legend's rows.
    */
   function layersAsked(): string[] {
     const coloured = colourLayer();
     if (coloured === null || layersOn.includes(coloured) || !meta) return layersOn;
     return [...layersOn, ...drawnOnly(layerClosure(meta.layers, [coloured])).filter((l) => !layersOn.includes(l))];
+  }
+
+  /**
+   * The layers a point request names, each putting a membership column on every band: those
+   * {@link layersAsked} names, less the layers attached to another (a clustering's labels), whose
+   * columns nothing reads. Their rows come from the channel's requests.
+   */
+  function pointLayers(): string[] {
+    const attached = new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
+    return layersAsked().filter((l) => !attached.has(l));
   }
 
   /**
@@ -1569,24 +1569,6 @@ export function createStore(options: StoreOptions): Store {
     const filters = 'filters' in req ? (req.filters ?? null) : requestFilters();
     // Not a spread alone: a caller's `view: undefined` would replace the store's view.
     return client.browse(asked.token, {...req, view: req.view ?? asked.view, filters});
-  }
-
-  async function attachedText(layer: string): Promise<Map<bigint, string>> {
-    const asked = await viewed();
-    const rows: {target: bigint | null; content: string[]}[] = [];
-    for (const labels of meta?.layers ?? []) {
-      if (!labels.depsOn.includes(layer) || !labels.views.includes(asked.view)) continue;
-      const read = await client.artifacts(asked.token, {view: asked.view, layer: labels.name, fields: ['target', 'content']});
-      for await (const page of read) {
-        const target = page.getChild('target');
-        const content = page.getChild('content');
-        for (let i = 0; i < page.numRows; i++) {
-          const texts = content?.get(i) as {toArray(): (string | null)[]} | null | undefined;
-          rows.push({target: (target?.get(i) as bigint | null | undefined) ?? null, content: (texts?.toArray() ?? []).map((t) => t ?? '')});
-        }
-      }
-    }
-    return attachedTextOf(rows);
   }
 
   function setMembers(clauses: readonly MemberClause[]): void {
@@ -1805,7 +1787,6 @@ export function createStore(options: StoreOptions): Store {
     },
     setView,
     browse,
-    attachedText,
     requestFilters,
     setFilters,
     setMembers,

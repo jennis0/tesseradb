@@ -27,11 +27,10 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * A layer's hierarchy, browsed through `POST /v1/artifacts/browse` independently of the viewport:
  * it opens on the roots at any zoom and does not move with the map. A select chooses among the
  * bundle's hierarchical layers where there are several. Each row is a name, a masked count and an
- * expander; expanding fetches the children, a page at a time under More. A row is named by its own
- * text, else by the label attached to it, which the panel reads once per layer through the store's
- * `attachedText`. On a layer where a child may have several parents, a row appears under each
- * parent it is served under and names the others. A parent the viewer may not see is absent, so its
- * child reads as a root. The search box lists matching names.
+ * expander; expanding fetches the children, a page at a time under More. On a layer where a child
+ * may have several parents, a row appears under each parent it is served under and names the
+ * others. A parent the viewer may not see is absent, so its child reads as a root. The search box
+ * lists matching names.
  *
  * The panel sends the map's filters and, while any is set, shows each row's matched count beside
  * its masked count. A row's presence and its masked count do not change with the filters. A row's
@@ -57,7 +56,8 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * @csspart row - One row, with `data-id`, and `data-clause` while a clause is on its artifact:
  *   `filter`, `highlight`, or both separated by a space.
  * @csspart expander - A row's expand button.
- * @csspart name - A row's name, with `data-unnamed` where it has none, which highlights the artifact when pressed.
+ * @csspart name - A row's name, with `data-unnamed` where it has none, which highlights the artifact
+ *   when pressed.
  * @csspart counts - A row's counts.
  * @csspart count-matched - A row's matched `<tessera-count>`, while a filter is set.
  * @csspart count-masked - A row's masked `<tessera-count>`.
@@ -203,9 +203,6 @@ export class TesseraHierarchy extends TesseraElement {
    * viewport, so this is the client's only source of their names.
    */
   private names = new Map<bigint, string>();
-  /** The layer's attached labels ({@link Store.attachedText}), and the layer they were read for. */
-  @state() private accessor attached: ReadonlyMap<bigint, string> = new Map();
-  private attachedFor = '';
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   /** Moved by {@link resetServerData}, so a page asked for before it is dropped. */
   private epoch = 0;
@@ -219,8 +216,6 @@ export class TesseraHierarchy extends TesseraElement {
     this.refusal = null;
     this.open = new Set();
     this.names.clear();
-    this.attached = new Map();
-    this.attachedFor = '';
     this.fetchedUnder = '';
     if (this.searchTimer) clearTimeout(this.searchTimer);
     this.searchTimer = null;
@@ -314,20 +309,6 @@ export class TesseraHierarchy extends TesseraElement {
     return s.browse({...req, layer: layer.name, limit: Math.max(1, Math.min(this.limit, ceiling))});
   }
 
-  /**
-   * The current layer's attached labels, read once per layer. A refused read leaves the rows
-   * unnamed and the tree shown.
-   */
-  private async loadAttached(): Promise<void> {
-    const s = this.resolvedStore;
-    const layer = this.current()?.name;
-    if (!s || !layer || layer === this.attachedFor) return;
-    this.attachedFor = layer;
-    const epoch = this.epoch;
-    const attached = await s.attachedText(layer).catch(() => new Map<bigint, string>());
-    if (epoch === this.epoch && this.attachedFor === layer) this.attached = attached;
-  }
-
   private async loadRoots(cursor?: string): Promise<void> {
     const request = this.page(cursor === undefined ? {} : {cursor});
     if (!request) return;
@@ -335,7 +316,7 @@ export class TesseraHierarchy extends TesseraElement {
     this.loading = true;
     this.refusal = null;
     try {
-      const [page] = await Promise.all([request, this.loadAttached()]);
+      const page = await request;
       if (epoch !== this.epoch) return;
       const nodes = page.artifacts.map((row) => this.node(row, ''));
       this.roots = cursor === undefined ? nodes : [...(this.roots ?? []), ...nodes];
@@ -350,14 +331,14 @@ export class TesseraHierarchy extends TesseraElement {
   }
 
   private node(row: BrowseRow, parentPath: string): Node {
-    const name = artifactName(row, this.attached);
+    const name = artifactName(row);
     if (name !== null) this.names.set(row.tesseraId, name);
     return {row, path: `${parentPath}/${row.tesseraId}`, children: null, next: null, loading: false, refusal: null};
   }
 
-  /** What to call an artifact: its name where the walk has met one, else its attached label. */
+  /** What to call an artifact: its name where the walk has met one. */
   private nameOf(id: bigint): string {
-    return this.names.get(id) ?? this.attached.get(id) ?? UNNAMED;
+    return this.names.get(id) ?? UNNAMED;
   }
 
   /**
@@ -435,7 +416,7 @@ export class TesseraHierarchy extends TesseraElement {
     if (!s || !layer) return;
     const held = s.get('filters').members;
     const on = this.clausesOn(id).includes(verb);
-    const label = this.names.get(id) ?? this.attached.get(id);
+    const label = this.names.get(id);
     s.setMembers(
       on
         ? withoutMember(held, layer.name, id, verb)
@@ -489,7 +470,7 @@ export class TesseraHierarchy extends TesseraElement {
   private renderNode(node: Node, depth: number, layer: Layer, filtered: boolean): unknown {
     const open = this.open.has(node.path);
     const clauses = this.clausesOn(node.row.tesseraId);
-    const name = artifactName(node.row, this.attached);
+    const name = artifactName(node.row);
     // A `dag` node is drawn under each served parent; the row names the others.
     const also = node.row.parentIds.filter((p) => String(p) !== node.path.split('/').at(-2));
     const drawn = !isFilterLayer(layer);

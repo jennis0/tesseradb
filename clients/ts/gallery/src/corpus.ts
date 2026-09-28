@@ -348,7 +348,7 @@ export function mapState(opts: MapOptions = {}): {marks: MarksProjection; tiles:
       served,
       colourServed: [...areas, ...topics],
       lineage: servedLineage(served),
-      attached: attachedTextOf(served),
+      attached: attachedTextOf(served, META.layers.map((l) => l.name)),
       status: 'shown',
       refusal: null,
       version: 1,
