@@ -172,6 +172,16 @@ export class TesseraFilter extends TesseraElement {
    */
   private lastEpoch = -1;
 
+  protected override resetServerData(): void {
+    this.shape = null;
+    this.search = '';
+    this.lastAsked = null;
+    this.lastEpoch = -1;
+    // The draft being edited was the previous store's; the next is seeded from the one adopted.
+    this.draft = null;
+    this.sent = null;
+  }
+
   private get resolvedOperand(): FilterOperandSet | null {
     if (this.operand) return this.operand;
     return this.resolvedStore?.get('meta')?.filterOperands.find((o) => o.column === this.column) ?? null;

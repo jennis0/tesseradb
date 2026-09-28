@@ -201,10 +201,7 @@ export class Replica {
     this.now = opts.now ?? (() => performance.now());
   }
 
-  /**
-   * Drops everything held. Called when the token changes, before the new principal's first
-   * response gives its identity key, so the store is empty across a change of principal.
-   */
+  /** Drops everything held, for a change of principal, filter or selection. */
   reset(): void {
     this.cache.dropIdentity();
     this.identityKey = '';
