@@ -1,8 +1,9 @@
 //! `POST /v1/aggregate` over HTTP: each table is the count the fixture's own data gives for what
 //! the viewer may see, a density table is the viewport's tiles, a table read through its cursor is
 //! the whole table, a suppression applies from the next response, every refusal has its status,
-//! the route takes its slot from the viewport's gate and frees it when the client goes away, and
-//! `/v1/meta` publishes its limits.
+//! a request takes its slot from the viewport's gate or, with cells, the bulk-read lane, and
+//! frees it when the client goes away, a trailer says when a table was counted over a changed
+//! corpus, and `/v1/meta` publishes its limits.
 
 mod common;
 
@@ -103,7 +104,6 @@ struct Fixture {
 }
 
 async fn fixture_with(compute_gate: ComputeGate, tune: impl FnOnce(&mut ServeLimits)) -> Fixture {
-    static BUILT: OnceLock<TempDir> = OnceLock::new();
     fixture_with_gates(compute_gate, generous_bulk_gate(), tune).await
 }
 
@@ -112,6 +112,7 @@ async fn fixture_with_gates(
     bulk_gate: ComputeGate,
     tune: impl FnOnce(&mut ServeLimits),
 ) -> Fixture {
+    static BUILT: OnceLock<TempDir> = OnceLock::new();
     let tmp = TempDir::new().unwrap();
     let bundle = copy_built(&BUILT, tmp.path(), build_bundle);
     let server = spawn_server_with_bulk_reads(
@@ -766,8 +767,8 @@ async fn every_refusal_has_its_status() {
         (json!({ "view": "s0", "groupings": [{}, {}, {}] }), Some("max_aggregate_groupings")),
         (json!({ "view": "s0", "groupings": [{ "unknown": 1 }] }), None),
         (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 33 } }] }), None),
-        (json!({ "view": "s0", "groupings": [{ "cells": { "zoom": 3 } }] }), None),
         (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 300 } }] }), None),
+        (json!({ "view": "s0", "groupings": [{ "cells": { "zoom": 3 } }] }), None),
         (by(json!({ "top": 2 })), None),
         (by(json!({ "field": "archive", "layer": LAYER, "top": 2 })), None),
         (by(json!({ "field": "archive" })), None),
@@ -848,8 +849,8 @@ async fn a_request_is_admitted_by_whether_it_asks_for_cells() {
     let resp = post(&f.server, "/v1/aggregate", &token, &counts).await;
     assert!(resp.headers().contains_key("retry-after"));
     assert_eq!(refused(resp, 429).await, "backpressure");
-    drop(held);
     aggregate_ok(&f.server, &token, &cells).await;
+    drop(held);
 
     let held = hold(&f.server.state.bulk_gate).await;
     let started = Instant::now();
@@ -921,6 +922,42 @@ async fn a_client_that_goes_away_stops_the_work() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// **A response that counts a changed corpus says so**: a suppression between two responses of
+/// one paged table puts `recomposed: true` in the next trailer, and only there.
+#[tokio::test]
+async fn a_trailer_says_when_a_table_was_counted_over_a_changed_corpus() {
+    let f = fixture().await;
+    let token = token_for(&f.server, &["0"]).await;
+    let mut body = json!({
+        "view": "s0",
+        "groupings": [{ "cells": { "depth": 32 } }],
+        "page_rows": 100,
+        "pages": 1,
+    });
+    let (_, first) = aggregate_ok(&f.server, &token, &body).await;
+    assert!(first.trailer.get("recomposed").is_none(), "{}", first.trailer);
+    body["cursor"] = first.trailer["next"].clone();
+    let (_, unchanged) = aggregate_ok(&f.server, &token, &body).await;
+    assert!(unchanged.trailer.get("recomposed").is_none(), "{}", unchanged.trailer);
+
+    let resp = f
+        .server
+        .client
+        .post(f.server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!([{ "field": "id", "value": member(N - 1), "op": "suppress" }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    body["cursor"] = unchanged.trailer["next"].clone();
+    let (_, changed) = aggregate_ok(&f.server, &token, &body).await;
+    assert_eq!(changed.trailer["recomposed"], true, "{}", changed.trailer);
+    body["cursor"] = changed.trailer["next"].clone();
+    let (_, after) = aggregate_ok(&f.server, &token, &body).await;
+    assert!(after.trailer.get("recomposed").is_none(), "{}", after.trailer);
 }
 
 /// **`/v1/meta` publishes the route's limits** beside the page ceilings.

@@ -190,19 +190,24 @@ fn run_aggregate(
         },
         cancel: Some(cancel),
     };
+    let mut recomposed = false;
     let outcome = state
         .engine
         .aggregate_stream(session, request, sink)
-        .map(|trailer| RecordsTrailer {
-            pages: trailer.pages,
-            rows: trailer.rows,
-            next: trailer.next,
-            ended_by: trailer.ended_by,
+        .map(|trailer| {
+            recomposed = trailer.recomposed;
+            RecordsTrailer {
+                pages: trailer.pages,
+                rows: trailer.rows,
+                next: trailer.next,
+                ended_by: trailer.ended_by,
+            }
         })
         .map_err(|e| in_callers_words(e, &req.groupings, &groupings));
     Read::Ran {
         view: view.id.clone(),
         outcome,
+        recomposed,
     }
 }
 

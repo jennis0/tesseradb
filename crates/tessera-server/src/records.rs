@@ -264,7 +264,11 @@ pub(crate) async fn bulk_read(
         let _timer = timer;
         match read(&closure_state, &session, cancel, &mut sink) {
             Read::Refused(e) => sink.producer.refuse(e),
-            Read::Ran { view, outcome } => finish(route, &view, outcome, sink),
+            Read::Ran {
+                view,
+                outcome,
+                recomposed,
+            } => finish(route, &view, outcome, recomposed, sink),
         }
     }));
 
@@ -285,6 +289,9 @@ pub(crate) enum Read {
     Ran {
         view: String,
         outcome: Result<RecordsTrailer, EngineError>,
+        /// Whether a page counted a different state of the corpus from the page before it, sent
+        /// as the trailer's `recomposed` where true. Only an aggregate read reports it.
+        recomposed: bool,
     },
 }
 
@@ -294,17 +301,21 @@ fn finish(
     route: &str,
     view: &str,
     outcome: Result<RecordsTrailer, EngineError>,
+    recomposed: bool,
     mut sink: FrameSink,
 ) {
     match outcome {
         Ok(trailer) => {
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "pages": trailer.pages,
                 "rows": trailer.rows,
                 "next": trailer.next,
                 "ended_by": trailer.ended_by.as_str(),
                 "stream_us": sink.start.elapsed().as_micros() as u64,
             });
+            if recomposed {
+                json["recomposed"] = true.into();
+            }
             sink.producer
                 .finish(trailer_frame(json.to_string().as_bytes()));
         }
@@ -401,6 +412,7 @@ fn run_items(
     Read::Ran {
         view: view.id.clone(),
         outcome: state.engine.items_stream(session, request, sink),
+        recomposed: false,
     }
 }
 
@@ -445,5 +457,6 @@ fn run_artifacts(
     Read::Ran {
         view: view.id.clone(),
         outcome: state.engine.artifacts_stream(session, request, sink),
+        recomposed: false,
     }
 }

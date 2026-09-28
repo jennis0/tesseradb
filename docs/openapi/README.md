@@ -239,10 +239,11 @@ grouping, in the order of the request's `groupings`:
 kind 9  table head before a table's first page JSON {grouping, total, reference_total?, groups?, resumed}
 kind 7  records    one or more per table        one Arrow IPC stream holding one batch of its rows
 kind 8  page end   one after each records frame JSON {next, ended_by}
-kind 4  trailer    exactly one, last            JSON {pages, rows, next, ended_by, stream_us}
+kind 4  trailer    exactly one, last            JSON {pages, rows, next, ended_by, recomposed?, stream_us}
 ```
 
-A response can end part-way through a table. The next response, sent with the trailer's `next` as
+`recomposed` is present, as `true`, only where a page counted a different state of the corpus
+from the page before it. A response can end part-way through a table. The next response, sent with the trailer's `next` as
 `cursor`, opens with that table's head again, with `resumed` true. The rules of the items read
 hold: no trailer means incomplete, and a whole result passes `next` back until it is null. A
 table's rows are the batches between its head and the next head or the trailer, joined across

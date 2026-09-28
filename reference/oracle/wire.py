@@ -488,7 +488,8 @@ def split_items_frames(data: bytes) -> ItemsBody:
 #                                                  before a table's first page in this response
 #     kind 7  records    one Arrow stream of one batch of the table's rows
 #     kind 8  page end   JSON {next, ended_by}     one after each records frame
-#     kind 4  trailer    JSON, as an items trailer  exactly one, last
+#     kind 4  trailer    JSON, as an items trailer, and `recomposed: true` where a page counted a
+#                        changed corpus                                 exactly one, last
 FRAME_TABLE_HEAD = 9
 
 _AGGREGATE_KINDS = {FRAME_TABLE_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER}
@@ -538,6 +539,6 @@ def split_aggregate_frames(data: bytes) -> AggregateBody:
         tables[-1][1].append((payload, json.loads(middle[index + 1][1])))
         index += 2
     trailer = json.loads(frames[-1][1])
-    if set(trailer) != ITEMS_TRAILER_KEYS:
-        raise ValueError(f"the aggregate trailer's keys are {sorted(trailer)}")
+    if set(trailer) - {"recomposed"} != ITEMS_TRAILER_KEYS or trailer.get("recomposed", True) is not True:
+        raise ValueError(f"the aggregate trailer is {trailer}")
     return AggregateBody(tables, trailer)

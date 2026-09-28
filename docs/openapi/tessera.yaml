@@ -3572,6 +3572,9 @@ components:
           type: string
           enum: [end, pages, budget_bytes, budget_time, deadline]
           description: "`end`: no row remains. `pages`: the response carried `pages` pages. `budget_bytes` and `budget_time`: the response's byte or time budget ran out. `deadline`: the stream deadline cancelled it."
+        recomposed:
+          const: true
+          description: "`POST /v1/aggregate` only, and present only as `true`: a page of this response counted a different state of the corpus from the page before it, in this response or in the one its cursor came from."
         stream_us:
           type: integer
           minimum: 0
