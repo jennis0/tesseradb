@@ -127,7 +127,9 @@ function open(opts: {
   });
   /** Every viewport request issued for one view. */
   const asked = (id: string) => viewport.mock.calls.filter((c) => (c[1] as FakeRequest).view === id);
-  return {store, viewport, asked, traces};
+  /** Holds the next `/v1/meta` read open, as a `clear` waiting for the next viewer's meta. */
+  const holdMeta = () => Object.assign(client, {meta: () => new Promise<never>(() => {})});
+  return {store, viewport, asked, traces, holdMeta};
 }
 
 /** Brings a store to its first shown frame in whichever view it opened on. */
@@ -584,7 +586,7 @@ describe('what a filter change, a switch and a clear leave behind', () => {
   it('cancels the pending artifact request on clear()', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    const {store, asked} = open({view: 'v0', clock, scheduler});
+    const {store, asked, holdMeta} = open({view: 'v0', clock, scheduler});
     store.setLayers(['l']);
     await clock.advance(1);
     // Filtered, so the channel asks the server rather than answering from scopes it holds whole.
@@ -598,6 +600,8 @@ describe('what a filter change, a switch and a clear leave behind', () => {
     await clock.advance(10);
     const askedV0 = asked('v0').length;
 
+    // Until the next meta arrives, a request can only be one the clear left pending.
+    holdMeta();
     store.clear();
     await clock.advance(1000);
     expect(asked('v0')).toHaveLength(askedV0);
@@ -606,11 +610,12 @@ describe('what a filter change, a switch and a clear leave behind', () => {
   it('cancels a switch’s settle on clear()', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    const {store, asked} = open({view: 'v0', clock, scheduler});
+    const {store, asked, holdMeta} = open({view: 'v0', clock, scheduler});
     await clock.advance(1);
     await shown(store, clock, scheduler);
 
     store.setCurrentView('v1');
+    holdMeta();
     store.clear();
     await clock.advance(1000);
     scheduler.flush();

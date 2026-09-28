@@ -60,12 +60,14 @@ cosmetic.
 
 | What changed | What it means for a held view |
 |---|---|
-| A different viewer authorises (a new token for a different viewer) | The replica, held artifacts, the selection and per-column state drop. Every `tessera_id` the client already holds stays valid, because the permutation is keyed per bundle, not per viewer. |
+| A different viewer authorises (a new token for a different viewer) | The host calls `clear()` or makes a new store, which drops the replica, held artifacts, the selection and per-column state and reads meta again. Every `tessera_id` the client already holds stays valid, because the permutation is keyed per bundle, not per viewer. |
+| An answer carries another identity key | The store detects a new viewer by the identity key, which hashes the exact credential bytes presented at authorisation, the identity of the viewer's visible-set fragment, and the view. An ingest or a suppression does not change it. The store drops everything the server answered, reads meta again and asks again, and keeps the host's own inputs. A renewal that presents different credential bytes, such as a freshly signed token, changes the key, so the store redraws from scratch at that renewal even for the same person. The check runs on answers; the `Store` reference says how long a host that changes viewer without `clear()` shows the previous viewer's data. |
+| A compaction is published | A compaction rotates the fragment identity the identity key hashes, so every store sees a new key on its next answer: it drops what it holds, reads meta again and draws afresh. Every `tessera_id` stays valid. |
 | The deployment is rebuilt | The new bundle has a new key, so every `tessera_id` the client holds is meaningless. Read the items again, by a unique field's values or afresh. |
 | The content behind the current identity (an item added, denied, or unsuppressed) | The client's counts and marks may be older than the corpus. Mark the view stale and offer refresh. |
 
-Segments merging and compaction moving rows never reach a client, because nothing it holds is
-addressed by row.
+Segments merging never reaches a client, because nothing it holds is addressed by row. A
+compaction reaches it only through the identity key, as the table says.
 
 Marking a view stale is built: the store compares content keys on every answer and flips a flag a
 display reads. Fetching fresh geometry on its own, without a person asking for it, is not: a

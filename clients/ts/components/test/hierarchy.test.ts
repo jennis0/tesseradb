@@ -226,3 +226,33 @@ describe('<tessera-hierarchy> refused', () => {
     expect(deep(host, '[part="state"][data-state="empty"]')).toBeNull();
   });
 });
+
+describe('<tessera-hierarchy> across a change of viewer', () => {
+  it('drops the roots and names it fetched when the store’s meta goes null, and asks again', async () => {
+    const {host, store} = await panel();
+    expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Neoplasms', 'Anatomy']);
+    const asked = store.calls.filter((c) => c.name === 'browse').length;
+
+    // A clear or a new identity key: meta goes, and returns for the next viewer.
+    store.set('meta', null);
+    await settle(host);
+    expect(deepAll(host, '[part="row"]')).toEqual([]);
+    store.setBrowse('roots', {artifacts: [row(9n, 'Other', 12n)], parents: [], next: null});
+    store.set('meta', META);
+    await settle(host);
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'browse').length).toBeGreaterThan(asked);
+    expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Other']);
+  });
+
+  it('shows the adopted store’s roots, not the previous store’s, under the same layer and filters', async () => {
+    const {host, el} = await panel();
+    const next = fakeStore({meta: META, status: status({})});
+    next.setBrowse('roots', {artifacts: [row(9n, 'Other', 12n)], parents: [], next: null});
+    el.store = next;
+    await settle(host);
+    await settle(host);
+    expect(next.calls.filter((c) => c.name === 'browse')).toHaveLength(1);
+    expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Other']);
+  });
+});

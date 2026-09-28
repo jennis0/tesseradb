@@ -7,6 +7,10 @@
  * suffix, such as `MapElement`, for typing a ref. Each element's attributes, properties, events,
  * slots and parts are on its page in the Components reference, which each wrapper's type links to.
  *
+ * `TesseraStore`, `TesseraMap` and `TesseraExplorer` read their `authorise` prop through a ref, so
+ * an inline function does not build a new store on every render. To show the map to another
+ * viewer, change `token` or `viewerUrl`, or give the component a new `key`.
+ *
  * This entry imports `@tesseradb/components`, and with it Lit and deck.gl. The hooks are in the
  * package root, `@tesseradb/react`, which imports neither.
  *
@@ -33,6 +37,7 @@ import {
   TesseraViewPicker as ViewPickerElement,
   type TesseraEventMap
 } from '@tesseradb/components';
+import type {TokenSupplier} from '@tesseradb/client';
 
 
 /**
@@ -46,6 +51,27 @@ const ev = <K extends keyof TesseraEvents>(name: K) => name as EventName<Tessera
 const wrap = <E extends HTMLElement, Ev extends Record<string, EventName>>(tagName: string, elementClass: new () => E, events: Ev) =>
   createComponent({react: React, tagName, elementClass, events, displayName: elementClass.name});
 
+/**
+ * Hands the element one function per mount in place of the `authorise` prop, and calls the latest
+ * prop through a ref, as `useTesseraStore` does. An element builds a new store when its `authorise`
+ * function changes, so an inline arrow passed straight through would build one on every render.
+ * The store is built again when `authorise` is given or removed; to show another viewer, change
+ * `token`, `viewerUrl` or the component's `key`.
+ */
+const withStableAuthorise = <C extends React.ForwardRefExoticComponent<any>>(Inner: C): C => {
+  const Outer = React.forwardRef<unknown, {authorise?: TokenSupplier | null}>((props, ref) => {
+    const latest = React.useRef(props.authorise);
+    React.useLayoutEffect(() => {
+      latest.current = props.authorise;
+    });
+    const given = props.authorise != null;
+    const authorise = React.useMemo(() => (given ? () => latest.current!() : null), [given]);
+    return React.createElement(Inner, {...props, authorise, ref});
+  });
+  Outer.displayName = Inner.displayName;
+  return Outer as unknown as C;
+};
+
 /** The handler props for events a map emits, which the explorer also carries. */
 const mapEvents = {
   onPick: ev('tessera-pick'),
@@ -57,7 +83,7 @@ const mapEvents = {
 };
 
 /** `<tessera-store>` as a React component. It has no event props. */
-export const TesseraStore = wrap('tessera-store', StoreElement, {});
+export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreElement, {}));
 /**
  * `<tessera-explorer>` as a React component. It has a handler prop for every event, since the
  * elements inside it emit them and each event bubbles out of it: `onPick`, `onHover`,
@@ -66,7 +92,7 @@ export const TesseraStore = wrap('tessera-store', StoreElement, {});
  * `onExpired`, `onOpen`, `onClose`, `onClauseChange`, `onViewSwitch` and `onViewFollow`, each for
  * the `tessera-` event of the same name in lower case.
  */
-export const TesseraExplorer = wrap('tessera-explorer', ExplorerElement, {
+export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', ExplorerElement, {
   ...mapEvents,
   onArtifactSelect: ev('tessera-artifactselect'),
   onArtifactFit: ev('tessera-artifactfit'),
@@ -80,14 +106,14 @@ export const TesseraExplorer = wrap('tessera-explorer', ExplorerElement, {
   onClauseChange: ev('tessera-clausechange'),
   onViewSwitch: ev('tessera-viewswitch'),
   onViewFollow: ev('tessera-viewfollow')
-});
+}));
 /**
  * `<tessera-map>` as a React component. Event props: `onPick` (`tessera-pick`), `onHover`
  * (`tessera-hover`), `onViewChange` (`tessera-viewchange`), `onSelectChange`
  * (`tessera-selectchange`), `onArtifactOpen` (`tessera-artifactopen`) and `onLayerChange`
  * (`tessera-layerchange`).
  */
-export const TesseraMap = wrap('tessera-map', MapElement, mapEvents);
+export const TesseraMap = withStableAuthorise(wrap('tessera-map', MapElement, mapEvents));
 /** `<tessera-status>` as a React component. Event props: `onStateChange` (`tessera-statechange`) and `onExpired` (`tessera-expired`). */
 export const TesseraStatus = wrap('tessera-status', StatusElement, {onStateChange: ev('tessera-statechange'), onExpired: ev('tessera-expired')});
 /** `<tessera-count>` as a React component. It has no event props. */

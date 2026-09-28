@@ -89,7 +89,7 @@ export class HeldShapes {
 export class HeldRecords {
   private held = new Map<bigint, Record<string, unknown> | null>();
   private inFlight = new Map<bigint, Promise<Record<string, unknown> | null>>();
-  /** Moved by {@link forget}, so an answer asked for before it is not held. */
+  /** Moved by {@link forget}, so an answer asked for before it is neither held nor returned. */
   private epoch = 0;
   private disposed = false;
 
@@ -104,7 +104,8 @@ export class HeldRecords {
     const request = this.fetch(id)
       .catch(() => null)
       .then((fields) => {
-        if (this.disposed || epoch !== this.epoch) return fields;
+        // Asked for before a forget: another principal's record, perhaps, so the caller gets none.
+        if (this.disposed || epoch !== this.epoch) return null;
         this.inFlight.delete(id);
         this.held.set(id, fields);
         return fields;

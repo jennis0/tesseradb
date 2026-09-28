@@ -173,9 +173,18 @@ export class SessionArtifactTable implements ArtifactTable {
   private journal: number[] = [];
   /** The version `journal[0]` follows: the oldest version {@link changesSince} can answer from. */
   private journalFrom = 0;
+  private clears = 0;
 
   get version(): number {
     return this.stamp;
+  }
+
+  /**
+   * Moved by {@link clear}. An ordinal named under one generation means nothing under the next, so
+   * a holder checks it before it retains or releases one.
+   */
+  get generation(): number {
+    return this.clears;
   }
 
   /** Records one change against a new version. */
@@ -330,6 +339,7 @@ export class SessionArtifactTable implements ArtifactTable {
    * `changesSince` answers `null` for any version from before.
    */
   clear(): void {
+    this.clears += 1;
     this.entries = [null];
     this.refs = [0];
     this.ordinals.clear();

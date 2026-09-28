@@ -53,6 +53,12 @@ export class HeldViews {
     return this.byId.values();
   }
 
+  /** Whether `machinery` is one this holds, rather than one {@link forget} dropped. */
+  holds(machinery: ViewMachinery): boolean {
+    for (const held of this.byId.values()) if (held === machinery) return true;
+    return false;
+  }
+
   /** Name the current view before any view is built. */
   name(id: string): void {
     this.currentId = id;
@@ -75,6 +81,15 @@ export class HeldViews {
     }
     this.currentId = id;
     return incoming;
+  }
+
+  /**
+   * Drop every view's machinery and any pending settle, keeping the current id. The caller cancels
+   * what each view has in flight first.
+   */
+  forget(): void {
+    this.byId.clear();
+    this.cancelSettle();
   }
 
   /** Call `fire` after the settle, unless another switch comes first. */

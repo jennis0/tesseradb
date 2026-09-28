@@ -206,6 +206,23 @@ export class TesseraHierarchy extends TesseraElement {
    */
   private names = new Map<bigint, string>();
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Moved by {@link resetServerData}, so a page asked for before it is dropped. */
+  private epoch = 0;
+
+  protected override resetServerData(): void {
+    this.epoch += 1;
+    this.roots = null;
+    this.rootsNext = null;
+    this.searching = null;
+    this.loading = false;
+    this.refusal = null;
+    this.open = new Set();
+    this.names.clear();
+    this.fetchedUnder = '';
+    if (this.searchTimer) clearTimeout(this.searchTimer);
+    this.searchTimer = null;
+    this.query = '';
+  }
 
   private layers(): Layer[] {
     return browsableLayers(this.resolvedStore?.get('meta')?.layers ?? []);
@@ -297,18 +314,21 @@ export class TesseraHierarchy extends TesseraElement {
   private async loadRoots(cursor?: string): Promise<void> {
     const request = this.page(cursor === undefined ? {} : {cursor});
     if (!request) return;
+    const epoch = this.epoch;
     this.loading = true;
     this.refusal = null;
     try {
       const page = await request;
+      if (epoch !== this.epoch) return;
       const nodes = page.artifacts.map((row) => this.node(row, ''));
       this.roots = cursor === undefined ? nodes : [...(this.roots ?? []), ...nodes];
       this.rootsNext = page.next;
     } catch (error) {
+      if (epoch !== this.epoch) return;
       this.refusal = refusalOf(error);
       this.roots = this.roots ?? [];
     } finally {
-      this.loading = false;
+      if (epoch === this.epoch) this.loading = false;
     }
   }
 
@@ -329,11 +349,13 @@ export class TesseraHierarchy extends TesseraElement {
   private async expand(node: Node, more = false): Promise<void> {
     const request = this.page({parent: node.row.tesseraId, ...(more && node.next ? {cursor: node.next} : {})});
     if (!request) return;
+    const epoch = this.epoch;
     node.loading = true;
     node.refusal = null;
     this.revision++;
     try {
       const page = await request;
+      if (epoch !== this.epoch) return;
       const nodes = page.artifacts.map((row) => this.node(row, node.path));
       node.children = more ? [...(node.children ?? []), ...nodes] : nodes;
       node.next = page.next;
@@ -369,11 +391,13 @@ export class TesseraHierarchy extends TesseraElement {
       }
       const request = this.page({q});
       if (!request) return;
+      const epoch = this.epoch;
       void request
         .then((page) => {
-          this.searching = page.artifacts.map((row) => this.node(row, 'q'));
+          if (epoch === this.epoch) this.searching = page.artifacts.map((row) => this.node(row, 'q'));
         })
         .catch((error: unknown) => {
+          if (epoch !== this.epoch) return;
           this.refusal = refusalOf(error);
           this.searching = [];
         });
