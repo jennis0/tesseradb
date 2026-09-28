@@ -56,7 +56,7 @@ vocabulary = "tag"
 
 /// Item `e`'s archive: none on every tenth, otherwise spread so that both viewers see all three.
 fn archive_of(e: u64) -> Option<&'static str> {
-    (e % 10 != 0).then(|| ARCHIVES[((e / 3) % 3) as usize])
+    (!e.is_multiple_of(10)).then(|| ARCHIVES[((e / 3) % 3) as usize])
 }
 
 /// Whether the viewer holding `terms` sees item `e`: term 0 reaches every item, term 1 a third.
