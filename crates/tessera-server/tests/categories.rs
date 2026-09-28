@@ -168,7 +168,7 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
         ],
     );
     write_pairs_n(pairs, N);
-    build_declared(out, points, pairs, SCHEMA_TOML);
+    build_declared(out, points, pairs, &format!("{SCHEMA_TOML}{ID_ATTRIBUTE}"));
 }
 
 /// A server over a copy of the categories fixture, plus a session token for a fully-granted

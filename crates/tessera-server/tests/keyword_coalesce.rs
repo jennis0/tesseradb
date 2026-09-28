@@ -48,7 +48,7 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
     write_points(&points, &ids, scatter, vec![column("tag", true, tag)]);
     write_pairs_n(&pairs, N);
     let out = dir.join("bundle");
-    build_declared(&out, &points, &pairs, SCHEMA);
+    build_declared(&out, &points, &pairs, &format!("{SCHEMA}{ID_ATTRIBUTE}"));
     out
 }
 

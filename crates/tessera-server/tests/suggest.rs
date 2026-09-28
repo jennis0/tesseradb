@@ -108,7 +108,7 @@ fn build_categories(dir: &Path) {
         ],
     );
     write_pairs_n(&pairs, N);
-    build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
+    build_declared(&dir.join("bundle"), &points, &pairs, &format!("{SCHEMA_TOML}{ID_ATTRIBUTE}"));
 }
 
 /// A copy of [`build_categories`]' bundle in `tmp`, built once for this binary.

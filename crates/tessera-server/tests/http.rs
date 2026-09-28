@@ -256,7 +256,7 @@ fn build_under_key(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
     let out = dir.join("bundle");
     tessera_build::build(&tessera_build::BuildArgs {
         identity_key: tessera_types::IdentityKey::from_hex(key).unwrap(),
-        ..build_args(&out, vec![view])
+        ..with_id(build_args(&out, vec![view]), &points)
     })
     .expect("the build succeeds");
     out

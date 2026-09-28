@@ -56,7 +56,7 @@ fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds
             ..view_args("s0", &points, AccessInput::relation(&pairs))
         }],
     );
-    build(&args).expect("a projected fixture build should succeed");
+    build(&with_id(args, &points)).expect("a projected fixture build should succeed");
 }
 
 /// `/v1/meta`'s single view, fetched over real HTTP with a real session.

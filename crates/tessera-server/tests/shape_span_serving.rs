@@ -69,7 +69,7 @@ async fn serve_two_frames(tmp: &TempDir) -> TestServer {
     write_lon_lat(&points, PLACES);
     write_pairs_n(&pairs, PLACES.len() as u64);
     let bundle = dir.join("bundle");
-    build(&build_args(
+    let args = build_args(
         &bundle,
         vec![
             view(
@@ -100,8 +100,8 @@ async fn serve_two_frames(tmp: &TempDir) -> TestServer {
                 &pairs,
             ),
         ],
-    ))
-    .expect("the two-frame fixture builds");
+    );
+    build(&with_id(args, &points)).expect("the two-frame fixture builds");
     open(dir).await
 }
 

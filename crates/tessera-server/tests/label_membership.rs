@@ -590,7 +590,7 @@ hierarchy = { kind = "flat" }
 
   [layer.members]
   source = "points"
-  fields = { key = "cluster_id", entity = "entity_id" }
+  fields = { key = "cluster_id" }
 
   [layer.labels]
   name = "topics/built"

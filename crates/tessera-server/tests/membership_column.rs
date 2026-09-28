@@ -149,7 +149,7 @@ content = {{ computed = ["centroid", "box"] }}
 
   [layer.members]
   source = "points"
-  fields = {{ key = "{key_column}", entity = "entity_id" }}
+  fields = {{ key = "{key_column}" }}
 "#
     )
 }

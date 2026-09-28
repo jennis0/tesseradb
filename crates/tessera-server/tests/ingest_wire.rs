@@ -111,7 +111,7 @@ fn build_over(
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, N);
     let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA).unwrap();
+    std::fs::write(&schema_path, format!("{SCHEMA}{ID_ATTRIBUTE}")).unwrap();
     let config = tessera_build::config::Config::parse(&schema_path, &Default::default())
         .expect("the declaration parses");
     let out = dir.join("bundle");

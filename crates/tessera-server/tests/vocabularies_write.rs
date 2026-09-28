@@ -43,7 +43,7 @@ index  = true
 "#;
 
 fn fixture(dir: &Path) -> std::path::PathBuf {
-    build_scored(dir, N, SCHEMA_TOML)
+    build_scored(dir, N, &format!("{SCHEMA_TOML}{ID_ATTRIBUTE}"))
 }
 
 async fn declare(served: &Served, name: &str, body: Value) -> (u16, Value) {

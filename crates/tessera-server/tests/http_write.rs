@@ -4589,7 +4589,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         .collect();
     write_points(&points, &ids, scatter, extra);
     write_pairs_n(&pairs, SCALAR_TAIL_N);
-    build_declared(out, &points, &pairs, &scalar_tail_schema_toml());
+    build_declared(out, &points, &pairs, &format!("{}{ID_ATTRIBUTE}", scalar_tail_schema_toml()));
 }
 
 /// One ingest batch of one item, carrying [`scalar_tail_planted`]'s value in every declared column
