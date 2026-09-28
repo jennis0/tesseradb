@@ -685,6 +685,12 @@ function explorerSpecimens(): Specimen[] {
       ready
     },
     {state: 'compact container, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 560), ready},
+    {
+      state: 'compact container, a box selected and an item open, 900 × 560',
+      pinned: 900,
+      build: (ctx) => explorer(full(ctx, {...item, region: region()}), {layout: 'overlay', ...named}, 560),
+      ready
+    },
     {state: 'compact container, the filters open, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 560), ready: openFilters},
     {state: 'points over a smooth density, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth'}, 900), ready},
     {state: 'density only, smooth, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth', 'no-points': ''}, 900), ready: readyFor(false)},

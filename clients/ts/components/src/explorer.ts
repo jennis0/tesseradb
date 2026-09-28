@@ -229,13 +229,13 @@ export class TesseraExplorer extends TesseraElement {
         height: 100%;
         min-height: 320px;
       }
-      /* The map's tools sit right of the card, and of the filter panel while it is open; in the
-         narrow layout there is no card beside them. */
+      /* What the map draws at its top-left, its tools or a region's tag, sits right of the card, and
+         of the filter panel while it is open; in the narrow layout there is no card. */
       @container explorer (width > 720px) {
-        .floating:not(.compact) tessera-map {
+        .floating tessera-map {
           --tessera-map-inset-left: calc(var(--_panel-width) + var(--_tessera-space));
         }
-        .floating.filters-open:not(.compact) tessera-map {
+        .floating.filters-open tessera-map {
           --tessera-map-inset-left: calc(var(--_panel-width) + 8px + 360px + var(--_tessera-space));
         }
       }
