@@ -1,7 +1,7 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {activeCount, emptyDraft, isPopulated, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
+import {activeCount, artifactName, emptyDraft, isPopulated, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
 import type {TesseraFilter} from './filter.js';
 import {TesseraElement, UNNAMED, columnCaption, dateText, emit, keyTitle} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -147,8 +147,9 @@ export class TesseraFilterPanel extends TesseraElement {
    * since it is not served), else the served name, else unnamed.
    */
   private memberText(clause: MemberClause): string {
-    const served = this.resolvedStore?.get('artifacts').served.find((a) => a.tesseraId === clause.artifact && a.layer === clause.layer);
-    const name = clause.label ?? served?.content[0] ?? UNNAMED;
+    const artifacts = this.resolvedStore?.get('artifacts');
+    const served = artifacts?.served.find((a) => a.tesseraId === clause.artifact && a.layer === clause.layer);
+    const name = clause.label ?? (served ? artifactName(served, artifacts!.attached) : null) ?? UNNAMED;
     return clause.outside ? `Outside ${name}` : name;
   }
 

@@ -1,13 +1,15 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {isFilterLayer, withMember, withoutMember, type Artifact, type ArtifactDetail, type ClauseVerb, type Masked, type Refusal} from '@tesseradb/client';
-import {attachedTopics, displayName} from '@tesseradb/deck/internal';
+import {artifactName, isFilterLayer, withMember, withoutMember, type Artifact, type ArtifactDetail, type ClauseVerb, type Masked, type Refusal} from '@tesseradb/client';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {refusalText, renderState} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
+
+/** A parent's or child's name, or {@link UNNAMED}. */
+const nameSpan = (name: string | null) => html`<span part="name" class="name" ?data-unnamed=${name === null}>${name ?? UNNAMED}</span>`;
 
 /** A `role="button"` row's keys: Enter and Space press it. */
 const onKeys = (press: () => void) => (e: KeyboardEvent) => {
@@ -50,7 +52,7 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
  * @csspart close - The close button.
  * @csspart state - The state line, with `data-state`.
  * @csspart refusal - The words "Not available", with `data-code` set to the refusal's code.
- * @csspart headline - The artifact's name.
+ * @csspart headline - The artifact's name, with `data-unnamed` where it has none.
  * @csspart count - The masked count.
  * @csspart content - The artifact's description, or its attached topic.
  * @csspart value - The layer and the key.
@@ -61,7 +63,7 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
  * @csspart parent - One parent, with `data-id`.
  * @csspart children - The list of children in this view.
  * @csspart child - One child, with `data-id`.
- * @csspart name - A parent's or a child's name.
+ * @csspart name - A parent's or a child's name, with `data-unnamed` where it has none.
  * @csspart fit - The Fit to cluster button.
  * @csspart verbs - The clause buttons.
  * @csspart filter - The Filter to this button, with `aria-pressed` while its clause is on.
@@ -230,7 +232,7 @@ export class TesseraArtifactCard extends TesseraElement {
     const s = this.resolvedStore;
     const artifacts = s?.get('artifacts');
     const served = artifacts?.served ?? [];
-    const topics = artifacts ? attachedTopics(artifacts, s?.get('meta') ?? null) : new Map<bigint, string>();
+    const attached = artifacts?.attached ?? new Map<bigint, string>();
     // The artifact's row and children are read from the served set now, on every render.
     const here = served.find((a) => a.tesseraId === artifact.id);
     // On a `dag` layer a child appears on the card of each served parent.
@@ -245,12 +247,12 @@ export class TesseraArtifactCard extends TesseraElement {
     // they may see.
     const shape = decl?.shape ? {kind: decl.shape, text: SHAPE_TEXT[decl.shape]} : null;
     // A clause made here carries the drawn name as its label, since nothing downstream can resolve it.
-    const clauseName = here ? displayName(here, topics) : null;
+    const clauseName = here ? artifactName(here, attached) : null;
     return html`<div class="panel">${heading(true)}
       <span part="state" data-state="shown"></span>
-      <div part="headline" class="card-title">${(here ? displayName(here, topics) : null) ?? UNNAMED}</div>
+      <div part="headline" class="card-title" ?data-unnamed=${clauseName === null}>${clauseName ?? UNNAMED}</div>
       <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members"></tessera-count></div>
-      ${here && here.content.length > 0 && topics.has(here.tesseraId) ? html`<p part="content">${topics.get(here.tesseraId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
+      ${here && here.content.length > 0 && attached.has(here.tesseraId) ? html`<p part="content">${attached.get(here.tesseraId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
       <div class="field">
         <div class="k">Layer</div><div part="value" class="v">${decl?.title || artifact.detail.layer}</div>
         ${artifact.detail.key ? html`<div class="k">Key</div><div part="value" class="v mono">${artifact.detail.key}</div>` : nothing}
@@ -261,7 +263,7 @@ export class TesseraArtifactCard extends TesseraElement {
             <ul part="parents" class="list">
               ${parents.map(
                 (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(pnt.tesseraId))}>
-                  <span part="name" class="name">${displayName(pnt, topics) ?? UNNAMED}</span>
+                  ${nameSpan(artifactName(pnt, attached))}
                   <tessera-count .masked=${{value: Number(pnt.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`
               )}
@@ -272,7 +274,7 @@ export class TesseraArtifactCard extends TesseraElement {
             <ul part="children" class="list">
               ${children.map(
                 (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(c.tesseraId))}>
-                  <span part="name" class="name">${displayName(c, topics) ?? UNNAMED}</span>
+                  ${nameSpan(artifactName(c, attached))}
                   <tessera-count .masked=${{value: Number(c.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`
               )}

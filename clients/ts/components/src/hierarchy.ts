@@ -1,6 +1,6 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
+import {artifactName, browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
 import {refusalOf} from '@tesseradb/client/internal';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -56,7 +56,8 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * @csspart row - One row, with `data-id`, and `data-clause` while a clause is on its artifact:
  *   `filter`, `highlight`, or both separated by a space.
  * @csspart expander - A row's expand button.
- * @csspart name - A row's name, which highlights the artifact when pressed.
+ * @csspart name - A row's name, with `data-unnamed` where it has none, which highlights the artifact
+ *   when pressed.
  * @csspart counts - A row's counts.
  * @csspart count-matched - A row's matched `<tessera-count>`, while a filter is set.
  * @csspart count-masked - A row's masked `<tessera-count>`.
@@ -125,9 +126,6 @@ export class TesseraHierarchy extends TesseraElement {
         text-overflow: ellipsis;
         white-space: nowrap;
         text-align: left;
-      }
-      [part='name'][data-unnamed] {
-        color: var(--_tessera-ink-2);
       }
       [part='counts'] {
         display: inline-flex;
@@ -333,7 +331,8 @@ export class TesseraHierarchy extends TesseraElement {
   }
 
   private node(row: BrowseRow, parentPath: string): Node {
-    if (row.name !== null) this.names.set(row.tesseraId, row.name);
+    const name = artifactName(row);
+    if (name !== null) this.names.set(row.tesseraId, name);
     return {row, path: `${parentPath}/${row.tesseraId}`, children: null, next: null, loading: false, refusal: null};
   }
 
@@ -471,7 +470,7 @@ export class TesseraHierarchy extends TesseraElement {
   private renderNode(node: Node, depth: number, layer: Layer, filtered: boolean): unknown {
     const open = this.open.has(node.path);
     const clauses = this.clausesOn(node.row.tesseraId);
-    const name = node.row.name;
+    const name = artifactName(node.row);
     // A `dag` node is drawn under each served parent; the row names the others.
     const also = node.row.parentIds.filter((p) => String(p) !== node.path.split('/').at(-2));
     const drawn = !isFilterLayer(layer);

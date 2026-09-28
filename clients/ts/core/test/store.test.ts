@@ -3,6 +3,7 @@ import {TesseraClient, TesseraError} from '../src/client.js';
 import {createStore, type Store} from '../src/store.js';
 import type {FilterDraft} from '../src/filters.js';
 import {withMember} from '../src/members.js';
+import {artifactName} from '../src/names.js';
 import type {Artifact, Layer, MembershipColumn, Meta, ViewportPart, ViewportResponse} from '../src/types.js';
 import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
@@ -879,7 +880,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
       content: target === null ? [] : ['a name'],
       target
     });
-  const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)]};
+  const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)], subtopics: [row('subtopics', 41n)]};
 
   /**
    * Answers as the server does: the artifacts of every layer named, and on a point request a
@@ -898,10 +899,10 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     return {...r, result: {...r.result, membership, artifacts: named.flatMap((n) => ROWS[n] ?? []), artifactsIdentity: null}};
   }
 
-  async function open(traces: {kind: string; fields: Record<string, number | string>}[] = []) {
+  async function open(traces: {kind: string; fields: Record<string, number | string>}[] = [], declared: Meta = LAYERED) {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    const {client, viewport} = fakeClient(answer, LAYERED);
+    const {client, viewport} = fakeClient(answer, declared);
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, instruments: {onTrace: (kind, fields) => traces.push({kind, fields})}});
     await clock.advance(1);
     const settle = async () => {
@@ -916,7 +917,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
 
   const layersOf = (artifacts: readonly Artifact[]) => [...new Set(artifacts.map((a) => a.layer))];
 
-  it('colours by a layer with nothing drawn: the request names the layer alone, points carry it, and nothing of it is drawn', async () => {
+  it('colours by a layer with nothing drawn: points carry its column and not its labels’, the channel asks for both, and nothing of it is drawn', async () => {
     const {store, settle, asked} = await open();
     store.setColourBy('cluster:topics');
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
@@ -925,17 +926,19 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     const points = asked().filter((r) => r.k !== 0);
     expect(points.length).toBeGreaterThan(0);
     for (const r of points) {
-      // The colour layer alone: its labels layer would be drawn, and nothing of it is.
+      // The colour layer alone: a label's membership column is read by nothing.
       expect(r.layers).toEqual(['topics']);
       expect(r.levels).toEqual([0, 1, 2, 3]);
       expect(r.artifactBudget).toBeGreaterThan(0);
     }
-    expect(asked().some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('topics'))).toBe(true);
+    // The channel asks for the labels too, which name the legend's rows.
+    expect(asked().some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('topics') && r.layers.includes('topic_names'))).toBe(true);
 
     const bands = store.get('marks').bands;
     expect(bands.length).toBeGreaterThan(0);
     const a = store.get('artifacts');
     for (const band of bands) {
+      expect(Object.keys(band.membership)).toEqual(['topics']);
       const m = band.membership['topics']!;
       expect(m).toBeDefined();
       for (const ordinal of m.distinct) expect(a.table.resolve(ordinal, a.colours)).not.toBe(0);
@@ -945,6 +948,19 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     expect(a.served).toEqual([]);
     expect(a.lineage.roots).toEqual([]);
     expect(layersOf(a.colourServed)).toEqual(['topics']);
+    // The coloured cluster is named by the label attached to it.
+    expect(a.colourServed.map((x) => artifactName(x, a.attached))).toEqual(['a name']);
+  });
+
+  it('keeps a drawn dependent layer that declares geometry on the point path, and drops only its labels', async () => {
+    // `subtopics` depends on `topics` and draws clusters of its own, so it is not a label layer.
+    const declared: Meta = {...LAYERED, layers: [...LAYERED.layers.slice(0, 2), drawn('subtopics', {depsOn: ['topics']}), ...LAYERED.layers.slice(2)]};
+    const {store, settle, asked} = await open([], declared);
+    store.setLayers(['topics']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'subtopics']);
+    expect(Object.keys(store.get('marks').bands[0]!.membership).sort()).toEqual(['subtopics', 'topics']);
   });
 
   it('draws a layer with its labels and colours by another, and each surface sees its own', async () => {
@@ -954,7 +970,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await settle();
 
-    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'topic_names', 'kmeans']);
+    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'kmeans']);
     const a = store.get('artifacts');
     expect(a.layers).toEqual(['topics', 'topic_names']);
     expect(layersOf(a.served)).toEqual(['topics', 'topic_names']);

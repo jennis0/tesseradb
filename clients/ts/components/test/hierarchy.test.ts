@@ -88,6 +88,19 @@ describe('<tessera-hierarchy>', () => {
     expect(name.textContent).not.toContain('d-3');
   });
 
+  it('names a row by the name the server serves it, and marks a row with none, or an empty one, unnamed', async () => {
+    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
+    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const store = fakeStore({meta: META, status: status({})});
+    store.setBrowse('roots', {artifacts: [row(3n, 'spin magnetic effect', 10n), row(4n, null, 8n), row(5n, '', 6n)], parents: [], next: null});
+    el.store = store;
+    await settle(host);
+    await settle(host);
+    const names = deepAll(host, '[part="row"] [part="name"]');
+    expect(names.map((n) => n.textContent?.trim())).toEqual(['spin magnetic effect', UNNAMED, UNNAMED]);
+    expect(names.map((n) => n.hasAttribute('data-unnamed'))).toEqual([false, true, true]);
+  });
+
   it('fetches a node’s children on expansion, and pages them under More', async () => {
     const {host, el, store} = await panel();
     store.setBrowse('p:1', {artifacts: [row(11n, 'Cysts', 900n)], parents: [], next: 'c2'});

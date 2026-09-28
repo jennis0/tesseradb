@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
-import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
-import {LABEL_CANDIDATE_CEILING, artifactName, displayName, frontier, labelBudget, labelCandidates} from '../src/layer.js';
+import {SessionArtifactTable, attachedTextOf, servedLineage} from '@tesseradb/client/internal';
+import {LABEL_CANDIDATE_CEILING, frontier, labelBudget, labelCandidates} from '../src/layer.js';
 import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, placeLabels} from '../src/labels.js';
 import medcpt from './fixtures/medcpt-kmeans-labels.json' with {type: 'json'};
 
@@ -53,7 +53,7 @@ function projection(input: Artifact[]): ArtifactsProjection {
   const served = withRungs(input);
   const table = new SessionArtifactTable();
   const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
-  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
+  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], lineage: servedLineage(served), attached: attachedTextOf(served, ['clusters', 'topics']), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
 const META = {layers: [{name: 'clusters', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: []}, {name: 'topics', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: ['clusters']}]} as unknown as Meta;
@@ -97,17 +97,6 @@ describe('frontier', () => {
     expect(ids(frontier(p, 1))).toEqual(['2', '4']);
     expect(ids(frontier(p, 0))).toEqual(['1']);
     expect(ids(frontier(p, 9))).toEqual(['3', '4']);
-  });
-});
-
-describe('naming', () => {
-  it('an artifact with no supplied text has no name — never its key', () => {
-    expect(artifactName(artifact(1n, 5n, ['quantum error correction']))).toBe('quantum error correction');
-    expect(artifactName(artifact(1n, 5n))).toBeNull();
-    expect(artifactName(artifact(1n, 5n, ['']))).toBeNull();
-    const topics = new Map([[2n, 'decoders, thresholds']]);
-    expect(displayName(artifact(2n, 5n), topics)).toBe('decoders, thresholds');
-    expect(displayName(artifact(3n, 5n), topics)).toBeNull();
   });
 });
 

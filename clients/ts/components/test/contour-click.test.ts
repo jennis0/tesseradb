@@ -45,6 +45,7 @@ function artifactsProjection(served: Artifact[]): ArtifactsProjection {
     layers: ['clusters'],
     served,
     colourServed: [],
+    attached: new Map(),
     lineage: servedLineage(served),
     status: 'shown',
     refusal: null,

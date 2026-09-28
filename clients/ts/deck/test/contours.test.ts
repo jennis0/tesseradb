@@ -47,7 +47,7 @@ function projection(input: Artifact[]): ArtifactsProjection {
   const served = withRungs(input);
   const table = new SessionArtifactTable();
   const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, rung: a.rung})));
-  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
+  return {layer: 'clusters', layers: ['clusters'], served, colourServed: [], attached: new Map(), lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
 /** The unsigned area of a closed ring, by the shoelace formula. */

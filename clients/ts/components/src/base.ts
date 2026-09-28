@@ -209,10 +209,11 @@ export abstract class TesseraElement extends LitElement {
 }
 
 /**
- * What stands where an artifact or a record has no name. A key such as `hdb-2422486` is an
- * identifier and would read as a name, so it shows only in the card's key field.
+ * What stands where an artifact has no name, on an element carrying `data-unnamed`, which draws it
+ * faint. A key such as `hdb-2422486` is an identifier and would read as a name, so it shows only in
+ * the card's key field.
  */
-export const UNNAMED = '\u2014';
+export const UNNAMED = 'Unnamed';
 
 /** Emit one of the elements' events, bubbling and composed so it crosses shadow roots. */
 export function emit<K extends keyof TesseraEventDetails>(from: HTMLElement, name: K, detail: TesseraEventDetails[K]): void {
