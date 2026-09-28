@@ -6,17 +6,29 @@ import {DEFAULT_COLOURING, type Colouring} from '@tesseradb/deck';
  * chosen for single values. The map draws with them and the legend shows and changes them, and the
  * two may be siblings that share nothing but the store, so the choices are kept per store here.
  * They are presentation only: nothing here changes what is fetched, counted or drawn.
+ *
+ * A value colour names a category key the server answered for one viewer. When the store forgets
+ * what the server answered (its `meta` goes to `null`, on `clear()` or an answer under another
+ * identity), the value colours go too, so the next viewer's values take none of them. The palette,
+ * the ramp, its scale and its direction are the user's and stay.
  */
 
-type Entry = {colouring: Colouring; listeners: Set<() => void>};
+type Entry = {colouring: Colouring; listeners: Set<() => void>; metaHeld: boolean};
 
 const entries = new WeakMap<Store, Entry>();
 
 function entry(store: Store): Entry {
   let held = entries.get(store);
   if (!held) {
-    held = {colouring: DEFAULT_COLOURING, listeners: new Set()};
-    entries.set(store, held);
+    const entry: Entry = {colouring: DEFAULT_COLOURING, listeners: new Set(), metaHeld: store.get('meta') !== null};
+    store.subscribe(() => {
+      const meta = store.get('meta') !== null;
+      const forgot = entry.metaHeld && !meta;
+      entry.metaHeld = meta;
+      if (forgot && Object.keys(entry.colouring.values).length > 0) setColouring(store, {values: {}});
+    });
+    entries.set(store, entry);
+    held = entry;
   }
   return held;
 }

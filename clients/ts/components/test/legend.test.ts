@@ -133,6 +133,51 @@ describe('<tessera-legend> rows as a filter and a highlight', () => {
 });
 
 describe('<tessera-legend> colours', () => {
+  it('gives a value past the palette a row of its own once it has a colour, and names Other only while some value falls past', async () => {
+    const many = Array.from({length: 12}, (_, i) => ({code: i + 1, key: `k${i}`, title: `Value ${i}`}));
+    const ranks = Object.fromEntries(many.map((v, i) => [v.code, i]));
+    const {host, store} = await mountLegend('field', undefined, {categories: {field: many}, ranks: {field: ranks}});
+    const names = () => deepAll(host, '[part="name"]').map((n) => n.textContent);
+    // Tableau 10 holds ten; the eleventh and twelfth share "Other".
+    expect(names()).toEqual([...many.slice(0, 10).map((v) => v.title), 'Other']);
+    const {setColouring} = await import('../src/colouring.js');
+    setColouring(store, {values: {field: {k11: '#123456'}}});
+    await settle(host);
+    expect(names()).toEqual([...many.slice(0, 10).map((v) => v.title), 'Value 11', 'Other']);
+    setColouring(store, {values: {field: {k10: '#654321', k11: '#123456'}}});
+    await settle(host);
+    expect(names()).toEqual([...many.slice(0, 10).map((v) => v.title), 'Value 10', 'Value 11']);
+  });
+
+  it('names each palette colour by its palette and place, and closes when focus leaves it', async () => {
+    const {host} = await mountLegend('field');
+    (entry(host, 'cs.LG').querySelector('[part="swatch"]') as HTMLButtonElement).click();
+    await settle(host);
+    const choices = deepAll(host, '[part="choice"]');
+    const second = hexOf(CATEGORY_PALETTES.tableau10.colours[1]!);
+    expect(choices[1]!.getAttribute('aria-label')).toBe(`Tableau 10, colour 2 of 10, ${second}`);
+    expect(choices[11]!.getAttribute('aria-label')).toMatch(/^Tableau 10, lighter colour 2 of 10, #/);
+    // Focus moving within the picker keeps it open; moving out of it, as Tab past its end does, closes it.
+    const popover = deep(host, '[part="colour-popover"]')!;
+    popover.dispatchEvent(new FocusEvent('focusout', {relatedTarget: choices[2]!, bubbles: true}));
+    await settle(host);
+    expect(deep(host, '[part="colour-popover"]')).not.toBeNull();
+    popover.dispatchEvent(new FocusEvent('focusout', {relatedTarget: document.body, bubbles: true}));
+    await settle(host);
+    expect(deep(host, '[part="colour-popover"]')).toBeNull();
+  });
+
+  it('closes the colour picker when Colour by is opened', async () => {
+    const {host} = await mountLegend('field', '<tessera-legend selectable readout></tessera-legend>');
+    (entry(host, 'cs.LG').querySelector('[part="swatch"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(deep(host, '[part="colour-popover"]')).not.toBeNull();
+    (deep(host, '[part="colour-by"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(deep(host, '[part="colour-popover"]')).toBeNull();
+    expect(deep(host, '[part="colour-menu"]')).not.toBeNull();
+  });
+
   it('applies a colour chosen in the picker at once and reports it; Reset gives the palette colour back', async () => {
     const {host, store} = await mountLegend('field');
     const picked: unknown[] = [];
@@ -248,19 +293,84 @@ describe('<tessera-legend> colours', () => {
 });
 
 describe('<tessera-legend> a number’s range', () => {
-  it('sets the column’s range filter from its handles, and follows the filter it is given', async () => {
+  /** The draft the store holds for citations, as the filter panel's chip reads it. */
+  const withRange = (store: FakeStore, gte: number | null, lte: number | null) =>
+    store.set('filters', filtersOf({...emptyDraft(META.filterOperands), citations: {family: 'numeric', gte, lte, verb: 'filter'}}));
+
+  it('leaves an end open that is not moved off the ramp’s edge, since the ramp spans only the values drawn', async () => {
     const {host, store} = await mountLegend('citations');
     expect(deep(host, '[part="range"]')).toBeNull();
     const low = deep(host, '[part="range-low"]') as HTMLElement;
     low.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowRight', shiftKey: true, bubbles: true}));
-    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: 100, lte: 1000, verb: 'filter'});
+    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: 100, lte: null, verb: 'filter'});
+    await answer(host, store);
+    // Home takes the low end back to the edge, which opens it.
+    (deep(host, '[part="range-low"]') as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', {key: 'Home', bubbles: true}));
+    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: null, lte: null, verb: 'filter'});
+  });
 
-    // The chip moved elsewhere: the range follows it.
-    store.set('filters', filtersOf({...emptyDraft(META.filterOperands), citations: {family: 'numeric', gte: 250, lte: 500, verb: 'filter'}}));
+  it('follows the filter it is given, and shows a bound beyond the values drawn as its own value', async () => {
+    const {host, store} = await mountLegend('citations');
+    withRange(store, 250, 500);
     await settle(host);
     expect(deep(host, '[part="range-low"]')!.getAttribute('aria-valuenow')).toBe('250');
     expect(deep(host, '[part="range-high"]')!.getAttribute('aria-valuenow')).toBe('500');
     expect(deepAll(host, '[part="range-value"]').map((v) => v.textContent)).toEqual(['250', '500']);
-    expect(deep(host, '[part="range"]')).not.toBeNull();
+
+    // The domain drawn is 0 to 1,000; the filter reaches past it on both sides.
+    withRange(store, -50, 5000);
+    await settle(host);
+    const low = deep(host, '[part="range-low"]') as HTMLElement;
+    const high = deep(host, '[part="range-high"]') as HTMLElement;
+    expect([low.getAttribute('aria-valuenow'), high.getAttribute('aria-valuenow')]).toEqual(['-50', '5000']);
+    expect([low.style.left, high.style.left]).toEqual(['0.00%', '100.00%']);
+    expect(deepAll(host, '[part="range-value"]').map((v) => v.textContent)).toEqual(['-50', '5,000']);
+    // Moving one end keeps the other end's own bound.
+    high.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowLeft', shiftKey: true, bubbles: true}));
+    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: -50, lte: 900, verb: 'filter'});
+  });
+
+  it('sets a range from a drag across the ramp, open where the drag reaches its end', async () => {
+    const {host, store} = await mountLegend('citations');
+    const track = deep(host, '.track') as HTMLElement;
+    track.getBoundingClientRect = () => ({left: 0, top: 0, right: 200, bottom: 22, width: 200, height: 22, x: 0, y: 0, toJSON: () => ({})});
+    const pointer = (type: string, clientX: number) => track.dispatchEvent(new PointerEvent(type, {clientX, button: 0, pointerId: 1, bubbles: true}));
+    pointer('pointerdown', 50);
+    pointer('pointermove', 150);
+    pointer('pointerup', 150);
+    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: 250, lte: 750, verb: 'filter'});
+    pointer('pointerdown', 100);
+    pointer('pointerup', 260);
+    expect(sent(store)!['citations']).toEqual({family: 'numeric', gte: 500, lte: null, verb: 'filter'});
+    // A press without a drag changes nothing.
+    const before = store.calls.length;
+    pointer('pointerdown', 120);
+    pointer('pointerup', 120);
+    expect(store.calls.length).toBe(before);
+  });
+});
+
+describe('the colour choices across a change of viewer', () => {
+  it('forget the value colours when the store forgets what the server answered, and keep the palette', async () => {
+    const {host, store} = await mountLegend('field');
+    (entry(host, 'cs.CV').querySelector('[part="swatch"]') as HTMLButtonElement).click();
+    await settle(host);
+    (deep(host, '[part="choice"]') as HTMLButtonElement).click();
+    const {setColouring} = await import('../src/colouring.js');
+    setColouring(store, {palette: 'dark2'});
+    expect(Object.keys(colouringOf(store).values)).toEqual(['field']);
+
+    // `clear()`: meta goes to null, then the next viewer's answer arrives.
+    store.set('meta', null);
+    store.set('meta', META);
+    store.set('legend', legend('field'));
+    await settle(host);
+    expect(colouringOf(store).values).toEqual({});
+    expect(colouringOf(store).palette).toBe('dark2');
+    const [r, g, b] = CATEGORY_PALETTES.dark2.colours[1]!;
+    expect((entry(host, 'cs.CV').querySelector('[part="swatch"]') as HTMLElement).style.getPropertyValue('--c')).toBe(`rgb(${r}, ${g}, ${b})`);
+    const {encodingOf} = await import('@tesseradb/deck/internal');
+    const encoding = encodingOf(META, legend('field'), colouringOf(store));
+    expect(encoding.kind === 'category' && encoding.chosen.size).toBe(0);
   });
 });

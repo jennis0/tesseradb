@@ -233,11 +233,11 @@ describe('<tessera-legend limit>', () => {
     const host = await mount('<tessera-legend limit="4"></tessera-legend>');
     (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
     await settle(host);
-    // Seven values and the entry for the rest, cut to four.
+    // Seven values, all within the palette, so no entry for the rest; cut to four.
     expect(deepAll(host, '[part="swatch"]')).toHaveLength(4);
     (deep(host, '[part="more"]') as HTMLButtonElement).click();
     await settle(host);
-    expect(deepAll(host, '[part="swatch"]')).toHaveLength(8);
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(7);
     expect(deep(host, '[part="more"]')).toBeNull();
   });
 });

@@ -344,9 +344,10 @@ export class TesseraMap extends TesseraElement {
   /** A deck.gl layer drawn under the points, such as a basemap, in the map's 512-unit world. */
   @property({attribute: false}) accessor basemap: Layer | null = null;
   /**
-   * The ground the map draws on, `light` or `dark`, where it differs from the page's, such as a light
-   * basemap under a dark page. The labels and the positional palette follow it, and the toolbar and
-   * panels follow the page. Unset, the host's `color-scheme` decides, else the system preference.
+   * The ground the map draws on, `light` or `dark`, where it differs from the page's, such as a
+   * light basemap under a dark page. The labels and the positional palette follow it, and the
+   * toolbar and panels follow the page. Unset, the host's `color-scheme` decides, else the system
+   * preference.
    */
   @property({reflect: true}) accessor ground: 'light' | 'dark' | '' = '';
   /** Hides the points. Density, outlines, labels and the selection are still drawn. */
@@ -388,9 +389,9 @@ export class TesseraMap extends TesseraElement {
   @property({type: Boolean, attribute: 'ramp-reverse'}) accessor rampReverse = false;
   /**
    * Colours for single category values, per column, per category key, as `#rrggbb`, such as
-   * `{field: {'cs.CV': '#f28e2b'}}`. Setting it replaces every value colour chosen before, including
-   * those chosen in the legend; a host restores a viewer's saved choices this way, having kept them
-   * from `tessera-valuecolour`. Unset, the legend's choices stand.
+   * `{field: {'cs.CV': '#f28e2b'}}`. Setting it replaces every value colour chosen before,
+   * including those chosen in the legend; a host restores a viewer's saved choices this way, having
+   * kept them from `tessera-valuecolour`. Unset, the legend's choices stand.
    */
   @property({attribute: false}) accessor valueColours: Colouring['values'] | null = null;
   /**
@@ -1045,8 +1046,8 @@ export class TesseraMap extends TesseraElement {
   };
 
   /**
-   * Select a shape in data coordinates, as drawing a box or lasso does; `null` clears the selection.
-   * Fires `tessera-selectchange`.
+   * Select a shape in data coordinates, as drawing a box or lasso does; `null` clears the
+   * selection. Fires `tessera-selectchange`.
    */
   select(shape: SelectionShape | null): void {
     this.regionAskedAt = performance.now();

@@ -1,5 +1,6 @@
 import {css} from 'lit';
-import type {DensityColours, DensityMode} from '@tesseradb/deck';
+import type {DensityColours} from '@tesseradb/deck';
+import type {TesseraEventDetails} from './events.js';
 import {densityStops} from '@tesseradb/deck/internal';
 
 /**
@@ -8,14 +9,7 @@ import {densityStops} from '@tesseradb/deck/internal';
  */
 
 /** Every display setting, as the explorer holds it and `tessera-displaychange` reports it. */
-export type DisplaySettings = {
-  points: boolean;
-  radius: number | null;
-  pointOpacity: number | null;
-  density: DensityMode;
-  densityColours: DensityColours | null;
-  densityStrength: number;
-};
+export type DisplaySettings = TesseraEventDetails['tessera-displaychange'];
 
 /** A density ramp as a CSS gradient, sparse to dense, on `scheme`'s ground. */
 export function densityGradient(colours: DensityColours, scheme: 'light' | 'dark'): string {

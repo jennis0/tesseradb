@@ -93,8 +93,8 @@ export function densityPaint(colours: DensityColours, scheme: 'light' | 'dark'):
 export type DensityCell = {position: [number, number]; count: number};
 
 /**
- * One cell per exact tile at `depth` whose `channel` count is not zero, at the tile's centre in world
- * units. A tile that is not exact, or is at another depth, gives none.
+ * One cell per exact tile at `depth` whose `channel` count is not zero, at the tile's centre in
+ * world units. A tile that is not exact, or is at another depth, gives none.
  */
 export function densityCells(tiles: readonly ComposedTile[], depth: number, channel: 'visible' | 'matched' | 'highlighted'): DensityCell[] {
   const span = WORLD_SIZE / 2 ** depth;
@@ -141,15 +141,14 @@ export const WASH_HUE: Record<'light' | 'dark', Rgb> = {light: [110, 104, 96], d
 const BIN_ALPHA_MAX = 178;
 
 /**
- * Bin the exact tiles at `depth` into one texel each, over the rectangle those tiles span.
- * `channel` chooses the count: `matched` narrows with a filter, `visible` does not, and
+ * Bin the exact tiles at `depth` into one texel each, over the rectangle those tiles span. A texel's
+ * alpha is its intensity and its colour is unset; {@link filterDensity} paints it. `channel` chooses the count: `matched` narrows with a filter, `visible` does not, and
  * `highlighted` shows where a highlight's members are when the marks are too sparse a sample to.
  */
 export function binDensity(
   tiles: readonly ComposedTile[],
   depth: number,
-  channel: 'visible' | 'matched' | 'highlighted' = 'matched',
-  hue: Rgb = WASH_HUE.light
+  channel: 'visible' | 'matched' | 'highlighted' = 'matched'
 ): DensityImage | null {
   const cells: {x: number; y: number; count: number}[] = [];
   let x0 = Infinity;
@@ -181,9 +180,6 @@ export function binDensity(
     if (cell.count === 0) continue;
     const t = rank.get(cell.count) ?? 0;
     const i = ((cell.y - y0) * width + (cell.x - x0)) * 4;
-    data[i] = hue[0];
-    data[i + 1] = hue[1];
-    data[i + 2] = hue[2];
     // Faint at the low end and never opaque, so the points stay legible over the densest bin.
     data[i + 3] = Math.round(28 + t * (BIN_ALPHA_MAX - 28));
     filled++;

@@ -1,6 +1,5 @@
 import {CompositeLayer, type BinaryAttribute as DeckBinaryAttribute, type CompositeLayerProps, type Layer, type LayersList, type UpdateParameters} from '@deck.gl/core';
 import {BitmapLayer, LineLayer, PolygonLayer, ScatterplotLayer, TextLayer} from '@deck.gl/layers';
-import {ContourLayer, GridLayer, HexagonLayer} from '@deck.gl/aggregation-layers';
 import {
   CLUSTER_PREFIX,
   NO_ORDINAL,
@@ -23,7 +22,7 @@ import {NEUTRAL} from '@tesseradb/client/internal';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rampAt as rampAtStops, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
-import {WASH_HUE, binDensity, contourThresholds, densityCells, densityPaint, densityStops, filterDensity, type DensityCell, type DensityColours, type DensityMode} from './density.js';
+import {binDensity, contourThresholds, densityCells, densityPaint, densityStops, filterDensity, type DensityCell, type DensityColours, type DensityMode} from './density.js';
 import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {LookupTexture} from './lut.js';
 import {DULL_COLOUR, MarksLayer, type HighlightPass} from './marks-layer.js';
@@ -32,9 +31,9 @@ import {MarkSlab, type GpuSlab} from './slab.js';
 
 /**
  * The props of a {@link TesseraLayer}: deck.gl's `CompositeLayerProps` and the props below, all
- * optional. `pickable` defaults to true. Set `store`, or set the projection props (`marks`, `tiles`,
- * `depth`, `artifacts`, `meta`, `legend`, `status`) yourself. A projection prop set beside `store`
- * is drawn in place of the store's.
+ * optional. `pickable` defaults to true. Set `store`, or set the projection props (`marks`,
+ * `tiles`, `depth`, `artifacts`, `meta`, `legend`, `status`) yourself. A projection prop set beside
+ * `store` is drawn in place of the store's.
  */
 export type TesseraLayerProps = CompositeLayerProps & {
   /** The store to read projections from. The layer subscribes to it and redraws on each change. Defaults to `null`. */
@@ -52,7 +51,8 @@ export type TesseraLayerProps = CompositeLayerProps & {
   artifacts?: ArtifactsProjection | null;
   /**
    * The `/v1/meta` answer, in place of the store's `meta`. Column colour reads its columns and the
-   * labels and outlines read its layers; without it the marks draw in one colour. Defaults to `null`.
+   * labels and outlines read its layers; without it the marks draw in one colour. Defaults to
+   * `null`.
    */
   meta?: Meta | null;
   /**
@@ -109,10 +109,10 @@ export type TesseraLayerProps = CompositeLayerProps & {
    */
   dragPolygon?: [number, number][] | null;
   /**
-   * Whether the request carried a highlight. When true, the marks that satisfy it keep their colour,
-   * draw larger and carry a soft glow of their own colour, and the rest draw light grey and faint.
-   * The layer does not read this from `store`: pass the store's `view.highlighting`. Defaults to
-   * false.
+   * Whether the request carried a highlight. When true, the marks that satisfy it keep their
+   * colour, draw larger and carry a soft glow of their own colour, and the rest draw light grey and
+   * faint. The layer does not read this from `store`: pass the store's `view.highlighting`.
+   * Defaults to false.
    */
   highlighting?: boolean;
   /** Whether the marks are drawn. Off, only density, outlines, labels and the selection draw. Defaults to true. */
@@ -125,8 +125,8 @@ export type TesseraLayerProps = CompositeLayerProps & {
   radius?: number | null;
   /**
    * A fixed mark alpha from 0 to 1, as a fraction of the colour's own alpha. Defaults to `null`,
-   * which sets it by how many marks are drawn: 0.78 at a hundred or fewer down to 0.34 at a million,
-   * plus a little per zoom level.
+   * which sets it by how many marks are drawn: 0.78 at a hundred or fewer down to 0.34 at a
+   * million, plus a little per zoom level.
    */
   pointOpacity?: number | null;
   /**
@@ -226,9 +226,9 @@ const INK: Record<'light' | 'dark', [number, number, number]> = {light: [27, 29,
 /** The label halo per ground: the map's default background, nearly opaque. */
 const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [246, 246, 244, 235], dark: [17, 19, 23, 235]};
 /**
- * The halo's width as a fraction of the em: 2 px on a 14 px name, the middle of the size band. The distance field's reach
- * ({@link HALO_RADIUS}) bounds the width it can draw; asking for more fills each glyph's cell as a
- * rectangle. 0.14 em is half the reach.
+ * The halo's width as a fraction of the em: 2 px on a 14 px name, the middle of the size band. The
+ * distance field's reach ({@link HALO_RADIUS}) bounds the width it can draw; asking for more fills
+ * each glyph's cell as a rectangle. 0.14 em is half the reach.
  */
 const HALO_EM = 0.14;
 /** The em the SDF atlas is baked at: deck's `fontSettings.fontSize` default. */
@@ -341,12 +341,38 @@ type WashState = {
 };
 const sameWash = (a: WashKey | null, b: WashKey) =>
   a !== null && a.tiles === b.tiles && a.depth === b.depth && a.channel === b.channel && a.scheme === b.scheme && a.colours === b.colours;
-/** The cells the hexagons, grid and contours aggregate, once per `tiles` object, depth and count. */
-const heldCells = new WeakMap<object, {key: string; cells: DensityCell[]}>();
+/** What the hexagons, grid and contours are built from: one `tiles` object, at one depth, reading one count. */
+type CellsKey = {tiles: TilesProjection; depth: number; channel: 'visible' | 'matched' | 'highlighted'};
+/**
+ * One layer's density cells: the last set built, drawn until the next is ready, and the build
+ * waiting to run. Debounced as the wash is, so a streaming response does not recolour the bins on
+ * every frame.
+ */
+type CellsState = {built: (CellsKey & {cells: DensityCell[]}) | null; pending: CellsKey | null; timer: ReturnType<typeof setTimeout> | null};
+const sameCells = (a: CellsKey | null, b: CellsKey) => a !== null && a.tiles === b.tiles && a.depth === b.depth && a.channel === b.channel;
+/** The grid's squares and colours, once per set of cells, colours and ground. */
+const heldGrid = new WeakMap<object, {key: string; data: GridDatum[]}>();
+type GridDatum = {polygon: [number, number][]; colour: [number, number, number]};
 /** The colours a hexagon or grid cell takes, sparse to dense: a quantile scale's steps. */
 const DENSITY_STEPS = 8;
 /** The share of a hexagon or grid cell drawn, so neighbouring cells show a hairline gap. */
 const DENSITY_COVERAGE = 0.94;
+
+/** `@deck.gl/aggregation-layers`, which the hexagons and contours need, once it has loaded. */
+type Aggregation = typeof import('@deck.gl/aggregation-layers');
+let aggregation: Aggregation | null = null;
+let aggregationLoading: Promise<Aggregation> | null = null;
+
+/**
+ * Load `@deck.gl/aggregation-layers`, once. The hexagons and contours are drawn from it, and it is
+ * loaded the first time either is asked for, so a host that never draws them does not load it.
+ *
+ * @internal
+ */
+export function loadAggregationLayers(): Promise<Aggregation> {
+  aggregationLoading ??= import('@deck.gl/aggregation-layers').then((m) => (aggregation = m));
+  return aggregationLoading;
+}
 /** How long `tiles` must stay unchanged before the wash is rebuilt. */
 const WASH_SETTLE_MS = 200;
 /** Shared empty inputs, so the empty sublayers' attribute objects are stable across paints. */
@@ -666,12 +692,12 @@ export type Outline = {parts: Part[]; source: OutlineSource};
 /**
  * A served artifact's outline in world space, with the served vertices unsmoothed: the parts of
  * `fetched` (the shape fetched by identifier) where given, else of the artifact's own shape, else
- * its box, else null. `source` says which, since a square shape and a box both have four corners and are drawn
- * differently.
+ * its box, else null. `source` says which, since a square shape and a box both have four corners
+ * and are drawn differently.
  *
  * A part is an outer ring and its holes. A ring of fewer than three vertices has no area and is
- * dropped; a part whose outer ring is dropped goes whole. With no part left, the box answers.
- * An outline is a drawing: membership comes from the served `membership:<layer>` column.
+ * dropped; a part whose outer ring is dropped goes whole. With no part left, the box answers. An
+ * outline is a drawing: membership comes from the served `membership:<layer>` column.
  */
 export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
   const w = gridToWorld;
@@ -707,6 +733,23 @@ export function attachedTopics(a: ArtifactsProjection, meta: Meta | null): Map<b
 /** What to call a served artifact: its own text, else an attached topic, else null ({@link artifactName}). */
 export function displayName(artifact: Artifact, topics: ReadonlyMap<bigint, string>): string | null {
   return artifactName(artifact) ?? topics.get(artifact.tesseraId) ?? null;
+}
+
+/**
+ * The grid: one square per cell, {@link DENSITY_COVERAGE} of a tile wide, coloured by the rank of
+ * its count among the distinct counts drawn, in {@link DENSITY_STEPS} steps of `stops`.
+ */
+function gridSquares(cells: readonly DensityCell[], span: number, stops: readonly Rgb[]): GridDatum[] {
+  const distinct = [...new Set(cells.map((c) => c.count))].sort((a, b) => a - b);
+  const rank = new Map<number, number>();
+  distinct.forEach((count, i) => rank.set(count, distinct.length === 1 ? 1 : i / (distinct.length - 1)));
+  const steps = Array.from({length: DENSITY_STEPS}, (_, i) => [...rampAtStops(stops, i / (DENSITY_STEPS - 1))] as [number, number, number]);
+  const half = (span * DENSITY_COVERAGE) / 2;
+  return cells.map((c) => {
+    const [x, y] = c.position;
+    const step = steps[Math.min(DENSITY_STEPS - 1, Math.floor((rank.get(c.count) ?? 0) * DENSITY_STEPS))]!;
+    return {polygon: [[x - half, y - half], [x + half, y - half], [x + half, y + half], [x - half, y + half]], colour: step};
+  });
 }
 
 /** The props `<tessera-map>` also passes, through `@tesseradb/deck/internal`. */
@@ -787,11 +830,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     ownSlab: MarkSlab | null;
     ownLut: LookupTexture | null;
     wash: WashState;
+    cells: CellsState;
   };
 
   /** @internal */
   override initializeState(): void {
-    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN, ownSlab: null, ownLut: null, wash: {built: null, pending: null, timer: null}};
+    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN, ownSlab: null, ownLut: null, wash: {built: null, pending: null, timer: null}, cells: {built: null, pending: null, timer: null}};
     this.follow(this.props.store ?? null);
   }
 
@@ -826,6 +870,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     this.release({slab: true, lut: true});
     if (this.state.wash.timer !== null) clearTimeout(this.state.wash.timer);
     this.state.wash = {built: null, pending: null, timer: null};
+    if (this.state.cells.timer !== null) clearTimeout(this.state.cells.timer);
+    this.state.cells = {built: null, pending: null, timer: null};
   }
 
   /** The `store` convenience: subscribe, and mark the layer for update on every change. */
@@ -1140,6 +1186,15 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     return colours;
   }
 
+  /**
+   * Whether the labels sit on plates: while density is drawn as hexagons or a grid, or as a smooth
+   * wash in a ramp, whose colours fill the ground under the names.
+   */
+  private platesLabels(): boolean {
+    const mode = this.props.density ?? 'smooth';
+    return mode === 'hex' || mode === 'grid' || (mode === 'smooth' && this.densityColours(mode) !== 'warm-grey');
+  }
+
   /** The density colours drawn: the prop, else warm grey for a wash under the marks, else Viridis. */
   private densityColours(mode: DensityMode): DensityColours {
     return this.props.densityColours ?? (mode === 'smooth' && this.props.points !== false ? 'warm-grey' : 'viridis');
@@ -1150,10 +1205,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
    * the `densityChannel` count ({@link densityCells}), never from the marks. The wash's layer is
    * always present, hidden unless `smooth` is drawn, so its program links at the first paint.
    *
-   * The hexagons and grid colour each bin by the mean count of the tiles whose centres fall in it,
-   * on a quantile scale over the bins, so a bin that happens to hold two tile centres does not read
-   * as twice as dense. A grid cell is one tile. The contours are drawn at the counts
-   * {@link contourThresholds} picks, in the label ink.
+   * The grid is one square per tile, coloured by the tile's count on a quantile scale over the
+   * tiles drawn. The hexagons colour each bin by the mean count of the tiles whose centres fall in
+   * it, on the same scale, so a bin that happens to hold two tile centres does not read as twice as
+   * dense. The contours are drawn at the counts {@link contourThresholds} picks, in the label ink.
+   * The hexagons and contours come from `@deck.gl/aggregation-layers`, loaded the first time one is
+   * asked for ({@link loadAggregationLayers}); nothing of theirs is drawn until it has loaded.
    */
   private densityLayers(r: Resolved, timings: {densityMs: number}): Layer[] {
     const started = performance.now();
@@ -1162,30 +1219,40 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     const colours = this.densityColours(mode);
     const strength = Math.min(1, Math.max(0, this.props.densityStrength ?? 1));
     const layers: Layer[] = [this.washLayer(mode === 'smooth' ? r.tiles : null, r.depth, colours, strength)];
-    if (r.tiles && (mode === 'hex' || mode === 'grid' || mode === 'contours')) {
-      const channel = this.props.densityChannel ?? 'matched';
-      const key = `${r.depth}|${channel}`;
-      let held = heldCells.get(r.tiles);
-      if (!held || held.key !== key) {
-        held = {key, cells: densityCells(r.tiles.tiles, r.depth, channel)};
-        heldCells.set(r.tiles, held);
-      }
-      const cells = held.cells;
-      const span = WORLD_SIZE / 2 ** r.depth;
-      const common = {
-        data: cells,
-        getPosition: (d: DensityCell) => d.position,
-        gpuAggregation: false,
-        opacity: strength,
-        pickable: false,
-        parameters: {depthCompare: 'always' as const}
-      };
-      if (mode === 'contours') {
-        const thresholds = contourThresholds(cells);
+    const binned = mode === 'hex' || mode === 'grid' || mode === 'contours';
+    const cells = binned && r.tiles ? this.cells({tiles: r.tiles, depth: r.depth, channel: this.props.densityChannel ?? 'matched'}) : null;
+    if (cells) {
+      const span = WORLD_SIZE / 2 ** cells.depth;
+      const stops = densityStops(colours, scheme);
+      const common = {opacity: strength, pickable: false, parameters: {depthCompare: 'always' as const}};
+      if (mode === 'grid') {
+        const key = `${colours}|${scheme}`;
+        let held = heldGrid.get(cells.cells);
+        if (!held || held.key !== key) {
+          held = {key, data: gridSquares(cells.cells, span, stops)};
+          heldGrid.set(cells.cells, held);
+        }
+        layers.push(
+          new PolygonLayer(this.getSubLayerProps({id: 'density-grid'}), {
+            ...common,
+            data: held.data,
+            getPolygon: (d: GridDatum) => d.polygon,
+            getFillColor: (d: GridDatum) => d.colour,
+            stroked: false,
+            updateTriggers: {getFillColor: key}
+          } as never)
+        );
+      } else if (!aggregation) {
+        void loadAggregationLayers().then(() => this.redrawLater());
+      } else if (mode === 'contours') {
+        const thresholds = contourThresholds(cells.cells);
         const ink = INK[scheme];
         layers.push(
-          new ContourLayer(this.getSubLayerProps({id: 'density-contours'}), {
+          new aggregation.ContourLayer(this.getSubLayerProps({id: 'density-contours'}), {
             ...common,
+            data: cells.cells,
+            getPosition: (d: DensityCell) => d.position,
+            gpuAggregation: false,
             cellSize: span,
             getWeight: (d: DensityCell) => d.count,
             aggregation: 'SUM',
@@ -1197,27 +1264,56 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
           } as never)
         );
       } else {
-        const stops = densityStops(colours, scheme);
-        const colorRange = Array.from({length: DENSITY_STEPS}, (_, i) => [...rampAtStops(stops, i / (DENSITY_STEPS - 1))] as [number, number, number]);
-        const binned = {
-          ...common,
-          getColorWeight: (d: DensityCell) => d.count,
-          colorAggregation: 'MEAN',
-          colorScaleType: 'quantile',
-          colorRange,
-          coverage: DENSITY_COVERAGE,
-          extruded: false,
-          updateTriggers: {getColorWeight: key}
-        };
         layers.push(
-          mode === 'hex'
-            ? new HexagonLayer(this.getSubLayerProps({id: 'density-hex'}), {...binned, radius: span} as never)
-            : new GridLayer(this.getSubLayerProps({id: 'density-grid'}), {...binned, cellSize: span} as never)
+          new aggregation.HexagonLayer(this.getSubLayerProps({id: 'density-hex'}), {
+            ...common,
+            data: cells.cells,
+            getPosition: (d: DensityCell) => d.position,
+            gpuAggregation: false,
+            getColorWeight: (d: DensityCell) => d.count,
+            colorAggregation: 'MEAN',
+            colorScaleType: 'quantile',
+            colorRange: Array.from({length: DENSITY_STEPS}, (_, i) => [...rampAtStops(stops, i / (DENSITY_STEPS - 1))] as [number, number, number]),
+            coverage: DENSITY_COVERAGE,
+            extruded: false,
+            radius: span
+          } as never)
         );
       }
     }
     timings.densityMs = performance.now() - started;
     return layers;
+  }
+
+  /**
+   * The cells for the hexagons, grid and contours, built {@link WASH_SETTLE_MS} after `tiles` stops
+   * changing; the previous set, if any, draws until then.
+   */
+  private cells(want: CellsKey): (CellsKey & {cells: DensityCell[]}) | null {
+    const state = this.state.cells;
+    if (!sameCells(state.built, want) && !sameCells(state.pending, want)) {
+      state.pending = want;
+      const build = () => {
+        state.timer = null;
+        state.pending = null;
+        state.built = {...want, cells: densityCells(want.tiles.tiles, want.depth, want.channel)};
+        this.redrawLater();
+      };
+      if (typeof setTimeout !== 'undefined') {
+        if (state.timer !== null) clearTimeout(state.timer);
+        state.timer = setTimeout(build, WASH_SETTLE_MS);
+      } else build();
+    }
+    return state.built;
+  }
+
+  /** Ask for a redraw of the layer that is current for this id, which may no longer be this instance. */
+  private redrawLater(): void {
+    const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
+    // A discarded instance has no manager to ask; the next paint reads the state anyway.
+    if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
+    current.setNeedsUpdate();
+    current.setNeedsRedraw();
   }
 
   /**
@@ -1238,19 +1334,14 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
         const build = () => {
           wash.timer = null;
           wash.pending = null;
-          const binned = binDensity(want.tiles.tiles, want.depth, want.channel, WASH_HUE[want.scheme]);
+          const binned = binDensity(want.tiles.tiles, want.depth, want.channel);
           const built = binned && binned.filled > 0 ? filterDensity(binned, want.depth, densityPaint(want.colours, want.scheme)) : null;
           wash.built = {
             ...want,
             image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
             bounds: built ? built.bounds : [0, 0, 1, 1]
           };
-          // The layer that is current for this id, which may no longer be this instance.
-          const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
-          // A discarded instance has no manager to ask; the next paint reads the state anyway.
-          if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
-          current.setNeedsUpdate();
-          current.setNeedsRedraw();
+          this.redrawLater();
         };
         // Debounced: a streaming response hands over a new `tiles` object every frame. The last
         // one asked for is built.
@@ -1411,6 +1502,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     }
     const scheme = this.props.scheme ?? 'dark';
     const ink = [...INK[scheme], 255] as [number, number, number, number];
+    // Over density in saturated colours a halo in the ground colour reads as an outline round each
+    // glyph, so the names sit on plates of the ground colour there instead. The plates are drawn as
+    // layers of their own beneath all the text, so one row's plate does not cover another's glyphs.
+    const plated = this.platesLabels();
+    const plateProps = {background: true, getBackgroundColor: HALO[scheme], backgroundPadding: [6, 4], backgroundBorderRadius: 3, getColor: [0, 0, 0, 0], outlineWidth: 0, pickable: false};
+    const own = plated ? {outlineWidth: 0} : {};
     const text = (id: string, kind: LabelDatum['kind'], rows: LabelDatum[], extra: Record<string, unknown>) =>
       new TextLayer(
         this.getSubLayerProps({id}),
@@ -1435,15 +1532,18 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
           pickable: this.props.pickable && kind === 'name',
           artifactIds: rows.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
-          updateTriggers: {getPixelOffset: key, getSize: key, getColor: scheme},
+          updateTriggers: {getPixelOffset: key, getSize: key, getColor: scheme, getBackgroundColor: scheme},
           ...extra
         } as never
       );
-    layers.push(
-      text('labels', 'name', data.filter((d) => d.kind === 'name'), {fontWeight: 600}),
-      text('label-counts', 'count', data.filter((d) => d.kind === 'count'), {fontWeight: 400}),
-      text('label-topics', 'topic', data.filter((d) => d.kind === 'topic'), {fontWeight: 400, fontStyle: 'italic'})
-    );
+    const kinds = [
+      {id: 'labels', kind: 'name', style: {fontWeight: 600}},
+      {id: 'label-counts', kind: 'count', style: {fontWeight: 400}},
+      {id: 'label-topics', kind: 'topic', style: {fontWeight: 400, fontStyle: 'italic'}}
+    ] as const;
+    const rowsOf = (kind: LabelDatum['kind']) => data.filter((d) => d.kind === kind);
+    if (plated) for (const k of kinds) layers.push(text(`${k.id}-plates`, k.kind, rowsOf(k.kind), {...k.style, ...plateProps}));
+    for (const k of kinds) layers.push(text(k.id, k.kind, rowsOf(k.kind), {...k.style, ...own}));
     return layers;
   }
 

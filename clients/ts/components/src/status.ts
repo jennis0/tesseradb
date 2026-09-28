@@ -10,13 +10,13 @@ import './count.js';
 /**
  * The view's state and counts on one line: `● | 16,822,190 of 21,406,522 match | 5,390 shown`.
  * While a highlight is set, a cell reads `N highlighted of M`, M being the matched count, and the
- * match cell is left out unless a filter or selection narrows what matches. While the view is up to date the first cell is a
- * dot alone, titled "Up to date"; otherwise it names the state in two or three words (Updating,
- * Reconnecting, Data updated, View refused, Session expired) with the action the state offers:
- * Refresh when the data changed, Retry when the view was refused, and Sign in on expiry where
- * `reauthorise` is set. The counts grey out while they are not current. The strip sizes to its
- * content and does not wrap. `compact` shortens the figures (`16.8M of 21.4M match`) and drops the
- * shown count. `expanded` renders the figures again as a card below the strip.
+ * match cell is left out unless a filter or selection narrows what matches. While the view is up to
+ * date the first cell is a dot alone, titled "Up to date"; otherwise it names the state in two or
+ * three words (Updating, Reconnecting, Data updated, View refused, Session expired) with the action
+ * the state offers: Refresh when the data changed, Retry when the view was refused, and Sign in on
+ * expiry where `reauthorise` is set. The counts grey out while they are not current. The strip
+ * sizes to its content and does not wrap. `compact` shortens the figures (`16.8M of 21.4M match`)
+ * and drops the shown count. `expanded` renders the figures again as a card below the strip.
  *
  * The strip is an `aria-live` region, so a refusal, an expiry or a change of data is announced. The
  * state is one of the eight panel states (see `PanelState`); what was refused and why stays in the

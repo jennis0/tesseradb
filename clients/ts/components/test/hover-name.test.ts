@@ -141,3 +141,20 @@ describe('a hover across a change of viewer', () => {
     expect(el.hover).toBeNull();
   });
 });
+
+describe('a hover under a highlight', () => {
+  it('reads a lit mark, and a dulled one, from the pass that drew it', async () => {
+    const {el} = await map([{name: 'name', arrowType: 'utf8'}], 'title-field="name"');
+    let asked: number | null = null;
+    el.slab.markAt = (slot: number) => {
+      asked = slot;
+      return carrying({name: {arrowType: 'utf8', value: 'London'}})();
+    };
+    for (const pass of ['lit', 'dull']) {
+      asked = null;
+      el.onHover({index: 0, x: 10, y: 20, sourceLayer: {id: `marks-p3-${pass}`, props: {tesseraIds: new BigUint64Array([5n])}}});
+      expect(asked).toBe(3);
+      expect(el.hover?.title).toBe('London');
+    }
+  });
+});

@@ -6,9 +6,9 @@ import type {PanelState} from './states.js';
 export type SelectionShapeDetail = Exclude<SelectionShape, {kind: 'artifact'}> | {kind: 'artifact'; id: string; outside?: boolean};
 
 /**
- * Every event the elements fire, by name, with its `detail`. Each bubbles and is composed, so a host
- * listens on any ancestor, including one outside `<tessera-explorer>`. A `tessera_id` crosses as a
- * decimal string, since it is a 64-bit integer.
+ * Every event the elements fire, by name, with its `detail`. Each bubbles and is composed, so a
+ * host listens on any ancestor, including one outside `<tessera-explorer>`. A `tessera_id` crosses
+ * as a decimal string, since it is a 64-bit integer.
  */
 export type TesseraEventDetails = {
   /** The panel state moved from `from` to `to`; `from` is null on the first render. */
@@ -60,9 +60,9 @@ export type TesseraEventDetails = {
   'tessera-levelchange': {level: number | null};
   /**
    * A colour was chosen for the value `value` (a category key) of the column `column`, as
-   * `#rrggbb`, or the value's chosen colour was reset (`colour` null) so it takes its palette colour
-   * again. The map already draws it; a host that keeps the choice sets it back through the map's or
-   * the explorer's `valueColours`.
+   * `#rrggbb`, or the value's chosen colour was reset (`colour` null) so it takes its palette
+   * colour again. The map already draws it; a host that keeps the choice sets it back through the
+   * map's or the explorer's `valueColours`.
    */
   'tessera-valuecolour': {column: string; value: string; colour: string | null};
   /** The palette, the ramp, the ramp's scale or its direction was chosen in the legend; the detail is all four as they now stand. */

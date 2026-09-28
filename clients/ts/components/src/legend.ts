@@ -43,24 +43,25 @@ type Picking = {column: string; key: string; title: string};
 /**
  * What the colours mean, under a "Colour" heading. For a category column, one row per value the
  * points on screen carry, in its colour; for a number column, a ramp over the range of the points
- * served, with its lowest and highest values; under colour by cluster, the served artifacts in their
- * colours. The first `limit` rows show, 40 where `limit` is 0, with an "N more" button that shows
- * the rest until the colouring changes.
+ * served, with its lowest and highest values; under colour by cluster, the served artifacts in
+ * their colours. The first `limit` rows show, 40 where `limit` is 0, with an "N more" button that
+ * shows the rest until the colouring changes.
  *
  * A category row is a swatch, the value's name, Highlight and Filter buttons, and a count where the
  * store holds exact counts for the column (not built yet: no route serves them, so no count shows).
- * The buttons show while the row is hovered or focused, and stay shown while pressed. Filter adds the
- * value to the column's filter, which may hold several; the rows left out empty their swatch.
+ * The buttons show while the row is hovered or focused, and stay shown while pressed. Filter adds
+ * the value to the column's filter, which may hold several; the rows left out empty their swatch.
  * Highlight picks the value out without changing any count; the other rows grey. A column holds one
  * clause, so pressing the other verb moves the column's clause to it with that value alone. Both go
- * through the store's filters, so the chips are the ones `<tessera-filter-panel>` shows. The buttons
- * appear only where the column can be filtered by value.
+ * through the store's filters, so the chips are the ones `<tessera-filter-panel>` shows. The
+ * buttons appear only where the column can be filtered by value.
  *
  * The swatch opens a colour picker: the palette's colours and a lighter row, a custom area with a
- * hue bar and a hex field, and Reset, which gives the value its palette colour back. A choice applies
- * at once and fires `tessera-valuecolour`. A number column's ramp carries a range with two handles,
- * where the column can be filtered by range: dragging across the ramp or moving a handle (with the
- * arrow keys, too) sets the column's range filter, and the range follows the filter's chip.
+ * hue bar and a hex field, and Reset, which gives the value its palette colour back. A choice
+ * applies at once and fires `tessera-valuecolour`. A number column's ramp carries a range with two
+ * handles, where the column can be filtered by range: dragging across the ramp or moving a handle
+ * (with the arrow keys, too) sets the column's range filter, and the range follows the filter's
+ * chip.
  *
  * `selectable` puts the *Colour by* choice in the heading, a button opening a menu of the rendered
  * columns and every layer that can colour, drawn or not; colouring by a layer does not draw it. For
@@ -544,7 +545,15 @@ export class TesseraLegend extends TesseraElement {
   private expandedFor: string | null = null;
   private unwatchColouring: (() => void) | null = null;
   /** Where a drag on the ramp started, and which end it moves. */
-  private dragFrom: {anchor: number; end: 'low' | 'high' | 'new'} | null = null;
+  private dragFrom: {
+    anchor: number;
+    /** The anchored end's own bound when a handle is moved; unset for a new range. */
+    keep: number | null | undefined;
+    toBound: (t: number) => number | null;
+    commit: (gte: number | null, lte: number | null) => void;
+    /** Where the pointer went down, from 0 to 1. */
+    start: number;
+  } | null = null;
 
   protected override onStoreAdopted(store: Store | null): void {
     this.unwatchColouring?.();
@@ -560,6 +569,10 @@ export class TesseraLegend extends TesseraElement {
 
   override disconnectedCallback(): void {
     this.closePopovers(false);
+    if (this.following) cancelAnimationFrame(this.following.frame);
+    this.following = null;
+    if (this.livePick) cancelAnimationFrame(this.livePick.frame);
+    this.livePick = null;
     document.removeEventListener('pointerdown', this.onOutside, true);
     super.disconnectedCallback();
   }
@@ -607,8 +620,8 @@ export class TesseraLegend extends TesseraElement {
   }
 
   /**
-   * Put `key` in or out of `column`'s clause in the position `verb`. A column holds one clause, so a
-   * clause in the other position is replaced by one holding `key` alone.
+   * Put `key` in or out of `column`'s clause in the position `verb`. A column holds one clause, so
+   * a clause in the other position is replaced by one holding `key` alone.
    */
   private applyVerb(column: string, key: string, verb: 'filter' | 'highlight'): void {
     const s = this.resolvedStore;
@@ -622,16 +635,21 @@ export class TesseraLegend extends TesseraElement {
     emit(this, 'tessera-filterchange', {column, expr: composeFilters(next)});
   }
 
-  /** Set `column`'s range filter to `[gte, lte]` in the column's units, rounded as the column stores them. */
-  private applyRange(column: Column, gte: number, lte: number): void {
+  /**
+   * Set `column`'s range filter to `[gte, lte]` in the column's units, rounded as the column stores
+   * them. A `null` end is open: the ramp spans only the values drawn, which are a sample, so an end
+   * dragged to the ramp's edge sets no bound there.
+   */
+  private applyRange(column: Column, gte: number | null, lte: number | null): void {
     const s = this.resolvedStore;
     if (!s) return;
     const draft = s.get('filters').draft;
     const held = draft[column.name];
     if (!held || held.family !== 'numeric') return;
     const whole = column.arrowType !== 'f32' && column.arrowType !== 'f64';
-    const round = (v: number) => (whole ? Math.round(v) : Number(v.toPrecision(6)));
-    const next: FilterDraft = {...draft, [column.name]: {family: 'numeric', gte: round(Math.min(gte, lte)), lte: round(Math.max(gte, lte)), verb: 'filter'}};
+    const round = (v: number | null) => (v === null ? null : whole ? Math.round(v) : Number(v.toPrecision(6)));
+    const [lo, hi] = gte !== null && lte !== null && gte > lte ? [lte, gte] : [gte, lte];
+    const next: FilterDraft = {...draft, [column.name]: {family: 'numeric', gte: round(lo), lte: round(hi), verb: 'filter'}};
     s.setFilters(next);
     emit(this, 'tessera-filterchange', {column: column.name, expr: composeFilters(next)});
   }
@@ -678,7 +696,11 @@ export class TesseraLegend extends TesseraElement {
     const current = options.find((o) => o.checked);
     const colourByButton = this.selectable
       ? html`<button part="colour-by" type="button" aria-haspopup="dialog" aria-expanded=${this.menuOpen ? 'true' : 'false'} aria-label=${`Colour by: ${current?.title ?? 'None'}`}
-          @click=${() => (this.menuOpen = !this.menuOpen)}><span class="t">${current?.title ?? 'None'}</span>${icon('chev', 12, 1.4)}</button>`
+          @click=${() => {
+            // One popover at a time: the menu takes the picker's place.
+            this.picking = null;
+            this.menuOpen = !this.menuOpen;
+          }}><span class="t">${current?.title ?? 'None'}</span>${icon('chev', 12, 1.4)}</button>`
       : nothing;
     const column = columns.find((c) => c.name === colourBy) ?? null;
     const menu = this.selectable && this.menuOpen ? this.colourMenu(options, column, colouring) : nothing;
@@ -751,9 +773,16 @@ export class TesseraLegend extends TesseraElement {
         ${counted ? html`<span part="count">${count?.exact ? count.value.toLocaleString('en-GB') : ''}</span>` : nothing}
       </div>`;
     };
-    // Values past the palette share one colour, named once.
-    const other = html`<div part="entry" role="listitem" data-state=${stateOfKey(null)}><span part="swatch" style=${`--c:${rgb(UNMAPPED)}`}></span><span part="name">Other</span></div>`;
-    return this.rows([...shown.map(row), other], counted);
+    // A value past the palette's end with a colour chosen for it has a row of its own; the rest
+    // share one colour, named once, where there are any.
+    const size = CATEGORY_PALETTES[colouring.palette].colours.length;
+    const past = values.map((value) => ({value, rank: ranks[value.code] ?? Number.MAX_SAFE_INTEGER})).filter((v) => v.rank >= size);
+    const pastChosen = past.filter((v) => chosen[v.value.key] !== undefined).sort((a, b) => a.rank - b.rank);
+    const other =
+      past.length > pastChosen.length
+        ? [html`<div part="entry" role="listitem" data-state=${stateOfKey(null)}><span part="swatch" style=${`--c:${rgb(UNMAPPED)}`}></span><span part="name">Other</span></div>`]
+        : [];
+    return this.rows([...shown.map(row), ...pastChosen.map(row), ...other], counted);
   }
 
   /** The rows in one column, the first of them until "N more" is pressed. */
@@ -783,16 +812,21 @@ export class TesseraLegend extends TesseraElement {
     const filterable = held?.family === 'numeric' && (s.get('meta')?.filterOperands.some((o) => o.column === column.name && o.operands.includes('range')) ?? false);
     const at = (v: number) => Math.min(1, Math.max(0, fractionOf(v, domain, colouring.scale, ramp.diverging)));
     const valueAt = (t: number) => valueAtFraction(t, domain, colouring.scale, ramp.diverging);
-    const set = held?.family === 'numeric' && held.verb === 'filter' && (held.gte !== null || held.lte !== null);
-    const range = this.dragging ?? (set && held?.family === 'numeric' ? {low: held.gte === null ? 0 : at(held.gte), high: held.lte === null ? 1 : at(held.lte)} : null);
-    const low = range?.low ?? 0;
-    const high = range?.high ?? 1;
+    // The filter's own bounds, `null` where an end is open. A bound outside the values drawn keeps
+    // its value and pins its handle to the ramp's end.
+    const bounds = held?.family === 'numeric' && held.verb === 'filter' ? {gte: held.gte, lte: held.lte} : {gte: null, lte: null};
+    const toBound = (t: number) => (t <= 0 || t >= 1 ? null : valueAt(t));
+    const drag = this.dragging;
+    const shown = drag ? {gte: toBound(drag.low), lte: toBound(drag.high)} : bounds;
+    const low = drag ? drag.low : bounds.gte === null ? 0 : at(bounds.gte);
+    const high = drag ? drag.high : bounds.lte === null ? 1 : at(bounds.lte);
+    const range = drag !== null || bounds.gte !== null || bounds.lte !== null;
     const pct = (t: number) => `${(t * 100).toFixed(2)}%`;
     // A label under a handle slides from left-aligned at the ramp's start to right-aligned at its
     // end, so it stays on the card.
     const slide = (t: number) => `left:${pct(t)};transform:translateX(-${pct(t)})`;
     const caption = columnCaption(column.name);
-    const commit = (lo: number, hi: number) => this.applyRange(column, valueAt(lo), valueAt(hi));
+    const commit = (gte: number | null, lte: number | null) => this.applyRange(column, gte, lte);
     const key = (end: 'low' | 'high') => (e: KeyboardEvent) => {
       const step = e.shiftKey ? 0.1 : 0.01;
       const from = end === 'low' ? low : high;
@@ -800,17 +834,19 @@ export class TesseraLegend extends TesseraElement {
       if (next === undefined) return;
       e.preventDefault();
       const t = Math.min(1, Math.max(0, next));
-      if (end === 'low') commit(Math.min(t, high), high);
-      else commit(low, Math.max(t, low));
+      // The end not moved keeps the filter's own bound.
+      if (end === 'low') commit(t >= high ? bounds.lte : toBound(t), bounds.lte);
+      else commit(bounds.gte, t <= low ? bounds.gte : toBound(t));
     };
-    const valueText = (t: number) => ({now: valueAt(t), text: fmt(valueAt(t))});
-    const lowAt = valueText(low);
-    const highAt = valueText(high);
-    const labels = range
-      ? html`<span part="range-value" style=${slide(low)}>${fmt(valueAt(low))}</span><span part="range-value" style=${slide(high)}>${fmt(valueAt(high))}</span>`
-      : nothing;
-    return html`<div class=${`track${filterable ? ' filterable' : ''}`} @pointerdown=${filterable ? (e: PointerEvent) => this.dragStart(e, low, high) : nothing}
-        @pointermove=${filterable ? (e: PointerEvent) => this.dragMove(e) : nothing} @pointerup=${filterable ? (e: PointerEvent) => this.dragEnd(e, commit) : nothing}
+    const aria = (bound: number | null, open: string) => ({now: bound ?? (open === 'lower' ? domain.min : domain.max), text: bound === null ? `No ${open} limit` : fmt(bound)});
+    const lowAt = aria(shown.gte, 'lower');
+    const highAt = aria(shown.lte, 'upper');
+    const labels = html`${shown.gte !== null ? html`<span part="range-value" style=${slide(low)}>${fmt(shown.gte)}</span>` : nothing}${shown.lte !== null
+      ? html`<span part="range-value" style=${slide(high)}>${fmt(shown.lte)}</span>`
+      : nothing}`;
+    const start = (e: PointerEvent) => this.dragStart(e, low, high, bounds, toBound, commit);
+    return html`<div class=${`track${filterable ? ' filterable' : ''}`} @pointerdown=${filterable ? start : nothing}
+        @pointermove=${filterable ? (e: PointerEvent) => this.dragMove(e) : nothing} @pointerup=${filterable ? (e: PointerEvent) => this.dragEnd(e) : nothing}
         @pointercancel=${() => this.dragCancel()}>
         <div part="ramp" style=${`background:linear-gradient(to right, ${stops})`}></div>
         ${range ? html`<div part="range" style=${`left:${pct(low)};right:${pct(1 - high)}`}></div>` : nothing}
@@ -822,7 +858,9 @@ export class TesseraLegend extends TesseraElement {
           : nothing}
       </div>
       <div class="axis">
-        ${!range || low > 0.18 ? html`<span part="value" class="lo">${fmt(domain.min)}</span>` : nothing}${labels}${!range || high < 0.82 ? html`<span part="value" class="hi">${fmt(domain.max)}</span>` : nothing}
+        ${shown.gte === null || low > 0.18 ? html`<span part="value" class="lo">${fmt(domain.min)}</span>` : nothing}${range ? labels : nothing}${shown.lte === null || high < 0.82
+          ? html`<span part="value" class="hi">${fmt(domain.max)}</span>`
+          : nothing}
       </div>`;
   }
 
@@ -832,14 +870,24 @@ export class TesseraLegend extends TesseraElement {
     return track.width > 0 ? Math.min(1, Math.max(0, (e.clientX - track.left) / track.width)) : 0;
   }
 
-  private dragStart(e: PointerEvent, low: number, high: number): void {
+  private dragStart(
+    e: PointerEvent,
+    low: number,
+    high: number,
+    bounds: {gte: number | null; lte: number | null},
+    toBound: (t: number) => number | null,
+    commit: (gte: number | null, lte: number | null) => void
+  ): void {
     if (e.button !== 0) return;
     const t = this.along(e);
     const width = (e.currentTarget as HTMLElement).getBoundingClientRect().width || 1;
-    // Near a handle, the drag moves it; elsewhere it draws a new range from the pointer.
+    // Near a handle, the drag moves it and the other end keeps the filter's own bound; elsewhere it
+    // draws a new range from the pointer.
     const near = 8 / width;
     const end = Math.abs(t - low) <= near ? 'low' : Math.abs(t - high) <= near ? 'high' : 'new';
-    this.dragFrom = {anchor: end === 'low' ? high : end === 'high' ? low : t, end};
+    const anchor = end === 'low' ? high : end === 'high' ? low : t;
+    const keep = end === 'low' ? bounds.lte : end === 'high' ? bounds.gte : undefined;
+    this.dragFrom = {anchor, keep, toBound, commit, start: t};
     this.dragging = end === 'new' ? {low: t, high: t} : {low, high};
     (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     e.preventDefault();
@@ -852,15 +900,18 @@ export class TesseraLegend extends TesseraElement {
     this.dragging = {low: Math.min(a, t), high: Math.max(a, t)};
   }
 
-  private dragEnd(e: PointerEvent, commit: (low: number, high: number) => void): void {
-    if (!this.dragFrom || !this.dragging) return;
-    this.dragMove(e);
-    const {low, high} = this.dragging;
+  private dragEnd(e: PointerEvent): void {
+    const from = this.dragFrom;
+    if (!from || !this.dragging) return;
+    const t = this.along(e);
     this.dragFrom = null;
     this.dragging = null;
-    // A press without a drag draws no range.
-    if (high - low < 0.005) return;
-    commit(low, high);
+    // A press without a drag changes nothing.
+    if (Math.abs(t - from.start) < 0.005) return;
+    const moving = from.toBound(t);
+    const fixed = from.keep !== undefined ? from.keep : from.toBound(from.anchor);
+    if (t < from.anchor) from.commit(moving, fixed);
+    else from.commit(fixed, moving);
   }
 
   private dragCancel(): void {
@@ -920,7 +971,7 @@ export class TesseraLegend extends TesseraElement {
                 @click=${() => this.choosePalette({reverse: !colouring.reverse})}><span class="knob"></span></button>
             </div>`
         : nothing;
-    return html`<div part="colour-menu" class="pop menu" popover="manual" role="dialog" aria-label="Colour by" @keydown=${this.onPopoverKey}>
+    return html`<div part="colour-menu" class="pop menu" popover="manual" role="dialog" aria-label="Colour by" @keydown=${this.onPopoverKey} @focusout=${this.onPopoverFocusOut}>
       <div class="hd" id="colour-by-label">Colour by</div>
       <div role="radiogroup" aria-labelledby="colour-by-label">
         ${options.map(
@@ -950,18 +1001,44 @@ export class TesseraLegend extends TesseraElement {
     if (final) emit(this, 'tessera-valuecolour', {column: p.column, value: p.key, colour: hex});
   }
 
+  /** A colour waiting for the next frame, while a custom colour is dragged. */
+  private livePick: {hex: string; frame: number} | null = null;
+
+  /**
+   * {@link pick} for the custom area and hue bar: a drag applies its colour at most once per
+   * animation frame, and the final colour at once, so the map is not recoloured on every pointer
+   * move.
+   */
+  private pickLive(hex: string, final: boolean): void {
+    if (this.livePick) cancelAnimationFrame(this.livePick.frame);
+    this.livePick = null;
+    if (final || typeof requestAnimationFrame === 'undefined') {
+      this.pick(hex, final);
+      return;
+    }
+    this.livePick = {hex, frame: requestAnimationFrame(() => {
+      this.livePick = null;
+      this.pick(hex, false);
+    })};
+  }
+
   /** The colour picker for one value. */
   private colourPicker(p: Picking, colouring: Colouring, ranks: Record<number, number>, values: CategoryValue[]): TemplateResult {
     const palette = CATEGORY_PALETTES[colouring.palette].colours;
     const code = values.find((v) => v.key === p.key)?.code;
     const own = hexOf(colourOfRank(code === undefined ? undefined : ranks[code], colouring.palette));
     const current = colouring.values[p.column]?.[p.key] ?? own;
-    const choices = [...palette, ...palette.map((c) => lighter(c, LIGHTER))].map(hexOf);
+    const title = CATEGORY_PALETTES[colouring.palette].title;
+    const n = palette.length;
+    const choices = [
+      ...palette.map((c, i) => ({hex: hexOf(c), label: `${title}, colour ${i + 1} of ${n}`})),
+      ...palette.map((c, i) => ({hex: hexOf(lighter(c, LIGHTER)), label: `${title}, lighter colour ${i + 1} of ${n}`}))
+    ];
     const [h, sat, val] = this.hsv;
     const custom = hexOf(rgbOfHsv(this.hsv));
     const setHsv = (next: Hsv, final: boolean) => {
       this.hsv = next;
-      this.pick(hexOf(rgbOfHsv(next)), final);
+      this.pickLive(hexOf(rgbOfHsv(next)), final);
     };
     const svAt = (e: PointerEvent): Hsv => {
       const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -1005,17 +1082,18 @@ export class TesseraLegend extends TesseraElement {
       e.preventDefault();
       setHsv([(next + 360) % 360, sat, val], true);
     };
-    return html`<div part="colour-popover" class="pop picker" popover="manual" role="dialog" aria-label=${`Colour of ${p.title}`} @keydown=${this.onPopoverKey}>
+    return html`<div part="colour-popover" class="pop picker" popover="manual" role="dialog" aria-label=${`Colour of ${p.title}`} @keydown=${this.onPopoverKey} @focusout=${this.onPopoverFocusOut}>
       <div class="head"><span class="t">${p.title}</span><button part="reset" class="quiet" type="button" @click=${() => {
         this.hsv = hsvOf(rgbOfHex(own)!);
         this.pick(null);
       }}>Reset</button></div>
       <div class="choices" role="group" aria-label="Palette colours" style=${`grid-template-columns:repeat(${palette.length}, minmax(0, 1fr))`}>
         ${choices.map(
-          (c) => html`<button part="choice" type="button" style=${`background:${c}`} aria-label=${c} aria-pressed=${c === current ? 'true' : 'false'}
+          ({hex, label}) => html`<button part="choice" type="button" style=${`background:${hex}`} aria-label=${`${label}, ${hex}`} title=${`${label}, ${hex}`}
+            aria-pressed=${hex === current ? 'true' : 'false'}
             @click=${() => {
-              this.hsv = hsvOf(rgbOfHex(c)!);
-              this.pick(c);
+              this.hsv = hsvOf(rgbOfHex(hex)!);
+              this.pick(hex);
             }}></button>`
         )}
       </div>
@@ -1055,6 +1133,32 @@ export class TesseraLegend extends TesseraElement {
     this.closePopovers(true);
   };
 
+  /** Focus leaving an open popover for something outside it, as Tab past its last control does, closes it. */
+  private onPopoverFocusOut = (e: FocusEvent): void => {
+    const to = e.relatedTarget as Node | null;
+    const pop = e.currentTarget as HTMLElement;
+    if (to && !pop.contains(to)) this.closePopovers(false);
+  };
+
+  /** The frame loop that keeps an open popover beside what opened it as the page scrolls or resizes. */
+  private following: {frame: number; at: string} | null = null;
+
+  private follow(): void {
+    if (this.following || typeof requestAnimationFrame === 'undefined') return;
+    const tick = () => {
+      const anchor = this.anchor();
+      if (!anchor || !this.isConnected) {
+        this.following = null;
+        return;
+      }
+      const r = anchor.getBoundingClientRect();
+      const at = `${r.left},${r.top},${innerWidth},${innerHeight}`;
+      if (this.following && at !== this.following.at) this.requestUpdate();
+      this.following = {frame: requestAnimationFrame(tick), at};
+    };
+    this.following = {frame: requestAnimationFrame(tick), at: ''};
+  }
+
   /** A press outside an open popover and what opened it closes the popover. */
   private onOutside = (e: PointerEvent): void => {
     const path = e.composedPath();
@@ -1078,9 +1182,9 @@ export class TesseraLegend extends TesseraElement {
   }
 
   /**
-   * An open popover is shown in the top layer, so no scrolling panel clips it, and placed beside the
-   * button that opened it: the menu beneath the Colour by button, the picker to the right of the
-   * legend, level with the swatch. Focus goes into it as it opens.
+   * An open popover is shown in the top layer, so no scrolling panel clips it, and placed beside
+   * the button that opened it: the menu beneath the Colour by button, the picker to the right of
+   * the legend, level with the swatch. Focus goes into it as it opens.
    */
   protected override updated(changed: PropertyValues<this>): void {
     const open = this.menuOpen || this.picking !== null;
@@ -1091,6 +1195,7 @@ export class TesseraLegend extends TesseraElement {
     const pop = this.renderRoot.querySelector<HTMLElement>('.pop');
     const anchor = this.anchor();
     if (!pop || !anchor) return;
+    this.follow();
     const fresh = !pop.matches?.(':popover-open');
     if (fresh && typeof pop.showPopover === 'function') {
       try {

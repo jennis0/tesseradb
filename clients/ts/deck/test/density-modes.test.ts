@@ -1,10 +1,10 @@
-import {afterEach, describe, expect, it, vi} from 'vitest';
+import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
 import {WORLD_SIZE, type ArtifactsProjection, type ComposedTile, type MarksProjection, type TilesProjection} from '@tesseradb/client';
 import {SessionArtifactTable, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
 import {band} from '../../core/test/support.js';
 import {contourThresholds, densityStops, type DensityMode} from '../src/density.js';
-import {TesseraLayer, type TesseraLayerInternalProps} from '../src/layer.js';
+import {TesseraLayer, loadAggregationLayers, type TesseraLayerInternalProps} from '../src/layer.js';
 import {fakeDevice} from './fake-device.js';
 
 /**
@@ -70,8 +70,21 @@ function host() {
     errors,
     sublayer,
     props,
-    draw: (props: Partial<TesseraLayerInternalProps>) =>
+    /** Draw, and draw again once the cells have settled, as a host's next frame would. */
+    draw: (props: Partial<TesseraLayerInternalProps>) => {
+      const layer = () => new TesseraLayer({id: 'tessera', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, tiles, ...props} as TesseraLayerInternalProps);
+      manager.setLayers([layer()]);
+      vi.advanceTimersByTime(1000);
+      manager.setLayers([layer()]);
+    },
+    /** Draw once, with no time to settle. */
+    drawNow: (props: Partial<TesseraLayerInternalProps>) =>
       manager.setLayers([new TesseraLayer({id: 'tessera', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, tiles, ...props} as TesseraLayerInternalProps)]),
+    /** The grid's squares: each one's centre and the index of its colour among `stops`' steps. */
+    squares: () => {
+      const props = sublayer('density-grid')?.props as unknown as {data: {polygon: [number, number][]; colour: number[]}[]} | undefined;
+      return props?.data.map((d) => ({centre: [(d.polygon[0]![0] + d.polygon[2]![0]) / 2, (d.polygon[0]![1] + d.polygon[2]![1]) / 2], width: d.polygon[1]![0] - d.polygon[0]![0], colour: d.colour})) ?? null;
+    },
     /** What an aggregation sublayer was given: each cell's position and the weight its accessor reads. */
     aggregated: (id: string): {position: [number, number]; weight: number}[] | null => {
       const props = sublayer(id)?.props as {data: Cell[]; getPosition: (d: Cell) => [number, number]; getColorWeight?: (d: Cell) => number; getWeight?: (d: Cell) => number} | undefined;
@@ -85,6 +98,15 @@ function host() {
 const centre = (x: number, y: number): [number, number] => [(x + 0.5) * SPAN, (y + 0.5) * SPAN];
 
 describe('density modes', () => {
+  beforeAll(async () => {
+    await loadAggregationLayers();
+  });
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('ImageData', class {
+      constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {}
+    });
+  });
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
@@ -92,7 +114,6 @@ describe('density modes', () => {
 
   it.each<[DensityMode, string]>([
     ['hex', 'density-hex'],
-    ['grid', 'density-grid'],
     ['contours', 'density-contours']
   ])('%s aggregates one point per exact tile at the drawn depth, weighted by its count, whatever the sample holds', (density, id) => {
     const h = host();
@@ -114,12 +135,32 @@ describe('density modes', () => {
     expect(h.aggregated('density-hex')!.map((c) => c.weight)).toEqual([90_000, 400]);
   });
 
-  it('bins hexagons and grid cells one tile wide, so no bin is finer than the counts', () => {
+  it('draws the grid as one square per exact tile, coloured by the tile’s count, whatever the sample holds', () => {
+    const h = host();
+    h.draw({density: 'grid', densityChannel: 'matched', densityColours: 'greys', scheme: 'light'});
+    const squares = h.squares()!;
+    expect(squares.map((q) => q.centre)).toEqual([centre(1, 1), centre(2, 1)]);
+    for (const q of squares) expect(q.width).toBeCloseTo(SPAN * 0.94);
+    // On a light ground the dense end of Greys is the darker: the three-mark tile of 80,000.
+    const lum = (c: number[]) => c[0]! + c[1]! + c[2]!;
+    expect(lum(squares[0]!.colour)).toBeLessThan(lum(squares[1]!.colour));
+  });
+
+  it('bins hexagons one tile wide, so no bin is finer than the counts', () => {
     const h = host();
     h.draw({density: 'hex'});
     expect(h.props<{radius: number}>('density-hex').radius).toBe(SPAN);
+  });
+
+  it('keeps the bins it drew while tiles stream, and redraws once they settle', () => {
+    const h = host();
     h.draw({density: 'grid'});
-    expect(h.props<{cellSize: number}>('density-grid').cellSize).toBe(SPAN);
+    expect(h.squares()).toHaveLength(2);
+    const next: TilesProjection = {tiles: [tile(4, 4, true, 10)]};
+    h.drawNow({density: 'grid', tiles: next});
+    expect(h.squares()).toHaveLength(2);
+    h.draw({density: 'grid', tiles: next});
+    expect(h.squares()!.map((q) => q.centre)).toEqual([centre(4, 4)]);
   });
 
   it('draws contours at counts taken from the tiles', () => {
@@ -133,14 +174,8 @@ describe('density modes', () => {
   });
 
   it('draws no aggregation layer under none or smooth, and the wash only under smooth', () => {
-    vi.useFakeTimers();
-    vi.stubGlobal('ImageData', class {
-      constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {}
-    });
     const h = host();
     for (const density of ['none', 'smooth'] as const) {
-      h.draw({density});
-      vi.advanceTimersByTime(1000);
       h.draw({density});
       expect(h.sublayer('density-hex') ?? h.sublayer('density-grid') ?? h.sublayer('density-contours')).toBeUndefined();
       expect((h.sublayer('wash')!.props as {visible: boolean}).visible).toBe(density === 'smooth');
@@ -151,11 +186,21 @@ describe('density modes', () => {
     const h = host();
     h.draw({density: 'grid', points: false});
     expect(h.errors).toEqual([]);
-    expect(h.aggregated('density-grid')).toHaveLength(2);
+    expect(h.squares()).toHaveLength(2);
     const drawnMarks = (h.sublayer('marks-p0')?.props as {visible: boolean} | undefined)?.visible ?? false;
     expect(drawnMarks).toBe(false);
     h.draw({density: 'grid', points: true});
     expect((h.sublayer('marks-p0')!.props as {visible: boolean}).visible).toBe(true);
+  });
+
+  it('sets the names on plates over hexagons, a grid or a ramped wash, and keeps the halo elsewhere', () => {
+    const h = host();
+    for (const [density, plated] of [['hex', true], ['grid', true], ['smooth', false], ['contours', false], ['none', false]] as const) {
+      h.draw({density});
+      expect(h.sublayer('labels-plates') !== undefined).toBe(plated);
+    }
+    h.draw({density: 'smooth', densityColours: 'viridis'});
+    expect(h.sublayer('labels-plates')).toBeDefined();
   });
 
   it('draws at the strength asked for', () => {
