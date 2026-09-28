@@ -40,7 +40,7 @@ describe('<tessera-item-card>', () => {
     expect(deep(host, '[part="headline"]')?.getAttribute('data-name')).toBe('title');
     expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['submitted_at', 'note', 'tessera_id']);
     expect(deep(host, '[part="field"][data-name="tessera_id"] [part="value"]')?.textContent).toBe('12345678901234567890');
-    expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('2023-11-14T22:13:20.000Z');
+    expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('14 November 2023, 22:13:20 UTC');
     expect(deep(host, 'slot[name="field-title"]')).not.toBeNull();
     expect(host.textContent).toContain('my link');
     expect(deep(host, '[part="field"][data-name="archive"]')).toBeNull();
@@ -138,8 +138,6 @@ describe('<tessera-filter>', () => {
     expect(sent).toBeDefined();
     expect((sent!.args[0] as {archive: {keys: string[]}}).archive.keys).toEqual(['zz.unlisted']);
     expect(deep(host, '[part="refusal"]')).toBeNull();
-    // The typed key is submitted and shows up as a chip, chosen, unresolved.
-    expect(deep(host, '[part="value-chip"]')?.textContent).toContain('zz.unlisted');
   });
 
   it('renders a checklist, not a search box, when the empty-q page says more: false', async () => {
@@ -412,7 +410,7 @@ describe('<tessera-filter-panel>', () => {
     // One chip, naming the column and the chosen key.
     const chips = deepAll(host, '[part="chip"]');
     expect(chips).toHaveLength(1);
-    expect(chips[0]!.textContent).toContain('archive');
+    expect(chips[0]!.getAttribute('data-column')).toBe('archive');
     expect(chips[0]!.textContent).toContain('cs');
     expect(deepAll(host, '[part="verb"]').map((v) => v.getAttribute('data-verb'))).toEqual(['filter']);
     const before = filters[0];
@@ -423,5 +421,45 @@ describe('<tessera-filter-panel>', () => {
     (deep(host, '[part="clear"]') as HTMLButtonElement).click();
     const sent = store.calls.find((c) => c.name === 'setFilters');
     expect((sent!.args[0] as {archive: {keys: string[]}}).archive.keys).toEqual([]);
+  });
+});
+
+describe('<tessera-filter-panel chips-only>', () => {
+  it('renders nothing while no clause is applied, and the chips without controls once one is', async () => {
+    const host = await mount('<tessera-filter-panel chips-only></tessera-filter-panel>');
+    const store = fakeStore({meta: META, status: status({})});
+    (host.querySelector('tessera-filter-panel') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    expect(deepAll(host, '[part]')).toHaveLength(0);
+    store.set('filters', {draft: {archive: {family: 'category', keys: ['cs'], verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0});
+    await settle(host);
+    expect(deepAll(host, '[part="chip"]')).toHaveLength(1);
+    expect(deepAll(host, 'tessera-filter')).toHaveLength(0);
+  });
+
+  it('writes an open range as a bound and a closed one as a span', async () => {
+    const host = await mount('<tessera-filter-panel chips-only></tessera-filter-panel>');
+    const store = fakeStore({meta: META, status: status({})});
+    (host.querySelector('tessera-filter-panel') as unknown as {store: unknown}).store = store;
+    const chip = async (gte: number | null, lte: number | null) => {
+      store.set('filters', {draft: {submitted_at: {family: 'numeric', gte, lte, verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0});
+      await settle(host);
+      return deep(host, '[part="chip"]')!.textContent!;
+    };
+    const day = Date.UTC(2020, 0, 1) * 1000;
+    expect(await chip(day, null)).toContain('≥');
+    expect(await chip(null, day)).toContain('≤');
+    expect(await chip(day, day)).not.toMatch(/[≥≤…]/);
+  });
+});
+
+describe('<tessera-filter> refusal', () => {
+  it('carries the refusal’s code where the values could not be listed', async () => {
+    const host = await mount('<tessera-filter column="archive"></tessera-filter>');
+    const store = fakeStore({meta: META, status: status({})});
+    store.set('filters', {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {archive: {code: 'vocabulary-withheld', detail: ''}}, suggestEpoch: 0});
+    (host.querySelector('tessera-filter') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    expect(deep(host, '[part="refusal"]')?.getAttribute('data-code')).toBe('vocabulary-withheld');
   });
 });

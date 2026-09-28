@@ -204,9 +204,41 @@ export function idString(id: bigint): string {
   return id.toString(10);
 }
 
-/** A `timestamp_us` value in full, as an ISO date-time. */
+/**
+ * A column's caption: `submitted_at` reads as "Submitted at". A column declares no title, so its
+ * name is written out as words.
+ */
+export function columnCaption(name: string): string {
+  const words = name.replace(/_/g, ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * A category key's title where the store has one, from the legend's names or a suggestion page,
+ * else the key.
+ */
+export function keyTitle(store: Store | null, column: string, key: string): string {
+  if (!store) return key;
+  const named = store.get('legend').categories[column]?.find((v) => v.key === key) ?? store.get('filters').suggestions[column]?.values.find((v) => v.key === key);
+  return named?.title ?? key;
+}
+
+const DATE = new Intl.DateTimeFormat('en-GB', {day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC'});
+const pad = (n: number) => String(n).padStart(2, '0');
+
+/**
+ * A `timestamp_us` value in full, readably and in UTC: `14 March 2024, 12:00 UTC`, with seconds
+ * where they are not zero. Fractions of a second are left out.
+ */
 export function timestampText(value: number | bigint): string {
-  return new Date(Number(value) / 1000).toISOString();
+  const d = new Date(Number(value) / 1000);
+  const seconds = d.getUTCSeconds();
+  return `${DATE.format(d)}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}${seconds ? `:${pad(seconds)}` : ''} UTC`;
+}
+
+/** A `timestamp_us` value as its UTC date alone, such as `14 March 2024`, where room is short. */
+export function dateText(value: number | bigint): string {
+  return DATE.format(new Date(Number(value) / 1000));
 }
 
 /** What the map's pick resolved to where it found no item: a miss, or a broken pick. */

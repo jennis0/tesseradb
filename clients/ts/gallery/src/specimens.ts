@@ -178,6 +178,7 @@ export const SECTIONS: Section[] = [
         state: 'shown, inexact counts',
         build: () => make('tessera-status', {store: store({view: {...SHOWN_VIEW, served: {...SHOWN_VIEW.served, exact: false}, matched: {value: 12_465_020, exact: false}}})})
       },
+      {fit: true, state: 'shown, compact', build: () => make('tessera-status', {store: store({view: SHOWN_VIEW})}, {compact: ''})},
       {fit: true, state: 'shown, expanded card', build: () => make('tessera-status', {store: store({view: {...SHOWN_VIEW, provisional: 1_204}, replica: {bytes: 48_812_000, points: 6_390, bands: 58, views: 1, lastPlan: null}}), expanded: true})},
       {fit: true, state: 'empty', build: () => make('tessera-status', {store: store({status: status({status: 'empty'})})})},
       {fit: true, state: 'refused', build: () => make('tessera-status', {store: store({status: status({status: 'refused', refusal: REFUSAL})})})},
@@ -228,6 +229,7 @@ export const SECTIONS: Section[] = [
       {state: 'loading (no meta yet)', build: () => make('tessera-legend', {store: store({meta: null, status: status({status: 'loading'})})})},
       {state: 'colour by none', build: () => make('tessera-legend', {store: legendStore(null)})},
       {state: 'category', build: () => make('tessera-legend', {store: legendStore('field')})},
+      {state: 'category, limit 4', build: () => make('tessera-legend', {store: legendStore('field')}, {limit: '4'})},
       {state: 'category, names loading', build: () => make('tessera-legend', {store: store({legend: legendOf('field', {categories: {}})})})},
       {
         state: 'category, more values than the palette',
@@ -241,7 +243,7 @@ export const SECTIONS: Section[] = [
       {state: 'numeric, no values on screen', build: () => make('tessera-legend', {store: store({legend: legendOf('citations', {domains: {}})})})},
       {state: 'a column that is not rendered', build: () => make('tessera-legend', {store: legendStore('published_at')})},
       {state: 'colour by cluster', build: () => make('tessera-legend', {store: legendStore('cluster:topics', {artifacts: mapState().artifacts})})},
-      {state: 'selectable, selects only', build: () => make('tessera-legend', {store: legendStore('field', {artifacts: mapState().artifacts}), selectable: true})},
+      {state: 'selectable, choice only', build: () => make('tessera-legend', {store: legendStore('field', {artifacts: mapState().artifacts}), selectable: true})},
       {state: 'selectable with readout, category', build: () => make('tessera-legend', {store: legendStore('field', {artifacts: mapState().artifacts}), selectable: true, readout: true})},
       {
         state: 'selectable with readout, cluster with a level select',
@@ -552,9 +554,9 @@ function mapSpecimens(): Specimen[] {
     },
     {state: 'highlight active (cs.CV lit)', wide: true, build: (ctx) => map(mapStore(ctx, 'field', {highlight: (m) => m.field === 2})), ready: ready(true)},
     {
-      state: 'a box selected, toolbar top-right',
+      state: 'a box selected, toolbar bottom-left',
       wide: true,
-      build: (ctx) => map(mapStore(ctx, 'field', {}, {region: region()}), {'controls-corner': 'top-right'}),
+      build: (ctx) => map(mapStore(ctx, 'field', {}, {region: region()}), {'controls-corner': 'bottom-left'}),
       ready: ready(true)
     },
     {state: 'refused', wide: true, build: () => map(store({status: status({status: 'refused', refusal: REFUSAL})})), ready: ready(false)},
@@ -564,9 +566,9 @@ function mapSpecimens(): Specimen[] {
 }
 
 function explorerSpecimens(): Specimen[] {
-  const explorer = (s: Store, attrs: Record<string, string> = {}) => {
+  const explorer = (s: Store, attrs: Record<string, string> = {}, height = 640) => {
     const el = make('tessera-explorer', {store: s}, {'title-field': 'title', 'tooltip-fields': 'field year citations', ...attrs});
-    el.style.setProperty('--tessera-explorer-height', '640px');
+    el.style.setProperty('--tessera-explorer-height', `${height}px`);
     return el;
   };
   const readyFor = (marks: boolean) => async (el: HTMLElement) => {
@@ -579,21 +581,26 @@ function explorerSpecimens(): Specimen[] {
   const full = (ctx: Context, over: Partial<Projections> = {}) =>
     mapStore(ctx, 'field', {}, {
       view: {...mapState().view},
-      filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: null, verb: 'filter'}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}}),
+      filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV'], verb: 'filter'}, citations: {family: 'numeric', gte: 100, lte: null, verb: 'filter'}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}}),
       ...over
     });
+  const item = {selection: {item: paper(), itemRefusal: null, artifact: null, artifactRefusal: null}};
   return [
+    {state: 'docked, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'docked'}, 900), ready},
+    {state: 'overlay, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 900), ready},
+    {state: 'compact container, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 560), ready},
     {
-      state: 'docked, an item selected',
-      wide: true,
-      build: (ctx) => explorer(full(ctx, {selection: {item: paper(), itemRefusal: null, artifact: null, artifactRefusal: null}}), {layout: 'docked'}),
-      ready
-    },
-    {
-      state: 'overlay, a topic opened',
+      state: 'overlay, a topic opened, the filters, the sections and the layers open',
       wide: true,
       build: (ctx) => explorer(full(ctx, {selection: {item: null, itemRefusal: null, artifact: {id: TOPIC(1).tesseraId, detail: detail(TOPIC(1))}, artifactRefusal: null}}), {layout: 'overlay'}),
-      ready
+      ready: async (el) => {
+        await ready(el);
+        shadow(el, '[part="filters-toggle"]')?.click();
+        for (const section of el.shadowRoot?.querySelectorAll('details') ?? []) section.open = true;
+        shadow(el, '[part="layers-toggle"]')?.click();
+        await until(() => !!shadow(el, '[part="layers-popover"]'), 'the layers popover');
+        await settle(el.parentElement!);
+      }
     },
     {
       state: 'narrow container, the filters sheet open',

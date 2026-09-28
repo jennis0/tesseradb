@@ -21,7 +21,7 @@ import {NEUTRAL} from '@tesseradb/client/internal';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {buildColourAttribute, type Encoding} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
-import {binDensity, filterDensity} from './density.js';
+import {WASH_HUE, binDensity, filterDensity} from './density.js';
 import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {LookupTexture} from './lut.js';
 import {MarksLayer, type HighlightPass} from './marks-layer.js';
@@ -191,24 +191,24 @@ type Resolved = {
   status: PresentedStatus;
 };
 
-/** The selected region's colour per ground. */
-const ACCENT: Record<'light' | 'dark', [number, number, number]> = {light: [36, 87, 163], dark: [134, 176, 240]};
+/** The selected region's colour per ground: the interface's ink, since colour on the map is data's. */
+const ACCENT: Record<'light' | 'dark', [number, number, number]> = {light: [27, 29, 33], dark: [236, 238, 241]};
 /** Label ink per ground. */
-const INK: Record<'light' | 'dark', [number, number, number]> = {light: [36, 39, 43], dark: [236, 238, 240]};
-/** The label halo's colour per ground, at 0.85 alpha. */
-const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [247, 247, 244, 217], dark: [12, 14, 17, 217]};
+const INK: Record<'light' | 'dark', [number, number, number]> = {light: [27, 29, 33], dark: [242, 243, 245]};
+/** The label halo per ground: the map's default background, nearly opaque. */
+const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [246, 246, 244, 235], dark: [17, 19, 23, 235]};
 /**
- * The halo's width as a fraction of the em: 1.2 px on a 12 px name. The distance field's reach
+ * The halo's width as a fraction of the em: 2 px on a 14 px name, the middle of the size band. The distance field's reach
  * ({@link HALO_RADIUS}) bounds the width it can draw; asking for more fills each glyph's cell as a
- * rectangle. 0.10 em is 36% of the reach.
+ * rectangle. 0.14 em is half the reach.
  */
-const HALO_EM = 0.1;
+const HALO_EM = 0.14;
 /** The em the SDF atlas is baked at: deck's `fontSettings.fontSize` default. */
 const ATLAS_PX = 64;
 /**
  * The distance field's reach in atlas pixels, and the padding around each glyph. deck puts the
  * outline threshold at `0.75 × (1 − outlineWidth / radius)`, so `outlineWidth / radius` must stay
- * well below 1. The padding need only cover the halo (6.4 px), and each pixel of it costs atlas
+ * well below 1. The padding need only cover the halo (9 px), and each pixel of it costs atlas
  * area per glyph.
  */
 const HALO_RADIUS = 24;
@@ -309,7 +309,7 @@ const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array
 /** `marks` objects whose slab-residency check has run. */
 const checkedMarks = new WeakSet<object>();
 /** What a wash is built for: one `tiles` object, at one depth, reading one count. */
-type WashKey = {tiles: TilesProjection; depth: number; channel: 'visible' | 'matched' | 'highlighted'};
+type WashKey = {tiles: TilesProjection; depth: number; channel: 'visible' | 'matched' | 'highlighted'; scheme: 'light' | 'dark'};
 /**
  * One layer's wash: the last image built, drawn until the next is ready, and the build waiting to
  * run. Held in the layer's state, so two maps on one page keep separate washes.
@@ -319,7 +319,7 @@ type WashState = {
   pending: WashKey | null;
   timer: ReturnType<typeof setTimeout> | null;
 };
-const sameWash = (a: WashKey | null, b: WashKey) => a !== null && a.tiles === b.tiles && a.depth === b.depth && a.channel === b.channel;
+const sameWash = (a: WashKey | null, b: WashKey) => a !== null && a.tiles === b.tiles && a.depth === b.depth && a.channel === b.channel && a.scheme === b.scheme;
 /** How long `tiles` must stay unchanged before the wash is rebuilt. */
 const WASH_SETTLE_MS = 200;
 /** Shared empty inputs, so the empty sublayers' attribute objects are stable across paints. */
@@ -1112,15 +1112,16 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     let bounds: [number, number, number, number] = [0, 0, 1, 1];
     if (tiles) {
       // A highlight change can hand over the same `tiles` object with a different channel.
-      const want: WashKey = {tiles, depth, channel: this.props.washChannel ?? 'matched'};
+      const want: WashKey = {tiles, depth, channel: this.props.washChannel ?? 'matched', scheme: this.props.scheme ?? 'dark'};
       const wash = this.state.wash;
       if (!sameWash(wash.built, want) && !sameWash(wash.pending, want)) {
         wash.pending = want;
         const build = () => {
           wash.timer = null;
           wash.pending = null;
-          const binned = binDensity(want.tiles.tiles, want.depth, want.channel);
-          const built = binned && binned.filled > 0 ? filterDensity(binned, want.depth) : null;
+          const hue = WASH_HUE[want.scheme];
+          const binned = binDensity(want.tiles.tiles, want.depth, want.channel, hue);
+          const built = binned && binned.filled > 0 ? filterDensity(binned, want.depth, hue) : null;
           wash.built = {
             ...want,
             image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
@@ -1305,7 +1306,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
           getPixelOffset: (d: LabelDatum) => d.offset,
           getTextAnchor: (d: LabelDatum) => d.anchor,
           getAlignmentBaseline: 'center' as const,
-          fontFamily: 'IBM Plex Sans, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+          fontFamily: "'Instrument Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
           // The halo is drawn from the distance field. deck's default buffer of 4 clips the field
           // to about a third of a pixel of outline on a 12 px name; see HALO_RADIUS.
           fontSettings: {sdf: true, buffer: HALO_BUFFER, radius: HALO_RADIUS, cutoff: 0.25},

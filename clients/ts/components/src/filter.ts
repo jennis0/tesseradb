@@ -12,7 +12,7 @@ import {
   type SuggestValue,
   type TextMode
 } from '@tesseradb/client';
-import {TesseraElement, emit} from './base.js';
+import {TesseraElement, columnCaption, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
@@ -20,6 +20,8 @@ import {chrome, tokens} from './tokens.js';
 /** The operators a keyword control can send. */
 const KEYWORD_OPERATORS = ['contains', 'prefix', 'eq'] as const;
 type KeywordOperator = (typeof KEYWORD_OPERATORS)[number];
+/** Each operator as the select says it. */
+const OPERATOR_WORDS: Record<KeywordOperator, string> = {contains: 'contains', prefix: 'starts with', eq: 'is'};
 
 /** How long a typed control must be quiet before its change is sent. */
 const TYPING_DEBOUNCE_MS = 350;
@@ -45,12 +47,11 @@ const TYPING_DEBOUNCE_MS = 350;
  * @csspart label - The column's name, as a caption.
  * @csspart entry - A text, number or date input.
  * @csspart mode - The text column's word toggle, or the keyword column's operator select.
- * @csspart value-chips - The chosen category values.
- * @csspart value-chip - One chosen category value, with a remove button.
  * @csspart values - The checklist, or the typeahead's suggestions.
  * @csspart tick - One value in the checklist or the suggestions.
  * @csspart more - The hint that more values match than one page holds.
- * @csspart refusal - The refusal of a suggestion request.
+ * @csspart refusal - The words "Values unavailable" where the values could not be listed, with
+ *   `data-code` set to the refusal's code.
  */
 export class TesseraFilter extends TesseraElement {
   static override styles = [
@@ -59,15 +60,12 @@ export class TesseraFilter extends TesseraElement {
     css`
       :host {
         display: block;
-        margin-top: 12px;
-      }
-      :host(:first-of-type) {
-        margin-top: 0;
       }
       [part='label'] {
         display: block;
-        margin-bottom: 6px;
-        font-size: 11px;
+        margin-bottom: 8px;
+        font-weight: 600;
+        color: var(--_tessera-ink);
       }
       .ctl-row {
         display: flex;
@@ -79,12 +77,6 @@ export class TesseraFilter extends TesseraElement {
         min-width: 0;
       }
       .seg {
-        margin-top: 6px;
-      }
-      [part='value-chips'] {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px;
         margin-top: 6px;
       }
       [part='values'] {
@@ -104,9 +96,19 @@ export class TesseraFilter extends TesseraElement {
       }
       /* The matched span the server gave. */
       [part='tick'] mark {
-        background: var(--_tessera-accent-soft);
-        color: var(--_tessera-accent);
-        border-radius: 2px;
+        background: none;
+        color: inherit;
+        font-weight: 600;
+      }
+      [part='tick'] input {
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        flex: none;
+      }
+      [part='values'][role='group'] > [part='tick'] {
+        min-height: 28px;
+        padding-left: 2px;
       }
       /* The key follows the title, muted, since a key may be an opaque identifier such as a uuid. */
       [part='tick'] .k {
@@ -116,16 +118,23 @@ export class TesseraFilter extends TesseraElement {
         font-variant-numeric: tabular-nums;
       }
       [part='more'] {
-        text-align: left;
-        height: 24px;
+        display: block;
+        margin-top: 6px;
         color: var(--_tessera-ink-3);
+        font-size: 12px;
+      }
+      [part='refusal'] {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 6px;
         font-size: 12px;
       }
       .to {
         color: var(--_tessera-ink-3);
       }
-      input.mono {
-        font-family: var(--_tessera-font-mono);
+      input.num {
+        font-variant-numeric: tabular-nums;
       }
     `
   ];
@@ -139,13 +148,6 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor draft: ColumnDraft | null = null;
   /** @internal */
   @state() accessor search = '';
-  /**
-   * The title seen for each chosen key when it was picked, so its chip keeps a name after the value
-   * leaves the suggestion page. A key with no recorded title shows as the key.
-   *
-   * @internal
-   */
-  @state() accessor labels: Record<string, string> = {};
   /**
    * Which category shape this control draws: `null` until the empty-`q` page answers, then
    * `'checklist'` if it said `more: false` (every visible value fits) or `'lookahead'` if not.
@@ -251,12 +253,6 @@ export class TesseraFilter extends TesseraElement {
     else this.typing = setTimeout(apply, TYPING_DEBOUNCE_MS);
   }
 
-  /** The column's name for a label: `submitted_at` reads as "Submitted at". */
-  private heading(): string {
-    const name = this.column.replace(/_/g, ' ');
-    return name.charAt(0).toUpperCase() + name.slice(1);
-  }
-
   override render(): TemplateResult | typeof nothing {
     const o = this.resolvedOperand;
     if (!o) return nothing;
@@ -266,8 +262,8 @@ export class TesseraFilter extends TesseraElement {
     // every other shape has an `input` with `id="ctl"`.
     const checklist = draft.family === 'category' && this.shape === 'checklist';
     const label = checklist
-      ? html`<span part="label" class="muted" id="ctl-label">${this.heading()}</span>`
-      : html`<label part="label" class="muted" for="ctl">${this.heading()}</label>`;
+      ? html`<span part="label" class="muted" id="ctl-label">${columnCaption(this.column)}</span>`
+      : html`<label part="label" class="muted" for="ctl">${columnCaption(this.column)}</label>`;
     return html`${label}${this.body(o, draft)}`;
   }
 
@@ -305,7 +301,7 @@ export class TesseraFilter extends TesseraElement {
         @input=${(e: Event) => this.change({...draft, needle: (e.target as HTMLInputElement).value}, false)} /></div>
       <select part="mode" style="width:auto" aria-label=${`${this.column} operator`} .value=${draft.op}
         @change=${(e: Event) => this.change({...draft, op: (e.target as HTMLSelectElement).value as KeywordOperator}, true)}>
-        ${ops.map((op) => html`<option value=${op} ?selected=${draft.op === op}>${op}</option>`)}
+        ${ops.map((op) => html`<option value=${op} ?selected=${draft.op === op}>${OPERATOR_WORDS[op]}</option>`)}
       </select>
     </div>`;
   }
@@ -329,10 +325,9 @@ export class TesseraFilter extends TesseraElement {
       : html`${this.markedField(v, 'key', v.key)}`;
   }
 
-  /** A checklist row's text, as {@link suggestionText} without a match span, since nothing was typed. */
-  private checklistText(v: SuggestValue): TemplateResult {
-    const title = v.title ?? v.key;
-    return v.title && v.title !== v.key ? html`${title}<span class="k">${v.key}</span>` : html`${v.key}`;
+  /** A checklist row's text: the title where there is one, else the key. The key is its tooltip. */
+  private checklistText(v: SuggestValue): string {
+    return v.title ?? v.key;
   }
 
   private category(draft: ColumnDraft & {family: 'category'}) {
@@ -341,33 +336,20 @@ export class TesseraFilter extends TesseraElement {
     const chosen = new Set(draft.keys);
 
     const pick = (v: SuggestValue) => {
-      if (v.title) this.labels = {...this.labels, [v.key]: v.title};
       this.change(chosen.has(v.key) ? {...draft, keys: draft.keys.filter((k) => k !== v.key)} : {...draft, keys: [...draft.keys, v.key]}, true);
     };
-    const remove = (key: string) => this.change({...draft, keys: draft.keys.filter((k) => k !== key)}, true);
-
-    const chips =
-      draft.keys.length > 0
-        ? html`<div part="value-chips">
-            ${repeat(
-              draft.keys,
-              (k) => k,
-              (k) => html`<span part="value-chip" class="chip">${this.labels[k] ?? k}<button type="button" aria-label=${`Remove ${k}`} @click=${() => remove(k)}>${icon('close', 12)}</button></span>`
-            )}
-          </div>`
-        : nothing;
-
     // The checklist: every visible value is on the page, so a checkbox per value and no search
-    // box. It uses the same `pick` and `chips` as the lookahead, so the draft sent is the same.
+    // box. It uses the same `pick` as the lookahead, so the draft sent is the same. The chosen
+    // values show as ticks here and as the filter panel's chip.
     if (this.shape === 'checklist') {
       const rows = suggestion?.values ?? [];
       // A checklist does not re-ask, so a refusal here is unexpected; it is shown if it happens.
-      const refusalNote = refusal ? html`<span part="refusal" class="xs">${refusal.code}: values not listable</span>` : nothing;
-      return html`${chips}<div part="values" class="list" role="group" aria-labelledby="ctl-label">
+      const refusalNote = refusal ? html`<span part="refusal" data-code=${refusal.code}><span class="dot refuse"></span>Values unavailable</span>` : nothing;
+      return html`<div part="values" class="list" role="group" aria-labelledby="ctl-label">
         ${repeat(
           rows,
           (v) => v.code,
-          (v) => html`<label part="tick" class="item">
+          (v) => html`<label part="tick" class="item" title=${v.key}>
               <input type="checkbox" .checked=${chosen.has(v.key)} @change=${() => pick(v)} aria-label=${v.title ?? v.key} />
               <span class="t">${this.checklistText(v)}</span>
             </label>`
@@ -408,14 +390,14 @@ export class TesseraFilter extends TesseraElement {
         : nothing;
 
     const note = refusal
-      ? html`<span part="refusal" class="xs">${refusal.code}: values not listable</span>`
+      ? html`<span part="refusal" data-code=${refusal.code}><span class="dot refuse"></span>Values unavailable</span>`
       : suggestion === null
         ? html`<span class="skel" aria-hidden="true"></span>`
         : suggestion.more
-          ? html`<span part="more" class="xs">type more to narrow</span>`
+          ? html`<span part="more">Type to narrow the list</span>`
           : nothing;
 
-    return html`${field}${chips}${list}${note}`;
+    return html`${field}${list}${note}`;
   }
 
   private numeric(draft: {family: 'numeric'; gte: number | null; lte: number | null}) {
@@ -428,7 +410,7 @@ export class TesseraFilter extends TesseraElement {
     };
     const fromValue = (v: number | null): string => (v === null ? '' : date ? new Date(v / 1000).toISOString().slice(0, 10) : String(v));
     const bound = (which: 'gte' | 'lte') =>
-      html`<input id=${which === 'gte' ? 'ctl' : nothing} part="entry" class="grow mono" type=${date ? 'date' : 'number'}
+      html`<input id=${which === 'gte' ? 'ctl' : nothing} part="entry" class="grow num" type=${date ? 'date' : 'number'}
         .value=${fromValue(draft[which])} aria-label=${`${this.column} ${which === 'gte' ? 'from' : 'to'}`}
         @change=${(e: Event) => this.change({...draft, [which]: toValue((e.target as HTMLInputElement).value)} as ColumnDraft, true)} />`;
     return html`<div class="ctl-row">${bound('gte')}<span class="to">to</span>${bound('lte')}</div>`;

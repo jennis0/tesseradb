@@ -212,3 +212,17 @@ describe('<tessera-hierarchy>', () => {
   });
 
 });
+
+describe('<tessera-hierarchy> refused', () => {
+  it('carries the refusal’s code and says nothing more about the empty tree', async () => {
+    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
+    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const store = fakeStore({meta: META, status: status({})});
+    store.browse = () => Promise.reject({code: 'layer-withheld', detail: ''});
+    el.store = store;
+    await settle(host);
+    await settle(host);
+    expect(deep(host, '[part="refusal"]')?.getAttribute('data-code')).toBe('layer-withheld');
+    expect(deep(host, '[part="state"][data-state="empty"]')).toBeNull();
+  });
+});

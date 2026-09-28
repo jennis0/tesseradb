@@ -5,6 +5,10 @@ import '../src/layer-picker.js';
 import '../src/artifact-card.js';
 import '../src/legend.js';
 import '../src/explorer.js';
+import '../src/artifact-list.js';
+import '../src/item-card.js';
+import '../src/selection.js';
+import '../src/status.js';
 import {deep, deepAll, deepText, fakeStore, mount, settle, status, meta, scalar} from './fake-store.js';
 
 afterEach(() => {
@@ -207,6 +211,26 @@ describe('<tessera-artifact-card>', () => {
   });
 });
 
+describe('<tessera-legend limit>', () => {
+  it('names the first entries and shows the rest when "N more" is pressed', async () => {
+    const values = Array.from({length: 7}, (_, i) => ({code: i + 1, key: `k${i}`, title: `Value ${i}`}));
+    const store = fakeStore({
+      meta: META,
+      status: status({}),
+      legend: {ranks: {archive: Object.fromEntries(values.map((v, i) => [v.code, i]))}, domains: {}, categories: {archive: values}, categoryErrors: {}, colourBy: 'archive'}
+    });
+    const host = await mount('<tessera-legend limit="4"></tessera-legend>');
+    (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    // Seven values and the entry for the rest, cut to four.
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(4);
+    (deep(host, '[part="more"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(8);
+    expect(deep(host, '[part="more"]')).toBeNull();
+  });
+});
+
 describe('<tessera-legend selectable>', () => {
   it('offers the clusters of every layer that can colour, drawn or not, and choosing one draws nothing', async () => {
     const host = await mount('<tessera-legend selectable readout></tessera-legend>');
@@ -216,9 +240,6 @@ describe('<tessera-legend selectable>', () => {
     const colourOptions = () => deepAll(host, '[part="select"] option').map((o) => o.getAttribute('value'));
     // No layer is drawn. A labels layer has no clusters of its own, so it is not offered.
     expect(colourOptions()).toEqual(['', 'cluster:clusters', 'cluster:districts', 'archive']);
-    // Nothing drawn: the select offers the two roots and sits on the entry that says none is on.
-    expect(deepAll(host, '[part="layers-select"] option').map((o) => o.getAttribute('value'))).toEqual(['', 'clusters', 'districts']);
-    expect((deep(host, '[part="layers-select"]') as HTMLSelectElement).value).toBe('');
     const select = deep(host, '[part="select"]') as HTMLSelectElement;
     select.value = 'cluster:clusters';
     select.dispatchEvent(new Event('change'));
@@ -231,7 +252,6 @@ describe('<tessera-legend selectable>', () => {
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
     expect((deep(host, '[part="select"]') as HTMLSelectElement).value).toBe('cluster:clusters');
-    expect((deep(host, '[part="layers-select"]') as HTMLSelectElement).value).toBe('');
   });
 
   it('is a readout without selectable', async () => {
@@ -349,5 +369,47 @@ describe('<tessera-explorer> on an artifact selection', () => {
     fit.click();
     await settle(host);
     expect(fitted).toEqual([1n]);
+  });
+});
+
+describe('<tessera-artifact-list rows>', () => {
+  it('offers the rest under "N more", and starts cut again when the layers change', async () => {
+    const host = await mount('<tessera-artifact-list rows="2"></tessera-artifact-list>');
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 30n), artifact(2n, 20n), artifact(3n, 10n)])});
+    (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    expect(deepAll(host, '[part="item"]')).toHaveLength(2);
+    (deep(host, '[part="more"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(deepAll(host, '[part="item"]')).toHaveLength(3);
+    expect(deep(host, '[part="more"]')).toBeNull();
+    store.set('artifacts', artifactsProjection([artifact(1n, 30n), artifact(2n, 20n), artifact(3n, 10n)], ['districts']));
+    await settle(host);
+    expect(deepAll(host, '[part="item"]')).toHaveLength(2);
+  });
+});
+
+describe('a refusal on screen', () => {
+  const code = async (markup: string, over: Parameters<typeof fakeStore>[0], ready?: (host: HTMLElement) => Promise<void>) => {
+    const host = await mount(markup);
+    (host.firstElementChild as unknown as {store: unknown}).store = fakeStore({meta: META, status: status({}), ...over});
+    await settle(host);
+    await ready?.(host);
+    const found = deep(host, '[part="refusal"]')?.getAttribute('data-code') ?? null;
+    host.remove();
+    return found;
+  };
+
+  it('carries the server’s code on the refusal part, in every element that shows one', async () => {
+    const refusal = {code: 'withheld', detail: 'not for you'};
+    const selection = {item: null, itemRefusal: null, artifact: null, artifactRefusal: null};
+    expect(await code('<tessera-item-card></tessera-item-card>', {selection: {...selection, itemRefusal: refusal}})).toBe('withheld');
+    expect(await code('<tessera-artifact-card></tessera-artifact-card>', {selection: {...selection, artifactRefusal: refusal}})).toBe('withheld');
+    expect(await code('<tessera-artifact-list></tessera-artifact-list>', {artifacts: {...artifactsProjection([]), status: 'refused', refusal}})).toBe('withheld');
+    expect(await code('<tessera-legend></tessera-legend>', {legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {archive: refusal}, colourBy: 'archive'}})).toBe('withheld');
+    const box = {kind: 'box' as const, bbox: [0, 0, 1, 1] as [number, number, number, number]};
+    const held = {ids: new BigUint64Array(0), positions: new Float32Array(0), count: 0};
+    expect(await code('<tessera-selection></tessera-selection>', {region: {shape: box, status: 'refused', refusal, visible: null, matched: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}, verdict: null, held}})).toBe('withheld');
+    expect(await code('<tessera-status></tessera-status>', {status: status({status: 'refused', refusal})})).toBe('withheld');
   });
 });

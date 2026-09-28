@@ -1,6 +1,6 @@
 /* The gallery's own chrome. The elements are styled only by the themes below. */
 :root {
-  --page-bg: light-dark(#eceae4, #0b0c0e);
+  --page-bg: light-dark(#f6f6f4, #111317);
   --page-ink: light-dark(#23262b, #d9dce0);
   --page-ink-2: light-dark(#666b73, #8d939b);
   --page-line: light-dark(#cfccc3, #2a2e33);
@@ -96,7 +96,7 @@ figure.specimen > figcaption code {
   box-sizing: border-box;
   max-width: 100%;
   min-height: 24px;
-  background: var(--tessera-surface, light-dark(#fbfbfa, #151719));
+  background: var(--tessera-surface, light-dark(#ffffff, #1a1d22));
   outline: 1px dashed var(--page-line);
   outline-offset: 0;
   /* Content wider than its frame scrolls inside it rather than painting over its neighbours. */
@@ -132,9 +132,7 @@ html[data-theme='editorial'] main.stage {
   --tessera-highlight: #6e4a8e;
   --tessera-highlight-soft: #ece0f1;
   --tessera-warn: #8a5a00;
-  --tessera-warn-soft: #f8e8c4;
   --tessera-refuse: #9b2c24;
-  --tessera-refuse-soft: #f6dcd6;
   --tessera-ok: #4f7a3a;
   --tessera-map-bg: #f5ede0;
   --tessera-radius: 10px;
@@ -152,7 +150,6 @@ html[data-theme='editorial'] .stage *::part(headline) {
   line-height: 1.25;
 }
 html[data-theme='editorial'] .stage *::part(chip),
-html[data-theme='editorial'] .stage *::part(value-chip),
 html[data-theme='editorial'] .stage *::part(view-chip),
 html[data-theme='editorial'] .stage *::part(label-chip),
 html[data-theme='editorial'] .stage *::part(filter-panel-chip),
@@ -188,9 +185,7 @@ html[data-theme='console'] main.stage {
   --tessera-highlight: #f5c542;
   --tessera-highlight-soft: #2e2610;
   --tessera-warn: #f5a524;
-  --tessera-warn-soft: #2b1d05;
   --tessera-refuse: #ff6b61;
-  --tessera-refuse-soft: #2a0f0e;
   --tessera-ok: #3ddc84;
   --tessera-map-bg: #050606;
   --tessera-radius: 0px;
@@ -202,7 +197,6 @@ html[data-theme='console'] .stage *::part(title) {
   letter-spacing: 0.14em;
 }
 html[data-theme='console'] .stage *::part(chip),
-html[data-theme='console'] .stage *::part(value-chip),
 html[data-theme='console'] .stage *::part(filter-panel-chip) {
   border-radius: 0;
   outline: 1px solid currentColor;

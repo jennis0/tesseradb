@@ -53,9 +53,18 @@ export type FormatOptions = {
   stale?: boolean;
   /** The locale for thousands separators, as `Number.prototype.toLocaleString` takes it. Defaults to `en-GB`. */
   locale?: string;
+  /**
+   * Whether figures of a thousand or more are shortened to one decimal, as `16.8M` for 16,822,190,
+   * where there is no room for every digit. Defaults to `false`.
+   */
+  compact?: boolean;
 };
 
-const fmt = (n: number, locale: string) => n.toLocaleString(locale);
+/** ICU writes British English's compact suffixes in lower case (`16.8m`); the figures use capitals. */
+const fmt = (n: number, opts: FormatOptions) =>
+  opts.compact
+    ? n.toLocaleString(opts.locale ?? 'en-GB', {notation: 'compact', maximumFractionDigits: 1}).replace(/(\d)([kmbt])$/, (_, d: string, u: string) => d + u.toUpperCase())
+    : n.toLocaleString(opts.locale ?? 'en-GB');
 
 /**
  * The count before anything is served: zero of zero, not exact.
@@ -78,8 +87,7 @@ export const NO_MASKED: Masked = {value: 0, exact: false};
  */
 export function formatCount(count: Count, opts: FormatOptions = {}): string {
   if (opts.stale || !count.exact) return '';
-  const locale = opts.locale ?? 'en-GB';
-  return `${fmt(count.shown, locale)} of ${fmt(count.total, locale)}`;
+  return `${fmt(count.shown, opts)} of ${fmt(count.total, opts)}`;
 }
 
 /**
@@ -90,6 +98,5 @@ export function formatCount(count: Count, opts: FormatOptions = {}): string {
  */
 export function formatMasked(masked: Masked, opts: FormatOptions = {}): string {
   if (opts.stale) return '';
-  const locale = opts.locale ?? 'en-GB';
-  return masked.exact ? fmt(masked.value, locale) : `≈ ${fmt(masked.value, locale)}`;
+  return masked.exact ? fmt(masked.value, opts) : `≈ ${fmt(masked.value, opts)}`;
 }

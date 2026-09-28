@@ -98,8 +98,8 @@ export function placeLabels(candidates: readonly LabelCandidate[], maxDisplaceme
 }
 
 /** The ends of the label size band, in pixels. */
-export const LABEL_SIZE_MIN = 12.5;
-export const LABEL_SIZE_MAX = 24;
+export const LABEL_SIZE_MIN = 13;
+export const LABEL_SIZE_MAX = 16;
 
 /**
  * The pixel size of an artifact's name, from its masked count on a logarithmic band between the

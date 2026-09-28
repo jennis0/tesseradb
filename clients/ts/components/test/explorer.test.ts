@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it} from 'vitest';
 import type {Meta} from '@tesseradb/client';
 import '../src/explorer.js';
-import {fakeStore, mount, settle, status, meta, scalar} from './fake-store.js';
+import {deep, deepAll, fakeStore, mount, settle, status, meta, scalar} from './fake-store.js';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -155,5 +155,80 @@ describe('<tessera-explorer> detail', () => {
     await settle(host);
     (shadow.querySelector('tessera-item-card')!.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
+  });
+});
+
+describe('<tessera-explorer> layouts', () => {
+  it('draws the panels in a sidebar when docked and in one card over the map as an overlay', async () => {
+    const docked = await explorer('<tessera-explorer layout="docked"></tessera-explorer>');
+    expect(docked.shadow.querySelector('[part="sidebar"] tessera-filter-panel')).not.toBeNull();
+    expect(docked.shadow.querySelector('[part="panel"]')).toBeNull();
+    document.body.innerHTML = '';
+    const overlay = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    expect(overlay.shadow.querySelector('[part="sidebar"]')).toBeNull();
+    expect(overlay.shadow.querySelector('[part="panel"] tessera-filter-panel')).not.toBeNull();
+    expect(overlay.shadow.querySelector('[part="panel"] tessera-legend')).not.toBeNull();
+  });
+
+  it('opens the filter controls from the card’s Filters button, which counts the clauses applied', async () => {
+    const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    const controls = () => deepAll(shadow.querySelector('[part="panel"]')!, 'tessera-filter');
+    expect(controls()).toHaveLength(0);
+    store.set('filters', {...store.get('filters'), draft: {archive: {family: 'category', keys: ['cs'], verb: 'filter'}}});
+    await settle(host);
+    const toggle = shadow.querySelector<HTMLButtonElement>('[part="filters-toggle"]')!;
+    expect(toggle.getAttribute('data-count')).toBe('1');
+    expect(shadow.getElementById(toggle.getAttribute('aria-controls')!)).not.toBeNull();
+    // The chips show with the controls closed.
+    expect(deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"]')).toHaveLength(1);
+    toggle.click();
+    await settle(host);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(controls()).toHaveLength(2);
+  });
+
+  it('opens the layer picker from the Layers button, passes its change on, and closes on Escape', async () => {
+    const clusters = {name: 'clusters', title: 'Clusters', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1} as unknown as Meta['layers'][number];
+    const host = await mount('<tessera-explorer></tessera-explorer>');
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+    const store = fakeStore({meta: {...META, layers: [clusters]}, status: status({})});
+    el.store = store;
+    await settle(host);
+    const shadow = el.shadowRoot!;
+    const toggle = shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!;
+    expect(shadow.querySelector('[part="layers-popover"]')).toBeNull();
+    toggle.click();
+    await settle(host);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const seen: unknown[] = [];
+    host.addEventListener('tessera-layerchange', (e) => seen.push((e as CustomEvent).detail));
+    const box = deep(shadow.querySelector('[part="layers-popover"]')!, '[part="entry"] input') as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(new Event('change', {bubbles: true}));
+    expect(seen).toEqual([{layers: ['clusters']}]);
+    toggle.focus();
+    box.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
+    await settle(host);
+    expect(shadow.querySelector('[part="layers-popover"]')).toBeNull();
+    expect(shadow.activeElement).toBe(toggle);
+    // A press anywhere else on the page closes it too, and a press inside it does not.
+    toggle.click();
+    await settle(host);
+    shadow.querySelector('[part="layers-popover"]')!.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, composed: true}));
+    await settle(host);
+    expect(shadow.querySelector('[part="layers-popover"]')).not.toBeNull();
+    document.body.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, composed: true}));
+    await settle(host);
+    expect(shadow.querySelector('[part="layers-popover"]')).toBeNull();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('marks the Layers button while any layer is drawn', async () => {
+    const {host, shadow, store} = await explorer();
+    const toggle = () => shadow.querySelector('[part="layers-toggle"]')!;
+    expect(toggle().hasAttribute('data-on')).toBe(false);
+    store.set('artifacts', {...store.get('artifacts'), layers: ['clusters']});
+    await settle(host);
+    expect(toggle().hasAttribute('data-on')).toBe(true);
   });
 });

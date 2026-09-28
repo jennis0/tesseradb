@@ -32,6 +32,13 @@ await mkdir(shots, {recursive: true});
 const browser = await launchBrowser(args);
 // Wide, so the viewer's panels leave more of the map visible.
 const page = await browser.newPage({viewport: {width: 1920, height: 1080}});
+
+/** The layer picker sits in the explorer's Layers popover, which a press on the map closes; open it. */
+async function openLayers() {
+  const toggle = page.locator('[part="layers-toggle"]').first();
+  await toggle.waitFor({timeout: 60_000});
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+}
 const consoleErrors = [];
 page.on('console', (m) => {
   if (m.type() === 'error') consoleErrors.push(m.text());
@@ -87,6 +94,7 @@ const drawn = async () =>
 
 /** Tick exactly one layer in the picker. */
 const only = async (layerName) => {
+  await openLayers();
   const entries = page.locator('tessera-layer-picker [part="entry"]');
   const n = await entries.count();
   for (let o = 0; o < n; o++) {
@@ -99,6 +107,7 @@ const only = async (layerName) => {
 
 const principal = async (index) => {
   await page.selectOption('#principal', String(index));
+  await openLayers();
   await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 };
 
@@ -143,6 +152,7 @@ const vertices = (parts) => (parts ?? []).flat().reduce((n, ring) => n + ring.le
 const partsOf = (parts) => (parts ?? []).length;
 const holesOf = (parts) => (parts ?? []).reduce((n, rings) => n + Math.max(0, rings.length - 1), 0);
 
+await openLayers();
 await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 await settled();
 

@@ -692,10 +692,15 @@ export function createStore(options: StoreOptions): Store {
   let awaitingSwitchFrame = false;
 
   const tokens = new TokenSupply(options.authorise, options.token, clock, (changed) => {
-    // A derived shape and a hovered record answer one principal; a new token may be another.
+    // A derived shape, a hovered record, the held bands and the view's counts answer one
+    // principal; a new token may be another. The counts go at once, and the view is asked for
+    // again under the new token.
     if (changed) {
       shapes.forget('derived');
       records.forget();
+      for (const held of views.all()) held.replica.reset();
+      replaceProjection('view', noFrame(views.id));
+      if (lastView) refresh();
     }
     // A warm-up that failed for want of a token runs again now there is one.
     if (meta === null) void ready().catch(() => {});

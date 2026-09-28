@@ -1,6 +1,6 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {REGION_HELD_LIMIT, type RegionProjection} from '@tesseradb/client';
+import {type RegionProjection} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -27,7 +27,7 @@ import './count.js';
  * @csspart title - The heading, with the shape's kind.
  * @csspart state - The state line, with `data-state`; its tooltip says whether the counts are
  *   exact for the shape or for a cover.
- * @csspart refusal - The refusal's code, in the refused state.
+ * @csspart refusal - The words "Selection refused", with `data-code` set to the refusal's code.
  * @csspart counts - The counts.
  * @csspart count-served - The `<tessera-count>` of marks shown inside.
  * @csspart count-matched - The `<tessera-count>` matched inside (or outside).
@@ -66,6 +66,7 @@ export class TesseraSelection extends TesseraElement {
         overflow-y: auto;
       }
       [part='item'] {
+        min-height: 26px;
         font-family: var(--_tessera-font-mono);
         font-size: 12px;
       }
@@ -102,10 +103,10 @@ export class TesseraSelection extends TesseraElement {
         : nothing;
     const stateRegion =
       r.status === 'loading'
-        ? html`<span part="state" data-state="loading"><span class="dot"></span>Counting<span class="skel" aria-hidden="true"></span></span>`
+        ? html`<span part="state" data-state="loading"><span class="dot quiet"></span>Counting<span class="skel" aria-hidden="true"></span></span>`
         : r.status === 'refused'
-          ? html`<span part="state" data-state="refused">${icon('warn', 14)}Refused<span part="refusal" class="mono">${r.refusal?.code}</span></span>`
-          : html`<span part="state" data-state=${state} title=${r.verdict === null ? 'not yet answered' : r.verdict.exact ? 'exact for the shape' : `a cover of the shape at depth ${r.verdict.depth}`}>${stale ? html`${icon('clock', 14)}Corpus updated` : nothing}</span>`;
+          ? html`<span part="state" data-state="refused"><span class="dot refuse"></span><span part="refusal" data-code=${r.refusal?.code ?? nothing}>Selection refused</span></span>`
+          : html`<span part="state" data-state=${state} title=${r.verdict === null ? 'Not counted yet' : r.verdict.exact ? 'Exact for the shape' : 'Approximate: counted over cells around the shape'}>${stale ? html`<span class="dot warn"></span>Data updated` : nothing}</span>`;
     const ids = Array.from(r.held.ids, idString);
     const waiting = (label: unknown, reason: string) => html`<button part="action" class="btn off" type="button" disabled title=${reason}>${label}</button>`;
     return html`<div class="panel">${heading(r.shape.outside ? `outside ${r.shape.kind}` : r.shape.kind)}${stateRegion}${counts}
@@ -119,7 +120,7 @@ export class TesseraSelection extends TesseraElement {
                     if (e.key === 'Enter' || e.key === ' ') void this.resolvedStore?.pick(BigInt(id));
                   }}><span class="name">${id}</span></li>`
             )}
-            ${r.held.count > ids.length ? html`<li class="muted xs">and ${(r.held.count - ids.length).toLocaleString('en-GB')} more (the first ${REGION_HELD_LIMIT} listed)</li>` : nothing}
+            ${r.held.count > ids.length ? html`<li class="muted sm">${(r.held.count - ids.length).toLocaleString('en-GB')} more not listed</li>` : nothing}
           </ul>`
         : nothing}
       <div part="actions">
@@ -131,9 +132,9 @@ export class TesseraSelection extends TesseraElement {
           const next = {...r.shape, outside: !r.shape.outside};
           this.resolvedStore?.select(next);
           emit(this, 'tessera-selectchange', {shape: shapeDetail(next), status: 'loading'});
-        }}>${icon('filter', 13)}${r.shape.outside ? 'Inside' : 'Outside'}</button>
-        ${waiting('Export', 'Needs the export verb (not yet served)')}
-        ${waiting('Save as artifact', 'Needs the runtime-artifact path (not yet served)')}
+        }}>${icon(r.shape.outside ? 'filter' : 'outside', 13)}${r.shape.outside ? 'Inside' : 'Outside'}</button>
+        ${waiting('Export', 'Not available yet')}
+        ${waiting('Save as artifact', 'Not available yet')}
       </div>
     </div>`;
   }

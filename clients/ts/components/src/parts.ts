@@ -6,7 +6,7 @@
  */
 
 /** What `renderState` draws, in every element that shows a state. */
-const STATE = ['state', 'refusal', 'refresh', 'reauthorise'];
+const STATE = ['state', 'refusal', 'refresh', 'retry', 'reauthorise'];
 
 /**
  * The parts each element may render, by element name without `tessera-`, as the lists an element
@@ -17,16 +17,16 @@ const STATE = ['state', 'refusal', 'refresh', 'reauthorise'];
 export const PARTS = {
   map: ['canvas', 'controls', 'overlay', 'tooltip', ...STATE],
   status: ['card', 'strip', 'count-shown', 'count-matched', 'count-highlighted', 'count-visible', ...STATE],
-  'view-picker': ['field', 'label', 'select'],
+  'view-picker': ['field', 'select'],
   'key-picker': ['entry', 'field', 'label', 'select', 'step'],
-  legend: ['cluster-option', 'label', 'layers-select', 'level-select', 'ramp', 'select', 'swatch', 'swatches', 'title', 'value', ...STATE],
+  legend: ['cluster-option', 'label', 'level-select', 'more', 'ramp', 'select', 'swatch', 'swatches', 'title', 'value', ...STATE],
   'layer-picker': ['entry', 'group', 'name', 'title', ...STATE],
-  filter: ['entry', 'label', 'mode', 'more', 'tick', 'value-chip', 'value-chips', 'values', 'refusal'],
+  filter: ['entry', 'label', 'mode', 'more', 'tick', 'values', 'refusal'],
   'filter-panel': ['chip', 'chips', 'clear', 'title', 'verb', ...STATE],
-  hierarchy: ['actions', 'also', 'children', 'count-masked', 'count-matched', 'counts', 'expander', 'filter', 'fit', 'highlight', 'layer', 'lineage', 'more', 'name', 'row', 'search', 'title', 'tree', ...STATE],
-  'artifact-list': ['count', 'item', 'items', 'name', 'title', ...STATE],
-  selection: ['action', 'actions', 'count-matched', 'count-served', 'count-visible', 'counts', 'item', 'items', 'label', 'title', ...STATE],
-  'item-card': ['close', 'copy', 'field', 'headline', 'key', 'label', 'label-chip', 'open', 'scoped', 'title', 'value', 'view-chip', ...STATE],
+  hierarchy: ['actions', 'also', 'children', 'count-masked', 'count-matched', 'counts', 'expander', 'filter', 'fit', 'highlight', 'layer', 'more', 'name', 'row', 'search', 'title', 'tree', ...STATE],
+  'artifact-list': ['count', 'item', 'items', 'more', 'name', 'title', ...STATE],
+  selection: ['action', 'actions', 'count-matched', 'count-served', 'count-visible', 'counts', 'item', 'items', 'label', 'refusal', 'state', 'title'],
+  'item-card': ['close', 'copy', 'field', 'headline', 'key', 'label', 'open', 'scoped', 'title', 'value', 'view-chip', ...STATE],
   'artifact-card': ['child', 'children', 'close', 'content', 'count', 'filter', 'fit', 'headline', 'highlight', 'label', 'name', 'outside', 'parent', 'parents', 'shape', 'title', 'value', 'verbs', ...STATE]
 } as const satisfies Record<string, readonly string[]>;
 

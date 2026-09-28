@@ -118,12 +118,12 @@ describe('a hover over a mark', () => {
     expect(el.hover?.lines).toEqual(['GB-LND', 'London']);
   });
 
-  it('shows a timestamp in full', async () => {
+  it('shows a timestamp in full to the second, in UTC, without its fraction', async () => {
     const at = 1_700_000_000_123_000;
     const {el} = await map([{name: 'published', arrowType: 'timestamp_us'}], 'tooltip-fields="published"');
     el.slab.markAt = carrying({published: {arrowType: 'timestamp_us', value: at}});
 
     el.onHover(markAt(5n));
-    expect(el.hover?.lines).toEqual([new Date(at / 1000).toISOString()]);
+    expect(el.hover?.lines).toEqual(['14 November 2023, 22:13:20 UTC']);
   });
 });

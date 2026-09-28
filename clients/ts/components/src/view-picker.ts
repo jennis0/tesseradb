@@ -3,22 +3,22 @@ import {type Meta} from '@tesseradb/client';
 import {enterGroup, hasOneLayout, viewPickerEntries} from '@tesseradb/client/internal';
 import {TesseraElement} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
+import {icon} from './icons.js';
 import {switchView} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
  * A select over the views the viewer may reach, one entry per plain view and one per view group,
- * in `/v1/meta`'s order. Choosing a group enters it under the current view's key where the two
- * groups share keys, else at the key this element last left it on, else at its first view. Renders
- * nothing where the bundle offers one entry.
+ * in `/v1/meta`'s order, drawn as the current view's title with a chevron. Choosing a group enters
+ * it under the current view's key where the two groups share keys, else at the key this element
+ * last left it on, else at its first view. Renders nothing where the bundle offers one entry.
  *
  * @summary Chooses the view.
  * @tagname tessera-view-picker
  * @category Elements
  * @fires {CustomEvent<TesseraEventDetails['tessera-viewswitch']>} tessera-viewswitch - The view
  *   changed.
- * @csspart field - The caption and the select.
- * @csspart label - The caption.
+ * @csspart field - The select and its chevron, drawn as the view's title in bold.
  * @csspart select - The select.
  */
 export class TesseraViewPicker extends TesseraElement {
@@ -30,10 +30,9 @@ export class TesseraViewPicker extends TesseraElement {
         display: block;
       }
       [part='field'] {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        padding: 14px 16px 0;
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.3;
       }
     `
   ];
@@ -83,13 +82,12 @@ export class TesseraViewPicker extends TesseraElement {
     const value = (entry: {kind: 'view' | 'group'; id: string}) => `${entry.kind === 'group' ? 'g' : 'v'}:${entry.id}`;
     const current = entries.find((e) => e.current);
     this.chosen = current ? value(current) : '';
-    return html`<div part="field">
-      <span part="label" class="xs muted">View</span>
+    return html`<div part="field" class="choice">
       <select part="select" aria-label="View" @change=${(e: Event) => this.choose(meta, (e.target as HTMLSelectElement).value)}>
         ${entries.map(
           (entry) => html`<option value=${value(entry)} data-kind=${entry.kind} ?selected=${entry.current}>${entry.text}</option>`
         )}
-      </select>
+      </select>${icon('chev', 14, 1.4)}
     </div>`;
   }
 }
