@@ -13,7 +13,7 @@
 
 mod artifacts;
 mod cursor;
-mod set;
+pub(crate) mod set;
 mod table;
 mod values;
 

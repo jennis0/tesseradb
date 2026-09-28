@@ -733,9 +733,7 @@ impl Engine {
     }
 
     /// The members of `candidate` holding a row in `view` that pass `expr`, and the coarsest
-    /// verdict its region leaves reached. The filter is routed as the viewport routes it, over the
-    /// view's composed mask: an entity-space answer is kept to the entities the mask's rows cover,
-    /// and a row-space one is taken under the mask over the whole view and crossed to entities.
+    /// verdict its region leaves reached, composed by the aggregate route's own set code.
     fn filtered_in_view(
         &self,
         session: &Session,
@@ -744,8 +742,6 @@ impl Engine {
         candidate: &croaring::Bitmap,
         expr: &crate::filter::FilterExpr,
     ) -> Result<(croaring::Bitmap, Option<crate::RegionVerdict>)> {
-        use crate::compose::MaskedSet;
-        use crate::filter::RoutedFilter;
         let open = self.open_view(
             session,
             generation,
@@ -753,51 +749,7 @@ impl Engine {
             &None,
             &mut crate::timing::Probe::new(),
         )?;
-        let served = &open.served;
-        let row_space = &served.data.row_space;
-        let no_inverse = || {
-            EngineError::Malformed(format!(
-                "view '{view}' has no row-to-entity table, so a filter answered by its rows \
-                 cannot be counted by entity; rebuild the bundle"
-            ))
-        };
-        let resolved = crate::viewport::ResolvedLeaves::default();
-        self.route_filters_under(served, &open.mask, candidate, &resolved, &None, |route| {
-            match route(expr, false)? {
-                RoutedFilter::Entity(entities) => {
-                    // The mask's rows were projected through this extent, so the entities kept
-                    // are the ones the map shows.
-                    let within = row_space
-                        .restrict_to_view(&entities, open.geometry.projection.covers_through())
-                        .ok_or_else(|| {
-                            EngineError::Malformed(format!(
-                                "view '{view}' no longer holds the extent its projection was \
-                                 taken through"
-                            ))
-                        })?;
-                    Ok((within, None))
-                }
-                RoutedFilter::Row(tree) => {
-                    let total = row_space.total_rows();
-                    let whole = 0..u32::try_from(total).unwrap_or(u32::MAX);
-                    let matched = self.evaluate_row_route(
-                        &tree,
-                        served,
-                        std::slice::from_ref(&whole),
-                        total,
-                        false,
-                    )?;
-                    let rows = open.mask.visible_rows(matched.rows());
-                    let mut entities = self
-                        .pool
-                        .install(|| row_space.entities_of_rows(&rows))
-                        .ok_or_else(no_inverse)?;
-                    // The mask's rows are the candidate's in this view; kept to it all the same.
-                    entities.and_inplace(candidate);
-                    Ok((entities, tree.region_verdict()))
-                }
-            }
-        })
+        crate::aggregate::set::entities_passing(self, &open, candidate, expr)
     }
 }
 
