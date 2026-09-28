@@ -256,6 +256,25 @@ def test_categories_with_a_prefix_counts_what_the_reader_may_see(db, points):
     }
 
 
+def test_categories_under_a_filter_count_the_rows_it_passes(db, points):
+    box = box_of(points, 0.2, 0.7)
+    expression = {"all_of": [
+        {"primary_category": {"in": ["cs.LG", "stat.ML"]}},
+        {"region": {"bbox": list(box)}},
+    ]}
+    passing = inside(points, box)
+    passing = passing[passing["primary_category"].isin(["cs.LG", "stat.ML"])]
+    unfiltered = db.categories("archive", prefix="", view="s0")
+    found = db.categories("archive", prefix="", view="s0", filters=expression)
+    assert found.column("key").to_pylist() == unfiltered.column("key").to_pylist()
+    carried = passing["archive"].value_counts()
+    counts = dict(zip(found.column("key").to_pylist(), found.column("count").to_pylist()))
+    assert counts == {key: carried.get(key, 0) for key in counts}
+    assert 0 in counts.values() and any(counts.values())
+    with pytest.raises(Refusal):
+        db.categories("archive", view="s0", filters=expression)
+
+
 def test_a_map_opens_on_the_selections_view_filters_and_box(db, points, stub_bundle):
     box = box_of(points, 0.2, 0.8)
     expression = {"archive": {"eq": "cs"}}
