@@ -42,7 +42,7 @@ use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation, ViewMetadataValue};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
-use tessera_store::{tile_ranges_all, tile_ranges_within};
+use tessera_store::tile_ranges_all;
 use tessera_types::layer::ComputedProperty;
 use tessera_types::{EntityId, GenerationStamp, RowId, TermId, TesseraId, API_VERSION};
 

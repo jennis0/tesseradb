@@ -49,7 +49,7 @@ pub use manifest_write::{
     write_manifest_json, write_segments_manifest, SIDE_MANIFESTS_KEPT,
 };
 pub use pairs::PairsParquetWriter;
-pub use permutation::{Permutation, RowSpace, SegmentExtent};
+pub use permutation::{EntityBuckets, Permutation, RowEntities, RowSpace, SegmentExtent};
 pub use read::{
     highest_side_manifest_n, open_bundle, open_written_prefix, tile_ranges, tile_ranges_all,
     tile_ranges_within, first_code_at_or_past, Bundle,

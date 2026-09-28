@@ -1864,12 +1864,8 @@ fn absent_cancel_token_never_aborts() {
 /// ... is NOT worth adding API for ... rely on code review for the per-tile placement").
 ///
 /// **Self-scaling, not a sleep-based guess.** `baseline_elapsed` is this run's own measured time
-/// for the full, uncancelled 16-tile sweep (`zoom = 2`, `underlay_offset = 8` — 4^8 = 65536
-/// sub-cell evaluations per tile, ~1.05M total; measured at ~270ms in this task's tuning run,
-/// comfortably above the floor asserted below). `cancelled_elapsed` should be a small fraction of
-/// `baseline_elapsed` regardless of which checkpoint caught it (measured at ~4ms cancelled against
-/// ~270ms baseline in this task's tuning run — comfortably inside the /2 bound asserted below, with
-/// wide margin to spare).
+/// for the full, uncancelled sweep over the 262,144 tiles of zoom 9, and `cancelled_elapsed` should
+/// be a small fraction of it whichever checkpoint caught the flip.
 #[test]
 fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes() {
     let tmp = TempDir::new().unwrap();
@@ -1885,8 +1881,7 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
         config_for_slow_multi_tile_sweep(),
     ));
 
-    let request =
-        || ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 1).underlay_offset(Some(8));
+    let request = || ViewportRequest::new("s0", 9, [0.0, 0.0, 1000.0, 1000.0], 1);
 
     // Baseline: an uncancelled full sweep over a fresh session, so `baseline_elapsed` reflects
     // this machine's real speed for the whole 16-tile workload (cold row-projection build

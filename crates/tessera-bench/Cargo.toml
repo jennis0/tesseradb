@@ -37,6 +37,7 @@ tessera-plugin = { path = "../tessera-plugin" }
 tessera-authz = { path = "../tessera-authz" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-store = { path = "../tessera-store" }
+tessera-roaring = { path = "../tessera-roaring" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
 tessera-engine = { path = "../tessera-engine" }
 tessera-build = { path = "../tessera-build" }

@@ -35,12 +35,11 @@
 //! # Ordinals are per column, and that is load-bearing
 //!
 //! An attribute ordinal is local to **one column**: each column owns a postings file and its own
-//! ordinal space, so an `AttrTermId` is really the pair `(column, AttrLocalId)`. An earlier design
-//! put every column in one positional file addressed as `base + local`; under ingest a value minted
-//! after the build takes an ordinal belonging to the next column, the base-union-tiers read then
-//! merges one value's members into another's, and because vocabulary visibility is
-//! membership-derived that shows a value to a principal on the strength of a different value's
-//! members — leak-register row C11, reachable by ordinary operation (filter-index §2.2).
+//! ordinal space, so an `AttrTermId` is really the pair `(column, AttrLocalId)`. With one file
+//! shared by every column and addressed as `base + local`, a value minted after the build would
+//! take an ordinal belonging to the next column and merge one value's members into another's;
+//! because vocabulary visibility is membership-derived, that would show a value to a principal on
+//! the strength of a different value's members.
 
 mod column;
 mod dict;

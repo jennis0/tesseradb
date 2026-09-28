@@ -660,6 +660,8 @@ pub struct ValueColumn {
     /// Present entities. `None` means every entity in `0..codes.len()` carries a value, and the
     /// entity id is the slot — the case that costs nothing to address.
     presence: Option<Bitmap>,
+    /// For a partial column, [`Self::block_ranks`], filled on the first lookup that needs it.
+    block_ranks: std::sync::OnceLock<(u32, Vec<u64>)>,
 }
 
 impl ValueColumn {
@@ -668,6 +670,7 @@ impl ValueColumn {
         ValueColumn {
             codes,
             presence: None,
+            block_ranks: std::sync::OnceLock::new(),
         }
     }
 
@@ -688,6 +691,7 @@ impl ValueColumn {
         Ok(ValueColumn {
             codes,
             presence: Some(presence),
+            block_ranks: std::sync::OnceLock::new(),
         })
     }
 
@@ -976,10 +980,36 @@ impl ValueColumn {
                 let slot = entity as usize;
                 (slot < self.codes.len()).then_some(slot)
             }
-            Some(presence) => presence
-                .contains(entity)
-                .then(|| (presence.rank(entity) - 1) as usize),
+            // The rank within the entity's block, above the ranks of the blocks below it: a
+            // whole-bitmap rank sums every container below the entity.
+            Some(presence) => presence.contains(entity).then(|| {
+                let first = entity & !0xFFFF;
+                let (first_block, ranks) = self.block_ranks(presence);
+                let below = ranks[((entity >> 16) - first_block) as usize];
+                (below + presence.range_cardinality(first..entity)) as usize
+            }),
         }
+    }
+
+    /// The first block holding a present entity, and how many present entities lie below each
+    /// block from it to the block past the last: memory proportional to the column's own span of
+    /// entity space.
+    fn block_ranks(&self, presence: &Bitmap) -> (u32, &[u64]) {
+        let (first, ranks) = self.block_ranks.get_or_init(|| {
+            let (Some(lo), Some(hi)) = (presence.minimum(), presence.maximum()) else {
+                return (0, vec![0]);
+            };
+            let (lo, hi) = (lo >> 16, hi >> 16);
+            let mut ranks = Vec::with_capacity((hi - lo) as usize + 2);
+            let mut below = 0u64;
+            for block in lo..=hi {
+                ranks.push(below);
+                below += presence.range_cardinality(block << 16..=(block << 16) | 0xFFFF);
+            }
+            ranks.push(below);
+            (lo, ranks)
+        });
+        (*first, ranks)
     }
 
     /// Entities carrying `value`, **restricted to `candidate`**.
@@ -1416,6 +1446,32 @@ fn read_values(path: &Path, access: Access) -> io::Result<Codes> {
 mod tests {
     use super::*;
     use crate::values_writer::write_value_column;
+
+    /// A partial column high in entity space answers each entity as a whole-bitmap rank would,
+    /// in its first block, across a block boundary and in its last.
+    #[test]
+    fn a_partial_column_high_in_entity_space_finds_each_slot() {
+        let first = 40u32 << 16;
+        let present: Vec<u32> = (first..first + 3 * 65_536)
+            .filter(|e| e % 3 == 0 || e % 65_536 == 65_535)
+            .collect();
+        let codes: Vec<u16> = (0..present.len()).map(|i| (i % 1_000) as u16 + 1).collect();
+        let column =
+            ValueColumn::partial(Codes::U16(codes.clone().into()), Bitmap::of(&present)).unwrap();
+        for (slot, &entity) in present.iter().enumerate() {
+            assert_eq!(
+                column.value_of(entity).map(|v| v.raw()),
+                Some(u32::from(codes[slot]))
+            );
+        }
+        assert_eq!(column.value_of(first + 1), None);
+        assert_eq!(column.value_of(3), None);
+        assert_eq!(column.value_of(first + 5 * 65_536), None);
+        assert_eq!(
+            column.block_ranks.get().map(|(lo, r)| (*lo, r.len())),
+            Some((40, 4))
+        );
+    }
 
     fn candidate(all: impl IntoIterator<Item = u32>) -> Bitmap {
         let mut b = Bitmap::new();
