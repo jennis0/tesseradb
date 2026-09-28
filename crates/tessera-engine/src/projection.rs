@@ -293,7 +293,7 @@ impl RowProjection {
 
     /// The `seg_id` of the last extent this projection covers, `None` where it covers the base
     /// alone: what [`RowSpace::restrict_to_view`] takes to find the entities of these rows.
-    pub fn covers_through(&self) -> Option<&str> {
+    pub(crate) fn covers_through(&self) -> Option<&str> {
         self.boundary_seg_id.as_deref()
     }
 

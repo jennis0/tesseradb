@@ -256,7 +256,7 @@ fn every_table_of_the_pass_is_the_one_counted_row_by_row() {
         .filter_columns
         .entity_codes("kind")
         .expect("kind is indexed");
-    let through_entities = RowGroups::entity(&segments, tables, &codes, &table);
+    let through_entities = RowGroups::entity(tables, &codes, &table);
 
     let mut rng = StdRng::seed_from_u64(11);
     let total = view_data.row_space.total_rows() as u32;
