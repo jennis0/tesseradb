@@ -378,7 +378,7 @@ impl Plan {
         let limit = page_rows as usize;
         let switches = &cx.engine.switches;
         let alone = switches.aggregate_alone_rows.load(Ordering::Relaxed) as usize;
-        let row_bytes = self.row_bytes(&groups, head.reference_total.is_some());
+        let row_bits = self.row_bits(&groups, head.reference_total.is_some());
         let dictionary = self.dictionary_bytes(&groups);
         let spilled = spill.filter(|(at, runs, complete)| {
             at == position && (*complete || runs.iter().map(Run::len).sum::<usize>() > limit)
@@ -422,8 +422,8 @@ impl Plan {
                         }
                     }
                 };
-                let rows_left =
-                    response_bytes_left.saturating_sub(dictionary as u64) / row_bytes as u64;
+                let rows_left = response_bytes_left.saturating_sub(dictionary as u64) * 8
+                    / row_bits as u64;
                 let walk = Walk {
                     cx,
                     source: &source,
@@ -450,7 +450,7 @@ impl Plan {
             }
         };
         let total: usize = runs.iter().map(Run::len).sum();
-        let fits = max_page_bytes.saturating_sub(dictionary) / row_bytes;
+        let fits = max_page_bytes.saturating_sub(dictionary) * 8 / row_bits;
         let most = total.min(limit).min(fits.max(1));
         // A long run goes out as its own page, sent as the columns it was counted into.
         let (page, rest) = split_runs(
@@ -508,31 +508,36 @@ impl Plan {
         Ok(Some(Page {
             head,
             batch,
-            bytes: kept * row_bytes + dictionary,
+            bytes: (kept * row_bits).div_ceil(8) + dictionary,
             cut_by_bytes,
             next,
         }))
     }
 
-    /// The Arrow bytes a row adds to a page, besides the dictionaries.
-    fn row_bytes(&self, groups: &Groups, reference: bool) -> usize {
+    /// The Arrow bits a row adds to a page, besides the dictionaries: its values, and a validity
+    /// bit in each column that can hold a null (`key`, `title` and `lift`).
+    fn row_bits(&self, groups: &Groups, reference: bool) -> usize {
         let mut bytes = 8;
+        let mut nullable = 0;
         if !matches!(self.outer, Outer::None) {
+            nullable += 1;
             bytes += 1 + match self.outer {
                 Outer::Layer(_) => 8,
                 _ => 4,
             };
         }
         if groups.titles.is_some() {
+            nullable += 1;
             bytes += 4;
         }
         if self.cells.is_some() {
             bytes += 8;
         }
         if reference {
+            nullable += 1;
             bytes += 16;
         }
-        bytes
+        8 * bytes + nullable
     }
 
     /// The Arrow bytes a page's dictionaries take: the group names, and a field's keys and titles.
