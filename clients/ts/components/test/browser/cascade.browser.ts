@@ -61,17 +61,17 @@ const INNER_PAN = ['tessera-explorer', 'tessera-map', '[part="controls"] button[
 describe('theme tokens', () => {
   it('fall back to the light defaults, and to the dark ones under a dark colour scheme', async () => {
     const light = await page('<tessera-map></tessera-map>');
-    expect(await computed(light, ['tessera-map'], 'background-color')).toBe('rgb(247, 247, 244)');
-    expect(await computed(light, PAN, 'color')).toBe('rgb(36, 87, 163)');
+    expect(await computed(light, ['tessera-map'], 'background-color')).toBe('rgb(246, 246, 244)');
+    expect(await computed(light, PAN, 'background-color')).toBe('rgb(27, 29, 33)');
     const dark = await page('<tessera-map></tessera-map>', ':root { color-scheme: dark; }');
-    expect(await computed(dark, ['tessera-map'], 'background-color')).toBe('rgb(12, 14, 17)');
-    expect(await computed(dark, PAN, 'color')).toBe('rgb(134, 176, 240)');
+    expect(await computed(dark, ['tessera-map'], 'background-color')).toBe('rgb(17, 19, 23)');
+    expect(await computed(dark, PAN, 'background-color')).toBe('rgb(236, 238, 241)');
   });
 
   it('take a value set on any ancestor', async () => {
     const p = await page('<div><tessera-map></tessera-map></div>', 'body { --tessera-map-bg: rgb(255, 0, 0); --tessera-accent: rgb(0, 128, 0); }');
     expect(await computed(p, ['tessera-map'], 'background-color')).toBe('rgb(255, 0, 0)');
-    expect(await computed(p, PAN, 'color')).toBe('rgb(0, 128, 0)');
+    expect(await computed(p, PAN, 'background-color')).toBe('rgb(0, 128, 0)');
   });
 
   it('take a value set on the element itself over one on an ancestor', async () => {
@@ -81,7 +81,7 @@ describe('theme tokens', () => {
 
   it('reach the elements inside an explorer from the explorer and from above it', async () => {
     const p = await page('<tessera-explorer style="--tessera-accent: rgb(1, 2, 3)"></tessera-explorer>', 'body { --tessera-map-bg: rgb(9, 8, 7); }');
-    expect(await computed(p, INNER_PAN, 'color')).toBe('rgb(1, 2, 3)');
+    expect(await computed(p, INNER_PAN, 'background-color')).toBe('rgb(1, 2, 3)');
     expect(await computed(p, ['tessera-explorer', 'tessera-map'], 'background-color')).toBe('rgb(9, 8, 7)');
   });
 });
@@ -94,5 +94,33 @@ describe('forwarded parts', () => {
     );
     expect(await computed(p, ['tessera-explorer', 'tessera-map', '[part="controls"]'], 'border-top-color')).toBe('rgb(4, 5, 6)');
     expect(await computed(p, ['tessera-explorer', '[part="strip-row"] tessera-status', '[part="strip"]'], 'color')).toBe('rgb(7, 8, 9)');
+  });
+});
+
+describe('the explorer by the width of its container', () => {
+  /** What the explorer drew: which arrangement, where the tools sit, and whether the strip is short. */
+  const layout = (p: Page) =>
+    p.evaluate(() => {
+      const root = document.querySelector('tessera-explorer')!.shadowRoot!;
+      return {
+        sidebar: root.querySelector('[part="sidebar"]') !== null,
+        panel: root.querySelector('[part="panel"]') !== null,
+        corner: root.querySelector('tessera-map')!.getAttribute('controls-corner'),
+        compact: root.querySelector('tessera-map tessera-status')!.hasAttribute('compact')
+      };
+    });
+  const settled = (p: Page) =>
+    p.waitForFunction(() => {
+      const root = document.querySelector('tessera-explorer')?.shadowRoot;
+      return root?.querySelector('tessera-map tessera-status') != null;
+    });
+
+  it('keeps the docked sidebar where there is room, and folds it into the card in a compact container', async () => {
+    const wide = await page('<div style="width: 1300px; height: 700px"><tessera-explorer layout="docked"></tessera-explorer></div>');
+    await settled(wide);
+    expect(await layout(wide)).toEqual({sidebar: true, panel: false, corner: 'top-left', compact: false});
+    const compact = await page('<div style="width: 900px; height: 560px"><tessera-explorer layout="docked"></tessera-explorer></div>');
+    await compact.waitForFunction(() => document.querySelector('tessera-explorer')?.shadowRoot?.querySelector('[part="panel"]') != null);
+    expect(await layout(compact)).toEqual({sidebar: false, panel: true, corner: 'bottom-left', compact: true});
   });
 });

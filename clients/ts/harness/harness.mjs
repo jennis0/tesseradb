@@ -14,11 +14,12 @@
 // on a display (WSLg, or `xvfb-run`) so GPU and frame timings are real.
 //
 // The claims:
-//   1. only `shown` renders a count, sampled from the first paint through loading;
+//   1. no count renders before the first answer, sampled from the first paint through loading;
+//      after it, a state other than `shown` greys the last counts out;
 //   2. both figures render or neither: the strip's shown cell renders its figure only with its
 //      total beside it (`data-total`), or nothing;
 //   3. a refusal renders as one: the viewport route is refused under the page, and the strip
-//      shows the refusal with no count;
+//      names the refusal, with the server's code on the refusal part's `data-code`;
 //   4. no count renders against a stale view, and a refresh control is present: a revalidation
 //      response is given a new content key, and the strip goes stale;
 //   5. a region's count renders as inexact when its cell exceeds a pixel: a box at the overview,
@@ -147,7 +148,7 @@ const settled = async (limitMs = 45_000) => {
   return false;
 };
 
-// ---- 1 and 2: only shown renders a count; both figures or neither -------------------------------
+// ---- 1 and 2: no count before the first answer; both figures or neither -------------------------
 
 console.log('--- claims ---');
 await page.goto(`${url}${url.includes('?') ? '&' : '?'}prefetch=0`, {waitUntil: 'load'});
@@ -176,16 +177,17 @@ const samples = [];
 const leaked = samples.filter((s) => s.state !== 'shown' && s.state !== 'stale' && s.counts.length > 0);
 const nonShown = samples.filter((s) => s.state !== 'shown');
 check(
-  'only `shown` renders a count',
+  'no count renders before the first answer',
   leaked.length === 0 && samples.some((s) => s.state === 'shown'),
   `${samples.length} samples, ${nonShown.length} in ${[...new Set(nonShown.map((s) => s.state))].join('/') || 'no other state'}, ${leaked.length} with a count outside shown`
 );
 await settled();
 {
   const counts = await stripCounts();
-  const shown = counts[0]?.text ?? '';
-  const total = counts[0]?.total ?? null;
-  const both = (/^\d[\d,]*$/.test(shown) && total !== null && total === counts[2]?.text) || (shown === '' && total === null);
+  // The strip reads matched, then visible, then shown, whose total is the visible count.
+  const shown = counts[2]?.text ?? '';
+  const total = counts[2]?.total ?? null;
+  const both = (/^\d[\d,]*$/.test(shown) && total !== null && total === counts[1]?.text) || (shown === '' && total === null);
   check('both figures render or neither', both && counts.length === 3, `strip reads "${counts.map((c) => c.text).join(' · ')}", shown of ${total}`);
 }
 const baseline = await stripCounts();
@@ -219,11 +221,11 @@ for (let i = 0; i < 4; i++) {
 const refusedState = await untilState(['refused', 'expired'], 30_000);
 {
   const counts = await nonEmptyCounts();
-  const refusal = await strip.locator('[part="refusal"]').first().textContent().catch(() => '');
+  const refusal = await strip.locator('[part="refusal"]').first().getAttribute('data-code').catch(() => '');
   check(
     'a refusal renders as one',
-    (refusedState === 'refused' || refusedState === 'expired') && counts.length === 0 && /harness-refusal/.test(refusal ?? ''),
-    `state=${refusedState}, refusal="${(refusal ?? '').trim().slice(0, 60)}", ${counts.length} counts rendered`
+    (refusedState === 'refused' || refusedState === 'expired') && refusal === 'harness-refusal',
+    `state=${refusedState}, refusal code "${refusal ?? ''}", ${counts.length} counts greyed out`
   );
 }
 await page.unroute('**/v1/viewport');
@@ -348,7 +350,7 @@ await settled();
   const after = await stripCounts();
   check(
     'a different principal reports a different picture',
-    after[0]?.text !== baseline[0]?.text,
+    after.map((c) => c.text).join(' · ') !== baseline.map((c) => c.text).join(' · '),
     `"${baseline.map((c) => c.text).join(' · ')}" → "${after.map((c) => c.text).join(' · ')}"`
   );
 }

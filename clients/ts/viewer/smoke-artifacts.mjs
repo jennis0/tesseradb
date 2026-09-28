@@ -26,6 +26,13 @@ await mkdir(shots, {recursive: true});
 // A layer × principal grid is one settle per cell, so a headed browser helps most here.
 const browser = await launchBrowser(args);
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
+
+/** The layer picker sits in the explorer's Layers popover, which a press on the map closes; open it. */
+async function openLayers() {
+  const toggle = page.locator('[part="layers-toggle"]').first();
+  await toggle.waitFor({timeout: 60_000});
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+}
 const consoleErrors = [];
 page.on('console', (m) => {
   if (m.type() === 'error') consoleErrors.push(m.text());
@@ -93,18 +100,22 @@ const drawn = async () =>
   });
 
 // The picker renders from `/v1/meta`, with an entry only for layers this principal reaches.
+await openLayers();
 await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 await settled();
 
+await openLayers();
 const layers = await page.locator('tessera-layer-picker [part="entry"]').count();
 const principals = await page.locator('#principal option').count();
 const results = [];
 
 for (let l = 0; l < layers; l++) {
+  await openLayers();
   const entry = page.locator('tessera-layer-picker [part="entry"]').nth(l);
   const layerName = await entry.getAttribute('data-layer');
   // One layer on at a time: tick this entry, untick the others.
   for (let o = 0; o < layers; o++) {
+    await openLayers();
     const box = page.locator('tessera-layer-picker [part="entry"]').nth(o).locator('input');
     if ((await box.isChecked()) !== (o === l)) await box.click();
   }
@@ -112,8 +123,10 @@ for (let l = 0; l < layers; l++) {
     const label = (await page.locator('#principal option').nth(p).innerText()).trim();
     await page.selectOption('#principal', String(p));
     // A new session's store: the layer choice is re-applied through the picker after meta.
+    await openLayers();
     await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
     for (let o = 0; o < layers; o++) {
+      await openLayers();
       const box = page.locator('tessera-layer-picker [part="entry"]').nth(o).locator('input');
       if ((await box.isChecked()) !== (o === l)) await box.click();
     }
@@ -128,7 +141,9 @@ for (let l = 0; l < layers; l++) {
 const shotsTaken = [];
 for (const p of [Math.max(0, principals - 3), principals - 1]) {
   await page.selectOption('#principal', String(p));
+  await openLayers();
   await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+  await openLayers();
   const box = page.locator('tessera-layer-picker [part="entry"]').first().locator('input');
   if (!(await box.isChecked())) await box.click();
   await settled();

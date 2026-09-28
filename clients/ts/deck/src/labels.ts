@@ -97,27 +97,8 @@ export function placeLabels(candidates: readonly LabelCandidate[], maxDisplaceme
   return placed;
 }
 
-/** The ends of the label size band, in pixels. */
-export const LABEL_SIZE_MIN = 12.5;
-export const LABEL_SIZE_MAX = 24;
-
-/**
- * The pixel size of an artifact's name, from its masked count on a logarithmic band between the
- * smallest and largest counts on the drawn frontier. Depth in the tree is not encoded: a condensed
- * tree is unbalanced, so depth does not track size. Only the frontier is labelled and it
- * partitions the view, so the counts on screen are comparable.
- *
- * The band is logarithmic because the counts on one screen span three or four orders of
- * magnitude. With no range (one artifact, or equal counts) every name takes {@link LABEL_SIZE_MAX}.
- */
-export function labelSize(count: number, smallest: number, largest: number): number {
-  const c = Math.max(1, count);
-  const lo = Math.max(1, Math.min(smallest, c));
-  const hi = Math.max(lo, largest, c);
-  const span = Math.log(hi / lo);
-  if (span <= 0) return LABEL_SIZE_MAX;
-  return LABEL_SIZE_MIN + (LABEL_SIZE_MAX - LABEL_SIZE_MIN) * (Math.log(c / lo) / span);
-}
+/** The pixel size of an artifact's name. Priority, not size, says which names are placed first. */
+export const LABEL_SIZE = 14;
 
 /**
  * How many characters a line of a name may hold before it wraps, and how many lines a name may

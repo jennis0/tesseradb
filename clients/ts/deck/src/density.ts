@@ -29,8 +29,11 @@ export type DensityImage = {
   filled: number;
 };
 
-/** The wash's hue, RGB: a cool neutral that sits under every palette colour. */
-export const WASH_HUE: [number, number, number] = [96, 132, 190];
+/**
+ * The wash's hue per ground, RGB: a warm grey on a light ground and a light grey on a dark one,
+ * neutral so it does not read as a data colour.
+ */
+export const WASH_HUE: Record<'light' | 'dark', [number, number, number]> = {light: [110, 104, 96], dark: [200, 202, 206]};
 
 /**
  * Bin the exact tiles at `depth` into one texel each, over the rectangle those tiles span.
@@ -41,7 +44,7 @@ export function binDensity(
   tiles: readonly ComposedTile[],
   depth: number,
   channel: 'visible' | 'matched' | 'highlighted' = 'matched',
-  hue: [number, number, number] = WASH_HUE
+  hue: [number, number, number] = WASH_HUE.light
 ): DensityImage | null {
   const cells: {x: number; y: number; count: number}[] = [];
   let x0 = Infinity;
@@ -99,7 +102,7 @@ export const DENSITY_SUPERSAMPLE = 4;
  * edge tile, {@link DENSITY_SUPERSAMPLE} texels per cell, intensity bilinear between cell
  * centres and box-blurred by one texel, alpha proportional to intensity.
  */
-export function filterDensity(image: DensityImage, depth: number, hue: [number, number, number] = WASH_HUE): DensityImage {
+export function filterDensity(image: DensityImage, depth: number, hue: [number, number, number] = WASH_HUE.light): DensityImage {
   const S = DENSITY_SUPERSAMPLE;
   const W = image.width + 2;
   const H = image.height + 2;

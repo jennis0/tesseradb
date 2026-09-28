@@ -1,4 +1,5 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
+import {property} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import {activeCount, emptyDraft, isPopulated, memberKey, withVerb, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
 import {TesseraElement, UNNAMED, columnCaption, emit, keyTitle, timestampText} from './base.js';
@@ -20,7 +21,8 @@ const FILTER_PARTS = exportparts('filter');
  * artifact card or in the hierarchy) is a chip too.
  *
  * Removing a chip empties its control and keeps its position. Clear all empties every control and
- * drops every `member_of` clause.
+ * drops every `member_of` clause. `chips-only` leaves the controls out, and renders nothing while no
+ * clause is applied.
  *
  * @summary Every filter control, with the applied clauses as chips.
  * @tagname tessera-filter-panel
@@ -41,6 +43,9 @@ const FILTER_PARTS = exportparts('filter');
  *   prefix: `filter-entry`, `filter-value-chip`, and so on.
  */
 export class TesseraFilterPanel extends TesseraElement {
+  /** Renders the heading and the chips without the controls, and nothing while no clause is applied. */
+  @property({type: Boolean, attribute: 'chips-only'}) accessor chipsOnly = false;
+
   static override styles = [
     tokens,
     chrome,
@@ -152,6 +157,7 @@ export class TesseraFilterPanel extends TesseraElement {
     const {draft, members} = s.get('filters');
     const active = activeCount(draft);
     const chips = Object.entries(draft).filter(([, d]) => isPopulated(d));
+    if (this.chipsOnly && chips.length === 0 && members.length === 0) return nothing;
     return html`<div class="panel"><h2 part="title">Filters${active > 0 || members.length > 0 ? html`<button part="clear" class="quiet" type="button" @click=${() => this.clear(null)}>Clear all</button>` : nothing}</h2>
       <span part="state" data-state="shown"></span>
       ${chips.length > 0 || members.length > 0
@@ -180,11 +186,13 @@ export class TesseraFilterPanel extends TesseraElement {
             )}
           </div>`
         : nothing}
-      ${repeat(
-        operands,
-        (o) => o.column,
-        (o) => html`<tessera-filter exportparts=${FILTER_PARTS} column=${o.column} .store=${s}></tessera-filter>`
-      )}
+      ${this.chipsOnly
+        ? nothing
+        : repeat(
+            operands,
+            (o) => o.column,
+            (o) => html`<tessera-filter exportparts=${FILTER_PARTS} column=${o.column} .store=${s}></tessera-filter>`
+          )}
     </div>`;
   }
 }

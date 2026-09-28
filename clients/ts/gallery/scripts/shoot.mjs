@@ -31,7 +31,7 @@ const SHOTS = [
 const server = await serve();
 const browser = await launch();
 try {
-  const page = await browser.newPage({viewport: {width: 1280, height: 900}, deviceScaleFactor: 2});
+  const page = await browser.newPage({viewport: {width: 1600, height: 900}, deviceScaleFactor: 2});
   for (const el of elements) {
     for (const {query, suffix} of SHOTS) {
       await open(page, server.url, {...query, width: 'natural', el, shoot: '1'});

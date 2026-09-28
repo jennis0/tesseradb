@@ -1,40 +1,43 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
-import {property} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, colourLayers, layerEntries, type Rgba} from '@tesseradb/client';
+import {property, state} from 'lit/decorators.js';
+import {CLUSTER_PREFIX, colourLayers, type Rgba} from '@tesseradb/client';
 import {NEUTRAL} from '@tesseradb/client/internal';
 import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck/internal';
-import {TesseraElement, UNNAMED, emit} from './base.js';
+import {TesseraElement, UNNAMED, columnCaption, emit, timestampText} from './base.js';
+import {icon} from './icons.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * What the colours mean. For a category column, the values the marks on screen carry, in their
- * colours; for a numeric column, a ramp over the range of the marks served, with its minimum and
- * maximum; under colour by cluster, the served artifacts in their colours.
+ * What the colours mean, under a "Colour" heading. For a category column, the values the marks on
+ * screen carry, by title, in their colours; for a numeric column, a ramp over the range of the
+ * marks served, with its minimum and maximum; under colour by cluster, the served artifacts in
+ * their colours. Entries sit in two columns. `limit` shows the first entries and an "N more"
+ * button that shows the rest.
  *
- * `selectable` adds up to three selects. *Colour by* offers the rendered columns and every layer
- * that can colour, drawn or not; colouring by a layer does not draw it. *Layers* draws one layer or
- * none. *Level* appears under colour by a levelled layer with several levels served.
+ * `selectable` puts the *Colour by* choice in the heading, drawn as text with a chevron. It offers
+ * the rendered columns and every layer that can colour, drawn or not; colouring by a layer does not
+ * draw it. A *Level* choice appears under colour by a levelled layer with several levels served.
+ * Which layers are drawn is `<tessera-layer-picker>`'s.
  *
  * @summary What the map's colours mean, and the colour controls.
  * @tagname tessera-legend
  * @category Elements
  * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - The Colour
- *   by select changed.
+ *   by choice changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level
- *   select, or a levelled layer's entry in Colour by, chose a level.
- * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - The Layers
- *   select changed.
- * @csspart title - The heading, shown where `selectable` is not set.
+ *   choice, or a levelled layer's entry in Colour by, chose a level.
+ * @csspart title - The heading, holding the Colour by choice under `selectable`.
  * @csspart state - The state line, with `data-state`.
- * @csspart refusal - A refusal's code and detail, or `no such column`.
+ * @csspart refusal - "Values unavailable" where the names were refused, or "Column unavailable"
+ *   where the column is not rendered, with `data-code` where the server gave one.
  * @csspart select - The Colour by select.
  * @csspart cluster-option - An entry in Colour by for a layer, or for one level of a levelled layer.
- * @csspart layers-select - The Layers select.
  * @csspart level-select - The Level select.
  * @csspart swatches - The list of colours.
  * @csspart swatch - One colour.
+ * @csspart more - The "N more" button, under `limit`.
  * @csspart ramp - A numeric column's ramp.
  * @csspart label - The ramp's `min` and `max` captions.
  * @csspart value - The ramp's minimum and maximum.
@@ -47,47 +50,71 @@ export class TesseraLegend extends TesseraElement {
       :host {
         display: block;
       }
-      .selects {
-        display: flex;
-        gap: 10px;
+      [part='title'] {
+        margin-bottom: 10px;
       }
-      .selects .col {
-        gap: 4px;
-        flex: 1 1 0;
-        min-width: 0;
+      [part='title'] .choice {
+        font-size: 12px;
+        font-weight: 500;
+        letter-spacing: 0;
+        text-transform: none;
+        color: var(--_tessera-ink);
+      }
+      .level {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: -2px 0 10px;
+        font-size: 12px;
+      }
+      .level .choice {
+        font-weight: 500;
       }
       [part='swatches'] {
-        max-height: 180px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 4px 12px;
+        max-height: 220px;
         overflow-y: auto;
-        margin-top: 10px;
+        font-size: 12px;
       }
-      [part='swatches'] .row {
-        height: 24px;
+      .entry {
+        display: grid;
+        grid-template-columns: 10px minmax(0, 1fr);
+        align-items: center;
+        column-gap: 7px;
+        min-height: 18px;
       }
       [part='swatch'] {
         display: inline-block;
         width: 10px;
         height: 10px;
         border-radius: 2px;
-        flex: none;
       }
-      [part='ramp'] {
-        height: 8px;
-        border-radius: var(--_tessera-radius);
-        margin: 10px 0 4px;
-      }
-      .v {
+      .entry .v {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      [part='more'] {
+        margin-top: 8px;
+      }
+      [part='ramp'] {
+        height: 8px;
+        border-radius: 4px;
+        margin: 2px 0 6px;
+      }
     `
   ];
 
-  /** Adds the Colour by, Layers and Level selects, and drops the heading. */
+  /** Puts the Colour by choice in the heading. */
   @property({type: Boolean}) accessor selectable = false;
-  /** Under `selectable`, also renders the swatches or the ramp below the selects. */
+  /** Under `selectable`, also renders the swatches or the ramp below the heading. */
   @property({type: Boolean}) accessor readout = false;
+  /** How many entries show before "N more" offers the rest; 0 shows every entry. */
+  @property({type: Number}) accessor limit = 0;
+  /** Whether "N more" was pressed. @internal */
+  @state() accessor expanded = false;
 
   private choose(value: string): void {
     const s = this.resolvedStore;
@@ -111,26 +138,16 @@ export class TesseraLegend extends TesseraElement {
     emit(this, 'tessera-levelchange', {level});
   }
 
-  private chooseLayers(value: string): void {
-    const s = this.resolvedStore;
-    if (!s) return;
-    const roots = value === '' ? [] : [value];
-    s.setLayers(roots);
-    emit(this, 'tessera-layerchange', {layers: roots});
-  }
-
   override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const meta = s?.get('meta') ?? null;
-    if (!s || !meta) return html`<div class="panel">${this.selectable ? nothing : html`<h2 part="title">Colour</h2>`}${renderState(stateOf(s?.get('status')), s?.get('status'))}</div>`;
+    if (!s || !meta) return html`<div class="panel"><h2 part="title">Colour</h2>${renderState(stateOf(s?.get('status')), s?.get('status'))}</div>`;
     const legend = s.get('legend');
     const artifacts = s.get('artifacts');
     const columns = meta.declaredScalars.filter((c) => c.render);
     const colourBy = legend.colourBy;
-    const entries = layerEntries(meta.layers);
-    const on = entries.filter((e) => artifacts.layers.includes(e.root.name));
     // The level options are the rungs present among the colouring layer's served artifacts,
-    // titled from `meta.levels` where the layer is levelled, else "level N". The server computes
+    // titled from `meta.levels` where the layer is levelled, else "Level N". The server computes
     // `rung` per layer kind, so a tree's depths are offered too.
     const cluster = clusterLayerOf(colourBy);
     const clusterMeta = cluster ? meta.layers.find((l) => l.name === cluster) : null;
@@ -139,86 +156,84 @@ export class TesseraLegend extends TesseraElement {
       for (const x of artifacts.colourServed) rungs.add(x.rung);
     }
     const levelsServed = [...rungs].sort((x, y) => x - y);
+    const levelTitle = (l: number) => clusterMeta?.levels.find((x) => x.level === l)?.title ?? `Level ${l}`;
     // The level drawn: the one chosen, else the explorer's, else the deepest served.
     const drawnLevel = this.level ?? this.autoLevel ?? levelsServed.at(-1) ?? null;
-    const selects = this.selectable
-      ? html`<div class="selects">
-          <div class="col"><span class="xs muted">Colour by</span>
-            <select part="select" aria-label="Colour by" @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}>
-              <option value="" ?selected=${colourBy === null}>none</option>
-              ${colourLayers(meta.layers).flatMap((decl) => {
-                // A levelled layer is offered once per level, by the declared level titles, since
-                // colouring it is membership at one level. Any other layer is offered once.
-                const value = `${CLUSTER_PREFIX}${decl.name}`;
-                if (decl.levels.length === 0) {
-                  return [html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>${decl.title || decl.name}</option>`];
-                }
-                return decl.levels.map(
-                  (lv) =>
-                    html`<option part="cluster-option" value=${`${value}@${lv.level}`} ?selected=${colourBy === value && (drawnLevel ?? decl.levels.at(-1)!.level) === lv.level}>${lv.title || `level ${lv.level}`}</option>`
-                );
-              })}
-              ${columns.map((c) => html`<option value=${c.name} ?selected=${colourBy === c.name}>${c.name}</option>`)}
-            </select></div>
-          <div class="col"><span class="xs muted">Layers</span>
-            <select part="layers-select" aria-label="Layers" @change=${(e: Event) => this.chooseLayers((e.target as HTMLSelectElement).value)}>
-              <option value="" ?selected=${on.length === 0}>${on.length} of ${entries.length} on</option>
-              ${entries.map((e) => html`<option value=${e.root.name} ?selected=${on.length === 1 && on[0]!.root.name === e.root.name}>${e.root.name}</option>`)}
-            </select></div>
-        </div>`
+    const choice = this.selectable
+      ? html`<span class="choice"><select part="select" aria-label="Colour by" @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}>
+            <option value="" ?selected=${colourBy === null}>None</option>
+            ${colourLayers(meta.layers).flatMap((decl) => {
+              // A levelled layer is offered once per level, by the declared level titles, since
+              // colouring it is membership at one level. Any other layer is offered once.
+              const value = `${CLUSTER_PREFIX}${decl.name}`;
+              if (decl.levels.length === 0) {
+                return [html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>${decl.title || decl.name}</option>`];
+              }
+              return decl.levels.map(
+                (lv) =>
+                  html`<option part="cluster-option" value=${`${value}@${lv.level}`} ?selected=${colourBy === value && (drawnLevel ?? decl.levels.at(-1)!.level) === lv.level}>${lv.title || `Level ${lv.level}`}</option>`
+              );
+            })}
+            ${columns.map((c) => html`<option value=${c.name} ?selected=${colourBy === c.name}>${columnCaption(c.name)}</option>`)}
+          </select>${icon('chev', 12, 1.4)}</span>`
       : nothing;
     const levelSelect =
       this.selectable && cluster && levelsServed.length > 1
-        ? html`<div class="col" style="margin-top:8px"><span class="xs muted">Level</span>
+        ? html`<div class="level"><span class="muted">Level</span><span class="choice">
             <select part="level-select" aria-label="Level" @change=${(e: Event) => this.chooseLevel((e.target as HTMLSelectElement).value)}>
-              <option value="" ?selected=${this.level === null}>${this.autoLevel === null ? 'deepest served' : `auto · ${clusterMeta?.levels.find((x) => x.level === this.autoLevel)?.title ?? `level ${this.autoLevel}`}`}</option>
-              ${levelsServed.map((l) => html`<option value=${l} ?selected=${this.level === l}>${clusterMeta?.levels.find((x) => x.level === l)?.title ?? `level ${l}`}</option>`)}
-            </select></div>`
+              <option value="" ?selected=${this.level === null}>${this.autoLevel === null ? 'Deepest' : `Automatic (${levelTitle(this.autoLevel)})`}</option>
+              ${levelsServed.map((l) => html`<option value=${l} ?selected=${this.level === l}>${levelTitle(l)}</option>`)}
+            </select>${icon('chev', 12, 1.4)}</span></div>`
         : nothing;
-    const heading = this.selectable ? nothing : html`<h2 part="title">Colour</h2>`;
-    const swatch = (c: Rgba | readonly number[], text: string, title = '') =>
-      html`<div class="row"><span part="swatch" style=${`background:${rgb(c as Rgba)}`}></span><span class="v" title=${title}>${text}</span></div>`;
-    const wrap = (body: unknown) => html`<div class="panel">${heading}${selects}${levelSelect}${body}</div>`;
+    const heading = html`<h2 part="title">Colour${choice}</h2>`;
+    const wrap = (body: unknown) => html`<div class="panel">${heading}${levelSelect}${body}</div>`;
     if (!this.readout && this.selectable) return wrap(html`<span part="state" data-state="shown"></span>`);
-
     if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);
+
+    const entry = (c: Rgba | readonly number[], text: string, title = text) =>
+      html`<div class="entry"><span part="swatch" style=${`background:${rgb(c as Rgba)}`}></span><span class="v" title=${title}>${text}</span></div>`;
     const clusterLayer = clusterLayerOf(colourBy);
     if (clusterLayer) {
       const named = artifacts.colourServed;
-      return wrap(html`<span part="state" data-state="shown"></span>
-        <div part="swatches">
-          ${named.slice(0, 40).map((a) => swatch(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, artifactName(a) ?? UNNAMED))}
-          ${named.length > 40 ? html`<div class="muted xs">and ${named.length - 40} more</div>` : nothing}
-          ${swatch(NEUTRAL, 'not yet known')}
-        </div>`);
+      return wrap(html`<span part="state" data-state="shown"></span>${this.swatches([
+        ...named.map((a) => entry(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, artifactName(a) ?? UNNAMED)),
+        entry(NEUTRAL, 'Not yet coloured')
+      ])}`);
     }
     const column = columns.find((c) => c.name === colourBy);
-    if (!column) return wrap(html`<span part="state" data-state="refused"><span part="refusal">no such column</span></span>`);
+    if (!column) return wrap(html`<span part="state" data-state="refused"><span class="dot refuse"></span><span part="refusal">Column unavailable</span></span>`);
     const error = legend.categoryErrors[colourBy];
-    if (error) return wrap(html`<span part="state" data-state="refused"><span part="refusal">${error.code}: ${error.detail}</span></span>`);
+    if (error) return wrap(html`<span part="state" data-state="refused"><span class="dot refuse"></span><span part="refusal" data-code=${error.code}>Values unavailable</span></span>`);
     if (column.category) {
       const values = legend.categories[colourBy];
       if (!values) return wrap(renderState('loading', s.get('status')));
       const shown = paletteValues(values, legend.ranks[colourBy] ?? {});
-      const overflow = values.length - shown.length;
-      return wrap(html`<span part="state" data-state="shown"></span>
-        <div part="swatches">
-          ${shown.map(({value, rank}) => swatch(colourOfRank(rank), value.title && value.title !== value.key ? `${value.key}: ${value.title}` : value.key, `code ${value.code}`))}
-          ${overflow > 0 ? swatch(UNMAPPED, `${overflow} rarer value${overflow === 1 ? '' : 's'}`) : nothing}
-          ${swatch(UNMAPPED, 'other')}
-        </div>`);
+      // Values past the palette share one colour, named once.
+      return wrap(html`<span part="state" data-state="shown"></span>${this.swatches([
+        ...shown.map(({value, rank}) => entry(colourOfRank(rank), value.title ?? value.key, value.key)),
+        entry(UNMAPPED, 'Other')
+      ])}`);
     }
     const domain = legend.domains[colourBy];
-    if (!domain) return wrap(html`<span part="state" data-state="empty">No values on screen</span>`);
+    if (!domain) return wrap(html`<span part="state" data-state="empty">Nothing in view</span>`);
     const stops = Array.from({length: 12}, (_, i) => rgb(colourOfFraction(i / 11))).join(', ');
     const fmt = (n: number) => {
-      if (column.arrowType === 'timestamp_us') return new Date(n / 1000).toISOString().slice(0, 10);
+      if (column.arrowType === 'timestamp_us') return timestampText(n);
       if (Math.abs(n) >= 1e6 || (n !== 0 && Math.abs(n) < 1e-3)) return n.toExponential(2);
       return n.toLocaleString('en-GB');
     };
     return wrap(html`<span part="state" data-state="shown"></span>
       <div part="ramp" style=${`background:linear-gradient(to right, ${stops})`}></div>
-      <div class="kv sm"><span part="label">min</span><span part="value" class="v">${fmt(domain.min)}</span><span part="label">max</span><span part="value" class="v">${fmt(domain.max)}</span></div>`);
+      <div class="kv sm"><span part="label">Lowest</span><span part="value" class="v">${fmt(domain.min)}</span><span part="label">Highest</span><span part="value" class="v">${fmt(domain.max)}</span></div>`);
+  }
+
+  /** The entries in two columns, the first `limit` of them until "N more" is pressed. */
+  private swatches(entries: TemplateResult[]): TemplateResult {
+    const cut = this.limit > 0 && !this.expanded && entries.length > this.limit;
+    const shown = cut ? entries.slice(0, this.limit) : entries;
+    return html`<div part="swatches">${shown}</div>${cut
+      ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = true)}>${(entries.length - this.limit).toLocaleString('en-GB')} more</button>`
+      : nothing}`;
   }
 }
 

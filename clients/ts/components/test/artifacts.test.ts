@@ -207,6 +207,26 @@ describe('<tessera-artifact-card>', () => {
   });
 });
 
+describe('<tessera-legend limit>', () => {
+  it('names the first entries and shows the rest when "N more" is pressed', async () => {
+    const values = Array.from({length: 7}, (_, i) => ({code: i + 1, key: `k${i}`, title: `Value ${i}`}));
+    const store = fakeStore({
+      meta: META,
+      status: status({}),
+      legend: {ranks: {archive: Object.fromEntries(values.map((v, i) => [v.code, i]))}, domains: {}, categories: {archive: values}, categoryErrors: {}, colourBy: 'archive'}
+    });
+    const host = await mount('<tessera-legend limit="4"></tessera-legend>');
+    (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    // Seven values and the entry for the rest, cut to four.
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(4);
+    (deep(host, '[part="more"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(8);
+    expect(deep(host, '[part="more"]')).toBeNull();
+  });
+});
+
 describe('<tessera-legend selectable>', () => {
   it('offers the clusters of every layer that can colour, drawn or not, and choosing one draws nothing', async () => {
     const host = await mount('<tessera-legend selectable readout></tessera-legend>');
@@ -216,9 +236,6 @@ describe('<tessera-legend selectable>', () => {
     const colourOptions = () => deepAll(host, '[part="select"] option').map((o) => o.getAttribute('value'));
     // No layer is drawn. A labels layer has no clusters of its own, so it is not offered.
     expect(colourOptions()).toEqual(['', 'cluster:clusters', 'cluster:districts', 'archive']);
-    // Nothing drawn: the select offers the two roots and sits on the entry that says none is on.
-    expect(deepAll(host, '[part="layers-select"] option').map((o) => o.getAttribute('value'))).toEqual(['', 'clusters', 'districts']);
-    expect((deep(host, '[part="layers-select"]') as HTMLSelectElement).value).toBe('');
     const select = deep(host, '[part="select"]') as HTMLSelectElement;
     select.value = 'cluster:clusters';
     select.dispatchEvent(new Event('change'));
@@ -231,7 +248,6 @@ describe('<tessera-legend selectable>', () => {
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
     expect((deep(host, '[part="select"]') as HTMLSelectElement).value).toBe('cluster:clusters');
-    expect((deep(host, '[part="layers-select"]') as HTMLSelectElement).value).toBe('');
   });
 
   it('is a readout without selectable', async () => {

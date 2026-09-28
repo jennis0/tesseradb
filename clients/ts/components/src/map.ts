@@ -113,10 +113,10 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * @summary The map canvas.
  * @tagname tessera-map
  * @category Elements
- * @slot top-left - Content in the top-left corner, beside the toolbar when it is there.
- * @slot top-right - Content in the top-right corner, beside the toolbar when it is there.
- * @slot bottom-left - Content in the bottom-left corner.
- * @slot bottom-right - Content in the bottom-right corner.
+ * @slot top-left - Content in the top-left corner, below the toolbar when it is there.
+ * @slot top-right - Content in the top-right corner, below the toolbar when it is there.
+ * @slot bottom-left - Content in the bottom-left corner, above the toolbar when it is there.
+ * @slot bottom-right - Content in the bottom-right corner, above the toolbar when it is there.
  * @slot tooltip - Replaces the hover tooltip's content.
  * @fires {CustomEvent<TesseraEventDetails['tessera-viewchange']>} tessera-viewchange - The camera
  *   moved.
@@ -141,6 +141,8 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * @csspart tooltip - The hover tooltip.
  * @cssprop --tessera-map-height - The map's height.
  * @cssprop --tessera-map-bg - The canvas's background, behind the points and any basemap.
+ * @cssprop --tessera-map-inset-left - Extra space between the top-left corner's content and the
+ *   map's left edge, for a panel floated over the map's left side. Defaults to 0.
  */
 export class TesseraMap extends TesseraElement {
   static override styles = [
@@ -181,7 +183,7 @@ export class TesseraMap extends TesseraElement {
       }
       .top-left {
         top: var(--_tessera-space);
-        left: var(--_tessera-space);
+        left: calc(var(--_tessera-space) + var(--tessera-map-inset-left, 0px));
       }
       .top-right {
         top: var(--_tessera-space);
@@ -336,8 +338,11 @@ export class TesseraMap extends TesseraElement {
   @property({type: Number}) accessor radius: number | null = null;
   /** Hides the toolbar. */
   @property({type: Boolean, attribute: 'no-controls'}) accessor noControls = false;
-  /** Which corner the toolbar sits in: `top-left` or `top-right`. */
-  @property({attribute: 'controls-corner'}) accessor controlsCorner: 'top-left' | 'top-right' = 'top-left';
+  /**
+   * Which corner the toolbar sits in: `top-left`, `top-right`, `bottom-left` or `bottom-right`. In
+   * a top corner the corner's slotted content is below the toolbar; in a bottom corner, above it.
+   */
+  @property({attribute: 'controls-corner'}) accessor controlsCorner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' = 'top-left';
 
   /** @internal */
   @state() accessor hover: {x: number; y: number; title: string; lines: string[]} | null = null;
@@ -1108,8 +1113,14 @@ export class TesseraMap extends TesseraElement {
         ${this.controlsCorner === 'top-right' ? controls : nothing}
         <slot name="top-right"></slot>
       </div>
-      <div class="corner bottom-left"><slot name="bottom-left"></slot></div>
-      <div class="corner bottom-right"><slot name="bottom-right"></slot></div>
+      <div class="corner bottom-left">
+        <slot name="bottom-left"></slot>
+        ${this.controlsCorner === 'bottom-left' ? controls : nothing}
+      </div>
+      <div class="corner bottom-right">
+        <slot name="bottom-right"></slot>
+        ${this.controlsCorner === 'bottom-right' ? controls : nothing}
+      </div>
       ${this.hover
         ? html`<div part="tooltip" style=${`left:${this.hover.x}px;top:${this.hover.y}px`}>
             <slot name="tooltip"><div class="t">${this.hover.title}</div>${this.hover.lines.length > 0 ? html`<div class="s">${this.hover.lines.join(' · ')}</div>` : nothing}</slot>
