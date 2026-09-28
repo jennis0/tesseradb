@@ -2,7 +2,7 @@ import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit'
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import {activeCount, artifactName, emptyDraft, isPopulated, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
-import type {TesseraFilter} from './filter.js';
+import {OPERATOR_WORDS, type TesseraFilter} from './filter.js';
 import {TesseraElement, UNNAMED, columnCaption, dateRangeText, emit, keyTitle} from './base.js';
 import {radioKeys} from './display.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -219,9 +219,9 @@ export class TesseraFilterPanel extends TesseraElement {
     const caption = columnCaption(column);
     switch (draft.family) {
       case 'text':
-        return `${caption}: ${draft.query.trim().replace(/"([^"]*)"?/g, '“$1”')}`;
+        return `${caption}: ${draft.expr !== undefined ? JSON.stringify(draft.expr) : draft.query.trim().replace(/"([^"]*)"?/g, '“$1”')}`;
       case 'keyword':
-        return `${caption} ${draft.op === 'eq' ? 'is' : draft.op === 'prefix' ? 'starts with' : 'contains'} ${draft.needle}`;
+        return `${caption} ${OPERATOR_WORDS[draft.op]} ${draft.needle}`;
       case 'category':
         return `${caption}: ${draft.keys.map((k) => keyTitle(this.resolvedStore, column, k)).join(', ')}`;
       case 'numeric': {

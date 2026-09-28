@@ -408,8 +408,8 @@ export function emptyDraft(): FilterDraft {
   return {
     filter: {
       field: {family: 'category', keys: []},
-      title: {family: 'text', query: ''},
-      abstract: {family: 'text', query: ''},
+      title: {family: 'text', query: '', phrase: true},
+      abstract: {family: 'text', query: '', phrase: false},
       authors: {family: 'keyword', needle: '', op: 'contains'},
       citations: {family: 'numeric', gte: null, lte: null},
       published_at: {family: 'numeric', gte: null, lte: null}

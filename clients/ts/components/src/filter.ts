@@ -10,8 +10,8 @@ import {chrome, tokens} from './tokens.js';
 /** The operators a keyword control can send. */
 const KEYWORD_OPERATORS = ['contains', 'prefix', 'eq'] as const;
 type KeywordOperator = (typeof KEYWORD_OPERATORS)[number];
-/** Each operator as the select says it. */
-const OPERATOR_WORDS: Record<KeywordOperator, string> = {contains: 'contains', prefix: 'starts with', eq: 'is'};
+/** Each operator as the select and a chip say it. */
+export const OPERATOR_WORDS: Record<KeywordOperator, string> = {contains: 'contains', prefix: 'starts with', eq: 'is'};
 
 /** How long a typed control must be quiet before its change is sent. */
 const TYPING_DEBOUNCE_MS = 350;
@@ -25,9 +25,9 @@ const BAR_FLOOR = 2;
  * clause. The two are separate clauses; the control shows the one in its position and leaves the
  * other alone.
  *
- * A text column is one search box. Its words must all appear; words in double quotes are a phrase;
- * `OR` between terms asks for either. A line under the box says so, leaving out the phrase where
- * the column takes none.
+ * A text column is one search box. Its words must all appear; words in double quotes are a phrase,
+ * or plain words where the column takes no phrase; `OR` between terms asks for either. A line under
+ * the box says so. A text clause set from outside that no query writes shows read-only, with Clear.
  *
  * A category is a search box over `/v1/categories/{column}/suggest`, which lists nothing until
  * something is typed. Each value suggested shows its count in the current view and a bar, its
@@ -411,13 +411,16 @@ export class TesseraFilter extends TesseraElement {
         this.change({family: 'numeric', gte: null, lte: null}, true);
       }}>Clear</button>`;
     }
+    if (draft.family === 'text' && draft.expr !== undefined) {
+      return html`<button part="aside" type="button" @click=${() => this.change({family: 'text', query: '', phrase: draft.phrase}, true)}>Clear</button>`;
+    }
     return nothing;
   }
 
   private body(o: FilterOperandSet, draft: ColumnDraft) {
     switch (draft.family) {
       case 'text':
-        return this.text(o, draft);
+        return this.text(draft);
       case 'keyword':
         return this.keyword(o, draft);
       case 'category':
@@ -427,11 +430,16 @@ export class TesseraFilter extends TesseraElement {
     }
   }
 
-  private text(o: FilterOperandSet, draft: ColumnDraft & {family: 'text'}) {
-    const hint = o.operands.includes('phrase') ? 'Words match together. Use “quotes” for a phrase, OR for either.' : 'Words match together. Use OR for either.';
+  private text(draft: ColumnDraft & {family: 'text'}) {
+    // An expression set from outside that no query writes is shown as it is, and cannot be typed over.
+    if (draft.expr !== undefined) {
+      return html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" readonly .value=${JSON.stringify(draft.expr)} aria-describedby="hint" /></div>
+        <span part="hint" id="hint">Set from outside. Clear it to type a search.</span>`;
+    }
+    const hint = draft.phrase ? 'Words match together. Use “quotes” for a phrase, OR for either.' : 'Words match together. Use OR for either.';
     return html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.query} placeholder="Search the text" autocomplete="off"
         aria-describedby="hint"
-        @input=${(e: Event) => this.change({family: 'text', query: (e.target as HTMLInputElement).value}, false)} /></div>
+        @input=${(e: Event) => this.change({family: 'text', query: (e.target as HTMLInputElement).value, phrase: draft.phrase}, false)} /></div>
       <span part="hint" id="hint">${hint}</span>`;
   }
 

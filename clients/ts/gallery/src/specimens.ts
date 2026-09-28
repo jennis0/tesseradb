@@ -62,7 +62,7 @@ const APPLIED = filtersOf(
       citations: {family: 'numeric', gte: 100, lte: null},
       published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}
     },
-    {title: {family: 'text', query: '"classifier-free guidance"'}, field: {family: 'category', keys: ['cs.CV']}}
+    {title: {family: 'text', query: '"classifier-free guidance"', phrase: true}, field: {family: 'category', keys: ['cs.CV']}}
   ),
   {
     members: [
@@ -350,7 +350,7 @@ export const SECTIONS: Section[] = [
         build: () => make('tessera-filter', {store: store({filters: filtersOf(emptyDraft(), {suggestErrors: {field: {code: 'vocabulary-withheld', detail: 'not listable'}}})})}, {column: 'field'}),
         ready: typeInto('q')
       },
-      {state: 'text, a phrase or a word', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({title: {family: 'text', query: '"score matching" OR guidance'}}))})}, {column: 'title'})},
+      {state: 'text, a phrase or a word', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({title: {family: 'text', query: '"score matching" OR guidance', phrase: true}}))})}, {column: 'title'})},
       {state: 'text, a column with no phrase', build: () => make('tessera-filter', {store: store()}, {column: 'abstract'})},
       {state: 'keyword with operator', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({authors: {family: 'keyword', needle: 'Okonkwo', op: 'prefix'}}))})}, {column: 'authors'})},
       {state: 'number range', build: () => make('tessera-filter', {store: store({filters: filtersOf(withDraft({citations: {family: 'numeric', gte: 100, lte: 25_000}}))})}, {column: 'citations'})},
@@ -649,7 +649,7 @@ function explorerSpecimens(): Specimen[] {
       build: (ctx) =>
         explorer(
           full(ctx, {
-            filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'stat.ML']}, published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}}, {abstract: {family: 'text', query: '"diffusion model"'}}))
+            filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'stat.ML']}, published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}}, {abstract: {family: 'text', query: '"diffusion model"', phrase: false}}))
           }),
           {layout: 'overlay', ...named},
           900

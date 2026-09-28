@@ -24,13 +24,17 @@ export type TextTerms = {
 
 /**
  * A text control's query as the alternatives it asks for. Plain words must all appear. Text in
- * straight or curly double quotes is a phrase; a quote left open runs to the end. `OR`, in capitals
- * and standing alone, separates alternatives, any one of which is enough. An alternative with no
- * words and no phrases is dropped, so a query of nothing but `OR` or empty quotes asks nothing.
+ * straight or curly double quotes that starts a word is a phrase, and a quote left open runs to
+ * the end; where `phrase` is false, as on a column that takes no phrase, its words are plain words
+ * instead. `OR`, in capitals and standing alone, separates alternatives, any one of which is
+ * enough, and binds loosest: every word on one side of it applies together, so `a b OR c` asks for
+ * a and b, or for c. Nothing else is syntax: parentheses and quotes inside a word are part of the
+ * word. An alternative with no words and no phrases is dropped, so a query of nothing but `OR` or
+ * empty quotes asks nothing.
  *
  * @category Filters
  */
-export function textTerms(query: string): TextTerms[] {
+export function textTerms(query: string, phrase = true): TextTerms[] {
   const out: TextTerms[] = [];
   let current: TextTerms = {words: [], phrases: []};
   const close = () => {
@@ -40,8 +44,9 @@ export function textTerms(query: string): TextTerms[] {
   const token = /["“”]([^"“”]*)["“”]?|(\S+)/g;
   for (const m of query.matchAll(token)) {
     if (m[1] !== undefined) {
-      const phrase = m[1].trim().split(/\s+/).filter(Boolean).join(' ');
-      if (phrase) current.phrases.push(phrase);
+      const words = m[1].trim().split(/\s+/).filter(Boolean);
+      if (!phrase) current.words.push(...words);
+      else if (words.length > 0) current.phrases.push(words.join(' '));
     } else if (m[2] === 'OR') close();
     else current.words.push(m[2]!);
   }
@@ -66,8 +71,13 @@ export type ClauseVerb = 'filter' | 'highlight';
  * @category Filters
  */
 export type ColumnDraft =
-  /** A search of `query` by analysed words, as {@link textTerms} reads it. */
-  | {family: 'text'; query: string}
+  /**
+   * A search of `query` by analysed words, as {@link textTerms} reads it, with `phrase` saying
+   * whether the column takes a phrase. `expr`, where set, is an expression on the column given
+   * from outside, such as by the notebook widget, that no query writes; it is sent as it is, in
+   * place of the query, until the control is cleared.
+   */
+  | {family: 'text'; query: string; phrase: boolean; expr?: FilterExpr}
   /** `needle` compared with the whole value (`eq`), its start (`prefix`) or any part (`contains`). */
   | {family: 'keyword'; needle: string; op: 'eq' | 'prefix' | 'contains'}
   /**
@@ -104,7 +114,7 @@ export type FilterDraft = {
 export function isPopulated(draft: ColumnDraft): boolean {
   switch (draft.family) {
     case 'text':
-      return textTerms(draft.query).length > 0;
+      return draft.expr !== undefined || textTerms(draft.query, draft.phrase).length > 0;
     case 'keyword':
       return draft.needle.length > 0;
     case 'category':
@@ -120,11 +130,41 @@ export function isPopulated(draft: ColumnDraft): boolean {
  */
 function expressionOf(column: string, draft: ColumnDraft): FilterExpr {
   if (draft.family !== 'text') return {[column]: operatorOf(draft)} as FilterExpr;
-  const alternatives = textTerms(draft.query).map(({words, phrases}): FilterExpr => {
+  if (draft.expr !== undefined) return draft.expr;
+  const alternatives = textTerms(draft.query, draft.phrase).map(({words, phrases}): FilterExpr => {
     const leaves = [...(words.length > 0 ? [{match: words.join(' ')}] : []), ...phrases.map((phrase) => ({phrase}))].map((op) => ({[column]: op}) as FilterExpr);
     return leaves.length === 1 ? leaves[0]! : {all_of: leaves};
   });
   return alternatives.length === 1 ? alternatives[0]! : {any_of: alternatives};
+}
+
+/**
+ * The query a text control on `column` would write to send `expr`, or `null` where no query writes
+ * exactly that expression: the words of each alternative as one `match`, its phrases each as a
+ * `phrase`, joined by `all_of`, and the alternatives by `any_of`. A `match` whose words the query
+ * would read otherwise, such as one holding `OR` or a quote, has no query.
+ *
+ * @category Filters
+ */
+export function textQueryOf(column: string, expr: FilterExpr, phrase: boolean): string | null {
+  const alternatives = 'any_of' in expr ? (expr.any_of as FilterExpr[]) : [expr];
+  const parts: string[] = [];
+  for (const alternative of alternatives) {
+    const leaves = 'all_of' in alternative ? (alternative.all_of as FilterExpr[]) : [alternative];
+    const words: string[] = [];
+    const phrases: string[] = [];
+    for (const leaf of leaves) {
+      const op = (leaf as Record<string, unknown>)[column] as Record<string, unknown> | undefined;
+      if (Object.keys(leaf).length !== 1 || !op || typeof op !== 'object') return null;
+      if (typeof op['match'] === 'string') words.push(op['match']);
+      else if (typeof op['phrase'] === 'string') phrases.push(`"${op['phrase']}"`);
+      else return null;
+    }
+    parts.push([...words, ...phrases].join(' '));
+  }
+  const query = parts.join(' OR ');
+  const draft: ColumnDraft = {family: 'text', query, phrase};
+  return isPopulated(draft) && JSON.stringify(expressionOf(column, draft)) === JSON.stringify(expr) ? query : null;
 }
 
 /**
@@ -198,7 +238,7 @@ export function withoutClause(draft: FilterDraft, column: string, verb: ClauseVe
   if (!control) return draft;
   const empty: ColumnDraft =
     control.family === 'text'
-      ? {...control, query: ''}
+      ? {family: 'text', query: '', phrase: control.phrase}
       : control.family === 'keyword'
         ? {...control, needle: ''}
         : control.family === 'category'
@@ -211,7 +251,7 @@ export function withoutClause(draft: FilterDraft, column: string, verb: ClauseVe
  * A draft with one empty control per filterable column in `operands` (`Meta.filterOperands`), each
  * in the `filter` position, and none in the `highlight` position. A column gets a control only
  * where it publishes the operator the control sends: `match` for text, `in` for category and
- * `range` for numeric. A keyword control starts on whichever of `eq`,
+ * `range` for numeric. A text control takes a phrase where the column publishes `phrase`. A keyword control starts on whichever of `eq`,
  * `prefix` and `contains` the column publishes first.
  *
  * A group-scoped column is keyed by its bare name, which the server answers only under a view of
@@ -225,7 +265,7 @@ export function emptyDraft(operands: FilterOperandSet[]): FilterDraft {
   for (const {column, family, operands: ops} of operands) {
     switch (family) {
       case 'text':
-        if (ops.includes('match')) draft[column] = {family: 'text', query: ''};
+        if (ops.includes('match')) draft[column] = {family: 'text', query: '', phrase: ops.includes('phrase')};
         break;
       case 'keyword': {
         const op = ops.find((o): o is 'eq' | 'prefix' | 'contains' => o === 'eq' || o === 'prefix' || o === 'contains');

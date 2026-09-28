@@ -231,20 +231,28 @@ describe('<tessera-filter> on a category', () => {
 describe('<tessera-filter> on text', () => {
   it('sends one box’s words, phrases and alternatives after the typing pause', async () => {
     vi.useFakeTimers();
-    const {host, store} = await mountFilter('title', filtersOf({filter: {title: {family: 'text', query: ''}}, highlight: {}}));
+    const {host, store} = await mountFilter('title', filtersOf({filter: {title: {family: 'text', query: '', phrase: true}}, highlight: {}}));
     expect(deep(host, '[part="hint"]')).not.toBeNull();
     const changes: unknown[] = [];
     host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
     await type(host, '"graph neural" OR lattice');
     expect(drafts(store)).toHaveLength(0);
     await vi.runAllTimersAsync();
-    expect(drafts(store)[0]!.filter['title']).toEqual({family: 'text', query: '"graph neural" OR lattice'});
+    expect(drafts(store)[0]!.filter['title']).toEqual({family: 'text', query: '"graph neural" OR lattice', phrase: true});
     expect(changes).toEqual([{column: 'title', verb: 'filter', expr: {any_of: [{title: {phrase: 'graph neural'}}, {title: {match: 'lattice'}}]}}]);
+  });
+
+  it('shows a clause set from outside that no query writes read-only, and Clear empties it', async () => {
+    const expr = {title: {match: 'salt OR pepper'}};
+    const {host, store} = await mountFilter('title', filtersOf({filter: {title: {family: 'text', query: '', phrase: true, expr}}, highlight: {}}));
+    expect((deep(host, '[part="entry"]') as HTMLInputElement).readOnly).toBe(true);
+    (deep(host, '[part="aside"]') as HTMLButtonElement).click();
+    expect(drafts(store)[0]!.filter['title']).toEqual({family: 'text', query: '', phrase: true});
   });
 
   it('sends typing still waiting when its position changes, to the position it was typed in', async () => {
     vi.useFakeTimers();
-    const filter = {title: {family: 'text' as const, query: 'graph'}};
+    const filter = {title: {family: 'text' as const, query: 'graph', phrase: true}};
     const {host, el, store} = await mountFilter('title', filtersOf({filter, highlight: {}}));
     el.verb = 'highlight';
     await settle(host);
@@ -252,7 +260,7 @@ describe('<tessera-filter> on text', () => {
     expect(entry.value).toBe('guidance');
     el.verb = 'filter';
     await settle(host);
-    expect(drafts(store)).toEqual([{filter, highlight: {title: {family: 'text', query: 'guidance'}}}]);
+    expect(drafts(store)).toEqual([{filter, highlight: {title: {family: 'text', query: 'guidance', phrase: true}}}]);
     expect((deep(host, '[part="entry"]') as HTMLInputElement).value).toBe('graph');
     await vi.runAllTimersAsync();
     expect(drafts(store)).toHaveLength(1);
@@ -321,7 +329,7 @@ describe('<tessera-filter-panel>', () => {
     const fields = () => deepAll(host, '[part~="field"]').map((f) => [f.getAttribute('data-column'), f.hasAttribute('data-open')]);
     return {host, panel, store, sent, controls, fields};
   }
-  const none = (): FilterDraft => ({filter: {archive: {family: 'category', keys: []}, title: {family: 'text', query: ''}, submitted_at: {family: 'numeric', gte: null, lte: null}}, highlight: {}});
+  const none = (): FilterDraft => ({filter: {archive: {family: 'category', keys: []}, title: {family: 'text', query: '', phrase: true}, submitted_at: {family: 'numeric', gte: null, lte: null}}, highlight: {}});
 
   it('lists no field until one is pinned, holds a clause or is added', async () => {
     const {host, fields} = await mountPanel(none());
@@ -355,7 +363,7 @@ describe('<tessera-filter-panel>', () => {
   });
 
   it('edits the position the switch names in every control, and opens the fields holding a clause there', async () => {
-    const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {title: {family: 'text', query: 'graph'}}};
+    const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {title: {family: 'text', query: 'graph', phrase: true}}};
     const {host, panel, controls, fields} = await mountPanel(draft);
     expect(fields()).toEqual([
       ['archive', true],
@@ -374,7 +382,7 @@ describe('<tessera-filter-panel>', () => {
 
   describe('a column both filtered and highlighted', () => {
     const both: FilterDraft = {
-      filter: {archive: {family: 'category', keys: ['cs.LG', 'cs.CV']}, title: {family: 'text', query: ''}},
+      filter: {archive: {family: 'category', keys: ['cs.LG', 'cs.CV']}, title: {family: 'text', query: '', phrase: true}},
       highlight: {archive: {family: 'category', keys: ['cs.CV', 'stat.ML']}}
     };
     const chip = (host: HTMLElement, verb: string) => deep(host, `[part="chip"][data-column="archive"][data-verb="${verb}"]`)!;
