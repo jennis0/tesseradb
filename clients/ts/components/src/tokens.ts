@@ -27,6 +27,7 @@ import {css} from 'lit';
  *   the map toolbar.
  * @cssprop --tessera-line-2 - The colour of the rules between sections and between the status
  *   strip's cells.
+ * @cssprop --tessera-line-control - The colour of borders around inputs and chips.
  * @cssprop --tessera-accent - The colour of the active map tool, primary buttons, badges, checked
  *   boxes and focus rings.
  * @cssprop --tessera-accent-ink - The text colour on an accent background.
@@ -64,6 +65,7 @@ export const tokens = css`
     --_tessera-ink-3: var(--tessera-ink-3, light-dark(#737981, #80868f));
     --_tessera-line: var(--tessera-line, light-dark(#e5e5e1, #2b2f36));
     --_tessera-line-2: var(--tessera-line-2, light-dark(#efefeb, #24272d));
+    --_tessera-line-control: var(--tessera-line-control, light-dark(#deded9, #33373e));
     --_tessera-accent: var(--tessera-accent, light-dark(#1b1d21, #eceef1));
     --_tessera-accent-ink: var(--tessera-accent-ink, light-dark(#ffffff, #111317));
     --_tessera-accent-soft: var(--tessera-accent-soft, light-dark(#ebebe6, #2c3037));
@@ -78,9 +80,10 @@ export const tokens = css`
     --_tessera-radius-control: var(--tessera-radius-control, 6px);
     --_tessera-font: var(--tessera-font, 'Instrument Sans', system-ui, sans-serif);
     --_tessera-font-mono: var(--tessera-font-mono, ui-monospace, 'SF Mono', Menlo, Consolas, monospace);
-    /* A shadow is not a colour, so light-dark() chooses only its colour. */
-    --_tessera-shadow: var(--tessera-shadow, 0 2px 10px light-dark(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.35)));
-    --_tessera-space: var(--tessera-space, calc(16px * var(--tessera-density, 1)));
+    /* light-dark() chooses only colours, so each scheme's shadow is a layer transparent in the other. */
+    --_tessera-shadow: var(--tessera-shadow, 0 2px 10px light-dark(rgba(0, 0, 0, 0.06), transparent), 0 4px 16px light-dark(transparent, rgba(0, 0, 0, 0.35)));
+    /* A layout such as the explorer's compact form sets the private base the default scales. */
+    --_tessera-space: var(--tessera-space, calc(var(--_tessera-space-base, 16px) * var(--tessera-density, 1)));
     --_tessera-map-height: var(--tessera-map-height, 420px);
     font-family: var(--_tessera-font);
     font-size: 13px;
@@ -158,10 +161,11 @@ export const chrome = css`
     flex-grow: 1;
     min-width: 0;
   }
-  /* A panel: padding, a rule beneath, a section heading. */
+  /* A panel: padding, a rule beneath, a section heading. A container such as the explorer's card
+     sets the two private properties for the panels inside it. */
   .panel {
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--_tessera-line-2);
+    padding: var(--_tessera-panel-padding, 14px 16px);
+    border-bottom: 1px solid var(--_tessera-panel-rule, var(--_tessera-line-2));
   }
   h2,
   [part='title'],
@@ -199,11 +203,11 @@ export const chrome = css`
     color: var(--_tessera-refuse);
     font-weight: 500;
   }
-  /* The key/value grid of a card. */
+  /* The key/value grid of a card. A container short of room sets the private sizes. */
   .field {
     display: grid;
-    grid-template-columns: 88px minmax(0, 1fr);
-    gap: 6px 12px;
+    grid-template-columns: var(--_tessera-key-width, 88px) minmax(0, 1fr);
+    gap: var(--_tessera-field-gap, 6px 12px);
     align-items: baseline;
   }
   .field .k,
@@ -221,7 +225,7 @@ export const chrome = css`
     text-align: right;
   }
   .card-title {
-    font-size: 15px;
+    font-size: var(--_tessera-title-size, 15px);
     font-weight: 600;
     line-height: 1.3;
     text-wrap: pretty;
@@ -231,7 +235,7 @@ export const chrome = css`
      keeps the box's single border. */
   :where(.input, input:not([type='checkbox']):not([type='radio']), select) {
     height: 30px;
-    border: 1px solid var(--_tessera-line);
+    border: 1px solid var(--_tessera-line-control);
     border-radius: var(--_tessera-radius-control);
     background: var(--_tessera-surface);
     color: var(--_tessera-ink);
@@ -413,19 +417,20 @@ export const chrome = css`
     gap: 6px;
     min-height: 24px;
     max-width: 100%;
-    padding: 2px 5px 2px 8px;
-    border: 1px solid var(--_tessera-line);
+    padding: 3px 5px 3px 8px;
+    border: 1px solid var(--_tessera-line-control);
     border-radius: var(--_tessera-radius-control);
     background: var(--_tessera-surface-2);
     color: var(--_tessera-ink);
     font-size: 12px;
     font-weight: 500;
-    line-height: 1.35;
+    line-height: 1.45;
     overflow-wrap: anywhere;
     text-align: left;
   }
   /* A chip whose clause is in the highlight position, in the highlight colour. */
   .chip[data-verb='highlight'] {
+    border-color: color-mix(in srgb, var(--_tessera-highlight) 18%, var(--_tessera-highlight-soft));
     background: var(--_tessera-highlight-soft);
     color: var(--_tessera-highlight);
   }

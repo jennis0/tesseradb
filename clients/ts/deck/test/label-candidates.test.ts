@@ -105,9 +105,9 @@ describe('labelCandidates', () => {
     const p = projection([artifact(1n, 100n, ['quantum error correction']), artifact(2n, 900n), artifact(3n, 50n, [''])]);
     const {candidates, byId} = labelCandidates(p, META, undefined, 0, 10);
     expect(candidates.map((c) => String(c.id))).toEqual(['1']);
-    // Wrapped to short lines, and the whole name is still there.
-    expect(byId.get(1n)!.lines).toEqual(['quantum error', 'correction']);
-    expect([...byId.values()].some((t) => t.lines.join(' ').startsWith('c-'))).toBe(false);
+    // One line, and the whole name is there.
+    expect(byId.get(1n)!.line).toBe('quantum error correction');
+    expect([...byId.values()].some((t) => t.line.startsWith('c-'))).toBe(false);
   });
 
   it('only the frontier is labelled — an ancestor of something drawn draws nothing', () => {
@@ -125,7 +125,7 @@ describe('labelCandidates', () => {
     const p = projection([artifact(1n, 100n), artifact(2n, 40n), topic(9n, 1n, 'decoders, thresholds')]);
     const {candidates, byId} = labelCandidates(p, META, undefined, 0, 10);
     expect(candidates.map((c) => String(c.id))).toEqual(['1']);
-    expect(byId.get(1n)!.lines.join(' ')).toBe('decoders, thresholds');
+    expect(byId.get(1n)!.line).toBe('decoders, thresholds');
     expect(byId.get(1n)!.topic).toBeNull();
   });
 
@@ -134,8 +134,8 @@ describe('labelCandidates', () => {
     // matter.
     const p = projection([artifact(1n, 100n), artifact(2n, 100n), topic(8n, 1n, 'left topic'), topic(9n, 2n, 'right topic')]);
     const {byId} = labelCandidates(p, META, undefined, 0, 10);
-    expect(byId.get(1n)!.lines.join(' ')).toBe('left topic');
-    expect(byId.get(2n)!.lines.join(' ')).toBe('right topic');
+    expect(byId.get(1n)!.line).toBe('left topic');
+    expect(byId.get(2n)!.line).toBe('right topic');
     // And a topic naming nothing this response holds attaches to nothing rather than to whichever
     // row happens to share its count.
     const orphan = projection([artifact(1n, 100n), {...topic(7n, 1n, 'unattached'), target: null}]);
@@ -262,8 +262,8 @@ describe('labelBudget', () => {
     const placed = (budget: number) => placeLabels(labelCandidates(p, MEDCPT_META, undefined, 0, budget).candidates).length;
     const screenDerived = placed(28);
     const drawnSet = placed(labelBudget(p.served.length));
-    expect(screenDerived).toBeLessThanOrEqual(4);
-    expect(drawnSet).toBeGreaterThanOrEqual(4 * screenDerived);
+    expect(screenDerived).toBeLessThanOrEqual(8);
+    expect(drawnSet).toBeGreaterThanOrEqual(3 * screenDerived);
   });
 
   it('offers every drawn artifact, so a small cluster in a gap is a candidate at all', () => {

@@ -182,6 +182,10 @@ export class TesseraExplorer extends TesseraElement {
         min-height: 320px;
         --_panel-width: var(--tessera-sidebar-width, 340px);
       }
+      /* The compact form's corners are nearer the edges. */
+      :host([data-compact]) {
+        --_tessera-space-base: 12px;
+      }
       [part='frame'] {
         position: relative;
         display: grid;
@@ -195,6 +199,7 @@ export class TesseraExplorer extends TesseraElement {
       }
       [part='frame'].compact {
         --_panel-width: min(var(--tessera-sidebar-width, 340px), 300px);
+        --_tessera-tool-size: 30px;
       }
       .stage {
         position: relative;
@@ -217,6 +222,10 @@ export class TesseraExplorer extends TesseraElement {
         overflow-y: auto;
         border-right: 1px solid var(--_tessera-line);
         background: var(--_tessera-surface);
+        --_tessera-panel-rule: var(--_tessera-line);
+      }
+      [part='sidebar'] .head {
+        border-bottom-color: var(--_tessera-line);
       }
       /* The card over the map: the sidebar folded up. */
       [part='panel'] {
@@ -229,6 +238,13 @@ export class TesseraExplorer extends TesseraElement {
         display: flex;
         flex-direction: column;
         overflow-y: auto;
+        --_tessera-panel-padding: 12px 14px 14px;
+      }
+      [part='panel'] tessera-filter-panel {
+        --_tessera-panel-padding: 12px 14px;
+      }
+      .compact [part='panel'] {
+        --_tessera-panel-padding: 10px 12px;
       }
       /* Room beneath for the tools and the Layers button in the bottom-left corner. */
       .compact [part='panel'] {
@@ -278,9 +294,12 @@ export class TesseraExplorer extends TesseraElement {
       }
       [part='filters-toggle'] {
         margin-left: auto;
-        padding: 0 9px 0 8px;
+        height: auto;
+        padding: 5px 9px 5px 8px;
       }
       .compact [part='filters-toggle'] {
+        height: 28px;
+        padding: 0 8px;
         border: 0;
       }
       .badge {
@@ -311,8 +330,8 @@ export class TesseraExplorer extends TesseraElement {
       }
       [part='layers-toggle'] {
         position: relative;
-        width: 32px;
-        height: 32px;
+        width: var(--_tessera-tool-size, 32px);
+        height: var(--_tessera-tool-size, 32px);
         display: grid;
         place-items: center;
         border-radius: var(--_tessera-radius-control);
@@ -349,6 +368,7 @@ export class TesseraExplorer extends TesseraElement {
         bottom: 0;
       }
       [part='detail'] {
+        --_tessera-panel-padding: 14px 14px 12px;
         width: 320px;
         max-width: 100%;
         max-height: calc(100cqh - 2 * var(--_tessera-space) - 48px);
@@ -356,6 +376,11 @@ export class TesseraExplorer extends TesseraElement {
       }
       .compact [part='detail'] {
         width: 272px;
+        font-size: 12px;
+        --_tessera-panel-padding: 12px 12px 10px;
+        --_tessera-title-size: 14px;
+        --_tessera-key-width: 76px;
+        --_tessera-field-gap: 4px 10px;
       }
       .right {
         display: flex;
@@ -941,6 +966,7 @@ export class TesseraExplorer extends TesseraElement {
 
   /** Focus goes into a sheet as it opens, and back to its tab as it closes. */
   protected override updated(changed: PropertyValues<this>): void {
+    this.toggleAttribute('data-compact', this.compact);
     if (!changed.has('sheet')) return;
     const before = changed.get('sheet');
     if (this.sheet) this.renderRoot.querySelector<HTMLElement>('[part="sheet"]')?.focus();

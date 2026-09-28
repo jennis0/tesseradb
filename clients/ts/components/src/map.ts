@@ -215,8 +215,8 @@ export class TesseraMap extends TesseraElement {
         pointer-events: auto;
       }
       [part='controls'] button {
-        width: 32px;
-        height: 32px;
+        width: var(--_tessera-tool-size, 32px);
+        height: var(--_tessera-tool-size, 32px);
         display: grid;
         place-items: center;
         color: color-mix(in srgb, var(--_tessera-ink) 82%, var(--_tessera-surface));

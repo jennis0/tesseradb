@@ -24,7 +24,7 @@ import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rampAt as rampAtStops, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
 import {binDensity, contourThresholds, densityCells, densityPaint, densityStops, filterDensity, type DensityCell, type DensityColours, type DensityMode} from './density.js';
-import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
+import {LABEL_LINE_HEIGHT, labelLine, labelSize, placeLabels, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {importAggregation} from './aggregation-loader.js';
 import {LookupTexture} from './lut.js';
 import {DULL_COLOUR, MarksLayer, type HighlightPass} from './marks-layer.js';
@@ -193,7 +193,7 @@ export type LayerTimings = {
   outlines: number;
   /** Artifacts outlined: 0, 1 or 2 (the hovered and the opened). */
   outlinesDrawn: number;
-  /** Labels placed. A name wrapped over several lines counts once. */
+  /** Labels placed. */
   labels: number;
   /** The mark radius drawn, in pixels. */
   markRadius: number;
@@ -423,7 +423,7 @@ type LabelDatum = {
   offset: [number, number];
   colour: Rgba;
   kind: 'name' | 'count' | 'topic';
-  /** Where the offset sits on the run: a wrapped name centres, its last line ends where the count starts. */
+  /** Where the offset sits on the run: a name ends where its count starts, and a topic centres. */
   anchor: 'start' | 'middle' | 'end';
 };
 type LeaderDatum = {from: [number, number]; to: [number, number]};
@@ -571,8 +571,8 @@ export function labelBudget(drawn: number): number {
 
 export type LabelText = {
   artifact: Artifact;
-  /** The name as drawn, in up to three short lines. */
-  lines: string[];
+  /** The name as drawn, on one line. */
+  line: string;
   countText: string;
   size: number;
   topic: string | null;
@@ -652,17 +652,15 @@ function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: numbe
     const attached = a.attached.get(artifact.tesseraId) ?? null;
     const topic = attached === name ? null : attached;
     const countText = count.toLocaleString('en-GB');
-    // The placed box is the wrapped block as drawn.
-    const lines = wrapLabel(name);
-    byId.set(artifact.tesseraId, {artifact, lines, countText, size, topic});
-    const widest = lines.reduce((w, line) => Math.max(w, line.length * NAME_EM * size), 0);
-    const lastLine = lines[lines.length - 1]!.length * NAME_EM * size + countText.length * COUNT_EM * size * COUNT_SCALE + COUNT_GAP_EM * size;
+    const line = labelLine(name);
+    byId.set(artifact.tesseraId, {artifact, line, countText, size, topic});
+    const lineWidth = line.length * NAME_EM * size + countText.length * COUNT_EM * size * COUNT_SCALE + COUNT_GAP_EM * size;
     candidates.push({
       id: artifact.tesseraId,
       x: gridToWorld(artifact.centroid![0]),
       y: gridToWorld(artifact.centroid![1]),
-      width: Math.max(widest, lastLine, topic ? topic.length * TOPIC_SIZE * 0.5 : 0) + 8,
-      height: lines.length * size * LABEL_LINE_HEIGHT + (topic ? TOPIC_SIZE + 3 : 0),
+      width: Math.max(lineWidth, topic ? topic.length * TOPIC_SIZE * 0.5 : 0) + 8,
+      height: size * LABEL_LINE_HEIGHT + (topic ? TOPIC_SIZE + 3 : 0),
       priority: count
     });
   }
@@ -1406,32 +1404,17 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
       let placed = 0;
       for (const p of placeLabels(candidates) as PlacedLabel[]) {
         placed += 1;
-        const {artifact, lines, countText, size, topic} = byId.get(p.id)!;
+        const {artifact, line, countText, size, topic} = byId.get(p.id)!;
         const position = gridToWorldXY(artifact.centroid!);
         const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
         const colour = a.colours.get(ordinal) ?? NEUTRAL;
-        // The name over up to three lines centred on the anchor, the count after the last line,
-        // and the topic beneath. The last line ends where the count starts, so they cannot overlap.
-        const step = size * LABEL_LINE_HEIGHT;
-        const top = p.dy - ((lines.length - 1) * step) / 2;
-        const last = lines[lines.length - 1]!;
-        const lastWidth = last.length * NAME_EM * size;
+        // The name and the count after it on one line centred on the anchor, and the topic
+        // beneath. The name ends where the count starts, so they cannot overlap.
+        const nameWidth = line.length * NAME_EM * size;
         const countWidth = countText.length * COUNT_EM * size * COUNT_SCALE;
-        const seam = p.dx - (lastWidth + countWidth + size * COUNT_GAP_EM) / 2 + lastWidth;
-        lines.forEach((line, i) => {
-          const isLast = i === lines.length - 1;
-          data.push({
-            id: artifact.tesseraId,
-            position,
-            text: line,
-            size,
-            offset: [isLast ? seam : p.dx, top + i * step],
-            colour,
-            kind: 'name',
-            anchor: isLast ? 'end' : 'middle'
-          });
-        });
-        const baseline = top + (lines.length - 1) * step;
+        const seam = p.dx - (nameWidth + countWidth + size * COUNT_GAP_EM) / 2 + nameWidth;
+        const baseline = p.dy;
+        data.push({id: artifact.tesseraId, position, text: line, size, offset: [seam, baseline], colour, kind: 'name', anchor: 'end'});
         data.push({id: artifact.tesseraId, position, text: countText, size: size * COUNT_SCALE, offset: [seam + size * COUNT_GAP_EM, baseline + size * 0.08], colour, kind: 'count', anchor: 'start'});
         if (topic) data.push({id: artifact.tesseraId, position, text: topic, size: TOPIC_SIZE, offset: [p.dx, baseline + size * 0.78 + 3], colour, kind: 'topic', anchor: 'middle'});
         if (p.leader) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
@@ -1442,7 +1425,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     const data = held?.data ?? NO_LABELS;
     const leaders = held?.leaders ?? NO_LEADERS;
     timings.labelsMs = performance.now() - started;
-    // Labels placed, not text rows: a wrapped name is several rows of one label.
+    // Labels placed, not text rows: a label is its name, its count and its topic.
     timings.labels = held?.placed ?? 0;
     // Present from the first paint, empty, so their programs link early.
     const layers: Layer[] = [];
