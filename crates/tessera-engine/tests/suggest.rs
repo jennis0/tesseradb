@@ -248,6 +248,7 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         ),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

@@ -18,16 +18,16 @@
 //! the directions that matter — an absent geometry column puts every point at the origin, and an
 //! absent access column puts every point in no principal's mask.
 //!
-//! Both honour a `limit`: `entity_id < limit` selects a prefix of entity space, which is a
-//! whole coherent corpus because entity IDs are append-only (I9, dataset §4.1). Row groups
-//! whose statistics prove they hold no qualifying row are skipped outright — at 10⁹ items the
-//! pairs relation is billions of rows and the prefix is a few hundred thousand.
+//! **A row is named by its position in its file**, and what it names is the number the rule gave
+//! it ([`crate::ids`]): every reader takes a file's [`crate::ids::ReadRows`] and hands its caller
+//! each row's number, skipping a row with none. A view's selection, `--limit` and the rows the rule
+//! refused are all rows with no number, so no reader here applies any of them again.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::ops::ControlFlow;
 use std::path::Path;
-use std::sync::mpsc;
+
 
 use arrow::array::{Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, TimeUnit};
@@ -42,10 +42,12 @@ use tessera_spatial::{fixed32, Bounds, Projection};
 use tessera_store::scalar_column::ScalarColumn;
 use tessera_store::vocabulary::{code_value, Resolved, Unresolved, VocabularyMinter};
 
-use crate::config::{Fields, ViewSelector, JOIN_COLUMN};
+use crate::config::{Fields, ViewSelector};
 use crate::error::{BuildError, Result};
+use crate::ids::{Numbers, ReadRows, NO_SOURCE};
+use crate::row_groups::FileGroups;
 
-/// One input point: its source id (the join value, or its rank) and geometry.
+/// One input point: its number ([`crate::ids`]) and geometry.
 ///
 /// Geometry is carried **already quantised**, as 32-bit fixed point per axis against the build's
 /// extent ([`tessera_spatial::fixed32`]), rather than as the coordinates the file held. Three
@@ -116,7 +118,7 @@ fn discriminator_index(
 /// roster, which is the pair an operator needs to tell a typo from a missing declaration.
 ///
 /// A null discriminator is the same refusal: a row that names no view is in no view.
-fn selected_rows(
+pub(crate) fn selected_rows(
     path: &Path,
     column: &arrow::array::ArrayRef,
     select: &ViewSelector,
@@ -184,97 +186,50 @@ fn selected_rows(
     })
 }
 
-/// One source and everything every reader of it needs to name a row in it.
-///
-/// **Five values that always travel together**: where the file is, how the declaration spells its
-/// fields, how it names a row (`crate::ids`), which prefix of it a `--limit` keeps, and which of
-/// its rows are this view's under a form B discriminator. Passing them as one value is what keeps
-/// the readers below to their own arguments, and it is where the three steps every one of them
-/// takes over an identity column live: which column it is, which row groups to decode, and what a
-/// batch's rows are called.
+/// One file and the number of each of its rows: everything a reader needs to name a row.
 #[derive(Clone, Copy)]
 pub struct Source<'a> {
     path: &'a Path,
     fields: &'a Fields,
-    ids: &'a crate::ids::IdSpace,
-    limit: Option<u64>,
-    select: Option<&'a ViewSelector>,
+    rows: &'a ReadRows,
 }
 
+/// Every row of a file, row `r` numbered `r`.
+static EVERY_ROW: ReadRows = ReadRows {
+    numbers: Numbers::Offset { base: 0 },
+    groups: None,
+    named: 0,
+    mixed: 0,
+};
+
 impl<'a> Source<'a> {
-    /// The whole file, every row.
-    pub fn new(path: &'a Path, fields: &'a Fields, ids: &'a crate::ids::IdSpace) -> Source<'a> {
+    pub(crate) fn new(path: &'a Path, fields: &'a Fields, rows: &'a ReadRows) -> Source<'a> {
+        Source { path, fields, rows }
+    }
+
+    /// Every row of the file, numbered by its position: for a caller reading a file on its own.
+    pub fn every_row(path: &'a Path, fields: &'a Fields) -> Source<'a> {
         Source {
             path,
             fields,
-            ids,
-            limit: None,
-            select: None,
+            rows: &EVERY_ROW,
         }
     }
 
-    /// Keep the rows whose identity is below `limit`.
-    pub fn limited(self, limit: Option<u64>) -> Source<'a> {
-        Source { limit, ..self }
+    /// The row groups a reader decodes.
+    fn groups(&self, groups: &FileGroups) -> Vec<usize> {
+        self.rows.groups(groups.count())
     }
 
-    /// Keep the rows a form B discriminator gives this view (`views.md` §3.1).
-    pub fn selecting(self, select: Option<&'a ViewSelector>) -> Source<'a> {
-        Source { select, ..self }
-    }
-
-    /// The column a row's identity is read from, or `None` on the positional route, where the file
-    /// carries no such column and a row is named by where it sits.
-    fn id_index(&self, schema: &arrow::datatypes::Schema) -> Result<Option<usize>> {
-        match self.ids.positional() {
-            true => Ok(None),
-            false => field_index(self.path, schema, self.fields, JOIN_COLUMN).map(Some),
-        }
-    }
-
-    /// Where the identity column landed in a reader's **projected** schema, given where it sits
-    /// in the file's. `None` on the positional route, which projects no such column.
-    fn projected_id_index(
-        &self,
-        projected: &arrow::datatypes::Schema,
-        in_file: Option<usize>,
-    ) -> Result<Option<usize>> {
-        match in_file {
-            Some(_) => column_index(self.path, projected, self.id_name()).map(Some),
-            None => Ok(None),
-        }
-    }
-
-    /// The row groups a reader decodes: the ones a `--limit` cannot rule out from the identity
-    /// column's own statistics, and every one where there is no such column to rule them out by.
-    fn row_groups(&self, meta: &ParquetMetaData, id_idx: Option<usize>) -> Vec<usize> {
-        match id_idx {
-            Some(idx) => prunable_row_groups(meta, idx, self.limit),
-            None => (0..meta.num_row_groups()).collect(),
-        }
-    }
-
-    /// One batch's rows, as the source ids every pass joins on. `cursor` is the reader's running
-    /// count over this file, which is what names a row on the positional route.
-    fn source_ids(
-        &self,
-        batch: &RecordBatch,
-        id_idx: Option<usize>,
-        cursor: &mut u64,
-    ) -> Result<Vec<u64>> {
-        match id_idx {
-            Some(idx) => read_id_column(self.path, batch, idx, self.id_name(), self.ids),
-            None => Ok(positional_ids(cursor, batch.num_rows())),
-        }
-    }
-
-    /// The column name a refusal should quote for the identity.
-    fn id_name(&self) -> &'a str {
-        self.fields.of(JOIN_COLUMN)
+    /// The numbers of `len` rows from file row `first`, [`NO_SOURCE`] where a row has none.
+    fn source_ids(&self, first: u64, len: usize) -> Vec<u64> {
+        let mut ids = Vec::with_capacity(len);
+        self.rows.numbers.extend(first, len, &mut ids);
+        ids
     }
 }
 
-/// Read `points`, keeping rows with `source_id < limit` when `limit` is `Some`.
+/// Read `points`: every row with a number.
 ///
 /// Accepted schemas (checked in this order), all yielding [`PointRow`]'s 32-bit fixed point:
 /// 1. `entity_id` + `x` + `y` — coordinates quantised against `extent`, the one place that
@@ -304,27 +259,6 @@ pub fn read_points(
     Ok(out)
 }
 
-/// How many row groups each decoder worker claims, and the decoded-batch channel bound.
-///
-/// Decode is the expensive half of a scan (Snappy + delta unpacking); visiting is a few
-/// instructions per row. So row groups are decoded on a small pool of worker threads and
-/// *visited* on the calling thread, which keeps `visit` free of any `Send` requirement and the
-/// resident set bounded by `DECODE_CHANNEL_BATCHES` decoded batches. **Rows arrive in no
-/// particular order across row groups.** Every consumer is insensitive to arrival order: both
-/// builds sort or group everything they read (the streaming build's pipeline argues this per
-/// pass; the linear build sorts points by source id and groups pairs per entity before use).
-const DECODE_WORKERS_MAX: usize = 6;
-const DECODE_CHANNEL_BATCHES: usize = 16;
-
-fn decode_worker_count(row_groups: usize) -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(DECODE_WORKERS_MAX)
-        .min(row_groups)
-        .max(1)
-}
-
 /// The streaming form of [`read_points`]: calls `visit` once per selected row, holding only a
 /// bounded number of decoded record batches. The batch build uses this so the points file —
 /// 10⁹ rows in the probe corpus — can be traversed several times without ever being
@@ -339,22 +273,9 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     extent: &Bounds,
     mut visit: F,
 ) -> Result<()> {
-    let Source {
-        path,
-        fields,
-        ids,
-        limit,
-        select,
-    } = src;
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    let schema = builder.schema().clone();
-
-    // Statistics live against the *file's* column order; batches come back in the projected
-    // order. Keep the two index spaces apart deliberately — conflating them would silently read
-    // the wrong column.
-    let id_idx_in_file = src.id_index(&schema)?;
+    let Source { path, fields, .. } = src;
+    let groups = FileGroups::open(path)?;
+    let schema = groups.schema().clone();
     let geometry_kind = geometry_kind(path, &schema, fields)?;
     if geometry_kind != GeometryKind::Xy && *extent != IDENTITY_EXTENT {
         return Err(BuildError::Schema {
@@ -368,60 +289,21 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
             ),
         });
     }
-    // The column *names*, resolved: what the declaration moved, and the canonical name for
-    // everything it left alone. Every index below — in this schema and in each worker's projected
-    // one — is looked up by these, never by the canonical name.
-    let wanted: Vec<&str> = match geometry_kind {
-        GeometryKind::Xy => vec![fields.of(JOIN_COLUMN), fields.of("x"), fields.of("y")],
-        GeometryKind::Morton => vec![fields.of(JOIN_COLUMN), fields.of("morton")],
-        GeometryKind::MortonResidual => vec![
-            fields.of(JOIN_COLUMN),
-            fields.of("morton"),
-            fields.of("residual"),
-        ],
-    };
-
     // Project: the probe corpus carries columns this build has no use for, and at 10^9 rows
-    // not decoding them is the difference between one pass and two. Each decode worker builds
-    // its own `ProjectionMask` from these root indices against its own reader.
-    let mut roots = Vec::with_capacity(wanted.len() + 1);
+    // not decoding them is the difference between one pass and two.
+    let mut roots = Vec::with_capacity(3);
     for canonical in geometry_kind.canonical_fields() {
-        if *canonical == JOIN_COLUMN && ids.positional() {
-            continue;
-        }
         roots.push(field_index(path, &schema, fields, canonical)?);
     }
-    // Form B's discriminator rides the same projection as the geometry: the selection is part of
-    // reading this view's points, not a second pass over the file (`views.md` §3.1).
-    if let Some(select) = select {
-        roots.push(discriminator_index(path, &schema, select)?);
-    }
-
-    let keep = src.row_groups(builder.metadata(), id_idx_in_file);
-    drop(builder);
-    // **One worker on the positional route**, because a row's name there is its position in the
-    // file and the batches must therefore arrive in the file's order (`crate::ids`).
-    let workers = match ids.positional() {
-        true => 1,
-        false => decode_worker_count(keep.len()),
-    };
-    let shards: Vec<Vec<usize>> = keep
-        .chunks(keep.len().div_ceil(workers).max(1))
-        .map(|c| c.to_vec())
-        .collect();
-    // Resolved once, on this thread, and copied into each worker: a worker re-resolves its own
-    // indices against its own projected schema, and it must do so under the same names.
-    let (id_name, x_name, y_name) = (fields.of(JOIN_COLUMN), fields.of("x"), fields.of("y"));
+    roots.sort_unstable();
+    let mask = groups.projection(&roots);
+    // Resolved once, on this thread, and copied into each worker: a worker reads its columns
+    // under the same names.
+    let (x_name, y_name) = (fields.of("x"), fields.of("y"));
     let (morton_name, residual_name) = (fields.of("morton"), fields.of("residual"));
 
-    /// One decoded batch's columns, extracted on a worker thread, with the rows this view's
-    /// selection keeps — `None` where the file is the view and every row is kept.
-    struct PointCols {
-        keep: Option<Vec<bool>>,
-        geometry: PointGeom,
-    }
-
-    /// One decoded batch's geometry columns, extracted on a worker thread.
+    /// One decoded batch's geometry columns, extracted on a worker thread, with the numbers of
+    /// its rows.
     enum PointGeom {
         Xy(Vec<u64>, Vec<f64>, Vec<f64>),
         /// Codes only: 16 bits per axis, all a bare `morton` column can carry.
@@ -430,199 +312,110 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
         MortonResidual(Vec<u64>, Vec<u64>, Vec<u64>),
     }
 
-    let select_name = select.map(|s| s.column.as_str());
-    let (tx, rx) =
-        mpsc::sync_channel::<std::result::Result<PointCols, BuildError>>(DECODE_CHANNEL_BATCHES);
-    std::thread::scope(|scope| {
-        for shard in shards {
-            let tx = tx.clone();
-            let roots = roots.clone();
-            scope.spawn(move || {
-                let decode = |tx: &mpsc::SyncSender<_>| -> Result<()> {
-                    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-                    let b = ParquetRecordBatchReaderBuilder::try_new(file)
-                        .map_err(|e| BuildError::parquet(path, e))?;
-                    let projection =
-                        parquet::arrow::ProjectionMask::roots(b.parquet_schema(), roots);
-                    let reader = b
-                        .with_row_groups(shard)
-                        .with_projection(projection)
-                        .with_batch_size(ATTRIBUTE_BATCH_ROWS)
-                        .build()
-                        .map_err(|e| BuildError::parquet(path, e))?;
-                    let projected = arrow::array::RecordBatchReader::schema(&reader);
-                    let id_idx = src.projected_id_index(&projected, id_idx_in_file)?;
-                    let geometry = match geometry_kind {
-                        GeometryKind::Xy => Geometry::Xy(
-                            column_index(path, &projected, x_name)?,
-                            column_index(path, &projected, y_name)?,
-                        ),
-                        GeometryKind::Morton => {
-                            Geometry::Morton(column_index(path, &projected, morton_name)?)
-                        }
-                        GeometryKind::MortonResidual => Geometry::MortonResidual(
-                            column_index(path, &projected, morton_name)?,
-                            column_index(path, &projected, residual_name)?,
-                        ),
-                    };
-                    let select_idx = match select_name {
-                        Some(name) => Some(column_index(path, &projected, name)?),
-                        None => None,
-                    };
-                    for batch in reader {
-                        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-                        // Empty on the positional route; the consumer fills it from its own
-                        // running count, which is the file's order because this route decodes on
-                        // one worker.
-                        let source_ids = match id_idx {
-                            Some(idx) => read_id_column(path, &batch, idx, id_name, ids)?,
-                            None => Vec::new(),
-                        };
-
-                        let keep = match (select, select_idx) {
-                            (Some(select), Some(idx)) => {
-                                Some(selected_rows(path, batch.column(idx), select)?)
-                            }
-                            _ => None,
-                        };
-                        let geometry = match geometry {
-                            Geometry::Xy(xi, yi) => {
-                                let at = |row| row_name(&batch, id_idx, id_name, row);
-                                PointGeom::Xy(
-                                    source_ids,
-                                    read_coordinate_column(path, &batch, xi, x_name, &at)?,
-                                    read_coordinate_column(path, &batch, yi, y_name, &at)?,
-                                )
-                            }
-                            Geometry::Morton(mi) => PointGeom::Morton(
-                                source_ids,
-                                read_u64_column(path, &batch, mi, morton_name)?,
-                            ),
-                            Geometry::MortonResidual(mi, ri) => PointGeom::MortonResidual(
-                                source_ids,
-                                read_u64_column(path, &batch, mi, morton_name)?,
-                                read_u64_column(path, &batch, ri, residual_name)?,
-                            ),
-                        };
-                        if tx.send(Ok(PointCols { keep, geometry })).is_err() {
-                            // The consumer went away (its own error path); stop quietly.
-                            return Ok(());
-                        }
+    let column = |batch: &RecordBatch, name: &str| -> Result<usize> {
+        column_index(path, &batch.schema(), name)
+    };
+    let decode = |first: u64, batch: RecordBatch| -> Result<(u64, PointGeom)> {
+        let ids = src.source_ids(first, batch.num_rows());
+        let at = |row: usize| format!("row {}", first + row as u64);
+        Ok((
+            first,
+            match geometry_kind {
+                GeometryKind::Xy => PointGeom::Xy(
+                    ids,
+                    read_coordinate_column(path, &batch, column(&batch, x_name)?, x_name, &at)?,
+                    read_coordinate_column(path, &batch, column(&batch, y_name)?, y_name, &at)?,
+                ),
+                GeometryKind::Morton => PointGeom::Morton(
+                    ids,
+                    read_u64_column(path, &batch, column(&batch, morton_name)?, morton_name)?,
+                ),
+                GeometryKind::MortonResidual => PointGeom::MortonResidual(
+                    ids,
+                    read_u64_column(path, &batch, column(&batch, morton_name)?, morton_name)?,
+                    read_u64_column(path, &batch, column(&batch, residual_name)?, residual_name)?,
+                ),
+            },
+        ))
+    };
+    let mut stopped = false;
+    groups.decode_parallel(path, &src.groups(&groups), &mask, decode, |(first, geometry)| {
+        match geometry {
+            PointGeom::Xy(ids, xs, ys) => {
+                for i in 0..ids.len() {
+                    if ids[i] == NO_SOURCE {
+                        continue;
                     }
-                    Ok(())
-                };
-                if let Err(e) = decode(&tx) {
-                    let _ = tx.send(Err(e));
-                }
-            });
-        }
-        drop(tx);
-
-        let mut cursor = 0u64;
-        let mut consume = || -> Result<()> {
-            while let Ok(message) = rx.recv() {
-                let PointCols { keep, geometry } = message?;
-                let geometry = match ids.positional() {
-                    false => geometry,
-                    true => match geometry {
-                        PointGeom::Xy(_, xs, ys) => {
-                            PointGeom::Xy(positional_ids(&mut cursor, xs.len()), xs, ys)
+                    // Counted by the survey every build runs before this pass.
+                    let placed = place(projection, Some(extent), xs[i], ys[i]).map_err(|e| {
+                        BuildError::Schema {
+                            path: path.to_path_buf(),
+                            detail: format!("row {} {e}", first + i as u64),
                         }
-                        PointGeom::Morton(_, codes) => {
-                            PointGeom::Morton(positional_ids(&mut cursor, codes.len()), codes)
-                        }
-                        PointGeom::MortonResidual(_, codes, residuals) => {
-                            PointGeom::MortonResidual(
-                                positional_ids(&mut cursor, codes.len()),
-                                codes,
-                                residuals,
-                            )
-                        }
-                    },
-                };
-                // The view's own rows, and no other's: a batch of a shared points file carries
-                // every view's (`views.md` §3.1's form B).
-                let selected = |i: usize| keep.as_ref().is_none_or(|keep| keep[i]);
-                match geometry {
-                    PointGeom::Xy(ids, xs, ys) => {
-                        for i in 0..ids.len() {
-                            if limit.is_some_and(|l| ids[i] >= l) || !selected(i) {
-                                continue;
-                            }
-                            // Counted by the survey every build runs before this pass.
-                            let placed = place(projection, Some(extent), xs[i], ys[i]).map_err(
-                                |e| BuildError::Schema {
-                                    path: path.to_path_buf(),
-                                    detail: format!("{} {} {e}", fields.of(JOIN_COLUMN), ids[i]),
-                                },
-                            )?;
-                            if visit(PointRow {
-                                source_id: ids[i],
-                                qx: fixed32(placed.x, extent.x_min, extent.x_max),
-                                qy: fixed32(placed.y, extent.y_min, extent.y_max),
-                            })
-                            .is_break()
-                            {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    PointGeom::Morton(ids, codes) => {
-                        for i in 0..ids.len() {
-                            if limit.is_some_and(|l| ids[i] >= l) || !selected(i) {
-                                continue;
-                            }
-                            let code = narrow_code(path, codes[i], "morton")?;
-                            let (cx, cy) = deinterleave(code);
-                            // A bare `morton` column holds 16 bits per axis and no more, so the
-                            // sub-cell position is *zero*, not unknown: the point sits at its
-                            // cell's origin. Widening rather than inventing precision is what
-                            // makes this branch honest, and it is why the source having no
-                            // residual is a property of the corpus rather than a defect here.
-                            if visit(PointRow {
-                                source_id: ids[i],
-                                qx: (cx as u32) << 16,
-                                qy: (cy as u32) << 16,
-                            })
-                            .is_break()
-                            {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    PointGeom::MortonResidual(ids, codes, residuals) => {
-                        for i in 0..ids.len() {
-                            if limit.is_some_and(|l| ids[i] >= l) || !selected(i) {
-                                continue;
-                            }
-                            let code = narrow_code(path, codes[i], "morton")?;
-                            let residual = narrow_code(path, residuals[i], "residual")?;
-                            let (cx, cy) = deinterleave(code);
-                            let (rx, ry) = deinterleave(residual);
-                            // Reassembly, not conversion: the file already holds the 32-bit
-                            // fixed-point position, split across two words in the same axis
-                            // convention this build stores it in.
-                            if visit(PointRow {
-                                source_id: ids[i],
-                                qx: ((cx as u32) << 16) | rx as u32,
-                                qy: ((cy as u32) << 16) | ry as u32,
-                            })
-                            .is_break()
-                            {
-                                return Ok(());
-                            }
-                        }
+                    })?;
+                    if visit(PointRow {
+                        source_id: ids[i],
+                        qx: fixed32(placed.x, extent.x_min, extent.x_max),
+                        qy: fixed32(placed.y, extent.y_min, extent.y_max),
+                    })
+                    .is_break()
+                    {
+                        stopped = true;
+                        return Ok(ControlFlow::Break(()));
                     }
                 }
             }
-            Ok(())
-        };
-        let result = consume();
-        // Drop the receiver BEFORE the scope joins the workers: a worker blocked mid-send into
-        // a full channel would otherwise deadlock the join when `consume` exited early.
-        drop(rx);
-        result
-    })
+            PointGeom::Morton(ids, codes) => {
+                for i in 0..ids.len() {
+                    if ids[i] == NO_SOURCE {
+                        continue;
+                    }
+                    let code = narrow_code(path, codes[i], "morton")?;
+                    let (cx, cy) = deinterleave(code);
+                    // A bare `morton` column holds 16 bits per axis and no more, so the
+                    // sub-cell position is *zero*, not unknown: the point sits at its cell's
+                    // origin.
+                    if visit(PointRow {
+                        source_id: ids[i],
+                        qx: (cx as u32) << 16,
+                        qy: (cy as u32) << 16,
+                    })
+                    .is_break()
+                    {
+                        stopped = true;
+                        return Ok(ControlFlow::Break(()));
+                    }
+                }
+            }
+            PointGeom::MortonResidual(ids, codes, residuals) => {
+                for i in 0..ids.len() {
+                    if ids[i] == NO_SOURCE {
+                        continue;
+                    }
+                    let code = narrow_code(path, codes[i], "morton")?;
+                    let residual = narrow_code(path, residuals[i], "residual")?;
+                    let (cx, cy) = deinterleave(code);
+                    let (rx, ry) = deinterleave(residual);
+                    // Reassembly, not conversion: the file already holds the 32-bit fixed-point
+                    // position, split across two words in the same axis convention this build
+                    // stores it in.
+                    if visit(PointRow {
+                        source_id: ids[i],
+                        qx: ((cx as u32) << 16) | rx as u32,
+                        qy: ((cy as u32) << 16) | ry as u32,
+                    })
+                    .is_break()
+                    {
+                        stopped = true;
+                        return Ok(ControlFlow::Break(()));
+                    }
+                }
+            }
+        }
+        Ok(ControlFlow::Continue(()))
+    })?;
+    let _ = stopped;
+    Ok(())
 }
 
 /// Read `pairs` (`entity_id`, `term_id`), keeping rows with `entity_id < limit`, grouped into
@@ -652,80 +445,26 @@ pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
     src: Source<'_>,
     mut visit: F,
 ) -> Result<()> {
-    let Source {
-        path,
-        fields,
-        ids,
-        limit,
-        ..
-    } = src;
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    let schema = builder.schema().clone();
-    let id_idx = field_index(path, &schema, fields, JOIN_COLUMN)?;
-    let term_idx = field_index(path, &schema, fields, TERM_ID)?;
-    let (id_name, term_name) = (fields.of(JOIN_COLUMN), fields.of(TERM_ID));
-
-    let keep = prunable_row_groups(builder.metadata(), id_idx, limit);
-    drop(builder);
-    let workers = decode_worker_count(keep.len());
-    let shards: Vec<Vec<usize>> = keep
-        .chunks(keep.len().div_ceil(workers).max(1))
-        .map(|c| c.to_vec())
-        .collect();
-
-    let (tx, rx) = mpsc::sync_channel::<std::result::Result<(Vec<u64>, Vec<u64>), BuildError>>(
-        DECODE_CHANNEL_BATCHES,
-    );
-    std::thread::scope(|scope| {
-        for shard in shards {
-            let tx = tx.clone();
-            scope.spawn(move || {
-                let decode = |tx: &mpsc::SyncSender<_>| -> Result<()> {
-                    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-                    let b = ParquetRecordBatchReaderBuilder::try_new(file)
-                        .map_err(|e| BuildError::parquet(path, e))?;
-                    let reader = b
-                        .with_row_groups(shard)
-                        .with_batch_size(65_536)
-                        .build()
-                        .map_err(|e| BuildError::parquet(path, e))?;
-                    for batch in reader {
-                        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-                        let rows = read_id_column(path, &batch, id_idx, id_name, ids)?;
-                        let terms = read_u64_column(path, &batch, term_idx, term_name)?;
-                        if tx.send(Ok((rows, terms))).is_err() {
-                            return Ok(());
-                        }
-                    }
-                    Ok(())
-                };
-                if let Err(e) = decode(&tx) {
-                    let _ = tx.send(Err(e));
-                }
-            });
-        }
-        drop(tx);
-
-        let mut consume = || -> Result<()> {
-            while let Ok(message) = rx.recv() {
-                let (ids, terms) = message?;
-                for i in 0..ids.len() {
-                    if limit.is_some_and(|l| ids[i] >= l) {
-                        continue;
-                    }
-                    if visit(ids[i], terms[i]).is_break() {
-                        return Ok(());
-                    }
-                }
+    let Source { path, fields, .. } = src;
+    let groups = FileGroups::open(path)?;
+    let term_idx = field_index(path, groups.schema(), fields, TERM_ID)?;
+    let term_name = fields.of(TERM_ID);
+    let projection = groups.projection(&[term_idx]);
+    let decode = |first: u64, batch: RecordBatch| -> Result<(Vec<u64>, Vec<u64>)> {
+        let ids = src.source_ids(first, batch.num_rows());
+        let terms = read_u64_column(path, &batch, 0, term_name)?;
+        Ok((ids, terms))
+    };
+    groups.decode_parallel(path, &src.groups(&groups), &projection, decode, |(ids, terms)| {
+        for i in 0..ids.len() {
+            if ids[i] == NO_SOURCE {
+                continue;
             }
-            Ok(())
-        };
-        let result = consume();
-        // See scan_points: the receiver must drop before the scope joins the workers.
-        drop(rx);
-        result
+            if visit(ids[i], terms[i]).is_break() {
+                return Ok(ControlFlow::Break(()));
+            }
+        }
+        Ok(ControlFlow::Continue(()))
     })
 }
 
@@ -953,62 +692,14 @@ pub struct AccessFill {
     pub filled: u64,
 }
 
-/// Walk the identity column alone, in file order.
+/// Every row with a number, in file order, with nothing decoded: the numbers are the rows.
 fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(src: Source<'_>, mut visit: F) -> Result<()> {
-    let Source {
-        path,
-        fields,
-        limit,
-        select,
-        ..
-    } = src;
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    let schema = builder.schema().clone();
-    let id_root = src.id_index(&schema)?;
-    let keep = src.row_groups(builder.metadata(), id_root);
-    let mut roots: Vec<usize> = id_root.into_iter().collect();
-    if let Some(select) = select {
-        roots.push(discriminator_index(path, &schema, select)?);
-    }
-    // **The positional route has no identity column to project**, so it projects this file's own
-    // geometry instead: the row counts are what name the rows, and the reader needs one column to
-    // yield a batch per row group. The geometry kind is what says which columns those are, a
-    // points file holding Morton codes carrying no `x` at all.
-    if roots.is_empty() {
-        for canonical in geometry_kind(path, &schema, fields)?.canonical_fields() {
-            if *canonical == JOIN_COLUMN {
-                continue;
-            }
-            roots.push(field_index(path, &schema, fields, canonical)?);
-        }
-    }
-    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
-    let reader = builder
-        .with_row_groups(keep)
-        .with_projection(projection)
-        .with_batch_size(65_536)
-        .build()
-        .map_err(|e| BuildError::parquet(path, e))?;
-    let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = src.projected_id_index(&projected, id_root)?;
-    let select_idx = match select {
-        Some(select) => Some(column_index(path, &projected, &select.column)?),
-        None => None,
-    };
-    let mut cursor = 0u64;
-    for batch in reader {
-        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let source_ids = src.source_ids(&batch, id_idx, &mut cursor)?;
-        let selected = match (select, select_idx) {
-            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
-            _ => None,
-        };
-        for (i, &id) in source_ids.iter().enumerate() {
-            if limit.is_some_and(|l| id >= l)
-                || !selected.as_ref().is_none_or(|selected| selected[i])
-            {
+    let groups = FileGroups::open(src.path)?;
+    for group in src.groups(&groups) {
+        let first = groups.start(group);
+        let len = groups.group_rows(group) as usize;
+        for id in src.source_ids(first, len) {
+            if id == NO_SOURCE {
                 continue;
             }
             if visit(id).is_break() {
@@ -1039,23 +730,14 @@ fn scan_access_column<F: FnMut(&[u64], &[u32], &AccessBatch<'_>) -> ControlFlow<
     field: &str,
     mut visit: F,
 ) -> Result<()> {
-    let Source {
-        path,
-        fields,
-        limit,
-        select,
-        ..
-    } = src;
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    let schema = builder.schema().clone();
-    let id_root = src.id_index(&schema)?;
+    let Source { path, fields, .. } = src;
+    let plain = FileGroups::open(path)?;
     // The access field is named directly by `point_visibility.field` rather than through the map:
     // it is the declaration, not a relocation of a canonical name. Absent is the same refusal a
-    // moved name gets, and for the same reason — an unread access column is a corpus in no
+    // moved name gets, and for the same reason: an unread access column is a corpus in no
     // principal's mask, silently.
-    let access_root = schema
+    let access_root = plain
+        .schema()
         .column_with_name(field)
         .map(|(i, _)| i)
         .ok_or_else(|| BuildError::Schema {
@@ -1065,107 +747,59 @@ fn scan_access_column<F: FnMut(&[u64], &[u32], &AccessBatch<'_>) -> ControlFlow<
                  carry. Its columns are: {}. Refused rather than read as empty: with no access \
                  column read, every point would carry no term and so sit in no principal\'s mask",
                 fields.object(),
-                column_names(&schema)
+                column_names(plain.schema())
             ),
         })?;
-    let keep = src.row_groups(builder.metadata(), id_root);
-    // The label is read for this view's rows alone where the file holds several views'
-    // (`views.md` §3.1): a shared source's other rows carry another view's labels for entities
-    // this view may not even hold.
-    let mut roots: Vec<usize> = id_root.into_iter().chain([access_root]).collect();
-    if let Some(select) = select {
-        roots.push(discriminator_index(path, &schema, select)?);
-    }
-    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
-    drop(builder);
-
-    // **Ask for the dictionary, take the strings if it is refused.** `with_schema` is checked
-    // against the file's own types, so a column that is not a plain string — a `list<string>` —
-    // fails here and the plain route below reads it. Nothing downstream sees which route ran: the
-    // batch handed to the visitor has one shape.
-    let reader = open_access_reader(path, &schema, field, &keep, &projection, true)
-        .or_else(|_| open_access_reader(path, &schema, field, &keep, &projection, false))?;
-    let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = src.projected_id_index(&projected, id_root)?;
-    let access_idx = column_index(path, &projected, field)?;
-    let select_idx = match select {
-        Some(select) => Some(column_index(path, &projected, &select.column)?),
-        None => None,
-    };
-
+    // **Ask for the dictionary, take the strings if it is refused.** A schema asking for the
+    // column as a dictionary is checked against the file's own types, so a column that is not a
+    // plain string, a `list<string>`, fails here and the plain footer reads it. Nothing downstream
+    // sees which ran: the batch handed to the visitor has one shape.
+    let groups = access_groups(path, plain.schema(), field).unwrap_or(plain);
+    let projection = groups.projection(&[access_root]);
+    let kept = src.groups(&groups);
     let mut rows: Vec<u32> = Vec::with_capacity(ATTRIBUTE_BATCH_ROWS);
-    let mut reader = reader;
-    let mut cursor = 0u64;
-    loop {
-        let Some(batch) = reader.next() else { break };
-        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let source_ids = src.source_ids(&batch, id_idx, &mut cursor)?;
-        let terms = read_access_column(path, batch.column(access_idx), field)?;
-        let selected = match (select, select_idx) {
-            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
-            _ => None,
-        };
+    groups.each_batch(path, &kept, &projection, |first, batch| {
+        let source_ids = src.source_ids(first, batch.num_rows());
+        let terms = read_access_column(path, batch.column(0), field)?;
         rows.clear();
         rows.extend(
             source_ids
                 .iter()
                 .enumerate()
-                .filter(|(row, &id)| {
-                    !limit.is_some_and(|l| id >= l)
-                        && selected.as_ref().is_none_or(|selected| selected[*row])
-                })
+                .filter(|(_, &id)| id != NO_SOURCE)
                 .map(|(row, _)| row as u32),
         );
-        if visit(&source_ids, &rows, &terms).is_break() {
-            return Ok(());
-        }
-    }
-    Ok(())
+        Ok(visit(&source_ids, &rows, &terms))
+    })
 }
 
-/// The access column's reader, optionally asking for the column as a dictionary rather than as
-/// hydrated strings. Separate so the caller can try one and fall back to the other without two
-/// spellings of the projection.
-fn open_access_reader(
+/// The access column's footer asking for the column as a dictionary rather than as hydrated
+/// strings, or `None` where the file's type does not allow it.
+fn access_groups(
     path: &Path,
     schema: &arrow::datatypes::SchemaRef,
     field: &str,
-    keep: &[usize],
-    projection: &parquet::arrow::ProjectionMask,
-    as_dictionary: bool,
-) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader> {
-    use arrow::datatypes::{DataType, Field, Schema};
+) -> Option<FileGroups> {
+    use arrow::datatypes::{Field, Schema};
     use parquet::arrow::arrow_reader::ArrowReaderOptions;
     use std::sync::Arc;
-
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let mut options = ArrowReaderOptions::new();
-    if as_dictionary {
-        let fields: Vec<Arc<Field>> = schema
-            .fields()
-            .iter()
-            .map(|f| {
-                if f.name() == field && crate::utf8::is_utf8(f.data_type()) {
-                    Arc::new(Field::new(
-                        f.name(),
-                        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-                        f.is_nullable(),
-                    ))
-                } else {
-                    f.clone()
-                }
-            })
-            .collect();
-        options = options.with_schema(Arc::new(Schema::new(fields)));
-    }
-    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)
-        .map_err(|e| BuildError::parquet(path, e))?;
-    builder
-        .with_row_groups(keep.to_vec())
-        .with_projection(projection.clone())
-        .with_batch_size(65_536)
-        .build()
-        .map_err(|e| BuildError::parquet(path, e))
+    let fields: Vec<Arc<Field>> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            if f.name() == field && crate::utf8::is_utf8(f.data_type()) {
+                Arc::new(Field::new(
+                    f.name(),
+                    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                    f.is_nullable(),
+                ))
+            } else {
+                f.clone()
+            }
+        })
+        .collect();
+    let options = ArrowReaderOptions::new().with_schema(Arc::new(Schema::new(fields)));
+    FileGroups::open_with(path, options).ok()
 }
 
 /// Each row's access labels, read as a points file's access column is read. An artifact source's
@@ -1263,7 +897,8 @@ impl CoordinateSurvey {
 ///
 /// `limit` is honoured, because the extent must frame the rows the build actually places: a
 /// prefix build whose box was computed over the whole file would quantise its rows into a
-/// fraction of the grid.
+/// fraction of the grid. It is the column the limit's attribute is read from and the value its
+/// rows must be below; a file without the column is not limited.
 ///
 /// A Morton points file has no coordinates to bound. With a frame in hand that is simply
 /// [`PointSurvey::Quantised`] — nothing is quantised at build, so nothing clamps. With none it is
@@ -1274,7 +909,7 @@ pub fn survey_points(
     path: &Path,
     fields: &Fields,
     projection: Projection,
-    limit: Option<u64>,
+    limit: Option<(&str, u64)>,
     select: Option<&ViewSelector>,
     against: Option<&Bounds>,
 ) -> Result<PointSurvey> {
@@ -1327,19 +962,18 @@ pub fn survey_points(
         });
     }
 
-    // **The identity column is read where the file carries one, and the survey works without it**
-    // (`crate::ids`): a points file naming no row is the positional route, and the survey's use of
-    // the column is a `--limit` and two refusals' wording.
-    let id_idx_in_file = schema
-        .column_with_name(fields.of(JOIN_COLUMN))
-        .map(|(i, _)| i);
-    let keep = match id_idx_in_file {
-        Some(idx) => prunable_row_groups(builder.metadata(), idx, limit),
+    let limit = limit.and_then(|(column, below)| {
+        schema
+            .column_with_name(column)
+            .map(|(index, _)| (index, column, below))
+    });
+    let keep = match limit {
+        Some((index, _, below)) => prunable_row_groups(builder.metadata(), index, Some(below)),
         None => (0..builder.metadata().num_row_groups()).collect(),
     };
     let mut roots = Vec::with_capacity(4);
-    if let Some(idx) = id_idx_in_file {
-        roots.push(idx);
+    if let Some((index, _, _)) = limit {
+        roots.push(index);
     }
     for canonical in ["x", "y"] {
         roots.push(field_index(path, &schema, fields, canonical)?);
@@ -1350,24 +984,11 @@ pub fn survey_points(
     if let Some(select) = select {
         roots.push(discriminator_index(path, &schema, select)?);
     }
-    let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
-    let reader = builder
-        .with_row_groups(keep)
-        .with_projection(mask)
-        .with_batch_size(65_536)
-        .build()
-        .map_err(|e| BuildError::parquet(path, e))?;
-    let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = match id_idx_in_file {
-        Some(_) => Some(column_index(path, &projected, fields.of(JOIN_COLUMN))?),
-        None => None,
-    };
-    let x_idx = column_index(path, &projected, x_name)?;
-    let y_idx = column_index(path, &projected, y_name)?;
-    let select_idx = match select {
-        Some(select) => Some(column_index(path, &projected, &select.column)?),
-        None => None,
-    };
+    roots.sort_unstable();
+    roots.dedup();
+    drop(builder);
+    let groups = FileGroups::open(path)?;
+    let mask = groups.projection(&roots);
 
     let mut found = false;
     let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -1380,50 +1001,38 @@ pub fn survey_points(
         clamped_y: 0,
         clipped: 0,
     };
-    for batch in reader {
-        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        // **Read as integers only where a `limit` selects on them.** The survey places
-        // coordinates; the identity is there to say which rows `--limit` keeps and to name a row
-        // in the two refusals below. A supplied id column holds bytes rather than an integer, so
-        // it is `--limit` that has no meaning over it, and the refusal says so where the file is
-        // open. The refusals name the row whatever the column holds (`crate::ids::display_at`).
-        let ids: Option<Vec<u64>> = match (limit, id_idx) {
-            (None, _) => None,
-            (Some(_), Some(idx)) => {
-                if !crate::ids::is_integer_id(batch.column(idx).data_type()) {
-                    return Err(BuildError::Schema {
-                        path: path.to_path_buf(),
-                        detail: format!(
-                            "`--limit` keeps the rows whose identity is below it, and the \
-                             identity column '{}' holds {:?} rather than an integer. Build \
-                             the whole corpus, or select the rows in the points file",
-                            fields.of(JOIN_COLUMN),
-                            batch.column(idx).data_type()
-                        ),
-                    });
-                }
-                Some(read_integer_ids(path, &batch, idx, fields.of(JOIN_COLUMN))?)
-            }
-            (Some(_), None) => {
-                return Err(BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "`--limit` keeps the rows whose identity is below it, and this file \
-                         carries no column named '{}'. Build the whole corpus",
-                        fields.of(JOIN_COLUMN)
-                    ),
-                })
-            }
+    groups.each_batch(path, &keep, &mask, |first, batch| {
+        let column = |name: &str| column_index(path, &batch.schema(), name);
+        let (x_idx, y_idx) = (column(x_name)?, column(y_name)?);
+        let below: Option<(UInt64Array, u64)> = match limit {
+            Some((_, column, below)) => Some((
+                id_values(
+                    path,
+                    batch
+                        .column_by_name(column)
+                        .expect("the limit's column is projected")
+                        .as_ref(),
+                    column,
+                )?,
+                below,
+            )),
+            None => None,
         };
-        let name_of = |i: usize| row_name(&batch, id_idx, fields.of(JOIN_COLUMN), i);
+        let name_of = |i: usize| format!("row {}", first + i as u64);
         let xs = read_coordinate_column(path, &batch, x_idx, x_name, &name_of)?;
         let ys = read_coordinate_column(path, &batch, y_idx, y_name, &name_of)?;
-        let keep = match (select, select_idx) {
-            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
-            _ => None,
+        let keep = match select {
+            Some(select) => Some(selected_rows(
+                path,
+                batch.column(column(&select.column)?),
+                select,
+            )?),
+            None => None,
         };
         for i in 0..xs.len() {
-            if limit.is_some_and(|l| ids.as_ref().expect("read under a limit")[i] >= l)
+            if below
+                .as_ref()
+                .is_some_and(|(values, below)| values.is_null(i) || values.value(i) >= *below)
                 || !keep.as_ref().is_none_or(|keep| keep[i])
             {
                 continue;
@@ -1444,7 +1053,8 @@ pub fn survey_points(
             y_min = y_min.min(y);
             y_max = y_max.max(y);
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     survey.bounds = found.then_some(Bounds {
         x_min,
         x_max,
@@ -1452,26 +1062,6 @@ pub fn survey_points(
         y_max,
     });
     Ok(PointSurvey::Coordinates(survey))
-}
-
-/// The points file's total row count, from parquet metadata alone — no decode.
-///
-/// Exact for an unfiltered scan: [`scan_points`] visits every row when there is no limit
-/// (the extent quantises, it never filters). With a limit the selected count is data-dependent
-/// and only a counting scan can establish it. The count is advisory (it sizes an allocation);
-/// every correctness property downstream is established from the rows actually read.
-pub fn count_point_rows(path: &Path) -> Result<u64> {
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    Ok(builder.metadata().file_metadata().num_rows().max(0) as u64)
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Geometry {
-    Xy(usize, usize),
-    Morton(usize),
-    MortonResidual(usize, usize),
 }
 
 /// Which geometry schema the points file offers, decided once from the file's columns and then
@@ -1484,13 +1074,13 @@ enum GeometryKind {
 }
 
 impl GeometryKind {
-    /// The canonical fields this shape reads, identity first — the list `fields` is resolved
-    /// against to build the projection.
+    /// The canonical fields this shape reads — the list `fields` is resolved against to build the
+    /// projection.
     fn canonical_fields(self) -> &'static [&'static str] {
         match self {
-            GeometryKind::Xy => &[JOIN_COLUMN, "x", "y"],
-            GeometryKind::Morton => &[JOIN_COLUMN, "morton"],
-            GeometryKind::MortonResidual => &[JOIN_COLUMN, "morton", "residual"],
+            GeometryKind::Xy => &["x", "y"],
+            GeometryKind::Morton => &["morton"],
+            GeometryKind::MortonResidual => &["morton", "residual"],
         }
     }
 }
@@ -1568,10 +1158,14 @@ fn compact(v: u32) -> u16 {
     x as u16
 }
 
-/// Row groups worth reading: those whose `entity_id` statistics do not prove every row is
-/// `>= limit`. Returns *all* row groups when there is no limit or no usable statistic — the
+/// Row groups worth reading: those whose statistics for the column at `id_idx` do not prove
+/// every row is `>= limit`. Returns *all* row groups when there is no limit or no usable statistic — the
 /// filter is an optimisation and must never drop a row it cannot prove is excluded.
-fn prunable_row_groups(meta: &ParquetMetaData, id_idx: usize, limit: Option<u64>) -> Vec<usize> {
+pub(crate) fn prunable_row_groups(
+    meta: &ParquetMetaData,
+    id_idx: usize,
+    limit: Option<u64>,
+) -> Vec<usize> {
     let all = || (0..meta.num_row_groups()).collect::<Vec<_>>();
     let Some(limit) = limit else { return all() };
 
@@ -1593,52 +1187,6 @@ fn statistic_min(stats: &Statistics) -> Option<u64> {
         Statistics::Int64(s) => s.min_opt().and_then(|v| u64::try_from(*v).ok()),
         _ => None,
     }
-}
-
-fn statistic_max(stats: &Statistics) -> Option<u64> {
-    match stats {
-        Statistics::Int32(s) => s.max_opt().and_then(|v| u64::try_from(*v).ok()),
-        Statistics::Int64(s) => s.max_opt().and_then(|v| u64::try_from(*v).ok()),
-        _ => None,
-    }
-}
-
-/// The lowest and highest `entity_id` a points file's own statistics claim, folded over its row
-/// groups — or `None` where the file cannot state them.
-///
-/// **A range the file's ids lie in, not the extrema of what a scan selects.** A `limit` or a form
-/// B discriminator selects a subset, so the selection's own extrema lie inside this range. A
-/// caller sizing a structure over it must take the true extrema from the rows it reads.
-///
-/// `None` where a row group carries no statistics, where the id column is a type the statistics
-/// cannot express, or where a statistic is negative, being a signed id or an unsigned one stored in
-/// a signed physical type, and `u64::try_from` refuses it. A caller gets no range rather than a
-/// wrong one.
-pub fn id_bounds(path: &Path, fields: &Fields) -> Result<Option<(u64, u64)>> {
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    let schema = builder.schema().clone();
-    let id_idx = field_index(path, &schema, fields, JOIN_COLUMN)?;
-    let meta = builder.metadata();
-    let mut bounds: Option<(u64, u64)> = None;
-    for rg in 0..meta.num_row_groups() {
-        let group = meta.row_group(rg);
-        if group.num_rows() == 0 {
-            continue;
-        }
-        let Some(stats) = group.column(id_idx).statistics() else {
-            return Ok(None);
-        };
-        let (Some(lo), Some(hi)) = (statistic_min(stats), statistic_max(stats)) else {
-            return Ok(None);
-        };
-        bounds = Some(match bounds {
-            None => (lo, hi),
-            Some((low, high)) => (low.min(lo), high.max(hi)),
-        });
-    }
-    Ok(bounds)
 }
 
 /// The column index of `canonical` under the names the declaration resolved — or a refusal naming
@@ -1706,118 +1254,45 @@ pub(crate) fn first_column_present(path: &Path, names: &[&str]) -> Result<Option
         .map(|name| (*name).to_string()))
 }
 
-/// `rows` source ids from `cursor` onward: the positional route's names for one batch's rows.
-///
-/// **Every reader on this route walks the same file whole and in order**, which `IdSpace::prepare`
-/// is what guarantees, so each one's running count reaches the same row under the same name.
-fn positional_ids(cursor: &mut u64, rows: usize) -> Vec<u64> {
-    let ids = (*cursor..*cursor + rows as u64).collect();
-    *cursor += rows as u64;
-    ids
-}
-
-/// The Arrow type the column a row's identity is read from holds, from the Parquet footer alone.
-pub(crate) fn id_column_type(path: &Path, fields: &Fields) -> Result<DataType> {
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    let schema = builder.schema().clone();
-    let idx = field_index(path, &schema, fields, JOIN_COLUMN)?;
-    Ok(schema.field(idx).data_type().clone())
-}
-
-/// Visit every key a points file's identity column carries, for the rows this view selects.
-///
-/// **One pass, before the build's own passes**, and it reads that column and the discriminator
-/// beside it and nothing else: the keys are what `crate::ids::IdSpace` interns, and the ranks it
-/// assigns are the source ids every later pass joins on.
-pub(crate) fn scan_id_keys<F: FnMut(&[u8])>(
-    path: &Path,
-    fields: &Fields,
-    select: Option<&ViewSelector>,
-    mut visit: F,
-) -> Result<()> {
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    let schema = builder.schema().clone();
-    let mut roots = vec![field_index(path, &schema, fields, JOIN_COLUMN)?];
-    if let Some(select) = select {
-        roots.push(discriminator_index(path, &schema, select)?);
+/// An integer column as `u64`s, a null staying null, or `None` where the column is not an integer.
+/// A signed value is sign-extended to 64 bits and its bits read as unsigned.
+fn integer_ids(column: &dyn Array) -> Option<UInt64Array> {
+    use arrow::array::{Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array, UInt8Array};
+    let any = column.as_any();
+    if let Some(ids) = any.downcast_ref::<UInt8Array>() {
+        return Some(ids.unary(u64::from));
     }
-    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
-    let reader = builder
-        .with_projection(projection)
-        .with_batch_size(ATTRIBUTE_BATCH_ROWS)
-        .build()
-        .map_err(|e| BuildError::parquet(path, e))?;
-    let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let name = fields.of(JOIN_COLUMN);
-    let id_idx = column_index(path, &projected, name)?;
-    let select_idx = match select {
-        Some(select) => Some(column_index(path, &projected, &select.column)?),
-        None => None,
-    };
-    for batch in reader {
-        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let column = batch.column(id_idx);
-        let keep = match (select, select_idx) {
-            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
-            _ => None,
-        };
-        for row in 0..batch.num_rows() {
-            if keep.as_ref().is_some_and(|keep| !keep[row]) {
-                continue;
-            }
-            let key = crate::ids::key_at(column.as_ref(), row)
-                .ok_or_else(|| crate::ids::null_id(path, name))?;
-            visit(&key);
-        }
+    if let Some(ids) = any.downcast_ref::<UInt16Array>() {
+        return Some(ids.unary(u64::from));
     }
-    Ok(())
+    if let Some(ids) = any.downcast_ref::<UInt32Array>() {
+        return Some(ids.unary(u64::from));
+    }
+    if let Some(ids) = any.downcast_ref::<UInt64Array>() {
+        return Some(ids.clone());
+    }
+    if let Some(ids) = any.downcast_ref::<Int8Array>() {
+        return Some(ids.unary(|id| i64::from(id) as u64));
+    }
+    if let Some(ids) = any.downcast_ref::<Int16Array>() {
+        return Some(ids.unary(|id| i64::from(id) as u64));
+    }
+    if let Some(ids) = any.downcast_ref::<Int32Array>() {
+        return Some(ids.unary(|id| i64::from(id) as u64));
+    }
+    if let Some(ids) = any.downcast_ref::<Int64Array>() {
+        return Some(ids.unary(|id| id as u64));
+    }
+    None
 }
 
-/// Read the column a row's identity is read from as the source ids the build joins on.
-///
-/// On the integer route this is [`read_integer_ids`]. On the supplied route each row's bytes are
-/// resolved to their rank, and a key no points file carries reads as
-/// [`crate::ids::NO_SOURCE_ID`], an id in no view, which every consumer already answers for.
-pub(crate) fn read_id_column(
-    path: &Path,
-    batch: &RecordBatch,
-    idx: usize,
-    name: &str,
-    ids: &crate::ids::IdSpace,
-) -> Result<Vec<u64>> {
-    let Some(keys) = ids.supplied() else {
-        return read_integer_ids(path, batch, idx, name);
-    };
-    let column = batch.column(idx);
-    let mut out = Vec::with_capacity(column.len());
-    for row in 0..column.len() {
-        let key = crate::ids::key_at(column.as_ref(), row)
-            .ok_or_else(|| crate::ids::null_id(path, name))?;
-        out.push(keys.rank(&key));
-    }
-    Ok(out)
-}
-
-/// An integer identity column's ids, refusing a null.
-fn read_integer_ids(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> Result<Vec<u64>> {
-    let column = batch.column(idx);
-    if column.null_count() > 0 {
-        return Err(crate::ids::null_id(path, name));
-    }
-    Ok(id_values(path, column.as_ref(), name)?.values().to_vec())
-}
-
-/// An integer identity column, or a list column of them, as its ids by
-/// [`crate::ids::integer_ids`], a null staying null. For a list column this is its items, every
-/// row's together.
+/// An integer column, or a list column of them, as `u64`s, a null staying null. A signed value is
+/// sign-extended to 64 bits and its bits read as unsigned. For a list column this is its items,
+/// every row's together.
 pub(crate) fn id_values(path: &Path, column: &dyn Array, name: &str) -> Result<UInt64Array> {
     let list = column.as_any().downcast_ref::<arrow::array::ListArray>();
     let values = list.map_or(column, |list| list.values().as_ref());
-    crate::ids::integer_ids(values).ok_or_else(|| {
+    integer_ids(values).ok_or_else(|| {
         let shape = if list.is_some() { "a list of " } else { "" };
         BuildError::Schema {
             path: path.to_path_buf(),
@@ -1903,18 +1378,6 @@ fn read_coordinate_column(
             detail: format!("{at}column '{name}' {e}"),
         }
     })
-}
-
-/// How a refusal names row `row` of `batch`: by its identity where the file carries a column
-/// `id_name` at `id_idx`, and by its position in the batch otherwise.
-fn row_name(batch: &RecordBatch, id_idx: Option<usize>, id_name: &str, row: usize) -> String {
-    match id_idx {
-        Some(idx) => format!(
-            "{id_name} {}",
-            crate::ids::display_at(batch.column(idx).as_ref(), row)
-        ),
-        None => format!("row {row}"),
-    }
 }
 
 /// Read a vocabulary file: `key`, an **optional** `code`, and an optional `title`.
@@ -2068,18 +1531,9 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     if columns.is_empty() {
         return Ok(());
     }
-    let Source {
-        path,
-        limit,
-        select,
-        ..
-    } = src;
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
-    let file_schema = builder.schema().clone();
-
-    let id_root = src.id_index(&file_schema)?;
+    let Source { path, .. } = src;
+    let groups = FileGroups::open(path)?;
+    let file_schema = groups.schema().clone();
     tessera_store::declaration::check_declared_present(
         columns
             .iter()
@@ -2090,77 +1544,37 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
         path: path.to_path_buf(),
         detail: format!("{detail} (its columns are {})", column_names(&file_schema)),
     })?;
-    let mut roots: Vec<usize> = id_root.into_iter().collect();
+    let mut roots: Vec<usize> = Vec::with_capacity(columns.len());
     for attribute in columns {
         let (index, _) = file_schema
             .column_with_name(attribute.column())
             .expect("every declared column was found above");
-        roots.push(index);
+        if !roots.contains(&index) {
+            roots.push(index);
+        }
     }
-    // A group-scoped column is read from a points file that may hold several views' rows, so the
-    // selection rides the same projection here as it does on the geometry (`views.md` §5, §3.1).
-    if let Some(select) = select {
-        roots.push(discriminator_index(path, &file_schema, select)?);
-    }
-    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.clone());
-    // **A limited build reads a prefix of this file too.** `--limit N` keeps the rows whose source
-    // id is below `N`, and the geometry reader has always pruned the row groups whose statistics
-    // prove they hold none of them ([`prunable_row_groups`]); this one read every row group of
-    // every attribute source to the end of the file. On the GBIF corpus that is 55 GB decoded to
-    // place 16.3×10⁶ rows.
-    let keep = src.row_groups(builder.metadata(), id_root);
-    let reader = builder
-        .with_row_groups(keep)
-        .with_projection(projection)
-        .with_batch_size(65_536)
-        .build()
-        .map_err(|e| BuildError::parquet(path, e))?;
-    let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = src.projected_id_index(&projected, id_root)?;
-    let attribute_idx: Vec<usize> = columns
-        .iter()
-        .map(|a| column_index(path, &projected, a.column()))
-        .collect::<Result<_>>()?;
-
-    // The batch's selected rows, rebuilt per batch into one retained allocation. Materialised even
-    // where no limit is set, so the visitor has one shape to walk rather than two.
-    let select_idx = match select {
-        Some(select) => Some(column_index(path, &projected, &select.column)?),
-        None => None,
-    };
+    roots.sort_unstable();
+    let projection = groups.projection(&roots);
     let mut rows: Vec<u32> = Vec::with_capacity(ATTRIBUTE_BATCH_ROWS);
-    let mut cursor = 0u64;
-    for batch in reader {
-        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let ids = src.source_ids(&batch, id_idx, &mut cursor)?;
-        let selected = match (select, select_idx) {
-            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
-            _ => None,
-        };
-
+    groups.each_batch(path, &src.groups(&groups), &projection, |first, batch| {
+        let ids = src.source_ids(first, batch.num_rows());
         // **Decoded once per batch, not once per row.** An earlier revision called a
         // whole-column converter from inside the row loop, so a 65,536-row batch decoded its
         // integer columns 65,536 times — quadratic in the batch size, and invisible at the scale
         // a test uses. A discovered category's mint pre-pass rides the same discipline: minting
         // is per distinct key in the batch, decided here, not per row.
         let mut decoded: Vec<BatchColumn> = Vec::with_capacity(columns.len());
-        for (attribute, &idx) in columns.iter().zip(&attribute_idx) {
-            decoded.push(BatchColumn::decode(
-                path,
-                batch.column(idx),
-                attribute,
-                minters,
-            )?);
+        for attribute in columns {
+            let column = batch
+                .column_by_name(attribute.column())
+                .expect("every declared column is projected");
+            decoded.push(BatchColumn::decode(path, column, attribute, minters)?);
         }
-
         rows.clear();
         rows.extend(
             ids.iter()
                 .enumerate()
-                .filter(|(row, &entity_id)| {
-                    !limit.is_some_and(|l| entity_id >= l)
-                        && selected.as_ref().is_none_or(|selected| selected[*row])
-                })
+                .filter(|(_, &id)| id != NO_SOURCE)
                 .map(|(row, _)| row as u32),
         );
         visit(AttributeBatch {
@@ -2168,18 +1582,17 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
             rows: &rows,
             decoded: &decoded,
         })?;
-    }
-    Ok(())
+        Ok(ControlFlow::Continue(()))
+    })
 }
 
-/// The refusal for an item this build creates that has no row in the attribute source at `path`,
-/// which carries `columns`: every such item has one, as a new item at a running service carries
+/// The refusal for the items this build created that have no row in the attribute source at
+/// `path`, which carries `columns`: every item has one, as a new item at a running service carries
 /// every declared column, and a row of nulls is how a source says it has no value.
-pub(crate) fn item_without_a_row(
+pub(crate) fn items_without_a_row(
     path: &Path,
     columns: &[&crate::config::Attribute],
-    id_space: &crate::ids::IdSpace,
-    source_id: u64,
+    items: u64,
 ) -> BuildError {
     let detail = tessera_store::declaration::check_declared_present(
         columns
@@ -2190,7 +1603,7 @@ pub(crate) fn item_without_a_row(
     .expect_err("an attribute source carries at least one column");
     BuildError::Schema {
         path: path.to_path_buf(),
-        detail: format!("item {} has no row: {detail}", id_space.display(source_id)),
+        detail: format!("{items} item(s) have no row: {detail}"),
     }
 }
 
@@ -2206,9 +1619,9 @@ pub const ATTRIBUTE_BATCH_ROWS: usize = 65_536;
 /// a row-shaped visit forces all of that onto one thread. See [`scan_attributes`] for the
 /// measurement that says so.
 pub struct AttributeBatch<'a> {
-    /// The batch's source ids, indexed by the values in [`Self::rows`].
+    /// The batch's numbers, indexed by the values in [`Self::rows`].
     pub ids: &'a [u64],
-    /// The rows of this batch the build selected, ascending — `--limit` already applied.
+    /// The rows of this batch that name an item, ascending.
     pub rows: &'a [u32],
     /// One decoded column per declared attribute of this source, in the caller's `columns` order.
     pub decoded: &'a [BatchColumn],

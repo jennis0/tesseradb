@@ -112,29 +112,41 @@ impl<K: Key> KeySpill<K> {
             group: None,
             on_duplicate,
         };
+        self.sort_into(&mut sink)?;
+        sink.finish()
+    }
+
+    /// Hand every entry to `visit` in `(key, entity)` order, each once, rather than writing runs:
+    /// for a caller that merges the sorted entries against something of its own.
+    pub fn drain(mut self, visit: impl FnMut(K, u32) -> Result<()>) -> Result<()> {
+        let mut out = Visit { last: None, visit };
+        self.sort_into(&mut out)
+    }
+
+    fn sort_into(&mut self, out: &mut impl Out<K>) -> Result<()> {
         match self.spilled.take() {
             None => {
                 let mut held = std::mem::take(&mut self.held);
                 held.sort_unstable();
                 for (key, entity) in held {
-                    sink.push(key, entity)?;
+                    out.push(key, entity)?;
                 }
             }
             Some(level) => {
                 let (store, bounds) = level.finish()?;
-                self.drain(store, bounds, &mut sink)?;
+                self.drain_level(store, bounds, out)?;
             }
         }
-        sink.finish()
+        Ok(())
     }
 
     /// Write out each bucket of one level in key order: sorted in memory when it fits the budget,
     /// routed into a finer level when it does not.
-    fn drain<F: FnMut(DuplicateKey<K>)>(
+    fn drain_level(
         &mut self,
         mut store: PartitionStore,
         bounds: Vec<Option<Bounds<K>>>,
-        sink: &mut Sink<K, F>,
+        sink: &mut impl Out<K>,
     ) -> Result<()> {
         let width = K::WIDTH + 4;
         for (k, b) in bounds.into_iter().enumerate() {
@@ -158,7 +170,7 @@ impl<K: Key> KeySpill<K> {
                 })?;
                 store.delete(k)?;
                 let (finer_store, finer_bounds) = finer.finish()?;
-                self.drain(finer_store, finer_bounds, sink)?;
+                self.drain_level(finer_store, finer_bounds, sink)?;
             } else {
                 // Every entry in the bucket is the same entry; check the file before using it.
                 store.read_each(k, |_| Ok(()))?;
@@ -296,6 +308,27 @@ impl<K: Key> Level<K> {
     }
 }
 
+/// Where the sorted stream goes.
+trait Out<K: Key> {
+    fn push(&mut self, key: K, entity: u32) -> Result<()>;
+}
+
+/// The sorted stream handed to a caller, exact repeats dropped.
+struct Visit<K: Key, F: FnMut(K, u32) -> Result<()>> {
+    last: Option<(K, u32)>,
+    visit: F,
+}
+
+impl<K: Key, F: FnMut(K, u32) -> Result<()>> Out<K> for Visit<K, F> {
+    fn push(&mut self, key: K, entity: u32) -> Result<()> {
+        if self.last == Some((key, entity)) {
+            return Ok(());
+        }
+        self.last = Some((key, entity));
+        (self.visit)(key, entity)
+    }
+}
+
 /// The sorted stream's end: drops exact repeats, gathers each key's entities, writes.
 struct Sink<K: Key, F: FnMut(DuplicateKey<K>)> {
     writer: KeyRunWriter<K>,
@@ -304,7 +337,7 @@ struct Sink<K: Key, F: FnMut(DuplicateKey<K>)> {
     on_duplicate: F,
 }
 
-impl<K: Key, F: FnMut(DuplicateKey<K>)> Sink<K, F> {
+impl<K: Key, F: FnMut(DuplicateKey<K>)> Out<K> for Sink<K, F> {
     fn push(&mut self, key: K, entity: u32) -> Result<()> {
         if self.last == Some((key, entity)) {
             return Ok(());
@@ -329,7 +362,9 @@ impl<K: Key, F: FnMut(DuplicateKey<K>)> Sink<K, F> {
         self.last = Some((key, entity));
         Ok(())
     }
+}
 
+impl<K: Key, F: FnMut(DuplicateKey<K>)> Sink<K, F> {
     fn close_group(&mut self) {
         if let Some(group) = self.group.take() {
             if group.entities > 1 {

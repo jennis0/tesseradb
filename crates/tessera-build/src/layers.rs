@@ -26,15 +26,14 @@
 //! validation against the deny lane (`annotation-write-cycle.md` §3.1): a bundle straight out of
 //! `tessera build` has no overlay, so no declared member can be deleted or suppressed yet.
 //!
-//! ## Addressing: source ids, because that is what a build input has
+//! ## Addressing: by the values a member carries
 //!
-//! Members are named by the **source** entity id — the `entity_id` of the points file — and
-//! resolved through this build's own assignment, exactly as the pairs file's ids are. A
-//! `tessera_id` would be meaningless: it is a keyed permutation of an entity space this build is in
-//! the middle of assigning. An id the build did not assign **refuses the build** rather than being
-//! dropped, on `input`'s rule for the pairs file and for the sharper reason the control plane gives
-//! it: a dropped member moves both the count a viewer is shown and the size a proportional
-//! criterion divides by, quietly, in the direction of hiding an artifact.
+//! A member is named by the values of the unique fields it carries, in a members file's columns
+//! or as a struct per member in an artifact row's list, and the rule decides which item each
+//! names ([`crate::ids`]), exactly as it decides a points row's. A member naming no item is a row
+//! the rule refused and the build reports, and the artifact holds the rest. A `tessera_id` would
+//! be meaningless here: it is a keyed permutation of an entity space this build is in the middle
+//! of assigning.
 //!
 //! ## Determinism
 //!
@@ -70,7 +69,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, ListArray, UInt32Array, UInt64Array};
+use arrow::array::{Array, ListArray, UInt32Array};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
@@ -85,7 +84,9 @@ use tessera_types::EntityId;
 
 use rayon::prelude::*;
 
-use crate::config::{ArtifactSource, Fields, InlineArtifact, JoinValue, LayerSources};
+use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources, MemberTable, MemberValue};
+use crate::ids::{Numbering, Numbers, ReadKind, NO_SOURCE};
+use tessera_store::unique::UniqueKey;
 use crate::error::{BuildError, Result};
 use crate::shapes::{
     inline_shape, shape_declared, space_at, space_column, ShapeColumns, ShapeContext,
@@ -625,12 +626,11 @@ impl Default for PublishedLayers {
 // The eighth argument is which layers are scoped, and it belongs beside the declarations it
 // qualifies: a struct around the seven would be a second spelling of `BuildArgs`' layer half.
 #[allow(clippy::too_many_arguments)]
-pub fn read(
+pub(crate) fn read(
     declarations: &[LayerDeclaration],
     inputs: &[LayerSources],
-    // How this declaration names a row, so a members table and an inline membership resolve their
-    // entities the way the points file spells them (`crate::ids`).
-    ids: &crate::ids::IdSpace,
+    // Which item each member row and each listed member names (`crate::ids`).
+    numbering: &Numbering,
     // Which layers are scoped to a group, by name (`views.md` §3.5).
     scoped: &BTreeMap<String, crate::ScopedLayer>,
     // **Every view this build materialises, each with its own frame** (decision 0111): a shape
@@ -652,7 +652,8 @@ pub fn read(
         members: MemberSpill::new(scratch, memory_budget),
         memory_budget,
     };
-    for input in inputs {
+    for (index, input) in inputs.iter().enumerate() {
+        let lists = numbering.of(ReadKind::Lists(index)).map(|rows| &rows.numbers);
         // An artifact source names artifacts *in a layer*, and a layer this build does not
         // register is a name the manifest cannot carry. The config produces these parallel to the
         // declarations; a caller assembling them by hand gets the refusal instead of a silently
@@ -715,7 +716,7 @@ pub fn read(
                 scoped.get(&input.name),
                 &mut plan,
                 shapes.as_mut(),
-                ids,
+                lists,
             )?,
             Some(ArtifactSource::Inline(rows)) => {
                 // **A scoped layer's artifacts are read from a file**, because the view each
@@ -732,7 +733,7 @@ pub fn read(
                         input.name, scope.group
                     )));
                 }
-                plan_inline(&input.name, rows, &mut plan, shapes.as_mut(), ids)?
+                plan_inline(&input.name, rows, &mut plan, shapes.as_mut(), lists)?
             }
             // **Which artifacts exist is the layer's own artifact source's to say** — while the
             // layer's value set is closed. Without one a member source would be both the roster and
@@ -838,7 +839,10 @@ pub fn read(
                 declaration,
                 scoped.get(&input.name),
                 &mut plan,
-                ids,
+                &numbering
+                    .of(ReadKind::Members(index))
+                    .expect("a layer's members file is numbered")
+                    .numbers,
             )?;
             let minted = (plan.artifacts.len() - before) as u64;
             if minted > 0 {
@@ -898,8 +902,10 @@ fn read_artifacts(
     scoped: Option<&crate::ScopedLayer>,
     plan: &mut LayerPlan,
     mut shapes: Option<&mut ShapeReader>,
-    ids: &crate::ids::IdSpace,
+    lists: Option<&Numbers>,
 ) -> Result<()> {
+    // The listed members, numbered in the order the rows are read ([`member_lists`]).
+    let mut listed = 0u64;
     for batch in batches(path)? {
         let batch = batch?;
         let key = key_column(path, &batch, fields, "key")?;
@@ -939,8 +945,8 @@ fn read_artifacts(
         let spaces = space_column(path, &batch, fields)?;
         let level = optional_levels(path, &batch, LEVEL)?;
         let contents = optional_ranked_values(path, &batch, fields, "contents")?;
-        let members = optional_u64_list(path, &batch, fields, "members", ids)?;
-        let excluding = optional_u64_list(path, &batch, fields, "excluding", ids)?;
+        let members = optional_list(path, &batch, fields, "members")?;
+        let excluding = optional_list(path, &batch, fields, "excluding")?;
         let target_layer = optional_utf8(path, &batch, fields, "attached_layer")?;
         let target_level = optional_levels(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
@@ -1036,12 +1042,12 @@ fn read_artifacts(
             // cycle detection all derive children by inverting the parent edges. Two spellings of
             // one edge is one more place for them to disagree, so the column is gone rather than
             // carried.
-            let membership = match (&members, &excluding) {
+            let membership = match (members, excluding) {
                 (Some(column), _) => {
-                    PlannedMembership::Included(u64s_at(path, column, row, &address.2)?)
+                    PlannedMembership::Included(listed_at(column, row, lists, &mut listed))
                 }
                 (_, Some(column)) => {
-                    PlannedMembership::Excluded(u64s_at(path, column, row, &address.2)?)
+                    PlannedMembership::Excluded(listed_at(column, row, lists, &mut listed))
                 }
                 (None, None) => PlannedMembership::default(),
             };
@@ -1085,8 +1091,10 @@ fn plan_inline(
     rows: &[InlineArtifact],
     plan: &mut LayerPlan,
     mut shapes: Option<&mut ShapeReader>,
-    ids: &crate::ids::IdSpace,
+    lists: Option<&Numbers>,
 ) -> Result<()> {
+    // The listed members, numbered in the order the artifacts are written ([`member_lists`]).
+    let mut listed = 0u64;
     for row in rows {
         // An inline artifact is on an unscoped layer: the scoped spelling is refused where the
         // source is chosen, having no column to name a view with.
@@ -1120,12 +1128,16 @@ fn plan_inline(
             view_key: None,
             membership: match (&row.members, &row.excluding) {
                 // Both is refused at parse, where the declaration can name the artifact.
-                (Some(members), _) => {
-                    PlannedMembership::Included(inline_ids(layer, &row.key, members, ids)?)
-                }
-                (_, Some(excluding)) => {
-                    PlannedMembership::Excluded(inline_ids(layer, &row.key, excluding, ids)?)
-                }
+                (Some(members), _) => PlannedMembership::Included(listed_in(
+                    table_len(members),
+                    lists,
+                    &mut listed,
+                )),
+                (_, Some(excluding)) => PlannedMembership::Excluded(listed_in(
+                    table_len(excluding),
+                    lists,
+                    &mut listed,
+                )),
                 (None, None) => PlannedMembership::default(),
             },
             contents: row
@@ -1198,7 +1210,7 @@ fn read_members(
     declaration: &LayerDeclaration,
     scoped: Option<&crate::ScopedLayer>,
     plan: &mut LayerPlan,
-    ids: &crate::ids::IdSpace,
+    numbers: &Numbers,
 ) -> Result<(u64, u64)> {
     let value_set = declaration.value_set;
     let (mut unclustered, mut read) = (0u64, 0u64);
@@ -1218,10 +1230,13 @@ fn read_members(
     // `None` where the entry named no artifact.
     let mut entries: Vec<Option<usize>> = Vec::new();
     let mut said_level_is_ignored = false;
+    let mut entity: Vec<u64> = Vec::new();
     // **Decoded ahead, on one other thread, in file order** ([`batches_ahead`]). The row loop below
     // stays serial: it mints into the plan, and the mint order is the file's.
     for batch in batches_ahead(path, READ_AHEAD_BATCHES)? {
         let batch = batch?;
+        entity.clear();
+        numbers.extend(read, batch.num_rows(), &mut entity);
         let key = member_keys(path, &batch, fields, layer, declaration)?;
         // **Which view each member row's key is in**, on a layer scoped to a group (`views.md`
         // §3.5) — the same column the artifacts source carries, under the same declared name. A
@@ -1253,7 +1268,6 @@ fn read_members(
         };
         let level = optional_levels(path, &batch, LEVEL)?;
         let rank = optional_u32_field(path, &batch, fields, "rank")?;
-        let entity = member_entities(path, &batch, fields, ids)?;
         read += batch.num_rows() as u64;
 
         // **Ignored and said so**, rather than refused or read: the positions in a list are what
@@ -1271,6 +1285,10 @@ fn read_members(
         }
 
         for row in 0..batch.num_rows() {
+            // **A row the rule refused is not read**: it names no item, and the report counts it.
+            if entity[row] == NO_SOURCE {
+                continue;
+            }
             match key.cells.is_list() {
                 false => {
                     let named = member_view(path, layer, scoped, view, row)?;
@@ -1290,20 +1308,11 @@ fn read_members(
                         unclustered += 1;
                         continue;
                     };
-                    let name = plan.address_of(member).2.clone();
-                    // **A null `entity` is a refusal, not entity zero.** Arrow's `value` reads the
-                    // values buffer whatever the validity bitmap says, and a Parquet writer leaves
-                    // a zero there — so a producer whose join missed a row would publish the
-                    // corpus's lowest-numbered document into the cluster, moving its masked count
-                    // for every viewer who can see that one document.
-                    if entity.is_null(row) {
-                        return Err(null_entity(path, &name));
-                    }
                     attach_member(
                         plan,
                         member,
                         path,
-                        entity.value(row),
+                        entity[row],
                         rank.as_ref().and_then(|c| value_index(c, row)),
                     )?;
                 }
@@ -1322,10 +1331,7 @@ fn read_members(
                         unclustered += 1;
                         continue;
                     };
-                    if entity.is_null(row) {
-                        return Err(null_entity(path, &format!("row {row}")));
-                    }
-                    let source = entity.value(row);
+                    let source = entity[row];
                     let rank = rank.as_ref().and_then(|c| value_index(c, row));
 
                     entries.clear();
@@ -1506,14 +1512,6 @@ fn attach_member(
         Some(rank) => content_at_rank(entry, rank).generated_from.push(source),
     }
     Ok(())
-}
-
-fn null_entity(path: &Path, what: &str) -> BuildError {
-    BuildError::Invalid(format!(
-        "{}: {what} has a null entity; a null is not entity zero, and publishing it as one puts a \
-         document nobody named into the artifact",
-        path.display()
-    ))
 }
 
 /// The edges one row's list declares, folded into what each child's parent is.
@@ -3513,66 +3511,6 @@ fn optional_utf8<'a>(
     }
 }
 
-/// One member table batch's `entity` column, at whichever type the declaration spells identity.
-///
-/// The integer route reads the column as `uint64` from any integer type a points file's ids may
-/// have. A supplied id column is resolved to the source ids the build joins on, one per row; a key
-/// no points file carries becomes [`crate::ids::NO_SOURCE_ID`], which is the refusal an unknown
-/// integer earns where the member is attached.
-enum MemberEntities {
-    Integer(UInt64Array),
-    Supplied(Vec<Option<u64>>),
-}
-
-impl MemberEntities {
-    fn is_null(&self, row: usize) -> bool {
-        match self {
-            MemberEntities::Integer(column) => column.is_null(row),
-            MemberEntities::Supplied(rows) => rows[row].is_none(),
-        }
-    }
-
-    fn value(&self, row: usize) -> u64 {
-        match self {
-            MemberEntities::Integer(column) => column.value(row),
-            MemberEntities::Supplied(rows) => rows[row].unwrap_or(crate::ids::NO_SOURCE_ID),
-        }
-    }
-}
-
-fn member_entities(
-    path: &Path,
-    batch: &arrow::record_batch::RecordBatch,
-    fields: &Fields,
-    ids: &crate::ids::IdSpace,
-) -> Result<MemberEntities> {
-    let column = required(path, batch, fields, "entity")?;
-    if let Some(keys) = ids.supplied() {
-        keys.require_same_family(
-            path,
-            "the member table",
-            fields.of("entity"),
-            column.data_type(),
-        )?;
-        let mut rows = Vec::with_capacity(column.len());
-        for row in 0..column.len() {
-            rows.push(match crate::ids::key_at(column.as_ref(), row) {
-                None => None,
-                Some(key) => match keys.rank(&key) {
-                    crate::ids::NO_SOURCE_ID => return Err(unknown_member(path, &key)),
-                    source_id => Some(source_id),
-                },
-            });
-        }
-        return Ok(MemberEntities::Supplied(rows));
-    }
-    Ok(MemberEntities::Integer(crate::input::id_values(
-        path,
-        column.as_ref(),
-        fields.of("entity"),
-    )?))
-}
-
 /// A level column read under its own name, one of the two the field map may not move, by
 /// [`read_levels`].
 fn optional_levels<'a>(
@@ -3616,35 +3554,6 @@ fn optional_list<'a>(
     }
 }
 
-/// The membership lists on a batch's artifact rows, included or excluded. On the integer route
-/// every row's items are read as `uint64` together; a supplied id column's are resolved row by row.
-struct MembershipLists<'a> {
-    lists: &'a ListArray,
-    items: ListItems<'a>,
-}
-
-enum ListItems<'a> {
-    Integers(UInt64Array),
-    Keys(&'a crate::ids::SuppliedIds),
-}
-
-fn optional_u64_list<'a>(
-    path: &Path,
-    batch: &'a arrow::record_batch::RecordBatch,
-    fields: &Fields,
-    canonical: &str,
-    ids: &'a crate::ids::IdSpace,
-) -> Result<Option<MembershipLists<'a>>> {
-    let Some(lists) = optional_list(path, batch, fields, canonical)? else {
-        return Ok(None);
-    };
-    let items = match ids.supplied() {
-        Some(keys) => ListItems::Keys(keys),
-        None => ListItems::Integers(crate::input::id_values(path, lists, fields.of(canonical))?),
-    };
-    Ok(Some(MembershipLists { lists, items }))
-}
-
 /// The ranked `contents` on an artifact row: a list of entries, each a list of values.
 fn optional_ranked_values<'a>(
     path: &Path,
@@ -3663,114 +3572,267 @@ fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
     (!column.is_null(row)).then(|| column.value(row))
 }
 
-/// An inline membership's source ids: a keyword resolved to its rank, as a members file's is, and
-/// an integer read by the rule every integer id column is.
-fn inline_ids(
-    layer: &str,
-    key: &str,
-    values: &[JoinValue],
-    ids: &crate::ids::IdSpace,
-) -> Result<Vec<u64>> {
-    let object = format!("layer '{layer}': artifact {key}");
-    values
-        .iter()
-        .map(|value| match (ids, value) {
-            (crate::ids::IdSpace::Supplied(keys), JoinValue::Text(text)) => {
-                match keys.rank(text.as_bytes()) {
-                    crate::ids::NO_SOURCE_ID => Err(BuildError::Invalid(format!(
-                        "{object}: the membership names '{text}', which no points file of this \
-                         build carries. Name a member by a value of the join field"
-                    ))),
-                    source_id => Ok(source_id),
+/// One artifact row's listed members, as the items the rule numbered them: the row's list is the
+/// next `len` members of the layer's lists, and a member the rule refused is left out.
+fn listed_at(column: &ListArray, row: usize, lists: Option<&Numbers>, listed: &mut u64) -> Vec<u64> {
+    let len = match column.is_null(row) {
+        true => 0,
+        false => column.value_length(row) as usize,
+    };
+    listed_in(len, lists, listed)
+}
+
+/// The next `len` listed members' items.
+fn listed_in(len: usize, lists: Option<&Numbers>, listed: &mut u64) -> Vec<u64> {
+    let mut items = Vec::with_capacity(len);
+    if let Some(lists) = lists {
+        lists.extend(*listed, len, &mut items);
+    }
+    *listed += len as u64;
+    items.retain(|&item| item != NO_SOURCE);
+    items
+}
+
+/// How many members a membership written in the declaration names: its columns' one length.
+fn table_len(table: &MemberTable) -> usize {
+    table.values().next().map_or(0, Vec::len)
+}
+
+/// A layer's memberships written in its artifact rows or in the declaration, each member a row
+/// the rule decides ([`crate::ids`]), in the order the artifacts are read: an artifacts file's rows
+/// in file order, or the declaration's artifacts in order, and each artifact's members in list
+/// order.
+pub(crate) struct MemberLists {
+    /// The file, or `the declaration`.
+    pub source: String,
+    pub carried: Vec<crate::ids::CarriedField>,
+    /// Each carried field's key at each member, in `carried`'s order.
+    pub keys: Vec<Vec<Option<UniqueKey>>>,
+    /// Each member as the report names it.
+    pub texts: Vec<String>,
+}
+
+impl MemberLists {
+    pub(crate) fn len(&self) -> usize {
+        self.texts.len()
+    }
+}
+
+/// The memberships a layer writes in its artifact rows or its declaration, or `None` where it
+/// writes none.
+pub(crate) fn member_lists(
+    input: &LayerSources,
+    schema: &crate::config::Schema,
+) -> Result<Option<MemberLists>> {
+    match &input.artifacts {
+        None => Ok(None),
+        Some(ArtifactSource::Inline(rows)) => inline_lists(&input.name, rows, schema),
+        Some(ArtifactSource::File { path, fields, .. }) => file_lists(path, fields, schema),
+    }
+}
+
+/// The member lists of an artifacts file: `members` or `excluding`, each a `list<struct>` whose
+/// struct carries a field per unique attribute a member is named by.
+fn file_lists(
+    path: &Path,
+    fields: &Fields,
+    schema: &crate::config::Schema,
+) -> Result<Option<MemberLists>> {
+    let names = [fields.of("members"), fields.of("excluding")];
+    if crate::input::first_column_present(path, &names)?.is_none() {
+        return Ok(None);
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let mut lists = MemberLists {
+        source: file_name,
+        carried: Vec::new(),
+        keys: Vec::new(),
+        texts: Vec::new(),
+    };
+    let mut carried_known = false;
+    for batch in batches(path)? {
+        let batch = batch?;
+        let key = key_column(path, &batch, fields, "key")?;
+        for name in names {
+            let Some(column) = batch.column_by_name(name) else {
+                continue;
+            };
+            let refuse = || {
+                BuildError::Invalid(format!(
+                    "{}: column '{name}' is {:?}. A membership names each member by the fields \
+                     declared `unique`: write it as a list of structs with a field per unique \
+                     attribute",
+                    path.display(),
+                    column.data_type()
+                ))
+            };
+            let list = column.as_any().downcast_ref::<ListArray>().ok_or_else(refuse)?;
+            let members = list
+                .values()
+                .as_any()
+                .downcast_ref::<arrow::array::StructArray>()
+                .ok_or_else(refuse)?;
+            let struct_schema = arrow::datatypes::Schema::new(members.fields().clone());
+            let carried = crate::ids::carried_unique(&struct_schema, fields, schema)
+                .map_err(BuildError::Invalid)?;
+            if !carried_known {
+                lists.keys = vec![Vec::new(); carried.len()];
+                lists.carried = carried;
+                carried_known = true;
+            } else if carried != lists.carried {
+                return Err(BuildError::Invalid(format!(
+                    "{}: the member structs name different unique fields in different batches; \
+                     write every membership with the same fields",
+                    path.display()
+                )));
+            }
+            let mut keys: Vec<Vec<Option<UniqueKey>>> = Vec::with_capacity(lists.carried.len());
+            for field in &lists.carried {
+                let child = members.column_by_name(&field.column).expect("carried");
+                keys.push(crate::ids::scan::keys_of(path, child, field)?);
+            }
+            let offsets = list.value_offsets();
+            for row in 0..batch.num_rows() {
+                if list.is_null(row) {
+                    continue;
+                }
+                for member in offsets[row] as usize..offsets[row + 1] as usize {
+                    let null = members.is_null(member);
+                    let mut parts = Vec::new();
+                    for (at, field) in lists.carried.iter().enumerate() {
+                        let value = keys[at][member].filter(|_| !null);
+                        lists.keys[at].push(value);
+                        let child = members.column_by_name(&field.column).expect("carried");
+                        if let Some(text) = crate::ids::scan::value_text(child.as_ref(), member)
+                            .filter(|_| !null)
+                        {
+                            parts.push(format!("{} = {text}", field.attribute));
+                        }
+                    }
+                    lists.texts.push(format!(
+                        "artifact {}: {}",
+                        key.key_at(row).unwrap_or_default(),
+                        match parts.is_empty() {
+                            true => "a member naming no field".to_string(),
+                            false => parts.join(", "),
+                        }
+                    ));
                 }
             }
-            (crate::ids::IdSpace::Supplied(_), JoinValue::Integer(integer)) => {
-                Err(BuildError::Invalid(format!(
-                    "{object}: the member {integer} is an integer, and the join field holds \
-                     strings. Write it as \"{integer}\""
-                )))
-            }
-            (_, JoinValue::Integer(integer)) => Ok(*integer as u64),
-            (crate::ids::IdSpace::Integer { signed: true }, JoinValue::Text(text)) => text
-                .parse::<i64>()
-                .map(|integer| integer as u64)
-                .map_err(|_| not_an_integer(&object, text)),
-            (_, JoinValue::Text(text)) => {
-                text.parse::<u64>().map_err(|_| not_an_integer(&object, text))
-            }
+        }
+    }
+    Ok(Some(lists))
+}
+
+/// The memberships a declaration writes, as tables of unique-field columns.
+fn inline_lists(
+    layer: &str,
+    rows: &[InlineArtifact],
+    schema: &crate::config::Schema,
+) -> Result<Option<MemberLists>> {
+    let tables: Vec<(&str, &MemberTable)> = rows
+        .iter()
+        .flat_map(|row| {
+            [&row.members, &row.excluding]
+                .into_iter()
+                .flatten()
+                .map(move |table| (row.key.as_str(), table))
         })
-        .collect()
-}
-
-fn not_an_integer(object: &str, text: &str) -> BuildError {
-    BuildError::Invalid(format!(
-        "{object}: the member '{text}' is not a value of the join field, which holds integers. \
-         Write it in decimal digits"
-    ))
-}
-
-/// One row's membership, as source entity ids.
-///
-/// **A null element is a refusal rather than entity zero**, on the member source's own rule: Arrow
-/// reads the values buffer whatever the validity bitmap says, so a producer whose join missed a row
-/// would otherwise publish the corpus's lowest-numbered document into the artifact.
-fn u64s_at(path: &Path, column: &MembershipLists<'_>, row: usize, key: &str) -> Result<Vec<u64>> {
-    if column.lists.is_null(row) {
-        return Ok(Vec::new());
+        .collect();
+    if tables.is_empty() {
+        return Ok(None);
     }
-    // **Named the way the declaration names a row** (`crate::ids`): the integer route takes a
-    // list of any integer type a points file's ids may have, and a supplied id column makes this
-    // a list of keys, each resolved to the source id the build joins on.
-    match &column.items {
-        ListItems::Integers(integers) => {
-            let offsets = column.lists.value_offsets();
-            (offsets[row] as usize..offsets[row + 1] as usize)
-                .map(|i| {
-                    if integers.is_null(i) {
-                        return Err(null_member(path, key));
-                    }
-                    Ok(integers.value(i))
-                })
-                .collect()
-        }
-        ListItems::Keys(keys) => {
-            let values = column.lists.value(row);
-            keys.require_same_family(path, key, "members", values.data_type())?;
-            (0..values.len())
-                .map(|i| {
-                    let member = crate::ids::key_at(values.as_ref(), i)
-                        .ok_or_else(|| null_member(path, key))?;
-                    match keys.rank(&member) {
-                        crate::ids::NO_SOURCE_ID => Err(unknown_member(path, &member)),
-                        source_id => Ok(source_id),
-                    }
-                })
-                .collect()
+    let mut carried: Vec<crate::ids::CarriedField> = Vec::new();
+    for (position, attribute) in schema.attributes.iter().enumerate() {
+        if attribute.unique && tables.iter().any(|(_, t)| t.contains_key(&attribute.name)) {
+            carried.push(crate::ids::CarriedField {
+                position: position as u16,
+                attribute: attribute.name.clone(),
+                column: attribute.name.clone(),
+                ty: attribute.ty,
+            });
         }
     }
+    let mut lists = MemberLists {
+        source: "the declaration".to_string(),
+        keys: vec![Vec::new(); carried.len()],
+        texts: Vec::new(),
+        carried,
+    };
+    for (key, table) in tables {
+        if let Some(name) = table
+            .keys()
+            .find(|name| !lists.carried.iter().any(|f| &f.attribute == *name))
+        {
+            return Err(BuildError::Invalid(format!(
+                "layer '{layer}': artifact {key}: the membership column '{name}' is not an \
+                 attribute declared `unique`"
+            )));
+        }
+        for member in 0..table_len(table) {
+            let mut parts = Vec::new();
+            for (at, field) in lists.carried.iter().enumerate() {
+                let value = table.get(&field.attribute).map(|column| &column[member]);
+                lists.keys[at].push(match value {
+                    Some(value) => Some(member_value_key(layer, key, field, value)?),
+                    None => None,
+                });
+                if let Some(value) = value {
+                    parts.push(format!(
+                        "{} = {}",
+                        field.attribute,
+                        match value {
+                            MemberValue::Integer(integer) => integer.to_string(),
+                            MemberValue::Text(text) => text.clone(),
+                        }
+                    ));
+                }
+            }
+            lists.texts.push(format!("artifact {key}: {}", parts.join(", ")));
+        }
+    }
+    Ok(Some(lists))
 }
 
-/// **A member naming a row no points file carries is refused**, exactly as an integer naming an
-/// entity this build did not assign is: a dropped member moves the count a viewer is shown and the
-/// size a proportional criterion divides by. Named here, where the key itself is still in hand.
-fn unknown_member(path: &Path, key: &[u8]) -> BuildError {
-    BuildError::Invalid(format!(
-        "{}: the membership names '{}', which no points file of this build carries. A member is \
-         named by the column the declaration spells identity in (configuration.md §8)",
-        path.display(),
-        String::from_utf8_lossy(key)
-    ))
-}
-
-/// **A null element is not entity zero.** Arrow reads the values buffer whatever the validity
-/// bitmap says, so a producer whose join missed a row would otherwise publish the corpus's
-/// lowest-numbered document into the artifact.
-fn null_member(path: &Path, key: &str) -> BuildError {
-    BuildError::Invalid(format!(
-        "{}: {key} has a null entity in its membership; a null is not entity zero, and publishing \
-         it as one puts a document nobody named into the artifact",
-        path.display()
-    ))
+/// A value written in the declaration as the key its unique field holds it under: a string for a
+/// keyword, and an integer, or a string of its decimal digits, for an integer field.
+fn member_value_key(
+    layer: &str,
+    key: &str,
+    field: &crate::ids::CarriedField,
+    value: &MemberValue,
+) -> Result<UniqueKey> {
+    let object = format!("layer '{layer}': artifact {key}");
+    let integer = match (field.ty, value) {
+        (tessera_spatial::tiler::ScalarType::Keyword, MemberValue::Text(text)) => {
+            return Ok(UniqueKey::keyword(text))
+        }
+        (tessera_spatial::tiler::ScalarType::Keyword, MemberValue::Integer(integer)) => {
+            return Err(BuildError::Invalid(format!(
+                "{object}: the member {integer} of '{}' is an integer, and the field holds \
+                 strings. Write it as \"{integer}\"",
+                field.attribute
+            )))
+        }
+        (_, MemberValue::Integer(integer)) => i128::from(*integer),
+        (_, MemberValue::Text(text)) => text.parse::<i128>().map_err(|_| {
+            BuildError::Invalid(format!(
+                "{object}: the member '{text}' of '{}' is not an integer, and the field holds \
+                 integers. Write it in decimal digits",
+                field.attribute
+            ))
+        })?,
+    };
+    tessera_store::unique::key_of_integer(field.ty, integer).ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "{object}: the member {integer} of '{}' is outside what a `{}` holds",
+            field.attribute,
+            field.ty.arrow_type_name()
+        ))
+    })
 }
 
 /// One row's ranked contents: entry *k* is `contents[k]`'s values, one per supplied kind.
@@ -4314,7 +4376,7 @@ mod tests {
         let plan = read(
             &declarations,
             &sources,
-            &crate::ids::IdSpace::Integer { signed: false },
+            &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world", projection, extent,
@@ -4425,7 +4487,7 @@ mod tests {
         let mut plan = read(
             std::slice::from_ref(&declaration),
             &sources,
-            &crate::ids::IdSpace::Integer { signed: false },
+            &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world",
@@ -4482,7 +4544,7 @@ mod tests {
         let error = read(
             &declarations,
             &sources,
-            &crate::ids::IdSpace::Integer { signed: false },
+            &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
             &[
                 tessera_store::derived::ViewFrame::new(
@@ -4524,7 +4586,7 @@ mod tests {
         read(
             &declarations,
             &sources,
-            &crate::ids::IdSpace::Integer { signed: false },
+            &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world", projection, extent,

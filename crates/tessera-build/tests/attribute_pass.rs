@@ -265,6 +265,7 @@ fn args(dir: &Path, out: PathBuf) -> BuildArgs {
         attribute_sources: tessera_build::config::AttributeSource::over(attributes, &schema),
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -337,7 +338,8 @@ fn expected_present() -> Vec<u64> {
     ]
 }
 
-fn assert_coverage(coverage: &[AttributeCoverage], which: &str) {
+fn assert_coverage(report: &tessera_build::BuildReport, which: &str) {
+    let coverage: &[AttributeCoverage] = &report.attribute_coverage;
     assert_eq!(coverage.len(), 1, "{which}: one attribute source");
     let source = &coverage[0];
     assert_eq!(source.entities, N, "{which}: the denominator is this build");
@@ -346,9 +348,15 @@ fn assert_coverage(coverage: &[AttributeCoverage], which: &str) {
         N,
         "{which}: every entity has a row"
     );
+    let named_nothing: u64 = report
+        .refused
+        .iter()
+        .filter(|entry| entry.reason == "names_no_item")
+        .map(|entry| entry.rows)
+        .sum();
     assert_eq!(
-        source.unknown_rows, STRANGERS,
-        "{which}: rows naming ids this build never loaded"
+        named_nothing, STRANGERS,
+        "{which}: rows naming ids this build never loaded are refused"
     );
     let names: Vec<&str> = source.columns.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(
@@ -375,7 +383,7 @@ fn every_column_lands_on_its_own_entities_and_reports_its_own_tally() {
     fixture(dir.path());
     let out = dir.path().join("bundle");
     let report = build(&args(dir.path(), out.clone())).expect("the build succeeds");
-    assert_coverage(&report.attribute_coverage, "streaming");
+    assert_coverage(&report, "streaming");
 
     let rows = rows_by_source(&out);
     assert_eq!(rows.len(), N as usize);
@@ -476,7 +484,7 @@ fn the_linear_build_reports_the_same_coverage_and_places_the_same_values() {
     let a = build(&args(dir.path(), streamed.clone())).expect("the streaming build succeeds");
     let b = build_in_memory(&args(dir.path(), linear.clone())).expect("the linear build succeeds");
 
-    assert_coverage(&a.attribute_coverage, "streaming");
-    assert_coverage(&b.attribute_coverage, "linear");
+    assert_coverage(&a, "streaming");
+    assert_coverage(&b, "linear");
     assert_eq!(rows_by_source(&streamed), rows_by_source(&linear));
 }

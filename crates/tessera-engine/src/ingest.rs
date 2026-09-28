@@ -232,14 +232,19 @@ impl Engine {
             generation,
             declared,
         };
-        let named = match resolve::resolve(&identities, &holdings)? {
-            Ok(named) => named,
-            Err(refusal) => {
-                return Err(AcceptError::Conflict(
-                    self.refusal_text(generation, declared, request, &refusal),
-                ))
-            }
-        };
+        let verdicts = resolve::resolve(&identities, &holdings, resolve::Batch::Creates)?;
+        if let Some(refusal) = resolve::first_refusal(&verdicts) {
+            return Err(AcceptError::Conflict(
+                self.refusal_text(generation, declared, request, refusal),
+            ));
+        }
+        let named: Vec<Option<EntityId>> = verdicts
+            .into_iter()
+            .map(|verdict| match verdict {
+                resolve::Verdict::Names(entity) => Some(entity),
+                _ => None,
+            })
+            .collect();
 
         let scoped_families = view
             .map(|v| crate::write::scoped_families_of_view(manifest, &v.id))
@@ -1033,6 +1038,9 @@ impl Engine {
                      an item, which is given its tessera_id when it is created"
                 )
             }
+            Refusal::NamesNoItem { row } => format!(
+                "row {row} names no item; send a value that names one, or send the row as a new item"
+            ),
             Refusal::OneItemTwice { rows, item } => format!(
                 "rows {} and {} both name item {}; send one row per item",
                 rows[0],

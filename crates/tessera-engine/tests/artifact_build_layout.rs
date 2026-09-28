@@ -191,6 +191,7 @@ fn fixture() -> Fixture {
         attribute_sources: Vec::new(),
         out: root.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: config.layers,

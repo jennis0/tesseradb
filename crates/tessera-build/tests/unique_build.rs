@@ -213,6 +213,7 @@ fn build_in(dir: &Path, repeat: bool, streaming: bool) -> Result<PathBuf, String
         attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),

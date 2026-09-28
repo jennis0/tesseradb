@@ -192,6 +192,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         ),
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),

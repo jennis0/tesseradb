@@ -256,6 +256,7 @@ fn build_fixture(out: &Path, points: &Path, pairs: &Path) {
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

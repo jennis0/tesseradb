@@ -342,6 +342,7 @@ fn build_with_labels(
         attribute_sources: Vec::new(),
         out: dir.join("bundle"),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers,

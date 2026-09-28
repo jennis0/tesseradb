@@ -21,8 +21,6 @@ use tessera_build::{build, BuildArgs};
 use tessera_spatial::Bounds;
 use tessera_types::IdentityKey;
 
-/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer { signed: false };
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
@@ -145,6 +143,7 @@ fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
         attribute_sources: acquired.attribute_sources,
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -254,7 +253,7 @@ fn a_moved_geometry_name_does_not_fall_through_to_the_other_shape() {
     let message = format!(
         "{}",
         tessera_build::input::read_points(
-            tessera_build::input::Source::new(&path, &fields, &INTEGER_IDS),
+            tessera_build::input::Source::every_row(&path, &fields),
             tessera_spatial::Projection::None,
             &extent(),
         )

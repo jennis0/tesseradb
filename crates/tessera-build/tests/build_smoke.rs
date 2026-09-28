@@ -35,8 +35,6 @@ fn id_attributes(
     (schema, sources)
 }
 
-/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer { signed: false };
 
 /// A fixed, non-degenerate test key shared by every fixture in this file.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -218,6 +216,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -507,6 +506,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -555,6 +555,7 @@ fn an_empty_selection_builds_an_empty_bundle() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: Some(0),
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -605,6 +606,7 @@ fn morton_input_requires_the_identity_extent() {
             .path()
             .join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -657,6 +659,7 @@ fn morton_input_requires_the_identity_extent() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -712,6 +715,7 @@ fn build_rejects_an_unsafe_view_id() {
         attribute_sources: Vec::new(),
         out: tmp.path().join("bundle"),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -764,6 +768,7 @@ fn limit_filters_the_source_entity_id_prefix() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: Some(100),
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -829,6 +834,7 @@ fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: Some(100),
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -873,6 +879,7 @@ fn verify_accepts_a_freshly_built_bundle() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -922,6 +929,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -1069,7 +1077,7 @@ fn morton_plus_residual_recovers_sub_cell_position() {
 
     let fields = Default::default();
     let mut rows = read_points(
-        tessera_build::input::Source::new(&points, &fields, &INTEGER_IDS),
+        tessera_build::input::Source::every_row(&points, &fields),
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
     )
@@ -1105,7 +1113,7 @@ fn bare_morton_widens_with_a_zero_residual() {
 
     let fields = Default::default();
     let rows = read_points(
-        tessera_build::input::Source::new(&points, &fields, &INTEGER_IDS),
+        tessera_build::input::Source::every_row(&points, &fields),
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
     )
@@ -1233,6 +1241,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
             attribute_sources,
             out: out.clone(),
             limit: None,
+            strict: false,
             identity_key: test_key(),
             shard_id: 0,
             layers: Vec::new(),

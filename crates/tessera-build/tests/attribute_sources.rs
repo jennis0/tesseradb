@@ -204,6 +204,7 @@ fn args(config: &Config, out: PathBuf) -> BuildArgs {
         attribute_sources: acquired.attribute_sources,
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),

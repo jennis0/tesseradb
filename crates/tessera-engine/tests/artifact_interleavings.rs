@@ -1169,6 +1169,7 @@ fn built_fixture() -> Fixture {
         attribute_sources: tessera_build::config::AttributeSource::over(points, &id_schema()),
         out: root.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: config.layers,

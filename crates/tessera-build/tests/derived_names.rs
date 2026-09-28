@@ -206,6 +206,7 @@ fn two_views_derived_files_do_not_collide() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: config.layers,

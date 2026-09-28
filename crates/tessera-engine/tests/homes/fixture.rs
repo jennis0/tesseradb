@@ -313,6 +313,7 @@ pub fn build_homes(dir: &Path) -> std::path::PathBuf {
         attribute_sources: tessera_build::config::AttributeSource::over(world, &schema),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

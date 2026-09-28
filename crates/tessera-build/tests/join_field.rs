@@ -215,6 +215,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
         attribute_sources: config.attribute_sources.clone(),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: config.layers.clone(),

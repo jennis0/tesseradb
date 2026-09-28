@@ -215,6 +215,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &id_schema()),
         out: root.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: config.layers,

@@ -357,6 +357,7 @@ pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

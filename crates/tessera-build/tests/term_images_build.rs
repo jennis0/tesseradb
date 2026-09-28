@@ -176,6 +176,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         attribute_sources: Vec::new(),
         out,
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

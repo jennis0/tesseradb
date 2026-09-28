@@ -21,8 +21,6 @@ use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{EntityId, IdentityKey};
 
-/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer { signed: false };
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -160,6 +158,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -300,6 +299,7 @@ fn a_label_that_disagrees_between_views_refuses() {
         attribute_sources: Vec::new(),
         out: dir.path().join("bundle"),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -345,6 +345,7 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -405,6 +406,7 @@ fn a_discriminator_value_outside_the_roster_refuses() {
         attribute_sources: Vec::new(),
         out: dir.path().join("bundle"),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -536,7 +538,7 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
     // The group's box holds both views' data; the single view's does not hold the other's.
     for path in [q2, q3] {
         let rows = tessera_build::input::read_points(
-            tessera_build::input::Source::new(path, &fields, &INTEGER_IDS),
+            tessera_build::input::Source::every_row(path, &fields),
             tessera_spatial::Projection::None,
             &group.extent,
         )
@@ -920,6 +922,7 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -1025,6 +1028,7 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -1180,6 +1184,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),

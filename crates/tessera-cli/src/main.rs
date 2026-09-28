@@ -52,14 +52,23 @@ enum Command {
         /// elsewhere.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Build only the rows whose join field's value is an integer below this value.
+        /// Build only the rows whose value of the declaration's one unique integer attribute is
+        /// below this value, in every file that carries its column.
         ///
         /// A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit
-        /// drops it. Refused when the join field holds strings, and when the declaration names no
-        /// join field. Layer member files are read whole: a member row naming a row the
-        /// limit dropped is refused, so limit the member file to the same values.
-        #[arg(long, value_name = "ID")]
+        /// drops it, and so does a null. Refused when the declaration has no unique integer
+        /// attribute, or more than one. A row of a file without the column is read, and one that
+        /// names an item the limit left out names no item and is refused.
+        #[arg(long, value_name = "VALUE")]
         limit: Option<u64>,
+        /// Refuse the build at the first file with a row the identity rule refuses.
+        ///
+        /// Without it, a row naming two items, naming an item or a unique value an earlier row of
+        /// its file names, or, outside a view's points, naming no item, is left out and the build
+        /// goes on. The refused rows are printed, and written to `reports/refused.json` in the
+        /// bundle.
+        #[arg(long)]
+        strict: bool,
         /// Read this corpus declaration instead of `[build] schema` in `tessera.toml`.
         ///
         /// The declaration is compiled into the bundle's `MANIFEST.json`, and the server reads
@@ -1039,6 +1048,7 @@ fn main() -> ExitCode {
             deployment,
             out,
             limit,
+            strict,
             config,
             file,
             no_oracle_pairs,
@@ -1095,6 +1105,18 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // `--limit`'s attribute: the declaration's one unique integer attribute, refused
+            // before any file is read where there is not exactly one.
+            let limit_attribute =
+                match tessera_build::ids::Limit::of(&config.schema, limit) {
+                    Ok(found) => {
+                        found.map(|found| (config.schema.attributes[usize::from(found.position)].clone(), found.below))
+                    }
+                    Err(e) => {
+                        eprintln!("build refused: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
             // The files this build reads, resolved from the declaration and any overrides — and
             // every absence a refusal here rather than an empty read (configuration.md §8).
             let acquired = match config.acquire() {
@@ -1167,7 +1189,9 @@ fn main() -> ExitCode {
                     view.projection,
                     &view.extent,
                     &sources,
-                    limit,
+                    limit_attribute
+                        .as_ref()
+                        .map(|(attribute, below)| (attribute, *below)),
                 ) {
                     Ok(frame) => frame,
                     Err(e) => {
@@ -1298,6 +1322,7 @@ fn main() -> ExitCode {
                 attribute_sources: acquired.attribute_sources,
                 out: out.clone(),
                 limit,
+                strict,
                 identity_key: IdentityKey::generate(),
                 shard_id: 0,
                 emit_oracle_pairs: !no_oracle_pairs,
@@ -1356,9 +1381,19 @@ fn main() -> ExitCode {
                         eprintln!("build FAILED: writing reports/disclosure.json: {e}");
                         return ExitCode::FAILURE;
                     }
+                    // **The rows the identity rule refused**, counted by file and reason with a few
+                    // of the values they carried: the build went on without them, as an ingest
+                    // refusing rows one at a time would.
+                    for line in tessera_build::describe_refused(&report.refused) {
+                        eprintln!("refused: {line}");
+                    }
+                    if let Err(e) = tessera_build::write_refused_report(&out, &report.refused) {
+                        eprintln!("build FAILED: writing reports/refused.json: {e}");
+                        return ExitCode::FAILURE;
+                    }
                     println!(
                         "built {} ({}): {} items, {} terms, {} pairs, {} bytes on disk, {} \
-                         artifact(s) minted, {} unclustered member row(s)",
+                         artifact(s) minted, {} unclustered member row(s), {} row(s) refused",
                         out.display(),
                         report.prefix,
                         report.items,
@@ -1367,6 +1402,7 @@ fn main() -> ExitCode {
                         report.bundle_bytes,
                         report.minted_artifacts,
                         report.unclustered_member_rows,
+                        report.refused.iter().map(|entry| entry.rows).sum::<u64>(),
                     );
                     // The per-view shapes, which is what a multi-view build has to say and a
                     // single total cannot: a view holds a subset of entity space (`views.md` §8).
