@@ -37,11 +37,7 @@ import {css} from 'lit';
  *   reads it, so setting it changes nothing.
  * @cssprop --tessera-highlight-soft - The background of a highlight chip and a highlighted row.
  * @cssprop --tessera-warn - The colour of the dot in the data updated and reconnecting states.
- * @cssprop --tessera-warn-soft - Not read by any element: the states show a dot on the surface. A
- *   host can use it in its own rules.
  * @cssprop --tessera-refuse - The colour of the refused and expired states and their dot.
- * @cssprop --tessera-refuse-soft - Not read by any element: the states show a dot on the surface.
- *   A host can use it in its own rules.
  * @cssprop --tessera-ok - The colour of the status dot when the view is up to date.
  * @cssprop --tessera-map-bg - The map canvas's background.
  * @cssprop --tessera-radius - The corner radius of panels, cards, the status strip, the map toolbar
@@ -76,9 +72,7 @@ export const tokens = css`
     --_tessera-highlight-ink: var(--tessera-highlight-ink, light-dark(#ffffff, #1b1430));
     --_tessera-highlight-soft: var(--tessera-highlight-soft, light-dark(#efe6fa, #2c2340));
     --_tessera-warn: var(--tessera-warn, light-dark(#c98a0a, #e0a940));
-    --_tessera-warn-soft: var(--tessera-warn-soft, light-dark(#fff1cf, #3a2e0e));
     --_tessera-refuse: var(--tessera-refuse, light-dark(#b42318, #f0857a));
-    --_tessera-refuse-soft: var(--tessera-refuse-soft, light-dark(#fbe5e5, #3e1c1c));
     --_tessera-ok: var(--tessera-ok, light-dark(#1f7a4d, #5cc98a));
     --_tessera-map-bg: var(--tessera-map-bg, light-dark(#f6f6f4, #111317));
     --_tessera-radius: var(--tessera-radius, 8px);
@@ -212,7 +206,7 @@ export const chrome = css`
   }
   .field .k,
   .field .v {
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
   }
   .kv {
     display: grid;

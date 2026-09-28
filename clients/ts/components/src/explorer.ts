@@ -116,7 +116,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart sidebar - The sidebar, in the docked layout.
  * @csspart panel - The card over the map, in the overlay layout and in a container narrower than
  *   1000 px.
- * @csspart filters-toggle - The card's Filters button, with `aria-expanded` while the controls show.
+ * @csspart filters-toggle - The card's Filters button, with `aria-expanded` while the controls show
+ *   and `data-count` set to the number of clauses applied.
  * @csspart layers-toggle - The Layers button under the map's tools, with `data-on` while any layer
  *   is drawn.
  * @csspart layers-popover - The popover holding the layer picker, while it is open.
@@ -212,9 +213,18 @@ export class TesseraExplorer extends TesseraElement {
         border-radius: var(--_tessera-radius);
         box-shadow: var(--_tessera-shadow);
       }
+      /* Each section keeps its height, so a long column scrolls rather than squeezing its last section. */
+      [part='sidebar'] > *,
+      [part='panel'] > * {
+        flex: none;
+      }
       [part='sidebar'] > *:last-child,
       [part='panel'] > *:last-child {
         border-bottom: 0;
+      }
+      .head[hidden],
+      .pickers[hidden] {
+        display: none;
       }
       .head {
         display: flex;
@@ -369,11 +379,23 @@ export class TesseraExplorer extends TesseraElement {
       details[open] > summary .closed-chev {
         display: none;
       }
-      details > .body > * {
+      details > .body {
+        box-sizing: border-box;
+        min-width: 0;
+      }
+      details > .body tessera-hierarchy,
+      details > .body tessera-artifact-list {
+        display: block;
+        max-width: 100%;
+      }
+      details > .body ::slotted(*),
+      details > .body tessera-hierarchy::part(title),
+      details > .body tessera-artifact-list::part(title) {
         border-bottom: 0;
       }
-      /* A section's own heading repeats the summary above it. */
-      details > .body > *::part(title) {
+      /* The default panels' own headings repeat the summary above them. */
+      details > .body tessera-hierarchy::part(title),
+      details > .body tessera-artifact-list::part(title) {
         display: none;
       }
       /* The narrow container: the strip full width, a tab bar, sheets. */
@@ -511,6 +533,12 @@ export class TesseraExplorer extends TesseraElement {
   @state() accessor layersOpen = false;
   /** Whether the container is narrower than 1000 px and wider than the narrow layout. @internal */
   @state() accessor compact = false;
+  /** Whether the host put anything in the toolbar slot. */
+  @state() private accessor toolbarFilled = false;
+
+  private onToolbarSlot = (e: Event): void => {
+    this.toolbarFilled = (e.target as HTMLSlotElement).assignedElements().length > 0;
+  };
 
   private provider = new ContextProvider(this, {context: storeContext, initialValue: null});
   /** Which selection changed last, which the detail region shows. */
@@ -608,13 +636,14 @@ export class TesseraExplorer extends TesseraElement {
     const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
     const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']}></tessera-artifact-card>` : html`<tessera-item-card exportparts=${FORWARD['item-card']} title-field=${this.titleField || nothing} .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
     // The view pickers draw nothing for a one-view bundle, so their row is left out there.
-    const pickersShown = Boolean(this.querySelector('[slot="toolbar"]')) || (meta !== null && !hasOneLayout(meta));
-    const pickers = pickersShown
-      ? html`<div class="pickers"><slot name="toolbar"><tessera-view-picker exportparts=${FORWARD['view-picker']}></tessera-view-picker><tessera-key-picker exportparts=${FORWARD['key-picker']}></tessera-key-picker></slot></div>`
-      : nothing;
+    // The pickers draw nothing for a one-view bundle, so their row is hidden there unless the host
+    // filled the slot. The slot is always rendered, so its slotchange keeps `toolbarFilled` current.
+    const pickersShown = this.toolbarFilled || (meta !== null && !hasOneLayout(meta));
+    const pickers = html`<div class="pickers" ?hidden=${!pickersShown}><slot name="toolbar" @slotchange=${this.onToolbarSlot}><tessera-view-picker exportparts=${FORWARD['view-picker']}></tessera-view-picker><tessera-key-picker exportparts=${FORWARD['key-picker']}></tessera-key-picker></slot></div>`;
     const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout .limit=${compact ? 4 : 0} .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
-    const filters = (chipsOnly: boolean) => html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} ?chips-only=${chipsOnly}></tessera-filter-panel></slot>`;
+    // Only the card's copy carries the id its Filters button controls, so no id repeats.
+    const filters = (chipsOnly: boolean, id: string | typeof nothing = nothing) => html`<div id=${id} class="filters"><slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} ?chips-only=${chipsOnly}></tessera-filter-panel></slot></div>`;
     const hierarchy = html`<slot name="hierarchy"><tessera-hierarchy exportparts=${FORWARD.hierarchy}></tessera-hierarchy></slot>`;
     // Drawn only where there is a hierarchy to walk; an empty section would look broken.
     const hasHierarchy = browsableLayers(meta?.layers ?? []).length > 0;
@@ -626,7 +655,7 @@ export class TesseraExplorer extends TesseraElement {
       ${this.has('artifacts') ? section('artifacts', 'In view', inView > 0 ? inView.toLocaleString('en-GB') : '', list) : nothing}`;
 
     const docked = html`<aside part="sidebar" aria-label="Explorer panels">
-      ${this.has('toolbar') && pickersShown ? html`<div class="head">${pickers}</div>` : nothing}
+      ${this.has('toolbar') ? html`<div class="head" ?hidden=${!pickersShown}>${pickers}</div>` : nothing}
       ${this.has('toolbar') ? colour : nothing}
       ${this.has('filters') ? filters(false) : nothing}
       ${selectionPanel}
@@ -634,11 +663,11 @@ export class TesseraExplorer extends TesseraElement {
     </aside>`;
 
     const filtersToggle = this.has('filters')
-      ? html`<button part="filters-toggle" class="btn" type="button" aria-expanded=${this.filtersOpen ? 'true' : 'false'} @click=${() => (this.filtersOpen = !this.filtersOpen)}>${icon('filter', 14, 1.3)}Filters${applied > 0 ? html`<span class="badge">${applied}</span>` : nothing}</button>`
+      ? html`<button part="filters-toggle" class="btn" type="button" aria-controls="filters" aria-expanded=${this.filtersOpen ? 'true' : 'false'} data-count=${applied} @click=${() => (this.filtersOpen = !this.filtersOpen)}>${icon('filter', 14, 1.3)}Filters${applied > 0 ? html`<span class="badge">${applied}</span>` : nothing}</button>`
       : nothing;
-    const panel = html`<div part="panel" class="card" aria-label="Explorer panels">
-      ${(this.has('toolbar') && pickersShown) || this.has('filters') ? html`<div class="head">${this.has('toolbar') ? pickers : nothing}${filtersToggle}</div>` : nothing}
-      ${this.has('filters') ? filters(!this.filtersOpen) : nothing}
+    const panel = html`<div part="panel" class="card" role="region" aria-label="Explorer panels">
+      ${this.has('toolbar') || this.has('filters') ? html`<div class="head" ?hidden=${!(this.has('toolbar') && pickersShown) && !this.has('filters')}>${this.has('toolbar') ? pickers : nothing}${filtersToggle}</div>` : nothing}
+      ${this.has('filters') ? filters(!this.filtersOpen, 'filters') : nothing}
       ${this.has('toolbar') ? colour : nothing}
       ${selectionPanel}
       ${sections}
@@ -676,7 +705,7 @@ export class TesseraExplorer extends TesseraElement {
       this.sheet === 'filters'
         ? html`${filters(false)}${this.has('hierarchy') && hasHierarchy ? hierarchy : nothing}${sheetFooter}`
         : this.sheet === 'layers'
-          ? html`${pickersShown ? html`<div class="head">${pickers}</div>` : nothing}${colour}<div class="panel">${layersPanel}</div>`
+          ? html`<div class="head" ?hidden=${!pickersShown}>${pickers}</div>${colour}<div class="panel">${layersPanel}</div>`
           : this.sheet === 'artifacts'
             ? html`${selectionPanel}${list}`
             : this.sheet === 'detail'

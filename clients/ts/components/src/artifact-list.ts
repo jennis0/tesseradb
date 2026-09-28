@@ -28,7 +28,7 @@ import './count.js';
  * @csspart item - One artifact, with `data-id`, and `data-opened` on the opened one.
  * @csspart name - An artifact's name, with `data-unnamed` where it has none.
  * @csspart count - An artifact's `<tessera-count>`.
- * @csspart more - The "N more" button, which shows the next `rows` rows.
+ * @csspart more - The "N more" button, which shows the next `rows` rows until the layers change.
  */
 export class TesseraArtifactList extends TesseraElement {
   static override styles = [
@@ -64,8 +64,19 @@ export class TesseraArtifactList extends TesseraElement {
   @property({attribute: false}) accessor artifacts: ArtifactsProjection | null = null;
   /** How many rows the list shows before it offers the rest under "N more". */
   @property({type: Number}) accessor rows = 40;
-  /** Rows shown beyond `rows` after "N more" was pressed. */
+  /** Rows shown beyond `rows` after "N more" was pressed, for the layers it was pressed under. */
   @state() private accessor extra = 0;
+  private extraFor = '';
+
+  protected override onStoreChange(): void {
+    // Other layers are another list, which starts at `rows` again.
+    const layers = this.shown?.layers.join(' ') ?? '';
+    if (layers !== this.extraFor) {
+      this.extraFor = layers;
+      this.extra = 0;
+    }
+    super.onStoreChange();
+  }
 
   private get shown(): ArtifactsProjection | null {
     return this.artifacts ?? this.resolvedStore?.get('artifacts') ?? null;

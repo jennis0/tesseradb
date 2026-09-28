@@ -177,7 +177,8 @@ describe('<tessera-explorer> layouts', () => {
     store.set('filters', {...store.get('filters'), draft: {archive: {family: 'category', keys: ['cs'], verb: 'filter'}}});
     await settle(host);
     const toggle = shadow.querySelector<HTMLButtonElement>('[part="filters-toggle"]')!;
-    expect(toggle.textContent).toContain('1');
+    expect(toggle.getAttribute('data-count')).toBe('1');
+    expect(shadow.getElementById(toggle.getAttribute('aria-controls')!)).not.toBeNull();
     // The chips show with the controls closed.
     expect(deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"]')).toHaveLength(1);
     toggle.click();
@@ -205,9 +206,21 @@ describe('<tessera-explorer> layouts', () => {
     box.checked = true;
     box.dispatchEvent(new Event('change', {bubbles: true}));
     expect(seen).toEqual([{layers: ['clusters']}]);
-    toggle.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
+    toggle.focus();
+    box.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
     await settle(host);
     expect(shadow.querySelector('[part="layers-popover"]')).toBeNull();
+    expect(shadow.activeElement).toBe(toggle);
+    // A press anywhere else on the page closes it too, and a press inside it does not.
+    toggle.click();
+    await settle(host);
+    shadow.querySelector('[part="layers-popover"]')!.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, composed: true}));
+    await settle(host);
+    expect(shadow.querySelector('[part="layers-popover"]')).not.toBeNull();
+    document.body.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, composed: true}));
+    await settle(host);
+    expect(shadow.querySelector('[part="layers-popover"]')).toBeNull();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('marks the Layers button while any layer is drawn', async () => {

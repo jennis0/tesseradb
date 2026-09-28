@@ -6,7 +6,7 @@ import '../src/item-card.js';
 import '../src/map.js';
 import '../src/explorer.js';
 import type {TesseraItemCard} from '../src/item-card.js';
-import {deep, deepAll, fakeStore, mount, settle, status, type FakeStore, meta, scalar} from './fake-store.js';
+import {deep, deepAll, deepText, fakeStore, mount, settle, status, type FakeStore, meta, scalar} from './fake-store.js';
 
 /**
  * What the two view pickers, the map and the item card draw and call, against the fake store. The
@@ -290,12 +290,12 @@ describe('<tessera-item-card> and the views it reaches', () => {
     return {host, el, store};
   }
 
-  it('draws a chip per reachable view, the current one marked, and the satisfied labels', async () => {
+  it('draws a chip per reachable view, the current one marked, and none for the viewer’s access labels', async () => {
     const {host} = await card();
     const chips = deepAll(host, '[part="view-chip"]');
     expect(chips.map((c) => c.textContent?.trim())).toEqual(['knn', 'pca64']);
     expect(chips.map((c) => c.getAttribute('aria-current'))).toEqual(['true', 'false']);
-    expect(deepAll(host, '[part="label-chip"]').map((c) => c.textContent?.trim())).toEqual(['quant-ph', '2024']);
+    expect(deepText(host)).not.toContain('quant-ph');
   });
 
   it('follows an item into another view, with the position dequantised under that view’s frame', async () => {

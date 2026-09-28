@@ -1068,6 +1068,35 @@ describe('the token', () => {
     expect(await store.describe(7n)).toEqual({asked: 't2'});
   });
 
+  it('drops the view’s counts the moment the token changes, and counts again under the new one', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewport} = fakeClient(() => response('ck'));
+    let issued = 0;
+    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    expect(store.get('view').matched.value).toBeGreaterThan(0);
+    // Every view published after the second token is issued, with the token it came under.
+    const after: {matched: number; exact: boolean}[] = [];
+    store.subscribe('view', (v) => {
+      if (authorise.mock.calls.length >= 2) after.push({matched: v.matched.value, exact: v.matched.exact});
+    });
+    await clock.advance(30_000);
+    scheduler.flush();
+    await clock.advance(600);
+    scheduler.flush();
+    expect(authorise).toHaveBeenCalledTimes(2);
+    // The first publish under the new token carries no count from the old one.
+    expect(after[0]).toEqual({matched: 0, exact: false});
+    // The counts that return were asked for with the new token.
+    expect(viewport.mock.calls.at(-1)![0]).toBe('t2');
+    expect(store.get('view').matched.value).toBeGreaterThan(0);
+  });
+
   it('answers every verb called before the first token lands, from one supplier call', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();

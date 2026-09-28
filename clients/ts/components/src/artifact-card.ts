@@ -97,7 +97,6 @@ export class TesseraArtifactCard extends TesseraElement {
         font-size: 12px;
         color: var(--_tessera-ink-2);
       }
-
       .children-label {
         margin: 12px 0 4px;
       }

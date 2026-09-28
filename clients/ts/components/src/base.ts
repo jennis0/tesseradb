@@ -224,9 +224,20 @@ export function keyTitle(store: Store | null, column: string, key: string): stri
 }
 
 const DATE = new Intl.DateTimeFormat('en-GB', {day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC'});
+const pad = (n: number) => String(n).padStart(2, '0');
 
-/** A `timestamp_us` value as a date, such as `14 March 2024`, in UTC. */
+/**
+ * A `timestamp_us` value in full, readably and in UTC: `14 March 2024, 12:00 UTC`, with seconds
+ * where they are not zero. Fractions of a second are left out.
+ */
 export function timestampText(value: number | bigint): string {
+  const d = new Date(Number(value) / 1000);
+  const seconds = d.getUTCSeconds();
+  return `${DATE.format(d)}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}${seconds ? `:${pad(seconds)}` : ''} UTC`;
+}
+
+/** A `timestamp_us` value as its UTC date alone, such as `14 March 2024`, where room is short. */
+export function dateText(value: number | bigint): string {
   return DATE.format(new Date(Number(value) / 1000));
 }
 

@@ -9,9 +9,9 @@ import {chrome, tokens} from './tokens.js';
 
 /**
  * A select over the views the viewer may reach, one entry per plain view and one per view group,
- * in `/v1/meta`'s order, drawn as the current view's title with a chevron. Choosing a group enters it under the current view's key where the two
- * groups share keys, else at the key this element last left it on, else at its first view. Renders
- * nothing where the bundle offers one entry.
+ * in `/v1/meta`'s order, drawn as the current view's title with a chevron. Choosing a group enters
+ * it under the current view's key where the two groups share keys, else at the key this element
+ * last left it on, else at its first view. Renders nothing where the bundle offers one entry.
  *
  * @summary Chooses the view.
  * @tagname tessera-view-picker

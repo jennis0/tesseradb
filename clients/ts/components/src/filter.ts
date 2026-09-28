@@ -12,7 +12,7 @@ import {
   type SuggestValue,
   type TextMode
 } from '@tesseradb/client';
-import {TesseraElement, columnCaption, emit, keyTitle} from './base.js';
+import {TesseraElement, columnCaption, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
@@ -47,8 +47,6 @@ const TYPING_DEBOUNCE_MS = 350;
  * @csspart label - The column's name, as a caption.
  * @csspart entry - A text, number or date input.
  * @csspart mode - The text column's word toggle, or the keyword column's operator select.
- * @csspart value-chips - The chosen category values.
- * @csspart value-chip - One chosen category value, with a remove button.
  * @csspart values - The checklist, or the typeahead's suggestions.
  * @csspart tick - One value in the checklist or the suggestions.
  * @csspart more - The hint that more values match than one page holds.
@@ -79,12 +77,6 @@ export class TesseraFilter extends TesseraElement {
         min-width: 0;
       }
       .seg {
-        margin-top: 6px;
-      }
-      [part='value-chips'] {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px;
         margin-top: 6px;
       }
       [part='values'] {
@@ -156,13 +148,6 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor draft: ColumnDraft | null = null;
   /** @internal */
   @state() accessor search = '';
-  /**
-   * The title seen for each chosen key when it was picked, so its chip keeps a name after the value
-   * leaves the suggestion page. A key with no recorded title shows as the key.
-   *
-   * @internal
-   */
-  @state() accessor labels: Record<string, string> = {};
   /**
    * Which category shape this control draws: `null` until the empty-`q` page answers, then
    * `'checklist'` if it said `more: false` (every visible value fits) or `'lookahead'` if not.
@@ -268,7 +253,6 @@ export class TesseraFilter extends TesseraElement {
     else this.typing = setTimeout(apply, TYPING_DEBOUNCE_MS);
   }
 
-
   override render(): TemplateResult | typeof nothing {
     const o = this.resolvedOperand;
     if (!o) return nothing;
@@ -352,29 +336,16 @@ export class TesseraFilter extends TesseraElement {
     const chosen = new Set(draft.keys);
 
     const pick = (v: SuggestValue) => {
-      if (v.title) this.labels = {...this.labels, [v.key]: v.title};
       this.change(chosen.has(v.key) ? {...draft, keys: draft.keys.filter((k) => k !== v.key)} : {...draft, keys: [...draft.keys, v.key]}, true);
     };
-    const remove = (key: string) => this.change({...draft, keys: draft.keys.filter((k) => k !== key)}, true);
-
-    const chips =
-      draft.keys.length > 0
-        ? html`<div part="value-chips">
-            ${repeat(
-              draft.keys,
-              (k) => k,
-              (k) => html`<span part="value-chip" class="chip" title=${k}>${this.labels[k] ?? keyTitle(this.resolvedStore, this.column, k)}<button type="button" aria-label=${`Remove ${k}`} @click=${() => remove(k)}>${icon('close', 12)}</button></span>`
-            )}
-          </div>`
-        : nothing;
-
     // The checklist: every visible value is on the page, so a checkbox per value and no search
-    // box. It uses the same `pick` and `chips` as the lookahead, so the draft sent is the same.
+    // box. It uses the same `pick` as the lookahead, so the draft sent is the same. The chosen
+    // values show as ticks here and as the filter panel's chip.
     if (this.shape === 'checklist') {
       const rows = suggestion?.values ?? [];
       // A checklist does not re-ask, so a refusal here is unexpected; it is shown if it happens.
       const refusalNote = refusal ? html`<span part="refusal" data-code=${refusal.code}><span class="dot refuse"></span>Values unavailable</span>` : nothing;
-      return html`${chips}<div part="values" class="list" role="group" aria-labelledby="ctl-label">
+      return html`<div part="values" class="list" role="group" aria-labelledby="ctl-label">
         ${repeat(
           rows,
           (v) => v.code,
@@ -426,7 +397,7 @@ export class TesseraFilter extends TesseraElement {
           ? html`<span part="more">Type to narrow the list</span>`
           : nothing;
 
-    return html`${field}${chips}${list}${note}`;
+    return html`${field}${list}${note}`;
   }
 
   private numeric(draft: {family: 'numeric'; gte: number | null; lte: number | null}) {

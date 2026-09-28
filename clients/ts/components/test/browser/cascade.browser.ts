@@ -124,3 +124,35 @@ describe('the explorer by the width of its container', () => {
     expect(await layout(compact)).toEqual({sidebar: false, panel: true, corner: 'bottom-left', compact: true});
   });
 });
+
+describe('the explorer’s sections', () => {
+  it('show one heading when open: the summary, not the panel’s own title as well', async () => {
+    const p = await page('<div style="width: 1300px; height: 700px"><tessera-explorer layout="docked"></tessera-explorer></div>');
+    const seen = await p.evaluate(async () => {
+      const root = document.querySelector('tessera-explorer')!.shadowRoot!;
+      const section = root.querySelector('details')!;
+      section.open = true;
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const inner = [...section.querySelectorAll('tessera-artifact-list, tessera-hierarchy')].map((e) => e.shadowRoot!.querySelector('[part="title"]'));
+      return {summary: section.querySelector('summary')!.checkVisibility(), titles: inner.filter((t) => t?.checkVisibility()).length, panels: inner.length};
+    });
+    expect(seen).toEqual({summary: true, titles: 0, panels: 1});
+  });
+});
+
+describe('the map’s toolbar in a bottom corner', () => {
+  it('sits against the bottom edge of the map, on its side', async () => {
+    const p = await page('<tessera-map controls-corner="bottom-left" style="--tessera-map-height: 400px; width: 600px"></tessera-map><tessera-map controls-corner="bottom-right" style="--tessera-map-height: 400px; width: 600px"></tessera-map>');
+    const at = await p.evaluate(() =>
+      [...document.querySelectorAll('tessera-map')].map((m) => {
+        const map = m.getBoundingClientRect();
+        const bar = m.shadowRoot!.querySelector('[part="controls"]')!.getBoundingClientRect();
+        return {bottom: map.bottom - bar.bottom < 40, left: bar.left - map.left < 40, right: map.right - bar.right < 40};
+      })
+    );
+    expect(at).toEqual([
+      {bottom: true, left: true, right: false},
+      {bottom: true, left: false, right: true}
+    ]);
+  });
+});

@@ -14,20 +14,13 @@ const PATHS = {
   filter: {box: 24, body: svg`<path d="M4 5h16l-6 7v6l-4 2v-8z"/>`},
   /** A frame around a dashed hole, for the complement of a set: everything outside it. */
   outside: {box: 24, body: svg`<rect x="3.5" y="3.5" width="17" height="17" rx="2"/><circle cx="12" cy="12" r="4.5" stroke-dasharray="2.2 2.2"/>`},
-  refresh: {box: 16, body: svg`<path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/>`},
   close: {box: 24, body: svg`<path d="M6 6l12 12M18 6L6 18"/>`},
   search: {box: 24, body: svg`<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>`},
   chev: {box: 24, body: svg`<path d="M6 9l6 6 6-6"/>`},
   chevr: {box: 24, body: svg`<path d="M9 6l6 6-6 6"/>`},
-  plus: {box: 24, body: svg`<path d="M12 5v14M5 12h14"/>`},
   info: {box: 16, body: svg`<circle cx="8" cy="8" r="6"/><path d="M8 7v4M8 5v.5"/>`},
-  warn: {box: 16, body: svg`<path d="M8 2l6.5 11.5h-13L8 2z"/><path d="M8 6.5v3M8 11.5v.5"/>`},
-  check: {box: 16, body: svg`<path d="M3 8.5l3 3 7-7"/>`},
   open: {box: 16, body: svg`<path d="M9 3h4v4M13 3l-6 6M7 3H3v10h10V9"/>`},
   list: {box: 16, body: svg`<path d="M5 4h9M5 8h9M5 12h9M2 4h.5M2 8h.5M2 12h.5"/>`},
-  clock: {box: 16, body: svg`<circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/>`},
-  lock: {box: 16, body: svg`<rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/>`},
-  menu: {box: 16, body: svg`<path d="M2 4h12M2 8h12M2 12h12"/>`},
   /** A marker pen over a ruled line, for the highlight verb. */
   highlight: {box: 16, body: svg`<path d="M4.5 10.5l5.5-5.5 2.5 2.5-5.5 5.5H4.5v-2.5z"/><path d="M2.5 14.5h11"/>`}
 };

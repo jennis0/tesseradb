@@ -3,18 +3,21 @@ import {property, state} from 'lit/decorators.js';
 import {CLUSTER_PREFIX, colourLayers, type Rgba} from '@tesseradb/client';
 import {NEUTRAL} from '@tesseradb/client/internal';
 import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck/internal';
-import {TesseraElement, UNNAMED, columnCaption, emit, timestampText} from './base.js';
+import {TesseraElement, UNNAMED, columnCaption, dateText, emit} from './base.js';
 import {icon} from './icons.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
+/** The entries shown where `limit` is 0, as many as a card can hold. */
+const ENTRIES_SHOWN = 40;
+
 /**
  * What the colours mean, under a "Colour" heading. For a category column, the values the marks on
  * screen carry, by title, in their colours; for a numeric column, a ramp over the range of the
  * marks served, with its minimum and maximum; under colour by cluster, the served artifacts in
- * their colours. Entries sit in two columns. `limit` shows the first entries and an "N more"
- * button that shows the rest.
+ * their colours. Entries sit in two columns. The first `limit` entries show, 40 where `limit` is
+ * 0, with an "N more" button that shows the rest until the colouring changes.
  *
  * `selectable` puts the *Colour by* choice in the heading, drawn as text with a chevron. It offers
  * the rendered columns and every layer that can colour, drawn or not; colouring by a layer does not
@@ -37,7 +40,7 @@ import {chrome, tokens} from './tokens.js';
  * @csspart level-select - The Level select.
  * @csspart swatches - The list of colours.
  * @csspart swatch - One colour.
- * @csspart more - The "N more" button, under `limit`.
+ * @csspart more - The "N more" button, where there are more entries than show.
  * @csspart ramp - A numeric column's ramp.
  * @csspart label - The ramp's `min` and `max` captions.
  * @csspart value - The ramp's minimum and maximum.
@@ -111,10 +114,21 @@ export class TesseraLegend extends TesseraElement {
   @property({type: Boolean}) accessor selectable = false;
   /** Under `selectable`, also renders the swatches or the ramp below the heading. */
   @property({type: Boolean}) accessor readout = false;
-  /** How many entries show before "N more" offers the rest; 0 shows every entry. */
+  /** How many entries show before "N more" offers the rest; 0 shows the first 40. */
   @property({type: Number}) accessor limit = 0;
-  /** Whether "N more" was pressed. @internal */
+  /** Whether "N more" was pressed, for the colouring it was pressed under. @internal */
   @state() accessor expanded = false;
+  private expandedFor: string | null = null;
+
+  protected override onStoreChange(): void {
+    // A new colouring is a new list, which starts cut again.
+    const colourBy = this.resolvedStore?.get('legend').colourBy ?? null;
+    if (colourBy !== this.expandedFor) {
+      this.expandedFor = colourBy;
+      this.expanded = false;
+    }
+    super.onStoreChange();
+  }
 
   private choose(value: string): void {
     const s = this.resolvedStore;
@@ -218,7 +232,7 @@ export class TesseraLegend extends TesseraElement {
     if (!domain) return wrap(html`<span part="state" data-state="empty">Nothing in view</span>`);
     const stops = Array.from({length: 12}, (_, i) => rgb(colourOfFraction(i / 11))).join(', ');
     const fmt = (n: number) => {
-      if (column.arrowType === 'timestamp_us') return timestampText(n);
+      if (column.arrowType === 'timestamp_us') return dateText(n);
       if (Math.abs(n) >= 1e6 || (n !== 0 && Math.abs(n) < 1e-3)) return n.toExponential(2);
       return n.toLocaleString('en-GB');
     };
@@ -227,12 +241,13 @@ export class TesseraLegend extends TesseraElement {
       <div class="kv sm"><span part="label">Lowest</span><span part="value" class="v">${fmt(domain.min)}</span><span part="label">Highest</span><span part="value" class="v">${fmt(domain.max)}</span></div>`);
   }
 
-  /** The entries in two columns, the first `limit` of them until "N more" is pressed. */
+  /** The entries in two columns, the first of them until "N more" is pressed. */
   private swatches(entries: TemplateResult[]): TemplateResult {
-    const cut = this.limit > 0 && !this.expanded && entries.length > this.limit;
-    const shown = cut ? entries.slice(0, this.limit) : entries;
+    const first = this.limit > 0 ? this.limit : ENTRIES_SHOWN;
+    const cut = !this.expanded && entries.length > first;
+    const shown = cut ? entries.slice(0, first) : entries;
     return html`<div part="swatches">${shown}</div>${cut
-      ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = true)}>${(entries.length - this.limit).toLocaleString('en-GB')} more</button>`
+      ? html`<button part="more" class="more-link" type="button" @click=${() => (this.expanded = true)}>${(entries.length - first).toLocaleString('en-GB')} more</button>`
       : nothing}`;
   }
 }

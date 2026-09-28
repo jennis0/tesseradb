@@ -179,10 +179,6 @@ export class TesseraHierarchy extends TesseraElement {
         gap: 8px;
         font-size: 12px;
       }
-      [part='lineage'] {
-        font-size: 11px;
-        color: var(--_tessera-ink-3);
-      }
     `
   ];
 

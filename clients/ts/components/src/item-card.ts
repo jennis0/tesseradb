@@ -2,17 +2,18 @@ import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import type {DeclaredScalar, ItemDetail, ItemViewPosition, Meta, Quantisation, Refusal} from '@tesseradb/client';
 import {GRID32} from '@tesseradb/client';
-import {TesseraElement, emit, idString, timestampText, type PickOutcome} from './base.js';
+import {TesseraElement, columnCaption, emit, idString, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {refusalText, renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * The selected item's record: a headline, the views and labels it is in, its fields as a label and
- * value grid, its group-scoped values, then Open and Copy id. Fields are listed by name in
+ * The selected item's record: a headline, the views it is in, its fields as a label and value
+ * grid, its group-scoped values, then Open and Copy id. Fields are listed by name in
  * declaration order, then any the schema does not declare; a field the record has no value for is
- * left out. A category field shows its key. A timestamp shows as a date, such as `14 March 2024`.
+ * left out. A declared field is captioned in words (`published_at` as "Published at"). A category
+ * field shows its key. A timestamp shows in full, as `14 March 2024, 12:00 UTC`.
  * The close button appears only while the card shows something: an item, a refusal or a click's
  * result.
  *
@@ -38,9 +39,8 @@ import {chrome, tokens} from './tokens.js';
  * @csspart headline - The headline, with `data-name` set to the field it shows.
  * @csspart view-chip - One view the item is in, with `data-view` and `aria-current` on the current
  *   view.
- * @csspart label-chip - One access label of the item that the viewer holds.
  * @csspart field - One field, with `data-name`, and `data-prose` on a value over 60 characters.
- * @csspart label - A field's name, and the headings above the view and label chips.
+ * @csspart label - A field's name, and the heading above the view chips.
  * @csspart value - A field's value.
  * @csspart scoped - The group-scoped values, grouped by key.
  * @csspart key - One key's heading among the group-scoped values, with `data-key`.
@@ -190,7 +190,6 @@ export class TesseraItemCard extends TesseraElement {
       )}
       <span part="state" data-state="shown"></span>
       ${this.views(item.detail.views, meta)}
-      ${this.labels(item.detail.labels)}
       <div class="field">
         ${rest.map((name) => this.field(name, fields[name], declared.find((c) => c.name === name)))}
         ${titleName
@@ -240,16 +239,6 @@ export class TesseraItemCard extends TesseraElement {
   }
 
   /**
-   * The item's labels this session satisfies, which is what the server serves, so the heading names
-   * the grants that admit the viewer. Empty draws nothing.
-   */
-  private labels(labels: string[]) {
-    if (labels.length === 0) return nothing;
-    return html`<span part="label" class="xs muted">Labels I hold</span>
-      <div class="chips">${labels.map((l) => html`<span part="label-chip" class="chip">${l}</span>`)}</div>`;
-  }
-
-  /**
    * The group-scoped attribute values, headed by key in the order served. Two views that share a
    * key through a `members` group share a heading.
    */
@@ -263,7 +252,7 @@ export class TesseraItemCard extends TesseraElement {
           <div class="field" data-key=${key}>
             ${Object.keys(scoped)
               .filter((family) => key in (scoped[family] ?? {}))
-              .map((family) => html`<div part="field" data-name=${family} data-key=${key} style="display:contents"><span part="label" class="k">${family}</span><span part="value" class="v">${present(scoped[family]![key], undefined)}</span></div>`)}
+              .map((family) => html`<div part="field" data-name=${family} data-key=${key} style="display:contents"><span part="label" class="k">${columnCaption(family)}</span><span part="value" class="v">${present(scoped[family]![key], undefined)}</span></div>`)}
           </div>`
       )}
     </div>`;
@@ -274,7 +263,7 @@ export class TesseraItemCard extends TesseraElement {
     const text = present(value, column);
     const prose = text.length > 60;
     return html`<div part="field" data-name=${name} ?data-prose=${prose} style=${prose ? nothing : 'display:contents'}>
-      <span part="label" class="k">${name}</span>
+      <span part="label" class="k">${column ? columnCaption(name) : name}</span>
       <slot name=${`field-${name}`}><span part="value" class="v" title=${prose ? text : nothing}>${text}</span></slot>
     </div>`;
   }

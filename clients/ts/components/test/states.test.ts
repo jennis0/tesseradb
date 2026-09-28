@@ -72,17 +72,32 @@ describe('<tessera-status> renders every state through part="state"', () => {
     });
   }
 
-  it('names the up-to-date state only in the dot’s accessible name, and the others on screen', async () => {
+  /**
+   * Counts outside `shown` are the last answer under the same token, greyed. A token change clears
+   * the view in the store, so a view with no answer must render no figure in any state.
+   */
+  it('renders no count from a view with no answer, in any state', async () => {
+    const empty = {...view, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, highlighted: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}};
+    for (const over of [{status: 'loading'}, {status: 'retrying'}, {status: 'refused', refusal: {code: 'x', detail: ''}}, {status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}, {status: 'shown'}] as const) {
+      const host = await mount('<tessera-status></tessera-status>');
+      (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status(over), view: empty});
+      await settle(host);
+      expect(deepAll(host, '[part="count"]').filter((c) => c.getAttribute('data-empty') === 'false'), over.status).toHaveLength(0);
+      host.remove();
+    }
+  });
+
+  it('names the up-to-date state through the dot’s accessible name, and no other state that way', async () => {
     const host = await mount('<tessera-status></tessera-status>');
     const el = host.querySelector('tessera-status') as TesseraStatus;
     const store = fakeStore({status: status({}), view});
     el.store = store;
     await settle(host);
     expect(deep(host, '[part="state"] [role="img"]')?.getAttribute('aria-label')).toBeTruthy();
-    expect(deep(host, '[part="state"]')!.textContent!.trim()).toBe('');
     store.set('status', status({status: 'retrying'}));
     await settle(host);
-    expect(deep(host, '[part="state"]')!.textContent!.trim()).not.toBe('');
+    expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('retrying');
+    expect(deep(host, '[part="state"] [role="img"]')).toBeNull();
   });
 
   it('shows the matched count out of the visible count, then the shown count', async () => {

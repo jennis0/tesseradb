@@ -15,7 +15,8 @@
 //
 // The claims:
 //   1. no count renders before the first answer, sampled from the first paint through loading;
-//      after it, a state other than `shown` greys the last counts out;
+//      after it, a state other than `shown` greys out the last counts answered under the same
+//      token, and a new token starts with none (claim 6 checks the switch of principal);
 //   2. both figures render or neither: the strip's shown cell renders its figure only with its
 //      total beside it (`data-total`), or nothing;
 //   3. a refusal renders as one: the viewport route is refused under the page, and the strip
@@ -24,7 +25,8 @@
 //      response is given a new content key, and the strip goes stale;
 //   5. a region's count renders as inexact when its cell exceeds a pixel: a box at the overview,
 //      counted in the `tiles` form at a bounded depth, reads `≈`;
-//   6. a switch of principal empties every card;
+//   6. a switch of principal empties every card, and the strip shows no count until the new
+//      principal's first answer;
 //   7. a different principal reports a different picture;
 //   8. an artifact's count does not change across a pan, though the served set may;
 //   9. every ordinal the marks on screen carry, under colour by cluster, resolves through the

@@ -22,7 +22,7 @@ import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {buildColourAttribute, type Encoding} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
 import {WASH_HUE, binDensity, filterDensity} from './density.js';
-import {LABEL_LINE_HEIGHT, LABEL_SIZE, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
+import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {LookupTexture} from './lut.js';
 import {MarksLayer, type HighlightPass} from './marks-layer.js';
 import {deckOpacity, markStyle} from './marks-style.js';
@@ -198,7 +198,7 @@ const INK: Record<'light' | 'dark', [number, number, number]> = {light: [27, 29,
 /** The label halo per ground: the map's default background, nearly opaque. */
 const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [246, 246, 244, 235], dark: [17, 19, 23, 235]};
 /**
- * The halo's width as a fraction of the em: 2 px on a 14 px name. The distance field's reach
+ * The halo's width as a fraction of the em: 2 px on a 14 px name, the middle of the size band. The distance field's reach
  * ({@link HALO_RADIUS}) bounds the width it can draw; asking for more fills each glyph's cell as a
  * rectangle. 0.14 em is half the reach.
  */
@@ -551,8 +551,8 @@ export function frontier(a: ArtifactsProjection, level: number | undefined): Set
 /**
  * The label candidates for a served set at `zoom`: the top `budget` frontier artifacts by masked
  * count that have text to draw, each with its name, count, topic and pixel box. An artifact with
- * no text and no attached topic gets no label; its key is an identifier, not a name. Every name is
- * {@link LABEL_SIZE}; the count sets its priority in placement.
+ * no text and no attached topic gets no label; its key is an identifier, not a name. Name size
+ * comes from {@link labelSize} over the candidates' counts.
  *
  * Only the anchor depends on the zoom, so the list is built once per served set, level and budget,
  * and each zoom bucket scales the anchors into a copy.
@@ -581,11 +581,18 @@ function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: numbe
     .filter((x) => hasText(x) || topicOf.has(x.tesseraId))
     .sort((x, y) => Number(y.maskedCount - x.maskedCount))
     .slice(0, Math.max(0, budget));
+  let smallest = Number.POSITIVE_INFINITY;
+  let largest = 0;
+  for (const x of named) {
+    const count = Number(x.maskedCount);
+    if (count < smallest) smallest = count;
+    if (count > largest) largest = count;
+  }
   const candidates: LabelCandidate[] = [];
   const byId = new Map<bigint, LabelText>();
   for (const artifact of named) {
     const count = Number(artifact.maskedCount);
-    const size = LABEL_SIZE;
+    const size = labelSize(count, smallest, largest);
     const attached = topicOf.get(artifact.tesseraId) ?? null;
     // An artifact with no text takes its topic as the name; one with both draws the topic beneath.
     const name = artifactName(artifact) ?? attached!;

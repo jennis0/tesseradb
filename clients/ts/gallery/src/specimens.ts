@@ -590,12 +590,13 @@ function explorerSpecimens(): Specimen[] {
     {state: 'overlay, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 900), ready},
     {state: 'compact container, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 560), ready},
     {
-      state: 'overlay, a topic opened, the filters and the layers open',
+      state: 'overlay, a topic opened, the filters, the sections and the layers open',
       wide: true,
       build: (ctx) => explorer(full(ctx, {selection: {item: null, itemRefusal: null, artifact: {id: TOPIC(1).tesseraId, detail: detail(TOPIC(1))}, artifactRefusal: null}}), {layout: 'overlay'}),
       ready: async (el) => {
         await ready(el);
         shadow(el, '[part="filters-toggle"]')?.click();
+        for (const section of el.shadowRoot?.querySelectorAll('details') ?? []) section.open = true;
         shadow(el, '[part="layers-toggle"]')?.click();
         await until(() => !!shadow(el, '[part="layers-popover"]'), 'the layers popover');
         await settle(el.parentElement!);
