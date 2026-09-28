@@ -101,7 +101,7 @@ impl<'a> FileRead<'a> {
         match self.kept_groups() {
             None => 0,
             Some(kept) => kept.iter().fold(self.groups.rows(), |left, &group| {
-                left - self.groups.group_rows(group) as u64
+                left - self.groups.group_rows(group)
             }),
         }
     }
