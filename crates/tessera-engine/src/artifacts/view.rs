@@ -587,6 +587,7 @@ mod tests {
                 parents: vec![Vec::new()],
                 declared: vec![Vec::new()],
                 access: Vec::new(),
+                attached_by: Default::default(),
             },
             MembershipRows {
                 rows: vec![Some(Arc::new(Bitmap::of(members)))],

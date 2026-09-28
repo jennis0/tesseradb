@@ -1306,7 +1306,7 @@ export function createStore(options: StoreOptions): Store {
       served,
       colourServed: coloured === null ? [] : state.artifacts.filter((a) => a.layer === coloured),
       lineage: servedLineage(served),
-      attached: attachedTextOf(state.artifacts, meta?.layers.map((l) => l.name) ?? []),
+      attached: attachedTextOf(state.artifacts, meta?.layers ?? []),
       status: state.status,
       refusal: state.refusal,
       version: state.version,

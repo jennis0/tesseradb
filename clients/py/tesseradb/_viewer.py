@@ -1047,13 +1047,15 @@ class Viewer:
         - `level`: list only this level of a layered hierarchy.
         - `parent`: list the children of this annotation, by its `tessera_id`. Without it, and
           without `q`, the list is the top-level annotations.
-        - `q`: list the annotations whose key or first text starts with this, ignoring case.
-          It cannot be combined with `parent`.
+        - `q`: list the annotations whose key or name contains this, ignoring case. It cannot
+          be combined with `parent`.
         - `filters`: a filter expression. Each row then also has `matched_count`.
         - `limit`: the most rows on the page.
         - `cursor`: the `next` value of the previous page, to get the page after it.
 
-        Each row has `masked_count`, the number of the annotation's items this reader may see.
+        Each row has `masked_count`, the number of the annotation's items this reader may see,
+        and `name` where it has one: its own first text, or else the text of a label attached to
+        it that this reader may see, such as a cluster's topic.
 
             page = v.browse_artifacts("papers", "clusters")
             more = v.browse_artifacts("papers", "clusters", cursor=page["next"])
