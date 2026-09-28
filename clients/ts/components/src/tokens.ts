@@ -321,7 +321,7 @@ export const chrome = css`
     height: 20px;
     padding: 2px;
     border-radius: 10px;
-    background: var(--_tessera-surface-3);
+    background: color-mix(in srgb, var(--_tessera-ink-3) 35%, var(--_tessera-surface));
     display: flex;
     justify-content: flex-start;
     flex: none;

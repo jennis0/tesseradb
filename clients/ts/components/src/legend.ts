@@ -314,7 +314,6 @@ export class TesseraLegend extends TesseraElement {
         right: 0;
       }
       [part='range-value'] {
-        transform: translateX(-50%);
         color: var(--_tessera-ink);
         font-weight: 500;
       }
@@ -789,6 +788,9 @@ export class TesseraLegend extends TesseraElement {
     const low = range?.low ?? 0;
     const high = range?.high ?? 1;
     const pct = (t: number) => `${(t * 100).toFixed(2)}%`;
+    // A label under a handle slides from left-aligned at the ramp's start to right-aligned at its
+    // end, so it stays on the card.
+    const slide = (t: number) => `left:${pct(t)};transform:translateX(-${pct(t)})`;
     const caption = columnCaption(column.name);
     const commit = (lo: number, hi: number) => this.applyRange(column, valueAt(lo), valueAt(hi));
     const key = (end: 'low' | 'high') => (e: KeyboardEvent) => {
@@ -805,7 +807,7 @@ export class TesseraLegend extends TesseraElement {
     const lowAt = valueText(low);
     const highAt = valueText(high);
     const labels = range
-      ? html`<span part="range-value" style=${`left:${pct(low)}`}>${fmt(valueAt(low))}</span><span part="range-value" style=${`left:${pct(high)}`}>${fmt(valueAt(high))}</span>`
+      ? html`<span part="range-value" style=${slide(low)}>${fmt(valueAt(low))}</span><span part="range-value" style=${slide(high)}>${fmt(valueAt(high))}</span>`
       : nothing;
     return html`<div class=${`track${filterable ? ' filterable' : ''}`} @pointerdown=${filterable ? (e: PointerEvent) => this.dragStart(e, low, high) : nothing}
         @pointermove=${filterable ? (e: PointerEvent) => this.dragMove(e) : nothing} @pointerup=${filterable ? (e: PointerEvent) => this.dragEnd(e, commit) : nothing}

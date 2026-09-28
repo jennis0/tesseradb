@@ -416,10 +416,12 @@ const countsAfter = await listCounts();
 
 // ---- 9: a coloured point's ordinal resolves to a served artifact ---------------------------------
 
-const legendSelect = page.locator('tessera-legend select').first();
-const clusterOption = await legendSelect.locator('option[part="cluster-option"]').first().getAttribute('value').catch(() => null);
+await page.locator('tessera-legend [part="colour-by"]').first().click().catch(() => null);
+const clusterEntry = page.locator('tessera-legend [part="option"][data-kind="layer"]').first();
+const clusterOption = await clusterEntry.getAttribute('data-value', {timeout: 5_000}).catch(() => null);
 const refillStarted = Date.now();
-if (clusterOption) await legendSelect.selectOption(clusterOption);
+if (clusterOption) await clusterEntry.click();
+await page.keyboard.press('Escape');
 await settled();
 await page.waitForTimeout(800);
 {

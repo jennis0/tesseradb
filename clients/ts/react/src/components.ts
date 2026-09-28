@@ -88,9 +88,10 @@ export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreEleme
  * `<tessera-explorer>` as a React component. It has a handler prop for every event, since the
  * elements inside it emit them and each event bubbles out of it: `onPick`, `onHover`,
  * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactSelect`,
- * `onArtifactFit`, `onColourChange`, `onLevelChange`, `onFilterChange`, `onStateChange`,
- * `onExpired`, `onOpen`, `onClose`, `onClauseChange`, `onViewSwitch` and `onViewFollow`, each for
- * the `tessera-` event of the same name in lower case.
+ * `onArtifactFit`, `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`,
+ * `onDisplayChange`, `onFilterChange`, `onStateChange`, `onExpired`, `onOpen`, `onClose`,
+ * `onClauseChange`, `onViewSwitch` and `onViewFollow`, each for the `tessera-` event of the same
+ * name in lower case.
  */
 export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', ExplorerElement, {
   ...mapEvents,
@@ -98,6 +99,9 @@ export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', Expl
   onArtifactFit: ev('tessera-artifactfit'),
   onColourChange: ev('tessera-colourchange'),
   onLevelChange: ev('tessera-levelchange'),
+  onValueColour: ev('tessera-valuecolour'),
+  onPaletteChange: ev('tessera-palettechange'),
+  onDisplayChange: ev('tessera-displaychange'),
   onFilterChange: ev('tessera-filterchange'),
   onStateChange: ev('tessera-statechange'),
   onExpired: ev('tessera-expired'),
@@ -152,12 +156,15 @@ export const TesseraArtifactCard = wrap('tessera-artifact-card', ArtifactCardEle
 });
 /**
  * `<tessera-legend>` as a React component. Event props: `onColourChange` (`tessera-colourchange`),
- * `onLevelChange` (`tessera-levelchange`) and `onLayerChange` (`tessera-layerchange`).
+ * `onLevelChange` (`tessera-levelchange`), `onValueColour` (`tessera-valuecolour`),
+ * `onPaletteChange` (`tessera-palettechange`) and `onFilterChange` (`tessera-filterchange`).
  */
 export const TesseraLegend = wrap('tessera-legend', LegendElement, {
   onColourChange: ev('tessera-colourchange'),
   onLevelChange: ev('tessera-levelchange'),
-  onLayerChange: ev('tessera-layerchange')
+  onValueColour: ev('tessera-valuecolour'),
+  onPaletteChange: ev('tessera-palettechange'),
+  onFilterChange: ev('tessera-filterchange')
 });
 /**
  * `<tessera-hierarchy>` as a React component. Event props: `onClauseChange` (`tessera-clausechange`)

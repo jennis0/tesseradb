@@ -6,7 +6,7 @@ import {TesseraStatus} from '../src/status.js';
 import {TesseraCount} from '../src/count.js';
 import {defineOnce} from '../src/define.js';
 import {emit} from '../src/base.js';
-import {fakeStore, mount, settle, status} from './fake-store.js';
+import {deep, fakeStore, meta, mount, settle, status} from './fake-store.js';
 
 /**
  * Store precedence (property, context, own, detached), an own store that follows its attributes,
@@ -339,5 +339,38 @@ describe('<tessera-map> defaults', () => {
     const el = asked.firstElementChild as unknown as Display;
     expect([el.density, el.noPoints]).toEqual(['hex', true]);
     asked.remove();
+  });
+});
+
+describe('<tessera-map> display', () => {
+  it('keys density’s colours while they encode counts, and not for the warm-grey wash under the points', async () => {
+    await import('../src/map.js');
+    const host = await mount('<tessera-map density="smooth"></tessera-map>');
+    const map = host.querySelector('tessera-map') as HTMLElement & {store: unknown; density: string; noPoints: boolean; densityColours: string};
+    map.store = fakeStore({meta: meta(), status: status({})});
+    await settle(host);
+    expect(deep(host, '[part="density-key"]')).toBeNull();
+    map.noPoints = true;
+    await settle(host);
+    expect(deep(host, '[part="density-key"]')).not.toBeNull();
+    map.noPoints = false;
+    map.densityColours = 'magma';
+    await settle(host);
+    expect(deep(host, '[part="density-key"]')).not.toBeNull();
+    map.density = 'contours';
+    await settle(host);
+    expect(deep(host, '[part="density-key"]')).toBeNull();
+  });
+
+  it('shares the palette and ramp a host sets with every element over its store', async () => {
+    await import('../src/map.js');
+    const {colouringOf} = await import('../src/colouring.js');
+    const host = await mount('<tessera-map category-palette="dark2" ramp="cividis" ramp-scale="log" ramp-reverse></tessera-map>');
+    const map = host.querySelector('tessera-map') as HTMLElement & {store: unknown};
+    const store = fakeStore({meta: meta(), status: status({})});
+    map.store = store;
+    await settle(host);
+    const {palette, ramp, scale, reverse} = colouringOf(store);
+    expect({palette, ramp, scale, reverse}).toEqual({palette: 'dark2', ramp: 'cividis', scale: 'log', reverse: true});
   });
 });
