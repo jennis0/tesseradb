@@ -31,9 +31,9 @@ const MODES: [ClauseVerb, string][] = [
  *
  * The switch sets `mode`, the position every control edits. The controls listed are the columns in
  * `pinned` and those holding a clause in either position, in `meta`'s order, and any the user has
- * opened. A listed column shows its `<tessera-filter>` while it holds a clause in the current
- * position or the user opened it, and otherwise a row reading "Any" that opens it. Add filter
- * lists the other filterable columns, with a search box, and opens the one chosen.
+ * opened or changed. A listed column shows its `<tessera-filter>` while it holds a clause in the
+ * current position or the user opened or changed it, and otherwise a row reading "Any" that opens
+ * it. Add filter lists the other filterable columns, with a search box, and opens the one chosen.
  *
  * Pressing a column's chip sets `mode` to the chip's position and opens, scrolls to and focuses
  * the column's control; under `chips-only`, where there are no controls, it fires
@@ -308,6 +308,10 @@ export class TesseraFilterPanel extends TesseraElement {
     this.mode = verb;
   }
 
+  private keepOpen(column: string): void {
+    if (!this.opened.has(column)) this.opened = new Set([...this.opened, column]);
+  }
+
   private add(column: string): void {
     this.adding = false;
     this.addSearch = '';
@@ -336,7 +340,7 @@ export class TesseraFilterPanel extends TesseraElement {
             ${chips.map(
               ({c, verb, d}) => html`<span part="chip" class="chip" data-verb=${verb} data-column=${c}
                 ><button part="edit" class="edit" type="button" title=${`Edit the ${verb}`} @click=${() => this.edit(c, verb)}>${this.mark(verb)}${this.chipText(c, d)}</button
-                ><button type="button" aria-label=${`Remove ${c} ${verb}`} @click=${() => this.clearColumn(c, verb)}>${icon('close', 12)}</button></span
+                ><button type="button" aria-label=${`Remove the ${columnCaption(c)} ${verb}`} @click=${() => this.clearColumn(c, verb)}>${icon('close', 12)}</button></span
               >`
             )}
             ${members.map(
@@ -366,7 +370,8 @@ export class TesseraFilterPanel extends TesseraElement {
     </div></div>`;
     const field = (column: string) => {
       const open = holds(column, this.mode) || this.opened.has(column);
-      return html`<div part="field" data-column=${column} ?data-open=${open}>
+      // A control the user has changed stays open, even as its clause empties under them.
+      return html`<div part="field" data-column=${column} ?data-open=${open} @tessera-filterchange=${() => this.keepOpen(column)}>
         ${open
           ? html`<tessera-filter exportparts=${FILTER_PARTS} column=${column} .verb=${this.mode} .store=${s}></tessera-filter>`
           : html`<button part="any" type="button" @click=${() => this.show(column, this.mode)}><span class="n">${columnCaption(column)}</span><span class="v">Any</span></button>`}

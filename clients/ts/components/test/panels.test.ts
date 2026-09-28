@@ -364,6 +364,19 @@ describe('<tessera-filter-panel>', () => {
     expect(deep(host, '[part="add-list"]')).toBeNull();
   });
 
+  it('keeps a field open while its clause is emptied under the user', async () => {
+    vi.useFakeTimers();
+    const draft: FilterDraft = {filter: {...none().filter, title: {family: 'text', query: 'graph', phrase: true}}, highlight: {}};
+    const {host, store, fields} = await mountPanel(draft);
+    expect(fields()).toEqual([['title', true]]);
+    await type(host, '');
+    await vi.runAllTimersAsync();
+    // The store publishes the emptied clause; the field the user is editing stays open.
+    store.set('filters', filtersOf(drafts(store).at(-1)!));
+    await settle(host);
+    expect(fields()).toEqual([['title', true]]);
+  });
+
   it('lists the pinned fields closed, as Any, and opens one when pressed', async () => {
     const {host, fields} = await mountPanel(none(), 'pinned="title archive"');
     // In meta's order, whatever order they were pinned in.
