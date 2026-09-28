@@ -740,8 +740,10 @@ struct LayerBlock {
     /// it has a shape or `polygon` content; and the shape's own fields: `min_x`, `min_y`, `max_x`
     /// and `max_y` for a `bbox`, `cx`, `cy` and `r` for a `circle`, `cx`, `cy`, `a`, `b` and
     /// `angle` for an `ellipse`, and `geometry`, as WKB, for a `polygon`. `level` and
-    /// `attached_level` are read under their own names. A field the layer does not declare, both
-    /// `members` and `excluding`, and `fields` beside `[[layer.artifacts]]` are refused.
+    /// `attached_level` are read under their own names. A `members` or `excluding` column is a list
+    /// of structs, each struct one member, with a field for each attribute declared `unique` that
+    /// names it, under the attribute's column. A field the layer does not declare, both `members`
+    /// and `excluding`, and `fields` beside `[[layer.artifacts]]` are refused.
     ///
     /// Default: not set.
     #[serde(default)]
@@ -1087,7 +1089,8 @@ struct MembersBlock {
     #[serde(default)]
     source: Option<String>,
     /// Where the members file keeps each field, as `field = "column"`: `key`, the artifact's key;
-    /// `entity`, the member's id; and `rank`, where the layer supplies content, the rank in
+    /// each attribute declared `unique`, under its own name, whose values name the member, such
+    /// as `fields = { id = "entity" }`; and `rank`, where the layer supplies content, the rank in
     /// `contents` whose content was made from this member.
     ///
     /// Default: not set.
@@ -2704,38 +2707,37 @@ impl Config {
     /// view owns everything downstream of the permutation and nothing upstream of it
     /// (`views.md` §1).
     pub fn acquire(&self) -> Result<Acquisition> {
-        // **Every declared column must have a file by now.** Declaring one with no source is
-        // legal (§2) and is the write-path deployment's normal state; a build that would have to
-        // read it is where the absence becomes a refusal, naming the columns rather than the block
-        // — which is what `[corpus]` could not do, there being one file for all of them.
-        let mut carried: Vec<usize> = self
-            .attribute_sources
-            .iter()
-            .flat_map(|s| s.attributes.iter().copied())
-            .collect();
-        carried.sort_unstable();
-        let unsourced: Vec<&str> = (0..self.schema.attributes.len())
-            .filter(|i| carried.binary_search(i).is_err())
-            .map(|i| self.schema.attributes[i].name.as_str())
-            .collect();
-        if !unsourced.is_empty() {
-            return Err(declaration_error(format!(
-                "{} attribute(s) name no `source` and `[defaults]` declares none: {}. The \
-                 attribute pass reads each column from the file its source names, so there is no \
-                 file for these to be read from. \
-                 Name a `[sources]` key on each, or write `[defaults]` with `source = \"<name>\"` \
-                 for every column that does not. ⊘ Declaring a column with no source is legal and \
-                 means the schema is declared and empty, which is a bundle with no rows in it (§2) \
-                 and is not built",
-                unsourced.len(),
-                names(unsourced.iter().copied())
-            )));
-        }
+        require_sources(&self.schema, &self.attribute_sources)?;
         Ok(Acquisition {
             attribute_sources: self.attribute_sources.clone(),
             layers: self.layer_sources.clone(),
         })
     }
+}
+
+/// Refuse a declared attribute no source reads, naming the columns. A unique attribute is the
+/// exception: its values come from every file that carries its column, so it needs no source of
+/// its own.
+pub fn require_sources(schema: &Schema, sources: &[AttributeSource]) -> Result<()> {
+    let mut carried: Vec<usize> = sources
+        .iter()
+        .flat_map(|s| s.attributes.iter().copied())
+        .collect();
+    carried.sort_unstable();
+    let unsourced: Vec<&str> = (0..schema.attributes.len())
+        .filter(|&i| !schema.attributes[i].unique && carried.binary_search(&i).is_err())
+        .map(|i| schema.attributes[i].name.as_str())
+        .collect();
+    if unsourced.is_empty() {
+        return Ok(());
+    }
+    Err(declaration_error(format!(
+        "{} attribute(s) name no `source` and `[defaults]` declares none: {}, so no file holds \
+         their values. Name a `[sources]` key on each, or write `[defaults]` with \
+         `source = \"<name>\"`",
+        unsourced.len(),
+        names(unsourced.iter().copied())
+    )))
 }
 
 /// One view's own inputs: its geometry source and where its points' labels come from.

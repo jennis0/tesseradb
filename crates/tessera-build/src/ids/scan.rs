@@ -25,6 +25,9 @@ pub(crate) struct FileRead<'a> {
     pub select: Option<&'a ViewSelector>,
     /// The limit's column in this file and the value its rows must be below.
     pub limit: Option<(&'a str, u64)>,
+    /// Whether the file's rows create items. A row of one that does not, with no value in the
+    /// limit's column, is read: it may name its item by another field.
+    pub creates: bool,
 }
 
 /// One decoded batch: consecutive rows of the file from `first`.
@@ -36,6 +39,9 @@ pub(crate) struct Scanned {
     pub selected: Option<Vec<bool>>,
     /// Each carried field's key at each row, in [`FileRead::carried`]'s order.
     pub keys: Vec<Vec<Option<UniqueKey>>>,
+    /// Whether each row names an item `--limit` left out: a value in the limit's column at or
+    /// above it, in a file whose rows do not create items. `None` where no row does.
+    pub outside: Option<Vec<bool>>,
     /// Whether each row carries a `tessera_id`, where the file has the column.
     pub tessera: Option<Vec<bool>>,
 }
@@ -47,6 +53,7 @@ impl<'a> FileRead<'a> {
         carried: &'a [CarriedField],
         select: Option<&'a ViewSelector>,
         limit: Option<&Limit>,
+        creates: bool,
     ) -> FileRead<'a> {
         FileRead {
             path,
@@ -55,6 +62,7 @@ impl<'a> FileRead<'a> {
             tessera: groups.schema().column_with_name(TESSERA_ID_COLUMN).is_some(),
             select,
             limit: limit.and_then(|limit| limit.column(carried).map(|c| (c, limit.below))),
+            creates,
         }
     }
 
@@ -64,15 +72,38 @@ impl<'a> FileRead<'a> {
     }
 
     /// The row groups that can hold a row of the read: those a `--limit` cannot rule out from the
-    /// column's own statistics.
+    /// column's own statistics. In a file whose rows do not create items, a group holding a null
+    /// there is kept, its null rows being read.
     pub(crate) fn kept_groups(&self) -> Option<Vec<usize>> {
         let (column, below) = self.limit?;
         let index = self.groups.schema().column_with_name(column)?.0;
-        Some(crate::input::prunable_row_groups(
-            self.groups.metadata(),
-            index,
-            Some(below),
-        ))
+        let meta = self.groups.metadata();
+        let kept = crate::input::prunable_row_groups(meta, index, Some(below));
+        Some(match self.creates {
+            true => kept,
+            false => (0..self.groups.count())
+                .filter(|group| {
+                    kept.binary_search(group).is_ok()
+                        || meta
+                            .row_group(*group)
+                            .column(index)
+                            .statistics()
+                            .and_then(|s| s.null_count_opt())
+                            .is_none_or(|nulls| nulls > 0)
+                })
+                .collect(),
+        })
+    }
+
+    /// How many rows of the groups [`Self::kept_groups`] leaves out: every one of them names an
+    /// item the limit left out, or would create one.
+    pub(crate) fn pruned_rows(&self) -> u64 {
+        match self.kept_groups() {
+            None => 0,
+            Some(kept) => kept.iter().fold(self.groups.rows(), |left, &group| {
+                left - self.groups.group_rows(group) as u64
+            }),
+        }
     }
 
     fn roots(&self) -> Result<Vec<usize>> {
@@ -120,6 +151,19 @@ impl<'a> FileRead<'a> {
         )
     }
 
+    /// [`Self::scan`], each batch in row order on this thread.
+    pub(crate) fn scan_ordered(&self, mut visit: impl FnMut(Scanned) -> Result<()>) -> Result<()> {
+        let groups = self
+            .kept_groups()
+            .unwrap_or_else(|| (0..self.groups.count()).collect());
+        let projection = self.groups.projection(&self.roots()?);
+        self.groups
+            .each_batch(self.path, &groups, &projection, |first, batch| {
+                visit(self.decode(first, &batch)?)?;
+                Ok(ControlFlow::Continue(()))
+            })
+    }
+
     fn decode(&self, first: u64, batch: &RecordBatch) -> Result<Scanned> {
         let len = batch.num_rows();
         let column = |name: &str| -> Result<&ArrayRef> {
@@ -140,11 +184,24 @@ impl<'a> FileRead<'a> {
         for field in self.carried {
             keys.push(keys_of(self.path, column(&field.column)?, field)?);
         }
+        let mut outside: Option<Vec<bool>> = None;
         if let Some((name, below)) = self.limit {
             let values = crate::input::id_values(self.path, column(name)?.as_ref(), name)?;
             let keep = selected.get_or_insert_with(|| vec![true; len]);
-            for (row, keep) in keep.iter_mut().enumerate() {
-                *keep &= !values.is_null(row) && values.value(row) < below;
+            let beyond = (0..len).map(|row| !values.is_null(row) && values.value(row) >= below);
+            match self.creates {
+                true => {
+                    for (row, keep) in keep.iter_mut().enumerate() {
+                        *keep &= !values.is_null(row) && values.value(row) < below;
+                    }
+                }
+                false => {
+                    let beyond: Vec<bool> = beyond.zip(keep.iter()).map(|(b, &k)| b && k).collect();
+                    for (keep, &beyond) in keep.iter_mut().zip(&beyond) {
+                        *keep &= !beyond;
+                    }
+                    outside = Some(beyond);
+                }
             }
         }
         let tessera = match self.tessera {
@@ -159,6 +216,7 @@ impl<'a> FileRead<'a> {
             len,
             selected,
             keys,
+            outside,
             tessera,
         })
     }

@@ -166,8 +166,8 @@ pub struct ViewArgs {
     /// (`views.md` §3.1's form B). `None` where the file *is* the view — every plain view, and
     /// every view of a form A group.
     ///
-    /// **Every pass over the file applies it**: the id union, the label vocabulary and its scan,
-    /// the geometry read, the frame survey and a group-scoped attribute's own column. A pass that
+    /// **Every pass over the file applies it**: the identity pass, the label vocabulary and its
+    /// scan, the geometry read, the frame survey and a group-scoped attribute's own column. A pass that
     /// forgot it would read another view's rows into this view's row space.
     pub select: Option<crate::config::ViewSelector>,
     /// Where each of this view's points gets its access terms, and what a point carrying none
@@ -250,8 +250,8 @@ pub struct BuildArgs {
     /// roster entry's `visibility` is a record of the declaration rather than a means of
     /// restricting reachability.
     pub groups: Vec<tessera_store::manifest::GroupDescriptor>,
-    /// The declared attributes **grouped by the file each is read from**, and the identity column
-    /// each group joins on (`configuration.md` §1's `[sources]` and `[defaults]`).
+    /// The declared attributes **grouped by the file each is read from**, with where that file
+    /// keeps the unique fields its rows name items by.
     ///
     /// **A group is a pass.** Each one is a merge sweep over its own file against this build's
     /// assigned ordinals, so a declaration whose columns sit in three files pays three passes and
@@ -339,8 +339,8 @@ pub struct BuildArgs {
     pub batch_items: Option<u64>,
     /// Peak-RSS budget in bytes for the build's own structures. `None` = detect from the
     /// machine (MemAvailable, damped). Drives batch and band sizing and the fail-closed
-    /// pre-flight; it cannot buy off the irreducible floors (the sorted source ids, the
-    /// entity-of-ordinal map, the per-term offsets), which the pre-flight states when refusing.
+    /// pre-flight; it cannot buy off the irreducible floors (the entity-of-ordinal map, the
+    /// per-term offsets), which the pre-flight states when refusing.
     pub memory_budget: Option<u64>,
     /// Override the derived postings band size, in pre-dedup rows. A tuning and **test** seam
     /// (a corpus small enough for a test cannot force multiple bands through the budget
@@ -922,7 +922,7 @@ pub(crate) struct AttributeScan<'a> {
 }
 
 /// Every sweep of the attribute join, in the order the rule read the files: each view's points,
-/// then each attribute file of its own.
+/// each attribute file of its own, then each view's rows of a group-scoped attribute's file.
 ///
 /// **A unique field is read from every file that carries it**, and not only from its own source:
 /// the rule took each such file's values as the item's, a later file's over an earlier's, so the
@@ -996,14 +996,32 @@ pub(crate) fn attribute_scans<'a>(
         });
         extra(&mut scans, &group.path, &group.fields, rows, &group.attributes)?;
     }
+    for (family_index, family) in args.scoped_attributes.iter().enumerate() {
+        let Some(source) = &family.source else {
+            continue;
+        };
+        for &view in &family.views {
+            let kind = ids::ReadKind::Scoped {
+                family: family_index,
+                view,
+            };
+            if let Some(rows) = numbering.of(kind) {
+                extra(&mut scans, &source.path, &source.fields, rows, &[])?;
+            }
+        }
+    }
     Ok(scans)
 }
 
 /// Write the rows the identity rule refused to `reports/refused.json` under the bundle, beside
-/// `disclosure.json`; a build that refused none writes nothing.
+/// `disclosure.json`. A build that refused none removes the file an earlier build left there.
 pub fn write_refused_report(out: &Path, refused: &[RefusedRows]) -> Result<()> {
+    let path = out.join("reports").join("refused.json");
     if refused.is_empty() {
-        return Ok(());
+        return match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(BuildError::io(&path, e)),
+            _ => Ok(()),
+        };
     }
     let dir = out.join("reports");
     fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
@@ -1060,33 +1078,8 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
                 .into(),
         ));
     }
-    // Every declared attribute must be read from somewhere, and the declaration refuses one that
-    // is not, naming the columns (`config::Config::acquire`, `configuration.md` §1's
-    // `[defaults]`); this is the same rule for the callers that build these arguments directly.
-    // A column no group carries would be written as the absent sentinel for every row — a column
-    // that cost its width to say nothing.
-    if !args.schema.is_empty() {
-        let mut carried: Vec<usize> = args
-            .attribute_sources
-            .iter()
-            .flat_map(|s| s.attributes.iter().copied())
-            .collect();
-        carried.sort_unstable();
-        let missing: Vec<&str> = (0..args.schema.attributes.len())
-            .filter(|i| carried.binary_search(i).is_err())
-            .map(|i| args.schema.attributes[i].name.as_str())
-            .collect();
-        if !missing.is_empty() {
-            return Err(BuildError::Invalid(format!(
-                "the schema declares {} attribute(s) and no source is bound to read {} of them \
-                 from: {}. Every column names a `[sources]` key or takes `[defaults].source` \
-                 (configuration.md §1)",
-                args.schema.attributes.len(),
-                missing.len(),
-                missing.join(", ")
-            )));
-        }
-    }
+    // The declaration's rule, for the callers that build these arguments directly.
+    config::require_sources(&args.schema, &args.attribute_sources)?;
     // **The path is derived from the id, never the id used as a path** (`views.md` §3.2): a
     // group's view is `group:key` and lives at `views/<group>/<key>/`, so what has to be safe is
     // each component [`tessera_store::view_path`] derives, not the joined form.
@@ -1498,7 +1491,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                         let number = batch.ids[row as usize];
                         let Some(&position) = position_of_source.get(&number) else {
                             return Err(BuildError::Invalid(format!(
-                                "{}: a row names item {number}, which no view holds",
+                                "{} changed while the build read it: a row names an item no \
+                                 view holds. Build again from files that do not change",
                                 scan.path.display()
                             )));
                         };

@@ -19,13 +19,17 @@
 //! The streaming build applies the rule by sorting each file's values and merging them against
 //! the values earlier files gave items (`stream`), because a lookup per row is random access at
 //! 10⁹ rows. The linear build asks [`tessera_lifecycle::resolve::resolve`] file by file over maps
-//! (`linear`). `tests/build_equivalence.rs` holds the two byte-identical, which is what checks the
-//! sort-merge against the rule as written.
+//! (`linear`). This module's tests hold the two numberings equal file by file, and
+//! `tests/identity_rule.rs` the two builds byte-identical, which is what checks the sort-merge
+//! against the rule as written.
 
 mod linear;
 mod report;
+mod run;
 pub(crate) mod scan;
 mod stream;
+#[cfg(test)]
+mod tests;
 
 use std::path::{Path, PathBuf};
 
@@ -191,7 +195,7 @@ pub(crate) fn reads(args: &crate::BuildArgs) -> Result<Vec<Read>> {
                     family: family_index,
                     view,
                 },
-                batch: Batch::Addresses,
+                batch: Batch::Edits,
                 input: ReadInput::File {
                     path: source.path.clone(),
                     fields: source.fields.clone(),

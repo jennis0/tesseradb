@@ -58,6 +58,7 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
         refused: Vec::new(),
     };
     for read in super::reads(args)? {
+        let mut outside = Tally::default();
         let (identities, texts): (Vec<Option<RowIdentity>>, Option<Vec<String>>) =
             match &read.input {
                 ReadInput::File {
@@ -71,7 +72,15 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                             path: path.clone(),
                             detail,
                         })?;
-                    let file = FileRead::new(path, &groups, &carried, select.as_ref(), limit.as_ref());
+                    let file = FileRead::new(
+                        path,
+                        &groups,
+                        &carried,
+                        select.as_ref(),
+                        limit.as_ref(),
+                        read.batch == Batch::Creates,
+                    );
+                    outside.count("outside_limit", file.pruned_rows());
                     if read.batch != Batch::Creates {
                         resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
                             BuildError::Invalid(super::no_identifier(&read.object, path))
@@ -81,6 +90,9 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                     file.scan(|scanned| {
                         for offset in 0..scanned.len {
                             if !scanned.selected.as_ref().is_none_or(|s| s[offset]) {
+                                if scanned.outside.as_ref().is_some_and(|o| o[offset]) {
+                                    outside.refuse("outside_limit", scanned.first + offset as u64);
+                                }
                                 continue;
                             }
                             let carries_tessera =
@@ -119,7 +131,8 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                     Some(lists.texts.clone()),
                 ),
             };
-        let (rows, tally) = decide(&read, &identities, &mut held, &mut next)?;
+        let (rows, mut tally) = decide(&read, &identities, &mut held, &mut next)?;
+        tally.merge(outside);
         let refused = match (&read.input, texts) {
             (_, Some(texts)) => {
                 tally.finish(&read.source, &read.object, |row| texts[row as usize].clone())
@@ -131,7 +144,14 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                         path: path.clone(),
                         detail,
                     })?;
-                let file = FileRead::new(path, &groups, &carried, select.as_ref(), limit.as_ref());
+                let file = FileRead::new(
+                    path,
+                    &groups,
+                    &carried,
+                    select.as_ref(),
+                    limit.as_ref(),
+                    read.batch == Batch::Creates,
+                );
                 let values = file.values_at(&tally.sampled())?;
                 tally.finish(&read.source, &read.object, |row| {
                     values.get(&row).cloned().unwrap_or_else(|| format!("row {row}"))
@@ -139,7 +159,7 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
             }
             (ReadInput::Lists(_), None) => unreachable!("a list read carries its texts"),
         };
-        if args.strict && !refused.is_empty() {
+        if args.strict && refused.iter().any(super::RefusedRows::is_refusal) {
             return Err(super::stream::strict_refusal(&refused));
         }
         numbering.refused.extend(refused);

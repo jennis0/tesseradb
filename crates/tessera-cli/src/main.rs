@@ -56,9 +56,11 @@ enum Command {
         /// below this value, in every file that carries its column.
         ///
         /// A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit
-        /// drops it, and so does a null. Refused when the declaration has no unique integer
-        /// attribute, or more than one. A row of a file without the column is read, and one that
-        /// names an item the limit left out names no item and is refused.
+        /// drops it, and so does a null in a view's points. Refused when the declaration has no
+        /// unique integer attribute, or more than one. In any other file a row whose value is at
+        /// or above the limit is left out and reported as outside it. A row of a file without the
+        /// column is read, and one that names an item the limit left out names no item and is
+        /// refused.
         #[arg(long, value_name = "VALUE")]
         limit: Option<u64>,
         /// Refuse the build at the first file with a row the identity rule refuses.
@@ -1403,7 +1405,12 @@ fn main() -> ExitCode {
                         report.bundle_bytes,
                         report.minted_artifacts,
                         report.unclustered_member_rows,
-                        report.refused.iter().map(|entry| entry.rows).sum::<u64>(),
+                        report
+                            .refused
+                            .iter()
+                            .filter(|entry| entry.is_refusal())
+                            .map(|entry| entry.rows)
+                            .sum::<u64>(),
                     );
                     // The per-view shapes, which is what a multi-view build has to say and a
                     // single total cannot: a view holds a subset of entity space (`views.md` §8).

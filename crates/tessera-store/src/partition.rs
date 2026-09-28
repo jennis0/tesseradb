@@ -140,7 +140,9 @@ impl SpillWriter {
         Ok(())
     }
 
-    /// Flush, fsync, and hand back the receipt the eventual [`read_bucket`] must be given.
+    /// Flush and hand back the receipt the eventual [`read_bucket`] must be given. Not synced: a
+    /// spill file is scratch the build reads back through the page cache and removes, and the
+    /// receipt is what vouches for its bytes.
     pub fn finish(self) -> Result<SpillReceipt> {
         let SpillWriter {
             path,
@@ -148,8 +150,7 @@ impl SpillWriter {
             count,
             anchor,
         } = self;
-        let file = writer.into_inner().map_err(|e| io(&path, e.into_error()))?;
-        file.sync_all().map_err(|e| io(&path, e))?;
+        writer.into_inner().map_err(|e| io(&path, e.into_error()))?;
         Ok(SpillReceipt {
             path,
             count,

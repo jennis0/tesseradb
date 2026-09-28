@@ -22,10 +22,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use tessera_lifecycle::resolve::{self, Batch, Named};
+use tessera_lifecycle::resolve::{self, Batch, Named, Refusal};
 use tessera_store::key_index::{Key, KeySpill};
-use tessera_store::partition::{RecordReader, SpillReceipt, SpillWriter};
+use super::run::{RunReader, RunReceipt, RunWriter};
 use tessera_store::unique::{KeyKind, UniqueKey};
 use tessera_types::EntityId;
 
@@ -46,6 +47,10 @@ const PENDING: u32 = u32::MAX;
 const UNKNOWN_TESSERA_ID: u32 = u32::MAX;
 const ONE_ITEM_TWICE: u32 = u32::MAX - 1;
 const ONE_VALUE_TWICE: u32 = u32::MAX - 2;
+
+/// How many rows of a names file are compared with the creating file's before a file in which
+/// fewer than half matched stops being compared.
+const ZIP_TRIAL: u64 = 1 << 20;
 
 /// The share of the memory budget one field's sort holds, and its bounds.
 const SORT_SHARE: u64 = 4;
@@ -72,7 +77,7 @@ pub(crate) fn number(args: &crate::BuildArgs, tmp: &Path) -> Result<Numbering> {
     };
     for read in super::reads(args)? {
         let (rows, refused) = pass.read(args, &read, limit.as_ref())?;
-        if args.strict && !refused.is_empty() {
+        if args.strict && refused.iter().any(super::RefusedRows::is_refusal) {
             return Err(strict_refusal(&refused));
         }
         numbering.refused.extend(refused);
@@ -84,26 +89,128 @@ pub(crate) fn number(args: &crate::BuildArgs, tmp: &Path) -> Result<Numbering> {
 
 /// `--strict`'s refusal, naming the first file and reason the rule refused rows for.
 pub(super) fn strict_refusal(refused: &[super::RefusedRows]) -> BuildError {
+    let first: Vec<super::RefusedRows> = refused
+        .iter()
+        .filter(|entry| entry.is_refusal())
+        .take(1)
+        .cloned()
+        .collect();
     BuildError::Invalid(format!(
         "--strict: {}. Remove or correct those rows, or build without --strict to refuse only them",
-        super::report::describe(&refused[..1])[0]
+        super::report::describe(&first)[0]
     ))
 }
 
 /// The run of `(key, item)` the files read so far gave one field.
 struct HeldRun {
-    receipt: SpillReceipt,
+    receipt: RunReceipt,
     /// Where the run's second column is a row of a file whose rows are items `base + row`.
     base: Option<u32>,
+    /// That file, where it is one every row of which created an item and gave it its value.
+    source: Option<ZipSource>,
 }
 
-/// What the files read so far hold, per unique field.
+/// A file whose row `r` created item `base + r` with its value of `field`: a file naming items by
+/// the same field in the same order is compared with it row by row, and only the rows that differ
+/// are sorted.
+#[derive(Clone)]
+struct ZipSource {
+    path: PathBuf,
+    field: CarriedField,
+}
+
+/// One field's keys of a file, row after row, decoded on a thread of their own.
+struct KeyStream {
+    receiver: Option<std::sync::mpsc::Receiver<Result<Vec<Option<UniqueKey>>>>>,
+    producer: Option<std::thread::JoinHandle<()>>,
+    batch: Vec<Option<UniqueKey>>,
+    first: u64,
+}
+
+impl KeyStream {
+    fn open(source: &ZipSource) -> Result<KeyStream> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(8);
+        let source = source.clone();
+        let producer = std::thread::Builder::new()
+            .name("identity-keys".to_string())
+            .spawn(move || {
+                let read = || -> Result<()> {
+                    let groups = FileGroups::open(&source.path)?;
+                    let (index, _) = groups
+                        .schema()
+                        .column_with_name(&source.field.column)
+                        .ok_or_else(|| BuildError::Schema {
+                            path: source.path.clone(),
+                            detail: format!("missing required column '{}'", source.field.column),
+                        })?;
+                    let projection = groups.projection(&[index]);
+                    let all: Vec<usize> = (0..groups.count()).collect();
+                    groups.each_batch(&source.path, &all, &projection, |_, batch| {
+                        let keys = super::scan::keys_of(&source.path, batch.column(0), &source.field)?;
+                        Ok(match sender.send(Ok(keys)) {
+                            Ok(()) => std::ops::ControlFlow::Continue(()),
+                            Err(_) => std::ops::ControlFlow::Break(()),
+                        })
+                    })
+                };
+                if let Err(e) = read() {
+                    let _ = sender.send(Err(e));
+                }
+            })
+            .map_err(|e| BuildError::io(Path::new("identity-keys"), e))?;
+        Ok(KeyStream {
+            receiver: Some(receiver),
+            producer: Some(producer),
+            batch: Vec::new(),
+            first: 0,
+        })
+    }
+
+    /// The key at `row`, rows asked in ascending order; `None` past the file's last row.
+    fn key_at(&mut self, row: u64) -> Result<Option<Option<UniqueKey>>> {
+        while row >= self.first + self.batch.len() as u64 {
+            let Some(receiver) = &self.receiver else {
+                return Ok(None);
+            };
+            match receiver.recv() {
+                Ok(keys) => {
+                    self.first += self.batch.len() as u64;
+                    self.batch = keys?;
+                }
+                Err(_) => {
+                    self.receiver = None;
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(self.batch[(row - self.first) as usize]))
+    }
+}
+
+impl Drop for KeyStream {
+    fn drop(&mut self) {
+        self.receiver = None;
+        if let Some(producer) = self.producer.take() {
+            let _ = producer.join();
+        }
+    }
+}
+
+/// What the files read so far hold, per unique field. The held runs' files go with it.
 struct Pass {
     tmp: PathBuf,
     sort_bytes: usize,
     held: BTreeMap<u16, Vec<HeldRun>>,
     next: u64,
     sequence: u64,
+}
+
+impl Drop for Pass {
+    fn drop(&mut self) {
+        for run in self.held.values().flatten() {
+            let _ = std::fs::remove_file(&run.receipt.path);
+        }
+    }
 }
 
 /// One file's numbers as they are decided.
@@ -158,7 +265,7 @@ struct Candidate {
 /// What merging one field against the holdings found.
 struct Merged {
     /// The file's `(key, row)` for keys nobody held, sorted: the values its accepted rows may set.
-    unset: Option<SpillReceipt>,
+    unset: Option<RunReceipt>,
     candidates: Vec<Candidate>,
 }
 
@@ -204,7 +311,14 @@ impl Pass {
                         path: path.clone(),
                         detail,
                     })?;
-                let file = FileRead::new(path, &groups, &carried, select.as_ref(), limit);
+                let file = FileRead::new(
+                    path,
+                    &groups,
+                    &carried,
+                    select.as_ref(),
+                    limit,
+                    read.batch == Batch::Creates,
+                );
                 if read.batch != Batch::Creates {
                     resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
                         BuildError::Invalid(super::no_identifier(&read.object, path))
@@ -258,6 +372,14 @@ impl Pass {
         let sets_values = matches!(read.batch, Batch::Creates | Batch::Edits);
         let one_row_per_item = read.batch != Batch::Names;
         let mut tally = Tally::default();
+        // Checked before a row is numbered, so no number is written past what a bundle holds.
+        if creates && base + total > ITEMS_MAX {
+            return Err(BuildError::Invalid(format!(
+                "this build's files could create {} items, over the {ITEMS_MAX} one bundle holds. \
+                 Build fewer rows, with --limit or smaller files",
+                base + total
+            )));
+        }
 
         // A file of new items with nothing to name them by: each row is the next item.
         if creates && carried.is_empty() && !tessera && takes_every_row {
@@ -275,18 +397,42 @@ impl Pass {
         let boundaries = boundaries_uniform(total);
         let mut updates = Partition::create(&updates_path, "row", boundaries.clone(), 8, total)?;
         let mut decided = 0u64;
+        // Every field's sort is held at once, so they share the sort's part of the budget.
+        let sort_bytes = (self.sort_bytes / carried.len().max(1)).max(SORT_MIN as usize);
         let mut sorts: Vec<FieldSort> = carried
             .iter()
             .map(|field| {
                 let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
                 Ok(match KeyKind::of(field.ty) {
                     Some(KeyKind::Keyword) => {
-                        FieldSort::Keyword(KeySpill::create(&self.tmp, self.sort_bytes).map_err(store)?)
+                        FieldSort::Keyword(KeySpill::create(&self.tmp, sort_bytes).map_err(store)?)
                     }
-                    _ => FieldSort::Int(KeySpill::create(&self.tmp, self.sort_bytes).map_err(store)?),
+                    _ => FieldSort::Int(KeySpill::create(&self.tmp, sort_bytes).map_err(store)?),
                 })
             })
             .collect::<Result<_>>()?;
+        if let Input::File(file) = &input {
+            tally.count("outside_limit", file.pruned_rows());
+        }
+        // A names file carrying the one field a single creating file set, compared with that file
+        // row by row: a row whose value is the one at its position there names that row's item.
+        let zip = match (&input, read.batch) {
+            (Input::File(_), Batch::Names) if single && !tessera => {
+                match self.held.get(&carried[0].position).map(Vec::as_slice) {
+                    Some([HeldRun {
+                        base: Some(zip_base),
+                        source: Some(source),
+                        ..
+                    }]) => Some((KeyStream::open(source)?, *zip_base)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let ordered = zip.is_some();
+        let mut zip = zip;
+        // Rows compared and rows that matched: a file in another order stops being compared.
+        let (mut compared, mut matched) = (0u64, 0u64);
         let mut on_batch = |scanned: Scanned| -> Result<()> {
             let numbers = rows.as_mut().map(Rows::slice);
             let mut numbers = numbers;
@@ -297,12 +443,28 @@ impl Pass {
                     numbers[row as usize] = if selected { PENDING } else { 0 };
                 }
                 if !selected {
+                    if scanned.outside.as_ref().is_some_and(|o| o[offset]) {
+                        tally.refuse("outside_limit", row);
+                    }
                     continue;
                 }
                 if scanned.tessera.as_ref().is_some_and(|t| t[offset]) {
                     push(&mut updates, row as u32, UNKNOWN_TESSERA_ID)?;
                     decided += 1;
                     continue;
+                }
+                if let (Some((stream, zip_base)), Some(numbers)) = (zip.as_mut(), numbers.as_deref_mut()) {
+                    if let Some(key) = scanned.keys[0][offset] {
+                        compared += 1;
+                        if stream.key_at(row)? == Some(Some(key)) {
+                            numbers[row as usize] = *zip_base + row as u32 + 1;
+                            matched += 1;
+                            continue;
+                        }
+                    }
+                }
+                if compared == ZIP_TRIAL && matched * 2 < compared {
+                    zip = None;
                 }
                 for (sort, keys) in sorts.iter_mut().zip(&scanned.keys) {
                     if let Some(key) = keys[offset] {
@@ -313,12 +475,14 @@ impl Pass {
             Ok(())
         };
         match &input {
+            Input::File(file) if ordered => file.scan_ordered(&mut on_batch)?,
             Input::File(file) => file.scan(&mut on_batch)?,
             Input::Lists(lists) => on_batch(Scanned {
                 first: 0,
                 len: lists.len(),
                 selected: None,
                 keys: lists.keys.clone(),
+                outside: None,
                 tessera: None,
             })?,
         }
@@ -352,9 +516,17 @@ impl Pass {
             let offset = self.offset(base, total)?;
             for (field, outcome) in carried.iter().zip(merged) {
                 if let Some(unset) = outcome.unset {
+                    let source = match &input {
+                        Input::File(file) => Some(ZipSource {
+                            path: file.path.to_path_buf(),
+                            field: field.clone(),
+                        }),
+                        Input::Lists(_) => None,
+                    };
                     self.held.entry(field.position).or_default().push(HeldRun {
                         receipt: unset,
                         base: Some(base as u32),
+                        source,
                     });
                 }
             }
@@ -383,6 +555,7 @@ impl Pass {
             &boundaries,
             total,
             lazy,
+            single,
             &mut tally,
             &mut named_items,
             (!deferred).then_some(&mut numbering),
@@ -411,7 +584,7 @@ impl Pass {
                 later.sort_unstable();
                 for row in later {
                     numbers[row as usize] = 0;
-                    tally.refuse("one_item_twice", u64::from(row));
+                    tally.refuse(Refusal::ONE_ITEM_TWICE, u64::from(row));
                 }
             }
             if sets_values {
@@ -436,7 +609,7 @@ impl Pass {
                     }
                     if resolve::one_value_twice(&mut claimed, row as usize, &values).is_some() {
                         numbers[row as usize] = 0;
-                        tally.refuse("one_value_twice", u64::from(row));
+                        tally.refuse(Refusal::ONE_VALUE_TWICE, u64::from(row));
                     }
                 }
             }
@@ -447,12 +620,6 @@ impl Pass {
         }
         let created = numbering.created;
         self.next = base + created.count;
-        if self.next > ITEMS_MAX {
-            return Err(BuildError::Invalid(format!(
-                "this build creates {} items, over the {ITEMS_MAX} one bundle holds",
-                self.next
-            )));
-        }
 
         // ---- 5. the values the accepted rows gave items become holdings -----------------------
         if sets_values {
@@ -468,7 +635,8 @@ impl Pass {
                     _ => set_values::<u64>(&unset, &path, numbers, &created, base as u32)?,
                 };
                 let _ = std::fs::remove_file(&unset.path);
-                if !retired.is_empty() {
+                let held_before = self.held.get(&field.position).is_some_and(|runs| !runs.is_empty());
+                if held_before && !retired.is_empty() {
                     self.retire(field.position, kind, &retired)?;
                 }
                 self.held.entry(field.position).or_default().push(run);
@@ -489,12 +657,6 @@ impl Pass {
     /// A file whose row `r` is item `base + r`, every row of it.
     fn offset(&mut self, base: u64, total: u64) -> Result<ReadRows> {
         self.next = base + total;
-        if self.next > ITEMS_MAX {
-            return Err(BuildError::Invalid(format!(
-                "this build creates {} items, over the {ITEMS_MAX} one bundle holds",
-                self.next
-            )));
-        }
         use rayon::prelude::*;
         let mixed = (base..base + total)
             .into_par_iter()
@@ -547,23 +709,9 @@ fn push(updates: &mut Partition, row: u32, code: u32) -> Result<()> {
     updates.push(&record).map_err(BuildError::from)
 }
 
-fn record<K: Key>(key: K, value: u32) -> Vec<u8> {
-    let mut record = vec![0u8; K::WIDTH + 4];
-    key.write(&mut record);
-    record[K::WIDTH..].copy_from_slice(&value.to_le_bytes());
-    record
-}
-
-fn decode<K: Key>(record: &[u8]) -> (K, u32) {
-    (
-        K::read(record),
-        u32::from_le_bytes(record[K::WIDTH..K::WIDTH + 4].try_into().expect("four bytes")),
-    )
-}
-
 /// One held run being read: its reader, the base its rows are numbered from where it has one,
 /// and the entry at its head.
-type HeldStream<K> = (RecordReader, Option<u32>, Option<(K, u32)>);
+type HeldStream<K> = (RunReader<K>, Option<u32>, Option<(K, u32)>);
 
 /// The holdings of one field, read in key order to answer keys asked in ascending order.
 struct HeldCursor<K: Key> {
@@ -574,8 +722,8 @@ impl<K: Key> HeldCursor<K> {
     fn open(runs: &[HeldRun]) -> Result<Self> {
         let mut streams = Vec::with_capacity(runs.len());
         for run in runs {
-            let mut reader = RecordReader::open(&run.receipt, K::WIDTH + 4)?;
-            let head = reader.next_record()?.map(decode::<K>);
+            let mut reader = RunReader::open(&run.receipt)?;
+            let head = reader.next_entry()?;
             streams.push((reader, run.base, head));
         }
         Ok(HeldCursor { streams })
@@ -589,7 +737,7 @@ impl<K: Key> HeldCursor<K> {
                 if held >= key {
                     break;
                 }
-                *head = reader.next_record()?.map(decode::<K>);
+                *head = reader.next_entry()?;
             }
             if let Some((held, value)) = *head {
                 if held == key {
@@ -603,7 +751,7 @@ impl<K: Key> HeldCursor<K> {
     /// Read every run to its end, which is where each is checked against its receipt.
     fn finish(mut self) -> Result<()> {
         for (reader, _, _) in &mut self.streams {
-            while reader.next_record()?.is_some() {}
+            while reader.next_entry()?.is_some() {}
         }
         Ok(())
     }
@@ -625,7 +773,7 @@ fn merge_field<K: Key>(
     // file names items by another field too.
     let keeps_unset = context.sets_values && (context.creates || !context.single);
     let mut unset = match keeps_unset {
-        true => Some(SpillWriter::create(unset_path)?),
+        true => Some(RunWriter::<K>::create(unset_path)?),
         false => None,
     };
     let mut candidates: Vec<Candidate> = Vec::new();
@@ -672,7 +820,7 @@ fn merge_field<K: Key>(
                         push(updates, row, ONE_VALUE_TWICE)?;
                         decided += 1;
                     } else if let Some(unset) = unset.as_mut() {
-                        unset.push_bytes(&record(key, row))?;
+                        unset.push(key, row)?;
                     }
                 }
             }
@@ -691,7 +839,7 @@ fn merge_field<K: Key>(
     held.finish()?;
     Ok((
         Merged {
-            unset: unset.map(SpillWriter::finish).transpose()?,
+            unset: unset.map(RunWriter::finish).transpose()?,
             candidates,
         },
         decided,
@@ -725,7 +873,7 @@ impl FileNumbers {
                 self.created.mark(row);
             } else {
                 *stored = 0;
-                tally.refuse("names_no_item", row);
+                tally.refuse(Refusal::NAMES_NO_ITEM, row);
             }
         }
         if let Some(number) = stored.checked_sub(1) {
@@ -786,7 +934,8 @@ impl Created {
     }
 }
 
-/// Replay the routed decisions in row order into the file's numbers.
+/// Replay the routed decisions in row order into the file's numbers. Where the file carries one
+/// field a row has at most one decision, so a bucket's are applied as they come and not sorted.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     rows: &mut Rows,
@@ -794,6 +943,7 @@ fn walk(
     boundaries: &[u32],
     total: u64,
     lazy: bool,
+    single: bool,
     tally: &mut Tally,
     named_items: &mut Option<KeySpill<u32>>,
     mut numbering: Option<&mut FileNumbers>,
@@ -814,7 +964,22 @@ fn walk(
             )
         }));
         drop(bytes);
-        hits.sort_unstable();
+        if single {
+            if lazy {
+                numbers[lo as usize..hi as usize].fill(PENDING);
+            }
+            for hit in &hits {
+                let row = u64::from(hit.0);
+                decide_row(&mut numbers[row as usize], row, std::slice::from_ref(hit), tally, named_items)?;
+            }
+            if let Some(numbering) = numbering.as_deref_mut() {
+                for row in u64::from(lo)..hi {
+                    numbering.decide(&mut numbers[row as usize], row, tally);
+                }
+            }
+            continue;
+        }
+        hits.par_sort_unstable();
         let mut at = 0usize;
         for row in u64::from(lo)..hi {
             let stored = &mut numbers[row as usize];
@@ -850,9 +1015,9 @@ fn decide_row(
 ) -> Result<()> {
     let codes = || decisions.iter().map(|&(_, code)| code);
     let refusal = [
-        (UNKNOWN_TESSERA_ID, "unknown_tessera_id"),
-        (ONE_ITEM_TWICE, "one_item_twice"),
-        (ONE_VALUE_TWICE, "one_value_twice"),
+        (UNKNOWN_TESSERA_ID, Refusal::UNKNOWN_TESSERA_ID),
+        (ONE_ITEM_TWICE, Refusal::ONE_ITEM_TWICE),
+        (ONE_VALUE_TWICE, Refusal::ONE_VALUE_TWICE),
     ]
     .into_iter()
     .find(|(code, _)| codes().any(|c| c == *code));
@@ -881,7 +1046,7 @@ fn decide_row(
         }
         Named::Two => {
             *stored = 0;
-            tally.refuse("names_two_items", row);
+            tally.refuse(Refusal::NAMES_TWO, row);
         }
         Named::Nothing => {}
     }
@@ -891,17 +1056,16 @@ fn decide_row(
 /// Turn a file's unset `(key, row)` into a run of `(key, item)` for the rows the rule accepted,
 /// and name the items whose value of this field changed.
 fn set_values<K: Key>(
-    unset: &SpillReceipt,
+    unset: &RunReceipt,
     path: &Path,
     numbers: &[u32],
     created: &Created,
     base: u32,
 ) -> Result<(HeldRun, Vec<u32>)> {
-    let mut reader = RecordReader::open(unset, K::WIDTH + 4)?;
-    let mut writer = SpillWriter::create(path)?;
+    let mut reader = RunReader::<K>::open(unset)?;
+    let mut writer = RunWriter::<K>::create(path)?;
     let mut retired: Vec<u32> = Vec::new();
-    while let Some(entry) = reader.next_record()? {
-        let (key, row) = decode::<K>(entry);
+    while let Some((key, row)) = reader.next_entry()? {
         let row = u64::from(row);
         let item = match created.contains(row) {
             true => base + created.rank(row) as u32,
@@ -914,7 +1078,7 @@ fn set_values<K: Key>(
                 None => continue,
             },
         };
-        writer.push_bytes(&record(key, item))?;
+        writer.push(key, item)?;
     }
     retired.sort_unstable();
     retired.dedup();
@@ -922,6 +1086,7 @@ fn set_values<K: Key>(
         HeldRun {
             receipt: writer.finish()?,
             base: None,
+            source: None,
         },
         retired,
     ))
@@ -929,18 +1094,18 @@ fn set_values<K: Key>(
 
 /// A copy of one held run without the entries of `items`.
 fn filter_run<K: Key>(run: &HeldRun, path: &Path, items: &[u32]) -> Result<HeldRun> {
-    let mut reader = RecordReader::open(&run.receipt, K::WIDTH + 4)?;
-    let mut writer = SpillWriter::create(path)?;
-    while let Some(entry) = reader.next_record()? {
-        let (_, value) = decode::<K>(entry);
+    let mut reader = RunReader::<K>::open(&run.receipt)?;
+    let mut writer = RunWriter::<K>::create(path)?;
+    while let Some((key, value)) = reader.next_entry()? {
         let item = run.base.map_or(value, |base| base + value);
         if items.binary_search(&item).is_ok() {
             continue;
         }
-        writer.push_bytes(entry)?;
+        writer.push(key, value)?;
     }
     Ok(HeldRun {
         receipt: writer.finish()?,
         base: run.base,
+        source: None,
     })
 }

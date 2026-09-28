@@ -16,9 +16,9 @@
 //! # What is resident there
 //!
 //! From the attribute pass to the segment write the build holds the **published memberships** in
-//! the store, as Roaring, and nothing else this model charges. The two structures that resolve a
-//! source id — the **sorted source ids** at 8 bytes an item and the **ordinal→entity map** at 4 —
-//! are both files under `.build-tmp/` and are charged to the disk below rather than to memory.
+//! the store, as Roaring, and nothing else this model charges. Each file's **row numbers**, 4 bytes
+//! a row, and the **ordinal→entity map**, 4 bytes an item, are files under `.build-tmp/` and are
+//! charged to the disk below rather than to memory.
 //!
 //! **The publication is not a batch.** The loop's residency shrinks when the stride does; this
 //! does not shrink at all, because a member table is its own size. So for that one term the
@@ -32,19 +32,6 @@
 //! to the last level published. They are sorted runs and a merged table under `.build-tmp/` now
 //! (`layers.rs`), read back one artifact at a time, so what the plan holds is a spill budget and
 //! what the disk holds is the corpus.
-//!
-//! The **sorted source ids** were the largest item on it until 2026-09-10: 8 bytes an item of
-//! anonymous memory, 26.0 GiB at the GBIF rung's 3.50×10⁹ items, and 52.1 GiB while pass one built
-//! them, because each view's ids were read into a vector of their own and then concatenated into a
-//! second. Both are gone — the union is one array of the final length, filled segment by segment,
-//! and the array is a file under `.build-tmp/` ([`crate::pipeline::SourceIds`]). Measured at
-//! 10⁹ items: a 14.96 GiB peak became 7.55 GiB of page cache over a flat 228 MiB of anonymous
-//! memory (`probes/2026-09-10-source-ids-memory/`).
-//!
-//! The array is gone altogether: the identity pass numbers items in creation order, so an ordinal
-//! is a number with nothing to look up. What stands in its place is each file's row numbers where
-//! a row's number is not its position ([`NumberFiles`]), 4 bytes a row, and nothing for a points
-//! file whose rows all create items.
 //!
 //! Every **declared column in entity order** was the other half of this list and the larger half of
 //! the campaign's kills: a fixed-width type at its own width, a `text`, `keyword` or `utf8` one at a
@@ -170,8 +157,8 @@ fn arena_offset(ty: ScalarType) -> u64 {
 /// says which of them it is on the disk for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
-    /// Pass one to the pairs pack: the sorted source ids, the pair buckets, and each view's
-    /// geometry as it is read.
+    /// The identity pass to the pairs pack: each file's row numbers, the pair buckets, and each
+    /// view's geometry as it is read.
     Spill,
     /// The batch loop and the postings write: the term bands, the anchor geometry, the
     /// ordinal→entity map, and the first of the bundle's own files.
@@ -2121,12 +2108,16 @@ pub(crate) fn report_identity_disk(
             (Batch::Creates, None, None) => 0,
             _ => 4 * rows,
         };
+        // Each field's sort spills its (key, row) once; a file whose rows set values writes the
+        // values it set beside it, and every row's decision goes through a partition by row.
+        let sets_values = matches!(read.batch, Batch::Creates | Batch::Edits);
+        let copies = if sets_values { 2 } else { 1 };
         let transient = rows
-            .saturating_mul(2 * entry)
+            .saturating_mul(copies * entry)
             .saturating_add(rows.saturating_mul(8 * carried.len().max(1) as u64));
         peak = peak.max(held + numbers + own_numbers + transient);
         numbers += own_numbers;
-        if matches!(read.batch, Batch::Creates | Batch::Edits) {
+        if sets_values {
             held += rows.saturating_mul(entry);
         }
     }

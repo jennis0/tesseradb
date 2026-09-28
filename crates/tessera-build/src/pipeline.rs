@@ -205,7 +205,7 @@ impl SortRec {
 fn input_changed(detail: &str) -> BuildError {
     BuildError::Invalid(format!(
         "the input files changed while the build was reading them ({detail}); \
-         the points and pairs files must be immutable for the duration of a build"
+         the files a build reads must not change until it ends"
     ))
 }
 
@@ -328,13 +328,11 @@ fn resolve_pairs_chunk(
     mut emit: impl FnMut(u64) -> Result<()>,
 ) -> Result<()> {
     resolved.clear();
-    join_chunk(chunk, n, |ordinal, source_id, source_term| {
+    join_chunk(chunk, n, |ordinal, _, source_term| {
         // Established by the dictionary pass over this same file; a miss means the file is not
         // the one that pass read.
         let Some(ordinal) = ordinal else {
-            return Err(input_changed(&format!(
-                "the pairs file names entity {source_id}, which its first pass did not"
-            )));
+            return Err(input_changed("the pairs file names an item its first pass did not"));
         };
         resolved.push((source_term, ordinal as u64));
         Ok(())
@@ -1140,9 +1138,9 @@ fn build_bundle(
                            geom_anchor: &mut u64| {
                 join_chunk(chunk, n, |ordinal, source_id, (x, y)| {
                     let Some(ordinal) = ordinal else {
-                        return Err(input_changed(&format!(
-                            "the points file names item {source_id}, which its first pass did not"
-                        )));
+                        return Err(input_changed(
+                            "the points file names an item its first pass did not",
+                        ));
                     };
                     xs[ordinal as usize] = x;
                     ys[ordinal as usize] = y;
@@ -2439,24 +2437,8 @@ fn read_one_attribute_scan(
     // Which of the build's items met a row, by ordinal, so one that met none is refused.
     let mut met = vec![0u64; (n as usize).div_ceil(64)];
 
-    // **[`join_chunk`]'s merge sweep, not a probe per row.** This pass used a `binary_search` into
-    // `source_ids` for every row, on the reasoning that it is "per-row work over a handful of
-    // narrow columns, not the corpus-scale join the geometry pass does". That holds while
-    // `source_ids` fits in cache and inverts well before it stops: at 2.5×10⁸ the array is 2 GB and
-    // the probes are uniformly scattered across it, so nearly every one of the ~28 comparisons is a
-    // cache miss.
-    //
-    // **Worth 1m49s of a ~19m build at 2.5×10⁸, not the "~20 minutes of one core" an earlier
-    // revision of this comment claimed.** That figure came from sampling the pass at 97% of one
-    // core for sixty seconds and taking the whole elapsed stretch to be it; the stretch included a
-    // suspended laptop, and the build's *total* CPU was 19m45s, which the pass alone plainly cannot
-    // exceed. Measured properly, by the cgroup's own accounting across two builds of the same
-    // corpus: 19min 45.7s of CPU before, 17min 56.8s after. Real, and worth keeping — the sweep is
-    // also the shape that stays sequential as the corpus grows, where the probe's cost per row does
-    // not — but a tenth of what was asserted.
-    //
-    // Chunked, both sides ascend and the sweep is sequential, which is the same trade the geometry
-    // pass makes for the same reason. The cost is a staging buffer, and **it is sized in bytes**:
+    // **[`join_chunk`]'s merge sweep, not a lookup per row.** Chunked, both sides ascend and the
+    // sweep is sequential, which is the same trade the geometry pass makes. The cost is a staging buffer, and **it is sized in bytes**:
     // see [`JOIN_STAGE_BYTES`] for why a row count is the wrong unit here.
     //
     // **At least one whole decoded batch**, because a batch is staged as a unit: the flush below
@@ -2493,11 +2475,11 @@ fn read_one_attribute_scan(
                  present: &mut [u64]|
      -> Result<()> {
         resolved.clear();
-        join_chunk(chunk, n, |ordinal, number, pos| {
+        join_chunk(chunk, n, |ordinal, _, pos| {
             let Some(ordinal) = ordinal else {
-                return Err(input_changed(&format!(
-                    "an attribute row names item {number}, which the identity pass did not number"
-                )));
+                return Err(input_changed(
+                    "an attribute file names an item the identity pass did not number",
+                ));
             };
             *matched += 1;
             met[ordinal as usize / 64] |= 1 << (ordinal % 64);

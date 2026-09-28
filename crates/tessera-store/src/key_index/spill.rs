@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::{Key, KeyRunWriter, WrittenRun};
 use crate::error::{Result, StoreError};
 use crate::partition::{Partition, PartitionStore};
+use rayon::prelude::*;
 
 const FANOUT: usize = 256;
 
@@ -127,7 +128,7 @@ impl<K: Key> KeySpill<K> {
         match self.spilled.take() {
             None => {
                 let mut held = std::mem::take(&mut self.held);
-                held.sort_unstable();
+                held.par_sort_unstable();
                 for (key, entity) in held {
                     out.push(key, entity)?;
                 }
@@ -156,9 +157,9 @@ impl<K: Key> KeySpill<K> {
             if fits {
                 let bytes = store.load(k)?;
                 store.delete(k)?;
-                let mut entries: Vec<(K, u32)> = bytes.chunks_exact(width).map(decode).collect();
+                let mut entries: Vec<(K, u32)> = bytes.par_chunks_exact(width).map(decode).collect();
                 drop(bytes);
-                entries.sort_unstable();
+                entries.par_sort_unstable();
                 for (key, entity) in entries {
                     sink.push(key, entity)?;
                 }

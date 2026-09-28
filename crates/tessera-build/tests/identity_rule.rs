@@ -764,3 +764,109 @@ fn creation_order_and_not_an_ids_value_numbers_items() {
         assert_eq!(view(&a, file), view(&b, file), "{file}");
     }
 }
+
+/// **A unique attribute needs no source of its own**: its values come from every file that
+/// carries its column, so a declaration naming none for it, and no default, builds with them.
+#[test]
+fn a_unique_attribute_with_no_source_takes_its_values_from_the_points() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    points(&dir.join("points.parquet"), &[Some(5), Some(9)], Vec::new());
+    let declaration = ONE_VIEW
+        .replace("[defaults]\nsource = \"points\"\n", "")
+        .replace(
+            "extent           = { min = 0.0, max = 100.0 }\n",
+            "extent           = { min = 0.0, max = 100.0 }\nsource           = \"points\"\n",
+        );
+    let (root, report) = both_ways(dir, &declaration);
+    assert_eq!(report.items, 2);
+    assert_ne!(item(&root, "a", 5), item(&root, "a", 9));
+}
+
+/// **`--limit` leaves out the members naming items it left out, and reports them as outside it**:
+/// not refused, so `--strict` builds.
+#[test]
+fn a_member_outside_the_limit_is_reported_and_not_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    points(&dir.join("points.parquet"), &[Some(1), Some(2), Some(30), Some(40)], Vec::new());
+    write(
+        &dir.join("members.parquet"),
+        vec![
+            ("key", strings(&[Some("k"), Some("k"), Some("k")])),
+            ("a", u64s(&[Some(1), Some(30), Some(40)])),
+        ],
+    );
+    let declaration = ONE_VIEW.replace(
+        "points = \"points.parquet\"\n",
+        "points = \"points.parquet\"\nmembers = \"members.parquet\"\n",
+    ) + r#"
+[[layer]]
+name                      = "groups"
+views                     = ["s0"]
+membership                = "enumerated"
+value_set                 = "open"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "any"
+
+  [layer.members]
+  source = "members"
+"#;
+    let limited = |out: &str| BuildArgs {
+        limit: Some(10),
+        strict: true,
+        ..args(dir, &declaration, &dir.join(out))
+    };
+    let report = build(&limited("streamed")).expect("rows outside the limit refuse nothing");
+    let reference = build_in_memory(&limited("linear")).expect("the linear build agrees");
+    common::assert_bundles_identical(&dir.join("streamed"), &dir.join("linear"), "limited");
+    assert_eq!(report.refused, reference.refused);
+    assert_eq!(report.items, 2);
+    let outside = refused(&report, "layer 'groups' members", "outside_limit").expect("reported");
+    assert_eq!(outside.rows, 2);
+    assert!(!outside.is_refusal());
+}
+
+/// **A member naming no item still refuses a `--strict` build under `--limit`**: an id below the
+/// limit that no points row holds is not outside it.
+#[test]
+fn a_member_below_the_limit_naming_no_item_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    points(&dir.join("points.parquet"), &[Some(1), Some(2), Some(30)], Vec::new());
+    write(
+        &dir.join("members.parquet"),
+        vec![
+            ("key", strings(&[Some("k"), Some("k"), Some("k")])),
+            ("a", u64s(&[Some(1), Some(30), Some(7)])),
+        ],
+    );
+    let declaration = ONE_VIEW.replace(
+        "points = \"points.parquet\"\n",
+        "points = \"points.parquet\"\nmembers = \"members.parquet\"\n",
+    ) + r#"
+[[layer]]
+name                      = "groups"
+views                     = ["s0"]
+membership                = "enumerated"
+value_set                 = "open"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "any"
+
+  [layer.members]
+  source = "members"
+"#;
+    let limited = |out: &str, strict: bool| BuildArgs {
+        limit: Some(10),
+        strict,
+        ..args(dir, &declaration, &dir.join(out))
+    };
+    assert!(build(&limited("strict", true)).is_err());
+    let report = build(&limited("lenient", false)).expect("without --strict it builds");
+    let no_item = refused(&report, "layer 'groups' members", "names_no_item").expect("reported");
+    assert_eq!(no_item.rows, 1);
+}

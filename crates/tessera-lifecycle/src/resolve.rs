@@ -58,10 +58,9 @@ pub enum Identifier {
 pub enum Batch {
     /// Rows create items and set values: an ingest, a view's points.
     Creates,
-    /// Rows address items one each and set values: an attribute file.
+    /// Rows address items one each and set values: an attribute file, or one view's rows of a
+    /// group-scoped attribute's file.
     Edits,
-    /// Rows address items one each and set no unique value: a group-scoped attribute's file.
-    Addresses,
     /// Rows name items, many rows to an item: a members file, an access relation.
     Names,
 }
@@ -124,14 +123,20 @@ impl Refusal {
         }
     }
 
+    pub const NAMES_TWO: &'static str = "names_two_items";
+    pub const UNKNOWN_TESSERA_ID: &'static str = "unknown_tessera_id";
+    pub const NAMES_NO_ITEM: &'static str = "names_no_item";
+    pub const ONE_ITEM_TWICE: &'static str = "one_item_twice";
+    pub const ONE_VALUE_TWICE: &'static str = "one_value_twice";
+
     /// The reason as a report spells it.
     pub fn reason(&self) -> &'static str {
         match self {
-            Refusal::NamesTwo { .. } => "names_two_items",
-            Refusal::UnknownTesseraId { .. } => "unknown_tessera_id",
-            Refusal::NamesNoItem { .. } => "names_no_item",
-            Refusal::OneItemTwice { .. } => "one_item_twice",
-            Refusal::OneValueTwice { .. } => "one_value_twice",
+            Refusal::NamesTwo { .. } => Self::NAMES_TWO,
+            Refusal::UnknownTesseraId { .. } => Self::UNKNOWN_TESSERA_ID,
+            Refusal::NamesNoItem { .. } => Self::NAMES_NO_ITEM,
+            Refusal::OneItemTwice { .. } => Self::ONE_ITEM_TWICE,
+            Refusal::OneValueTwice { .. } => Self::ONE_VALUE_TWICE,
         }
     }
 }

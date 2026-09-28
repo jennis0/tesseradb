@@ -16,12 +16,22 @@ pub struct RefusedRows {
     /// The block reading it: `view 'world'`, `layer 'taxonomy' members`.
     pub object: String,
     /// `names_two_items`, `one_item_twice`, `one_value_twice`, `names_no_item` or
-    /// `unknown_tessera_id`.
+    /// `unknown_tessera_id`; or `outside_limit`, a row naming an item `--limit` left out, which is
+    /// left out with it and is not a refusal.
     pub reason: String,
     pub rows: u64,
     /// The values of the first ten refused rows in the file, each once.
     pub values: Vec<String>,
 }
+
+impl RefusedRows {
+    /// Whether the rule refused these rows, rather than `--limit` leaving them out.
+    pub fn is_refusal(&self) -> bool {
+        self.reason != OUTSIDE_LIMIT
+    }
+}
+
+const OUTSIDE_LIMIT: &str = "outside_limit";
 
 /// How many rows a report names by their values, for each file and reason.
 pub(crate) const SAMPLES: usize = 10;
@@ -42,6 +52,23 @@ impl Tally {
         } else if first.peek().is_some_and(|&last| row < last) {
             first.pop();
             first.push(row);
+        }
+    }
+
+    /// `rows` more rows for `reason`, none of them sampled.
+    pub(crate) fn count(&mut self, reason: &'static str, rows: u64) {
+        if rows > 0 {
+            self.reasons.entry(reason).or_default().0 += rows;
+        }
+    }
+
+    /// `other`'s rows added to these.
+    pub(crate) fn merge(&mut self, other: Tally) {
+        for (reason, (rows, first)) in other.reasons {
+            for row in first.iter().copied() {
+                self.refuse(reason, row);
+            }
+            self.count(reason, rows - first.len() as u64);
         }
     }
 
@@ -95,10 +122,11 @@ pub fn describe(refused: &[RefusedRows]) -> Vec<String> {
         .iter()
         .map(|entry| {
             format!(
-                "{} ({}): {} row(s) refused, {}{}",
+                "{} ({}): {} row(s) {}, {}{}",
                 entry.object,
                 entry.source,
                 crate::thousands(entry.rows),
+                if entry.is_refusal() { "refused" } else { "left out" },
                 reason_text(&entry.reason),
                 match entry.values.is_empty() {
                     true => String::new(),
@@ -111,11 +139,12 @@ pub fn describe(refused: &[RefusedRows]) -> Vec<String> {
 
 fn reason_text(reason: &str) -> &'static str {
     match reason {
-        "names_two_items" => "each names two items",
-        "one_item_twice" => "each names an item an earlier row of the file names",
-        "one_value_twice" => "each gives a unique value an earlier row of the file gives",
-        "names_no_item" => "each names no item",
-        "unknown_tessera_id" => "each carries a tessera_id, which names no item at a build",
+        Refusal::NAMES_TWO => "each names two items",
+        Refusal::ONE_ITEM_TWICE => "each names an item an earlier row of the file names",
+        Refusal::ONE_VALUE_TWICE => "each gives a unique value an earlier row of the file gives",
+        Refusal::NAMES_NO_ITEM => "each names no item",
+        Refusal::UNKNOWN_TESSERA_ID => "each carries a tessera_id, which names no item at a build",
+        OUTSIDE_LIMIT => "each names an item --limit left out, and is left out with it",
         _ => "refused",
     }
 }
