@@ -41,6 +41,9 @@ const N: u64 = 3_000;
 /// `kind` is drawn and indexed, `shade` is indexed alone under a `derived` vocabulary, and `mark`
 /// is drawn alone.
 const SCHEMA: &str = r#"
+[sources]
+marks = "marks.parquet"
+
 [[vocabulary]]
 name       = "kind"
 width      = "u16"
@@ -58,6 +61,7 @@ name       = "mark"
 width      = "u8"
 value_set  = "open"
 visibility = "public"
+source     = "marks"
 
 [[attribute]]
 name       = "kind"
@@ -170,11 +174,31 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
+/// `mark`'s values: `p` and `q` titled, `r` not.
+fn write_marks(path: &Path) {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("title", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["p", "q", "r"])),
+            Arc::new(StringArray::from(vec![Some("Pea"), Some("Queue"), None])),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
 fn build_bundle(dir: &Path) -> PathBuf {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points(&points);
     write_pairs_n(&pairs, N);
+    write_marks(&dir.join("marks.parquet"));
     std::fs::write(dir.join("config.toml"), SCHEMA).unwrap();
     let schema = Config::parse(&dir.join("config.toml"), &HashMap::new())
         .expect("the schema parses")
@@ -393,6 +417,9 @@ fn rows_of(batch: &RecordBatch) -> Vec<Row> {
     };
     // A dictionary-encoded text column's value at row `i`, `None` where it is null.
     let text = |c: &dyn Array, i: usize| -> Option<String> {
+        if let DataType::Dictionary(_, values) = c.data_type() {
+            assert_eq!(**values, DataType::Utf8, "a dictionary of text");
+        }
         if c.is_null(i) {
             return None;
         }
@@ -413,13 +440,6 @@ fn rows_of(batch: &RecordBatch) -> Vec<Row> {
                 let values = d.values().as_any().downcast_ref::<StringArray>().unwrap();
                 Some(values.value(d.keys().value(i) as usize).to_string())
             }
-            DataType::Utf8 => Some(
-                c.as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(i)
-                    .to_string(),
-            ),
             DataType::UInt64 => Some(
                 c.as_any()
                     .downcast_ref::<UInt64Array>()
@@ -1487,16 +1507,22 @@ fn a_cell_table_pages_from_any_cell() {
             .iter()
             .any(|r| r.count == 0 && r.reference.unwrap() > 0));
     }
+    // A response ends at its pages or its bytes, and what it can still send decides whether a
+    // table is counted in one walk or a group at a time.
     for page_rows in [17u32, 64, 500] {
-        for pages in [Some(1u32), Some(3)] {
+        for (pages, response_bytes) in
+            [(Some(1u32), 256 << 20), (Some(3), 256 << 20), (None, 6_000)]
+        {
             let mut paged = req.clone();
             paged.page_rows = Some(page_rows);
             paged.pages = pages;
+            paged.limits.response_bytes = response_bytes;
+            paged.limits.max_page_bytes = response_bytes.min(64 << 20) / 2;
             let joined = read_all(engine, &session, paged);
             assert_eq!(
                 joined.values().map(|(_, r)| r.clone()).collect::<Vec<_>>(),
                 whole.values().map(|(_, r)| r.clone()).collect::<Vec<_>>(),
-                "{page_rows} rows a page, {pages:?} pages a response"
+                "{page_rows} rows a page, {pages:?} pages, {response_bytes} bytes a response"
             );
         }
     }
@@ -1996,6 +2022,18 @@ fn artifact_cells_are_the_oracles() {
                     served_rows, expected,
                     "{name}, broad {broad}, depth {depth}"
                 );
+                let mut paged = request(&groupings);
+                paged.page_rows = Some(7);
+                paged.pages = Some(2);
+                let joined: Vec<(Option<String>, u64, u64)> = table(engine, &session, paged)
+                    .1
+                    .into_iter()
+                    .map(|r| (r.key, r.cell.unwrap(), r.count))
+                    .collect();
+                assert_eq!(
+                    joined, expected,
+                    "{name}, broad {broad}, depth {depth}, paged"
+                );
             }
         }
     }
@@ -2041,10 +2079,12 @@ fn an_attached_layer_counts_as_the_artifacts_route_does() {
     labels.depends_on = vec!["topics/major".into()];
     engine.register_layer(labels).unwrap();
     let planted = planted();
-    let attached = (0..3)
+    // One label on each planted artifact, `secret` and `mine` among them.
+    let attached = (0..planted.len())
         .map(|i| {
             // Its own members are the next artifact's.
-            let mut label = artifact(&fx, &format!("label-{i}"), &planted[(i + 1) % 3].1, None);
+            let own = &planted[(i + 1) % planted.len()].1;
+            let mut label = artifact(&fx, &format!("label-{i}"), own, None);
             label.attached_to = Some(IncomingAttachment {
                 layer: "topics/major".into(),
                 level: 0,
@@ -2083,18 +2123,75 @@ fn an_attached_layer_counts_as_the_artifacts_route_does() {
                     &mut route,
                 )
                 .unwrap();
-            assert_eq!(route.0.len(), 3, "every label is served");
-            let groupings = [layer("labels/major", Pick::Named(label_ids.clone()))];
+            // A label is served where its target is: `secret`'s never, `mine`'s to the subset.
+            let served: Vec<usize> = (0..planted.len())
+                .filter(|&i| match planted[i].2 {
+                    None => true,
+                    Some("1") => !broad,
+                    Some(_) => false,
+                })
+                .collect();
+            assert_eq!(
+                route
+                    .0
+                    .keys()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                served.iter().map(|&i| label_ids[i].raw()).collect(),
+                "broad {broad}"
+            );
+            let groupings = [
+                layer("labels/major", Pick::Named(label_ids.clone())),
+                layer("labels/major", Pick::Top(1)),
+            ];
             let mut req = request(&groupings);
             req.filter = Some(filter.clone());
-            let (_, rows) = table(engine, &session, req);
-            let counted: BTreeMap<u64, u64> = rows
+            let tables = read_all(engine, &session, req);
+            let counted: BTreeMap<u64, u64> = tables[&0]
+                .1
                 .iter()
                 .filter(|r| r.group.as_deref() == Some("listed"))
                 .map(|r| (r.key.as_ref().unwrap().parse().unwrap(), r.count))
                 .collect();
             assert_eq!(counted, route.0, "broad {broad}, {filter:?}");
             assert!(route.0.values().any(|&n| n > 0));
+
+            // An item held only by a withheld target is in none, never the rest.
+            let keep = |i: &Item| match &filter {
+                FilterExpr::AllOf(_) => true,
+                _ => matches!(i.kind.as_deref(), Some("a" | "b")),
+            };
+            let set: Vec<u64> = fx.visible(broad, &keep).map(|i| i.source).collect();
+            let in_target = |i: usize, s: &u64| planted[i].1.contains(s);
+            let count = |i: usize| set.iter().filter(|s| in_target(i, s)).count() as u64;
+            let top = *served
+                .iter()
+                .max_by(|&&a, &&b| {
+                    count(a)
+                        .cmp(&count(b))
+                        .then(label_ids[b].cmp(&label_ids[a]))
+                })
+                .unwrap();
+            let in_served = |s: &u64| served.iter().any(|&i| in_target(i, s));
+            let rest = set
+                .iter()
+                .filter(|s| in_served(s) && !in_target(top, s))
+                .count() as u64;
+            let none = set.iter().filter(|s| !in_served(s)).count() as u64;
+            let summary: Vec<(String, u64)> = tables[&1]
+                .1
+                .iter()
+                .map(|r| (r.group.clone().unwrap(), r.count))
+                .collect();
+            assert_eq!(
+                summary,
+                vec![
+                    ("listed".to_string(), count(top)),
+                    ("rest".to_string(), rest),
+                    ("none".to_string(), none),
+                ],
+                "broad {broad}, {filter:?}"
+            );
         }
     }
 }
@@ -2235,4 +2332,147 @@ fn a_region_in_the_reference_gives_the_coarsest_verdict() {
         head(None, Some(Reference::Filter(region))),
         Some(RegionVerdict::Cover { .. })
     ));
+}
+
+/// **Every column has the contract's type**, on a table with no rows too: a field's key and title
+/// dictionaries of text keyed by `int32`, a layer's key `uint64`; and a field's titles are the
+/// ones `/v1/categories` gives.
+#[test]
+fn every_column_has_its_type_and_a_title_is_the_vocabularys() {
+    use tessera_types::layer::ServingLayout;
+    let fx = fixture();
+    let engine = &fx.engine;
+    plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
+    let text = |key: DataType| DataType::Dictionary(Box::new(key), Box::new(DataType::Utf8));
+    let groupings = [
+        field("mark", Pick::Top(3)),
+        with_cells(layer("topics/major", Pick::Top(2)), 4),
+        size(),
+    ];
+    for (broad, filter, reference) in [
+        (true, None, Some(Reference::Visible)),
+        (false, Some(fx.is_in("shade", &["hidden"])), None),
+    ] {
+        let session = fx.session(broad);
+        let mut req = request(&groupings);
+        req.filter = filter;
+        req.reference = reference.clone();
+        let (collect, _) = respond(engine, &session, req).unwrap();
+        let schema = |grouping: u32| {
+            let (_, batch, _) = collect
+                .pages
+                .iter()
+                .find(|(g, _, _)| *g == grouping)
+                .expect("every table has a page");
+            batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| (f.name().clone(), f.data_type().clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut counts = vec![("count".to_string(), DataType::UInt64)];
+        if reference.is_some() {
+            counts.push(("reference_count".to_string(), DataType::UInt64));
+            counts.push(("lift".to_string(), DataType::Float64));
+        }
+        let with = |head: Vec<(&str, DataType)>| -> Vec<(String, DataType)> {
+            head.into_iter()
+                .map(|(n, t)| (n.to_string(), t))
+                .chain(counts.iter().cloned())
+                .collect()
+        };
+        assert_eq!(
+            schema(0),
+            with(vec![
+                ("group", text(DataType::Int8)),
+                ("key", text(DataType::Int32)),
+                ("title", text(DataType::Int32)),
+            ])
+        );
+        assert_eq!(
+            schema(1),
+            with(vec![
+                ("group", text(DataType::Int8)),
+                ("key", DataType::UInt64),
+                ("cell", DataType::UInt64),
+            ])
+        );
+        assert_eq!(schema(2), with(vec![]));
+        if !broad {
+            let rows: usize = collect
+                .pages
+                .iter()
+                .filter(|(g, _, _)| *g < 2)
+                .map(|(_, b, _)| b.num_rows())
+                .sum();
+            assert_eq!(rows, 0, "the set is empty");
+        }
+    }
+    let session = fx.session(true);
+    let titles: BTreeMap<String, Option<String>> = engine
+        .categories(
+            &session,
+            "mark",
+            CategoryQuery::Page {
+                after: None,
+                limit: 100,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .values
+        .into_iter()
+        .map(|v| (v.key, v.title))
+        .collect();
+    assert_eq!(titles.get("p"), Some(&Some("Pea".to_string())));
+    assert_eq!(titles.get("r"), Some(&None));
+    let (_, rows) = table(engine, &session, request(&[field("mark", Pick::Top(3))]));
+    let listed: Vec<&Row> = rows
+        .iter()
+        .filter(|r| r.group.as_deref() == Some("listed"))
+        .collect();
+    assert_eq!(listed.len(), 3);
+    for row in listed {
+        assert_eq!(&row.title, &titles[row.key.as_ref().unwrap()], "{row:?}");
+    }
+}
+
+/// **A resumed table lists only the artifacts its first page chose**, each by its own entity: one
+/// deleted between two pages gives no row after it, and no other artifact takes its place.
+#[test]
+fn a_resumed_table_lists_only_the_artifacts_it_chose() {
+    use tessera_types::layer::ServingLayout;
+    let fx = fixture();
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    let ids = plant(&fx, "topics/major", ServingLayout::ArtifactMajor);
+    let groupings = [layer(
+        "topics/major",
+        Pick::Named(vec![ids["t2"], ids["t0"], ids["t1"]]),
+    )];
+    let mut req = request(&groupings);
+    req.page_rows = Some(1);
+    req.pages = Some(1);
+    let (first, trailer) = respond(engine, &session, req.clone()).unwrap();
+    assert_eq!(
+        rows_of(&first.pages[0].1)[0].key,
+        Some(ids["t2"].raw().to_string())
+    );
+    engine
+        .accept_change(artifact_entity(engine, ids["t0"]), ChangeOp::Delete)
+        .unwrap();
+    tick(engine);
+    let token = trailer.next.unwrap();
+    req.cursor = Some(&token);
+    req.pages = None;
+    let (rest, _) = respond(engine, &session, req).unwrap();
+    let keys: Vec<Option<String>> = rest
+        .pages
+        .iter()
+        .flat_map(|(_, b, _)| rows_of(b))
+        .filter(|r| r.group.as_deref() == Some("listed"))
+        .map(|r| r.key)
+        .collect();
+    assert_eq!(keys, vec![Some(ids["t1"].raw().to_string())]);
 }

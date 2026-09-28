@@ -551,7 +551,10 @@ impl Walk<'_> {
             let found = (rows.len() as u64).max(1);
             let wanted = (need - rows.len().min(need)) as u64;
             let chunks_wanted = wanted.saturating_mul((at - start) as u64).div_ceil(found);
-            batch = (chunks_wanted as usize + 1).clamp(1, threads * 64);
+            batch = chunks_wanted
+                .saturating_add(1)
+                .min(threads as u64 * 64)
+                .max(1) as usize;
         }
         Ok((rows, at == chunks.len()))
     }

@@ -133,29 +133,23 @@ impl Set {
 }
 
 /// The members of `entities` holding a row in the view's rows the page's mask was projected over.
-fn restrict_under(open: &OpenView<'_>, engine: &Engine, entities: &Bitmap) -> Result<Bitmap> {
-    let row_space = &open.served.data.row_space;
-    match row_space.restrict_to_view(entities, open.geometry.projection.covers_through()) {
-        Some(restricted) => Ok(restricted),
-        // A merge has collapsed the extent the projection was taken through, so which of the
-        // extents' entities its rows cover is read from the mask's rows above the base.
-        None => {
-            let mut held = row_space
-                .restrict_to_view(entities, None)
-                .expect("the base alone is always covered");
-            let above_base = open.mask.visible_all().and(&Bitmap::from_range(
-                row_space.base_rows()..u32::try_from(row_space.total_rows()).unwrap_or(u32::MAX),
-            ));
-            let mut extents = crossing(engine, open, &above_base)?;
-            extents.and_inplace(entities);
-            held.or_inplace(&extents);
-            Ok(held)
-        }
-    }
+fn restrict_under(open: &OpenView<'_>, entities: &Bitmap) -> Result<Bitmap> {
+    // The projection covers an extent of this generation's row space: a projection served from
+    // the generation before is served only where this one extends it, which a merge does not.
+    open.served
+        .data
+        .row_space
+        .restrict_to_view(entities, open.geometry.projection.covers_through())
+        .ok_or_else(|| {
+            EngineError::Malformed(format!(
+                "view '{}' no longer holds the extent its projection was taken through",
+                open.served.name
+            ))
+        })
 }
 
 fn restrict(cx: &Cx<'_>, entities: &Bitmap) -> Result<Bitmap> {
-    restrict_under(cx.open, cx.engine, entities)
+    restrict_under(cx.open, entities)
 }
 
 fn cross(cx: &Cx<'_>, rows: &Bitmap) -> Result<Bitmap> {
@@ -204,7 +198,7 @@ pub(super) fn compose(
                 check_cancelled(&req.cancel)?;
                 Ok(match route(expr, prefer_row)? {
                     RoutedFilter::Entity(entities) => {
-                        let restricted = restrict_under(open, engine, &entities)?;
+                        let restricted = restrict_under(open, &entities)?;
                         let size = restricted.cardinality();
                         Set::of(Held::Entities(restricted), size, None)
                     }

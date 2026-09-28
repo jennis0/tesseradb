@@ -9,8 +9,8 @@
 //! overlap, so a table's rows can add to more than the set's size.
 
 use croaring::Bitmap;
-use rustc_hash::FxHashMap;
-use tessera_types::layer::HierarchyKind;
+use rustc_hash::{FxHashMap, FxHashSet};
+use tessera_types::layer::{HierarchyKind, RegisteredLayer};
 use tessera_types::{EntityId, TesseraId};
 
 use super::set::Cx;
@@ -127,6 +127,7 @@ impl Layer {
             .filter(|layer| layer.entity == self.entity)
             .filter(|layer| (self.level as usize) < layer.runs.len());
         let mut ordinals: Vec<u32> = Vec::new();
+        let mut targets = Targets::default();
         let read = match &registered {
             None => None,
             Some(layer) => {
@@ -155,6 +156,7 @@ impl Layer {
                         ordinals.push(ordinal);
                     }
                 }
+                targets = Targets::of(cx, &read, &ordinals, &dependency_served);
                 Some(read)
             }
         };
@@ -190,7 +192,6 @@ impl Layer {
                 (counts, None)
             }
             Some(read) => {
-                let targets = targets(engine, served_view, mask, read, &ordinals);
                 let of = |rows: &Bitmap| -> Vec<Bitmap> {
                     engine.pool.install(|| {
                         use rayon::prelude::*;
@@ -205,8 +206,22 @@ impl Layer {
                 (counts, Some((in_set, reference_rows.map(of))))
             }
         };
+        // A resumed table's artifacts are carried by entity: an ordinal that holds another entity
+        // now, or none, stands for nothing.
+        let ordinal_of = |entity: u64| -> u32 {
+            let Some((name, level, ordinal)) =
+                engine.write.live().locate_artifact(EntityId::new(entity))
+            else {
+                return u32::MAX;
+            };
+            if name == self.name && level == self.level && entity_at(ordinal) == Some(entity) {
+                ordinal
+            } else {
+                u32::MAX
+            }
+        };
         let listed: Vec<u32> = match chosen {
-            Some(chosen) => chosen.iter().map(|&g| g as u32).collect(),
+            Some(chosen) => chosen.iter().map(|&entity| ordinal_of(entity)).collect(),
             None => match &self.pick {
                 Pick::Top(n) => {
                     let mut ranked: Vec<(u64, u64, u32)> = ordinals
@@ -287,19 +302,25 @@ impl Layer {
             }
         };
         let named = matches!(self.pick, Pick::Named(_));
-        let keys = served
-            .listed
+        let chosen: Vec<u64> = match chosen {
+            Some(chosen) => chosen.to_vec(),
+            None => served
+                .listed
+                .iter()
+                .map(|&o| entity_at(o).expect("a listed artifact is held"))
+                .collect(),
+        };
+        let keys = chosen
             .iter()
-            .map(|&o| Key::Id(tessera_id(o).unwrap_or_default()))
+            .map(|&entity| {
+                let id = engine.identity_key.forward(shard, EntityId::new(entity));
+                Key::Id(id.map_or(0, |id| id.raw()))
+            })
             .collect();
         timings.count_ns += counting.elapsed().as_nanos() as u64;
         Ok((
             Groups {
-                chosen: served
-                    .listed
-                    .iter()
-                    .map(|&o| u64::from(self.level) << 32 | u64::from(o))
-                    .collect(),
+                chosen,
                 sizes,
                 always: served
                     .listed
@@ -315,49 +336,87 @@ impl Layer {
     }
 }
 
-/// The level each attached artifact among `ordinals` hangs from, read under the page's mask.
-fn targets(
-    engine: &Engine,
-    served: &crate::viewport::ServedView<'_>,
-    mask: &crate::compose::EffectiveMask,
-    read: &ReadLevel,
-    ordinals: &[u32],
-) -> FxHashMap<(String, u32), ReadLevel> {
-    let mut targets: FxHashMap<(String, u32), ReadLevel> = FxHashMap::default();
-    for &ordinal in ordinals {
-        let Some(attachment) = read.rows.attachment(ordinal) else {
-            continue;
-        };
-        let key = (attachment.layer.clone(), attachment.level);
-        if targets.contains_key(&key) {
-            continue;
+/// What the attached artifacts among a level's served ones hang from: each target level read
+/// under the page's mask, and the attached ordinals whose target this viewer is served, its slot
+/// still holding the entity the edge names and its content readable, as `/v1/artifacts` requires
+/// before it counts a target's members.
+#[derive(Default)]
+struct Targets {
+    levels: FxHashMap<(String, u32), ReadLevel>,
+    counted: FxHashSet<u32>,
+}
+
+impl Targets {
+    fn of(
+        cx: &Cx<'_>,
+        read: &ReadLevel,
+        ordinals: &[u32],
+        dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+    ) -> Targets {
+        let (engine, served, mask) = (cx.engine, &cx.open.served, &cx.open.mask);
+        let mut targets = Targets::default();
+        let mut layers: FxHashMap<String, Option<RegisteredLayer>> = FxHashMap::default();
+        for &ordinal in ordinals {
+            let Some(attachment) = read.rows.attachment(ordinal) else {
+                continue;
+            };
+            let Some(layer) = layers
+                .entry(attachment.layer.clone())
+                .or_insert_with(|| engine.write.live().registered_layer(&attachment.layer))
+            else {
+                continue;
+            };
+            let Some(runs) = layer.runs.get(attachment.level as usize) else {
+                continue;
+            };
+            if runs.entity_of(u64::from(attachment.ordinal)) != Some(attachment.entity.raw()) {
+                continue;
+            }
+            let key = (attachment.layer.clone(), attachment.level);
+            let level = targets
+                .levels
+                .entry(key)
+                .or_insert_with(|| engine.read_level(served, mask, layer, attachment.level, false));
+            let view = level.view(engine, served, mask, layer, dependency_served);
+            let crate::artifacts::ArtifactVerdict::Serve { rank, .. } =
+                view.verdict(attachment.entity, attachment.ordinal)
+            else {
+                continue;
+            };
+            let content = level.content(
+                engine,
+                cx.generation,
+                layer,
+                attachment.ordinal,
+                attachment.entity,
+                rank,
+            );
+            if content.is_some() {
+                targets.counted.insert(ordinal);
+            }
         }
-        let Some(layer) = engine.write.live().registered_layer(&attachment.layer) else {
-            continue;
-        };
-        if (attachment.level as usize) < layer.runs.len() {
-            let level = engine.read_level(served, mask, &layer, attachment.level, false);
-            targets.insert(key, level);
-        }
+        targets
     }
-    targets
 }
 
 /// The members of the artifact at `ordinal` among `rows`, which lie inside the mask: its target's
-/// where it hangs from one.
+/// where it hangs from one, and none where that target is not counted.
 fn members(
     read: &ReadLevel,
-    targets: &FxHashMap<(String, u32), ReadLevel>,
+    targets: &Targets,
     mask: &crate::compose::EffectiveMask,
     ordinal: u32,
     rows: &Bitmap,
 ) -> Bitmap {
     let (level, ordinal) = match read.rows.attachment(ordinal) {
         None => (read, ordinal),
-        Some(attachment) => match targets.get(&(attachment.layer.clone(), attachment.level)) {
-            Some(target) => (target, attachment.ordinal),
-            None => return Bitmap::new(),
-        },
+        Some(attachment) => {
+            let key = (attachment.layer.clone(), attachment.level);
+            match targets.levels.get(&key) {
+                Some(target) if targets.counted.contains(&ordinal) => (target, attachment.ordinal),
+                _ => return Bitmap::new(),
+            }
+        }
     };
     match level.rows.get(ordinal) {
         Some(members) => members.and(rows),

@@ -5,8 +5,8 @@
 //! the session's authorisation-data hash and, on the artifacts route, the layer, its entity and
 //! the level named, and on the aggregate route a digest of the request, are the associated data,
 //! so a cursor presented under any other binding does not open, and every such failure is the one
-//! refusal [`EngineError::CursorRefused`]. A cursor issued by another bundle is sealed under another key
-//! and refused the same way. The order is sealed inside, and a request that names no order takes
+//! refusal [`EngineError::CursorRefused`]. A cursor issued by another bundle is sealed under
+//! another key and refused the same way. The order is sealed inside, and a request that names no order takes
 //! the cursor's. A client can read nothing from a cursor and can build none, so no position in one
 //! is used before it has opened.
 
