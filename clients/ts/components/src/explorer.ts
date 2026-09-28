@@ -991,8 +991,8 @@ export class TesseraExplorer extends TesseraElement {
   private displaySection(): TemplateResult {
     const s = this.display;
     const probe = this.map?.probe.timings;
-    const radius = s.radius ?? (probe && probe.markRadius > 0 ? probe.markRadius : 1.5);
-    const opacity = s.pointOpacity ?? (probe && probe.markAlpha > 0 ? probe.markAlpha : 0.7);
+    const radius = s.radius ?? (probe && probe.markRadius > 0 ? probe.markRadius : 2);
+    const opacity = s.pointOpacity ?? (probe && probe.markAlpha > 0 ? probe.markAlpha : 0.8);
     const scheme = this.map?.drawnGround ?? 'light';
     const colours = drawnDensityColours(s.density, this.densityColours, s.points);
     const modeAt = DENSITY_MODES.findIndex((m) => m.mode === s.density);
