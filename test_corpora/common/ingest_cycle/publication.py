@@ -50,7 +50,7 @@ def cells_within(entities: np.ndarray, budget: int) -> int:
 
 
 def json_list(entities: np.ndarray) -> bytes:
-    """A JSON array of entity ids as decimal strings, the naming field's values, as bytes: one
+    """A JSON array of entity ids as decimal strings, the unique field's values, as bytes: one
     `(n, 23)` byte array holding each id's quote, twenty digits, quote and comma, masked to the
     digits each id takes, then one copy, rather than a Python string built per member.
     """
@@ -218,7 +218,7 @@ def rank_groups(idx: np.ndarray, rank: np.ndarray, entity: np.ndarray):
 
 class Publication:
     """One declared layer's roster, published in batches under a byte cap. Every artifact
-    carries its whole member set, named by the naming field `field`; one whose body would exceed
+    carries its whole member set, named by the unique field `field`; one whose body would exceed
     `--publish-max-bytes` is published with as many members as fit, then grown through
     `PATCH /control/layers/{name}/artifacts`. Only an artifact whose key, content and parents
     alone do not fit is declined.
@@ -246,9 +246,9 @@ class Publication:
         access_column: str | None = None,
     ):
         self.table = in_parent_order(roster_table(roster))
-        #: The naming field every member, as a decimal value, is named by.
+        #: The unique field every member, as a decimal value, is named by.
         self.field = field
-        #: The struct field a roster's own `members` list holds the naming field's value in.
+        #: The struct field a roster's own `members` list holds the unique field's value in.
         self.member_field = member_field
         #: The roster column naming the view each artifact belongs to, on a group-scoped layer.
         self.view_column = view_column

@@ -92,8 +92,6 @@ def test_a_layer_scoped_to_a_view_group_keys_its_artifacts_per_view(tmp_path, ch
         y="y",
         view="q",
     )
-    # A group's rows fill no attribute at the first commit, the unique one included.
-    db.insert("id", pd.DataFrame({"id": ["p0"]}), value="id")
     db.insert(
         "quarter_clusters",
         artifacts=pd.DataFrame({"key": ["a"], "quarter": ["q1"]}),

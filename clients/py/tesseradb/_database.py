@@ -890,8 +890,7 @@ class Database:
         """The unique attributes a table names its items by, as `{attribute: column}`.
 
         A table carries a unique attribute in the column `columns=` names for it, else in the
-        attribute's own column: the `field` its block declares, the column the allocation view's
-        frame fills it from, or its name. An artifacts table names its members inside its member
+        attribute's own column: the `field` its block declares, or its name. An artifacts table names its members inside its member
         structs, and a roster, a label set's text and a value set name no item, so they carry none
         here. An insert into a unique attribute carries it as its values.
         """
@@ -935,16 +934,9 @@ class Database:
 
     def _unique_column(self, name: str) -> str:
         """The column a table carries a unique attribute in when `columns=` names none: the
-        `field` its block declares, the column the allocation view's frame fills it from, or its
-        name. The build reads it from that column in every file."""
+        `field` its block declares, or its name."""
         block = next(b for b in self.blocks.blocks["attribute"] if b.get("name") == name)
-        if block.get("field"):
-            return block["field"]
-        anchor = self.blocks.allocation_view()
-        for insert in self.inserts:
-            if insert.target == anchor and insert.role == "rows":
-                return insert.named_attributes.get(name, name)
-        return name
+        return block.get("field") or name
 
     def _attribute_columns(
         self, target: str, kind: str, role: str, data: Any, columns: dict | None, named: dict
@@ -1346,7 +1338,7 @@ class Database:
             report.minted = int(built.group("minted"))
             report.unclustered = int(built.group("unclustered"))
         refused = self.path / "bundle" / "reports" / "refused.json"
-        if refused.exists():
+        if built is not None and int(built.group("refused")) > 0 and refused.exists():
             report.refused = json.loads(refused.read_text(encoding="utf-8"))
         return report
 
@@ -1946,7 +1938,7 @@ def _extent_in_words(extent: Any) -> str:
 #: unclustered member row(s), R row(s) refused`.
 _BUILT = re.compile(
     r"^built .*: (?P<items>\d+) items, .* (?P<minted>\d+) artifact\(s\) minted, "
-    r"(?P<unclustered>\d+) unclustered member row\(s\), \d+ row\(s\) refused$",
+    r"(?P<unclustered>\d+) unclustered member row\(s\), (?P<refused>\d+) row\(s\) refused$",
     re.MULTILINE,
 )
 

@@ -18,7 +18,7 @@ from pyarrow import ipc
 from .. import serve_battery
 from .control import quote
 from .holdout import wire_columns
-from .split import naming_field, read_view_rows
+from .split import unique_field, read_view_rows
 
 #: A view's rows read to draw a probe's values from.
 PROBE_SAMPLE_ROWS = 200_000
@@ -185,8 +185,8 @@ def column_sample(
     """Up to `PROBE_SAMPLE_ROWS` non-null values of `column`, from the first of `candidates` whose
     batches carry it: its points file, or the file the column is joined from. Read from any file
     other than `view`'s own points file, only the rows of the entities `view` holds, `entities()`,
-    are kept, so every value is one `view` has. The naming field's values are the view's entities."""
-    if column == naming_field(rung)["name"]:
+    are kept, so every value is one `view` has. The unique field's values are the view's entities."""
+    if column == unique_field(rung)["name"]:
         return pa.array(entities()[:PROBE_SAMPLE_ROWS])
     for candidate in candidates:
         _, attributes, joined = wire_columns(rung, candidate)

@@ -33,7 +33,7 @@ INTEGER_TYPES = {
 }
 
 
-def naming_field(rung: Path) -> dict:
+def unique_field(rung: Path) -> dict:
     """The attribute the rung's items are named by: the one `[[attribute]]` declared `unique`.
     `name` is the attribute's; `column`, the column its files hold it in unless a block's `fields`
     moves it; and `type`, the Arrow type a batch sends it at. Every row, change and membership the
@@ -64,7 +64,7 @@ def naming_field(rung: Path) -> dict:
 
 
 def declared_entities(rung: Path) -> np.ndarray:
-    """Every entity id the rung's views hold, as values of the naming field: the anchor view's in
+    """Every entity id the rung's views hold, as values of the unique field: the anchor view's in
     file order, then each other view's ids the ones before it did not hold."""
     parts: list[np.ndarray] = []
     seen: np.ndarray | None = None
@@ -212,14 +212,14 @@ def declared_views(rung: Path) -> list[dict]:
     """Every view the declaration names, the allocation view first: a plain view by its name and
     a group's view as `group:key`, the id the server gives it. `points` is the file its rows are
     read from, `select` the `(column, key)` picking them out of a file a group's views share, and
-    `fields` each canonical column name (`entity_id`, the naming field's column; the coordinate
+    `fields` each canonical column name (`entity_id`, the unique field's column; the coordinate
     pair; `view`) as that file spells it. `record` is a group view's roster record under
     canonical names, on the group that owns the keys, and `metadata` the names that group
     declares."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
     defaults = declared.get("defaults", {})
-    naming = naming_field(rung)
+    naming = unique_field(rung)
     views = [
         {
             "id": view["name"],
@@ -267,7 +267,7 @@ def declared_views(rung: Path) -> list[dict]:
 
 def view_fields(block: dict, naming: dict) -> dict[str, str]:
     """A view's or a group's canonical column names mapped to its file's: `entity_id`, the naming
-    field's column unless `fields` moves it under the naming field's name; `x`/`y` for a view with
+    field's column unless `fields` moves it under the unique field's name; `x`/`y` for a view with
     no projection or `lon`/`lat` for a projected one; and the discriminator `view`, each its own
     name unless `fields` renames it."""
     projected = block.get("projection", "none") != "none"
@@ -630,7 +630,7 @@ def copy_declared_inputs(
         if got is not None and got.exists():
             shutil.copy2(got, out / got.name)
             kept.setdefault("vocabularies", []).append(got.name)
-    naming = naming_field(rung)
+    naming = unique_field(rung)
     entity_files: dict[Path, str] = {}
     for view in declared_views(rung):
         entity_files.setdefault(view["points"], view["fields"]["entity_id"])

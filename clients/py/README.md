@@ -173,10 +173,8 @@ attribute: one declared `unique=True`, a keyword, an integer or a timestamp, eac
 at most one item holds. Every table names each row's item by the columns it carries of the unique
 attributes: the column of the attribute's name, or the one the insert's `columns=` names, as in
 `insert(layer, members=table, key="key", columns={"paper": "paper_id"})`. The allocation view's
-column fills the unique attribute itself. A view group's rows fill no attribute at the first
-commit, so a database whose views are all in groups inserts the unique attribute's values as a
-table of their own, `db.insert("paper", ids, value="paper")`; the check refuses the declaration
-until it does. A file that calls the column something else says so in its block's `fields` under the attribute's name;
+column fills the unique attribute itself, and so does a view group's. A file that calls the
+column something else says so in its block's `fields` under the attribute's name;
 the SDK rewrites no column to say it. On a later commit the column travels under the attribute's
 name on `/control/ingest`, and a row whose value names an item the database holds edits that
 item.

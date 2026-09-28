@@ -85,8 +85,9 @@ which is what made the closure a test that flipped rather than a gap somebody ha
 
 ## `serial`
 
-The source id offset by [`PLANTED_ID_BASE`], declared `unique`: the column both corpus files carry,
-so each row names its item by it. It rises with the source id, so the build meets the items in source order, which the block layout above is designed against.
+The source id offset by [`PLANTED_ID_BASE`], declared `unique`: the column both corpus files
+carry, so each row names its item by it. It rises with the source id, so the build meets the items
+in source order, which the block layout above is designed against.
 The bundle's index of it is how this module carries a source id to the entity the build made of it
 ([`entities_by_source`]). The offset keeps it clear of the entity-id range, for the byte scan's
 reason: it is rendered, and served on every item card.

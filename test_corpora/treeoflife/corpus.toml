@@ -134,8 +134,8 @@ point_visibility = { field = "publisher", default = "unpublished" }
 # an indexed keyword puts the string in entity space at no cost to it.
 # ---------------------------------------------------------------------------------------------
 
-# The row number `prepare.py` gives each image. Every file names a image by it: both points files
-# as `entity_id`, the member files as `entity`.
+# The row number `prepare.py` gives each image. Every file names an image by it: both points
+# files as `entity_id`, the member files as `entity`.
 [[attribute]]
 name   = "id"
 type   = "u64"

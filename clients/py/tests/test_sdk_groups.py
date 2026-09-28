@@ -131,13 +131,6 @@ def grouped(tmp_path, corpus):
         access="access",
         view="slice",
     )
-    # A group's rows fill no attribute at the first commit, the unique one included, so its
-    # values are an insert of their own.
-    db.insert(
-        "entity_id",
-        pa.table({"entity_id": pa.array(IDS, pa.uint64())}),
-        value="entity_id",
-    )
     # A scoped family: one value per view of the group, so every insert names the view column.
     db.declare_attribute("quality", type="f32", scope={"group": "slices"}, index=True)
     db.insert(

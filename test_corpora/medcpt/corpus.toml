@@ -61,8 +61,8 @@ value_set  = "closed"
 visibility = "public"
 source     = "branch"
 
-# The row number `prepare.py` gives each article. Every file names a article by it: the points file
-# as `entity_id`, the member files as `entity`.
+# The row number `prepare.py` gives each article. Every file names an article by it: the points
+# file as `entity_id`, the member files as `entity`.
 [[attribute]]
 name   = "id"
 type   = "u64"

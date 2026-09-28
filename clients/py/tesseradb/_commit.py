@@ -705,14 +705,14 @@ class Planner:
                 value = schema.field(column).type
                 value = value.value_type if pa.types.is_list(value) else value
                 if pa.types.is_struct(value):
-                    named |= {struct_columns.get(one.name, one.name) for one in value}
+                    named |= {struct_columns[one.name] for one in value if one.name in struct_columns}
         for record in inline:
             for role in ("members", "excluding"):
                 table = record.get(role)
                 if table:
                     listed = True
                 if isinstance(table, dict):
-                    named |= set(table)
+                    named |= set(table) & set(self.db.blocks.unique_names())
         if len(named) > 1 or (listed and not named):
             self.findings.append(
                 Finding(
