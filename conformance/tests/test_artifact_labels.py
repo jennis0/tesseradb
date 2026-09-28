@@ -195,6 +195,7 @@ def test_the_fixture_separates_two_principals_by_one_label():
     assert fx.browse_names(["3", "1"])["t-one"] is None
     assert fx.browse_names(["3", "1", "2"])["t-one"] == "Firstly"
     assert fx.browse_names(["3", "1", "2"])["t-open"] == "Open", "`names` is listed first"
+    assert fx.browse_names(["3", "2"])["t-late"] == "Late, by a", "by key, not publication"
 
 
 @pytest.fixture(scope="module")

@@ -38,23 +38,25 @@
 //! than over a request's ranges. Served naively its `matched_count` would be silently zero, which
 //! is the failure decision 0104 exists to prevent.
 //!
-//! A row without text of its own takes its name from an attached label. The label is looked up
-//! only for the rows of a page, or for every candidate of a search, through an index from target
-//! to label kept with the label level's row form, so a page does not walk the label layer.
+//! A row without text of its own takes its name from an attached label. The label layers are read
+//! on the first row that needs one, and a label is looked up only for the rows of a page, or for
+//! the candidates of a search whose key does not match, through an index from target to label
+//! kept with the label level's row form, so a page does not walk the label layer.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use tessera_types::layer::HierarchyKind;
+use tessera_types::layer::{HierarchyKind, RegisteredLayer};
 use tessera_types::{EntityId, TesseraId};
 
+use crate::artifacts::{ArtifactVerdict, ArtifactView};
 use crate::compose::compose;
+use crate::compose::EffectiveMask;
+use crate::error::Result;
 use crate::filter::FilterExpr;
-use crate::artifacts::ArtifactVerdict;
 use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
 use crate::viewport::{response_rungs, segments_with_row_bases, DependencyContext};
-use crate::error::Result;
 use crate::EngineError;
 
 /// Which of §4's three forms a request takes. One verb, three forms (§9 (a), owner ruling).
@@ -128,9 +130,11 @@ pub struct BrowseRow {
     /// The publisher's own key, where they supplied one.
     pub key: Option<String>,
     /// The artifact's first supplied text content where it has one, and otherwise the first text
-    /// of an artifact attached to it that this principal is served, as the viewport serves that
-    /// artifact. Attached layers are taken in the order `/v1/meta` lists layers, and within one
-    /// by level and ordinal. `None` where neither gives text.
+    /// of an artifact attached to it that `POST /v1/artifacts` would serve this principal. Label
+    /// layers are taken in the order `/v1/meta` lists layers; within one, by level, then keyed
+    /// artifacts by key, then keyless ones by publication, which is the order the viewport's
+    /// frame serves a level in and the same for a built level and a published one. `None` where
+    /// neither gives text.
     pub name: Option<String>,
     /// `|membership ∩ M_auth|`, computed per request and never precomputed (C8). **It never moves
     /// with the filter.**
@@ -320,7 +324,10 @@ impl crate::Engine {
         // this design adds.
         let filter_rows = match &req.filter {
             None => None,
-            Some(expr) => Some(self.whole_view_filter_rows(&served_view, &mask, expr, &None)?.0),
+            Some(expr) => Some(
+                self.whole_view_filter_rows(&served_view, &mask, expr, &None)?
+                    .0,
+            ),
         };
 
         // **The gate, over every artifact of every level of the layer, before any page.** Every
@@ -425,47 +432,83 @@ impl crate::Engine {
 
         // **The layers attached to this one that this principal reads**, each level under this
         // request's mask, and each artifact of them judged by the viewport's own verdict with the
-        // viewport's dependency hook. A name is looked up only for a row that needs one: the
-        // rows of a page, and every candidate of a search.
+        // viewport's dependency hook. They are read on the first row that has no text of its own,
+        // and a name is looked up only for a row that needs one: the rows of a page, and the
+        // candidates of a search whose key does not match.
         let reachable = self.reachable_layers(session);
-        let label_layers: Vec<(tessera_types::layer::RegisteredLayer, Vec<ReadLevel>)> = reachable
-            .names()
-            .filter_map(|name| self.readable_layer(session, &generation, name, view).ok())
-            .filter(|label| label.declaration.depends_on.iter().any(|d| d == req.layer))
-            .map(|label| {
-                let levels = (0..label.runs.len() as u32)
-                    .map(|level| self.read_level(&served_view, &mask, &label, level, false))
-                    .collect();
-                (label, levels)
-            })
-            .collect();
         let ctx = DependencyContext::new(&served_view, &mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
-        let label_views: Vec<Vec<_>> = label_layers
-            .iter()
-            .map(|(label, levels)| {
-                levels
-                    .iter()
-                    .map(|read| read.view(self, &served_view, &mask, label, &dependency_served))
-                    .collect()
-            })
-            .collect();
+        let label_layers: OnceCell<Vec<(RegisteredLayer, Vec<ReadLevel>)>> = OnceCell::new();
+        let label_views: OnceCell<Vec<Vec<ArtifactView<'_, EffectiveMask>>>> = OnceCell::new();
         let attached_name = |level: u32, ordinal: u32| -> Option<String> {
             let target = layer.runs[level as usize]
                 .entity_of(u64::from(ordinal))
                 .map(EntityId::new)?;
-            label_layers
+            let layers = label_layers.get_or_init(|| {
+                reachable
+                    .names()
+                    .filter_map(|name| self.readable_layer(session, &generation, name, view).ok())
+                    .filter(|label| label.declaration.depends_on.iter().any(|d| d == req.layer))
+                    .map(|label| {
+                        let levels = (0..label.runs.len() as u32)
+                            .map(|level| self.read_level(&served_view, &mask, &label, level, false))
+                            .collect();
+                        (label, levels)
+                    })
+                    .collect()
+            });
+            let views = label_views.get_or_init(|| {
+                layers
+                    .iter()
+                    .map(|(label, levels)| {
+                        levels
+                            .iter()
+                            .map(|read| {
+                                read.view(self, &served_view, &mask, label, &dependency_served)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            });
+            layers
                 .iter()
-                .zip(&label_views)
+                .zip(views)
                 .find_map(|((label, levels), views)| {
                     levels.iter().zip(views).find_map(|(read, view)| {
-                        let attached = read.rows.records().attached_to(req.layer, level, ordinal);
-                        attached.iter().find_map(|&at| {
-                            // An edge naming an entity the target slot no longer holds is into an
-                            // artifact since republished over.
-                            if read.rows.attachment(at)?.entity != target {
-                                return None;
-                            }
+                        // An edge naming an entity the target slot no longer holds is into an
+                        // artifact since republished over.
+                        let mut attached: Vec<u32> = read
+                            .rows
+                            .records()
+                            .attached_to(req.layer, level, ordinal)
+                            .filter(|&at| {
+                                read.rows.attachment(at).is_some_and(|a| a.entity == target)
+                            })
+                            .collect();
+                        // The viewport's order within a level: by key, then the keyless by ordinal.
+                        if attached.len() > 1 {
+                            let name = label.declaration.name.as_str();
+                            let keyed: Vec<(Option<String>, u32)> =
+                                self.write.live().with_artifacts(|store| {
+                                    attached
+                                        .iter()
+                                        .map(|&at| {
+                                            (
+                                                store
+                                                    .get(name, read.level, at)
+                                                    .and_then(|r| r.key.clone()),
+                                                at,
+                                            )
+                                        })
+                                        .collect()
+                                });
+                            let mut keyed = keyed;
+                            keyed.sort_unstable_by(|(a, at), (b, bt)| {
+                                (a.is_none(), a, at).cmp(&(b.is_none(), b, bt))
+                            });
+                            attached = keyed.into_iter().map(|(_, at)| at).collect();
+                        }
+                        attached.into_iter().find_map(|at| {
                             let entity = label.runs[read.level as usize]
                                 .entity_of(u64::from(at))
                                 .map(EntityId::new)?;
@@ -571,14 +614,12 @@ impl crate::Engine {
                         .iter()
                         .enumerate()
                         .filter(|(_, g)| {
+                            let found = |text: Option<String>| {
+                                text.is_some_and(|text| text.to_lowercase().contains(&needle))
+                            };
                             g.level == level
-                                && [
-                                    keys.get(&(g.level, g.ordinal)).cloned().flatten(),
-                                    name_of(g),
-                                ]
-                                .iter()
-                                .flatten()
-                                .any(|text| text.to_lowercase().contains(&needle))
+                                && (found(keys.get(&(g.level, g.ordinal)).cloned().flatten())
+                                    || found(name_of(g)))
                         })
                         .map(|(at, _)| at)
                         .collect(),

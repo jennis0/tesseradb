@@ -839,80 +839,68 @@ fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
     );
 }
 
-/// **A row with no text of its own is named by the label attached to it, where this viewer is
-/// served that label, and the search form reads that name.**
+/// `clusters/bare`, a layer whose artifacts carry no text, over the browse fixture, and the label
+/// layers attached to it.
 ///
-/// `clusters/bare` carries no text. Two label layers attach to it. `labels/a` serves a label
-/// while one of its own members is visible, and the label on `b1` holds only members the subset
-/// viewer cannot see. `labels/b` comes after `labels/a` in the order `/v1/meta` lists layers, so
-/// it names only the cluster `labels/a` leaves unnamed.
-#[test]
-fn an_attached_label_names_a_row_only_where_this_viewer_is_served_it() {
-    use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
+/// - `labels/a` serves a label while one of its own members is visible. Its label on `b1` holds
+///   only members the subset viewer cannot see. It holds two labels on `b4`, published `a4-z`
+///   first, and the viewport's order within a level puts `a4-a` first by key.
+/// - `labels/b` comes after `labels/a` in the order `/v1/meta` lists layers, so it names only the
+///   clusters `labels/a` leaves unnamed.
+/// - `labels/gated` is behind the layer label `1`, which the subset viewer holds and the broad
+///   viewer does not.
+const BARE: &str = "clusters/bare";
 
-    const BARE: &str = "clusters/bare";
-    let fx = fixture(None);
-    let map = source_to_new_map(&fx._dir.path().join("bundle"), "v00000");
-    let members = |sources: Vec<u64>| -> Vec<EntityId> {
-        sources.into_iter().map(|s| EntityId::new(map[&s])).collect()
-    };
-    let mut bare = declaration(None);
-    bare.name = BARE.into();
-    bare.hierarchy.kind = HierarchyKind::Flat;
-    bare.content = ContentDeclaration::default();
-    fx.engine.register_layer(bare).unwrap();
-    let clusters: Vec<IncomingArtifact> = (0..4u64)
-        .map(|b| {
-            IncomingArtifact::from_entities(
-                Some(format!("b{b}")),
-                members((b * 100..b * 100 + 100).collect()),
-            )
-        })
-        .collect();
-    fx.engine.publish_artifacts(BARE.into(), 0, clusters).unwrap();
+struct Labelled {
+    fx: Fixture,
+    map: std::collections::BTreeMap<u64, u64>,
+    /// The label artifacts' identifiers, by key.
+    ids: HashMap<String, TesseraId>,
+}
 
-    let label = |key: &str, target: &str, text: &str, sources: Vec<u64>| {
-        let mut label = IncomingArtifact::from_entities(Some(key.into()), members(sources));
-        label.attached_to = Some(IncomingAttachment {
+impl Labelled {
+    fn members(&self, sources: impl IntoIterator<Item = u64>) -> Vec<EntityId> {
+        sources
+            .into_iter()
+            .map(|s| EntityId::new(self.map[&s]))
+            .collect()
+    }
+
+    fn label(
+        &self,
+        key: &str,
+        target: &str,
+        text: &str,
+        sources: impl IntoIterator<Item = u64>,
+    ) -> IncomingArtifact {
+        let mut label = IncomingArtifact::from_entities(Some(key.into()), self.members(sources));
+        label.attached_to = Some(tessera_lifecycle::membership::IncomingAttachment {
             layer: BARE.into(),
             level: 0,
             key: target.into(),
         });
-        label.contents = vec![IncomingContent {
+        label.contents = vec![tessera_lifecycle::membership::IncomingContent {
             values: vec![text.into()],
             generated_from: Default::default(),
         }];
         label
-    };
-    let hidden_from_subset: Vec<u64> = (100..130).filter(|&s| !subset_sees(s)).collect();
-    for (name, labels) in [
-        (
-            "labels/a",
-            vec![
-                label("a0", "b0", "Spin magnetic effect", (0..30).collect()),
-                label("a1", "b1", "Quantum dots", hidden_from_subset),
-                label("a2", "b2", "Alpha topic", (200..230).collect()),
-            ],
-        ),
-        (
-            "labels/b",
-            vec![
-                label("x2", "b2", "Beta topic", (200..230).collect()),
-                label("x3", "b3", "Only topic", (300..330).collect()),
-            ],
-        ),
-    ] {
-        let mut declared = declaration(Some(ExistenceCriterion::Count(1)));
-        declared.name = name.into();
-        declared.hierarchy.kind = HierarchyKind::Flat;
-        declared.depends_on = vec![BARE.into()];
-        fx.engine.register_layer(declared).unwrap();
-        fx.engine.publish_artifacts(name.into(), 0, labels).unwrap();
     }
 
-    let ask = |credential: &[u8], form: BrowseForm| {
-        let session = fx.engine.authorise(credential).unwrap();
-        fx.engine
+    fn publish(&mut self, layer: &str, labels: Vec<IncomingArtifact>) {
+        let keys: Vec<String> = labels.iter().map(|l| l.key.clone().unwrap()).collect();
+        let ids = self
+            .fx
+            .engine
+            .publish_artifacts(layer.into(), 0, labels)
+            .unwrap();
+        self.ids.extend(keys.into_iter().zip(ids));
+        tick(&self.fx.engine);
+    }
+
+    fn ask(&self, credential: &[u8], form: BrowseForm, filter: Option<FilterExpr>) -> BrowseOut {
+        let session = self.fx.engine.authorise(credential).unwrap();
+        self.fx
+            .engine
             .browse(
                 &session,
                 BrowseRequest {
@@ -920,66 +908,213 @@ fn an_attached_label_names_a_row_only_where_this_viewer_is_served_it() {
                     layer: BARE,
                     level: None,
                     form,
-                    filter: None,
+                    filter,
                     limit: 100,
                     cursor: None,
                 },
             )
             .expect("a browse answers")
-    };
-    let names = |out: &BrowseOut| -> Vec<(String, Option<String>)> {
-        let mut names: Vec<_> = out
-            .artifacts
-            .iter()
-            .map(|row| (row.key.clone().unwrap_or_default(), row.name.clone()))
-            .collect();
-        names.sort();
-        names
-    };
-    let named = |pairs: &[(&str, Option<&str>)]| -> Vec<(String, Option<String>)> {
-        pairs
-            .iter()
-            .map(|(key, name)| (key.to_string(), name.map(str::to_string)))
-            .collect()
-    };
+    }
 
+    fn names(&self, credential: &[u8]) -> Vec<(String, Option<String>)> {
+        named_rows(&self.ask(credential, BrowseForm::Roots, None))
+    }
+
+    /// The keys a search finds, and that the answer equals one for text nobody wrote where it
+    /// finds nothing.
+    fn search(&self, credential: &[u8], q: &str) -> Vec<String> {
+        let found = self.ask(credential, BrowseForm::Search(q.into()), None);
+        if found.artifacts.is_empty() {
+            assert_eq!(
+                found,
+                self.ask(
+                    credential,
+                    BrowseForm::Search("no such text anywhere".into()),
+                    None
+                ),
+                "a search finding nothing answers as text nobody wrote"
+            );
+        }
+        key_set(&found)
+    }
+}
+
+fn named_rows(out: &BrowseOut) -> Vec<(String, Option<String>)> {
+    let mut names: Vec<_> = out
+        .artifacts
+        .iter()
+        .map(|row| (row.key.clone().unwrap_or_default(), row.name.clone()))
+        .collect();
+    names.sort();
+    names
+}
+
+fn named(pairs: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+    pairs
+        .iter()
+        .map(|(key, name)| (key.to_string(), name.map(str::to_string)))
+        .collect()
+}
+
+fn labelled() -> Labelled {
+    let fx = fixture(None);
+    let map = source_to_new_map(&fx._dir.path().join("bundle"), "v00000");
+    let mut lx = Labelled {
+        fx,
+        map,
+        ids: HashMap::new(),
+    };
+    let mut bare = declaration(None);
+    bare.name = BARE.into();
+    bare.hierarchy.kind = HierarchyKind::Flat;
+    bare.content = ContentDeclaration::default();
+    lx.fx.engine.register_layer(bare).unwrap();
+    let clusters: Vec<IncomingArtifact> = (0..6u64)
+        .map(|b| {
+            IncomingArtifact::from_entities(
+                Some(format!("b{b}")),
+                lx.members(b * 100..b * 100 + 100),
+            )
+        })
+        .collect();
+    lx.fx
+        .engine
+        .publish_artifacts(BARE.into(), 0, clusters)
+        .unwrap();
+    for (name, visibility) in [
+        ("labels/a", None),
+        ("labels/b", None),
+        ("labels/gated", Some("1")),
+    ] {
+        let mut declared = declaration(Some(ExistenceCriterion::Count(1)));
+        declared.name = name.into();
+        declared.visibility = visibility.map(str::to_string);
+        declared.hierarchy.kind = HierarchyKind::Flat;
+        declared.depends_on = vec![BARE.into()];
+        lx.fx.engine.register_layer(declared).unwrap();
+    }
+    // Source ids 100..130 not divisible by three: members only the broad viewer sees.
+    let hidden: Vec<u64> = (100..130).filter(|&s| !subset_sees(s)).collect();
+    let a = vec![
+        lx.label("a0", "b0", "Spin magnetic effect", 0..30),
+        lx.label("a1", "b1", "Quantum dots", hidden),
+        lx.label("a2", "b2", "Alpha topic", 200..230),
+        lx.label("a4-z", "b4", "Published first", 400..430),
+        lx.label("a4-a", "b4", "First by key", 400..430),
+    ];
+    lx.publish("labels/a", a);
+    let b = vec![
+        lx.label("x2", "b2", "Beta topic", 200..230),
+        lx.label("x3", "b3", "Only topic", 300..330),
+    ];
+    lx.publish("labels/b", b);
+    let gated = vec![lx.label("g5", "b5", "Gated topic", 500..530)];
+    lx.publish("labels/gated", gated);
+    lx
+}
+
+/// **A row with no text of its own is named by the label attached to it, where this viewer is
+/// served that label, and the search form reads that name.**
+#[test]
+fn an_attached_label_names_a_row_only_where_this_viewer_is_served_it() {
+    let lx = labelled();
     let broad = full_coverage_credential();
     let subset = subset_credential();
     assert_eq!(
-        names(&ask(&broad, BrowseForm::Roots)),
+        lx.names(&broad),
         named(&[
             ("b0", Some("Spin magnetic effect")),
             ("b1", Some("Quantum dots")),
             ("b2", Some("Alpha topic")),
             ("b3", Some("Only topic")),
-        ])
+            ("b4", Some("First by key")),
+            ("b5", None),
+        ]),
+        "the first layer names a row, and within it the first by key"
     );
     assert_eq!(
-        names(&ask(&subset, BrowseForm::Roots)),
+        lx.names(&subset),
         named(&[
             ("b0", Some("Spin magnetic effect")),
             ("b1", None),
             ("b2", Some("Alpha topic")),
             ("b3", Some("Only topic")),
+            ("b4", Some("First by key")),
+            ("b5", Some("Gated topic")),
         ]),
         "a label the viewer is not served names nothing"
     );
-
     for credential in [&broad, &subset] {
-        let found = ask(credential, BrowseForm::Search("spin MAGNETIC".into()));
-        assert_eq!(names(&found), named(&[("b0", Some("Spin magnetic effect"))]));
+        assert_eq!(lx.search(credential, "spin MAGNETIC"), vec!["b0"]);
         assert!(
-            ask(credential, BrowseForm::Search("beta".into())).artifacts.is_empty(),
-            "a label that is not the row's name is not searched"
+            lx.search(credential, "beta").is_empty(),
+            "a label that is not the name"
+        );
+        assert!(lx.search(credential, "published first").is_empty());
+    }
+    assert_eq!(lx.search(&broad, "quantum"), vec!["b1"]);
+    assert!(
+        lx.search(&subset, "quantum").is_empty(),
+        "a label withheld by its members"
+    );
+    assert_eq!(lx.search(&subset, "gated"), vec!["b5"]);
+    assert!(
+        lx.search(&broad, "gated").is_empty(),
+        "a label layer behind a label not held"
+    );
+}
+
+/// **A filter neither withholds a label nor reveals one**: labels gate on the visible set.
+#[test]
+fn a_filter_moves_no_name() {
+    let lx = labelled();
+    // Matches no item at all.
+    let filter = FilterExpr::Leaf {
+        column: "score".into(),
+        operand: FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(1000),
+                inclusive: true,
+            }),
+            hi: None,
+        },
+    };
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let plain = named_rows(&lx.ask(&credential, BrowseForm::Roots, None));
+        let filtered = named_rows(&lx.ask(&credential, BrowseForm::Roots, Some(filter.clone())));
+        assert_eq!(filtered, plain);
+        let q = || BrowseForm::Search("quantum".into());
+        assert_eq!(
+            key_set(&lx.ask(&credential, q(), Some(filter.clone()))),
+            key_set(&lx.ask(&credential, q(), None))
         );
     }
-    assert_eq!(
-        names(&ask(&broad, BrowseForm::Search("quantum".into()))),
-        named(&[("b1", Some("Quantum dots"))])
+}
+
+/// **A suppressed label names nothing and is not found**, and a label published after a browse
+/// names its target on the next. An attachment is fixed once published, so a publication is the
+/// only write that adds one.
+#[test]
+fn a_write_to_a_label_layer_moves_the_names_on_the_next_browse() {
+    let mut lx = labelled();
+    let broad = full_coverage_credential();
+    assert_eq!(lx.search(&broad, "only topic"), vec!["b3"]);
+
+    let x3 = artifact_entity(&lx.fx.engine, lx.ids["x3"]);
+    lx.fx
+        .engine
+        .accept_change(x3, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .unwrap();
+    let names = lx.names(&broad);
+    assert!(names.contains(&("b3".to_string(), None)), "{names:?}");
+    assert!(lx.search(&broad, "only topic").is_empty());
+
+    let late = vec![lx.label("x5", "b5", "Late topic", 500..530)];
+    lx.publish("labels/b", late);
+    let names = lx.names(&broad);
+    assert!(
+        names.contains(&("b5".to_string(), Some("Late topic".to_string()))),
+        "{names:?}"
     );
-    assert_eq!(
-        ask(&subset, BrowseForm::Search("quantum".into())),
-        ask(&subset, BrowseForm::Search("no such text anywhere".into())),
-        "a withheld label's text finds what text nobody wrote finds"
-    );
+    assert_eq!(lx.search(&broad, "late topic"), vec!["b5"]);
 }

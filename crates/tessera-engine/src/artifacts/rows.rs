@@ -1,6 +1,5 @@
 //! The row-space forms an annotation layer's memberships take, and what they answer.
 
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use croaring::Bitmap;
@@ -41,12 +40,19 @@ pub struct ArtifactRecords {
     /// labelled ordinal, so a layer whose artifacts carry no label holds nothing here.
     pub(super) access: Vec<Option<Arc<[Vec<u8>]>>>,
     /// [`Self::attachments`] turned round, built on first use and dropped by every write.
-    pub(super) attached_by: OnceLock<AttachedBy>,
+    pub(super) attached_by: AttachedBy,
 }
 
-/// Per target layer, per target `(level, ordinal)`, the ordinals of one level attached to it,
-/// ascending.
-pub(crate) type AttachedBy = HashMap<String, HashMap<(u32, u32), Vec<u32>>>;
+/// Every attachment of one level as `(target level, target ordinal, ordinal)`, sorted, built on
+/// first use. A clone starts empty, since the copy a write makes is written to at once.
+#[derive(Debug, Default)]
+pub(super) struct AttachedBy(OnceLock<Vec<(u32, u32, u32)>>);
+
+impl Clone for AttachedBy {
+    fn clone(&self) -> Self {
+        AttachedBy::default()
+    }
+}
 
 /// One layer's membership in the row space of one view, built at open and rebuilt when the
 /// generation moves — the expensive half of [`ArtifactRows`]. Built member-wise, never
@@ -191,7 +197,7 @@ impl ArtifactRecords {
     /// Place one record at `idx`, growing the dense vectors to reach it. A slot never written is a
     /// hole, not an empty artifact — see [`ArtifactStore`].
     pub(super) fn put(&mut self, idx: usize, record: &ArtifactRecord) {
-        self.attached_by = OnceLock::new();
+        self.attached_by = AttachedBy::default();
         if self.attachments.len() <= idx {
             self.attachments.resize_with(idx + 1, || None);
             self.parents.resize_with(idx + 1, Vec::new);
@@ -229,24 +235,28 @@ impl ArtifactRecords {
 
     /// The ordinals of this level attached to the artifact at `(level, ordinal)` of `layer`,
     /// ascending.
-    pub(crate) fn attached_to(&self, layer: &str, level: u32, ordinal: u32) -> &[u32] {
-        self.attached_by
-            .get_or_init(|| {
-                let mut by = AttachedBy::new();
-                for (at, attachment) in self.attachments.iter().enumerate() {
-                    if let Some(a) = attachment {
-                        by.entry(a.layer.clone())
-                            .or_default()
-                            .entry((a.level, a.ordinal))
-                            .or_default()
-                            .push(at as u32);
-                    }
-                }
-                by
-            })
-            .get(layer)
-            .and_then(|targets| targets.get(&(level, ordinal)))
-            .map_or(&[], Vec::as_slice)
+    pub(crate) fn attached_to<'s>(
+        &'s self,
+        layer: &'s str,
+        level: u32,
+        ordinal: u32,
+    ) -> impl Iterator<Item = u32> + 's {
+        let index = self.attached_by.0.get_or_init(|| {
+            let mut index: Vec<(u32, u32, u32)> = self
+                .attachments
+                .iter()
+                .enumerate()
+                .filter_map(|(at, a)| a.as_ref().map(|a| (a.level, a.ordinal, at as u32)))
+                .collect();
+            index.sort_unstable();
+            index
+        });
+        let from = index.partition_point(|&(l, o, _)| (l, o) < (level, ordinal));
+        index[from..]
+            .iter()
+            .take_while(move |&&(l, o, _)| (l, o) == (level, ordinal))
+            .map(|&(_, _, at)| at)
+            .filter(move |&at| self.attachment(at).is_some_and(|a| a.layer == layer))
     }
 
     /// The artifact's parent edges, as the registry holds them — ascending by ordinal, empty at

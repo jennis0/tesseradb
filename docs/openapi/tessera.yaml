@@ -914,11 +914,12 @@ paths:
 
         **Names.** A row's `name` is the artifact's own first supplied text. An artifact with none,
         such as a cluster whose topic is published in a separate label layer, is named by the first
-        text of an artifact attached to it, where this principal is served that artifact on the
-        viewport's terms: its layer reachable, its own label admitted and its membership
-        requirement met over this principal's visible set, never the filtered set. Attached
-        layers are taken in the order `/v1/meta` lists layers, and within one layer by level and
-        publication. A label this principal is not served names nothing and matches no `q`.
+        text of an artifact attached to it that `POST /v1/artifacts` would serve this principal
+        when reading that label layer. Label layers are taken in the order `/v1/meta` lists them;
+        within one, by level, then artifacts with a key in key order, then those without in
+        publication order, which is the order the viewport's artifacts frame serves a level in. A
+        label this principal would not be served names nothing and matches no `q`, and `filters`
+        does not change a name.
 
         **Visibility first.** Every artifact served has passed its own existence criterion,
         evaluated over the form's whole candidate set before `limit` and `cursor` apply, so a
@@ -3035,7 +3036,7 @@ components:
           description: The publisher's key, where one was supplied.
         name:
           type: string
-          description: The artifact's first supplied text content where it has one; otherwise the first text of an artifact attached to it that this principal is served, as the viewport serves it, taking attached layers in the order `/v1/meta` lists layers. Absent where neither gives text. An authored shape is not text. An artifact whose own content cannot be served is left off the page.
+          description: The artifact's first supplied text content where it has one; otherwise the first text of an artifact attached to it that `POST /v1/artifacts` would serve this principal, chosen in the order the route description gives. Absent where neither gives text. An authored shape is not text. An artifact whose own content cannot be served is left off the page.
         masked_count:
           type: integer
           description: How many of this artifact's members this principal can see. Not its size, and not changed by `filters`.

@@ -22,9 +22,11 @@ principals `1` and `1, 2` differ by one term.
 * `titles` depends on `teams` too, and each of its artifacts has members of its own, so it is
   served only where its team is and one of its own members is visible. `x-one` holds only points
   carrying `2`, so principal `1` is served `t-one` and not the title naming it. `x-open` names
-  `t-open`, which `names` also names and which is listed first.
-* A browse row of `teams` carries no text of its own, so its name is the first served text
-  attached to it, taking the attached layers in the order `/v1/meta` lists them.
+  `t-open`, which `names` also names and which is listed first. `x-late-b` and `x-late-a` both
+  name `t-late` and are published in that order.
+* A browse row of `teams` carries no text of its own, so its name is the text of the first
+  served artifact attached to it: the layers in the order `/v1/meta` lists them, and within one
+  layer by level, then by key, which is the order the viewport serves a level in.
 * `gated` is behind its own layer label, `2`, and its artifacts carry labels too: a principal needs
   both.
 
@@ -90,6 +92,8 @@ NAME_ROWS: list[tuple[str, str, str]] = [
 TITLE_ROWS: list[tuple[str, str, str, list[int]]] = [
     ("x-open", "t-open", "Open, titled", list(range(0, 10))),
     ("x-one", "t-one", "Firstly", list(range(50, 60))),
+    ("x-late-b", "t-late", "Late, by b", list(range(120, 130))),
+    ("x-late-a", "t-late", "Late, by a", list(range(120, 130))),
 ]
 
 #: `(key, members, labels)` per artifact of `gated`.
@@ -163,7 +167,7 @@ def served(terms: list[str]) -> Served:
 
 def browse_names(terms: list[str]) -> dict[str, str | None]:
     """The `name` of each served team's browse row: the text of the first served artifact
-    attached to it, the attached layers taken in name order, or `None`."""
+    attached to it, by layer name, then level (0 on every layer here), then key, or `None`."""
     out = served(terms)
     texts = {(NAMES, key): text for key, _, text in NAME_ROWS}
     texts |= {(TITLES, key): text for key, _, text, _ in TITLE_ROWS}
